@@ -14,8 +14,9 @@ use mfm_executor::{
 use mfm_ids::{
     ContentRef, EffectKey, NodeId, RequestDigest, RunId, StableId, StoreScopeId, TenantScopeId,
 };
-use mfm_journal::v1::{
-    AuthorizationRef, InputManifestRef, ReadCapabilityBinding, TransitionRef, ValueRef,
+use mfm_journal::v2::{
+    AuthorizationRef, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
+    NonDomainFailureCode, ReadCapabilityBinding, ValueRef,
 };
 use mfm_program::{
     ProposedValueMaterial, QualifiedAuthoredRequest, QualifiedEffectEntry, QualifiedReadEntry,
@@ -23,9 +24,8 @@ use mfm_program::{
 };
 use mfm_spec::ComponentImplementationDescriptor;
 
-use crate::access::{
-    call_ensure, call_read, mint_ensure_access, mint_read_access, ReadAccessExpectation,
-};
+use crate::access::{PreparedEnsureAccess, PreparedReadAccess};
+use crate::runtime_error::non_domain_failure;
 use crate::{
     AuditedReadCapability, ReadCapabilityOutcome, RecoverableEffectExecutor, Result, RuntimeError,
 };
@@ -55,9 +55,14 @@ where
         component_descriptor,
         RuntimeReadInvoker {
             erased: Arc::new(TypedReadCapability::<Request, Capability> {
-                capability,
+                capability: Arc::new(capability),
                 _request: PhantomData,
             }),
+            adapter_may_have_entered: non_domain_failure(
+                NonDomainEntryStatus::MayHaveEntered,
+                NonDomainDisposition::IntegrityBlocked,
+                NonDomainFailureCode::AdapterContractViolation,
+            )?,
         },
     )
     .map_err(Into::into)
@@ -90,16 +95,22 @@ where
         component_descriptor,
         RuntimeEffectInvoker {
             erased: Arc::new(TypedEffectExecutor::<Request, Executor> {
-                executor,
+                executor: Arc::new(executor),
                 _request: PhantomData,
             }),
+            adapter_may_have_entered: EffectExecutorOutcome::non_domain_failure(
+                non_domain_failure(
+                    NonDomainEntryStatus::MayHaveEntered,
+                    NonDomainDisposition::IntegrityBlocked,
+                    NonDomainFailureCode::AdapterContractViolation,
+                )?,
+            )?,
         },
     )
     .map_err(Into::into)
 }
 
 pub(crate) struct RoutedReadRequest {
-    request_type: TypeId,
     request: Box<dyn Any + Send + Sync>,
     proposed: ProposedValueMaterial,
     routing_generation_ref: ContentRef,
@@ -117,17 +128,11 @@ impl RoutedReadRequest {
     fn into_parts(
         self,
     ) -> (
-        TypeId,
         Box<dyn Any + Send + Sync>,
         ProposedValueMaterial,
         ContentRef,
     ) {
-        (
-            self.request_type,
-            self.request,
-            self.proposed,
-            self.routing_generation_ref,
-        )
+        (self.request, self.proposed, self.routing_generation_ref)
     }
 }
 
@@ -141,6 +146,7 @@ pub(crate) enum ErasedReadOutcome {
         diagnostic: Option<Box<dyn Any + Send + Sync>>,
         metadata: mfm_store::SafeFailureMetadata,
     },
+    NonDomainFailure(NonDomainFailure),
 }
 
 pub(crate) struct ErasedReadObservation {
@@ -149,17 +155,36 @@ pub(crate) struct ErasedReadObservation {
 }
 
 pub(crate) struct ReadInvocationContext {
-    pub(crate) binding_ref: ContentRef,
-    pub(crate) operation_id: StableId,
-    pub(crate) node_id: NodeId,
-    pub(crate) input_manifest_ref: InputManifestRef,
-    pub(crate) frozen_read_intent_ref: ValueRef,
     pub(crate) routing_generation_ref: ContentRef,
     pub(crate) safe_failure_contract_ref: ContentRef,
+    pub(crate) adapter_may_have_entered: NonDomainFailure,
 }
 
-type ErasedReadFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ErasedReadObservation>> + Send + 'a>>;
+type ErasedReadFuture<'a> = Pin<Box<dyn Future<Output = ErasedReadObservation> + Send + 'a>>;
+
+trait PreparedErasedReadInvocation: Send {
+    fn invoke_and_totalize(
+        self: Box<Self>,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedReadFuture<'static>;
+}
+
+pub(crate) struct PreparedReadInvocation {
+    invocation: Box<dyn PreparedErasedReadInvocation>,
+}
+
+impl PreparedReadInvocation {
+    fn new(invocation: Box<dyn PreparedErasedReadInvocation>) -> Self {
+        Self { invocation }
+    }
+
+    pub(crate) fn invoke_and_totalize(
+        self,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedReadFuture<'static> {
+        self.invocation.invoke_and_totalize(witness)
+    }
+}
 
 trait ErasedReadCapability: Send + Sync {
     fn route_request(
@@ -168,18 +193,77 @@ trait ErasedReadCapability: Send + Sync {
         request: QualifiedAuthoredRequest,
     ) -> Result<RoutedReadRequest>;
 
-    fn call<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    fn prepare_call(
+        &self,
         expected_request_ref: ValueRef,
         context: ReadInvocationContext,
         request: RoutedReadRequest,
-    ) -> ErasedReadFuture<'a>;
+    ) -> Result<PreparedReadInvocation>;
 }
 
 struct TypedReadCapability<Request, Capability> {
-    capability: Capability,
+    capability: Arc<Capability>,
     _request: PhantomData<fn(Request) -> Request>,
+}
+
+struct TypedPreparedReadInvocation<Request, Capability>
+where
+    Capability: AuditedReadCapability<Request>,
+{
+    capability: Arc<Capability>,
+    access: PreparedReadAccess<Request>,
+    safe_failure_contract_ref: ContentRef,
+    adapter_may_have_entered: NonDomainFailure,
+}
+
+impl<Request, Capability> PreparedErasedReadInvocation
+    for TypedPreparedReadInvocation<Request, Capability>
+where
+    Request: Send + Sync + 'static,
+    Capability: AuditedReadCapability<Request>,
+{
+    fn invoke_and_totalize(
+        self: Box<Self>,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedReadFuture<'static> {
+        Box::pin(async move {
+            let authorization_ref = witness.authorization_ref().clone();
+            let access = self.access.authorize(witness);
+            let outcome = match self.capability.call(access).await {
+                ReadCapabilityOutcome::Returned(value) => {
+                    ErasedReadOutcome::Returned(Box::new(value))
+                }
+                ReadCapabilityOutcome::DidNotEnter {
+                    diagnostic,
+                    metadata,
+                } if metadata.safe_failure_contract_ref() == &self.safe_failure_contract_ref => {
+                    ErasedReadOutcome::DidNotEnter {
+                        diagnostic: diagnostic
+                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
+                        metadata,
+                    }
+                }
+                ReadCapabilityOutcome::Indeterminate {
+                    diagnostic,
+                    metadata,
+                } if metadata.safe_failure_contract_ref() == &self.safe_failure_contract_ref => {
+                    ErasedReadOutcome::Indeterminate {
+                        diagnostic: diagnostic
+                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
+                        metadata,
+                    }
+                }
+                ReadCapabilityOutcome::DidNotEnter { .. }
+                | ReadCapabilityOutcome::Indeterminate { .. } => {
+                    ErasedReadOutcome::NonDomainFailure(self.adapter_may_have_entered)
+                }
+            };
+            ErasedReadObservation {
+                authorization_ref,
+                outcome,
+            }
+        })
+    }
 }
 
 impl<Request, Capability> ErasedReadCapability for TypedReadCapability<Request, Capability>
@@ -215,79 +299,33 @@ where
             return Err(RuntimeError::CatalogSelection);
         }
         Ok(RoutedReadRequest {
-            request_type: TypeId::of::<Request>(),
             request,
             proposed,
             routing_generation_ref,
         })
     }
 
-    fn call<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    fn prepare_call(
+        &self,
         expected_request_ref: ValueRef,
         context: ReadInvocationContext,
         request: RoutedReadRequest,
-    ) -> ErasedReadFuture<'a> {
-        Box::pin(async move {
-            let (request_type, request, _, routed_generation_ref) = request.into_parts();
-            if request_type != TypeId::of::<Request>()
-                || context.routing_generation_ref != routed_generation_ref
-            {
-                return Err(RuntimeError::AuthorityMismatch);
-            }
-            let request = request
-                .downcast::<Request>()
-                .map_err(|_| RuntimeError::InvalidCallbackResult)?;
-            let access = mint_read_access(
-                witness,
-                ReadAccessExpectation::new(
-                    &context.binding_ref,
-                    &context.operation_id,
-                    &context.node_id,
-                    &context.input_manifest_ref,
-                    &expected_request_ref,
-                    &context.frozen_read_intent_ref,
-                ),
-                *request,
-            )?;
-            let observation = call_read(&self.capability, access).await;
-            let outcome = match observation.outcome {
-                ReadCapabilityOutcome::Returned(value) => {
-                    ErasedReadOutcome::Returned(Box::new(value))
-                }
-                ReadCapabilityOutcome::DidNotEnter {
-                    diagnostic,
-                    metadata,
-                } => {
-                    if metadata.safe_failure_contract_ref() != &context.safe_failure_contract_ref {
-                        return Err(RuntimeError::InvalidCallbackResult);
-                    }
-                    ErasedReadOutcome::DidNotEnter {
-                        diagnostic: diagnostic
-                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
-                        metadata,
-                    }
-                }
-                ReadCapabilityOutcome::Indeterminate {
-                    diagnostic,
-                    metadata,
-                } => {
-                    if metadata.safe_failure_contract_ref() != &context.safe_failure_contract_ref {
-                        return Err(RuntimeError::InvalidCallbackResult);
-                    }
-                    ErasedReadOutcome::Indeterminate {
-                        diagnostic: diagnostic
-                            .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>),
-                        metadata,
-                    }
-                }
-            };
-            Ok(ErasedReadObservation {
-                authorization_ref: observation.authorization_ref,
-                outcome,
-            })
-        })
+    ) -> Result<PreparedReadInvocation> {
+        let (request, _, routed_generation_ref) = request.into_parts();
+        if context.routing_generation_ref != routed_generation_ref {
+            return Err(RuntimeError::CatalogSelection);
+        }
+        let request = request
+            .downcast::<Request>()
+            .map_err(|_| RuntimeError::InvalidCallbackResult)?;
+        Ok(PreparedReadInvocation::new(Box::new(
+            TypedPreparedReadInvocation::<Request, Capability> {
+                capability: Arc::clone(&self.capability),
+                access: PreparedReadAccess::new(expected_request_ref, *request),
+                safe_failure_contract_ref: context.safe_failure_contract_ref,
+                adapter_may_have_entered: context.adapter_may_have_entered,
+            },
+        )))
     }
 }
 
@@ -319,9 +357,9 @@ pub(crate) struct EffectInvocationContext {
     pub(crate) store_scope_id: StoreScopeId,
     pub(crate) run_id: RunId,
     pub(crate) node_id: NodeId,
-    pub(crate) request_transition_ref: TransitionRef,
     pub(crate) effect_key: EffectKey,
     pub(crate) request_digest: RequestDigest,
+    pub(crate) adapter_may_have_entered: EffectExecutorOutcome,
 }
 
 pub(crate) struct ErasedEnsureObservation {
@@ -329,8 +367,31 @@ pub(crate) struct ErasedEnsureObservation {
     pub(crate) outcome: EffectExecutorOutcome,
 }
 
-type ErasedEnsureFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<ErasedEnsureObservation>> + Send + 'a>>;
+type ErasedEnsureFuture<'a> = Pin<Box<dyn Future<Output = ErasedEnsureObservation> + Send + 'a>>;
+
+trait PreparedErasedEffectInvocation: Send {
+    fn invoke_and_totalize(
+        self: Box<Self>,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedEnsureFuture<'static>;
+}
+
+pub(crate) struct PreparedEffectInvocation {
+    invocation: Box<dyn PreparedErasedEffectInvocation>,
+}
+
+impl PreparedEffectInvocation {
+    fn new(invocation: Box<dyn PreparedErasedEffectInvocation>) -> Self {
+        Self { invocation }
+    }
+
+    pub(crate) fn invoke_and_totalize(
+        self,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedEnsureFuture<'static> {
+        self.invocation.invoke_and_totalize(witness)
+    }
+}
 
 trait ErasedEffectExecutor: Send + Sync {
     fn identify_request(
@@ -339,18 +400,71 @@ trait ErasedEffectExecutor: Send + Sync {
         request: QualifiedAuthoredRequest,
     ) -> Result<PreparedEffectRequest>;
 
-    fn ensure<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    fn prepare_ensure(
+        &self,
         expected_request_ref: ValueRef,
         context: EffectInvocationContext,
         request: QualifiedAuthoredRequest,
-    ) -> ErasedEnsureFuture<'a>;
+    ) -> Result<PreparedEffectInvocation>;
 }
 
 struct TypedEffectExecutor<Request, Executor> {
-    executor: Executor,
+    executor: Arc<Executor>,
     _request: PhantomData<fn(Request) -> Request>,
+}
+
+struct TypedPreparedEffectInvocation<Request, Executor>
+where
+    Request: CanonicalExecutorRequest + Send + Sync + 'static,
+    Executor: RecoverableEffectExecutor<Request>,
+{
+    executor: Arc<Executor>,
+    access: PreparedEnsureAccess<Request>,
+    binding: VerifiedExecutorBinding,
+    adapter_may_have_entered: EffectExecutorOutcome,
+}
+
+impl<Request, Executor> PreparedErasedEffectInvocation
+    for TypedPreparedEffectInvocation<Request, Executor>
+where
+    Request: CanonicalExecutorRequest + Send + Sync + 'static,
+    Executor: RecoverableEffectExecutor<Request>,
+{
+    fn invoke_and_totalize(
+        self: Box<Self>,
+        witness: mfm_store::NewlyAppendedAuthorization,
+    ) -> ErasedEnsureFuture<'static> {
+        Box::pin(async move {
+            let authorization_ref = witness.authorization_ref().clone();
+            let access = self.access.authorize(witness);
+            let outcome = self.executor.ensure(access).await;
+            let valid = match outcome.view() {
+                EffectExecutorOutcomeView::Returned(result) => {
+                    result.identity().executor_binding_ref() == self.binding.binding_ref()
+                        && result.retained_closure().executor_binding_ref()
+                            == self.binding.binding_ref()
+                        && result.retained_closure().contract()
+                            == self.binding.contract().retained_closure_contract()
+                }
+                EffectExecutorOutcomeView::DidNotEnter(failure)
+                | EffectExecutorOutcomeView::Indeterminate(failure) => {
+                    failure.safe_failure_contract_ref()
+                        == self.binding.contract().safe_failure_contract_ref()
+                }
+                EffectExecutorOutcomeView::NonDomainFailure(failure) => failure
+                    .validate_layer(mfm_journal::v2::NonDomainFailureLayer::Ensure)
+                    .is_ok(),
+            };
+            ErasedEnsureObservation {
+                authorization_ref,
+                outcome: if valid {
+                    outcome
+                } else {
+                    self.adapter_may_have_entered
+                },
+            }
+        })
+    }
 }
 
 impl<Request, Executor> ErasedEffectExecutor for TypedEffectExecutor<Request, Executor>
@@ -398,97 +512,67 @@ where
         })
     }
 
-    fn ensure<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    fn prepare_ensure(
+        &self,
         expected_request_ref: ValueRef,
         context: EffectInvocationContext,
         request: QualifiedAuthoredRequest,
-    ) -> ErasedEnsureFuture<'a> {
-        Box::pin(async move {
-            if request.request_type() != TypeId::of::<Request>()
-                || context.request_type != TypeId::of::<Request>()
-                || context.response_type != TypeId::of::<VerifiedEnsureResult>()
-                || context.failure_type != TypeId::of::<mfm_executor::ExecutorError>()
-                || context.operation_id.is_empty()
-                || context.tenant_scope_id != *context.binding.deployment().tenant_scope_id()
-                || expected_request_ref
-                    .validate_contract(context.binding.contract().semantic_request_contract())
-                    .is_err()
-            {
-                return Err(RuntimeError::EffectIdentityMismatch);
-            }
-            let request = request
-                .into_value()
-                .downcast::<Request>()
-                .map_err(|_| RuntimeError::InvalidCallbackResult)?;
-            let expected = expected_request_ref.fields()?;
-            let canonical = request.canonical_request();
-            let content_ref = canonical.reference()?;
-            let byte_length = u64::try_from(canonical.as_bytes().len())
-                .map_err(|_| RuntimeError::InvalidCallbackResult)?;
-            if &expected.schema_id != content_ref.schema_id()
-                || &expected.content_digest != content_ref.content_digest()
-                || expected.byte_length != byte_length
-            {
-                return Err(RuntimeError::EffectIdentityMismatch);
-            }
-
-            let committed = CommittedEffectRequest::new(
-                context.binding.binding_ref().clone(),
-                context.tenant_scope_id,
-                &context.store_scope_id,
-                &context.run_id,
-                &context.node_id,
-                *request,
-            )?;
-            if committed.identity().effect_key() != &context.effect_key
-                || committed.identity().request_digest() != &context.request_digest
-            {
-                return Err(RuntimeError::EffectIdentityMismatch);
-            }
-            let binding_ref = context.binding.binding_ref().as_content_ref().clone();
-            let access = mint_ensure_access(
-                witness,
-                &binding_ref,
-                &context.operation_id,
-                &context.node_id,
-                &context.request_transition_ref,
-                &expected_request_ref,
-                committed,
-            )?;
-            let (authorization_ref, outcome) = call_ensure(&self.executor, access).await?;
-            match outcome.view() {
-                EffectExecutorOutcomeView::Returned(result) => {
-                    if result.identity().executor_binding_ref() != context.binding.binding_ref()
-                        || result.retained_closure().executor_binding_ref()
-                            != context.binding.binding_ref()
-                        || result.retained_closure().contract()
-                            != context.binding.contract().retained_closure_contract()
-                    {
-                        return Err(RuntimeError::EffectIdentityMismatch);
-                    }
-                }
-                EffectExecutorOutcomeView::DidNotEnter(failure)
-                | EffectExecutorOutcomeView::Indeterminate(failure)
-                    if failure.safe_failure_contract_ref()
-                        != context.binding.contract().safe_failure_contract_ref() =>
-                {
-                    return Err(RuntimeError::EffectIdentityMismatch);
-                }
-                EffectExecutorOutcomeView::DidNotEnter(_)
-                | EffectExecutorOutcomeView::Indeterminate(_) => {}
-            }
-            Ok(ErasedEnsureObservation {
-                authorization_ref,
-                outcome,
-            })
-        })
+    ) -> Result<PreparedEffectInvocation> {
+        if request.request_type() != TypeId::of::<Request>()
+            || context.request_type != TypeId::of::<Request>()
+            || context.response_type != TypeId::of::<VerifiedEnsureResult>()
+            || context.failure_type != TypeId::of::<mfm_executor::ExecutorError>()
+            || context.operation_id.is_empty()
+            || context.tenant_scope_id != *context.binding.deployment().tenant_scope_id()
+        {
+            return Err(RuntimeError::EffectIdentityMismatch);
+        }
+        expected_request_ref
+            .validate_contract(context.binding.contract().semantic_request_contract())
+            .map_err(|_| RuntimeError::EffectIdentityMismatch)?;
+        let request = request
+            .into_value()
+            .downcast::<Request>()
+            .map_err(|_| RuntimeError::InvalidCallbackResult)?;
+        let expected = expected_request_ref.fields()?;
+        let canonical = request.canonical_request();
+        let content_ref = canonical.reference()?;
+        let byte_length = u64::try_from(canonical.as_bytes().len())
+            .map_err(|_| RuntimeError::EffectIdentityMismatch)?;
+        if &expected.schema_id != content_ref.schema_id()
+            || &expected.content_digest != content_ref.content_digest()
+            || expected.byte_length != byte_length
+        {
+            return Err(RuntimeError::EffectIdentityMismatch);
+        }
+        let committed = CommittedEffectRequest::new(
+            context.binding.binding_ref().clone(),
+            context.tenant_scope_id.clone(),
+            &context.store_scope_id,
+            &context.run_id,
+            &context.node_id,
+            *request,
+        )?;
+        if committed.identity().effect_key() != &context.effect_key
+            || committed.identity().request_digest() != &context.request_digest
+        {
+            return Err(RuntimeError::EffectIdentityMismatch);
+        }
+        Ok(PreparedEffectInvocation::new(Box::new(
+            TypedPreparedEffectInvocation::<Request, Executor> {
+                executor: Arc::clone(&self.executor),
+                access: PreparedEnsureAccess::new(expected_request_ref, committed),
+                binding: context.binding,
+                adapter_may_have_entered: context.adapter_may_have_entered,
+            },
+        )))
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RuntimeReadInvoker {
     erased: Arc<dyn ErasedReadCapability>,
+    adapter_may_have_entered: NonDomainFailure,
 }
 
 impl RuntimeReadInvoker {
@@ -509,20 +593,25 @@ impl RuntimeReadInvoker {
         self.erased.route_request(entry, request)
     }
 
-    pub(crate) fn call<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    pub(crate) fn adapter_may_have_entered(&self) -> NonDomainFailure {
+        self.adapter_may_have_entered
+    }
+
+    pub(crate) fn prepare_call(
+        &self,
         expected_request_ref: ValueRef,
         context: ReadInvocationContext,
         request: RoutedReadRequest,
-    ) -> ErasedReadFuture<'a> {
+    ) -> Result<PreparedReadInvocation> {
         self.erased
-            .call(witness, expected_request_ref, context, request)
+            .prepare_call(expected_request_ref, context, request)
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct RuntimeEffectInvoker {
     erased: Arc<dyn ErasedEffectExecutor>,
+    adapter_may_have_entered: EffectExecutorOutcome,
 }
 
 impl RuntimeEffectInvoker {
@@ -543,14 +632,17 @@ impl RuntimeEffectInvoker {
         self.erased.identify_request(context, request)
     }
 
-    pub(crate) fn ensure<'a>(
-        &'a self,
-        witness: mfm_store::NewlyAppendedAuthorization,
+    pub(crate) fn adapter_may_have_entered(&self) -> EffectExecutorOutcome {
+        self.adapter_may_have_entered.clone()
+    }
+
+    pub(crate) fn prepare_ensure(
+        &self,
         expected_request_ref: ValueRef,
         context: EffectInvocationContext,
         request: QualifiedAuthoredRequest,
-    ) -> ErasedEnsureFuture<'a> {
+    ) -> Result<PreparedEffectInvocation> {
         self.erased
-            .ensure(witness, expected_request_ref, context, request)
+            .prepare_ensure(expected_request_ref, context, request)
     }
 }

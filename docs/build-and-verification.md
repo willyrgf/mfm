@@ -75,13 +75,13 @@ directly instead of its enclosing gate:
 
 ```bash
 nix run .#run -- --task cargo-metadata-contract
-nix run .#run -- --task recoverability-postgres-v2
+nix run .#run -- --task recoverability-postgres-v3
 nix run .#run -- --task parity-bitcoin-core
 ```
 
 The task invocation starts only its declared service requirements. Task ids
 come from `nixfied.nix`; the examples above run the metadata contract without a
-service, the complete recoverability-v2 PostgreSQL corpus/conformance target
+service, the complete recoverability-v3 PostgreSQL corpus/conformance target
 with managed PostgreSQL, and the Bitcoin parity target with managed Bitcoin
 Core. Direct task runs use the broad verification target and retain Nixfied
 evidence.
@@ -172,7 +172,7 @@ nix develop -c cargo clean --target-dir target/verification
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
 | `nix run .#check` | Run formatting, Clippy, architecture/Cargo metadata contracts, and offline SQLx checking. |
 | `nix run .#test` | Run main-workspace Nextest and doctests without managed external services. |
-| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative runtime schema model (including a hostile mutation probe), run the recoverability-v2 journal corpus/conformance target, and run the fenced executor PostgreSQL qualification matrix. |
+| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative runtime schema model (including a hostile mutation probe), run the recoverability-v3 journal corpus/conformance target, and run the fenced executor PostgreSQL qualification matrix. |
 | `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or

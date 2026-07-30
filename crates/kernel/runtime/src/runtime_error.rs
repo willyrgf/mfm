@@ -14,7 +14,7 @@ pub enum RuntimeError {
     StoreBackendUnavailable,
     /// Frozen journal construction or projection failed.
     #[error(transparent)]
-    Journal(#[from] mfm_journal::v1::JournalError),
+    Journal(#[from] mfm_journal::v2::JournalError),
     /// A checked runtime-owned stable identity could not be derived.
     #[error(transparent)]
     Identity(#[from] mfm_ids::IdentityError),
@@ -54,6 +54,18 @@ pub enum RuntimeError {
     /// effect request.
     #[error("executor request identity does not match committed effect state")]
     EffectIdentityMismatch,
+    /// A committed logical observation exists with different exact content.
+    #[error("committed access observation conflicts with the pending outcome")]
+    ObservationConflict,
+}
+
+pub(crate) fn non_domain_failure(
+    entry_status: mfm_journal::v2::NonDomainEntryStatus,
+    disposition: mfm_journal::v2::NonDomainDisposition,
+    code: mfm_journal::v2::NonDomainFailureCode,
+) -> Result<mfm_journal::v2::NonDomainFailure> {
+    mfm_journal::v2::NonDomainFailure::new(entry_status, disposition, code)
+        .map_err(|_| RuntimeError::InvalidCallbackResult)
 }
 
 pub(crate) fn map_store_error(error: &impl mfm_store::StoreErrorInspection) -> RuntimeError {

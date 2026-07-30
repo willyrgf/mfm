@@ -32,12 +32,13 @@ pub use contract::{
     SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
 };
 pub use engine::{
-    ExecutorAppendOutcome, ExecutorEffectSnapshot, ExecutorLedgerAppend, ExecutorLedgerStore,
-    ExecutorLedgerStoreIdentity, ExecutorResourceAppend, ExecutorResourceSnapshot,
-    ExecutorStoreSnapshot, KeyedExecutorLedger,
+    ExecuteTargetOutcome, ExecutorAppendOutcome, ExecutorEffectSnapshot, ExecutorLedgerAppend,
+    ExecutorLedgerStore, ExecutorLedgerStoreIdentity, ExecutorResourceAppend,
+    ExecutorResourceSnapshot, ExecutorStoreSnapshot, KeyedExecutorLedger,
 };
 pub use frontier::{
-    derive_attempt_id, reference_safe_failure, verify_reference_safe_failure_tuple, AdmitFrontier,
+    derive_attempt_id, observation_completion_closure_bytes, reference_safe_failure,
+    tombstone_completion_closure_bytes, verify_reference_safe_failure_tuple, AdmitFrontier,
     DeliveryAttemptOutcome, DeliveryAttemptView, DeliveryAudit, DeliveryAuditAccumulator,
     DeliveryAuditFrontier, DeliveryAuditFrontierRef, EvidenceBounds, ExecutorEvidenceRecord,
     ExecutorLedgerRecordRef, FrontierProof, ReferenceFailureCode, ReferenceSafeFailure,
@@ -47,10 +48,12 @@ pub use frontier::{
 pub use ledger::{
     AllocationOutcome, EffectEntryView, MemoryExecutorStore, MemoryLedgerCheckpoint,
     ResourceAllocationEvidence, ResourceLedgerRecord, ResourceLedgerRecordRef, ResourceStreamView,
-    TargetEntryAuthority, TargetOperationReceipt,
+    TargetEntryAuthority,
 };
 pub use mfm_capabilities::{
-    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureError,
+    BoundaryStage, CoarseSizeClass, FailureClass, NonDomainDisposition, NonDomainEntryStatus,
+    NonDomainFailure, NonDomainFailureCode, NonDomainFailureError, NonDomainFailureFields,
+    NonDomainFailureLayer, SafeFailure, SafeFailureCode, SafeFailureError,
 };
 pub use mfm_ids::{AttemptId, ContentRef, EffectKey, RequestDigest, SemanticDigest, TenantScopeId};
 pub use mfm_values::RetainedValueContract;
@@ -66,9 +69,9 @@ pub use reference::{
 };
 pub use retained::{
     verify_ensure_result, verify_retained_delivery_audit, verify_retained_terminal_evidence,
-    EffectExecutorOutcome, EffectExecutorOutcomeView, Ensure, ExecutorEnsureResultClaim,
-    ExecutorRetainedClosureClaim, ExecutorRetainedValue, ExecutorRetainedValueRelation,
-    ExecutorTerminalEvidenceClaim, ProofBasis, VerifiedEnsureResult,
+    EffectExecutorOutcome, EffectExecutorOutcomeParts, EffectExecutorOutcomeView, Ensure,
+    ExecutorEnsureResultClaim, ExecutorRetainedClosureClaim, ExecutorRetainedValue,
+    ExecutorRetainedValueRelation, ExecutorTerminalEvidenceClaim, ProofBasis, VerifiedEnsureResult,
     VerifiedExecutorRetainedClosure, VerifiedTerminalEvidence,
 };
 
@@ -132,6 +135,9 @@ pub enum ExecutorError {
     /// A resource compare-and-swap predecessor is stale.
     #[error("resource stream compare-and-swap mismatch")]
     ResourceCasMismatch,
+    /// Ordinary local compare-and-append contention exhausted its fixed attempt bound.
+    #[error("executor local contention")]
+    LocalContention,
     /// Restored allocation state has not matched its exact policy pair.
     #[error("typed resource policy was not revalidated")]
     ResourcePolicyNotRevalidated,

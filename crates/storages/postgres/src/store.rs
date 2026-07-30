@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use mfm_ids::{AppendRequestId, RunId};
 use mfm_ids::{StoreEpoch, StoreScopeId};
 #[cfg(any(test, feature = "parity-tests"))]
-use mfm_journal::v1::BatchPurpose;
-use mfm_store::v1::{RunAccessAuthorityIssuer, StoreAuthorityContext, StoreIdentity};
+use mfm_journal::v2::BatchPurpose;
+use mfm_store::v2::{RunAccessAuthorityIssuer, StoreAuthorityContext, StoreIdentity};
 use sqlx::{PgConnection, PgPool, Row};
 
 use crate::error::{database_error, PostgresStoreError, Result};

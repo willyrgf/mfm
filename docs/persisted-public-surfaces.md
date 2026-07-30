@@ -38,7 +38,7 @@ RPC URL, provider response body, provider message, or unreviewed diagnostic text
 Every authority-bearing read and write uses one qualified fenced authoritative PostgreSQL writer.
 The application role may insert/select through the store contract but cannot update, delete,
 truncate, or directly manipulate immutable rows, store identity, or tenant fact heads. A replica,
-backup clone, cursor, or apparent applied position cannot mint v1 store-backed authority.
+backup clone, cursor, or apparent applied position cannot mint current store-backed authority.
 
 The in-memory store has the same logical surfaces. It validates one complete candidate in scratch
 state and performs one infallible swap only after every check succeeds.
@@ -50,7 +50,7 @@ state and performs one infallible swap only after every check succeeds.
 | `RunAdmitted` | Run/store/tenant identity, canonical invocation identity, entry point, planning profile, authored/expanded graph, certificate, config/seeds, cross-run source manifest, routing-generation refs, executable and implementation manifests, genesis digest. | Establishes the immutable root. Admission performs no semantic live IO. |
 | `StateTransitionCommitted` | Node occurrence, transition kind, before/after state, exact input lineage, request/selected observation where applicable, result, outputs, facts, evidence, typed failure or blocking sources, binding delta. | The only semantic state change. |
 | `ExternalAccessAuthorized` | Exact read or ensure scope, immutable request identity/value, capability/operation binding, and optional effect/executor binding. | Authorizes zero or one application-protocol operation and changes no semantic state. |
-| `ExternalAccessObserved` | Exact authorization reference and one `Returned`, `DidNotEnter`, or `Indeterminate` typed outcome. | Audit evidence only; state changes only if a later transition consumes it. |
+| `ExternalAccessObserved` | Exact authorization reference and one `Returned`, `DidNotEnter`, `Indeterminate`, or audit-only `NonDomainFailure` typed outcome. | Audit evidence only; state changes only if a later transition consumes state-consumable evidence. A non-domain outcome is never consumable. |
 | `RunClosed` | Final transition reference and terminal semantic-state digest. | Structurally fixes closure in the same commit as the final transition. |
 
 `JournalHead` advances for every commit. `SemanticHead` advances only for admission or a semantic
@@ -64,13 +64,13 @@ transition. A legal late observation after closure advances only the journal hea
 | `mfm_journal::ValueRef` | Full reviewed producer binding, role, schema/semantic type, digest/evidence, length, and media type. | Exact retained journal identity when reachable through a verified commit binding. |
 | Config and seed objects | Canonical typed non-secret values. | Root authority after admission binding. |
 | State request objects | Canonical typed non-secret requests. | Immutable state intent. A read request becomes committed by authorization; an effect request by `EffectRequested`. |
-| Observation objects | Reviewed typed result or closed `SafeFailure`. | Audit evidence selected by an exact authorization. |
+| Observation objects | Reviewed typed result, closed `SafeFailure`, or closed audit-only `NonDomainFailure`. | Audit evidence selected by an exact authorization. Only the first two classes can reach state evidence policy. |
 | Output and fact objects | Canonical typed non-secret values. | Semantic result only through a verified transition binding. |
 | Typed failure objects | Closed domain failure values without provider diagnostics. | Committed domain truth for one terminal state. |
 | Public-output objects | Only fields approved by the certified public schema. | Strict source for `read_public_run`; rendered JSON is a representation. |
 
-Objects referenced by committed authority are retained indefinitely in v1. Garbage collection is
-not a semantic workflow and cannot delete a reachable object.
+Objects referenced by committed authority are retained indefinitely in the current contract.
+Garbage collection is not a semantic workflow and cannot delete a reachable object.
 
 ## Facts
 
@@ -109,6 +109,34 @@ EVM read audit records may retain exact reviewed HTTP status, JSON-RPC numeric c
 response-invalid discriminator through the EVM diagnostic union. Semantic source mismatch and
 anchor change are typed returned values interpreted by the state, not provider diagnostics.
 
+### Audit-only non-domain failure
+
+`NonDomainFailure` is a distinct closed observation outcome:
+
+```text
+NonDomainFailure {
+    entry_status: "proven_not_entered" | "may_have_entered",
+    disposition: "retryable_operational" | "integrity_blocked",
+    code:
+        "adapter_contract_violation" |
+        "result_encoding_failure" |
+        "fact_store_unavailable" |
+        "fact_history_invalid" |
+        "executor_store_unavailable" |
+        "executor_contention" |
+        "executor_history_invalid" |
+        "executor_capacity_exhausted",
+}
+```
+
+The schema fixes each permitted code/status/disposition relation and each permitted read, fact,
+ensure, or executor-target layer. It contains no diagnostic reference, provider text, path,
+endpoint, credential, response body, source chain, arbitrary map, or typed domain value.
+`RetryableOperational` may enable a later separately authorized call after the observation commits;
+`IntegrityBlocked` blocks progress. Both are audit-only: neither is a `SafeFailure`, neither enters
+a state callback, neither can satisfy a settlement, and neither can be transformed into a domain
+failure by replay or a public renderer.
+
 ### Transient EVM transport ownership
 
 The exact-generation EVM transport changes no retained surface. MFM-owned authorization values,
@@ -146,12 +174,12 @@ Its prospective audited surfaces are described in `docs/btc-rpc-routing.md`.
 | --- | --- | --- |
 | Committed executor request | Exact canonical safe request identity; no credential or bearer material. | Identity only; cannot enter a target. |
 | Delivery authorization | Tenant/deployment/effect/attempt and exact request digest. | Strict executor authority that precedes one target call. |
-| Target receipt and observation | Closed returned/did-not-enter/indeterminate outcome with reviewed safe result/failure refs. | Exact evidence for the committed delivery authorization. |
+| Target completion and sealed observation | The target returns one unbound closed returned/did-not-enter/indeterminate/non-domain outcome with reviewed safe result/failure material; the private completion seal binds it to the affine target-entry authority. | Exact sealed evidence for the committed delivery authorization; `execute_target_once` cannot return normally before this observation is persisted or resolved identically. |
 | Delivery frontier and tombstone | Bounded predecessor-linked audit, exact terminal proof, assurance-policy ref. | Strict executor terminal evidence. |
 | Typed resource stream | Resource ownership/key, policy/config refs, immutable allocation state. | Executor-private resource authority. |
 | EVM wallet request | Exact tenant, target, chain, public account, signer binding, policy, and unsigned transaction intent. No secret selector, key material, or signature. | Immutable effect identity and target intent. |
 | EVM wallet candidate | Exact public unsigned transaction fields, fee ordinal, allocated nonce, and signed-transaction hash. No signature or raw signed bytes. | Recoverable public candidate; permits hash lookup and finality recovery without reopening the signer. |
-| EVM wallet attempt evidence | Exact operation, request/result refs, and closed returned/did-not-enter/indeterminate classification. Provider diagnostics and credentials are excluded. | Audited evidence for one authorized target exchange. |
+| EVM wallet attempt evidence | Exact operation, request/result refs, and closed returned/did-not-enter/indeterminate/non-domain classification. Provider diagnostics and credentials are excluded. | Audited evidence for one authorized target exchange. A valid result above the retained bound is `ResultUnrepresentable`; invalid typed/contract or encoding construction outcomes carry the closed integrity-blocked non-domain codes. |
 | EVM wallet terminal evidence | Exact accepted transaction hash, inclusion/finality proof refs, and closure outcome. | Content-addressed terminal proof consumed by the journal only through audited ensure. |
 | PostgreSQL executor binding | One tenant, executor binding, durable generation, evidence authority, and optional resource owner in the dedicated executor schema. | Immutable strict executor authority admitted only after the independent deployment fence succeeds. |
 | PostgreSQL executor records | Immutable effect frontiers, resource records, exact effect/resource links, and content-addressed closure objects. | Raw executor authority accepted only after opaque decoding and shared-engine strict refold. |
@@ -191,8 +219,8 @@ access; resume resolves the exact admitted generation without fallback.
 | Public run view | `active`, `succeeded`, or `failed`; reviewed active fields; certified public outputs. |
 | Replay response | Frozen verified, reproduced, or candidate-comparison result. Reproduction `unavailable` has no reason field. |
 | Transition trace | Separately authorized exact transition lineage and retained values; cross-run denial uses redacted lineage. |
-| Access audit | Separately authorized safe authorization/observation chronology. |
-| Portable export | Framed `mfm.portable-run-export-stream.v1` JSON text sequence plus one external `ContentRef`. |
+| Access audit | Separately authorized safe authorization/observation chronology, including the optional closed `non_domain_failure` value for that exact outcome. |
+| Portable export | Framed `mfm.portable-run-export-stream.v2` JSON text sequence plus one external `ContentRef`. |
 
 The portable stream begins with one header, emits root-first run material and deduplicated object
 payloads with every logical `ValueRef` authority, and ends with one terminal frame followed by

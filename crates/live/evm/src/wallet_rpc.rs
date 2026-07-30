@@ -17,7 +17,6 @@ use mfm_evm::{
 use mfm_executor::{
     reference_safe_failure, BoundaryStage, CanonicalExecutorRequest, DeliveryAttemptOutcome,
     FailureClass, ReferenceFailureCode, SchemaQualifiedCanonicalValue, TargetEntryAuthority,
-    TargetOperationReceipt,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
 use mfm_program::{boundary_content_ref, encode_boundary};
@@ -39,9 +38,9 @@ use crate::{
 pub const EVM_ALREADY_KNOWN_CLASSIFIER_VERSION: &str = "mfm.evm-live.already-known-classifier.v1";
 /// Exact five-method wallet target callback-surface version.
 pub const EVM_WALLET_TARGET_CALLBACK_SURFACE_VERSION: &str =
-    "mfm.evm-live.wallet-target-callback-surface.v1";
+    "mfm.evm-live.wallet-target-callback-surface.v2";
 /// Exact durable target-entry descriptor version.
-pub const EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION: &str = "mfm.evm-live.wallet-target-entry.v1";
+pub const EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION: &str = "mfm.evm-live.wallet-target-entry.v2";
 
 /// Redaction-safe local wallet target failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -253,7 +252,7 @@ impl EvmWalletTargetEntryDescriptor {
         &self.canonical
     }
 
-    /// Returns its exact content identity.
+    #[cfg(test)]
     pub(crate) fn content_ref(&self) -> Result<ContentRef, EvmWalletLiveError> {
         self.canonical
             .reference()
@@ -391,40 +390,142 @@ impl EvmWalletTargetEntryDescriptor {
     }
 }
 
-pub(crate) struct PreparedEvmWalletBroadcast {
+pub(crate) struct PreparedEvmWalletCommon {
     descriptor: EvmWalletTargetEntryDescriptor,
+    request: EvmSubmitTransactionRequest,
     candidate: EvmWalletTransactionCandidate,
-    signed: TransientSignedEip1559Envelope,
+    candidate_ref: EvmWalletReference,
+    route: ContentRef,
+    chain_id: u64,
+    transaction_hash: B256,
+    result_schema: SchemaId,
+    max_result_bytes: usize,
+    outcomes: PreparedWalletOutcomes,
 }
 
-impl PreparedEvmWalletBroadcast {
+/// One fully validated wallet target invocation prepared before durable authorization.
+pub(crate) enum PreparedEvmWalletTarget {
+    /// One signed raw-transaction broadcast.
+    Broadcast {
+        common: Box<PreparedEvmWalletCommon>,
+        signed: TransientSignedEip1559Envelope,
+    },
+    /// One transaction-by-hash lookup.
+    TransactionLookup {
+        common: Box<PreparedEvmWalletCommon>,
+    },
+    /// One receipt-by-hash lookup.
+    ReceiptLookup {
+        common: Box<PreparedEvmWalletCommon>,
+    },
+    /// One finalized-head lookup.
+    FinalizedHead {
+        common: Box<PreparedEvmWalletCommon>,
+    },
+    /// One exact-number canonical-inclusion lookup.
+    CanonicalInclusion {
+        common: Box<PreparedEvmWalletCommon>,
+        inclusion_number: U256,
+        terminal_candidate: Option<Box<EvmWalletTerminalEvidence>>,
+    },
+}
+
+impl PreparedEvmWalletTarget {
+    const fn common(&self) -> &PreparedEvmWalletCommon {
+        match self {
+            Self::Broadcast { common, .. }
+            | Self::TransactionLookup { common }
+            | Self::ReceiptLookup { common }
+            | Self::FinalizedHead { common }
+            | Self::CanonicalInclusion { common, .. } => common,
+        }
+    }
+
     /// Returns the public candidate committed by authorization.
     pub(crate) const fn candidate(&self) -> &EvmWalletTransactionCandidate {
-        &self.candidate
+        match self {
+            Self::Broadcast { common, .. }
+            | Self::TransactionLookup { common }
+            | Self::ReceiptLookup { common }
+            | Self::FinalizedHead { common }
+            | Self::CanonicalInclusion { common, .. } => &common.candidate,
+        }
+    }
+
+    /// Returns the exact descriptor committed by authorization.
+    pub(crate) const fn descriptor(&self) -> &EvmWalletTargetEntryDescriptor {
+        match self {
+            Self::Broadcast { common, .. }
+            | Self::TransactionLookup { common }
+            | Self::ReceiptLookup { common }
+            | Self::FinalizedHead { common }
+            | Self::CanonicalInclusion { common, .. } => &common.descriptor,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn classify_with_result_bound_for_test(
+        &self,
+        result: EvmWalletAttemptResult,
+        max_result_bytes: usize,
+    ) -> DeliveryAttemptOutcome {
+        self.common()
+            .returned_with_encoder(result, max_result_bytes, |result| {
+                encode_boundary(result).map_err(|_| EvmWalletLiveError::ResultEncoding)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn classify_encoding_failure_for_test(
+        &self,
+        result: EvmWalletAttemptResult,
+    ) -> DeliveryAttemptOutcome {
+        self.common()
+            .returned_with_encoder(result, self.common().max_result_bytes, |_| {
+                Err(EvmWalletLiveError::ResultEncoding)
+            })
     }
 }
 
-impl fmt::Debug for PreparedEvmWalletBroadcast {
+impl fmt::Debug for PreparedEvmWalletTarget {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("PreparedEvmWalletBroadcast")
-            .field("descriptor", &self.descriptor)
-            .field("candidate", &self.candidate)
-            .field("signed", &"<redacted-zeroizing>")
+            .debug_struct("PreparedEvmWalletTarget")
+            .field("descriptor", self.descriptor())
+            .field("candidate", self.candidate())
             .finish()
     }
 }
 
-pub(crate) struct EvmWalletBroadcastReturn {
-    receipt: TargetOperationReceipt,
-    candidate: EvmWalletTransactionCandidate,
+/// Fresh target-entry authority paired inseparably with its preauthorized invocation.
+pub(crate) struct AuthorizedEvmWalletTarget {
+    authority: TargetEntryAuthority,
+    prepared: PreparedEvmWalletTarget,
 }
 
-impl EvmWalletBroadcastReturn {
-    /// Splits the receipt and public candidate.
-    pub(crate) fn into_parts(self) -> (TargetOperationReceipt, EvmWalletTransactionCandidate) {
-        (self.receipt, self.candidate)
+impl AuthorizedEvmWalletTarget {
+    pub(crate) const fn new(
+        authority: TargetEntryAuthority,
+        prepared: PreparedEvmWalletTarget,
+    ) -> Self {
+        Self {
+            authority,
+            prepared,
+        }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedWalletOutcomes {
+    generation_fenced: DeliveryAttemptOutcome,
+    access_cancelled: DeliveryAttemptOutcome,
+    unavailable_before_entry: DeliveryAttemptOutcome,
+    response_lost: DeliveryAttemptOutcome,
+    request_conflict: DeliveryAttemptOutcome,
+    unclassified: DeliveryAttemptOutcome,
+    result_unrepresentable: DeliveryAttemptOutcome,
+    adapter_contract_violation: DeliveryAttemptOutcome,
+    result_encoding_failure: DeliveryAttemptOutcome,
 }
 
 #[derive(Clone)]
@@ -451,20 +552,13 @@ impl EvmWalletJsonRpcTarget {
         })
     }
 
-    /// Returns the generation required by both guarded signing and target entry.
-    pub(crate) fn durable_generation_ref(&self) -> &ContentRef {
-        self.qualification
-            .signer_descriptor()
-            .durable_generation_ref()
-    }
-
-    /// Guardedly prepares one exact candidate before durable authorization.
+    /// Guardedly prepares one exact signed candidate before durable authorization.
     pub(crate) async fn prepare_broadcast(
         &self,
         request: &EvmSubmitTransactionRequest,
         allocated_nonce: u64,
         fee_ordinal: u16,
-    ) -> Result<PreparedEvmWalletBroadcast, EvmWalletLiveError> {
+    ) -> Result<PreparedEvmWalletTarget, EvmWalletLiveError> {
         self.qualification.verify_request(request)?;
         let envelope = request
             .unsigned_envelope(allocated_nonce, fee_ordinal)
@@ -493,248 +587,299 @@ impl EvmWalletJsonRpcTarget {
         )
         .map_err(|_| EvmWalletLiveError::InvalidContract)?;
         let descriptor = EvmWalletTargetEntryDescriptor::broadcast(request, &candidate)?;
-        Ok(PreparedEvmWalletBroadcast {
-            descriptor,
-            candidate,
+        let common = self.prepare_common(request, candidate, descriptor)?;
+        Ok(PreparedEvmWalletTarget::Broadcast {
+            common: Box::new(common),
             signed,
         })
     }
 
-    /// Performs one authorized `eth_sendRawTransaction` exchange.
-    pub(crate) async fn broadcast(
+    /// Prepares one exact transaction lookup before durable authorization.
+    pub(crate) fn prepare_transaction_lookup(
         &self,
-        authority: TargetEntryAuthority,
         request: &EvmSubmitTransactionRequest,
-        prepared: PreparedEvmWalletBroadcast,
-    ) -> Result<EvmWalletBroadcastReturn, EvmWalletLiveError> {
-        self.qualification.verify_request(request)?;
-        let PreparedEvmWalletBroadcast {
-            descriptor,
-            candidate,
-            signed,
-        } = prepared;
-        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
-        require_candidate_request(request, &candidate)?;
-        let signed_hash = signed.transaction_hash();
-        if descriptor.operation_id() != EVM_WALLET_BROADCAST_OPERATION_ID
-            || parse_hash(candidate.transaction_hash()) != Some(signed_hash)
-        {
-            return Err(EvmWalletLiveError::InvalidContract);
-        }
-        let route = self
-            .rpc_route(request)
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let response = self
-            .qualification
-            .transport()
-            .send_raw_transaction(&route, self.qualification.chain_id(), signed)
-            .await;
-        let outcome = match response {
-            Ok(WalletBroadcastResponse::Accepted(acknowledged)) => {
-                if acknowledged != signed_hash {
-                    self.indeterminate_unclassified()?
-                } else {
-                    self.returned(
-                        request,
-                        EvmWalletAttemptResult::Broadcast {
-                            candidate_ref: candidate
-                                .reference()
-                                .map_err(|_| EvmWalletLiveError::InvalidContract)?,
-                            transaction_hash: candidate.transaction_hash().to_owned(),
-                            status: EvmWalletBroadcastStatus::Accepted,
-                            classifier_ref: None,
-                        },
-                    )?
-                }
-            }
-            Ok(WalletBroadcastResponse::AlreadyKnown)
-                if request.policy().already_known_classifier_ref()
-                    == self.qualification.already_known_classifier_ref() =>
-            {
-                self.returned(
-                    request,
-                    EvmWalletAttemptResult::Broadcast {
-                        candidate_ref: candidate
-                            .reference()
-                            .map_err(|_| EvmWalletLiveError::InvalidContract)?,
-                        transaction_hash: candidate.transaction_hash().to_owned(),
-                        status: EvmWalletBroadcastStatus::AlreadyKnown,
-                        classifier_ref: Some(
-                            request.policy().already_known_classifier_ref().clone(),
-                        ),
-                    },
-                )?
-            }
-            Ok(WalletBroadcastResponse::AlreadyKnown) => self.indeterminate_conflict()?,
-            Err(failure) => self.failure_outcome(failure)?,
-        };
-        Ok(EvmWalletBroadcastReturn {
-            receipt: authority.complete(outcome),
-            candidate,
+        candidate: EvmWalletTransactionCandidate,
+    ) -> Result<PreparedEvmWalletTarget, EvmWalletLiveError> {
+        let descriptor = EvmWalletTargetEntryDescriptor::transaction_lookup(request, &candidate)?;
+        Ok(PreparedEvmWalletTarget::TransactionLookup {
+            common: Box::new(self.prepare_common(request, candidate, descriptor)?),
         })
     }
 
-    /// Performs one `eth_getTransactionByHash` exchange.
-    pub(crate) async fn transaction_lookup(
+    /// Prepares one exact receipt lookup before durable authorization.
+    pub(crate) fn prepare_receipt_lookup(
         &self,
-        authority: TargetEntryAuthority,
         request: &EvmSubmitTransactionRequest,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
-        self.qualification.verify_request(request)?;
-        require_candidate_request(request, candidate)?;
-        let descriptor = EvmWalletTargetEntryDescriptor::transaction_lookup(request, candidate)?;
-        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
-        let route = self
-            .rpc_route(request)
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let transaction_hash =
-            parse_hash(candidate.transaction_hash()).ok_or(EvmWalletLiveError::InvalidContract)?;
-        let response = self
-            .qualification
-            .transport()
-            .transaction_by_hash(&route, self.qualification.chain_id(), transaction_hash)
-            .await;
-        let outcome = match response {
-            Ok(None) => self.returned(
-                request,
-                EvmWalletAttemptResult::TransactionLookup {
-                    transaction_hash: candidate.transaction_hash().to_owned(),
-                    transaction: None,
-                },
-            )?,
-            Ok(Some(transaction)) if transaction.matches_candidate(candidate).unwrap_or(false) => {
-                self.returned(
-                    request,
-                    EvmWalletAttemptResult::TransactionLookup {
-                        transaction_hash: candidate.transaction_hash().to_owned(),
-                        transaction: Some(transaction),
-                    },
-                )?
-            }
-            Ok(Some(_)) => self.indeterminate_unclassified()?,
-            Err(failure) => self.failure_outcome(failure)?,
-        };
-        Ok(authority.complete(outcome))
+        candidate: EvmWalletTransactionCandidate,
+    ) -> Result<PreparedEvmWalletTarget, EvmWalletLiveError> {
+        let descriptor = EvmWalletTargetEntryDescriptor::receipt_lookup(request, &candidate)?;
+        Ok(PreparedEvmWalletTarget::ReceiptLookup {
+            common: Box::new(self.prepare_common(request, candidate, descriptor)?),
+        })
     }
 
-    /// Performs one `eth_getTransactionReceipt` exchange.
-    pub(crate) async fn receipt_lookup(
+    /// Prepares one exact finalized-head lookup before durable authorization.
+    pub(crate) fn prepare_finalized_head(
         &self,
-        authority: TargetEntryAuthority,
         request: &EvmSubmitTransactionRequest,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
-        self.qualification.verify_request(request)?;
-        require_candidate_request(request, candidate)?;
-        let descriptor = EvmWalletTargetEntryDescriptor::receipt_lookup(request, candidate)?;
-        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
-        let route = self
-            .rpc_route(request)
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let transaction_hash =
-            parse_hash(candidate.transaction_hash()).ok_or(EvmWalletLiveError::InvalidContract)?;
-        let response = self
-            .qualification
-            .transport()
-            .receipt_by_hash(&route, self.qualification.chain_id(), transaction_hash)
-            .await;
-        let outcome = match response {
-            Ok(None) => self.returned(
-                request,
-                EvmWalletAttemptResult::ReceiptLookup {
-                    transaction_hash: candidate.transaction_hash().to_owned(),
-                    receipt: None,
-                },
-            )?,
-            Ok(Some(receipt)) if receipt.transaction_hash() == candidate.transaction_hash() => self
-                .returned(
-                    request,
-                    EvmWalletAttemptResult::ReceiptLookup {
-                        transaction_hash: candidate.transaction_hash().to_owned(),
-                        receipt: Some(receipt),
-                    },
-                )?,
-            Ok(Some(_)) => self.indeterminate_unclassified()?,
-            Err(failure) => self.failure_outcome(failure)?,
-        };
-        Ok(authority.complete(outcome))
+        candidate: EvmWalletTransactionCandidate,
+    ) -> Result<PreparedEvmWalletTarget, EvmWalletLiveError> {
+        let descriptor = EvmWalletTargetEntryDescriptor::finalized_head(request, &candidate)?;
+        Ok(PreparedEvmWalletTarget::FinalizedHead {
+            common: Box::new(self.prepare_common(request, candidate, descriptor)?),
+        })
     }
 
-    /// Performs one `eth_getBlockByNumber("finalized", false)` exchange.
-    pub(crate) async fn finalized_head(
+    /// Prepares one exact canonical-inclusion lookup before durable authorization.
+    pub(crate) fn prepare_canonical_inclusion(
         &self,
-        authority: TargetEntryAuthority,
         request: &EvmSubmitTransactionRequest,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
-        self.qualification.verify_request(request)?;
-        require_candidate_request(request, candidate)?;
-        let descriptor = EvmWalletTargetEntryDescriptor::finalized_head(request, candidate)?;
-        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
-        let route = self
-            .rpc_route(request)
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let response = self
-            .qualification
-            .transport()
-            .finalized_head(&route, self.qualification.chain_id())
-            .await;
-        let outcome = match response {
-            Ok(block) => self.returned(request, EvmWalletAttemptResult::FinalizedHead { block })?,
-            Err(failure) => self.failure_outcome(failure)?,
-        };
-        Ok(authority.complete(outcome))
-    }
-
-    /// Performs one inclusion-number block lookup and admits terminal evidence only on equality.
-    pub(crate) async fn canonical_inclusion(
-        &self,
-        authority: TargetEntryAuthority,
-        request: &EvmSubmitTransactionRequest,
-        candidate: &EvmWalletTransactionCandidate,
+        candidate: EvmWalletTransactionCandidate,
         inclusion_number: U256,
         terminal_candidate: Option<EvmWalletTerminalEvidence>,
-    ) -> Result<TargetOperationReceipt, EvmWalletLiveError> {
-        self.qualification.verify_request(request)?;
-        require_candidate_request(request, candidate)?;
+    ) -> Result<PreparedEvmWalletTarget, EvmWalletLiveError> {
         let descriptor = EvmWalletTargetEntryDescriptor::canonical_inclusion(
             request,
-            candidate,
+            &candidate,
             inclusion_number,
         )?;
-        require_target_entry(&authority, &descriptor, self.durable_generation_ref())?;
+        Ok(PreparedEvmWalletTarget::CanonicalInclusion {
+            common: Box::new(self.prepare_common(request, candidate, descriptor)?),
+            inclusion_number,
+            terminal_candidate: terminal_candidate.map(Box::new),
+        })
+    }
+
+    /// Performs exactly one exchange and returns one unbound outcome candidate.
+    pub(crate) async fn invoke_target(
+        &self,
+        authorized: AuthorizedEvmWalletTarget,
+    ) -> DeliveryAttemptOutcome {
+        let AuthorizedEvmWalletTarget {
+            authority,
+            prepared,
+        } = authorized;
+        let target_operation_ref = prepared.descriptor().canonical().reference();
+        let authority_mismatch = match target_operation_ref.as_ref() {
+            Ok(target_operation_ref) => {
+                target_operation_ref != authority.target_operation_ref()
+                    || authority.identity().executor_binding_ref()
+                        != self.qualification.executor_binding().binding_ref()
+                    || authority.identity().tenant_scope_id()
+                        != self
+                            .qualification
+                            .executor_binding()
+                            .deployment()
+                            .tenant_scope_id()
+                    || authority.durable_ledger_generation_ref()
+                        != self
+                            .qualification
+                            .executor_binding()
+                            .deployment()
+                            .durable_ledger_generation_ref()
+            }
+            Err(_) => true,
+        };
+        if authority_mismatch {
+            return prepared
+                .common()
+                .outcomes
+                .adapter_contract_violation
+                .clone();
+        }
+        let outcome = match prepared {
+            PreparedEvmWalletTarget::Broadcast { common, signed } => {
+                let response = self
+                    .qualification
+                    .transport()
+                    .send_raw_transaction(&common.route, common.chain_id, signed)
+                    .await;
+                match response {
+                    Ok(WalletBroadcastResponse::Accepted(acknowledged))
+                        if acknowledged == common.transaction_hash =>
+                    {
+                        common.returned_or_unrepresentable(EvmWalletAttemptResult::Broadcast {
+                            candidate_ref: common.candidate_ref.clone(),
+                            transaction_hash: common.candidate.transaction_hash().to_owned(),
+                            status: EvmWalletBroadcastStatus::Accepted,
+                            classifier_ref: None,
+                        })
+                    }
+                    Ok(WalletBroadcastResponse::Accepted(_)) => {
+                        common.outcomes.unclassified.clone()
+                    }
+                    Ok(WalletBroadcastResponse::AlreadyKnown)
+                        if common.request.policy().already_known_classifier_ref()
+                            == self.qualification.already_known_classifier_ref() =>
+                    {
+                        common.returned_or_unrepresentable(EvmWalletAttemptResult::Broadcast {
+                            candidate_ref: common.candidate_ref.clone(),
+                            transaction_hash: common.candidate.transaction_hash().to_owned(),
+                            status: EvmWalletBroadcastStatus::AlreadyKnown,
+                            classifier_ref: Some(
+                                common
+                                    .request
+                                    .policy()
+                                    .already_known_classifier_ref()
+                                    .clone(),
+                            ),
+                        })
+                    }
+                    Ok(WalletBroadcastResponse::AlreadyKnown) => {
+                        common.outcomes.request_conflict.clone()
+                    }
+                    Err(failure) => common.outcomes.for_rpc_failure(failure),
+                }
+            }
+            PreparedEvmWalletTarget::TransactionLookup { common } => {
+                let response = self
+                    .qualification
+                    .transport()
+                    .transaction_by_hash(&common.route, common.chain_id, common.transaction_hash)
+                    .await;
+                match response {
+                    Ok(None) => common.returned_or_unrepresentable(
+                        EvmWalletAttemptResult::TransactionLookup {
+                            transaction_hash: common.candidate.transaction_hash().to_owned(),
+                            transaction: None,
+                        },
+                    ),
+                    Ok(Some(transaction))
+                        if transaction
+                            .matches_candidate(&common.candidate)
+                            .unwrap_or(false) =>
+                    {
+                        common.returned_or_unrepresentable(
+                            EvmWalletAttemptResult::TransactionLookup {
+                                transaction_hash: common.candidate.transaction_hash().to_owned(),
+                                transaction: Some(transaction),
+                            },
+                        )
+                    }
+                    Ok(Some(_)) => common.outcomes.unclassified.clone(),
+                    Err(failure) => common.outcomes.for_rpc_failure(failure),
+                }
+            }
+            PreparedEvmWalletTarget::ReceiptLookup { common } => {
+                let response = self
+                    .qualification
+                    .transport()
+                    .receipt_by_hash(&common.route, common.chain_id, common.transaction_hash)
+                    .await;
+                match response {
+                    Ok(None) => {
+                        common.returned_or_unrepresentable(EvmWalletAttemptResult::ReceiptLookup {
+                            transaction_hash: common.candidate.transaction_hash().to_owned(),
+                            receipt: None,
+                        })
+                    }
+                    Ok(Some(receipt))
+                        if receipt.transaction_hash() == common.candidate.transaction_hash() =>
+                    {
+                        common.returned_or_unrepresentable(EvmWalletAttemptResult::ReceiptLookup {
+                            transaction_hash: common.candidate.transaction_hash().to_owned(),
+                            receipt: Some(receipt),
+                        })
+                    }
+                    Ok(Some(_)) => common.outcomes.unclassified.clone(),
+                    Err(failure) => common.outcomes.for_rpc_failure(failure),
+                }
+            }
+            PreparedEvmWalletTarget::FinalizedHead { common } => {
+                let response = self
+                    .qualification
+                    .transport()
+                    .finalized_head(&common.route, common.chain_id)
+                    .await;
+                match response {
+                    Ok(block) => {
+                        common.returned_or_unrepresentable(EvmWalletAttemptResult::FinalizedHead {
+                            block,
+                        })
+                    }
+                    Err(failure) => common.outcomes.for_rpc_failure(failure),
+                }
+            }
+            PreparedEvmWalletTarget::CanonicalInclusion {
+                common,
+                inclusion_number,
+                terminal_candidate,
+            } => {
+                let response = self
+                    .qualification
+                    .transport()
+                    .inclusion_block(&common.route, common.chain_id, inclusion_number)
+                    .await;
+                match response {
+                    Ok(None) => common.returned_or_unrepresentable(
+                        EvmWalletAttemptResult::CanonicalInclusion {
+                            block: None,
+                            terminal: None,
+                        },
+                    ),
+                    Ok(Some(block)) => {
+                        let terminal = terminal_candidate
+                            .filter(|terminal| terminal.inclusion_block() == &block)
+                            .filter(|terminal| terminal.outcome().is_ok())
+                            .map(|terminal| *terminal);
+                        common.returned_or_unrepresentable(
+                            EvmWalletAttemptResult::CanonicalInclusion {
+                                block: Some(block),
+                                terminal,
+                            },
+                        )
+                    }
+                    Err(failure) => common.outcomes.for_rpc_failure(failure),
+                }
+            }
+        };
+        outcome
+    }
+
+    fn prepare_common(
+        &self,
+        request: &EvmSubmitTransactionRequest,
+        candidate: EvmWalletTransactionCandidate,
+        descriptor: EvmWalletTargetEntryDescriptor,
+    ) -> Result<PreparedEvmWalletCommon, EvmWalletLiveError> {
+        self.qualification.verify_request(request)?;
+        require_candidate_request(request, &candidate)?;
+        descriptor.validate_for_request(request)?;
+        let candidate_ref = candidate
+            .reference()
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        if descriptor.candidate_ref() != &candidate_ref {
+            return Err(EvmWalletLiveError::InvalidContract);
+        }
+        let transaction_hash =
+            parse_hash(candidate.transaction_hash()).ok_or(EvmWalletLiveError::InvalidContract)?;
         let route = self
             .rpc_route(request)
             .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let response = self
-            .qualification
-            .transport()
-            .inclusion_block(&route, self.qualification.chain_id(), inclusion_number)
-            .await;
-        let outcome = match response {
-            Ok(None) => self.returned(
-                request,
-                EvmWalletAttemptResult::CanonicalInclusion {
-                    block: None,
-                    terminal: None,
-                },
-            )?,
-            Ok(Some(block)) => {
-                let terminal = terminal_candidate
-                    .filter(|terminal| terminal.inclusion_block() == &block)
-                    .filter(|terminal| terminal.outcome().is_ok());
-                self.returned(
-                    request,
-                    EvmWalletAttemptResult::CanonicalInclusion {
-                        block: Some(block),
-                        terminal,
-                    },
-                )?
-            }
-            Err(failure) => self.failure_outcome(failure)?,
-        };
-        Ok(authority.complete(outcome))
+        let result_schema =
+            EvmWalletAttemptResult::schema_id().map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        let max_result_bytes =
+            usize::try_from(request.policy().convergence().max_attempt_result_bytes())
+                .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        let outcomes = PreparedWalletOutcomes::new(
+            self.qualification
+                .executor_binding()
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+        )?;
+        Ok(PreparedEvmWalletCommon {
+            descriptor,
+            request: request.clone(),
+            candidate,
+            candidate_ref,
+            route,
+            chain_id: self.qualification.chain_id(),
+            transaction_hash,
+            result_schema,
+            max_result_bytes,
+            outcomes,
+        })
     }
 
     fn rpc_route(
@@ -749,96 +894,150 @@ impl EvmWalletJsonRpcTarget {
             .to_content_ref()
             .map_err(|_| WalletRpcFailure::GenerationFenced)
     }
+}
 
-    fn returned(
+impl PreparedEvmWalletCommon {
+    fn returned_or_unrepresentable(
         &self,
-        request: &EvmSubmitTransactionRequest,
         result: EvmWalletAttemptResult,
-    ) -> Result<DeliveryAttemptOutcome, EvmWalletLiveError> {
-        result
-            .validate()
-            .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        let canonical = encode_boundary(&result).map_err(|_| EvmWalletLiveError::ResultEncoding)?;
-        if canonical.as_bytes().len()
-            > usize::try_from(request.policy().convergence().max_attempt_result_bytes())
-                .map_err(|_| EvmWalletLiveError::InvalidContract)?
-        {
-            return Err(EvmWalletLiveError::ResultEncoding);
-        }
-        let schema =
-            EvmWalletAttemptResult::schema_id().map_err(|_| EvmWalletLiveError::ResultEncoding)?;
-        let result = SchemaQualifiedCanonicalValue::new(schema, canonical.as_bytes())
-            .map_err(|_| EvmWalletLiveError::ResultEncoding)?;
-        DeliveryAttemptOutcome::returned(result).map_err(|_| EvmWalletLiveError::ResultEncoding)
+    ) -> DeliveryAttemptOutcome {
+        self.returned_with_encoder(result, self.max_result_bytes, |result| {
+            encode_boundary(result).map_err(|_| EvmWalletLiveError::ResultEncoding)
+        })
     }
 
-    fn failure_outcome(
+    fn returned_with_encoder<Encode>(
         &self,
-        failure: WalletRpcFailure,
-    ) -> Result<DeliveryAttemptOutcome, EvmWalletLiveError> {
-        let (code, class, stage, did_not_enter) = match failure {
-            WalletRpcFailure::GenerationFenced => (
+        result: EvmWalletAttemptResult,
+        max_result_bytes: usize,
+        encode: Encode,
+    ) -> DeliveryAttemptOutcome
+    where
+        Encode:
+            FnOnce(&EvmWalletAttemptResult) -> Result<PlainCanonicalJsonBytes, EvmWalletLiveError>,
+    {
+        if result.validate_for_candidate(&self.candidate).is_err() {
+            return self.outcomes.adapter_contract_violation.clone();
+        }
+        let canonical = match encode(&result) {
+            Ok(canonical) => canonical,
+            Err(_) => return self.outcomes.result_encoding_failure.clone(),
+        };
+        if canonical.as_bytes().len() > max_result_bytes {
+            return self.outcomes.result_unrepresentable.clone();
+        }
+        let result = match SchemaQualifiedCanonicalValue::new(
+            self.result_schema.clone(),
+            canonical.as_bytes(),
+        ) {
+            Ok(result) => result,
+            Err(_) => return self.outcomes.result_encoding_failure.clone(),
+        };
+        DeliveryAttemptOutcome::returned(result)
+            .unwrap_or_else(|_| self.outcomes.result_encoding_failure.clone())
+    }
+}
+
+impl PreparedWalletOutcomes {
+    pub(crate) fn new(safe_failure_contract_ref: ContentRef) -> Result<Self, EvmWalletLiveError> {
+        let outcome = |code, class, stage, did_not_enter| {
+            let failure =
+                reference_safe_failure(safe_failure_contract_ref.clone(), code, class, stage)
+                    .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+            if did_not_enter {
+                DeliveryAttemptOutcome::did_not_enter(failure)
+            } else {
+                DeliveryAttemptOutcome::indeterminate(failure)
+            }
+            .map_err(|_| EvmWalletLiveError::InvalidContract)
+        };
+        Ok(Self {
+            generation_fenced: outcome(
                 ReferenceFailureCode::GenerationFenced,
                 FailureClass::Authorization,
                 BoundaryStage::BeforeBoundaryEntry,
                 true,
-            ),
-            WalletRpcFailure::AccessCancelled => (
+            )?,
+            access_cancelled: outcome(
                 ReferenceFailureCode::AccessCancelled,
                 FailureClass::Cancellation,
                 BoundaryStage::BeforeBoundaryEntry,
                 true,
-            ),
-            WalletRpcFailure::UnavailableBeforeEntry => (
+            )?,
+            unavailable_before_entry: outcome(
                 ReferenceFailureCode::DestinationUnavailable,
                 FailureClass::Transport,
                 BoundaryStage::BeforeBoundaryEntry,
                 true,
-            ),
-            WalletRpcFailure::ResponseLost => (
+            )?,
+            response_lost: outcome(
                 ReferenceFailureCode::DestinationUnavailable,
                 FailureClass::Transport,
                 BoundaryStage::BoundaryEntry,
                 false,
-            ),
-            WalletRpcFailure::DestinationRejected => (
+            )?,
+            request_conflict: outcome(
                 ReferenceFailureCode::RequestConflict,
                 FailureClass::Destination,
                 BoundaryStage::BoundaryObservation,
                 false,
-            ),
-            WalletRpcFailure::InvalidResponse => (
+            )?,
+            unclassified: outcome(
                 ReferenceFailureCode::UnclassifiedFailure,
                 FailureClass::Unclassified,
                 BoundaryStage::BoundaryObservation,
                 false,
-            ),
-        };
-        let failure = reference_safe_failure(
-            self.qualification
-                .executor_binding()
-                .contract()
-                .safe_failure_contract_ref()
-                .clone(),
-            code,
-            class,
-            stage,
-        )
-        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
-        if did_not_enter {
-            DeliveryAttemptOutcome::did_not_enter(failure)
-        } else {
-            DeliveryAttemptOutcome::indeterminate(failure)
+            )?,
+            result_unrepresentable: outcome(
+                ReferenceFailureCode::ResultUnrepresentable,
+                FailureClass::UnrepresentableResponse,
+                BoundaryStage::BoundaryObservation,
+                false,
+            )?,
+            adapter_contract_violation: DeliveryAttemptOutcome::non_domain_failure(
+                mfm_journal::v2::NonDomainFailure::new(
+                    mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                    mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                    mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation,
+                )
+                .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+            )
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+            result_encoding_failure: DeliveryAttemptOutcome::non_domain_failure(
+                mfm_journal::v2::NonDomainFailure::new(
+                    mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                    mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                    mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure,
+                )
+                .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+            )
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+        })
+    }
+
+    pub(crate) fn completion_outcomes(&self) -> [&DeliveryAttemptOutcome; 9] {
+        [
+            &self.generation_fenced,
+            &self.access_cancelled,
+            &self.unavailable_before_entry,
+            &self.response_lost,
+            &self.request_conflict,
+            &self.unclassified,
+            &self.result_unrepresentable,
+            &self.adapter_contract_violation,
+            &self.result_encoding_failure,
+        ]
+    }
+
+    fn for_rpc_failure(&self, failure: WalletRpcFailure) -> DeliveryAttemptOutcome {
+        match failure {
+            WalletRpcFailure::GenerationFenced => self.generation_fenced.clone(),
+            WalletRpcFailure::AccessCancelled => self.access_cancelled.clone(),
+            WalletRpcFailure::UnavailableBeforeEntry => self.unavailable_before_entry.clone(),
+            WalletRpcFailure::ResponseLost => self.response_lost.clone(),
+            WalletRpcFailure::DestinationRejected => self.request_conflict.clone(),
+            WalletRpcFailure::InvalidResponse => self.unclassified.clone(),
         }
-        .map_err(|_| EvmWalletLiveError::InvalidContract)
-    }
-
-    fn indeterminate_conflict(&self) -> Result<DeliveryAttemptOutcome, EvmWalletLiveError> {
-        self.failure_outcome(WalletRpcFailure::DestinationRejected)
-    }
-
-    fn indeterminate_unclassified(&self) -> Result<DeliveryAttemptOutcome, EvmWalletLiveError> {
-        self.failure_outcome(WalletRpcFailure::InvalidResponse)
     }
 }
 
@@ -905,9 +1104,9 @@ pub fn evm_wallet_target_callback_surface_support_contract(
         SemanticTypeId::new(
             "mfm.evm-live",
             "wallet-target-callback-surface",
-            "1",
+            "2",
             DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"semantic:mfm.evm-live:wallet-target-callback-surface:1"),
+            sha256_digest_bytes(b"semantic:mfm.evm-live:wallet-target-callback-surface:2"),
         )
         .map_err(|_| EvmWalletLiveError::InvalidContract)?,
         role,
@@ -915,19 +1114,6 @@ pub fn evm_wallet_target_callback_surface_support_contract(
         evidence_contract_ref,
     )
     .map_err(|_| EvmWalletLiveError::InvalidContract)
-}
-
-fn require_target_entry(
-    authority: &TargetEntryAuthority,
-    descriptor: &EvmWalletTargetEntryDescriptor,
-    guarded_generation_ref: &ContentRef,
-) -> Result<(), EvmWalletLiveError> {
-    if authority.target_operation_ref() != &descriptor.content_ref()?
-        || authority.durable_ledger_generation_ref() != guarded_generation_ref
-    {
-        return Err(EvmWalletLiveError::InvalidContract);
-    }
-    Ok(())
 }
 
 fn require_candidate_request(
@@ -965,11 +1151,15 @@ fn parse_hash(value: &str) -> Option<B256> {
 }
 
 fn descriptor_schema_id(name: &'static str) -> Result<SchemaId, EvmWalletLiveError> {
+    let version = match name {
+        "mfm.evm-live.wallet-target-entry" | "mfm.evm-live.wallet-target-callback-surface" => "2",
+        _ => "1",
+    };
     SchemaId::new(
         name,
-        "1",
+        version,
         DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("schema:{name}:1").as_bytes()),
+        sha256_digest_bytes(format!("schema:{name}:{version}").as_bytes()),
     )
     .map_err(|_| EvmWalletLiveError::InvalidContract)
 }

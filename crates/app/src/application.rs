@@ -611,7 +611,7 @@ mod tests {
         RunAccessGrant, RunAccessPolicy, SecretCredential,
     };
     use async_trait::async_trait;
-    use mfm_canonical::RecoverabilityContractV2;
+    use mfm_canonical::RecoverabilityContractV3;
     use mfm_ids::{ContentRef, RunId, StoreScopeId, TenantScopeId};
     use tokio::io::{AsyncRead, ReadBuf};
 
@@ -862,10 +862,10 @@ mod tests {
     }
 
     fn stream_input(polls: Arc<AtomicUsize>) -> ExportStreamInput {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let content_ref = ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v1")
+                .schema_id("mfm.portable-run-export-stream.v2")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(b"stream"),

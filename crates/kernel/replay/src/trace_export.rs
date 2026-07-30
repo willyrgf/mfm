@@ -10,29 +10,29 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use mfm_canonical::{
-    CanonicalBytes, CanonicalValue, RawContentDigestHasher, RecoverabilityContractV2,
-    ValidatedCanonicalValueV2,
+    CanonicalBytes, CanonicalValue, RawContentDigestHasher, RecoverabilityContractV3,
+    ValidatedCanonicalValueV3,
 };
 use mfm_ids::{
     ContentDigest, ContentRef, JournalCommitDigest, RecordId, RunId, SchemaId, StoreEpoch,
     StoreScopeId, TenantScopeId,
 };
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     CandidateRecordEnvelope, CommitEnvelope, JournalHead, JournalPredecessorFields,
     RecordHashPreimage, RecordIdPreimage, RecordRef, RunPhase, TransitionRef, ValueRef,
 };
-use mfm_store::v1::{
+use mfm_store::v2::{
     verify_offline_recorded_material, CommittedJournalCommit, CommittedJournalRecord,
     CommittedObject, Export, RunAccessAuthority, RunHistoryReader, RunJournalBackend,
     StoreIdentity, UntrustedObjectPayload, VerifiedRunView,
 };
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
-use crate::v1::{store_error, ReplayError, Result};
+use crate::v2::{store_error, ReplayError, Result};
 
 /// Exact media type of portable run export streams.
 pub const PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE: &str =
-    "application/vnd.mfm.run-export-stream.v1+json-seq";
+    "application/vnd.mfm.run-export-stream.v2+json-seq";
 /// Maximum canonical JSON byte length of one stream frame.
 pub const MAX_STREAM_FRAME_JSON_BYTES: usize = 16_777_216;
 /// Maximum decoded byte length carried by one chunk frame.
@@ -44,9 +44,9 @@ pub const CLOSURE_STEP_SOURCES: usize = 256;
 /// Maximum retained objects processed before cooperatively yielding.
 pub const CLOSURE_STEP_OBJECTS: usize = 512;
 
-const PORTABLE_STREAM_CONTRACT: &str = "mfm.portable-run-export-stream.v1";
-const PORTABLE_FRAME_CONTRACT: &str = "mfm.portable-run-export-frame.v1";
-const PORTABLE_FRAME_VERSION: &str = "mfm.portable-run-export-frame.v1";
+const PORTABLE_STREAM_CONTRACT: &str = "mfm.portable-run-export-stream.v2";
+const PORTABLE_FRAME_CONTRACT: &str = "mfm.portable-run-export-frame.v2";
+const PORTABLE_FRAME_VERSION: &str = "mfm.portable-run-export-frame.v2";
 const RECORD_SEPARATOR: u8 = 0x1e;
 const RECORD_SUFFIX: u8 = 0x0a;
 
@@ -610,7 +610,7 @@ impl PreparedExportClosure {
         if !self.coordinate.matches_kind(self.kind) || self.runs.is_empty() {
             return Err(ReplayError::InvalidExport);
         }
-        let contract = RecoverabilityContractV2::embedded()?;
+        let contract = RecoverabilityContractV3::embedded()?;
         let schema_id = contract.schema_id(PORTABLE_STREAM_CONTRACT)?.clone();
         let mut output = FramedStreamWriter::new(writer, contract.raw_content_digest_hasher());
         output
@@ -755,7 +755,7 @@ async fn write_member<W: AsyncWrite + Unpin>(
     schema_id: &SchemaId,
     bytes: &[u8],
 ) -> Result<()> {
-    let contract = RecoverabilityContractV2::embedded()?;
+    let contract = RecoverabilityContractV3::embedded()?;
     let content_digest = contract.raw_content_digest(bytes);
     let byte_length = u64::try_from(bytes.len()).map_err(|_| ReplayError::InvalidExport)?;
     let mut fields = vec![
@@ -789,7 +789,7 @@ impl<'writer, W: AsyncWrite + Unpin> FramedStreamWriter<'writer, W> {
     }
 
     async fn write_frame(&mut self, value: CanonicalValue) -> Result<()> {
-        let contract = RecoverabilityContractV2::embedded()?;
+        let contract = RecoverabilityContractV3::embedded()?;
         let frame = contract.encode(PORTABLE_FRAME_CONTRACT, &value)?;
         if frame.as_bytes().len() > MAX_STREAM_FRAME_JSON_BYTES {
             return Err(ReplayError::InvalidExport);
@@ -864,7 +864,7 @@ pub async fn verify_portable_run_export_stream<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let contract = RecoverabilityContractV2::embedded()?;
+    let contract = RecoverabilityContractV3::embedded()?;
     let schema_id = contract.schema_id(PORTABLE_STREAM_CONTRACT)?;
     if expected_ref.schema_id() != schema_id {
         return Err(ReplayError::InvalidExport);
@@ -1298,7 +1298,7 @@ impl<R: AsyncRead + Unpin> ClosureVerificationSession<R> {
     fn start_member(&mut self, header: MemberHeader, target: ActiveMemberTarget) -> Result<()> {
         let expected_length =
             usize::try_from(header.byte_length).map_err(|_| ReplayError::InvalidExport)?;
-        let digest = RecoverabilityContractV2::embedded()?.raw_content_digest_hasher();
+        let digest = RecoverabilityContractV3::embedded()?.raw_content_digest_hasher();
         self.active_member = Some(ActiveMember {
             header,
             target,
@@ -1478,7 +1478,7 @@ enum DecodedFrame {
 }
 
 impl DecodedFrame {
-    fn decode(frame: &ValidatedCanonicalValueV2) -> Result<Self> {
+    fn decode(frame: &ValidatedCanonicalValueV3) -> Result<Self> {
         let value = frame.canonical_value()?;
         match export_string_field(&value, "kind")? {
             "header" => {
@@ -1656,7 +1656,7 @@ impl<R: AsyncRead + Unpin> FramedStreamReader<R> {
             if json.len() > MAX_STREAM_FRAME_JSON_BYTES {
                 return Err(ReplayError::InvalidExport);
             }
-            let frame = RecoverabilityContractV2::embedded()?
+            let frame = RecoverabilityContractV3::embedded()?
                 .strict_decode(PORTABLE_FRAME_CONTRACT, json)
                 .map_err(|_| ReplayError::InvalidExport)?;
             return DecodedFrame::decode(&frame).map(|frame| {
@@ -2299,12 +2299,12 @@ mod tests {
     use std::str::FromStr;
     use std::task::{Context as TaskContext, Poll};
 
-    use mfm_canonical::RecoverabilityContractV2;
+    use mfm_canonical::RecoverabilityContractV3;
     use mfm_ids::{
         ContentDigest, ContentRef, JournalCommitDigest, RunId, StoreEpoch, StoreScopeId,
         TenantScopeId,
     };
-    use mfm_journal::v1::{JournalHead, ValueRef};
+    use mfm_journal::v2::{JournalHead, ValueRef};
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
     use super::{
@@ -2344,7 +2344,7 @@ mod tests {
         assert!(!error.to_string().contains("/private/path"));
         assert_eq!(
             PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE,
-            "application/vnd.mfm.run-export-stream.v1+json-seq"
+            "application/vnd.mfm.run-export-stream.v2+json-seq"
         );
     }
 
@@ -2364,7 +2364,7 @@ mod tests {
             WriterFailure::Flush,
             WriterFailure::Shutdown,
         ] {
-            let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+            let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
             let mut writer = FailingWriter { failure };
             let mut stream =
                 FramedStreamWriter::new(&mut writer, contract.raw_content_digest_hasher());
@@ -2397,7 +2397,7 @@ mod tests {
         let exact = [full.as_slice(), full.as_slice(), final_chunk.as_slice()].concat();
         assert_eq!(exact.len(), CLOSURE_STEP_STREAM_BYTES);
 
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let mut reader = FramedStreamReader::new(
             ShortReader::new(exact.clone(), 7),
             contract.raw_content_digest_hasher(),
@@ -2436,7 +2436,7 @@ mod tests {
         plus_one.push(RECORD_SEPARATOR);
         assert_eq!(plus_one.len(), CLOSURE_STEP_STREAM_BYTES + 1);
 
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let mut reader = FramedStreamReader::new(
             ShortReader::new(plus_one, 8_192),
             contract.raw_content_digest_hasher(),
@@ -2478,7 +2478,7 @@ mod tests {
         let bytes = record.repeat(192);
         assert!(bytes.len() > 16_777_216);
 
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let mut reader = FramedStreamReader::new(
             ShortReader::new(bytes.clone(), 4_093),
             contract.raw_content_digest_hasher(),
@@ -2558,7 +2558,7 @@ mod tests {
         };
         assert!(accepted.pending_frame.is_none());
         assert_eq!(accepted.input.committed_bytes(), &bytes[..accepted_end]);
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         assert_eq!(
             accepted.input.finish(),
             contract.raw_content_digest(&bytes[..accepted_end])
@@ -2619,7 +2619,7 @@ mod tests {
             accepted.input.committed_bytes(),
             &bytes[..object_begin_length]
         );
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         assert_eq!(
             accepted.input.finish(),
             contract.raw_content_digest(&bytes[..object_begin_length])
@@ -2675,13 +2675,13 @@ mod tests {
         session.phase = StreamParsePhase::Objects;
         session.runs.truncate(1);
         session.prior_payload = None;
-        let schema_id = RecoverabilityContractV2::embedded()
+        let schema_id = RecoverabilityContractV3::embedded()
             .expect("recoverability contract")
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("stream schema")
             .clone();
         counts.unique_payloads = CLOSURE_STEP_OBJECTS;
-        let empty_digest = RecoverabilityContractV2::embedded()
+        let empty_digest = RecoverabilityContractV3::embedded()
             .expect("recoverability contract")
             .raw_content_digest(&[]);
         let first = member_header(schema_id.clone(), empty_digest.clone(), 0);
@@ -2752,9 +2752,9 @@ mod tests {
 
     #[test]
     fn every_authority_is_retained_without_counting_as_another_payload() {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.access-audit-entry.v1")
+            .schema_id("mfm.access-audit-entry.v2")
             .expect("authority payload schema")
             .clone();
         let mut session = test_session();
@@ -2825,7 +2825,7 @@ mod tests {
 
     #[test]
     fn active_member_accepts_max_chunks_and_rejects_chunk_boundary_failures() {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
             .schema_id("mfm.primitive-canonical_value.v1")
             .expect("canonical value schema")
@@ -2925,7 +2925,7 @@ mod tests {
 
     #[tokio::test]
     async fn discarded_partial_session_restarts_from_immutable_stream_bytes() {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
             .schema_id("mfm.primitive-canonical_value.v1")
             .expect("canonical value schema")
@@ -3004,10 +3004,10 @@ mod tests {
     }
 
     fn stream_ref(bytes: &[u8]) -> ContentRef {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v1")
+                .schema_id("mfm.portable-run-export-stream.v2")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(bytes),
@@ -3016,7 +3016,7 @@ mod tests {
     }
 
     fn frame_record(value: mfm_canonical::CanonicalValue) -> Vec<u8> {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let frame = contract
             .encode(PORTABLE_FRAME_CONTRACT, &value)
             .expect("valid portable frame");
@@ -3048,7 +3048,7 @@ mod tests {
     }
 
     fn append_empty_run(bytes: &mut Vec<u8>, run_id: &RunId) {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
             .schema_id("mfm.primitive-canonical_value.v1")
             .expect("canonical value schema");
@@ -3105,7 +3105,7 @@ mod tests {
     }
 
     fn object_begin_record(discriminator: u64) -> Vec<u8> {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = boundary_object_schema_id(discriminator);
         let content_digest = contract.raw_content_digest(&[]);
         frame_record(
@@ -3225,9 +3225,9 @@ mod tests {
     }
 
     fn test_session() -> ClosureVerificationSession<&'static [u8]> {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("stream schema")
             .clone();
         ClosureVerificationSession::new(
@@ -3239,9 +3239,9 @@ mod tests {
     }
 
     fn configured_partial_session(bytes: &[u8]) -> Box<ClosureVerificationSession<&[u8]>> {
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("stream schema")
             .clone();
         let mut session = ClosureVerificationSession::new(
@@ -3321,7 +3321,7 @@ mod tests {
     ) {
         let committed = session.input.committed_bytes();
         assert_eq!(committed, &bytes[..end]);
-        let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
         assert_eq!(
             contract.raw_content_digest(committed),
             contract.raw_content_digest(&bytes[..end])

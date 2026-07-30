@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_ids::{StoreEpoch, StoreScopeId};
-use mfm_store::v1::{QualifiedRunStore, RunAccessAuthorityIssuer};
+use mfm_store::v2::{QualifiedRunStore, RunAccessAuthorityIssuer};
 use sqlx::{PgPool, Row};
 
 use crate::error::{PostgresStoreError, Result};

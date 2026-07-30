@@ -1,11 +1,11 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
-use mfm_journal::v1::*;
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
+use mfm_journal::v2::*;
 use mfm_values::component_object_evidence_contract_ref;
 use serde_json::Value;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v2/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/corpus.json");
 
 fn corpus() -> Value {
     serde_json::from_slice(CORPUS_BYTES).expect("frozen corpus must decode")
@@ -89,6 +89,39 @@ fn assert_exact_retained_contract_rebuild(
 }
 
 #[test]
+fn persisted_non_domain_failure_constructors_preserve_capability_values() {
+    let failure = NonDomainFailure::new(
+        NonDomainEntryStatus::MayHaveEntered,
+        NonDomainDisposition::RetryableOperational,
+        NonDomainFailureCode::ExecutorContention,
+    )
+    .expect("closed non-domain failure");
+    let persisted = PersistedNonDomainFailure::new(&failure).expect("persisted wrapper");
+    assert_eq!(persisted.value().expect("projected failure"), failure);
+    assert_eq!(
+        PersistedNonDomainEntryStatus::new(failure.entry_status())
+            .expect("persisted entry status")
+            .value()
+            .expect("projected entry status"),
+        failure.entry_status()
+    );
+    assert_eq!(
+        PersistedNonDomainDisposition::new(failure.disposition())
+            .expect("persisted disposition")
+            .value()
+            .expect("projected disposition"),
+        failure.disposition()
+    );
+    assert_eq!(
+        PersistedNonDomainFailureCode::new(failure.code())
+            .expect("persisted code")
+            .value()
+            .expect("projected code"),
+        failure.code()
+    );
+}
+
+#[test]
 fn every_added_codec_strictly_rejects_open_fields() {
     assert_unknown_field_rejected("mfm.safe-failure.v1", SafeFailure::strict_decode);
     assert_unknown_field_rejected("mfm.input-source.v1", InputSource::strict_decode);
@@ -142,7 +175,7 @@ fn every_added_codec_strictly_rejects_open_fields() {
         ExternalAccessAuthorized::strict_decode,
     );
     assert_unknown_field_rejected(
-        "mfm.external-access-observed.v1",
+        "mfm.external-access-observed.v2",
         ExternalAccessObserved::strict_decode,
     );
     assert_unknown_field_rejected(
@@ -330,11 +363,11 @@ fn journal_runtime_retained_contract_factories_are_exact_and_deterministic() {
         schema_contract: &'static str,
         semantic_type_id: &'static str,
         role: &'static str,
-        factory: fn() -> mfm_journal::v1::Result<RetainedValueContract>,
+        factory: fn() -> mfm_journal::v2::Result<RetainedValueContract>,
     }
 
     let recoverability =
-        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
     let evidence_ref =
         component_object_evidence_contract_ref().expect("component object evidence ref");
     let cases = [
@@ -1345,7 +1378,7 @@ fn fact_scan_attestation_and_observation_constructors_preserve_authority_links()
     assert_exact_rebuild(&original_attestation, &rebuilt_attestation);
 
     let mut saw_attested_return = false;
-    for bytes in schema_goldens("mfm.external-access-observed.v1") {
+    for bytes in schema_goldens("mfm.external-access-observed.v2") {
         let original = ExternalAccessObserved::strict_decode(&bytes).expect("external observation");
         let fields = original.fields().expect("typed external observation");
         saw_attested_return |= fields.fact_selection_scan_attestation_ref.is_some();
@@ -1561,7 +1594,7 @@ fn every_executor_ensure_result_constructor_matches_its_frozen_union_variant() {
 
 #[test]
 fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
-    let audit = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v1"))
+    let audit = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v2"))
         .expect("access audit");
     let authorization_ref = audit
         .fields()
@@ -1581,6 +1614,7 @@ fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
         Some(&observation_ref),
         AccessAuditStatus::Returned,
         None,
+        None,
         Some(&evidence.effect_key),
         Some(&evidence.delivery_audit_ref),
     )
@@ -1597,6 +1631,7 @@ fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
             Some(&observation_ref),
             AccessAuditStatus::Returned,
             None,
+            None,
             Some(&evidence.effect_key),
             None,
         )
@@ -1609,6 +1644,7 @@ fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
             Some(&observation_ref),
             AccessAuditStatus::Indeterminate,
             None,
+            None,
             Some(&evidence.effect_key),
             Some(&evidence.delivery_audit_ref),
         )
@@ -1619,6 +1655,7 @@ fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
         &authorization_ref,
         Some(&observation_ref),
         AccessAuditStatus::Returned,
+        None,
         None,
         None,
         None,

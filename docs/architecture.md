@@ -52,7 +52,7 @@ EffectRequested
   -> immutable executor binding and request identity
   -> append-only keyed delivery/resource ledger
   -> committed affine target-entry authority
-  -> one target receipt
+  -> one unbound target outcome bound by the private completion seal
   -> exact observation, bounded frontier, and terminal tombstone
   -> terminal evidence returned through one audited ensure call
   -> EffectSettled
@@ -92,13 +92,13 @@ names and directory counts are not architecture.
 | Program | Typed graphs, `StateExecution`, `StateFrame`, value views, settlement values, process-only fact proposals | Store or live-access authority |
 | Certifier | Planning-profile verification, deterministic expansion verification, manifests, certified dependency, terminal, and bounded homogeneous fact-slot contracts | Runtime scheduling or live IO |
 | State | Pure request authorship, observation interpretation, output/fact/failure construction | Ambient IO, persistence, scheduler policy |
-| Capability contract | One typed application-protocol request/return, a closed safe-failure contract, and the callback-free classifier that embeds and enforces an optional exact diagnostic schema identity | State reduction, hidden retry, workflow topology |
-| Adapter | Private binding from runtime-authorized state request to reusable transport/executor surface | A second lifecycle or replay reducer |
+| Capability contract | One typed application-protocol request and one closed returned/safe/non-domain completion, plus the callback-free classifier that embeds and enforces an optional exact diagnostic schema identity | State reduction, hidden retry, workflow topology, or an outer post-invocation error channel |
+| Adapter | Private total binding from runtime-authorized state request to reusable transport/executor surface; every surviving return becomes exact pending-observation material | A second lifecycle, replay reducer, or unjournaled completion path |
 | Transport | Reusable protocol encoding, IO, checked decoding, and safe error classification | Journal access, state settlement, workflow topology |
-| Executor | Keyed delivery convergence, target-entry authority, terminal evidence, typed resource policy | Run scheduling, state settlement, journal mutation |
+| Executor | Keyed delivery convergence, `execute_target_once`, affine target-entry authority, unbound target outcomes, private completion seals, sealed exact observations, terminal evidence, typed resource policy | Run scheduling, state settlement, journal mutation |
 | Store | One-shot qualified assembly, sole affine writer, cloneable purpose readers, atomic append, object binding, hashes, CAS, callback-free structural fold, exact producer/object/observation closure verification, fact-group validation and actual-ordinal assignment, verified views | State execution, domain outcomes, destination IO |
-| Runtime | Sole run-history writer ownership, exact admission, deterministic readiness, exact materialization, audited call orchestration, one-action drive | Business policy, protocol phases, resource policy, persisted status |
-| Replay | Recorded verification, exact reproduction, candidate comparison | Live scheduler, live capability, append |
+| Runtime | Sole run-history writer ownership, exact admission, deterministic readiness/materialization, the private `Prepared -> Authorized -> PendingObservation -> CommittedObservation` bracket, and one-action drive | Business policy, target protocol phases, resource policy, persisted status |
+| Replay | Callback-free recorded verification including non-domain non-consumability, exact reproduction, candidate comparison | Live scheduler, live capability, append |
 | App assembly | Authentication, grants, entry-point catalog, pre-split support bootstrap, runtime/reader wiring, DTO services | Run-history mutation, planning logic, or state behavior |
 | Binary/API | Input decoding, route/command dispatch, response rendering | Store/runtime/live implementation construction |
 
@@ -199,7 +199,10 @@ Committed proof and live-access authority stay private to runtime.
 
 A capability represents exactly one application-protocol operation for one immutable typed request.
 It owns bounded encoding/decoding, source validation, cancellation behavior, and a closed
-`SafeFailure` classifier. One runtime authorization permits at most one such operation.
+`SafeFailure` classifier. One runtime authorization permits at most one such operation. Its
+runtime-facing return is exhaustive: a reviewed typed value, an admitted `DidNotEnter` or
+`Indeterminate` safe failure, or an audit-only `NonDomainFailure`. There is no outer error after
+affine authority is consumed.
 
 A capability cannot:
 
@@ -211,8 +214,14 @@ A capability cannot:
 - define replay behavior.
 
 The adapter is private live-crate glue. It consumes runtime's affine `AuthorizedAccess`, invokes a
-lower runtime-agnostic transport or executor, and returns one typed wrapper result. It owns no
-persisted lifecycle. Reusable transports do not expose or depend on MFM runtime authority.
+lower runtime-agnostic transport or executor, and totalizes every surviving return into one exact
+pending observation. Returned-value encoding and contract faults become closed integrity-blocked
+non-domain outcomes; they cannot escape as an unjournaled `Result`. The adapter owns no persisted
+lifecycle. Reusable transports do not expose or depend on MFM runtime authority.
+
+`NonDomainFailure` is never sent to state code. Its closed entry-status, disposition, and code
+relation is verified by store and replay. `RetryableOperational` permits only a later separately
+authorized attempt after the audit record commits; `IntegrityBlocked` blocks semantic progress.
 
 Every required live bootstrap, including source and chain validation, is its own audited state
 after `RunAdmitted`. App admission may bind one immutable non-secret routing generation but cannot
@@ -244,8 +253,8 @@ private.
 ## Executor And Mutation Boundary
 
 `mfm-executor` owns domain-free keyed convergence. It retains immutable request identity, bounded
-delivery history, affine target-entry/receipt authority, terminal proof, and typed resource-policy
-state. A concrete executor backend is a `storage` package.
+delivery history, affine target-entry and private completion-seal authority, terminal proof, and
+typed resource-policy state. A concrete executor backend is a `storage` package.
 
 `KeyedExecutorLedger<Store>` is the sole high-level executor implementation. It owns strict folding,
 typed resource-policy validation, deterministic attempt derivation, bounded CAS retry, observation,
@@ -253,6 +262,14 @@ and terminal semantics. Its asynchronous `ExecutorLedgerStore` boundary owns onl
 store identity, complete immutable effect/resource and exact-content reads, and atomic
 compare-and-append. Memory, file, and PostgreSQL stores implement that same raw contract; no backend
 duplicates the engine.
+
+`execute_target_once` is the sole high-level target-entry method. It commits the target
+authorization, invokes the caller's closure exactly once with affine authority, validates and
+binds its unbound outcome through the retained private completion seal, and persists or exactly
+resolves the matching observation before returning. Reload, stale CAS, acknowledgement ambiguity,
+terminal conflict, and restart use immutable ledger evidence and cannot invoke the target again. A
+schema-valid returned result that exceeds the retained bound is the explicit
+`ResultUnrepresentable` attempt outcome.
 
 One compare-and-append may atomically bind an effect and allocate a resource, or upgrade a
 previously bound effect that has no target attempt. `Applied` is the only store result that can mint
@@ -264,6 +281,14 @@ Each authorization atomically retains the complete schema-qualified target-entry
 reference derives the attempt identity. The shared engine can resolve that descriptor by effect and
 attempt during recovery. This keeps candidate-specific public target input durable without
 retaining signatures, raw signed envelopes, credentials, or other bearer material.
+
+The EVM adapter preflights one closed prepared sum—`Broadcast`, `TransactionLookup`,
+`ReceiptLookup`, `FinalizedHead`, or `CanonicalInclusion`—before executor authorization. Each
+variant makes one transport call. Post-exchange conversion distinguishes an oversized otherwise
+valid result (`ResultUnrepresentable`), an invalid typed/contract result
+(`adapter_contract_violation`), and encoding/schema construction failure
+(`result_encoding_failure`); the latter two are `MayHaveEntered/IntegrityBlocked` non-domain
+target observations.
 
 `mfm-evm-live` owns one wallet-specific history fold above that domain-free ledger. After request
 qualification and permanent allocation, every initial, restored, post-target,
@@ -346,7 +371,7 @@ process scheduling.
 The first production backend is PostgreSQL. Every authority-bearing read and write uses one fenced
 authoritative writer. The application role cannot update/delete/truncate immutable authority or
 manipulate store identity and tenant fact heads directly. HA/WAL promotion must fence old writers
-and prove a complete non-rollback lineage. Replica reads cannot mint v1 store authority.
+and prove a complete non-rollback lineage. Replica reads cannot mint current store authority.
 
 Physical tables and indexes may normalize the journal, objects, bindings, and fact routing fields.
 They must not create a separately writable semantic model. Current configuration is a distinct
@@ -360,10 +385,9 @@ Its private action algebra is:
 
 ```text
 CommitPure
-CallRead
+ExecuteAccess(PreparedAccess)
 SettleRead
 CommitEffectRequest
-CallEnsure
 SettleEffect
 CommitDependencySkip
 Closed
@@ -380,10 +404,21 @@ Runtime owns:
 - sole qualified-program-registry selection and callback/live-invoker dispatch;
 - committed request/observation proof selection;
 - complete physical observation-suffix validation before action ranking;
-- authorization append followed by one affine call;
+- one closed `PreparedAccess` sum over read, ensure, and reserved fact selection;
+- private kind-typed `Prepared -> Authorized -> PendingObservation -> CommittedObservation`
+  sequencing;
+- authorization append followed by one affine call and mandatory exact observation persistence;
 - canonical settlement validation;
 - transition candidate construction; and
 - exact-head retry after reload.
+
+The pending observation owns stable logical identity independently of predecessor-bound physical
+append candidates. Runtime resolves the authorization key before each attempt, accepts only
+byte-identical committed content, rebases only after a definite stale predecessor, and resolves an
+acknowledgement-ambiguous attempt unchanged before rebase. It never reinvokes while resolving that
+obligation. Operational persistence failure uses 10-to-1,000-millisecond capped exponential
+backoff and resets on verified head progress. Task cancellation starts no detached work and leaves
+an unmatched authorization if no observation committed.
 
 Runtime owns no process-persistent semantic state. Another process may independently qualify the
 same fenced backend, construct the same exact registry and runtime, and continue under store CAS;
@@ -399,6 +434,11 @@ Replay may read the exact journal, immutable object closure, certification proof
 authorized cross-run source stream. It may self-attest its executable where the mode requires it.
 It does not invoke the live scheduler, authorize access, append, resolve routing, call a provider or
 executor, read domain files, or construct a signer.
+
+Recorded verification accepts the complete four-outcome access algebra callback-free. It preserves
+`NonDomainFailure` as audit-only evidence, derives only its fixed retryable-operational or
+integrity-blocked projection, and rejects any transition that tries to consume it as safe or domain
+evidence.
 
 Purpose-specific trace, audit, fact-completeness, reproduction, and export readers borrow the same
 verified authority. A cursor or reference cannot mint reader authority.
@@ -434,6 +474,13 @@ persisted or resumed as public authority. `FactScanPageVerifier` solely owns the
 8,192-emission step budgets, and each logical emission range. Memory and PostgreSQL adapters only
 load ordered complete publications and submit them; a publication continued within its emissions
 is reloaded and fully verified before the next range is consumed.
+
+Completion consumes the affine scan exactly once into immutable sealed pending-observation
+material before any predecessor-bound append candidate exists. Exact-content resolution,
+stale-head retry, and acknowledgement recovery retain those bytes and never repeat the scan.
+Normally returned store-unavailable or invalid-history failures totalize into fact-layer
+`NonDomainFailure`; task/process loss simply abandons the private scan and leaves an unmatched
+authorization.
 
 The fresh authorization result owns the sole affine live-scan permit. Scan pages include every
 dense publication through the barrier, including unselectable publications from the consuming run.
@@ -575,6 +622,9 @@ POST /v1/runs/{run_id}/exports        mfm run export
 ```
 
 There is no arbitrary object read or tenant-wide run/fact discovery contract.
+The separately authorized audit projection exposes `NonDomainFailure` only in its closed
+`non_domain_failure` field; app and binaries do not reinterpret it as a safe failure, returned
+value, or domain result.
 
 ## Public Naming Rules
 
@@ -594,6 +644,9 @@ Before merging, verify:
 - state request authorship is pure and total;
 - every semantic external operation receives exactly one preceding authorization;
 - only a directly observed new authorization mints live authority;
+- every surviving live return becomes exact pending-observation material and no normal success
+  escapes before committed or byte-identically resolved observation proof;
+- no `NonDomainFailure` reaches state logic or satisfies settlement;
 - runtime performs one action and retains no process semantic state;
 - effects use the executor boundary and do not add journal phases;
 - same-run data uses graph edges and prior-run selection is audited;
@@ -611,7 +664,7 @@ Before merging, verify:
 
 - `docs/design.md`: normative semantic and authority contract
 - `docs/persisted-public-surfaces.md`: persisted/public no-secret inventory
-- `docs/recoverability-app-surface-v2.md`: exact app, CLI, REST, DTO, and disclosure contract
+- `docs/recoverability-app-surface-v3.md`: exact app, CLI, REST, DTO, and disclosure contract
 - `docs/portfolio-snapshot.md`: published product objective
 - `docs/evm-rpc-routing.md`: EVM routing generation and audited read graph
 - `docs/btc-rpc-routing.md`: unregistered Bitcoin qualification target

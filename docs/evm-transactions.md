@@ -33,8 +33,9 @@ process.
 The MFM journal owns no mutation delivery phases, nonce allocator, signer workflow, resource
 ownership, rebroadcast policy, receipt poller, or destination recovery rule. Repeated
 `drive_once` calls invoke the same keyed executor `ensure` contract. The executor either returns a
-stronger bounded frontier/terminal proof or a reviewed pending/safe-failure result. Only the state
-callback can interpret certified terminal evidence and settle the node.
+stronger bounded frontier/terminal proof, a reviewed pending/safe-failure result, or an audit-only
+closed `NonDomainFailure`. Only the state callback can interpret certified terminal evidence and
+settle the node; non-domain evidence never reaches it.
 
 ## Qualified Executor Boundary
 
@@ -50,7 +51,7 @@ The registered wallet executor qualifies:
 - safe rebroadcast or exact-hash observation semantics;
 - restart, backup, restore, failover, and reorganization behavior;
 - bounded cumulative delivery evidence and terminal tombstone;
-- exact-attempt target receipt linkage; and
+- exact-attempt target observation linkage; and
 - complete no-secret retained evidence.
 
 One live-owned `EvmWalletRequestQualification` is the sole cross-field predicate. It is built from
@@ -141,9 +142,14 @@ evidence. Allocated nonces are never reassigned to unrelated requests.
 
 ## Target Entry And Observation
 
-The executor must commit one delivery authorization before returning affine
-`TargetEntryAuthority`. The destination adapter consumes it exactly once and returns an affine
-`TargetOperationReceipt`. Only that receipt can append the matching executor observation.
+The executor's sole target-entry method is `execute_target_once`. It commits one delivery
+authorization before returning affine `TargetEntryAuthority` to the invocation closure. The
+destination adapter consumes it exactly once and returns an unbound `DeliveryAttemptOutcome`.
+`execute_target_once` retains the private affine completion seal, validates and binds that outcome
+to the current identity, attempt, operation, and generation, and persists or byte-identically
+resolves the matching executor observation before it returns. A stale CAS, lost acknowledgement,
+tombstone conflict, or restart resolves immutable ledger evidence and cannot invoke the target a
+second time.
 
 An inconclusive submit exchange never authorizes a different transaction. Recovery must converge
 on the immutable request through the qualified wallet/relayer contract. Exact-hash observation,
@@ -154,6 +160,21 @@ The only public live execution seam is `EvmWalletExecutor<Store>` with the concr
 `EvmJsonRpcTransport`. The five wallet operations are private typed transport methods. There is no
 generic wallet RPC client, arbitrary method/parameter call, raw JSON response, or public target
 wrapper that can bypass typed decoding or qualification.
+
+Before target authorization the adapter constructs exactly one private prepared variant:
+`Broadcast`, `TransactionLookup`, `ReceiptLookup`, `FinalizedHead`, or
+`CanonicalInclusion`. Each variant owns its complete qualified request material and makes exactly
+one transport call. Post-exchange result totalization is exhaustive:
+
+- a typed-contract-valid result whose canonical encoding exceeds the retained bound is the
+  explicit `ResultUnrepresentable` attempt failure;
+- an invalid typed or contract result is
+  `adapter_contract_violation/MayHaveEntered/IntegrityBlocked`; and
+- canonical encoding or schema construction failure is
+  `result_encoding_failure/MayHaveEntered/IntegrityBlocked`.
+
+The latter two are closed executor-target `NonDomainFailure` observations, carry no provider
+diagnostic, and cannot become terminal domain evidence.
 
 Guarded deterministic signing precedes broadcast authorization and derives one public
 candidate-specific target-entry descriptor. The descriptor commits the exact operation kind,

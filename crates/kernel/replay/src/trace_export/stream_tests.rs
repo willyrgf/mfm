@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentDigest, ContentRef, SchemaId};
-use mfm_store::v1::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
-use mfm_store::v1::{
+use mfm_store::v2::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
+use mfm_store::v2::{
     open_in_memory, AppendOutcome, ExistingRunAppendMaterial, InMemoryRunJournalBackend,
     NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
     RunAccessAuthorityIssuer, RunHistoryReader, RunHistoryWriter, SettlementMaterial,
@@ -172,7 +172,7 @@ async fn closure_wide_lookup_returns_dependency_only_retained_bytes() {
 
     let replay_authority =
         issuer.authorize_replay(root.tenant_scope_id().clone(), root_view.run_id().clone());
-    let history = crate::v1::verify_recorded_history(&reader, &replay_authority)
+    let history = crate::v2::verify_recorded_history(&reader, &replay_authority)
         .await
         .expect("verify root history");
     let stream = history

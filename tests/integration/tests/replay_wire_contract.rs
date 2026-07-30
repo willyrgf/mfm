@@ -1,7 +1,7 @@
 use mfm_app::{PageRequest, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::RunId;
-use mfm_replay::v1::{CanonicalReplayResult, ExactReproduction};
+use mfm_replay::v2::{CanonicalReplayResult, ExactReproduction};
 
 #[test]
 fn exact_reproduction_results_have_the_frozen_public_shape() {

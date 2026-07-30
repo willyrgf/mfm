@@ -15,8 +15,8 @@ use mfm_evm::{
 use mfm_executor::{
     reference_safe_failure, verify_ensure_result, AccountSequenceAllocation, AccountSequencePolicy,
     AccountSequenceRequest, AllocationOutcome, BoundaryStage, DeliveryAttemptOutcome,
-    EffectEntryView, EffectExecutorOutcome, ExecutorEnsureResultClaim, ExecutorError,
-    ExecutorEvidenceRecord, ExecutorLedgerStore, ExecutorRetainedClosureClaim,
+    EffectEntryView, EffectExecutorOutcome, ExecuteTargetOutcome, ExecutorEnsureResultClaim,
+    ExecutorError, ExecutorEvidenceRecord, ExecutorLedgerStore, ExecutorRetainedClosureClaim,
     ExecutorTerminalEvidenceClaim, FailureClass, FencingRef, KeyedExecutorLedger, ProofBasis,
     ReferenceFailureCode, ReferenceTerminalProof, ReturnedOutcome, TerminalTombstone,
     VerifiedEnsureResult,
@@ -28,7 +28,9 @@ use mfm_signing::GenerationGuardedDeterministicSigningProviderBinder;
 use mfm_values::MfmValue;
 
 use crate::{
-    wallet_rpc::{EvmWalletJsonRpcTarget, EvmWalletTargetEntryDescriptor},
+    wallet_rpc::{
+        AuthorizedEvmWalletTarget, EvmWalletJsonRpcTarget, EvmWalletTargetEntryDescriptor,
+    },
     EvmWalletLiveError, EvmWalletRequestQualification,
 };
 
@@ -41,16 +43,49 @@ where
     ledger: KeyedExecutorLedger<Store>,
     target: EvmWalletJsonRpcTarget,
     qualification: Arc<EvmWalletRequestQualification>,
+    failures: EvmExecutorFailureOutcomes,
 }
 
 enum WalletDriveError {
     SignerUnavailable,
-    Executor(ExecutorError),
+    Executor {
+        error: ExecutorError,
+        phase: WalletDrivePhase,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WalletDrivePhase {
+    FreshMaterial,
+    RetainedHistory,
+}
+
+#[derive(Clone)]
+struct EvmExecutorFailureOutcomes {
+    signer_unavailable: EffectExecutorOutcome,
+    store_unavailable: EffectExecutorOutcome,
+    contention: EffectExecutorOutcome,
+    history_invalid: EffectExecutorOutcome,
+    capacity_exhausted: EffectExecutorOutcome,
+    adapter_contract_violation: EffectExecutorOutcome,
+    result_encoding_failure: EffectExecutorOutcome,
 }
 
 impl From<ExecutorError> for WalletDriveError {
     fn from(error: ExecutorError) -> Self {
-        Self::Executor(error)
+        Self::Executor {
+            error,
+            phase: WalletDrivePhase::FreshMaterial,
+        }
+    }
+}
+
+impl WalletDriveError {
+    fn retained(error: ExecutorError) -> Self {
+        Self::Executor {
+            error,
+            phase: WalletDrivePhase::RetainedHistory,
+        }
     }
 }
 
@@ -69,10 +104,12 @@ where
         }
         let target = EvmWalletJsonRpcTarget::new(signer, Arc::clone(&qualification))
             .map_err(map_live_error)?;
+        let failures = EvmExecutorFailureOutcomes::new(ledger.exact_binding())?;
         Ok(Self {
             ledger,
             target,
             qualification,
+            failures,
         })
     }
 
@@ -81,26 +118,33 @@ where
         self.ledger.exact_binding()
     }
 
+    #[cfg(test)]
+    pub(crate) fn classify_executor_error_for_test(
+        &self,
+        error: &ExecutorError,
+        retained_history: bool,
+    ) -> EffectExecutorOutcome {
+        self.failures.for_executor_error(
+            error,
+            if retained_history {
+                WalletDrivePhase::RetainedHistory
+            } else {
+                WalletDrivePhase::FreshMaterial
+            },
+        )
+    }
+
     /// Drives at most one newly authorized target exchange.
     pub async fn drive(
         &self,
         committed: &mfm_executor::CommittedEffectRequest<EvmSubmitTransactionRequest>,
-    ) -> mfm_executor::Result<EffectExecutorOutcome> {
+    ) -> EffectExecutorOutcome {
         match self.drive_result(committed).await {
-            Ok(result) => Ok(EffectExecutorOutcome::returned(result)),
-            Err(WalletDriveError::SignerUnavailable) => {
-                let failure = reference_safe_failure(
-                    self.exact_binding()
-                        .contract()
-                        .safe_failure_contract_ref()
-                        .clone(),
-                    ReferenceFailureCode::DestinationUnavailable,
-                    FailureClass::Transport,
-                    BoundaryStage::BeforeBoundaryEntry,
-                )?;
-                EffectExecutorOutcome::did_not_enter(failure)
+            Ok(result) => EffectExecutorOutcome::returned(result),
+            Err(WalletDriveError::SignerUnavailable) => self.failures.signer_unavailable.clone(),
+            Err(WalletDriveError::Executor { error, phase }) => {
+                self.failures.for_executor_error(&error, phase)
             }
-            Err(WalletDriveError::Executor(error)) => Err(error),
         }
     }
 
@@ -113,46 +157,105 @@ where
             .verify_request(request)
             .map_err(map_live_error)?;
         let identity = committed.identity();
-        let allocation = self.allocate_nonce(identity).await?;
+        let allocation = match self.allocate_nonce(identity).await {
+            Ok(allocation) => allocation,
+            Err(ExecutorError::ResourcePolicy(mfm_executor::PolicyError::PriorSequencePending)) => {
+                let view = self
+                    .ledger
+                    .bind_effect(identity)
+                    .await
+                    .map_err(WalletDriveError::retained)?;
+                return self
+                    .pending_return(VerifiedWalletHistory {
+                        view,
+                        history: WalletHistory::default(),
+                    })
+                    .map_err(WalletDriveError::retained);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let mut verified = self
             .load_verified_history(identity, request, allocation.sequence())
-            .await?;
+            .await
+            .map_err(WalletDriveError::retained)?;
         if verified.view.terminal_tombstone().is_some() {
-            return Ok(self.terminal_return(verified)?);
+            return self
+                .terminal_return(verified)
+                .map_err(WalletDriveError::retained);
         }
         if let Some(terminal) = verified.history.terminal.as_ref() {
-            self.append_terminal(identity, terminal).await?;
+            self.append_terminal(identity, terminal)
+                .await
+                .map_err(WalletDriveError::retained)?;
             verified = self
                 .load_verified_history(identity, request, allocation.sequence())
-                .await?;
-            return Ok(self.terminal_return(verified)?);
+                .await
+                .map_err(WalletDriveError::retained)?;
+            return self
+                .terminal_return(verified)
+                .map_err(WalletDriveError::retained);
         }
 
-        let Some(plan) = verified.history.next_plan(
-            request,
-            allocation.sequence(),
-            self.qualification.as_ref(),
-        )?
+        let Some(plan) = verified
+            .history
+            .next_plan(request, allocation.sequence(), self.qualification.as_ref())
+            .map_err(WalletDriveError::retained)?
         else {
-            return Ok(self.pending_return(verified)?);
+            return self
+                .pending_return(verified)
+                .map_err(WalletDriveError::retained);
         };
-        let expected_head = verified.view.delivery_audit().head_ref()?;
-        self.execute_plan(identity, request, &expected_head, plan)
-            .await?;
+        let expected_head = verified
+            .view
+            .delivery_audit()
+            .head_ref()
+            .map_err(WalletDriveError::retained)?;
+        match self
+            .execute_plan(identity, request, &expected_head, plan)
+            .await
+        {
+            Ok(()) => {}
+            Err(WalletDriveError::Executor {
+                error: ExecutorError::EffectAlreadyTerminal,
+                ..
+            }) => {
+                let verified = self
+                    .load_verified_history(identity, request, allocation.sequence())
+                    .await
+                    .map_err(WalletDriveError::retained)?;
+                return if verified.view.terminal_tombstone().is_some() {
+                    self.terminal_return(verified)
+                        .map_err(WalletDriveError::retained)
+                } else {
+                    self.pending_return(verified)
+                        .map_err(WalletDriveError::retained)
+                };
+            }
+            Err(error) => return Err(error),
+        }
         verified = self
             .load_verified_history(identity, request, allocation.sequence())
-            .await?;
+            .await
+            .map_err(WalletDriveError::retained)?;
         if verified.view.terminal_tombstone().is_some() {
-            return Ok(self.terminal_return(verified)?);
+            return self
+                .terminal_return(verified)
+                .map_err(WalletDriveError::retained);
         }
         if let Some(terminal) = verified.history.terminal.as_ref() {
-            self.append_terminal(identity, terminal).await?;
+            self.append_terminal(identity, terminal)
+                .await
+                .map_err(WalletDriveError::retained)?;
             verified = self
                 .load_verified_history(identity, request, allocation.sequence())
-                .await?;
-            return Ok(self.terminal_return(verified)?);
+                .await
+                .map_err(WalletDriveError::retained)?;
+            return self
+                .terminal_return(verified)
+                .map_err(WalletDriveError::retained);
         }
-        Ok(self.pending_return(verified)?)
+        self.pending_return(verified)
+            .map_err(WalletDriveError::retained)
     }
 
     async fn allocate_nonce(
@@ -280,7 +383,7 @@ where
         expected_head: &mfm_executor::DeliveryAuditFrontierRef,
         mut plan: WalletPlan,
     ) -> Result<(), WalletDriveError> {
-        let receipt = match plan.kind {
+        let prepared = match plan.kind {
             WalletPlanKind::Broadcast => {
                 let prepared = self
                     .target
@@ -290,7 +393,7 @@ where
                         EvmWalletLiveError::SignerUnavailable => {
                             WalletDriveError::SignerUnavailable
                         }
-                        error => WalletDriveError::Executor(map_live_error(error)),
+                        error => WalletDriveError::from(map_live_error(error)),
                     })?;
                 if plan
                     .candidate()
@@ -298,82 +401,69 @@ where
                 {
                     return Err(ExecutorError::TargetOperationMismatch.into());
                 }
-                let descriptor = plan.descriptor(request, prepared.candidate())?;
-                let Some(authority) = self
-                    .ledger
-                    .try_authorize_target(
-                        identity,
-                        expected_head,
-                        descriptor.canonical().clone(),
-                        Some(self.qualification.resource_policy_binding()),
-                    )
-                    .await?
-                else {
-                    return Ok(());
-                };
-                let returned = self
-                    .target
-                    .broadcast(authority, request, prepared)
-                    .await
-                    .map_err(map_live_error)?;
-                returned.into_parts().0
+                prepared
             }
-            WalletPlanKind::TransactionLookup
-            | WalletPlanKind::ReceiptLookup
-            | WalletPlanKind::FinalizedHead
-            | WalletPlanKind::CanonicalInclusion => {
+            WalletPlanKind::TransactionLookup => {
+                let candidate = plan
+                    .candidate
+                    .take()
+                    .ok_or(ExecutorError::TargetOperationMismatch)?;
+                self.target
+                    .prepare_transaction_lookup(request, candidate)
+                    .map_err(map_live_error)?
+            }
+            WalletPlanKind::ReceiptLookup => {
+                let candidate = plan
+                    .candidate
+                    .take()
+                    .ok_or(ExecutorError::TargetOperationMismatch)?;
+                self.target
+                    .prepare_receipt_lookup(request, candidate)
+                    .map_err(map_live_error)?
+            }
+            WalletPlanKind::FinalizedHead => {
+                let candidate = plan
+                    .candidate
+                    .take()
+                    .ok_or(ExecutorError::TargetOperationMismatch)?;
+                self.target
+                    .prepare_finalized_head(request, candidate)
+                    .map_err(map_live_error)?
+            }
+            WalletPlanKind::CanonicalInclusion => {
                 let terminal_evidence = plan.terminal_evidence.take();
                 let candidate = plan
-                    .candidate()
+                    .candidate
+                    .take()
                     .ok_or(ExecutorError::TargetOperationMismatch)?;
-                let descriptor = plan.descriptor(request, candidate)?;
-                let Some(authority) = self
-                    .ledger
-                    .try_authorize_target(
-                        identity,
-                        expected_head,
-                        descriptor.canonical().clone(),
-                        Some(self.qualification.resource_policy_binding()),
+                self.target
+                    .prepare_canonical_inclusion(
+                        request,
+                        candidate,
+                        plan.inclusion_number
+                            .ok_or(ExecutorError::TargetOperationMismatch)?,
+                        terminal_evidence,
                     )
-                    .await?
-                else {
-                    return Ok(());
-                };
-                match plan.kind {
-                    WalletPlanKind::TransactionLookup => self
-                        .target
-                        .transaction_lookup(authority, request, candidate)
-                        .await
-                        .map_err(map_live_error)?,
-                    WalletPlanKind::ReceiptLookup => self
-                        .target
-                        .receipt_lookup(authority, request, candidate)
-                        .await
-                        .map_err(map_live_error)?,
-                    WalletPlanKind::FinalizedHead => self
-                        .target
-                        .finalized_head(authority, request, candidate)
-                        .await
-                        .map_err(map_live_error)?,
-                    WalletPlanKind::CanonicalInclusion => self
-                        .target
-                        .canonical_inclusion(
-                            authority,
-                            request,
-                            candidate,
-                            plan.inclusion_number
-                                .ok_or(ExecutorError::TargetOperationMismatch)?,
-                            terminal_evidence,
-                        )
-                        .await
-                        .map_err(map_live_error)?,
-                    WalletPlanKind::Broadcast => {
-                        return Err(ExecutorError::TargetOperationMismatch.into());
-                    }
-                }
+                    .map_err(map_live_error)?
             }
         };
-        self.ledger.observe_target(receipt).await?;
+        let target_operation = prepared.descriptor().canonical().clone();
+        let target = &self.target;
+        match self
+            .ledger
+            .execute_target_once(
+                identity,
+                expected_head,
+                target_operation,
+                Some(self.qualification.resource_policy_binding()),
+                |authority| {
+                    target.invoke_target(AuthorizedEvmWalletTarget::new(authority, prepared))
+                },
+            )
+            .await?
+        {
+            ExecuteTargetOutcome::Observed(_) | ExecuteTargetOutcome::Contended => {}
+        }
         Ok(())
     }
 
@@ -463,6 +553,121 @@ where
     }
 }
 
+impl EvmExecutorFailureOutcomes {
+    fn new(binding: &mfm_executor::VerifiedExecutorBinding) -> mfm_executor::Result<Self> {
+        let signer_failure = reference_safe_failure(
+            binding.contract().safe_failure_contract_ref().clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry,
+        )?;
+        let non_domain = |entry_status, disposition, code| {
+            let failure = mfm_journal::v2::NonDomainFailure::new(entry_status, disposition, code)
+                .map_err(|_| ExecutorError::InvalidSafeFailure)?;
+            EffectExecutorOutcome::non_domain_failure(failure)
+        };
+        Ok(Self {
+            signer_unavailable: EffectExecutorOutcome::did_not_enter(signer_failure)?,
+            store_unavailable: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::v2::NonDomainDisposition::RetryableOperational,
+                mfm_journal::v2::NonDomainFailureCode::ExecutorStoreUnavailable,
+            )?,
+            contention: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::v2::NonDomainDisposition::RetryableOperational,
+                mfm_journal::v2::NonDomainFailureCode::ExecutorContention,
+            )?,
+            history_invalid: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid,
+            )?,
+            capacity_exhausted: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::ProvenNotEntered,
+                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::v2::NonDomainFailureCode::ExecutorCapacityExhausted,
+            )?,
+            adapter_contract_violation: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::ProvenNotEntered,
+                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation,
+            )?,
+            result_encoding_failure: non_domain(
+                mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered,
+                mfm_journal::v2::NonDomainDisposition::IntegrityBlocked,
+                mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure,
+            )?,
+        })
+    }
+
+    fn for_executor_error(
+        &self,
+        error: &ExecutorError,
+        phase: WalletDrivePhase,
+    ) -> EffectExecutorOutcome {
+        match error {
+            ExecutorError::DurableBackendUnavailable
+            | ExecutorError::DurableAppendOutcomeUnknown => self.store_unavailable.clone(),
+            ExecutorError::ResourceCasMismatch
+            | ExecutorError::LocalContention
+            | ExecutorError::DestinationFenceMismatch => self.contention.clone(),
+            ExecutorError::EvidenceBoundsExhausted
+            | ExecutorError::ResourcePolicy(
+                mfm_executor::PolicyError::SequenceExhausted
+                | mfm_executor::PolicyError::InventoryExhausted,
+            ) => self.capacity_exhausted.clone(),
+            ExecutorError::TargetAuthorityConsumed
+            | ExecutorError::TargetOperationMismatch
+            | ExecutorError::InvalidReferenceEffectIdentifier
+            | ExecutorError::InvalidSafeFailure => match phase {
+                WalletDrivePhase::FreshMaterial => self.adapter_contract_violation.clone(),
+                WalletDrivePhase::RetainedHistory => self.history_invalid.clone(),
+            },
+            ExecutorError::Recoverability(_) | ExecutorError::CanonicalEncoding => match phase {
+                WalletDrivePhase::FreshMaterial => self.result_encoding_failure.clone(),
+                WalletDrivePhase::RetainedHistory => self.history_invalid.clone(),
+            },
+            ExecutorError::SchemaReferenceMismatch
+            | ExecutorError::DeploymentReferenceMismatch
+            | ExecutorError::ExecutorContractReferenceMismatch
+            | ExecutorError::ResourceOwnershipReferenceMismatch
+            | ExecutorError::LedgerGenerationMismatch
+            | ExecutorError::ResourceDomainMismatch
+            | ExecutorError::TenantScopeMismatch
+            | ExecutorError::WrongExecutorBinding
+            | ExecutorError::EffectKeyMismatch
+            | ExecutorError::EffectBindingConflict
+            | ExecutorError::EffectNotBound
+            | ExecutorError::EffectAlreadyTerminal
+            | ExecutorError::ResourceAllocationConflict
+            | ExecutorError::ResourceOwnershipRequired
+            | ExecutorError::ResourcePolicyNotRevalidated
+            | ExecutorError::ResourcePolicy(_)
+            | ExecutorError::EvidenceBoundsMismatch
+            | ExecutorError::InvalidFrontier
+            | ExecutorError::InvalidFrontierProof
+            | ExecutorError::RetainedObjectMissing
+            | ExecutorError::RetainedObjectMismatch
+            | ExecutorError::RetainedValueContractMismatch
+            | ExecutorError::RetainedClosureDuplicate
+            | ExecutorError::RetainedClosureIncomplete
+            | ExecutorError::RetainedClosureExtra
+            | ExecutorError::FrontierFork
+            | ExecutorError::InvalidDeliveryObservation
+            | ExecutorError::AttemptIdentityMismatch
+            | ExecutorError::TerminalProofMismatch
+            | ExecutorError::TerminalTombstoneConflict
+            | ExecutorError::TerminalEvidenceMissing
+            | ExecutorError::DestinationOperationConflict
+            | ExecutorError::DestinationGenerationFenced
+            | ExecutorError::ReferenceCrashInjected
+            | ExecutorError::SynchronizationFailure
+            | ExecutorError::InvalidDurableSnapshot => self.history_invalid.clone(),
+        }
+    }
+}
+
 impl<Store> RecoverableEffectExecutor<EvmSubmitTransactionRequest> for EvmWalletExecutor<Store>
 where
     Store: ExecutorLedgerStore,
@@ -470,7 +675,7 @@ where
     fn ensure<'a>(
         &'a self,
         access: AuthorizedEnsureAccess<EvmSubmitTransactionRequest>,
-    ) -> mfm_executor::ExecutorFuture<'a, mfm_executor::Result<EffectExecutorOutcome>> {
+    ) -> mfm_executor::ExecutorFuture<'a, EffectExecutorOutcome> {
         Box::pin(async move { self.drive(access.committed_request()).await })
     }
 }
@@ -526,36 +731,6 @@ impl WalletPlan {
             WalletPlanKind::FinalizedHead => EVM_WALLET_FINALIZED_HEAD_OPERATION_ID,
             WalletPlanKind::CanonicalInclusion => EVM_WALLET_INCLUSION_BLOCK_OPERATION_ID,
         }
-    }
-
-    fn descriptor(
-        &self,
-        request: &EvmSubmitTransactionRequest,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> mfm_executor::Result<EvmWalletTargetEntryDescriptor> {
-        let descriptor = match self.kind {
-            WalletPlanKind::Broadcast => {
-                EvmWalletTargetEntryDescriptor::broadcast(request, candidate)
-            }
-            WalletPlanKind::TransactionLookup => {
-                EvmWalletTargetEntryDescriptor::transaction_lookup(request, candidate)
-            }
-            WalletPlanKind::ReceiptLookup => {
-                EvmWalletTargetEntryDescriptor::receipt_lookup(request, candidate)
-            }
-            WalletPlanKind::FinalizedHead => {
-                EvmWalletTargetEntryDescriptor::finalized_head(request, candidate)
-            }
-            WalletPlanKind::CanonicalInclusion => {
-                EvmWalletTargetEntryDescriptor::canonical_inclusion(
-                    request,
-                    candidate,
-                    self.inclusion_number
-                        .ok_or(ExecutorError::TargetOperationMismatch)?,
-                )
-            }
-        };
-        descriptor.map_err(map_live_error)
     }
 
     fn validate_descriptor(

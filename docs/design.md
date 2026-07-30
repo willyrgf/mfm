@@ -4,7 +4,7 @@ Status: authoritative typed-core design contract
 
 This document defines the one current runtime, journal, store, replay, and application design. The
 canonical recoverability schemas and identities are frozen in
-`contracts/recoverability/v2/annex.json` and `contracts/recoverability/v2/corpus.json`. Where this
+`contracts/recoverability/v3/annex.json` and `contracts/recoverability/v3/corpus.json`. Where this
 document summarizes a frozen encoding, the annex is authoritative.
 The typed-core cutover is implemented and no pre-cutover lifecycle remains. Production EVM reads
 are current audited graph nodes. EVM transaction submission is a registered recoverable effect
@@ -41,6 +41,11 @@ App, CLI, and REST only authorize, invoke, and render those lower contracts.
 - Every MFM-controlled semantic external operation is preceded by its own committed
   `ExternalAccessAuthorized` record. Only a directly observed newly appended authorization can
   mint affine live-access authority.
+- Every surviving normal live-boundary return is totalized into one exact pending observation.
+  The access protocol cannot report normal success until that logical observation is committed or
+  resolved as byte-identical committed history.
+- A `NonDomainFailure` is audit-only platform evidence. It is never a returned domain value, a
+  `SafeFailure`, a typed domain failure, or state-consumable evidence.
 - State logic performs no ambient semantic IO. Read and effect requests are pure and total over a
   certified `StateFrame`.
 - Effect delivery and cross-effect resource coordination belong to a separately durable typed
@@ -56,7 +61,7 @@ App, CLI, and REST only authorize, invoke, and render those lower contracts.
 - Recorded-history verification, exact reproduction, and candidate comparison perform no live
   semantic-capability, provider, executor, domain-filesystem, or signer IO.
 - All store-backed authority reads and writes use one qualified, fenced authoritative PostgreSQL
-  writer. A replica is not v1 authority.
+  writer. A replica is not current store authority.
 
 ## Authority Surfaces
 
@@ -74,12 +79,15 @@ App, CLI, and REST only authorize, invoke, and render those lower contracts.
 | `VerifiedPublicRunView` | reviewed public value | Owned annex-validated status and certified-output projection with no journal, object, or follow-up read authority. |
 | `PreparedCommit<Purpose>` | append authority | Sealed purpose-specific candidate carrying exact predecessor, records, object intents, and structural proof. |
 | `NewlyAppendedAuthorization` | one-use store permit | Returned only with a directly observed new authorization append; consumed by runtime to mint one `AuthorizedAccess`. |
+| `PreparedAccess` / `Prepared<K>` | private preflight proof | Closed runtime-owned sum and kind-typed value whose request, binding, codecs, contracts, routing, and immutable identities were validated before authorization. |
 | `AuthorizedAccess<K, T>` | one-use live authority | Private runtime authority for exactly one registered read or ensure operation. |
+| `PendingObservation<K>` | private persistence obligation | Immutable exact authorization plus complete persistable outcome. It is retained independently of predecessor-bound append attempts and cannot reach state, application, or a successful drive result. |
+| `CommittedObservation<K>` | private committed proof | Constructed only after a positive observation commit or byte-identical logical-key resolution; it is the only normal successful result after invocation. |
 | `ContentRef` | content identity only | Executor and general lightweight reference: schema id plus raw-byte content digest. |
 | `ValueRef` | journal-retained identity | Full producer-bound artifact, evidence, schema, semantic type, role, length, media type, and producer binding. |
 | `VerifiedExecutorBinding` | executor-ledger authority | Exact tenant, deployment generation, evidence contract, and optional typed resource ownership. |
 | `EvmWalletRequestQualification` | deployment predicate plus private live transport ownership, not target-entry authority | One secret-free sealed equality proof over the actual route catalog, selected route/chain, executor semantic and evidence closure, derived signer descriptor, nonce policy/configuration, classifier, finality, assurance, generation/fence, tenant, wallet domain, sender, and evidence bounds. The live object separately retains a private clone of that exact transport instance; admission and execution share one qualification `Arc`. |
-| `TargetEntryAuthority` / `TargetOperationReceipt` | one-use executor authority | Authorization committed before target entry and affine receipt returned by that exact entry. |
+| `TargetEntryAuthority` | one-use executor authority | Authorization is committed before target entry; a private executor completion seal binds the callback's unbound outcome to that exact entry before observation persistence. |
 | Rendered JSON and portable bytes | no live authority | Reviewed output/export representations; identifiers and cursors are never bearer authority. |
 
 Authority types have private construction paths and are non-cloneable or affine where duplicating
@@ -283,7 +291,9 @@ An observation references exactly one authorization and records:
 
 - `Returned`, with one reviewed typed result;
 - `DidNotEnter`, with a reviewed safe failure proving no boundary entry; or
-- `Indeterminate`, with a reviewed safe failure after entry may have occurred.
+- `Indeterminate`, with a reviewed safe failure after entry may have occurred; or
+- `NonDomainFailure`, with conservative `ProvenNotEntered | MayHaveEntered` entry status, fixed
+  `RetryableOperational | IntegrityBlocked` disposition, and one closed redaction-safe code.
 
 The shared `SafeFailure` envelope is selected by an exact contract reference and contains only a
 closed code, failure class, boundary stage, optional coarse size class, and optional bounded typed
@@ -298,6 +308,14 @@ every observation object's full `ValueRef`, exact producer path, and frozen obje
 reconstructs exact pending and terminal effect-retained closure and the authoritative fact-scan
 response, attestation, selected-source closure, and evidence dependencies before granting
 observation authority.
+
+The non-domain codes are exactly `adapter_contract_violation`, `result_encoding_failure`,
+`fact_store_unavailable`, `fact_history_invalid`, `executor_store_unavailable`,
+`executor_contention`, `executor_history_invalid`, and `executor_capacity_exhausted`. Store and
+replay validate each code's permitted access layer, entry status, and disposition. A retryable
+operational outcome may permit a later separately authorized call only after its observation
+commits. An integrity-blocked outcome blocks progress. Neither form is passed to a state callback,
+and neither can satisfy a read or effect settlement.
 
 ### `RunClosed`
 
@@ -409,10 +427,9 @@ Runtime derives one private next action:
 
 ```text
 CommitPure
-CallRead
+ExecuteAccess(PreparedAccess)
 SettleRead
 CommitEffectRequest
-CallEnsure
 SettleEffect
 CommitDependencySkip
 Closed
@@ -440,14 +457,42 @@ consumable observation suffix. The first callback-accepted observation must be
 the observation recorded by the terminal transition, and any later invalid
 evidence still blocks.
 
-For a live call, runtime:
+For a live call, runtime alone owns the private staged protocol:
 
-1. purely authors the immutable request;
+```text
+Prepared<K>
+  -> Authorized<K>
+  -> PendingObservation<K>
+  -> CommittedObservation<K>
+```
+
+Runtime:
+
+1. purely authors and preflights the immutable request and all selected contracts into
+   `Prepared<K>`;
 2. appends `ExternalAccessAuthorized`;
-3. consumes `NewlyAppendedAuthorization` into one `AuthorizedAccess`;
-4. invokes one registered private capability boundary;
-5. commits `ExternalAccessObserved`; and
-6. returns without settling the state in that same drive.
+3. consumes only a directly acknowledged `NewlyAppendedAuthorization` into one affine
+   `Authorized<K>`;
+4. invokes one registered private boundary and totalizes every surviving return, including
+   returned-value encoding failure, into `PendingObservation<K>` with no outer post-invocation
+   error channel;
+5. commits or exactly resolves the linked `ExternalAccessObserved`; and
+6. returns normal success only with `CommittedObservation<K>`, without settling the state in that
+   same drive.
+
+The pending value owns one stable logical observation identity: authorization reference plus exact
+persistable bytes. A predecessor-bound physical append attempt separately owns its append request
+id, predecessor, and candidate. Before each attempt runtime reloads and resolves the authorization
+logical key. Identical content completes the protocol; different content is an integrity
+conflict. A definite stale predecessor discards only the physical attempt and prepares a new one
+over the unchanged pending value. Acknowledgement ambiguity resolves the unchanged original
+physical attempt before any rebase. No observation retry reinvokes the live boundary.
+
+Operational store unavailability while the pending obligation is live uses capped exponential
+backoff of 10, 20, 40, …, 1,000 milliseconds. Verified head progress or a resolved append resets
+the delay. Cancellation drops the in-memory obligation and starts no detached completion work;
+task or process loss therefore leaves the committed authorization unmatched rather than
+fabricating an outcome.
 
 The next call can consume the observation and settle. A crash at any boundary is recovered from the
 journal; no process-local semantic state, worker identity, or claim is needed.
@@ -498,7 +543,8 @@ committed request identity
   -> exact executor binding
   -> append authorization
   -> affine target-entry authority
-  -> target returns affine receipt
+  -> target returns an unbound closed outcome
+  -> private completion seal validates and binds the outcome
   -> exact observation
   -> bounded delivery frontier and terminal tombstone
   -> verified terminal claim
@@ -513,6 +559,14 @@ immutable histories through `ExecutorLedgerStore`, strictly folds them, evaluate
 policy, derives deterministic attempts, and submits one atomic compare-and-append proposal. The raw
 store owns only its exact fenced identity, immutable effect/resource records, exact content-object
 loads, and CAS; it does not own folding, policy, attempt, observation, or terminal rules.
+
+The sole public target boundary is `execute_target_once`. It commits one target authorization,
+consumes the resulting affine authority in one caller-supplied invocation, validates and binds the
+returned unbound outcome through its retained private completion seal, and durably records the
+exact target observation before returning. A stale append, lost acknowledgement, tombstone
+conflict, or restart resolves retained ledger evidence and never calls the target a second time.
+Returned target values that are valid for their typed contract but exceed the retained-result
+bound become the closed `ResultUnrepresentable` attempt failure.
 
 After request qualification and permanent allocation, the EVM wallet executor consumes every
 initial, restored, post-target, authorization/terminalization-conflict, pending, and terminal
@@ -549,12 +603,30 @@ mutation additionally requires a qualified non-rollback executor generation, sta
 exclusion, authoritative destination convergence/resource fencing, and a tested recovery procedure.
 PostgreSQL co-location does not merge executor authority with the MFM journal.
 
+The EVM target preflight is one closed five-variant sum:
+
+```text
+Broadcast
+TransactionLookup
+ReceiptLookup
+FinalizedHead
+CanonicalInclusion
+```
+
+Each variant validates and owns all operation-specific request material before target
+authorization. Target invocation makes exactly one transport call and returns one closed result.
+After possible exchange, classification is exhaustive: a schema-valid result whose encoding
+exceeds the retained bound is `ResultUnrepresentable`; an invalid typed/contract result is
+`adapter_contract_violation` with `MayHaveEntered/IntegrityBlocked`; and canonical
+encoding/schema construction failure is `result_encoding_failure` with
+`MayHaveEntered/IntegrityBlocked`.
+
 ## Objects, Facts, And Cross-Run Inputs
 
 Every retained journal value uses the full producer-bound `ValueRef`. Each commit atomically binds
 all newly admitted or exact preexisting objects through one `commit_artifact_bindings` relation.
-Referenced immutable bytes are retained indefinitely in v1; there is no semantic retention
-workflow or garbage-collection record.
+Referenced immutable bytes are retained indefinitely in the current contract; there is no
+semantic retention workflow or garbage-collection record.
 
 A transition fact emission carries:
 
@@ -598,6 +670,12 @@ in-memory and non-serializable, and there is no public or persisted resume token
 abandons that authorization as audit-only; the next attempt appends a fresh current-head
 authorization and starts a new deterministic scan. Partial work cannot mint a response or
 completeness proof.
+
+Once the scan reaches `Complete`, its affine result is consumed exactly once into immutable sealed
+pending-observation material. Observation reload, exact-content resolution, stale-head retry, and
+acknowledgement recovery reuse those same bytes and never rescan. A normally returned store
+unavailability or invalid-history result is totalized into the corresponding fact-layer
+`NonDomainFailure`.
 
 Only sources selected by the final top-k results survive. Each selected publication independently
 closes its claim, subject, response, descriptor, and transitive typed references against the exact
@@ -697,7 +775,8 @@ promotion. The application role may insert/select only through the qualified sto
 cannot update, delete, truncate, or directly manipulate identity or fact-head authority.
 
 Every authority-bearing read and write uses that fenced writer. Status, drive, replay loading,
-trace, audit, export, object dereference, and fact completeness do not use replicas in v1.
+trace, audit, export, object dereference, and fact completeness do not use replicas in the current
+contract.
 Independent processes may each qualify the same fenced lineage and construct their own sole
 runtime writer; PostgreSQL locks, exact-head CAS, and append-request idempotency serialize them.
 
@@ -754,7 +833,9 @@ Replay has three modes:
 
 Replay does not invoke the live scheduler, mint access authority, append, resolve current routing,
 call a provider or executor, or construct a signer. `unavailable` in the frozen reproduction
-response carries no reason field.
+response carries no reason field. Recorded verification preserves `NonDomainFailure` as
+callback-free audit evidence, applies its fixed retry-or-block projection, and rejects any history
+that consumes it in a semantic transition.
 
 ## Production Capabilities
 
@@ -853,15 +934,17 @@ The published transport contract is:
 Public status is exactly `active | succeeded | failed`. The ordinary run read exposes only derived
 status, reviewed active-run fields, and certified public outputs. Trace, audit, replay, and export
 are separately authorized. There is no arbitrary object reader or tenant-wide discovery surface.
+The access-audit projection exposes the optional closed `non_domain_failure` value and never
+recasts it as `failure`, a returned value, or a domain result.
 
-Portable run transfer is the annex-defined `mfm.portable-run-export-stream.v1` framed JSON text
+Portable run transfer is the annex-defined `mfm.portable-run-export-stream.v2` framed JSON text
 sequence. It begins with one header, carries root-first journals and deduplicated object payloads
 with every logical `ValueRef` authority, and ends with one terminal frame followed immediately by
 EOF. The external content digest is SHA-256 over every exact record separator, canonical frame
 byte, and line feed; no frame contains a self-digest.
 
 The exact DTOs, disclosure rules, pagination, authentication, and portable-export contract are in
-`docs/recoverability-app-surface-v2.md`.
+`docs/recoverability-app-surface-v3.md`.
 
 ## Security And Redaction
 

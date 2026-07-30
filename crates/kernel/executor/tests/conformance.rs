@@ -1,33 +1,320 @@
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2,
+    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV3, ValidatedCanonicalValueV3,
 };
-use mfm_capabilities::SafeFailureOutcome;
 use mfm_executor::{
     reference_safe_failure, verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest,
-    AllocationOutcome, BoundaryStage, CommittedEffectRequest, ContentRef, EffectExecutorOutcome,
-    EffectExecutorOutcomeView, EffectIdentity, Ensure, EvidenceBounds, ExecutorBinding,
-    ExecutorContractDescriptor, ExecutorDeployment, ExecutorEnsureResultClaim, ExecutorError,
-    ExecutorEvidenceRecord, ExecutorFuture, ExecutorRetainedClosureClaim,
-    ExecutorRetainedClosureContract, ExecutorRetainedValue, ExecutorRetainedValueRelation,
-    ExecutorStoreSnapshot, ExecutorTerminalEvidenceClaim, FailureClass, FencingRef,
-    FiniteInventoryPolicy, FiniteInventoryRequest, KeyedExecutorLedger,
-    MemoryConvergentDestination, MemoryDestinationCheckpoint, MemoryExecutorStore,
-    MemoryLedgerCheckpoint, ReferenceContract, ReferenceCrashPoint, ReferenceDestination,
-    ReferenceDestinationReturn, ReferenceDriveOutcome, ReferenceExecutor, ReferenceFailureCode,
-    ReferenceRequest, ReferenceTargetBehavior, ReferenceTerminalProof, ResourceLedgerRecord,
-    ResourceOwnership, ResourcePolicyBinding, RetainedValueContract, SchemaQualifiedCanonicalValue,
-    TargetEntryAuthority, TerminalTombstone, TypedResourcePolicy, VerifiedExecutorBinding,
+    AllocationOutcome, BoundaryStage, CommittedEffectRequest, ContentRef, DeliveryAttemptOutcome,
+    EffectExecutorOutcome, EffectExecutorOutcomeParts, EffectExecutorOutcomeView, EffectIdentity,
+    Ensure, EvidenceBounds, ExecuteTargetOutcome, ExecutorAppendOutcome, ExecutorBinding,
+    ExecutorContractDescriptor, ExecutorDeployment, ExecutorEffectSnapshot,
+    ExecutorEnsureResultClaim, ExecutorError, ExecutorEvidenceRecord, ExecutorFuture,
+    ExecutorLedgerAppend, ExecutorLedgerStore, ExecutorLedgerStoreIdentity,
+    ExecutorResourceSnapshot, ExecutorRetainedClosureClaim, ExecutorRetainedClosureContract,
+    ExecutorRetainedValue, ExecutorRetainedValueRelation, ExecutorStoreSnapshot,
+    ExecutorTerminalEvidenceClaim, FailureClass, FencingRef, FiniteInventoryPolicy,
+    FiniteInventoryRequest, KeyedExecutorLedger, MemoryConvergentDestination,
+    MemoryDestinationCheckpoint, MemoryExecutorStore, MemoryLedgerCheckpoint, NonDomainDisposition,
+    NonDomainEntryStatus, NonDomainFailure, NonDomainFailureCode, ReferenceContract,
+    ReferenceCrashPoint, ReferenceDestination, ReferenceDestinationReturn, ReferenceDriveOutcome,
+    ReferenceExecutor, ReferenceFailureCode, ReferenceRequest, ReferenceTargetBehavior,
+    ReferenceTerminalProof, ResourceKeyRef, ResourceLedgerRecord, ResourceOwnership,
+    ResourceOwnershipRef, ResourcePolicyBinding, RetainedValueContract,
+    SchemaQualifiedCanonicalValue, TargetEntryAuthority, TerminalTombstone, TypedResourcePolicy,
+    VerifiedExecutorBinding,
 };
 use mfm_ids::{
-    DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
+    AttemptId, DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId,
+    TenantScopeId,
 };
 
-#[path = "../../../../tests/support/recoverability_v2.rs"]
-mod recoverability_v2;
+#[path = "../../../../tests/support/recoverability_v3.rs"]
+mod recoverability_v3;
 
-const CORPUS: &str = include_str!("../../../../contracts/recoverability/v2/corpus.json");
+const CORPUS: &str = include_str!("../../../../contracts/recoverability/v3/corpus.json");
+
+#[derive(Clone)]
+struct RetryingObservationStore {
+    inner: MemoryExecutorStore,
+    return_absent_once: Arc<AtomicBool>,
+    observation_failures: Arc<AtomicUsize>,
+    observation_attempts: Arc<AtomicUsize>,
+}
+
+impl RetryingObservationStore {
+    fn new(inner: MemoryExecutorStore, observation_failures: usize) -> Self {
+        Self {
+            inner,
+            return_absent_once: Arc::new(AtomicBool::new(false)),
+            observation_failures: Arc::new(AtomicUsize::new(observation_failures)),
+            observation_attempts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn return_absent_on_next_load(&self) {
+        self.return_absent_once.store(true, Ordering::SeqCst);
+    }
+
+    fn observation_attempts(&self) -> usize {
+        self.observation_attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl ExecutorLedgerStore for RetryingObservationStore {
+    fn store_identity(&self) -> &ExecutorLedgerStoreIdentity {
+        self.inner.store_identity()
+    }
+
+    fn load_effect<'a>(
+        &'a self,
+        effect_key: &'a mfm_executor::EffectKey,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<ExecutorEffectSnapshot>, ExecutorError>>
+    {
+        if self.return_absent_once.swap(false, Ordering::SeqCst) {
+            Box::pin(async { Ok(None) })
+        } else {
+            self.inner.load_effect(effect_key)
+        }
+    }
+
+    fn load_resource<'a>(
+        &'a self,
+        resource_ownership_ref: &'a ResourceOwnershipRef,
+        resource_key_ref: &'a ResourceKeyRef,
+    ) -> ExecutorFuture<'a, std::result::Result<ExecutorResourceSnapshot, ExecutorError>> {
+        self.inner
+            .load_resource(resource_ownership_ref, resource_key_ref)
+    }
+
+    fn load_content<'a>(
+        &'a self,
+        content_ref: &'a ContentRef,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<SchemaQualifiedCanonicalValue>, ExecutorError>>
+    {
+        self.inner.load_content(content_ref)
+    }
+
+    fn compare_and_append<'a>(
+        &'a self,
+        append: ExecutorLedgerAppend,
+    ) -> ExecutorFuture<'a, std::result::Result<mfm_executor::ExecutorAppendOutcome, ExecutorError>>
+    {
+        let is_observation = append
+            .effect_frontier()
+            .appended_records()
+            .iter()
+            .any(|record| {
+                matches!(
+                    record,
+                    ExecutorEvidenceRecord::DeliveryAttemptObserved { .. }
+                )
+            });
+        if is_observation {
+            self.observation_attempts.fetch_add(1, Ordering::SeqCst);
+            if self
+                .observation_failures
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Box::pin(async { Err(ExecutorError::InvalidDurableSnapshot) });
+            }
+        }
+        self.inner.compare_and_append(append)
+    }
+}
+
+#[derive(Clone)]
+struct AlwaysConflictingStore {
+    inner: MemoryExecutorStore,
+    append_attempts: Arc<AtomicUsize>,
+}
+
+impl AlwaysConflictingStore {
+    fn new(inner: MemoryExecutorStore) -> Self {
+        Self {
+            inner,
+            append_attempts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn append_attempts(&self) -> usize {
+        self.append_attempts.load(Ordering::SeqCst)
+    }
+}
+
+impl ExecutorLedgerStore for AlwaysConflictingStore {
+    fn store_identity(&self) -> &ExecutorLedgerStoreIdentity {
+        self.inner.store_identity()
+    }
+
+    fn load_effect<'a>(
+        &'a self,
+        effect_key: &'a mfm_executor::EffectKey,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<ExecutorEffectSnapshot>, ExecutorError>>
+    {
+        self.inner.load_effect(effect_key)
+    }
+
+    fn load_resource<'a>(
+        &'a self,
+        resource_ownership_ref: &'a ResourceOwnershipRef,
+        resource_key_ref: &'a ResourceKeyRef,
+    ) -> ExecutorFuture<'a, std::result::Result<ExecutorResourceSnapshot, ExecutorError>> {
+        self.inner
+            .load_resource(resource_ownership_ref, resource_key_ref)
+    }
+
+    fn load_content<'a>(
+        &'a self,
+        content_ref: &'a ContentRef,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<SchemaQualifiedCanonicalValue>, ExecutorError>>
+    {
+        self.inner.load_content(content_ref)
+    }
+
+    fn compare_and_append<'a>(
+        &'a self,
+        _append: ExecutorLedgerAppend,
+    ) -> ExecutorFuture<'a, std::result::Result<mfm_executor::ExecutorAppendOutcome, ExecutorError>>
+    {
+        self.append_attempts.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(mfm_executor::ExecutorAppendOutcome::Conflict) })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalResolutionEvidence {
+    Identical,
+    Conflicting,
+}
+
+const FINAL_RESOLUTION_CASES: [(&str, ExecutorAppendOutcome, FinalResolutionEvidence); 4] = [
+    (
+        "applied",
+        ExecutorAppendOutcome::Applied,
+        FinalResolutionEvidence::Identical,
+    ),
+    (
+        "already-applied",
+        ExecutorAppendOutcome::AlreadyApplied,
+        FinalResolutionEvidence::Identical,
+    ),
+    (
+        "conflict-identical",
+        ExecutorAppendOutcome::Conflict,
+        FinalResolutionEvidence::Identical,
+    ),
+    (
+        "conflict-conflicting",
+        ExecutorAppendOutcome::Conflict,
+        FinalResolutionEvidence::Conflicting,
+    ),
+];
+
+#[derive(Clone)]
+struct ScriptedFinalResolutionStore {
+    before: MemoryExecutorStore,
+    after: MemoryExecutorStore,
+    after_effect_override: Option<ExecutorEffectSnapshot>,
+    final_outcome: ExecutorAppendOutcome,
+    append_attempts: Arc<AtomicUsize>,
+}
+
+impl ScriptedFinalResolutionStore {
+    fn new(
+        before: MemoryExecutorStore,
+        after: MemoryExecutorStore,
+        final_outcome: ExecutorAppendOutcome,
+    ) -> Self {
+        assert_eq!(before.store_identity(), after.store_identity());
+        Self {
+            before,
+            after,
+            after_effect_override: None,
+            final_outcome,
+            append_attempts: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn with_after_effect_override(mut self, snapshot: ExecutorEffectSnapshot) -> Self {
+        self.after_effect_override = Some(snapshot);
+        self
+    }
+
+    fn append_attempts(&self) -> usize {
+        self.append_attempts.load(Ordering::SeqCst)
+    }
+
+    fn resolution_visible(&self) -> bool {
+        self.append_attempts() >= 64
+    }
+
+    fn visible_store(&self) -> &MemoryExecutorStore {
+        if self.resolution_visible() {
+            &self.after
+        } else {
+            &self.before
+        }
+    }
+}
+
+impl ExecutorLedgerStore for ScriptedFinalResolutionStore {
+    fn store_identity(&self) -> &ExecutorLedgerStoreIdentity {
+        self.before.store_identity()
+    }
+
+    fn load_effect<'a>(
+        &'a self,
+        effect_key: &'a mfm_executor::EffectKey,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<ExecutorEffectSnapshot>, ExecutorError>>
+    {
+        if self.resolution_visible() {
+            if let Some(snapshot) = &self.after_effect_override {
+                let snapshot = snapshot.clone();
+                return Box::pin(async move { Ok(Some(snapshot)) });
+            }
+        }
+        self.visible_store().load_effect(effect_key)
+    }
+
+    fn load_resource<'a>(
+        &'a self,
+        resource_ownership_ref: &'a ResourceOwnershipRef,
+        resource_key_ref: &'a ResourceKeyRef,
+    ) -> ExecutorFuture<'a, std::result::Result<ExecutorResourceSnapshot, ExecutorError>> {
+        self.visible_store()
+            .load_resource(resource_ownership_ref, resource_key_ref)
+    }
+
+    fn load_content<'a>(
+        &'a self,
+        content_ref: &'a ContentRef,
+    ) -> ExecutorFuture<'a, std::result::Result<Option<SchemaQualifiedCanonicalValue>, ExecutorError>>
+    {
+        self.visible_store().load_content(content_ref)
+    }
+
+    fn compare_and_append<'a>(
+        &'a self,
+        _append: ExecutorLedgerAppend,
+    ) -> ExecutorFuture<'a, std::result::Result<ExecutorAppendOutcome, ExecutorError>> {
+        let attempt = self.append_attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        assert!(
+            attempt <= 64,
+            "the engine must never issue a 65th local CAS"
+        );
+        let outcome = if attempt == 64 {
+            self.final_outcome
+        } else {
+            ExecutorAppendOutcome::Conflict
+        };
+        Box::pin(async move { Ok(outcome) })
+    }
+}
 
 #[derive(Clone)]
 struct BindingFixture {
@@ -37,8 +324,8 @@ struct BindingFixture {
     destination_domain_ref: ContentRef,
 }
 
-fn contract() -> &'static RecoverabilityContractV2 {
-    RecoverabilityContractV2::embedded().expect("embedded contract")
+fn contract() -> &'static RecoverabilityContractV3 {
+    RecoverabilityContractV3::embedded().expect("embedded contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -76,7 +363,10 @@ fn retained_contract(label: &str, schema_contract: &str) -> RetainedValueContrac
     .expect("retained value contract")
 }
 
-fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
+fn retained_closure_contract_with_domain(
+    label: &str,
+    domain_evidence_schema_contract: &str,
+) -> ExecutorRetainedClosureContract {
     ExecutorRetainedClosureContract::new(
         retained_contract(
             &format!("{label}.ensure-result"),
@@ -84,11 +374,11 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -96,21 +386,45 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v1",
+            "mfm.executor-terminal-tombstone.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v1",
+            "mfm.executor-reference-terminal-proof.v2",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
-            "mfm.executor-reference-queue-result.v1",
+            domain_evidence_schema_contract,
         ),
     )
     .expect("retained closure contract")
 }
 
 fn binding_fixture(label: &str, with_resource_owner: bool, max_attempts: u32) -> BindingFixture {
+    binding_fixture_with_bounds(label, with_resource_owner, bounds(max_attempts))
+}
+
+fn binding_fixture_with_bounds(
+    label: &str,
+    with_resource_owner: bool,
+    evidence_bounds: EvidenceBounds,
+) -> BindingFixture {
+    binding_fixture_with_outcome_contract(
+        label,
+        with_resource_owner,
+        evidence_bounds,
+        "mfm.executor-reference-queue-result.v2",
+        reviewed_ref("reference.safe-failure"),
+    )
+}
+
+fn binding_fixture_with_outcome_contract(
+    label: &str,
+    with_resource_owner: bool,
+    evidence_bounds: EvidenceBounds,
+    domain_evidence_schema_contract: &str,
+    safe_failure_contract_ref: ContentRef,
+) -> BindingFixture {
     let tenant_scope_id = TenantScopeId::new(format!(
         "mfm.tenant_scope.v1:{:032x}",
         label.len() + usize::from(with_resource_owner) + 10
@@ -146,10 +460,10 @@ fn binding_fixture(label: &str, with_resource_owner: bool, max_attempts: u32) ->
             "mfm.executor-reference-queue-request.v1",
         ),
         retained_contract(&format!("{label}.safe-failure"), "mfm.safe-failure.v1"),
-        retained_closure_contract(label),
-        reviewed_ref("reference.safe-failure"),
+        retained_closure_contract_with_domain(label, domain_evidence_schema_contract),
+        safe_failure_contract_ref,
         destination_domain_ref.clone(),
-        bounds(max_attempts),
+        evidence_bounds,
         resource_domain_ref,
         Vec::new(),
     )
@@ -178,8 +492,36 @@ fn binding_fixture(label: &str, with_resource_owner: bool, max_attempts: u32) ->
     }
 }
 
+fn domain_outcome(schema_contract: &str, value: CanonicalValue) -> DeliveryAttemptOutcome {
+    let value = contract()
+        .encode(schema_contract, &value)
+        .expect("domain outcome value");
+    let value =
+        SchemaQualifiedCanonicalValue::from_validated(&value).expect("schema-qualified outcome");
+    DeliveryAttemptOutcome::returned(value).expect("returned outcome")
+}
+
+#[derive(Debug)]
+struct CapturedTargetAuthority {
+    identity: EffectIdentity,
+    attempt_id: AttemptId,
+    target_operation_ref: ContentRef,
+    durable_ledger_generation_ref: ContentRef,
+}
+
+impl CapturedTargetAuthority {
+    fn from_authority(authority: &TargetEntryAuthority) -> Self {
+        Self {
+            identity: authority.identity().clone(),
+            attempt_id: authority.attempt_id().clone(),
+            target_operation_ref: authority.target_operation_ref().clone(),
+            durable_ledger_generation_ref: authority.durable_ledger_generation_ref().clone(),
+        }
+    }
+}
+
 fn bounds(max_attempts: u32) -> EvidenceBounds {
-    EvidenceBounds::new(max_attempts, 256, 4_000_000, 2, 16_384).expect("bounds")
+    EvidenceBounds::new(max_attempts, 256, 4_000_000, 16_384, 2, 16_384).expect("bounds")
 }
 
 fn reference_contract(fixture: &BindingFixture) -> ReferenceContract {
@@ -191,6 +533,66 @@ fn reference_contract(fixture: &BindingFixture) -> ReferenceContract {
         reviewed_ref("reference.safe-failure"),
     )
     .expect("reference contract")
+}
+
+fn adversarial_delivery_outcomes(
+    fixture: &BindingFixture,
+) -> [(&'static str, DeliveryAttemptOutcome); 4] {
+    let wrong_outcome_tuple = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            fixture
+                .binding
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BoundaryEntry,
+        )
+        .expect("structurally valid wrong outcome tuple"),
+    )
+    .expect("wrong tuple candidate");
+    let illegal_fact_layer = DeliveryAttemptOutcome::non_domain_failure(
+        NonDomainFailure::new(
+            NonDomainEntryStatus::MayHaveEntered,
+            NonDomainDisposition::RetryableOperational,
+            NonDomainFailureCode::FactStoreUnavailable,
+        )
+        .expect("globally valid fact-layer failure"),
+    )
+    .expect("fact-layer candidate");
+    let wrong_safe_failure_contract = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            reviewed_ref("hostile.safe-failure-contract"),
+            ReferenceFailureCode::GenerationFenced,
+            FailureClass::Authorization,
+            BoundaryStage::BeforeBoundaryEntry,
+        )
+        .expect("wrong-contract safe failure"),
+    )
+    .expect("wrong-contract candidate");
+    let wrong_returned_schema =
+        DeliveryAttemptOutcome::returned(reviewed_value("hostile.returned-schema"))
+            .expect("wrong-schema returned candidate");
+    [
+        ("wrong-outcome-tuple", wrong_outcome_tuple),
+        ("illegal-fact-layer", illegal_fact_layer),
+        ("wrong-safe-failure-contract", wrong_safe_failure_contract),
+        ("wrong-returned-schema", wrong_returned_schema),
+    ]
+}
+
+fn assert_adapter_contract_violation(outcome: &DeliveryAttemptOutcome) {
+    assert!(outcome.returned_outcome().is_none());
+    assert!(outcome.did_not_enter_failure().is_none());
+    assert!(outcome.indeterminate_failure().is_none());
+    let fields = outcome
+        .non_domain_failure_value()
+        .expect("adapter failure outcome")
+        .fields();
+    assert_eq!(fields.entry_status, NonDomainEntryStatus::MayHaveEntered);
+    assert_eq!(fields.disposition, NonDomainDisposition::IntegrityBlocked);
+    assert_eq!(fields.code, NonDomainFailureCode::AdapterContractViolation);
 }
 
 fn identity_inputs(seed: u8) -> (StoreScopeId, RunId, NodeId) {
@@ -260,6 +662,13 @@ where
         .block_on(future)
 }
 
+fn restore_memory_store(
+    binding: &VerifiedExecutorBinding,
+    checkpoint: &MemoryLedgerCheckpoint,
+) -> MemoryExecutorStore {
+    MemoryExecutorStore::restore(binding, checkpoint.clone()).expect("restore memory checkpoint")
+}
+
 fn terminalize_allocated_effect(
     ledger: &KeyedExecutorLedger<MemoryExecutorStore>,
     fixture: &BindingFixture,
@@ -271,28 +680,45 @@ fn terminalize_allocated_effect(
         .activate_generation(fixture.generation_ref.clone())
         .expect("activate generation");
     let contract = reference_contract(fixture);
-    let authority = block_on(ledger.authorize_target(
+    let current = block_on(ledger.effect_view(request.identity()))
+        .expect("effect view")
+        .expect("bound effect");
+    let expected_head = current.delivery_audit().head_ref().expect("head");
+    let outcome = block_on(ledger.execute_target_once(
         request.identity(),
+        &expected_head,
         contract.enqueue_operation().clone(),
         Some(policy_binding),
-    ))
-    .expect("allocated target authority");
-    let returned = block_on(destination.enqueue(
-        authority,
-        request.request(),
-        &contract,
-        ReferenceTargetBehavior::Available,
+        |authority| async {
+            destination
+                .enqueue(
+                    authority,
+                    request.request(),
+                    &contract,
+                    ReferenceTargetBehavior::Available,
+                )
+                .await
+                .into_outcome()
+        },
     ))
     .expect("allocated target");
-    let attempt_id = returned.receipt().attempt_id().clone();
-    let returned_outcome = returned
-        .receipt()
+    let ExecuteTargetOutcome::Observed(view) = outcome else {
+        panic!("allocated target must be uncontended")
+    };
+    let attempt = view
+        .delivery_audit()
+        .attempts()
+        .expect("attempts")
+        .into_iter()
+        .last()
+        .expect("target attempt");
+    let attempt_id = attempt.attempt_id().clone();
+    let returned_outcome = attempt
         .outcome()
+        .expect("observed outcome")
         .returned_outcome()
         .cloned()
         .expect("returned outcome");
-    let view = block_on(ledger.observe_target(returned.into_target_receipt()))
-        .expect("allocated observation");
     let attempts = view.delivery_audit().attempts().expect("folded attempts");
     let observation_ref = attempts
         .iter()
@@ -556,7 +982,10 @@ fn verified_results_and_executor_outcomes_preserve_public_values() {
         returned.view(),
         EffectExecutorOutcomeView::Returned(&verified)
     );
-    assert_eq!(returned.into_parts(), Ok(verified.clone()));
+    assert_eq!(
+        returned.into_parts(),
+        EffectExecutorOutcomeParts::Returned(verified.clone())
+    );
     assert_eq!(
         verified.into_parts(),
         (
@@ -587,7 +1016,7 @@ fn verified_results_and_executor_outcomes_preserve_public_values() {
     );
     assert_eq!(
         did_not_enter.into_parts(),
-        Err((SafeFailureOutcome::DidNotEnter, did_not_enter_failure,))
+        EffectExecutorOutcomeParts::DidNotEnter(did_not_enter_failure)
     );
 
     let indeterminate_failure = reference_safe_failure(
@@ -605,7 +1034,7 @@ fn verified_results_and_executor_outcomes_preserve_public_values() {
     );
     assert_eq!(
         indeterminate.into_parts(),
-        Err((SafeFailureOutcome::Indeterminate, indeterminate_failure,))
+        EffectExecutorOutcomeParts::Indeterminate(indeterminate_failure)
     );
 }
 
@@ -815,11 +1244,6 @@ fn concurrent_delayed_and_post_terminal_drives_converge() {
 fn every_crash_boundary_recovers_without_duplicate_mutation() {
     for (seed, point, expected_mutations) in [
         (4, ReferenceCrashPoint::BeforeTargetEntry, 0),
-        (
-            5,
-            ReferenceCrashPoint::AfterTargetMutationBeforeObservation,
-            1,
-        ),
         (6, ReferenceCrashPoint::AfterObservationBeforeTombstone, 1),
         (7, ReferenceCrashPoint::AfterTombstoneBeforeReturn, 1),
     ] {
@@ -873,6 +1297,382 @@ fn safe_failures_remain_pending_and_attempt_bounds_fail_closed() {
 }
 
 #[test]
+fn bind_effect_resolves_every_64th_append_outcome_without_a_65th_cas_or_target_entry() {
+    for (label, final_outcome, evidence) in FINAL_RESOLUTION_CASES {
+        let fixture = binding_fixture(&format!("final-bind-{label}"), false, 8);
+        let request = committed(&fixture, 99, "operation.final-bind", "payload");
+        let before = MemoryExecutorStore::new(&fixture.binding);
+        let after = MemoryExecutorStore::new(&fixture.binding);
+        let after_ledger = KeyedExecutorLedger::new(after.clone(), fixture.binding.clone())
+            .expect("after-state ledger");
+        let effect_override = match evidence {
+            FinalResolutionEvidence::Identical => {
+                block_on(after_ledger.bind_effect(request.identity())).expect("identical binding");
+                None
+            }
+            FinalResolutionEvidence::Conflicting => {
+                let other = committed(&fixture, 100, "operation.final-bind-conflict", "payload");
+                block_on(after_ledger.bind_effect(other.identity())).expect("conflicting binding");
+                Some(
+                    block_on(after.load_effect(other.identity().effect_key()))
+                        .expect("load conflicting binding")
+                        .expect("conflicting snapshot"),
+                )
+            }
+        };
+        let mut store = ScriptedFinalResolutionStore::new(before, after, final_outcome);
+        if let Some(snapshot) = effect_override {
+            store = store.with_after_effect_override(snapshot);
+        }
+        let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+            .expect("scripted ledger");
+        let destination = MemoryConvergentDestination::new();
+
+        match evidence {
+            FinalResolutionEvidence::Identical => {
+                let view = block_on(ledger.bind_effect(request.identity()))
+                    .expect("resolved exact binding");
+                assert_eq!(view.identity(), request.identity());
+                assert_eq!(view.delivery_audit().attempt_count(), 0);
+            }
+            FinalResolutionEvidence::Conflicting => {
+                assert_eq!(
+                    block_on(ledger.bind_effect(request.identity()))
+                        .expect_err("resolved binding conflict"),
+                    ExecutorError::EffectBindingConflict
+                );
+            }
+        }
+        assert_eq!(store.append_attempts(), 64, "{label}");
+        assert_eq!(
+            destination.target_entry_count().expect("target entries"),
+            0,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn bind_and_allocate_resolves_every_64th_append_outcome_without_a_65th_cas_or_target_entry() {
+    for (label, final_outcome, evidence) in FINAL_RESOLUTION_CASES {
+        let fixture = binding_fixture(&format!("final-allocation-{label}"), true, 8);
+        let request = committed(&fixture, 101, "operation.final-allocation", "payload");
+        let policy_request = AccountSequenceRequest::new("final-allocation-sender", "chain-1")
+            .expect("policy request");
+        let policy = AccountSequencePolicy::new(
+            ResourcePolicyBinding::new(
+                reviewed_ref(&format!("final-allocation-{label}.policy")),
+                reviewed_ref(&format!("final-allocation-{label}.configuration")),
+            ),
+            51,
+            None,
+        );
+        let before = MemoryExecutorStore::new(&fixture.binding);
+        let after = MemoryExecutorStore::new(&fixture.binding);
+        let after_ledger = KeyedExecutorLedger::new(after.clone(), fixture.binding.clone())
+            .expect("after-state ledger");
+        match evidence {
+            FinalResolutionEvidence::Identical => {
+                block_on(after_ledger.try_bind_and_allocate(
+                    request.identity(),
+                    None,
+                    &policy,
+                    &policy_request,
+                ))
+                .expect("identical allocation");
+            }
+            FinalResolutionEvidence::Conflicting => {
+                let conflicting_policy = AccountSequencePolicy::new(
+                    ResourcePolicyBinding::new(
+                        reviewed_ref(&format!("final-allocation-{label}.other-policy")),
+                        reviewed_ref(&format!("final-allocation-{label}.other-configuration")),
+                    ),
+                    61,
+                    None,
+                );
+                block_on(after_ledger.try_bind_and_allocate(
+                    request.identity(),
+                    None,
+                    &conflicting_policy,
+                    &policy_request,
+                ))
+                .expect("conflicting allocation");
+            }
+        }
+        let store = ScriptedFinalResolutionStore::new(before, after, final_outcome);
+        let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+            .expect("scripted ledger");
+        let destination = MemoryConvergentDestination::new();
+
+        let result = block_on(ledger.try_bind_and_allocate(
+            request.identity(),
+            None,
+            &policy,
+            &policy_request,
+        ));
+        match evidence {
+            FinalResolutionEvidence::Conflicting => {
+                assert_eq!(
+                    result.expect_err("resolved allocation conflict"),
+                    ExecutorError::ResourceAllocationConflict
+                );
+            }
+            FinalResolutionEvidence::Identical => match result.expect("resolved allocation") {
+                AllocationOutcome::Allocated { allocation, .. } => {
+                    assert_eq!(final_outcome, ExecutorAppendOutcome::Applied);
+                    assert_eq!(allocation.sequence(), 51);
+                }
+                AllocationOutcome::Existing { allocation, .. } => {
+                    assert_ne!(final_outcome, ExecutorAppendOutcome::Applied);
+                    assert_eq!(allocation.sequence(), 51);
+                }
+            },
+        }
+        assert_eq!(store.append_attempts(), 64, "{label}");
+        assert_eq!(
+            destination.target_entry_count().expect("target entries"),
+            0,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn terminal_tombstone_resolves_every_64th_append_outcome_without_reinvocation_or_a_65th_cas() {
+    for (label, final_outcome, evidence) in FINAL_RESOLUTION_CASES {
+        let fixture = binding_fixture(&format!("final-tombstone-{label}"), false, 8);
+        let raw = MemoryExecutorStore::new(&fixture.binding);
+        let ledger = KeyedExecutorLedger::new(raw.clone(), fixture.binding.clone())
+            .expect("preparation ledger");
+        let destination = MemoryConvergentDestination::new();
+        destination
+            .activate_generation(fixture.generation_ref.clone())
+            .expect("activate generation");
+        let contract = reference_contract(&fixture);
+        let request = committed(&fixture, 102, "operation.final-tombstone", "payload");
+        let bound = block_on(ledger.bind_effect(request.identity())).expect("bind effect");
+        let observed = block_on(ledger.execute_target_once(
+            request.identity(),
+            &bound.delivery_audit().head_ref().expect("bound head"),
+            contract.enqueue_operation().clone(),
+            None,
+            |authority| async {
+                destination
+                    .enqueue(
+                        authority,
+                        request.request(),
+                        &contract,
+                        ReferenceTargetBehavior::Available,
+                    )
+                    .await
+                    .into_outcome()
+            },
+        ))
+        .expect("observed target");
+        let ExecuteTargetOutcome::Observed(view) = observed else {
+            panic!("fresh target authorization must be observed")
+        };
+        let attempt = view
+            .delivery_audit()
+            .attempts()
+            .expect("attempts")
+            .into_iter()
+            .last()
+            .expect("observed attempt");
+        let proof = ReferenceTerminalProof::new(
+            attempt.attempt_id().clone(),
+            attempt
+                .outcome()
+                .and_then(DeliveryAttemptOutcome::returned_outcome)
+                .cloned()
+                .expect("returned outcome"),
+            attempt
+                .returned_observation_ref()
+                .cloned()
+                .expect("returned observation"),
+        )
+        .expect("terminal proof");
+        let tombstone =
+            TerminalTombstone::new("operation.final-tombstone", "applied", proof.clone())
+                .expect("terminal tombstone");
+        let base = raw.checkpoint().expect("observed checkpoint");
+        let before = restore_memory_store(&fixture.binding, &base);
+        let exact_after = restore_memory_store(&fixture.binding, &base);
+        let exact_ledger = KeyedExecutorLedger::new(exact_after.clone(), fixture.binding.clone())
+            .expect("exact after-state ledger");
+        block_on(exact_ledger.append_terminal_tombstone(request.identity(), tombstone.clone()))
+            .expect("exact durable tombstone");
+        let after = match evidence {
+            FinalResolutionEvidence::Identical => exact_after,
+            FinalResolutionEvidence::Conflicting => {
+                let conflicting_after = restore_memory_store(&fixture.binding, &base);
+                let conflicting_ledger =
+                    KeyedExecutorLedger::new(conflicting_after.clone(), fixture.binding.clone())
+                        .expect("conflicting after-state ledger");
+                let conflicting =
+                    TerminalTombstone::new("operation.final-tombstone-conflict", "applied", proof)
+                        .expect("conflicting tombstone");
+                block_on(
+                    conflicting_ledger.append_terminal_tombstone(request.identity(), conflicting),
+                )
+                .expect("conflicting durable tombstone");
+                conflicting_after
+            }
+        };
+        let store = ScriptedFinalResolutionStore::new(before, after, final_outcome);
+        let scripted = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+            .expect("scripted ledger");
+
+        match evidence {
+            FinalResolutionEvidence::Identical => {
+                let resolved = block_on(
+                    scripted.append_terminal_tombstone(request.identity(), tombstone.clone()),
+                )
+                .expect("resolved exact tombstone");
+                assert_eq!(
+                    resolved.terminal_tombstone().map(|(_, value)| value),
+                    Some(&tombstone)
+                );
+            }
+            FinalResolutionEvidence::Conflicting => {
+                assert_eq!(
+                    block_on(
+                        scripted.append_terminal_tombstone(request.identity(), tombstone.clone()),
+                    )
+                    .expect_err("resolved tombstone conflict"),
+                    ExecutorError::TerminalTombstoneConflict
+                );
+            }
+        }
+        assert_eq!(store.append_attempts(), 64, "{label}");
+        assert_eq!(
+            destination.target_entry_count().expect("target entries"),
+            1,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn bind_effect_local_contention_stops_after_exactly_64_attempts_without_target_entry() {
+    let fixture = binding_fixture("bounded-bind-contention", false, 8);
+    let store = AlwaysConflictingStore::new(MemoryExecutorStore::new(&fixture.binding));
+    let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
+    let destination = MemoryConvergentDestination::new();
+    destination
+        .activate_generation(fixture.generation_ref.clone())
+        .expect("activate generation");
+    let executor =
+        ReferenceExecutor::new(ledger, destination.clone(), reference_contract(&fixture));
+    let request = committed(&fixture, 96, "operation.bounded-bind", "payload");
+
+    assert_eq!(
+        block_on(executor.drive(&request)).expect_err("bounded local contention"),
+        ExecutorError::LocalContention
+    );
+    assert_eq!(store.append_attempts(), 64);
+    assert_eq!(destination.target_entry_count().expect("target entries"), 0);
+}
+
+#[test]
+fn bind_and_allocate_local_contention_stops_after_exactly_64_attempts_without_target_entry() {
+    let fixture = binding_fixture("bounded-allocation-contention", true, 8);
+    let store = AlwaysConflictingStore::new(MemoryExecutorStore::new(&fixture.binding));
+    let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
+    let policy = AccountSequencePolicy::new(
+        ResourcePolicyBinding::new(
+            reviewed_ref("bounded-allocation.policy"),
+            reviewed_ref("bounded-allocation.configuration"),
+        ),
+        51,
+        None,
+    );
+    let policy_request = AccountSequenceRequest::new("bounded-allocation-sender", "chain-1")
+        .expect("policy request");
+    let request = committed(&fixture, 97, "operation.bounded-allocation", "payload");
+    let destination = MemoryConvergentDestination::new();
+
+    assert_eq!(
+        block_on(ledger.try_bind_and_allocate(request.identity(), None, &policy, &policy_request,))
+            .expect_err("bounded local contention"),
+        ExecutorError::LocalContention
+    );
+    assert_eq!(store.append_attempts(), 64);
+    assert_eq!(destination.target_entry_count().expect("target entries"), 0);
+}
+
+#[test]
+fn terminal_tombstone_local_contention_stops_after_64_attempts_without_reinvocation() {
+    let fixture = binding_fixture("bounded-tombstone-contention", false, 8);
+    let raw = MemoryExecutorStore::new(&fixture.binding);
+    let ledger = KeyedExecutorLedger::new(raw.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
+    let destination = MemoryConvergentDestination::new();
+    destination
+        .activate_generation(fixture.generation_ref.clone())
+        .expect("activate generation");
+    let contract = reference_contract(&fixture);
+    let request = committed(&fixture, 98, "operation.bounded-tombstone", "payload");
+    let bound = block_on(ledger.bind_effect(request.identity())).expect("bind effect");
+    let observed = block_on(ledger.execute_target_once(
+        request.identity(),
+        &bound.delivery_audit().head_ref().expect("bound head"),
+        contract.enqueue_operation().clone(),
+        None,
+        |authority| async {
+            destination
+                .enqueue(
+                    authority,
+                    request.request(),
+                    &contract,
+                    ReferenceTargetBehavior::Available,
+                )
+                .await
+                .into_outcome()
+        },
+    ))
+    .expect("observed target");
+    let ExecuteTargetOutcome::Observed(view) = observed else {
+        panic!("fresh target authorization must be observed")
+    };
+    let attempt = view
+        .delivery_audit()
+        .attempts()
+        .expect("attempts")
+        .into_iter()
+        .last()
+        .expect("observed attempt");
+    let proof = ReferenceTerminalProof::new(
+        attempt.attempt_id().clone(),
+        attempt
+            .outcome()
+            .and_then(DeliveryAttemptOutcome::returned_outcome)
+            .cloned()
+            .expect("returned outcome"),
+        attempt
+            .returned_observation_ref()
+            .cloned()
+            .expect("returned observation"),
+    )
+    .expect("terminal proof");
+    let tombstone = TerminalTombstone::new("operation.bounded-tombstone", "applied", proof)
+        .expect("terminal tombstone");
+
+    let store = AlwaysConflictingStore::new(raw);
+    let contended = KeyedExecutorLedger::new(store.clone(), fixture.binding)
+        .expect("contended executor ledger");
+    assert_eq!(
+        block_on(contended.append_terminal_tombstone(request.identity(), tombstone))
+            .expect_err("bounded local contention"),
+        ExecutorError::LocalContention
+    );
+    assert_eq!(store.append_attempts(), 64);
+    assert_eq!(destination.target_entry_count().expect("target entries"), 1);
+}
+
+#[test]
 fn exact_head_authorization_rejects_a_stale_planner_before_target_entry() {
     let fixture = binding_fixture("exact-head-authorization", false, 8);
     let store = MemoryExecutorStore::new(&fixture.binding);
@@ -882,25 +1682,45 @@ fn exact_head_authorization_rejects_a_stale_planner_before_target_entry() {
     let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
     let expected_head = initial.delivery_audit().head_ref().expect("initial head");
 
-    let first = block_on(ledger.try_authorize_target(
+    let target_outcome = mfm_executor::DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            fixture
+                .binding
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry,
+        )
+        .expect("safe failure"),
+    )
+    .expect("target outcome");
+    let first = block_on(ledger.execute_target_once(
         request.identity(),
         &expected_head,
         reviewed_value("exact-head.target"),
         None,
+        {
+            let target_outcome = target_outcome.clone();
+            move |_authority| async move { target_outcome }
+        },
     ))
-    .expect("first authorization")
-    .expect("fresh planner obtains authority");
-    assert_eq!(first.identity(), request.identity());
+    .expect("first authorization");
+    assert!(matches!(first, ExecuteTargetOutcome::Observed(_)));
 
     assert!(
-        block_on(ledger.try_authorize_target(
-            request.identity(),
-            &expected_head,
-            reviewed_value("exact-head.target"),
-            None,
-        ))
-        .expect("stale authorization decision")
-        .is_none(),
+        matches!(
+            block_on(ledger.execute_target_once(
+                request.identity(),
+                &expected_head,
+                reviewed_value("exact-head.target"),
+                None,
+                move |_authority| async move { target_outcome },
+            ))
+            .expect("stale authorization decision"),
+            ExecuteTargetOutcome::Contended
+        ),
         "a stale plan must not receive target-entry authority"
     );
     let current = block_on(ledger.effect_view(request.identity()))
@@ -910,80 +1730,815 @@ fn exact_head_authorization_rejects_a_stale_planner_before_target_entry() {
 }
 
 #[test]
-fn terminal_tombstone_blocks_new_authority_but_late_receipt_appends() {
-    let fixture = binding_fixture("late-receipt", false, 8);
-    let bounds = bounds(8);
+fn oversized_valid_target_result_is_totalized_by_the_private_completion_seal() {
+    let completion_limit = 8 * 1024;
+    let fixture = binding_fixture_with_bounds(
+        "completion-totalization",
+        false,
+        EvidenceBounds::new(1, 8, 1_000_000, completion_limit, 2, completion_limit)
+            .expect("bounded completion contract"),
+    );
     let store = MemoryExecutorStore::new(&fixture.binding);
     let ledger =
         KeyedExecutorLedger::new(store, fixture.binding.clone()).expect("keyed executor ledger");
+    let request = committed(&fixture, 95, "operation.completion-totalization", "payload");
+    let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+    let expected_head = initial.delivery_audit().head_ref().expect("initial head");
+    let oversized_bytes =
+        serde_json::to_vec(&"x".repeat(32 * 1024)).expect("canonical JSON string");
+    let oversized = SchemaQualifiedCanonicalValue::new(
+        fixture
+            .binding
+            .contract()
+            .retained_closure_contract()
+            .domain_evidence_contract()
+            .schema_id()
+            .clone(),
+        &oversized_bytes,
+    )
+    .expect("oversized schema-qualified result");
+    let oversized =
+        mfm_executor::DeliveryAttemptOutcome::returned(oversized).expect("returned outcome");
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let invoked = Arc::clone(&invocations);
+
+    let observed = block_on(ledger.execute_target_once(
+        request.identity(),
+        &expected_head,
+        reviewed_value("completion-totalization.target"),
+        None,
+        move |_authority| async move {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            oversized
+        },
+    ))
+    .expect("bounded observation");
+    let ExecuteTargetOutcome::Observed(view) = observed else {
+        panic!("fresh authorization must be observed")
+    };
+    let attempts = view.delivery_audit().attempts().expect("attempts");
+    let outcome = attempts[0].outcome().expect("observed outcome");
+    let failure = outcome
+        .indeterminate_failure()
+        .expect("oversized result must be totalized");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+
+    let checkpoint = ledger.store().checkpoint().expect("checkpoint");
+    let restored =
+        MemoryExecutorStore::restore(&fixture.binding, checkpoint).expect("strict restart");
+    let reopened = KeyedExecutorLedger::new(restored, fixture.binding.clone())
+        .expect("reopened keyed executor ledger");
+    let view = block_on(reopened.effect_view(request.identity()))
+        .expect("reopened effect view")
+        .expect("persisted effect");
+    let attempts = view.delivery_audit().attempts().expect("reopened attempts");
+    let failure = attempts[0]
+        .outcome()
+        .expect("reopened observed outcome")
+        .indeterminate_failure()
+        .expect("reopened oversized result must remain totalized");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
+}
+
+#[test]
+fn affine_completion_normalizes_all_unbound_outcomes_before_memory_persistence() {
+    let fixture = binding_fixture("completion-binding-seal", false, 8);
+    let store = MemoryExecutorStore::new(&fixture.binding);
+    let ledger =
+        KeyedExecutorLedger::new(store, fixture.binding.clone()).expect("keyed executor ledger");
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let mut identities = Vec::new();
+
+    for (index, (label, hostile)) in adversarial_delivery_outcomes(&fixture)
+        .into_iter()
+        .enumerate()
+    {
+        let seed = u8::try_from(100 + index).expect("test seed");
+        let request = committed(&fixture, seed, label, "binding-seal");
+        identities.push(request.identity().clone());
+        let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+        let expected_head = initial.delivery_audit().head_ref().expect("head");
+        let invoked = Arc::clone(&invocations);
+        let observed = block_on(ledger.execute_target_once(
+            request.identity(),
+            &expected_head,
+            reviewed_value(&format!("{label}.target")),
+            None,
+            move |_authority| async move {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                hostile
+            },
+        ))
+        .expect("sealed observation");
+        let ExecuteTargetOutcome::Observed(view) = observed else {
+            panic!("fresh target authority must be observed")
+        };
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1, "{label}");
+        assert_adapter_contract_violation(attempts[0].outcome().expect("one exact observation"));
+    }
+    assert_eq!(invocations.load(Ordering::SeqCst), 4);
+
+    let checkpoint = ledger.store().checkpoint().expect("checkpoint");
+    let restored =
+        MemoryExecutorStore::restore(&fixture.binding, checkpoint).expect("strict restart");
+    let reopened = KeyedExecutorLedger::new(restored, fixture.binding.clone())
+        .expect("reopened keyed executor ledger");
+    for identity in identities {
+        let view = block_on(reopened.effect_view(&identity))
+            .expect("reopened view")
+            .expect("persisted effect");
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_adapter_contract_violation(
+            attempts[0].outcome().expect("reopened exact observation"),
+        );
+    }
+}
+
+#[test]
+fn concurrent_same_binding_swapped_outcomes_keep_each_authorization_identity() {
+    let fixture = binding_fixture_with_outcome_contract(
+        "same-binding-outcome-swap",
+        false,
+        bounds(8),
+        "mfm.primitive-stable_id.v1",
+        reviewed_ref("same-binding-outcome-swap.safe-failure"),
+    );
+    let store = MemoryExecutorStore::new(&fixture.binding);
+    let ledger =
+        KeyedExecutorLedger::new(store, fixture.binding.clone()).expect("keyed executor ledger");
+    let first = committed(&fixture, 180, "operation.same-binding.first", "payload");
+    let second = committed(&fixture, 181, "operation.same-binding.second", "payload");
+    let first_head = block_on(ledger.bind_effect(first.identity()))
+        .expect("bind first")
+        .delivery_audit()
+        .head_ref()
+        .expect("first head");
+    let second_head = block_on(ledger.bind_effect(second.identity()))
+        .expect("bind second")
+        .delivery_audit()
+        .head_ref()
+        .expect("second head");
+    let first_stale_head = first_head.clone();
+    let first_target = reviewed_value("same-binding.target.first");
+    let second_target = reviewed_value("same-binding.target.second");
+    let first_target_ref = first_target.reference().expect("first target ref");
+    let second_target_ref = second_target.reference().expect("second target ref");
+    let first_outcome = domain_outcome(
+        "mfm.primitive-stable_id.v1",
+        CanonicalValue::String("same-binding.outcome.first".to_owned()),
+    );
+    let second_outcome = domain_outcome(
+        "mfm.primitive-stable_id.v1",
+        CanonicalValue::String("same-binding.outcome.second".to_owned()),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let (authority_tx, authority_rx) = std::sync::mpsc::channel();
+
+    let first_task = {
+        let ledger = ledger.clone();
+        let identity = first.identity().clone();
+        let target = first_target.clone();
+        let returned = second_outcome.clone();
+        let barrier = Arc::clone(&barrier);
+        let invocations = Arc::clone(&invocations);
+        let authority_tx = authority_tx.clone();
+        std::thread::spawn(move || {
+            block_on(ledger.execute_target_once(
+                &identity,
+                &first_head,
+                target,
+                None,
+                move |authority| {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    authority_tx
+                        .send((0_u8, CapturedTargetAuthority::from_authority(&authority)))
+                        .expect("first authority capture");
+                    barrier.wait();
+                    async move { returned }
+                },
+            ))
+        })
+    };
+    let second_task = {
+        let ledger = ledger.clone();
+        let identity = second.identity().clone();
+        let target = second_target.clone();
+        let returned = first_outcome.clone();
+        let barrier = Arc::clone(&barrier);
+        let invocations = Arc::clone(&invocations);
+        let authority_tx = authority_tx;
+        std::thread::spawn(move || {
+            block_on(ledger.execute_target_once(
+                &identity,
+                &second_head,
+                target,
+                None,
+                move |authority| {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    authority_tx
+                        .send((1_u8, CapturedTargetAuthority::from_authority(&authority)))
+                        .expect("second authority capture");
+                    barrier.wait();
+                    async move { returned }
+                },
+            ))
+        })
+    };
+
+    let ExecuteTargetOutcome::Observed(first_view) = first_task
+        .join()
+        .expect("first worker")
+        .expect("first observation")
+    else {
+        panic!("first authorization must be observed")
+    };
+    let ExecuteTargetOutcome::Observed(second_view) = second_task
+        .join()
+        .expect("second worker")
+        .expect("second observation")
+    else {
+        panic!("second authorization must be observed")
+    };
+    assert_eq!(invocations.load(Ordering::SeqCst), 2);
+    let first_attempts = first_view
+        .delivery_audit()
+        .attempts()
+        .expect("first attempts");
+    let second_attempts = second_view
+        .delivery_audit()
+        .attempts()
+        .expect("second attempts");
+    assert_eq!(first_attempts.len(), 1);
+    assert_eq!(second_attempts.len(), 1);
+    assert_eq!(
+        first_attempts[0].outcome().expect("first outcome"),
+        &second_outcome
+    );
+    assert_eq!(
+        second_attempts[0].outcome().expect("second outcome"),
+        &first_outcome
+    );
+    assert_ne!(
+        first_attempts[0].attempt_id(),
+        second_attempts[0].attempt_id()
+    );
+
+    let mut captures = [
+        authority_rx.recv().expect("first capture"),
+        authority_rx.recv().expect("second capture"),
+    ];
+    captures.sort_by_key(|(ordinal, _)| *ordinal);
+    for (capture, expected_identity, expected_attempt, expected_target_ref) in [
+        (
+            &captures[0].1,
+            first.identity(),
+            first_attempts[0].attempt_id(),
+            &first_target_ref,
+        ),
+        (
+            &captures[1].1,
+            second.identity(),
+            second_attempts[0].attempt_id(),
+            &second_target_ref,
+        ),
+    ] {
+        assert_eq!(&capture.identity, expected_identity);
+        assert_eq!(&capture.attempt_id, expected_attempt);
+        assert_eq!(&capture.target_operation_ref, expected_target_ref);
+        assert_eq!(
+            &capture.durable_ledger_generation_ref,
+            &fixture.generation_ref
+        );
+    }
+
+    let stale_invocations = Arc::clone(&invocations);
+    let stale = block_on(ledger.execute_target_once(
+        first.identity(),
+        &first_stale_head,
+        first_target,
+        None,
+        move |_authority| async move {
+            stale_invocations.fetch_add(1, Ordering::SeqCst);
+            first_outcome
+        },
+    ))
+    .expect("stale authorization decision");
+    assert!(matches!(stale, ExecuteTargetOutcome::Contended));
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        2,
+        "a stale retry must not remint authority"
+    );
+}
+
+#[test]
+fn cross_contract_schema_and_generation_swaps_normalize_under_each_local_seal() {
+    let first_fixture = binding_fixture_with_outcome_contract(
+        "cross-outcome-first",
+        false,
+        bounds(8),
+        "mfm.primitive-stable_id.v1",
+        reviewed_ref("cross-outcome-first.safe-failure"),
+    );
+    let second_fixture = binding_fixture_with_outcome_contract(
+        "cross-outcome-second",
+        false,
+        bounds(8),
+        "mfm.executor-reference-failure-code.v2",
+        reviewed_ref("cross-outcome-second.safe-failure"),
+    );
+    assert_ne!(
+        first_fixture.generation_ref, second_fixture.generation_ref,
+        "the adversarial bindings must use distinct durable generations"
+    );
+    assert_ne!(
+        first_fixture.binding.contract().safe_failure_contract_ref(),
+        second_fixture
+            .binding
+            .contract()
+            .safe_failure_contract_ref()
+    );
+    assert_ne!(
+        first_fixture
+            .binding
+            .contract()
+            .retained_closure_contract()
+            .domain_evidence_contract()
+            .schema_id(),
+        second_fixture
+            .binding
+            .contract()
+            .retained_closure_contract()
+            .domain_evidence_contract()
+            .schema_id()
+    );
+
+    let first_ledger = KeyedExecutorLedger::new(
+        MemoryExecutorStore::new(&first_fixture.binding),
+        first_fixture.binding.clone(),
+    )
+    .expect("first ledger");
+    let second_ledger = KeyedExecutorLedger::new(
+        MemoryExecutorStore::new(&second_fixture.binding),
+        second_fixture.binding.clone(),
+    )
+    .expect("second ledger");
+    let first = committed(
+        &first_fixture,
+        182,
+        "operation.cross-outcome.first",
+        "payload",
+    );
+    let second = committed(
+        &second_fixture,
+        183,
+        "operation.cross-outcome.second",
+        "payload",
+    );
+    let first_head = block_on(first_ledger.bind_effect(first.identity()))
+        .expect("bind first")
+        .delivery_audit()
+        .head_ref()
+        .expect("first head");
+    let second_head = block_on(second_ledger.bind_effect(second.identity()))
+        .expect("bind second")
+        .delivery_audit()
+        .head_ref()
+        .expect("second head");
+    let first_stale_head = first_head.clone();
+    let second_stale_head = second_head.clone();
+    let first_target = reviewed_value("cross-outcome.target.first");
+    let second_target = reviewed_value("cross-outcome.target.second");
+    let first_target_ref = first_target.reference().expect("first target ref");
+    let second_target_ref = second_target.reference().expect("second target ref");
+    let first_contract_outcome = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            first_fixture
+                .binding
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry,
+        )
+        .expect("first safe failure"),
+    )
+    .expect("first contract outcome");
+    let second_schema_outcome = domain_outcome(
+        "mfm.executor-reference-failure-code.v2",
+        CanonicalValue::String("destination_unavailable".to_owned()),
+    );
+    let barrier = Arc::new(Barrier::new(2));
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let (authority_tx, authority_rx) = std::sync::mpsc::channel();
+
+    let first_task = {
+        let ledger = first_ledger.clone();
+        let identity = first.identity().clone();
+        let target = first_target.clone();
+        let returned = second_schema_outcome;
+        let barrier = Arc::clone(&barrier);
+        let invocations = Arc::clone(&invocations);
+        let authority_tx = authority_tx.clone();
+        std::thread::spawn(move || {
+            block_on(ledger.execute_target_once(
+                &identity,
+                &first_head,
+                target,
+                None,
+                move |authority| {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    authority_tx
+                        .send((0_u8, CapturedTargetAuthority::from_authority(&authority)))
+                        .expect("first authority capture");
+                    barrier.wait();
+                    async move { returned }
+                },
+            ))
+        })
+    };
+    let second_task = {
+        let ledger = second_ledger.clone();
+        let identity = second.identity().clone();
+        let target = second_target.clone();
+        let returned = first_contract_outcome;
+        let barrier = Arc::clone(&barrier);
+        let invocations = Arc::clone(&invocations);
+        let authority_tx = authority_tx;
+        std::thread::spawn(move || {
+            block_on(ledger.execute_target_once(
+                &identity,
+                &second_head,
+                target,
+                None,
+                move |authority| {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    authority_tx
+                        .send((1_u8, CapturedTargetAuthority::from_authority(&authority)))
+                        .expect("second authority capture");
+                    barrier.wait();
+                    async move { returned }
+                },
+            ))
+        })
+    };
+
+    let ExecuteTargetOutcome::Observed(first_view) = first_task
+        .join()
+        .expect("first worker")
+        .expect("first observation")
+    else {
+        panic!("first authorization must be observed")
+    };
+    let ExecuteTargetOutcome::Observed(second_view) = second_task
+        .join()
+        .expect("second worker")
+        .expect("second observation")
+    else {
+        panic!("second authorization must be observed")
+    };
+    assert_eq!(invocations.load(Ordering::SeqCst), 2);
+    let first_attempts = first_view
+        .delivery_audit()
+        .attempts()
+        .expect("first attempts");
+    let second_attempts = second_view
+        .delivery_audit()
+        .attempts()
+        .expect("second attempts");
+    assert_eq!(first_attempts.len(), 1);
+    assert_eq!(second_attempts.len(), 1);
+    assert_adapter_contract_violation(first_attempts[0].outcome().expect("first outcome"));
+    assert_adapter_contract_violation(second_attempts[0].outcome().expect("second outcome"));
+
+    let mut captures = [
+        authority_rx.recv().expect("first capture"),
+        authority_rx.recv().expect("second capture"),
+    ];
+    captures.sort_by_key(|(ordinal, _)| *ordinal);
+    for (
+        capture,
+        expected_identity,
+        expected_attempt,
+        expected_target_ref,
+        expected_generation_ref,
+    ) in [
+        (
+            &captures[0].1,
+            first.identity(),
+            first_attempts[0].attempt_id(),
+            &first_target_ref,
+            &first_fixture.generation_ref,
+        ),
+        (
+            &captures[1].1,
+            second.identity(),
+            second_attempts[0].attempt_id(),
+            &second_target_ref,
+            &second_fixture.generation_ref,
+        ),
+    ] {
+        assert_eq!(&capture.identity, expected_identity);
+        assert_eq!(&capture.attempt_id, expected_attempt);
+        assert_eq!(&capture.target_operation_ref, expected_target_ref);
+        assert_eq!(
+            &capture.durable_ledger_generation_ref,
+            expected_generation_ref
+        );
+    }
+
+    for (ledger, identity, stale_head, target) in [
+        (
+            &first_ledger,
+            first.identity(),
+            &first_stale_head,
+            first_target,
+        ),
+        (
+            &second_ledger,
+            second.identity(),
+            &second_stale_head,
+            second_target,
+        ),
+    ] {
+        let stale_invocations = Arc::clone(&invocations);
+        let stale = block_on(ledger.execute_target_once(
+            identity,
+            stale_head,
+            target,
+            None,
+            move |_authority| async move {
+                stale_invocations.fetch_add(1, Ordering::SeqCst);
+                domain_outcome(
+                    "mfm.primitive-stable_id.v1",
+                    CanonicalValue::String("must-not-run".to_owned()),
+                )
+            },
+        ))
+        .expect("stale authorization decision");
+        assert!(matches!(stale, ExecuteTargetOutcome::Contended));
+    }
+    assert_eq!(
+        invocations.load(Ordering::SeqCst),
+        2,
+        "stale retries must not remint either authority"
+    );
+}
+
+#[test]
+fn post_return_completion_seal_retries_absent_history_and_non_operational_store_errors() {
+    let fixture = binding_fixture("post-return-retry", false, 8);
+    let raw = MemoryExecutorStore::new(&fixture.binding);
+    let store = RetryingObservationStore::new(raw, 1);
+    let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
+    let request = committed(&fixture, 92, "operation.post-return-retry", "payload");
+    let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+    let expected_head = initial.delivery_audit().head_ref().expect("initial head");
+    let failure = reference_safe_failure(
+        fixture
+            .binding
+            .contract()
+            .safe_failure_contract_ref()
+            .clone(),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("failure");
+    let outcome =
+        mfm_executor::DeliveryAttemptOutcome::did_not_enter(failure).expect("target outcome");
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let invoked = Arc::clone(&invocations);
+    let store_for_completion = store.clone();
+    let observed = block_on(ledger.execute_target_once(
+        request.identity(),
+        &expected_head,
+        reviewed_value("post-return-retry.target"),
+        None,
+        move |_authority| async move {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            store_for_completion.return_absent_on_next_load();
+            outcome
+        },
+    ))
+    .expect("eventually sealed");
+    assert!(matches!(observed, ExecuteTargetOutcome::Observed(_)));
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(store.observation_attempts(), 2);
+}
+
+#[test]
+fn cancelling_before_target_return_leaves_only_the_authorized_attempt() {
+    let fixture = binding_fixture("pre-return-cancel", false, 8);
+    let store = MemoryExecutorStore::new(&fixture.binding);
+    let ledger =
+        KeyedExecutorLedger::new(store.clone(), fixture.binding.clone()).expect("keyed ledger");
+    let request = committed(&fixture, 94, "operation.pre-return-cancel", "payload");
+    let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+    let expected_head = initial.delivery_audit().head_ref().expect("initial head");
+    let callback_started = Arc::new(AtomicBool::new(false));
+    let started = Arc::clone(&callback_started);
+    let cancelled = block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            ledger.execute_target_once(
+                request.identity(),
+                &expected_head,
+                reviewed_value("pre-return-cancel.target"),
+                None,
+                move |_authority| async move {
+                    started.store(true, Ordering::SeqCst);
+                    std::future::pending::<()>().await;
+                    unreachable!("the cancelled target callback cannot return")
+                },
+            ),
+        )
+        .await
+    });
+    assert!(
+        cancelled.is_err(),
+        "timeout must cancel the target callback before return"
+    );
+    assert!(
+        callback_started.load(Ordering::SeqCst),
+        "the target callback must have received fresh authority"
+    );
+
+    let reopened = KeyedExecutorLedger::new(store, fixture.binding).expect("reopened ledger");
+    let pending = block_on(reopened.effect_view(request.identity()))
+        .expect("load authorized effect")
+        .expect("bound effect");
+    let attempts = pending.delivery_audit().attempts().expect("attempts");
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].outcome().is_none());
+}
+
+#[test]
+fn cancelling_after_target_return_drops_only_the_completion_retry_future() {
+    let fixture = binding_fixture("post-return-cancel", false, 8);
+    let raw = MemoryExecutorStore::new(&fixture.binding);
+    let store = RetryingObservationStore::new(raw.clone(), usize::MAX);
+    let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
+    let request = committed(&fixture, 93, "operation.post-return-cancel", "payload");
+    let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+    let expected_head = initial.delivery_audit().head_ref().expect("initial head");
+    let failure = reference_safe_failure(
+        fixture
+            .binding
+            .contract()
+            .safe_failure_contract_ref()
+            .clone(),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("failure");
+    let outcome =
+        mfm_executor::DeliveryAttemptOutcome::did_not_enter(failure).expect("target outcome");
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let invoked = Arc::clone(&invocations);
+    let callback_returned = Arc::new(AtomicBool::new(false));
+    let returned = Arc::clone(&callback_returned);
+    let cancelled = block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(40),
+            ledger.execute_target_once(
+                request.identity(),
+                &expected_head,
+                reviewed_value("post-return-cancel.target"),
+                None,
+                move |_authority| async move {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    returned.store(true, Ordering::SeqCst);
+                    outcome
+                },
+            ),
+        )
+        .await
+    });
+    assert!(
+        cancelled.is_err(),
+        "timeout must cancel the completion retry future"
+    );
+    assert_eq!(invocations.load(Ordering::SeqCst), 1);
+    assert!(
+        callback_returned.load(Ordering::SeqCst),
+        "cancellation must occur after the target callback returned"
+    );
+    assert!(store.observation_attempts() >= 1);
+
+    let reopened =
+        KeyedExecutorLedger::new(raw, fixture.binding.clone()).expect("reopened executor ledger");
+    let pending = block_on(reopened.effect_view(request.identity()))
+        .expect("load authorized effect")
+        .expect("bound effect");
+    let attempts = pending.delivery_audit().attempts().expect("attempts");
+    assert_eq!(attempts.len(), 1);
+    assert!(attempts[0].outcome().is_none());
+}
+
+#[test]
+fn target_bracket_tombstone_and_restart_are_stable_without_a_second_exchange() {
+    let fixture = binding_fixture("target-bracket-restart", false, 8);
+    let store = MemoryExecutorStore::new(&fixture.binding);
+    let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+        .expect("keyed executor ledger");
     let destination = MemoryConvergentDestination::new();
     destination
         .activate_generation(fixture.generation_ref.clone())
         .expect("activate");
     let contract = reference_contract(&fixture);
-    let request = committed(&fixture, 9, "operation.late", "payload");
+    let request = committed(&fixture, 9, "operation.bracket", "payload");
     let identity = request.identity();
-    block_on(ledger.bind_effect(identity)).expect("bind");
-    let first =
-        block_on(ledger.authorize_target(identity, contract.enqueue_operation().clone(), None))
-            .expect("first authority");
-    let second =
-        block_on(ledger.authorize_target(identity, contract.enqueue_operation().clone(), None))
-            .expect("second authority");
-    let first = block_on(destination.enqueue(
-        first,
-        request.request(),
-        &contract,
-        ReferenceTargetBehavior::Available,
+    let bound = block_on(ledger.bind_effect(identity)).expect("bind");
+    let expected_head = bound.delivery_audit().head_ref().expect("bound head");
+    let outcome = block_on(ledger.execute_target_once(
+        identity,
+        &expected_head,
+        contract.enqueue_operation().clone(),
+        None,
+        |authority| async {
+            destination
+                .enqueue(
+                    authority,
+                    request.request(),
+                    &contract,
+                    ReferenceTargetBehavior::Available,
+                )
+                .await
+                .into_outcome()
+        },
     ))
-    .expect("first target");
-    let second = block_on(destination.enqueue(
-        second,
-        request.request(),
-        &contract,
-        ReferenceTargetBehavior::Available,
-    ))
-    .expect("second target");
-
-    let first_attempt = first.receipt().attempt_id().clone();
-    let first_returned = first
-        .receipt()
-        .outcome()
-        .returned_outcome()
-        .cloned()
-        .expect("returned");
-    let view = block_on(ledger.observe_target(into_receipt(first))).expect("first observation");
-    let observation_ref = view
+    .expect("target bracket");
+    let ExecuteTargetOutcome::Observed(view) = outcome else {
+        panic!("fresh target bracket must be uncontended")
+    };
+    let attempt = view
         .delivery_audit()
-        .frontiers()
-        .iter()
-        .flat_map(|frontier| frontier.appended_records())
-        .find_map(|record| record.observed_content_ref().ok().flatten())
-        .expect("observation ref");
-    let proof =
-        ReferenceTerminalProof::new(first_attempt, first_returned, observation_ref).expect("proof");
+        .attempts()
+        .expect("attempts")
+        .into_iter()
+        .last()
+        .expect("observed attempt");
+    let proof = ReferenceTerminalProof::new(
+        attempt.attempt_id().clone(),
+        attempt
+            .outcome()
+            .and_then(mfm_executor::DeliveryAttemptOutcome::returned_outcome)
+            .cloned()
+            .expect("returned outcome"),
+        attempt
+            .returned_observation_ref()
+            .cloned()
+            .expect("observation ref"),
+    )
+    .expect("proof");
     assert_eq!(
-        TerminalTombstone::new("x".repeat(257), "applied", proof.clone(),)
+        TerminalTombstone::new("x".repeat(257), "applied", proof.clone())
             .expect_err("oversized tombstone identity"),
         ExecutorError::InvalidReferenceEffectIdentifier
     );
-    let tombstone = TerminalTombstone::new("operation.late", "applied", proof).expect("tombstone");
-    block_on(ledger.append_terminal_tombstone(identity, tombstone)).expect("tombstone append");
+    block_on(ledger.append_terminal_tombstone(
+        identity,
+        TerminalTombstone::new("operation.bracket", "applied", proof).expect("tombstone"),
+    ))
+    .expect("tombstone append");
 
-    let strengthened = block_on(ledger.observe_target(into_receipt(second))).expect("late receipt");
-    strengthened
-        .delivery_audit()
-        .verify(
-            identity,
-            &bounds,
-            fixture.binding.deployment().evidence_authority_ref(),
-        )
-        .expect("late-tail audit");
+    let checkpoint = store.checkpoint().expect("checkpoint");
+    let restored_store =
+        MemoryExecutorStore::restore(&fixture.binding, checkpoint).expect("restore");
+    let restored =
+        KeyedExecutorLedger::new(restored_store, fixture.binding.clone()).expect("restored ledger");
+    let terminal = block_on(restored.effect_view(identity))
+        .expect("restored view")
+        .expect("bound effect");
+    assert!(terminal.terminal_tombstone().is_some());
+    assert_eq!(destination.target_entry_count().expect("entry count"), 1);
     assert_eq!(
-        block_on(ledger.authorize_target(identity, contract.enqueue_operation().clone(), None,))
-            .expect_err("terminal authorization"),
+        block_on(restored.execute_target_once(
+            identity,
+            &terminal.delivery_audit().head_ref().expect("terminal head"),
+            contract.enqueue_operation().clone(),
+            None,
+            |_| async { panic!("terminal effect must not mint target authority") },
+        ))
+        .expect_err("terminal authorization"),
         ExecutorError::EffectAlreadyTerminal
     );
+    assert_eq!(destination.target_entry_count().expect("entry count"), 1);
 }
 
 #[test]
@@ -1092,14 +2647,42 @@ fn strict_store_refold_requires_exact_content_closure_and_durable_codecs() {
         .expect("allocation");
     let target_operation = reviewed_value("strict.target-operation");
     let target_operation_ref = target_operation.reference().expect("target operation ref");
-    let authority = block_on(ledger.authorize_target(
+    let current = block_on(ledger.effect_view(request.identity()))
+        .expect("effect view")
+        .expect("bound effect");
+    let safe_failure = reference_safe_failure(
+        fixture
+            .binding
+            .contract()
+            .safe_failure_contract_ref()
+            .clone(),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("safe failure");
+    let target_outcome =
+        mfm_executor::DeliveryAttemptOutcome::did_not_enter(safe_failure).expect("outcome");
+    let appended = block_on(ledger.execute_target_once(
         request.identity(),
+        &current.delivery_audit().head_ref().expect("head"),
         target_operation.clone(),
         Some(policy.binding()),
+        move |_authority| async move { target_outcome },
     ))
-    .expect("target authorization");
-    let attempt_id = authority.attempt_id().clone();
-    drop(authority);
+    .expect("target bracket");
+    let ExecuteTargetOutcome::Observed(view) = appended else {
+        panic!("target bracket must be uncontended")
+    };
+    let attempt_id = view
+        .delivery_audit()
+        .attempts()
+        .expect("attempts")
+        .into_iter()
+        .last()
+        .expect("attempt")
+        .attempt_id()
+        .clone();
     assert_eq!(
         block_on(ledger.target_operation(request.identity(), &attempt_id))
             .expect("target operation"),
@@ -1299,17 +2882,42 @@ fn account_sequence_policy_is_atomic_and_refolds_after_restart() {
             .expect_err("policy swap"),
         ExecutorError::ResourceAllocationConflict
     );
+    let current = block_on(restored.effect_view(&loser))
+        .expect("effect view")
+        .expect("bound effect");
+    let expected_head = current.delivery_audit().head_ref().expect("head");
     assert_eq!(
-        block_on(restored.authorize_target(&loser, reviewed_value("account.submit"), None,))
-            .expect_err("missing policy pair"),
+        block_on(restored.execute_target_once(
+            &loser,
+            &expected_head,
+            reviewed_value("account.submit"),
+            None,
+            |_| async { panic!("invalid policy pair must not mint authority") },
+        ))
+        .expect_err("missing policy pair"),
         ExecutorError::ResourcePolicyNotRevalidated
     );
-    block_on(restored.authorize_target(
+    let failure = reference_safe_failure(
+        fixture
+            .binding
+            .contract()
+            .safe_failure_contract_ref()
+            .clone(),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("failure");
+    let outcome = mfm_executor::DeliveryAttemptOutcome::did_not_enter(failure).expect("outcome");
+    let appended = block_on(restored.execute_target_once(
         &loser,
+        &expected_head,
         reviewed_value("account.submit"),
         Some(&policy_binding),
+        move |_authority| async move { outcome },
     ))
     .expect("exact policy pair");
+    assert!(matches!(appended, ExecuteTargetOutcome::Observed(_)));
 }
 
 #[test]
@@ -1403,6 +3011,16 @@ fn checkpoints_reject_corruption_and_restore_only_contract_bounds() {
             .expect_err("truncated"),
         ExecutorError::InvalidDurableSnapshot
     );
+    let mut legacy = bytes.clone();
+    legacy[..8].copy_from_slice(b"MFMELG04");
+    let payload_end = legacy.len() - 32;
+    let legacy_digest = sha256_digest_bytes(&legacy[..payload_end]);
+    legacy[payload_end..].copy_from_slice(legacy_digest.as_bytes());
+    assert_eq!(
+        MemoryLedgerCheckpoint::from_durable_bytes(&legacy)
+            .expect_err("retired checkpoint generation"),
+        ExecutorError::InvalidDurableSnapshot
+    );
     let checkpoint = MemoryLedgerCheckpoint::from_durable_bytes(&bytes).expect("decode");
     let restored = MemoryExecutorStore::restore(&fixture.binding, checkpoint).expect("restore");
     let restored =
@@ -1439,7 +3057,7 @@ impl ReferenceDestination for SecretInjectingDestination {
         request: &'a ReferenceRequest,
         contract: &'a ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> ExecutorFuture<'a, mfm_executor::Result<ReferenceDestinationReturn>> {
+    ) -> ExecutorFuture<'a, ReferenceDestinationReturn> {
         let _credential_used_below_boundary = self.credential.as_bytes();
         self.inner.enqueue(authority, request, contract, behavior)
     }
@@ -1505,35 +3123,35 @@ fn credentials_injected_below_target_entry_never_reach_retained_surfaces() {
 }
 
 #[test]
-fn all_578_frozen_vectors_are_consumed_by_the_shared_authority() {
-    recoverability_v2::run_consumer("mfm-executor", |owner| {
-        recoverability_v2::assert_lower_layer_owner_vector(owner);
+fn all_587_frozen_vectors_are_consumed_by_the_shared_authority() {
+    recoverability_v3::run_consumer("mfm-executor", |owner| {
+        recoverability_v3::assert_lower_layer_owner_vector(owner);
         assert_executor_owner_vector(owner);
     });
 }
 
-fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
+fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
     let vector = owner.vector();
     match owner {
-        recoverability_v2::OwnerVector::RelationalPositive(_) => match owner.kind() {
+        recoverability_v3::OwnerVector::RelationalPositive(_) => match owner.kind() {
             "frontier_order" => assert_eq!(
-                recoverability_v2::string(vector, "expected"),
+                recoverability_v3::string(vector, "expected"),
                 "ancestor_or_equal_does_not_regress_descendant_advances"
             ),
             "relational_acceptance" => assert_eq!(
-                recoverability_v2::string(vector, "expected"),
+                recoverability_v3::string(vector, "expected"),
                 "exact_returned_observation_matches"
             ),
             "request_identity" => assert_eq!(
-                recoverability_v2::string(vector, "expected"),
+                recoverability_v3::string(vector, "expected"),
                 "different_request_digest"
             ),
             "resource_refold" => assert_eq!(
-                recoverability_v2::string(vector, "expected"),
+                recoverability_v3::string(vector, "expected"),
                 "restored_policy_and_configuration_match_before_authorization"
             ),
             "type_separation" => assert_eq!(
-                recoverability_v2::string(vector, "expected"),
+                recoverability_v3::string(vector, "expected"),
                 "non_substitutable"
             ),
             "commit_coordinate_separation"
@@ -1550,9 +3168,9 @@ fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
                 owner.id()
             ),
         },
-        recoverability_v2::OwnerVector::RelationalRejection(_) => {
-            let target = recoverability_v2::string(vector, "target");
-            let expected = recoverability_v2::string(vector, "expected_error");
+        recoverability_v3::OwnerVector::RelationalRejection(_) => {
+            let target = recoverability_v3::string(vector, "target");
+            let expected = recoverability_v3::string(vector, "expected_error");
             let mapped = match (target, expected) {
                 ("mfm.initial-binding.v1", "binding_conflict") => {
                     Some(ExecutorError::EffectBindingConflict)
@@ -1560,14 +3178,14 @@ fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
                 ("mfm.evidence-bounds.v1", "reserve_exhausted") => {
                     Some(ExecutorError::EvidenceBoundsExhausted)
                 }
-                ("mfm.executor-delivery-frontier.v1", "evidence_chain_fork") => {
+                ("mfm.executor-delivery-frontier.v2", "evidence_chain_fork") => {
                     Some(ExecutorError::FrontierFork)
                 }
                 (
-                    "mfm.executor-reference-terminal-proof.v1",
+                    "mfm.executor-reference-terminal-proof.v2",
                     "attempt_observation_mismatch" | "receipt_link_missing",
                 )
-                | ("mfm.executor-terminal-tombstone.v1", "tombstone_proof_mismatch") => {
+                | ("mfm.executor-terminal-tombstone.v2", "tombstone_proof_mismatch") => {
                     Some(ExecutorError::TerminalProofMismatch)
                 }
                 ("mfm.executor-resource-ledger-record.v1", "resource_policy_mismatch") => {
@@ -1592,7 +3210,8 @@ fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
                     | "mfm.fact-publication-routing.v1"
                     | "mfm.fact-selection-completeness.v1"
                     | "mfm.journal-predecessor.v1"
-                    | "mfm.legal-commit-batch.v1"
+                    | "mfm.legal-commit-batch.v2"
+                    | "mfm.non-domain-failure.v1"
                     | "recoverability_annex"
                     | "schema_algebra"
                     | "schema_arrays"
@@ -1612,7 +3231,7 @@ fn assert_executor_owner_vector(owner: recoverability_v2::OwnerVector<'_>) {
     }
 }
 
-fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV2 {
+fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV3 {
     let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus");
     let vector = corpus["positive_vectors"]
         .as_array()
@@ -1627,13 +3246,6 @@ fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV2 {
     contract()
         .strict_decode("mfm.value-ref.v1", &bytes)
         .expect("value ref")
-}
-
-fn into_receipt(value: ReferenceDestinationReturn) -> mfm_executor::TargetOperationReceipt {
-    // The destination return intentionally exposes no general raw-parts
-    // constructor. This test uses the public affine result by routing it
-    // through a one-shot helper method supplied for conformance.
-    value.into_target_receipt()
 }
 
 fn decode_hex(value: &str) -> Vec<u8> {

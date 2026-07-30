@@ -1,6 +1,6 @@
 //! Public result of one stateless drive operation.
 
-use mfm_journal::v1::{ClosureRef, JournalHead};
+use mfm_journal::v2::{ClosureRef, JournalHead};
 
 /// Why a verified open run cannot make another automatic step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

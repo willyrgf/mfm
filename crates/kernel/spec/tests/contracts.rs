@@ -14,7 +14,7 @@ fn stable(value: &str) -> StableId {
 fn retained_value_contract_is_one_shared_rust_type() {
     let _: fn(mfm_spec::RetainedValueContract) -> mfm_values::RetainedValueContract =
         std::convert::identity;
-    let _: fn(mfm_journal::v1::RetainedValueContract) -> mfm_values::RetainedValueContract =
+    let _: fn(mfm_journal::v2::RetainedValueContract) -> mfm_values::RetainedValueContract =
         std::convert::identity;
 }
 
@@ -112,7 +112,7 @@ fn frozen_values_reject_partial_or_noncanonical_inputs() {
 #[test]
 fn state_manifest_uses_the_frozen_content_ref_wire_order() {
     let schema_first_but_wire_last = ContentRef::new(
-        schema_id("mfm.access-audit-entry.v1").expect("first registered schema"),
+        schema_id("mfm.access-audit-entry.v2").expect("first registered schema"),
         ContentDigest::parse(format!("content:sha256-v1:{}", "ff".repeat(32)))
             .expect("last content digest"),
     )
@@ -152,7 +152,7 @@ fn journal_protocol_contracts_are_factory_exact_not_schema_only() {
         CertifiedJournalProtocolContracts::current().expect("current journal protocol contracts");
     assert_eq!(
         current.input_manifest_contract(),
-        &mfm_journal::v1::InputManifest::retained_contract().expect("input contract")
+        &mfm_journal::v2::InputManifest::retained_contract().expect("input contract")
     );
 
     let original = current.input_manifest_contract();

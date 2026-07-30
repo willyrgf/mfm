@@ -1,20 +1,20 @@
 use std::str::FromStr;
 
 use mfm_canonical::{
-    CanonicalObject, CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2,
+    CanonicalObject, CanonicalValue, RecoverabilityContractV3, ValidatedCanonicalValueV3,
 };
 use mfm_ids::{ContentDigest, ContentRef, SchemaId};
 
 use crate::{FactError, Result};
 
-pub(crate) fn contract() -> Result<&'static RecoverabilityContractV2> {
-    RecoverabilityContractV2::embedded().map_err(Into::into)
+pub(crate) fn contract() -> Result<&'static RecoverabilityContractV3> {
+    RecoverabilityContractV3::embedded().map_err(Into::into)
 }
 
 pub(crate) fn encode(
     schema_contract: &str,
     value: &CanonicalValue,
-) -> Result<ValidatedCanonicalValueV2> {
+) -> Result<ValidatedCanonicalValueV3> {
     contract()?
         .encode(schema_contract, value)
         .map_err(Into::into)
@@ -23,7 +23,7 @@ pub(crate) fn encode(
 pub(crate) fn strict_decode(
     schema_contract: &str,
     bytes: &[u8],
-) -> Result<ValidatedCanonicalValueV2> {
+) -> Result<ValidatedCanonicalValueV3> {
     contract()?
         .strict_decode(schema_contract, bytes)
         .map_err(Into::into)

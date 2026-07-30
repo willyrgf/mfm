@@ -50,6 +50,14 @@ fn recoverability_workspace_uses_one_journal_crate() {
             "{consumer_name} must consume the one journal contract"
         );
     }
+
+    let executor = packages
+        .get("mfm-executor")
+        .expect("mfm-executor must be a workspace member");
+    assert!(
+        !dependency_names(executor).contains("mfm-journal"),
+        "mfm-executor must embed capability-owned values without depending on mfm-journal"
+    );
 }
 
 #[test]
@@ -144,7 +152,7 @@ fn run_history_ownership_dependencies_and_sources_are_one_way() {
         !postgres_exports.contains("QualifiedPostgresStore"),
         "the retired combined PostgreSQL facade must not remain exported"
     );
-    let store_exports = read_source(&root, "crates/kernel/store/src/v1/mod.rs");
+    let store_exports = read_source(&root, "crates/kernel/store/src/v2/mod.rs");
     for retired in [
         "RunJournalStore",
         "SupportStore",

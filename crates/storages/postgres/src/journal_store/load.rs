@@ -1,4 +1,4 @@
-use mfm_store::v1::{CommittedRunJournal, JournalLoadVerifier, StoreError};
+use mfm_store::v2::{CommittedRunJournal, JournalLoadVerifier, StoreError};
 
 use crate::error::{database_error, Result};
 use crate::store::PostgresRunJournalBackend;

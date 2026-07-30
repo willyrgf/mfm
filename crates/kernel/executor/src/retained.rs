@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_capabilities::{BoundaryStage, FailureClass};
+use mfm_capabilities::{BoundaryStage, FailureClass, NonDomainFailure, NonDomainFailureLayer};
 use mfm_ids::{AttemptId, ContentRef, EffectKey, RequestDigest};
 use mfm_values::RetainedValueContract;
 
 use crate::contract::{
-    contract_error, recoverability_contract, validate_reference_effect_identifier,
-    AllocationStateRef, EffectIdentity, ExecutorBindingRef, ExecutorRetainedClosureContract,
-    FencingRef, ResourceKeyRef, ResourceOwnershipRef, SchemaQualifiedCanonicalValue,
-    VerifiedExecutorBinding,
+    contract_error, plain_json_to_canonical_value, recoverability_contract,
+    validate_reference_effect_identifier, AllocationStateRef, EffectIdentity, ExecutorBindingRef,
+    ExecutorRetainedClosureContract, FencingRef, ResourceKeyRef, ResourceOwnershipRef,
+    SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
 };
 use crate::frontier::{
     reference_safe_failure, DeliveryAttemptOutcome, DeliveryAudit, DeliveryAuditFrontier,
@@ -170,14 +170,18 @@ impl ExecutorRetainedClosureClaim {
             )?);
             for record in frontier.appended_records() {
                 match record {
-                    ExecutorEvidenceRecord::DeliveryAttemptObserved {
-                        outcome: DeliveryAttemptOutcome::Returned(returned),
-                        ..
-                    } => members.push(ExecutorRetainedValue::new(
-                        ExecutorRetainedValueRelation::DomainEvidence,
-                        contracts.domain_evidence_contract().clone(),
-                        returned.safe_result().clone(),
-                    )?),
+                    ExecutorEvidenceRecord::DeliveryAttemptObserved { outcome, .. }
+                        if outcome.returned_outcome().is_some() =>
+                    {
+                        let returned = outcome
+                            .returned_outcome()
+                            .ok_or(ExecutorError::InvalidDeliveryObservation)?;
+                        members.push(ExecutorRetainedValue::new(
+                            ExecutorRetainedValueRelation::DomainEvidence,
+                            contracts.domain_evidence_contract().clone(),
+                            returned.safe_result().clone(),
+                        )?)
+                    }
                     ExecutorEvidenceRecord::TerminalTombstone(tombstone) => {
                         members.push(ExecutorRetainedValue::new(
                             ExecutorRetainedValueRelation::TerminalProof,
@@ -550,6 +554,7 @@ enum EffectExecutorOutcomeKind {
     Returned(VerifiedEnsureResult),
     DidNotEnter(crate::ReferenceSafeFailure),
     Indeterminate(crate::ReferenceSafeFailure),
+    NonDomainFailure(NonDomainFailure),
 }
 
 /// Borrowed closed view of one surviving executor outcome.
@@ -561,6 +566,21 @@ pub enum EffectExecutorOutcomeView<'a> {
     DidNotEnter(&'a crate::ReferenceSafeFailure),
     /// Target boundary entry or the terminal outcome remains indeterminate.
     Indeterminate(&'a crate::ReferenceSafeFailure),
+    /// The ensure completed with an audit-only non-domain failure.
+    NonDomainFailure(&'a NonDomainFailure),
+}
+
+/// Owned closed decomposition of one surviving executor outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectExecutorOutcomeParts {
+    /// One binding-verified pending or terminal result.
+    Returned(VerifiedEnsureResult),
+    /// Target entry was proven not to have occurred.
+    DidNotEnter(crate::ReferenceSafeFailure),
+    /// Target entry or terminal outcome remains indeterminate.
+    Indeterminate(crate::ReferenceSafeFailure),
+    /// A surviving operational or integrity failure is audit-only.
+    NonDomainFailure(NonDomainFailure),
 }
 
 impl EffectExecutorOutcome {
@@ -587,6 +607,16 @@ impl EffectExecutorOutcome {
         })
     }
 
+    /// Constructs an ensure-layer audit-only non-domain failure.
+    pub fn non_domain_failure(failure: NonDomainFailure) -> Result<Self> {
+        failure
+            .validate_layer(NonDomainFailureLayer::Ensure)
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?;
+        Ok(Self {
+            kind: EffectExecutorOutcomeKind::NonDomainFailure(failure),
+        })
+    }
+
     /// Returns the borrowed closed outcome.
     pub const fn view(&self) -> EffectExecutorOutcomeView<'_> {
         match &self.kind {
@@ -599,26 +629,26 @@ impl EffectExecutorOutcome {
             EffectExecutorOutcomeKind::Indeterminate(failure) => {
                 EffectExecutorOutcomeView::Indeterminate(failure)
             }
+            EffectExecutorOutcomeKind::NonDomainFailure(failure) => {
+                EffectExecutorOutcomeView::NonDomainFailure(failure)
+            }
         }
     }
 
-    /// Splits the outcome into a returned result or one validated safe-failure tuple.
-    pub fn into_parts(
-        self,
-    ) -> std::result::Result<
-        VerifiedEnsureResult,
-        (
-            mfm_capabilities::SafeFailureOutcome,
-            crate::ReferenceSafeFailure,
-        ),
-    > {
+    /// Splits the outcome into its closed owned variant.
+    pub fn into_parts(self) -> EffectExecutorOutcomeParts {
         match self.kind {
-            EffectExecutorOutcomeKind::Returned(result) => Ok(result),
+            EffectExecutorOutcomeKind::Returned(result) => {
+                EffectExecutorOutcomeParts::Returned(result)
+            }
             EffectExecutorOutcomeKind::DidNotEnter(failure) => {
-                Err((mfm_capabilities::SafeFailureOutcome::DidNotEnter, failure))
+                EffectExecutorOutcomeParts::DidNotEnter(failure)
             }
             EffectExecutorOutcomeKind::Indeterminate(failure) => {
-                Err((mfm_capabilities::SafeFailureOutcome::Indeterminate, failure))
+                EffectExecutorOutcomeParts::Indeterminate(failure)
+            }
+            EffectExecutorOutcomeKind::NonDomainFailure(failure) => {
+                EffectExecutorOutcomeParts::NonDomainFailure(failure)
             }
         }
     }
@@ -771,11 +801,7 @@ fn verify_retained_delivery_audit_index(
     }
     reversed.reverse();
     let audit = DeliveryAudit::from_ledger(reversed);
-    audit.verify(
-        identity,
-        binding.contract().evidence_bounds(),
-        binding.deployment().evidence_authority_ref(),
-    )?;
+    audit.verify(identity, binding)?;
     verify_contract_records(&audit, binding)?;
     append_linked_members(&audit, &mut expected_members)?;
     Ok((audit, expected_members))
@@ -795,11 +821,7 @@ pub fn verify_retained_terminal_evidence(
     if claim.identity().tenant_scope_id() != binding.deployment().tenant_scope_id() {
         return Err(ExecutorError::TenantScopeMismatch);
     }
-    audit.verify(
-        claim.identity(),
-        binding.contract().evidence_bounds(),
-        binding.deployment().evidence_authority_ref(),
-    )?;
+    audit.verify(claim.identity(), binding)?;
     verify_contract_records(audit, binding)?;
     let index = RetainedValueIndex::new(binding, retained_closure)?;
     let head = audit.head_ref()?;
@@ -906,10 +928,12 @@ fn append_linked_members(
 ) -> Result<()> {
     for record in audit.records() {
         match record {
-            ExecutorEvidenceRecord::DeliveryAttemptObserved {
-                outcome: DeliveryAttemptOutcome::Returned(returned),
-                ..
-            } => {
+            ExecutorEvidenceRecord::DeliveryAttemptObserved { outcome, .. }
+                if outcome.returned_outcome().is_some() =>
+            {
+                let returned = outcome
+                    .returned_outcome()
+                    .ok_or(ExecutorError::InvalidDeliveryObservation)?;
                 expected.insert((
                     ExecutorRetainedValueRelation::DomainEvidence,
                     returned.safe_result_ref().clone(),
@@ -969,17 +993,7 @@ fn verify_contract_records(audit: &DeliveryAudit, binding: &VerifiedExecutorBind
                 }
             }
             ExecutorEvidenceRecord::DeliveryAttemptObserved { outcome, .. } => {
-                let failure = match outcome {
-                    DeliveryAttemptOutcome::DidNotEnter(failure)
-                    | DeliveryAttemptOutcome::Indeterminate(failure) => Some(failure),
-                    DeliveryAttemptOutcome::Returned(_) => None,
-                };
-                if failure.is_some_and(|failure| {
-                    failure.safe_failure_contract_ref()
-                        != binding.contract().safe_failure_contract_ref()
-                }) {
-                    return Err(ExecutorError::InvalidSafeFailure);
-                }
+                outcome.validate_for_binding(binding)?;
             }
             ExecutorEvidenceRecord::EffectBound { .. }
             | ExecutorEvidenceRecord::DeliveryAttemptAuthorized { .. }
@@ -1122,6 +1136,18 @@ fn decode_outcome(
                 .get("safe_failure")
                 .ok_or(ExecutorError::CanonicalEncoding)?,
         )?),
+        "non_domain_failure" => {
+            let canonical = plain_json_to_canonical_value(
+                value
+                    .get("non_domain_failure")
+                    .ok_or(ExecutorError::CanonicalEncoding)?
+                    .clone(),
+            )?;
+            DeliveryAttemptOutcome::non_domain_failure(
+                NonDomainFailure::from_canonical_value(&canonical)
+                    .map_err(|_| ExecutorError::CanonicalEncoding)?,
+            )
+        }
         _ => Err(ExecutorError::CanonicalEncoding),
     }
 }
@@ -1142,6 +1168,7 @@ fn decode_safe_failure(value: &serde_json::Value) -> Result<crate::ReferenceSafe
         "request_conflict" => ReferenceFailureCode::RequestConflict,
         "access_cancelled" => ReferenceFailureCode::AccessCancelled,
         "unclassified_failure" => ReferenceFailureCode::UnclassifiedFailure,
+        "result_unrepresentable" => ReferenceFailureCode::ResultUnrepresentable,
         _ => return Err(ExecutorError::InvalidSafeFailure),
     };
     let class = match string_field(value, "failure_class")? {
@@ -1150,6 +1177,7 @@ fn decode_safe_failure(value: &serde_json::Value) -> Result<crate::ReferenceSafe
         "destination" => FailureClass::Destination,
         "cancellation" => FailureClass::Cancellation,
         "unclassified" => FailureClass::Unclassified,
+        "unrepresentable_response" => FailureClass::UnrepresentableResponse,
         _ => return Err(ExecutorError::InvalidSafeFailure),
     };
     let stage = match string_field(value, "boundary_stage")? {

@@ -30,7 +30,7 @@ The file is bounded to 64 KiB. The CLI removes at most one final LF or CRLF and 
 remaining opaque bytes in a consuming, zeroizing credential. There is no raw token argument,
 tenant option, tenant environment variable, cookie, or session.
 
-## Recoverability-v2 commands
+## Recoverability-v3 commands
 
 Entry-point discovery itself requires no credential:
 
@@ -86,9 +86,9 @@ Candidate recorded-history, execution, and comparison-integrity failures return 
 `unavailable` reproduction result.
 
 JSON audit output is the same exact public page DTO as REST. Its entry exposes the reviewed
-authorization, observation, capability binding and operation, request/result/failure, effect, and
-sole `delivery_audit_ref`; `delivery_audit_terminal` is the presentation-only verified
-pending/terminal annotation.
+authorization, observation, capability binding and operation, request/result/failure,
+`non_domain_failure`, effect, and sole `delivery_audit_ref`; `delivery_audit_terminal` is the
+presentation-only verified pending/terminal annotation.
 
 Removed surfaces do not have aliases: there is no `facts`, `setup`, run list/watch, `start`,
 `resume`, `status`, `stream`, `manual-resolution`, `public-output`, arbitrary object reader, raw
@@ -116,4 +116,4 @@ files. Do not place private keys, mnemonics, passphrases, bearer credentials, or
 authorization values in command arguments, logs, configured values, or runtime configuration.
 
 The exact application/transport contract is
-[`docs/recoverability-app-surface-v2.md`](../../docs/recoverability-app-surface-v2.md).
+[`docs/recoverability-app-surface-v3.md`](../../docs/recoverability-app-surface-v3.md).

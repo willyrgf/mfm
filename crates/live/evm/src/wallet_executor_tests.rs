@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use alloy_primitives::{address, b256, keccak256, Address, PrimitiveSignature, B256, U256};
 use k256::ecdsa::SigningKey;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
 use mfm_evm::{
     evm_submit_transaction_leaf_expansion, evm_submit_transaction_value_contracts,
     evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
@@ -12,16 +12,17 @@ use mfm_evm::{
     EvmWalletAccessListEntry, EvmWalletAttemptResult, EvmWalletBroadcastStatus,
     EvmWalletConvergencePlan, EvmWalletFeeCandidate, EvmWalletInitialNonceDescriptor,
     EvmWalletPolicy, EvmWalletReference, EvmWalletReplacementPolicy, EvmWalletTransactionAction,
-    EvmWalletTransactionTemplate, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
-    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
-    EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
+    EvmWalletTransactionCandidate, EvmWalletTransactionTemplate,
+    EVM_SUBMIT_TRANSACTION_OPERATION_ID, EVM_WALLET_BROADCAST_OPERATION_ID,
+    EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES, EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
 };
 use mfm_executor::{
-    CommittedEffectRequest, DeliveryAttemptOutcome, Ensure, EvidenceBounds, ExecutorBinding,
-    ExecutorContractDescriptor, ExecutorDeployment, ExecutorError, ExecutorRetainedClosureContract,
-    KeyedExecutorLedger, MemoryExecutorStore, ReferenceFailureCode, ReferenceTerminalProof,
-    ResourceOwnership, SchemaQualifiedCanonicalValue, TerminalTombstone, VerifiedEnsureResult,
-    VerifiedExecutorBinding,
+    AttemptId, CommittedEffectRequest, DeliveryAttemptOutcome, DeliveryAuditFrontierRef,
+    EffectExecutorOutcome, EffectExecutorOutcomeParts, Ensure, EvidenceBounds,
+    ExecuteTargetOutcome, ExecutorBinding, ExecutorContractDescriptor, ExecutorDeployment,
+    ExecutorError, ExecutorRetainedClosureContract, KeyedExecutorLedger, MemoryExecutorStore,
+    ReferenceFailureCode, ReferenceTerminalProof, ResourceOwnership, SchemaQualifiedCanonicalValue,
+    TerminalTombstone, VerifiedEnsureResult, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     ContentRef, DigestAlgorithm, NodeId, RunId, SchemaId, SemanticTypeId, StableId, StoreScopeId,
@@ -49,7 +50,8 @@ use crate::transport::{
 };
 use crate::{
     evm_already_known_classifier_ref, evm_wallet_target_callback_surface_ref,
-    wallet_rpc::EvmWalletTargetEntryDescriptor, EvmWalletExecutor, EvmWalletRequestQualification,
+    wallet_rpc::{EvmWalletJsonRpcTarget, EvmWalletTargetEntryDescriptor},
+    EvmWalletExecutor, EvmWalletRequestQualification,
 };
 
 const RECIPIENT: Address = address!("2222222222222222222222222222222222222222");
@@ -618,6 +620,7 @@ struct RequestInputs {
     assurance_policy_ref: ContentRef,
     sender: Address,
     bounds: EvidenceBounds,
+    max_attempt_result_bytes: u64,
 }
 
 struct Fixture {
@@ -635,6 +638,20 @@ struct Fixture {
 
 impl Fixture {
     async fn new(scenario: Scenario) -> Self {
+        let bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 256 * 1024, 2, 256 * 1024)
+            .expect("bounds");
+        Self::new_with_configuration(scenario, bounds, 128 * 1024).await
+    }
+
+    async fn new_with_bounds(scenario: Scenario, bounds: EvidenceBounds) -> Self {
+        Self::new_with_configuration(scenario, bounds, 128 * 1024).await
+    }
+
+    async fn new_with_configuration(
+        scenario: Scenario,
+        bounds: EvidenceBounds,
+        max_attempt_result_bytes: u64,
+    ) -> Self {
         let key = SigningKey::from_slice(&[7_u8; 32]).expect("test signing key");
         let sender = signing_address(&key);
         let tenant_scope_id =
@@ -643,7 +660,6 @@ impl Fixture {
         let generation_ref = reviewed_ref("wallet-generation");
         let fence_ref = reviewed_ref("wallet-generation-fence");
         let wallet_domain_ref = reviewed_ref("wallet-domain");
-        let bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("bounds");
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind loopback RPC");
@@ -679,12 +695,12 @@ impl Fixture {
             ),
             retained_contract(
                 "delivery-audit",
-                "mfm.executor-delivery-frontier.v1",
+                "mfm.executor-delivery-frontier.v2",
                 &object_evidence_ref,
             ),
             retained_contract(
                 "executor-frontier",
-                "mfm.executor-delivery-frontier.v1",
+                "mfm.executor-delivery-frontier.v2",
                 &object_evidence_ref,
             ),
             retained_contract(
@@ -694,12 +710,12 @@ impl Fixture {
             ),
             retained_contract(
                 "terminal-tombstone",
-                "mfm.executor-terminal-tombstone.v1",
+                "mfm.executor-terminal-tombstone.v2",
                 &object_evidence_ref,
             ),
             retained_contract(
                 "terminal-proof",
-                "mfm.executor-reference-terminal-proof.v1",
+                "mfm.executor-reference-terminal-proof.v2",
                 &object_evidence_ref,
             ),
             value_contracts.attempt_result().clone(),
@@ -821,6 +837,7 @@ impl Fixture {
                 .expect("assurance policy reference"),
             sender,
             bounds,
+            max_attempt_result_bytes,
         };
         let request = make_request(&request_inputs, U256::from(5));
         let signer_calls = Arc::new(AtomicUsize::new(0));
@@ -915,7 +932,8 @@ fn make_request(inputs: &RequestInputs, value: U256) -> EvmSubmitTransactionRequ
         EvmWalletReference::from_content_ref(inputs.already_known_classifier_ref.clone()),
         EvmWalletReference::from_content_ref(inputs.finality_policy_ref.clone()),
         EvmWalletReference::from_content_ref(inputs.assurance_policy_ref.clone()),
-        EvmWalletConvergencePlan::new(2, 2, 2, 2, 2, 128 * 1024).expect("convergence"),
+        EvmWalletConvergencePlan::new(2, 2, 2, 2, 2, inputs.max_attempt_result_bytes)
+            .expect("convergence"),
         inputs.bounds.clone(),
     )
     .expect("policy");
@@ -969,7 +987,7 @@ fn retained_contract(
     evidence_contract_ref: &ContentRef,
 ) -> RetainedValueContract {
     RetainedValueContract::new(
-        RecoverabilityContractV2::embedded()
+        RecoverabilityContractV3::embedded()
             .expect("recoverability contract")
             .schema_id(schema_contract)
             .expect("retained schema")
@@ -1014,18 +1032,22 @@ async fn drive_to_terminal(
     rpc: &LoopbackRpc,
 ) -> VerifiedEnsureResult {
     for _ in 0..40 {
-        let result = executor
-            .drive(committed)
-            .await
-            .unwrap_or_else(|error| panic!("wallet drive {error:?}; calls={:?}", rpc.calls()));
-        let result = result
-            .into_parts()
-            .unwrap_or_else(|failure| panic!("unexpected safe failure: {failure:?}"));
+        let result = expect_returned(executor.drive(committed).await, rpc);
         if matches!(result.outcome(), Ensure::Terminal { .. }) {
             return result;
         }
     }
     panic!("finite wallet script did not reach terminal evidence")
+}
+
+fn expect_returned(outcome: EffectExecutorOutcome, rpc: &LoopbackRpc) -> VerifiedEnsureResult {
+    match outcome.into_parts() {
+        EffectExecutorOutcomeParts::Returned(result) => result,
+        failure => panic!(
+            "unexpected wallet outcome {failure:?}; calls={:?}",
+            rpc.calls()
+        ),
+    }
 }
 
 fn terminal_attempt(result: &VerifiedEnsureResult) -> EvmWalletAttemptResult {
@@ -1046,13 +1068,10 @@ async fn drive_from_preterminal_checkpoint(fixture: &Fixture) -> (Vec<u8>, EvmWa
             .expect("checkpoint")
             .to_durable_bytes()
             .expect("checkpoint bytes");
-        let result = fixture
-            .executor
-            .drive(&fixture.committed)
-            .await
-            .expect("wallet drive")
-            .into_parts()
-            .expect("returned ensure result");
+        let result = expect_returned(
+            fixture.executor.drive(&fixture.committed).await,
+            &fixture.rpc,
+        );
         if matches!(result.outcome(), Ensure::Terminal { .. }) {
             return (before, terminal_attempt(&result));
         }
@@ -1079,24 +1098,311 @@ fn returned_attempt_outcome(result: &EvmWalletAttemptResult) -> DeliveryAttemptO
     DeliveryAttemptOutcome::returned(safe_result).expect("returned attempt outcome")
 }
 
+fn prepared_lookup_for_classification(
+    fixture: &Fixture,
+) -> crate::wallet_rpc::PreparedEvmWalletTarget {
+    let candidate = EvmWalletTransactionCandidate::new(
+        fixture.committed.request().clone(),
+        fixture.request_inputs.initial_nonce,
+        0,
+        b256!("abababababababababababababababababababababababababababababababab"),
+    )
+    .expect("classification candidate");
+    EvmWalletJsonRpcTarget::new(fixture.signer.clone(), Arc::clone(&fixture.qualification))
+        .expect("wallet target")
+        .prepare_transaction_lookup(fixture.committed.request(), candidate)
+        .expect("prepared lookup")
+}
+
+fn valid_lookup_result(
+    prepared: &crate::wallet_rpc::PreparedEvmWalletTarget,
+) -> EvmWalletAttemptResult {
+    EvmWalletAttemptResult::TransactionLookup {
+        transaction_hash: prepared.candidate().transaction_hash().to_owned(),
+        transaction: None,
+    }
+}
+
+fn executor_failure_code(outcome: EffectExecutorOutcome) -> mfm_executor::NonDomainFailureCode {
+    let EffectExecutorOutcomeParts::NonDomainFailure(failure) = outcome.into_parts() else {
+        panic!("executor error classification must produce a non-domain failure")
+    };
+    failure.fields().code
+}
+
+#[tokio::test]
+async fn executor_error_classification_distinguishes_fresh_material_from_retained_history() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+
+    assert_eq!(
+        executor_failure_code(
+            fixture
+                .executor
+                .classify_executor_error_for_test(&ExecutorError::TargetOperationMismatch, false,),
+        ),
+        mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
+    );
+    assert_eq!(
+        executor_failure_code(
+            fixture
+                .executor
+                .classify_executor_error_for_test(&ExecutorError::TargetOperationMismatch, true,),
+        ),
+        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+    );
+    assert_eq!(
+        executor_failure_code(
+            fixture
+                .executor
+                .classify_executor_error_for_test(&ExecutorError::CanonicalEncoding, false),
+        ),
+        mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure
+    );
+    assert_eq!(
+        executor_failure_code(
+            fixture
+                .executor
+                .classify_executor_error_for_test(&ExecutorError::CanonicalEncoding, true),
+        ),
+        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
+    );
+    assert_eq!(
+        executor_failure_code(
+            fixture
+                .executor
+                .classify_executor_error_for_test(&ExecutorError::LocalContention, false),
+        ),
+        mfm_executor::NonDomainFailureCode::ExecutorContention
+    );
+}
+
+#[tokio::test]
+async fn exact_qualified_completion_maximum_admits_observations_and_the_largest_tombstone() {
+    let baseline = Fixture::new(Scenario::Succeeded).await;
+    let (max_observation, max_tombstone) =
+        crate::wallet_qualification::calculated_completion_maxima_for_test(
+            &baseline.binding,
+            baseline.committed.request(),
+        )
+        .expect("calculated completion maxima");
+    let exact_maximum = max_observation.max(max_tombstone);
+    let exact_maximum_u64 = u64::try_from(exact_maximum).expect("completion maximum");
+    let exact_bounds = EvidenceBounds::new(
+        20,
+        64,
+        8 * 1024 * 1024,
+        exact_maximum_u64,
+        2,
+        exact_maximum_u64,
+    )
+    .expect("exact EVM completion bounds");
+    drop(baseline);
+
+    let fixture = Fixture::new_with_bounds(Scenario::Succeeded, exact_bounds).await;
+    let recalculated = crate::wallet_qualification::calculated_completion_maxima_for_test(
+        &fixture.binding,
+        fixture.committed.request(),
+    )
+    .expect("recalculated maxima");
+    assert_eq!(recalculated, (max_observation, max_tombstone));
+    assert_eq!(
+        fixture
+            .binding
+            .contract()
+            .evidence_bounds()
+            .max_completion_record_bytes(),
+        exact_maximum
+    );
+    fixture
+        .qualification
+        .verify_request(fixture.committed.request())
+        .expect("exact completion maximum is qualified");
+    let terminal = drive_to_terminal(&fixture.executor, &fixture.committed, &fixture.rpc).await;
+    assert!(matches!(terminal.outcome(), Ensure::Terminal { .. }));
+}
+
+#[tokio::test]
+async fn qualification_rejects_one_byte_less_than_the_calculated_generic_maximum() {
+    let baseline = Fixture::new(Scenario::Succeeded).await;
+    let (max_observation, max_tombstone) =
+        crate::wallet_qualification::calculated_completion_maxima_for_test(
+            &baseline.binding,
+            baseline.committed.request(),
+        )
+        .expect("calculated completion maxima");
+    let required = max_observation.max(max_tombstone);
+    drop(baseline);
+    let reserve = u64::try_from(required).expect("completion reserve");
+    let one_short = u64::try_from(required - 1).expect("one-short maximum");
+    let fixture = Fixture::new_with_bounds(
+        Scenario::Succeeded,
+        EvidenceBounds::new(20, 64, 8 * 1024 * 1024, one_short, 2, reserve)
+            .expect("one-short bounds"),
+    )
+    .await;
+    assert_eq!(
+        fixture
+            .qualification
+            .verify_request(fixture.committed.request()),
+        Err(crate::EvmWalletLiveError::InvalidContract)
+    );
+}
+
+#[tokio::test]
+async fn one_byte_oversized_valid_rpc_result_is_persisted_as_result_unrepresentable() {
+    let sample = EvmWalletAttemptResult::TransactionLookup {
+        transaction_hash: "0xabababababababababababababababababababababababababababababababab"
+            .to_owned(),
+        transaction: None,
+    };
+    let sample_bytes = encode_boundary(&sample).expect("sample lookup result");
+    let result_limit =
+        u64::try_from(sample_bytes.as_bytes().len() - 1).expect("one-short result limit");
+    let bounds =
+        EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 256 * 1024, 2, 256 * 1024).expect("bounds");
+    let fixture = Fixture::new_with_configuration(Scenario::Succeeded, bounds, result_limit).await;
+    fixture
+        .qualification
+        .verify_request(fixture.committed.request())
+        .expect("one-short result contract remains exactly qualified");
+    let candidate = EvmWalletTransactionCandidate::new(
+        fixture.committed.request().clone(),
+        fixture.request_inputs.initial_nonce,
+        0,
+        b256!("abababababababababababababababababababababababababababababababab"),
+    )
+    .expect("lookup candidate");
+    let target =
+        EvmWalletJsonRpcTarget::new(fixture.signer.clone(), Arc::clone(&fixture.qualification))
+            .expect("wallet target");
+    let prepared = target
+        .prepare_transaction_lookup(fixture.committed.request(), candidate)
+        .expect("prepared lookup");
+    let target_operation = prepared.descriptor().canonical().clone();
+    let ledger = KeyedExecutorLedger::new(fixture.store.clone(), fixture.binding.clone())
+        .expect("keyed ledger");
+    let bound = ledger
+        .bind_effect(fixture.committed.identity())
+        .await
+        .expect("bind effect");
+    let observed = ledger
+        .execute_target_once(
+            fixture.committed.identity(),
+            &bound.delivery_audit().head_ref().expect("bound head"),
+            target_operation,
+            None,
+            move |_authority| async move {
+                let valid_result = valid_lookup_result(&prepared);
+                assert_eq!(
+                    encode_boundary(&valid_result)
+                        .expect("valid lookup result")
+                        .as_bytes()
+                        .len(),
+                    usize::try_from(result_limit).expect("result limit") + 1
+                );
+                prepared.classify_with_result_bound_for_test(
+                    valid_result,
+                    usize::try_from(result_limit).expect("result limit"),
+                )
+            },
+        )
+        .await
+        .expect("persist totalized observation");
+    let ExecuteTargetOutcome::Observed(view) = observed else {
+        panic!("fresh lookup authorization must be observed")
+    };
+    let attempts = view.delivery_audit().attempts().expect("attempts");
+    let failure = attempts[0]
+        .outcome()
+        .expect("persisted outcome")
+        .indeterminate_failure()
+        .expect("one-byte oversized valid result must be totalized");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
+}
+
+#[tokio::test]
+async fn valid_oversized_postexchange_result_is_result_unrepresentable() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let prepared = prepared_lookup_for_classification(&fixture);
+    let outcome = prepared.classify_with_result_bound_for_test(valid_lookup_result(&prepared), 1);
+    let failure = outcome
+        .indeterminate_failure()
+        .expect("oversized valid result must be a domain-safe indeterminate outcome");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
+    assert_eq!(
+        failure.failure_class(),
+        mfm_executor::FailureClass::UnrepresentableResponse
+    );
+    assert_eq!(
+        failure.boundary_stage(),
+        mfm_executor::BoundaryStage::BoundaryObservation
+    );
+}
+
+#[tokio::test]
+async fn invalid_typed_postexchange_result_is_adapter_contract_violation() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let prepared = prepared_lookup_for_classification(&fixture);
+    let outcome = prepared.classify_with_result_bound_for_test(
+        EvmWalletAttemptResult::TransactionLookup {
+            transaction_hash: "not-a-transaction-hash".to_owned(),
+            transaction: None,
+        },
+        usize::MAX,
+    );
+    let failure = outcome
+        .non_domain_failure_value()
+        .expect("invalid typed result must be an audit-only target failure");
+    let fields = failure.fields();
+    assert_eq!(
+        fields.entry_status,
+        mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered
+    );
+    assert_eq!(
+        fields.disposition,
+        mfm_journal::v2::NonDomainDisposition::IntegrityBlocked
+    );
+    assert_eq!(
+        fields.code,
+        mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
+    );
+}
+
+#[tokio::test]
+async fn postexchange_canonical_encoding_failure_is_result_encoding_failure() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let prepared = prepared_lookup_for_classification(&fixture);
+    let outcome = prepared.classify_encoding_failure_for_test(valid_lookup_result(&prepared));
+    let failure = outcome
+        .non_domain_failure_value()
+        .expect("canonical encoding failure must be an audit-only target failure");
+    let fields = failure.fields();
+    assert_eq!(
+        fields.entry_status,
+        mfm_journal::v2::NonDomainEntryStatus::MayHaveEntered
+    );
+    assert_eq!(
+        fields.disposition,
+        mfm_journal::v2::NonDomainDisposition::IntegrityBlocked
+    );
+    assert_eq!(
+        fields.code,
+        mfm_journal::v2::NonDomainFailureCode::ResultEncodingFailure
+    );
+}
+
 async fn append_terminal_attempt_result(
     fixture: &Fixture,
     store: &MemoryExecutorStore,
     result: EvmWalletAttemptResult,
 ) {
-    let EvmWalletAttemptResult::CanonicalInclusion {
-        block: Some(block),
-        terminal: Some(evidence),
-    } = &result
-    else {
-        panic!("expected terminal canonical-inclusion result")
-    };
-    let descriptor = EvmWalletTargetEntryDescriptor::canonical_inclusion(
-        fixture.committed.request(),
-        evidence.candidate(),
-        block.number_quantity().expect("inclusion number"),
-    )
-    .expect("canonical-inclusion descriptor");
+    let target_operation = terminal_target_operation(fixture, &result);
     let ledger =
         KeyedExecutorLedger::new(store.clone(), fixture.binding.clone()).expect("keyed ledger");
     let view = ledger
@@ -1104,27 +1410,102 @@ async fn append_terminal_attempt_result(
         .await
         .expect("effect view")
         .expect("bound effect");
-    let authority = ledger
-        .try_authorize_target(
+    let outcome = ledger
+        .execute_target_once(
             fixture.committed.identity(),
             &view.delivery_audit().head_ref().expect("audit head"),
-            descriptor.canonical().clone(),
+            target_operation,
             Some(fixture.qualification.resource_policy_binding()),
+            |_authority| async move { returned_attempt_outcome(&result) },
         )
         .await
-        .expect("authorize terminal attempt")
-        .expect("uncontested terminal attempt");
-    ledger
-        .observe_target(authority.complete(returned_attempt_outcome(&result)))
-        .await
-        .expect("observe hostile terminal result");
+        .expect("append hostile terminal result");
+    assert!(matches!(outcome, ExecuteTargetOutcome::Observed(_)));
 }
 
-async fn assert_restored_drive_is_read_only_failure(
+fn terminal_target_operation(
     fixture: &Fixture,
-    store: MemoryExecutorStore,
-    expected_error: ExecutorError,
-) {
+    result: &EvmWalletAttemptResult,
+) -> SchemaQualifiedCanonicalValue {
+    let EvmWalletAttemptResult::CanonicalInclusion {
+        block: Some(block),
+        terminal: Some(evidence),
+    } = result
+    else {
+        panic!("expected terminal canonical-inclusion result")
+    };
+    EvmWalletTargetEntryDescriptor::canonical_inclusion(
+        fixture.committed.request(),
+        evidence.candidate(),
+        block.number_quantity().expect("inclusion number"),
+    )
+    .expect("canonical-inclusion descriptor")
+    .canonical()
+    .clone()
+}
+
+struct HeldTerminalAttempt {
+    attempt_id: AttemptId,
+    release: Option<oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<mfm_executor::Result<ExecuteTargetOutcome>>,
+}
+
+impl HeldTerminalAttempt {
+    async fn release_and_observe(&mut self) {
+        self.release
+            .take()
+            .expect("held attempt release")
+            .send(())
+            .expect("held attempt receiver");
+        let outcome = (&mut self.task)
+            .await
+            .expect("held attempt task")
+            .expect("observe held attempt");
+        assert!(matches!(outcome, ExecuteTargetOutcome::Observed(_)));
+    }
+}
+
+async fn hold_terminal_attempt(
+    fixture: &Fixture,
+    ledger: KeyedExecutorLedger<MemoryExecutorStore>,
+    expected_head: DeliveryAuditFrontierRef,
+    target_operation: SchemaQualifiedCanonicalValue,
+    result: EvmWalletAttemptResult,
+) -> HeldTerminalAttempt {
+    let identity = fixture.committed.identity().clone();
+    let policy_binding = fixture.qualification.resource_policy_binding().clone();
+    let (authorized_tx, authorized_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        ledger
+            .execute_target_once(
+                &identity,
+                &expected_head,
+                target_operation,
+                Some(&policy_binding),
+                move |authority| {
+                    authorized_tx
+                        .send(authority.attempt_id().clone())
+                        .expect("authorized attempt receiver");
+                    async move {
+                        release_rx.await.expect("held attempt release");
+                        returned_attempt_outcome(&result)
+                    }
+                },
+            )
+            .await
+    });
+    let attempt_id = authorized_rx
+        .await
+        .expect("target authorization must precede held observation");
+    HeldTerminalAttempt {
+        attempt_id,
+        release: Some(release_tx),
+        task,
+    }
+}
+
+async fn assert_restored_drive_is_read_only_failure(fixture: &Fixture, store: MemoryExecutorStore) {
     let durable = store
         .checkpoint()
         .expect("hostile checkpoint")
@@ -1134,12 +1515,14 @@ async fn assert_restored_drive_is_read_only_failure(
     let rpc_calls = fixture.rpc.call_count();
     let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
     let executor = fixture.restart(restored.clone());
+    let EffectExecutorOutcomeParts::NonDomainFailure(failure) =
+        executor.drive(&fixture.committed).await.into_parts()
+    else {
+        panic!("hostile restored history must produce a non-domain failure")
+    };
     assert_eq!(
-        executor
-            .drive(&fixture.committed)
-            .await
-            .expect_err("hostile restored history must fail"),
-        expected_error
+        failure.fields().code,
+        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
     );
     assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
@@ -1226,14 +1609,8 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
         fixture.executor.drive(&fixture.committed),
         fixture.executor.drive(&fixture.committed)
     );
-    let left = left
-        .expect("left drive")
-        .into_parts()
-        .expect("left returned outcome");
-    let right = right
-        .expect("right drive")
-        .into_parts()
-        .expect("right returned outcome");
+    let left = expect_returned(left, &fixture.rpc);
+    let right = expect_returned(right, &fixture.rpc);
     assert_eq!(fixture.rpc.operation_count("eth_sendRawTransaction"), 1);
     assert!(
         left.delivery_audit().attempt_count() <= 2 && right.delivery_audit().attempt_count() <= 2
@@ -1244,13 +1621,14 @@ async fn concurrent_ensure_does_not_duplicate_one_plan_and_rejects_request_subst
         &fixture.request_inputs.tenant_scope_id,
         make_request(&fixture.request_inputs, U256::from(6)),
     );
+    let EffectExecutorOutcomeParts::NonDomainFailure(failure) =
+        fixture.executor.drive(&substituted).await.into_parts()
+    else {
+        panic!("request substitution must be audit-only")
+    };
     assert_eq!(
-        fixture
-            .executor
-            .drive(&substituted)
-            .await
-            .expect_err("same key with another request must fail"),
-        ExecutorError::EffectBindingConflict
+        failure.fields().code,
+        mfm_journal::v2::NonDomainFailureCode::ExecutorHistoryInvalid
     );
 }
 
@@ -1303,23 +1681,23 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
     changed.assurance_policy_ref = reviewed_ref("other-assurance-policy");
     hostile.push(changed);
     let mut changed = fixture.request_inputs.clone();
-    changed.bounds =
-        EvidenceBounds::new(21, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("changed max attempts");
+    changed.bounds = EvidenceBounds::new(21, 64, 8 * 1024 * 1024, 256 * 1024, 2, 256 * 1024)
+        .expect("changed max attempts");
     hostile.push(changed);
     let mut changed = fixture.request_inputs.clone();
-    changed.bounds =
-        EvidenceBounds::new(20, 65, 8 * 1024 * 1024, 2, 16 * 1024).expect("changed max records");
+    changed.bounds = EvidenceBounds::new(20, 65, 8 * 1024 * 1024, 256 * 1024, 2, 256 * 1024)
+        .expect("changed max records");
     hostile.push(changed);
     let mut changed = fixture.request_inputs.clone();
-    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024 + 1, 2, 16 * 1024)
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024 + 1, 256 * 1024, 2, 256 * 1024)
         .expect("changed retained bytes");
     hostile.push(changed);
     let mut changed = fixture.request_inputs.clone();
-    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 3, 16 * 1024)
-        .expect("changed completion records");
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 256 * 1024 - 1, 2, 256 * 1024)
+        .expect("changed completion maximum");
     hostile.push(changed);
     let mut changed = fixture.request_inputs.clone();
-    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024 + 1)
+    changed.bounds = EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 256 * 1024, 2, 256 * 1024 + 1)
         .expect("changed completion bytes");
     hostile.push(changed);
 
@@ -1329,13 +1707,14 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
             &inputs.tenant_scope_id,
             make_request(&inputs, U256::from(5)),
         );
+        let EffectExecutorOutcomeParts::NonDomainFailure(failure) =
+            fixture.executor.drive(&committed).await.into_parts()
+        else {
+            panic!("qualification mismatch must be audit-only")
+        };
         assert_eq!(
-            fixture
-                .executor
-                .drive(&committed)
-                .await
-                .expect_err("qualification mismatch"),
-            ExecutorError::TargetOperationMismatch
+            failure.fields().code,
+            mfm_journal::v2::NonDomainFailureCode::AdapterContractViolation
         );
         assert_eq!(fixture.rpc.call_count(), 0);
         assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);
@@ -1354,13 +1733,10 @@ async fn every_qualified_policy_mismatch_fails_before_effect_or_nonce_allocation
 #[tokio::test]
 async fn response_loss_restart_recovers_by_hash_without_persisting_bearer_material() {
     let fixture = Fixture::new(Scenario::ResponseLost).await;
-    let pending = fixture
-        .executor
-        .drive(&fixture.committed)
-        .await
-        .expect("lost response")
-        .into_parts()
-        .expect("returned pending outcome");
+    let pending = expect_returned(
+        fixture.executor.drive(&fixture.committed).await,
+        &fixture.rpc,
+    );
     assert!(matches!(pending.outcome(), Ensure::Pending { .. }));
     assert_eq!(pending.delivery_audit().attempt_count(), 1);
 
@@ -1443,6 +1819,152 @@ async fn finalized_success_and_revert_produce_closed_terminal_evidence() {
 }
 
 #[tokio::test]
+async fn two_terminal_inclusions_select_first_observed_across_tombstone_and_restart() {
+    let fixture = Fixture::new(Scenario::Succeeded).await;
+    let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
+    let target_operation = terminal_target_operation(&fixture, &valid_result);
+
+    for first_observed in 0..2 {
+        for tombstone_before_late_observation in [false, true] {
+            let store = restore_checkpoint(&fixture, &preterminal);
+            let ledger = KeyedExecutorLedger::new(store.clone(), fixture.binding.clone())
+                .expect("keyed ledger");
+            let mut held = Vec::new();
+            for _ in 0..2 {
+                let view = ledger
+                    .effect_view(fixture.committed.identity())
+                    .await
+                    .expect("effect view")
+                    .expect("bound effect");
+                held.push(
+                    hold_terminal_attempt(
+                        &fixture,
+                        ledger.clone(),
+                        view.delivery_audit().head_ref().expect("audit head"),
+                        target_operation.clone(),
+                        valid_result.clone(),
+                    )
+                    .await,
+                );
+            }
+            assert_ne!(held[0].attempt_id, held[1].attempt_id);
+
+            let late_observed = 1 - first_observed;
+            let selected_attempt_id = held[first_observed].attempt_id.clone();
+            held[first_observed].release_and_observe().await;
+
+            if tombstone_before_late_observation {
+                let rpc_calls = fixture.rpc.call_count();
+                let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
+                let result = expect_returned(
+                    fixture
+                        .restart(store.clone())
+                        .drive(&fixture.committed)
+                        .await,
+                    &fixture.rpc,
+                );
+                assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
+                assert_eq!(fixture.rpc.call_count(), rpc_calls);
+                assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
+            }
+
+            held[late_observed].release_and_observe().await;
+
+            if !tombstone_before_late_observation {
+                let rpc_calls = fixture.rpc.call_count();
+                let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
+                let result = expect_returned(
+                    fixture
+                        .restart(store.clone())
+                        .drive(&fixture.committed)
+                        .await,
+                    &fixture.rpc,
+                );
+                assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
+                assert_eq!(fixture.rpc.call_count(), rpc_calls);
+                assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
+            }
+
+            let view = ledger
+                .effect_view(fixture.committed.identity())
+                .await
+                .expect("effect view")
+                .expect("bound effect");
+            let (_, tombstone) = view.terminal_tombstone().expect("terminal tombstone");
+            assert_eq!(
+                tombstone.terminal_proof().attempt_id(),
+                &selected_attempt_id
+            );
+            let attempts = view.delivery_audit().attempts().expect("delivery attempts");
+            for held_attempt in &held {
+                let attempt = attempts
+                    .iter()
+                    .find(|attempt| attempt.attempt_id() == &held_attempt.attempt_id)
+                    .expect("held attempt");
+                assert!(attempt.returned_observation_ref().is_some());
+            }
+            let selected = attempts
+                .iter()
+                .find(|attempt| attempt.attempt_id() == &selected_attempt_id)
+                .expect("selected attempt");
+            assert_eq!(
+                selected
+                    .outcome()
+                    .and_then(DeliveryAttemptOutcome::returned_outcome),
+                Some(tombstone.terminal_proof().returned_outcome())
+            );
+            assert_eq!(
+                selected.returned_observation_ref(),
+                Some(tombstone.terminal_proof().returned_observation_ref())
+            );
+
+            let durable = store
+                .checkpoint()
+                .expect("terminal checkpoint")
+                .to_durable_bytes()
+                .expect("terminal checkpoint bytes");
+            let restored = restore_checkpoint(&fixture, &durable);
+            let rpc_calls = fixture.rpc.call_count();
+            let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
+            let result = expect_returned(
+                fixture
+                    .restart(restored.clone())
+                    .drive(&fixture.committed)
+                    .await,
+                &fixture.rpc,
+            );
+            assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
+            assert_eq!(fixture.rpc.call_count(), rpc_calls);
+            assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
+            assert_eq!(
+                restored
+                    .checkpoint()
+                    .expect("checkpoint after terminal replay")
+                    .to_durable_bytes()
+                    .expect("checkpoint bytes after terminal replay"),
+                durable
+            );
+            let restored_ledger =
+                KeyedExecutorLedger::new(restored, fixture.binding.clone()).expect("keyed ledger");
+            let restored_view = restored_ledger
+                .effect_view(fixture.committed.identity())
+                .await
+                .expect("restored effect view")
+                .expect("restored bound effect");
+            assert_eq!(
+                restored_view
+                    .terminal_tombstone()
+                    .expect("restored terminal tombstone")
+                    .1
+                    .terminal_proof()
+                    .attempt_id(),
+                &selected_attempt_id
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn hostile_restored_terminal_descriptor_fails_before_target_entry() {
     let fixture = Fixture::new(Scenario::Succeeded).await;
     let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
@@ -1463,23 +1985,18 @@ async fn hostile_restored_terminal_descriptor_fails_before_target_entry() {
         .await
         .expect("effect view")
         .expect("bound effect");
-    let authority = ledger
-        .try_authorize_target(
+    let outcome = ledger
+        .execute_target_once(
             fixture.committed.identity(),
             &view.delivery_audit().head_ref().expect("audit head"),
             descriptor.canonical().clone(),
             Some(fixture.qualification.resource_policy_binding()),
+            |_authority| async move { returned_attempt_outcome(&valid_result) },
         )
         .await
-        .expect("authorize hostile descriptor")
-        .expect("uncontested hostile descriptor");
-    drop(authority);
-    assert_restored_drive_is_read_only_failure(
-        &fixture,
-        store,
-        ExecutorError::TargetOperationMismatch,
-    )
-    .await;
+        .expect("persist hostile descriptor");
+    assert!(matches!(outcome, ExecuteTargetOutcome::Observed(_)));
+    assert_restored_drive_is_read_only_failure(&fixture, store).await;
 }
 
 #[tokio::test]
@@ -1565,12 +2082,7 @@ async fn hostile_restored_terminal_history_fails_before_signing_rpc_or_append() 
         };
         let store = restore_checkpoint(&fixture, &preterminal);
         append_terminal_attempt_result(&fixture, &store, hostile_result).await;
-        assert_restored_drive_is_read_only_failure(
-            &fixture,
-            store,
-            ExecutorError::TargetOperationMismatch,
-        )
-        .await;
+        assert_restored_drive_is_read_only_failure(&fixture, store).await;
     }
 }
 
@@ -1625,12 +2137,7 @@ async fn hostile_restored_tombstone_relation_fails_without_mutation() {
             .append_terminal_tombstone(fixture.committed.identity(), tombstone)
             .await
             .expect("generic ledger accepts domain-hostile tombstone");
-        assert_restored_drive_is_read_only_failure(
-            &fixture,
-            store,
-            ExecutorError::TerminalProofMismatch,
-        )
-        .await;
+        assert_restored_drive_is_read_only_failure(&fixture, store).await;
     }
 
     let store = restore_checkpoint(&fixture, &preterminal);
@@ -1692,12 +2199,7 @@ async fn hostile_restored_tombstone_relation_fails_without_mutation() {
         .append_terminal_tombstone(fixture.committed.identity(), tombstone)
         .await
         .expect("generic ledger accepts exact prior-attempt proof tuple");
-    assert_restored_drive_is_read_only_failure(
-        &fixture,
-        store,
-        ExecutorError::TerminalProofMismatch,
-    )
-    .await;
+    assert_restored_drive_is_read_only_failure(&fixture, store).await;
 }
 
 #[tokio::test]
@@ -1715,13 +2217,13 @@ async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
     fixture.signer_available.store(false, Ordering::SeqCst);
     let rpc_calls = fixture.rpc.call_count();
     let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
-    let result = fixture
-        .restart(restored.clone())
-        .drive(&fixture.committed)
-        .await
-        .expect("restored terminal drive")
-        .into_parts()
-        .expect("restored terminal result");
+    let result = expect_returned(
+        fixture
+            .restart(restored.clone())
+            .drive(&fixture.committed)
+            .await,
+        &fixture.rpc,
+    );
     assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
     assert_eq!(fixture.rpc.call_count(), rpc_calls);
     assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
@@ -1731,137 +2233,6 @@ async fn restored_valid_tombstone_is_signer_rpc_and_write_free() {
             .expect("checkpoint after terminal replay")
             .to_durable_bytes()
             .expect("checkpoint bytes after terminal replay"),
-        durable
-    );
-}
-
-#[tokio::test]
-async fn late_terminal_observation_after_tombstone_preserves_frozen_plan_and_selection() {
-    let fixture = Fixture::new(Scenario::Succeeded).await;
-    let (preterminal, valid_result) = drive_from_preterminal_checkpoint(&fixture).await;
-    let EvmWalletAttemptResult::CanonicalInclusion {
-        block: Some(block),
-        terminal: Some(evidence),
-    } = &valid_result
-    else {
-        panic!("expected terminal canonical-inclusion result")
-    };
-    let descriptor = EvmWalletTargetEntryDescriptor::canonical_inclusion(
-        fixture.committed.request(),
-        evidence.candidate(),
-        block.number_quantity().expect("inclusion number"),
-    )
-    .expect("canonical-inclusion descriptor");
-    let store = restore_checkpoint(&fixture, &preterminal);
-    let ledger =
-        KeyedExecutorLedger::new(store.clone(), fixture.binding.clone()).expect("keyed ledger");
-
-    let initial = ledger
-        .effect_view(fixture.committed.identity())
-        .await
-        .expect("effect view")
-        .expect("bound effect");
-    let first = ledger
-        .try_authorize_target(
-            fixture.committed.identity(),
-            &initial.delivery_audit().head_ref().expect("initial head"),
-            descriptor.canonical().clone(),
-            Some(fixture.qualification.resource_policy_binding()),
-        )
-        .await
-        .expect("authorize first inclusion")
-        .expect("uncontested first inclusion");
-    let after_first = ledger
-        .effect_view(fixture.committed.identity())
-        .await
-        .expect("effect view after first authorization")
-        .expect("bound effect");
-    let second = ledger
-        .try_authorize_target(
-            fixture.committed.identity(),
-            &after_first
-                .delivery_audit()
-                .head_ref()
-                .expect("head after first authorization"),
-            descriptor.canonical().clone(),
-            Some(fixture.qualification.resource_policy_binding()),
-        )
-        .await
-        .expect("authorize second inclusion")
-        .expect("uncontested second inclusion");
-    let second_attempt_id = second.attempt_id().clone();
-
-    ledger
-        .observe_target(second.complete(returned_attempt_outcome(&valid_result)))
-        .await
-        .expect("observe second inclusion first");
-    let after_second_observation = ledger
-        .effect_view(fixture.committed.identity())
-        .await
-        .expect("effect view after second observation")
-        .expect("bound effect");
-    let second_attempt = after_second_observation
-        .delivery_audit()
-        .attempts()
-        .expect("attempts after second observation")
-        .into_iter()
-        .find(|attempt| attempt.attempt_id() == &second_attempt_id)
-        .expect("second inclusion attempt");
-    let proof = ReferenceTerminalProof::new(
-        second_attempt_id,
-        second_attempt
-            .outcome()
-            .and_then(DeliveryAttemptOutcome::returned_outcome)
-            .cloned()
-            .expect("second returned outcome"),
-        second_attempt
-            .returned_observation_ref()
-            .cloned()
-            .expect("second returned observation"),
-    )
-    .expect("second terminal proof");
-    ledger
-        .append_terminal_tombstone(
-            fixture.committed.identity(),
-            TerminalTombstone::new(
-                EVM_SUBMIT_TRANSACTION_OPERATION_ID,
-                EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
-                proof,
-            )
-            .expect("second terminal tombstone"),
-        )
-        .await
-        .expect("append second terminal tombstone");
-    ledger
-        .observe_target(first.complete(returned_attempt_outcome(&valid_result)))
-        .await
-        .expect("observe first inclusion after tombstone");
-
-    let durable = store
-        .checkpoint()
-        .expect("late-observation checkpoint")
-        .to_durable_bytes()
-        .expect("late-observation checkpoint bytes");
-    let restored = restore_checkpoint(&fixture, &durable);
-    fixture.signer_available.store(false, Ordering::SeqCst);
-    let rpc_calls = fixture.rpc.call_count();
-    let signer_calls = fixture.signer_calls.load(Ordering::SeqCst);
-    let result = fixture
-        .restart(restored.clone())
-        .drive(&fixture.committed)
-        .await
-        .expect("late-observation terminal replay")
-        .into_parts()
-        .expect("late-observation terminal result");
-    assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
-    assert_eq!(fixture.rpc.call_count(), rpc_calls);
-    assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), signer_calls);
-    assert_eq!(
-        restored
-            .checkpoint()
-            .expect("checkpoint after late-observation replay")
-            .to_durable_bytes()
-            .expect("checkpoint bytes after late-observation replay"),
         durable
     );
 }
@@ -1903,14 +2274,14 @@ async fn bounded_rebroadcast_then_replacement_preserves_nonce_and_semantic_reque
 async fn signer_unavailability_never_creates_a_delivery_authorization() {
     let fixture = Fixture::new(Scenario::Succeeded).await;
     fixture.signer_available.store(false, Ordering::SeqCst);
-    let (outcome, failure) = fixture
+    let EffectExecutorOutcomeParts::DidNotEnter(failure) = fixture
         .executor
         .drive(&fixture.committed)
         .await
-        .expect("safe signer failure")
         .into_parts()
-        .expect_err("signer failure must not return an ensure result");
-    assert_eq!(outcome, mfm_capabilities::SafeFailureOutcome::DidNotEnter);
+    else {
+        panic!("signer failure must be did-not-enter")
+    };
     assert_eq!(
         failure.stable_code(),
         &ReferenceFailureCode::DestinationUnavailable

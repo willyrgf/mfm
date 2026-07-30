@@ -1,7 +1,7 @@
 //! Deterministic EVM read and transaction graph authoring.
 
 use mfm_ids::{ContentRef, StableId};
-use mfm_journal::v1::ValueRef;
+use mfm_journal::v2::ValueRef;
 use mfm_program::{AuthoredHandle, AuthoredProgramBuilder, Operation, StateBindings};
 use mfm_spec::{
     AuthoredSourceSelector, CanonicalAuthoredProgram, CanonicalJsonValue, EntryPointContract,

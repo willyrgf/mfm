@@ -1,30 +1,30 @@
 # RFC: Runtime History Choke Point
 
-Status: proposed for discussion — not an implemented or authoritative current contract
+Status: accepted and implemented current recoverability-v3 contract
 
 Scope: run-history ownership, runtime mutation authority, external-access orchestration, typed
 completion, state-transition boundaries, store append APIs, replay, and application admission
 
-This RFC proposes a breaking internal architecture change to enforce the external-access audit
-contract established by `RFC_REFACTOR_RECOVERABILITY.md`. Until this RFC is accepted and
-implemented, `docs/design.md`, `docs/architecture.md`, the recoverability-v2 annex, and the current
-code remain authoritative.
+This RFC records the accepted breaking internal architecture that enforces the external-access
+audit contract established by `RFC_REFACTOR_RECOVERABILITY.md`. It is implemented by the current
+code, `docs/design.md`, `docs/architecture.md`, and the sole production
+`contracts/recoverability/v3` annex and corpus. The byte-identical v1 and v2 artifacts are archival
+and hostile-input references only; no production reader accepts them.
 
-The proposal does not weaken the existing requirements for append-only history, pre-access durable
+This design does not weaken the existing requirements for append-only history, pre-access durable
 authorization, per-append atomicity, affine live authority, content addressing, callback-free
 recorded-history verification, independently durable effect execution, or no-secret persistence.
-It addresses a different problem: the current repository centralizes physical persistence while
-distributing the obligation to persist across several runtime branches.
+It closes the former gap in which physical persistence was centralized while the obligation to
+persist was distributed across several runtime branches.
 
 ## Executive Decision
 
-MFM should keep one active state-machine interpreter: `Runtime`.
+MFM keeps one active state-machine interpreter: `Runtime`.
 
-`Runtime` should be the sole production code-path and type owner of run-history mutation and
-authorized live-access orchestration. Each process assembly should consume its mutation-capable
-history handle into `Runtime` during construction. Application services, replay, trace, audit,
-export, CLI, and REST should retain purpose-specific read-only facades rather than a clone that can
-append.
+`Runtime` is the sole production code-path and type owner of run-history mutation and authorized
+live-access orchestration. Each process assembly consumes its mutation-capable history handle into
+`Runtime` during construction. Application services, replay, trace, audit, export, CLI, and REST
+retain purpose-specific read-only facades rather than a clone that can append.
 
 This is not a deployment-wide singleton-writer claim. Independently assembled runtime workers may
 hold their own non-cloneable mutation handles under the same qualified authoritative writer lineage.
@@ -38,14 +38,19 @@ as a type, `RunHistoryWriter<S>` is passive: it is analogous to an unforgeable f
 owns no scheduling, state interpretation, live invocation, completion classification, cross-phase
 retry, or semantic decision.
 
-One drive should reduce to:
+One drive reduces to:
 
 ```rust
-let step = self.derive_next_step(&view)?;
-self.execute_step(authority, view, step).await
+let decision = self.derive_decision(authority, &view, admitted).await?;
+match select_action(decision) {
+    SelectedAction::Access { candidate, .. } => {
+        self.perform_access(authority, &view, candidate).await
+    }
+    // The remaining closed variants commit local/settlement work or return waiting/closed.
+}
 ```
 
-For every live access, `Runtime` alone should execute one sealed private protocol:
+For every live access, `Runtime` alone executes one sealed private protocol:
 
 ```text
 Prepared<K>
@@ -108,9 +113,9 @@ to a committed observation, the prior unmatched authorization is the authoritati
 does not claim cross-system atomicity that a local Rust type system and local database cannot
 provide.
 
-## Problem Situation
+## Resolved Problem
 
-### The intended contract is stronger than the current ownership structure
+### The contract was stronger than the former ownership structure
 
 The accepted recoverability design requires:
 
@@ -130,12 +135,12 @@ if an authorized wrapper returns,
 runtime must not leave the access path before the observation commits
 ```
 
-That obligation is currently implemented by ordinary control flow in several functions. It is not
-owned by one type or one interpreter boundary.
+That obligation was implemented by ordinary control flow in several functions. The accepted
+cutover moved it behind one type and interpreter boundary.
 
-### Physical persistence is centralized but recording obligation is distributed
+### Physical persistence was centralized but recording obligation was distributed
 
-The current run-history model has one sealed backend append seam:
+The pre-cutover run-history model had one sealed backend append seam:
 
 ```text
 RunJournalBackend::backend_append
@@ -144,8 +149,8 @@ RunJournalBackend::backend_append
 PostgreSQL and the in-memory backend implement that seam. The store validates the candidate,
 assigns its sequence and hashes, binds immutable objects, and publishes the append atomically.
 
-The production code that decides which candidate to construct is more distributed. At the time of
-this RFC, the meaningful authoring sites are:
+The production code that decided which candidate to construct was more distributed. The
+meaningful pre-cutover authoring sites were:
 
 1. application admission;
 2. semantic transitions through the shared transition helper;
@@ -162,7 +167,7 @@ The physical write implementation is therefore centralized, but the answer to �
 post-authorization result now become an observation?” is spread across read, effect, fact-scan,
 erased-dispatch, encoding, and error-propagation paths.
 
-### A normal Rust error can bypass the observation append
+### A normal Rust error could bypass the observation append
 
 The current runtime-facing effect executor returns:
 
@@ -193,7 +198,7 @@ Some outer errors are genuine local integrity failures rather than domain eviden
 not justify making the completed authorized interaction disappear. It means the persisted audit
 contract needs a non-consumable integrity representation.
 
-### The same structural risk exists outside effects
+### The same structural risk existed outside effects
 
 Reads already return a closed capability outcome, but later runtime work can still fail before
 append:
@@ -278,7 +283,7 @@ Using the semantic transition path as the only write point would therefore requi
 
 None of those choices makes observation persistence structurally mandatory.
 
-### Current affine types prove ordering but not complete consumption
+### Former affine types proved ordering but not complete consumption
 
 The current `NewlyAppendedAuthorization` and `AuthorizedReadAccess` /
 `AuthorizedEnsureAccess` types prove important facts:
@@ -356,8 +361,7 @@ The stronger design must combine:
 - Treating `#[must_use]`, comments, code review, or architectural convention alone as the safety
   mechanism.
 - Adding best-effort audit mode or an unaudited fallback when the history store is unavailable.
-- Retaining recoverability-v2 as a second current reader after the new persisted-schema cutover.
-- Implementing the proposal before its material uncertainties are resolved.
+- Retaining recoverability v1 or v2 as a production reader after the v3 persisted-schema cutover.
 
 ## Terminology
 
@@ -481,7 +485,7 @@ non-domain failure. The unmatched authorization remains the complete MFM fact.
 ### G-09: Semantic consumption requires committed proof
 
 State settlement receives only observation views reconstructed from a fresh callback-free
-`VerifiedRunView`. An in-memory pending observation or observation proposal has no semantic
+`VerifiedRunView`. An in-memory pending observation or observation candidate has no semantic
 authority.
 
 ### G-10: Store validation remains authoritative
@@ -502,7 +506,7 @@ Every surviving outcome is converted below the history boundary into a reviewed 
 closed safe metadata. Provider-controlled text and secret-bearing material have no persisted
 representation.
 
-## Proposed Architecture
+## Accepted Architecture
 
 ### One active owner: `Runtime`
 
@@ -562,7 +566,7 @@ All active orchestration remains in `Runtime`; store legality remains in `mfm-st
 - public rendering.
 
 The runtime-facing capability or executor adapter owns the translation from its internal failures,
-actual authority/receipt custody, and exact boundary stage into one closed redaction-safe outcome.
+actual affine-authority consumption, and exact boundary stage into one closed redaction-safe outcome.
 The private runtime adapter totalizes that value into `PendingObservation<K>`. `Runtime`
 exhaustively persists that obligation; it does not infer entry status or retry disposition from an
 error name.
@@ -587,9 +591,10 @@ enum PreparedAccess {
 ```
 
 The planned access form is a private closed concrete sum, not an erased lifecycle object. It has no
-`execute` hook and cannot supply a custom append lifecycle. `execute_step` performs the exhaustive
-three-way match and calls the same generic access bracket. Read, ensure, and fact selection differ
-only in typed material and registered invocation.
+`execute` hook and cannot supply a custom append lifecycle. The runtime's private selected-action
+match dispatches all three variants through the same sealed stage protocol and shared generic
+observation-commit bracket. Read, ensure, and fact selection retain kind-specific preparation,
+typed material, and registered invocation.
 
 `drive_once` remains the sole active driver:
 
@@ -600,10 +605,16 @@ pub async fn drive_once(
 ) -> Result<DriveOutcome> {
     loop {
         let view = self.load_verified(&authority).await?;
-        let step = self.derive_next_step(&authority, &view)?;
-        match self.execute_step(&authority, view, step).await? {
-            StepResult::Outcome(outcome) => return Ok(outcome),
-            StepResult::Replan => {}
+        let decision = self.derive_decision(&authority, &view, admitted).await?;
+        let result = match select_action(decision) {
+            SelectedAction::Access { candidate, .. } => {
+                self.perform_access(&authority, &view, candidate).await?
+            }
+            // The remaining closed variants handle settlement, local work, or waiting.
+        };
+        match result {
+            ActionResult::Outcome(outcome) => return Ok(outcome),
+            ActionResult::Retry => {}
         }
     }
 }
@@ -611,14 +622,15 @@ pub async fn drive_once(
 
 The pseudocode is ownership-oriented, not a commitment to borrowing or allocation details.
 
-`execute_step` is the sole private interpreter of `PlannedRunStep`. A genuine head advance before
-invocation invalidates the plan and returns `StepResult::Replan`; the runtime loop loads the new
-view and derives another step. It may resolve acknowledgement ambiguity for the identical append
-identity without re-planning.
+The selected-action match inside `drive_once` is the sole private interpreter of this conceptual
+algebra. A genuine head advance before invocation invalidates the plan and retries the runtime loop
+against a freshly loaded view. It may resolve acknowledgement ambiguity for the identical append
+identity without invoking.
 
-After a live invocation, the rule is different: `execute_access` retains the sealed
-`PendingObservation<K>`, reloads as required, and retries only its exact linked observation. It may
-not return the pending value for re-planning and may not invoke the external operation again.
+After a live invocation, the rule is different: the kind-specific runtime access method retains the
+sealed `PendingObservation<K>` and delegates to `commit_observation<K>`, which reloads as required
+and retries only its exact linked observation. It may not return the pending value for re-planning
+and may not invoke the external operation again.
 
 ### Transition execution
 
@@ -693,12 +705,6 @@ struct Authorized<K: AccessKind> {
     // Affine authority scoped to one invocation.
 }
 
-enum AuthorizationStep<K: AccessKind> {
-    Fresh(Authorized<K>),
-    Advanced(JournalHead),
-    Replan,
-}
-
 enum PersistableAccessOutcome<K: AccessKind> {
     Returned(PersistableReturned<K>),
     DidNotEnter(PersistableSafeFailure<K>),
@@ -723,17 +729,13 @@ struct CommittedObservation<K: AccessKind> {
     // Private constructor and exact committed observation reference.
 }
 
-enum AccessStepResult<K: AccessKind> {
-    Committed(CommittedObservation<K>),
-    Advanced(JournalHead),
-    Replan,
-}
 ```
 
 Only a directly acknowledged new authorization append can consume `Prepared<K>` and construct
-`AuthorizationStep::Fresh(Authorized<K>)`. An identical already-committed authorization produces
-`Advanced`; a genuine head advance or closure produces `Replan`; unresolved store failure or
-acknowledgement ambiguity produces `AccessInterrupted`. None of those non-fresh outcomes can invoke.
+`Authorized<K>`. An identical already-committed authorization advances without invocation; a
+genuine head advance or closure retries derivation; and a store failure or acknowledgement
+ambiguity before fresh authority returns a reviewed `RuntimeError`. None of those non-fresh
+outcomes can invoke.
 
 Invocation plus totalization consumes `Authorized<K>` and has no normal return other than
 `PendingObservation<K>`. Observation persistence retains `PendingObservation<K>` across physical
@@ -745,34 +747,16 @@ lifecycle, and may not add another fallible invocation-or-totalization result ch
 
 ### One reusable access composition
 
-The only complete live-access sequence is a private `Runtime` method:
-
-```rust
-impl<S> Runtime<S> {
-    async fn execute_access<K: AccessKind>(
-        &self,
-        context: AccessContext<'_>,
-        prepared: Prepared<K>,
-    ) -> Result<AccessStepResult<K>, AccessInterrupted> {
-        match self.authorize(context, prepared).await? {
-            AuthorizationStep::Fresh(authorized) => {
-                let pending = self.invoke_and_totalize(authorized).await;
-                let committed = self.commit_observation(context, pending).await?;
-                Ok(AccessStepResult::Committed(committed))
-            }
-            AuthorizationStep::Advanced(head) => Ok(AccessStepResult::Advanced(head)),
-            AuthorizationStep::Replan => Ok(AccessStepResult::Replan),
-        }
-    }
-}
-```
+`perform_access` exhaustively dispatches the closed `PreparedAccess` sum. Each private kind-specific
+method performs the same fixed order and delegates persistence to the one generic
+`commit_observation<K>` implementation.
 
 The stage operations consume their inputs:
 
 ```text
-authorize:           Prepared<K>           -> Fresh(Authorized<K>) | Advanced | Replan | Interrupted
+authorize:           Prepared<K>           -> Fresh(Authorized<K>) | Advanced | Replan | RuntimeError
 invoke_and_totalize: Authorized<K>         -> PendingObservation<K>
-commit_observation: PendingObservation<K>  -> CommittedObservation<K> | Interrupted
+commit_observation: PendingObservation<K>  -> CommittedObservation<K> | exact conflict
 ```
 
 The awaits and their order are irreducible: authorization must physically commit before IO, and
@@ -783,19 +767,19 @@ The implementation must preserve `PendingObservation<K>` while preparing and res
 observation append attempts. It must not repeat the live invocation after a stale observation
 append or acknowledgement ambiguity.
 
-`AccessInterrupted` carries no returned value, state evidence, or semantic proof. It represents
-failure to complete the runtime protocol, not a domain result.
-
-The boundary between the two closed cases is deliberate:
+The boundary between the two failure classes is deliberate:
 
 - `NonDomainFailure` totalizes a surviving live-boundary return or the producer-free conversion of
   that return into persistable material; and
-- `AccessInterrupted` represents inability to establish or resolve the required durable history,
-  or loss/cancellation of the task that owns the pending obligation.
+- before authority exists, a reviewed runtime/store error may return without a live result;
+- after `PendingObservation<K>` exists, transient load, verification, preparation, append, and
+  acknowledgement failures remain internal retry state. Only exact changed-content conflict
+  returns; task or process loss drops the in-memory obligation and leaves the durable unmatched
+  authorization.
 
 A journal failure must not be recursively converted into `NonDomainFailure` in the journal it
 cannot safely append. Conversely, a live adapter or returned-value encoder must not label an
-ordinary return as `AccessInterrupted` merely to bypass pending-observation construction.
+ordinary return as an outer runtime error merely to bypass pending-observation construction.
 
 ### Fixed state-kind composition
 
@@ -881,7 +865,7 @@ DidNotEnter
 Indeterminate
 ```
 
-This RFC proposes adding:
+The accepted outcome algebra adds:
 
 ```text
 NonDomainFailure {
@@ -902,8 +886,8 @@ NonDomainFailure {
 
 - an authorized invocation produced a surviving operational, protocol, integrity, or contract
   failure that is not domain evidence;
-- the qualified adapter derived a conservative entry-status claim from actual affine
-  authority/receipt custody;
+- the qualified adapter derived a conservative entry-status claim from actual affine-authority
+  consumption and boundary progress;
 - the qualified adapter selected a closed disposition from the reviewed fault taxonomy;
 - the state callback never receives it as ordinary evidence; and
 - replay reproduces its retryable-operational or integrity-blocked projection without invoking
@@ -920,7 +904,7 @@ Store and replay validate the closed code, status, disposition, binding, and per
 code/status/disposition relation. They do not independently prove whether a remote target was
 physically entered.
 
-The proposal prefers a distinct outcome over reusing `DidNotEnter` or `Indeterminate`, because
+The design uses a distinct outcome rather than reusing `DidNotEnter` or `Indeterminate`, because
 certified state policy may consume an admitted safe failure. Operational platform faults and
 integrity corruption must not become domain evidence through that path.
 
@@ -990,8 +974,8 @@ An effect state spans several drives under one fixed runtime-provided lifecycle:
    has occurred. This transition is the stable MFM outbox.
 3. **Prepare ensure.** On a later drive, `Runtime` reconstructs the exact request and executor
    binding and produces `Prepared<Ensure>`. Every expected local validation finishes here.
-4. **Authorize.** `Runtime::execute_access` appends `ExternalAccessAuthorized`. Only a positively
-   acknowledged new append constructs `Authorized<Ensure>`.
+4. **Authorize.** The kind-specific runtime access method appends `ExternalAccessAuthorized`.
+   Only a positively acknowledged new append constructs `Authorized<Ensure>`.
 5. **Invoke executor.** The affine authority is consumed by one `ensure`. The independently fenced
    executor ledger owns effect binding, resource allocation, target-attempt authorization, target
    entry, target observation, retained frontier, and terminal tombstone.
@@ -1035,16 +1019,16 @@ Every normally returned fact-store scan or scan-result conversion failure after 
 become a closed `PendingObservation<FactSelection>`, normally a `NonDomainFailure` or an explicitly
 admitted safe failure. A complete affine scan must be converted exactly once into immutable sealed
 pending material before a predecessor-bound observation candidate is prepared; stale-head retry
-retains that material and never rescans. Only task cancellation, process loss, or inability to
-establish or resolve the required run-history record is `AccessInterrupted`. A returned scan error
-may not escape through a fact-selection-only lifecycle.
+retains that material and never rescans. Store unavailability and unresolved acknowledgement after
+the scan remain inside observation retry; task or process loss leaves the authorization unmatched.
+A returned scan error may not escape through a fact-selection-only lifecycle.
 
 ### Admission through the same mutation owner
 
-Application code currently authenticates, resolves immutable configuration, authors/certifies
-artifacts, prepares admission, and appends `RunAdmitted`.
+Application code authenticates, resolves immutable configuration, and authors/certifies artifacts.
+It constructs the authorized admission plan; runtime owns the append.
 
-The target split is:
+The implemented split is:
 
 ```text
 application:
@@ -1062,7 +1046,7 @@ Runtime:
 ```
 
 `Runtime::admit` is mutation orchestration, not authentication or graph authorship. Application
-code should not retain a direct run-history mutation handle after constructing `Runtime`. Read,
+code does not retain a direct run-history mutation handle after constructing `Runtime`. Read,
 replay, trace, audit, and export use purpose-specific reader facades rather than a clone that can
 also append.
 
@@ -1116,7 +1100,7 @@ They may not:
 - consume `NonDomainFailure`.
 
 The existing “one state request maps to one independently meaningful capability operation” rule
-should be retained and strengthened through registration and certification tests. State size is a
+is retained and strengthened through registration and certification tests. State size is a
 domain-composition concern, not the access-audit enforcement mechanism.
 
 ### Replay boundary
@@ -1140,7 +1124,7 @@ the runtime mutation path.
 
 ### The appealing version
 
-The proposed intuition is:
+The useful intuition was:
 
 > If states were smaller, each meaningful step could produce one state transition, and all
 > persistence could happen at the transition choke point.
@@ -1256,7 +1240,7 @@ Smaller states remain useful when they expose independently meaningful domain op
 - one pure aggregation;
 - one recoverable transaction submission effect.
 
-They should not represent runtime implementation phases such as “authorization append” or
+They do not represent runtime implementation phases such as “authorization append” or
 “observation append.”
 
 The certified execution kind instead selects a reusable runtime-supplied composition. State code
@@ -1274,7 +1258,7 @@ The number of `RecordedEnsure` attempts is reconstructed from history and remain
 Typing relates the request, executor completion, retained evidence, and settlement contracts for
 each attempt; it does not attempt to encode an unbounded attempt count in the certified graph.
 
-The proposal therefore adopts the useful part of the intuition at the runtime-protocol layer:
+The accepted design adopts the useful part of the intuition at the runtime-protocol layer:
 
 > Make the private runtime protocol phases small and typed; do not make them domain states.
 
@@ -1323,22 +1307,23 @@ error into the exhaustive persistable outcome algebra before returning to `Runti
 may not return a raw completion plus a separate fallible encoding or validation step.
 
 This rule prevents `?` from accidentally becoming an unjournaled completion policy.
-`commit_observation` may still return `AccessInterrupted` when the required history cannot be
-established or resolved; that path carries neither the pending value nor a successful access
-result.
+`commit_observation` retries store unavailability, stale predecessors, and acknowledgement
+ambiguity while retaining the pending value. It returns only committed identical content or an
+exact integrity conflict; dropping its task starts no detached completion.
 
 ### Unforgeable success
 
-`Runtime::execute_access` succeeds only with `CommittedObservation<K>`, whose constructor requires a
-positively committed store result or an exact identical-content resolution under the authorization
-logical key.
+The private access bracket succeeds only with `CommittedObservation<K>`, whose constructor requires
+a positively committed store result or an exact identical-content resolution under the
+authorization logical key.
 
-No other successful post-access return type should exist.
+No other successful post-access return type exists.
 
 ### Intermediate values do not escape
 
-`Authorized<K>` and `PendingObservation<K>` remain within `Runtime::execute_access` or its private
-helpers. No caller receives a value and a separate obligation to remember the next method.
+`Authorized<K>` and `PendingObservation<K>` remain within the private runtime access methods,
+`commit_observation<K>`, or their private helpers. No caller receives a value and a separate
+obligation to remember the next method.
 
 This is stronger than publishing a typestate builder such as:
 
@@ -1374,7 +1359,7 @@ The cutover must include compile-fail and architecture tests proving:
   `Authorized<K>`;
 - application code cannot call run-history mutation APIs;
 - scheduler, decision, callback, replay, and application modules cannot access the passive writer;
-- only `Runtime::execute_access` can dispatch registered live invokers; and
+- only the private `Runtime::perform_access` dispatch can reach registered live invokers; and
 - only the private runtime execution module reaches the production append surface.
 
 An architecture text scan alone is not sufficient where type/module privacy can enforce the same
@@ -1407,31 +1392,30 @@ The distinctions preserve:
 - late audit-only observations; and
 - clear replay and disclosure policy.
 
-### Add one audit-only `NonDomainFailure` outcome
+### Retain one audit-only `NonDomainFailure` outcome
 
-The target design requires `NonDomainFailure`. The current three outcomes have no clearly
+The current v3 design includes `NonDomainFailure`. The former three outcomes had no clearly
 non-consumable representation for a surviving operational, protocol, integrity, or contract
 failure. Reusing `DidNotEnter` or `Indeterminate` could turn platform unavailability or corruption
 into state-consumable evidence.
 
-Acceptance requires an exhaustive inventory of every error reachable from the registered live
-boundary through pending-observation construction. That inventory freezes the closed fault-code,
+The completed cutover inventories every error reachable from the registered live boundary through
+pending-observation construction. The v3 annex freezes the closed fault-code,
 conservative entry-status, and
-`RetryableOperational | IntegrityBlocked` disposition relation; it does not decide whether the
-non-domain outcome exists.
+`RetryableOperational | IntegrityBlocked` disposition relation.
 
-The change creates one new current schema identity and corpus, explicitly rejects the old current
-format, and has no dual reader or compatibility writer. No frozen recoverability-v2 bytes may be
-silently reinterpreted.
+The change created one current v3 schema lineage and corpus, explicitly rejects the v1 and v2
+archives, and has no dual reader or compatibility writer. Archived bytes cannot be silently
+reinterpreted.
 
 ## Ownership After Cutover
 
 | Responsibility | Sole owner |
 | --- | --- |
 | Drive loop and pure next-step derivation | `Runtime` over `VerifiedRunView` |
-| Run-history mutation orchestration | `Runtime::execute_step` and `Runtime::admit` |
+| Run-history mutation orchestration | `Runtime::drive_once` selected-action match and `Runtime::admit` |
 | Passive mutation capability custody | `Runtime` |
-| Typed authorization/invocation/observation protocol | `Runtime::execute_access<K>` |
+| Typed authorization/invocation/observation protocol | `Runtime::perform_access` and `Runtime::commit_observation<K>` |
 | Stable pending-observation ownership and physical append retry | `Runtime::commit_observation<K>` |
 | Live request and outcome semantics | Certified state and capability/executor contracts |
 | Low-level boundary-stage and non-domain disposition classification | Registered runtime-facing adapter or executor |
@@ -1456,8 +1440,8 @@ silently reinterpreted.
   compare-and-swap contract.
 - Add one private sealed access-protocol module.
 - Centralize all semantic transition commits under `Runtime::commit_transition`.
-- Replace separate read, effect, and fact-selection lifecycles with
-  `Runtime::execute_access<K>`.
+- Route the closed read, effect, and fact-selection sum through `Runtime::perform_access` and the
+  shared `Runtime::commit_observation<K>` bracket.
 - Keep kind-specific preflight and invocation beneath that shared typed sequence.
 - Return genuine pre-invocation head advances to the runtime loop as `StepResult::Replan`.
 - Retain post-invocation `PendingObservation<K>` independently of predecessor-bound candidates and
@@ -1486,9 +1470,10 @@ silently reinterpreted.
 
 - Retain internal typed `ExecutorError`.
 - Inventory every error site after MFM authorization.
-- Record whether target authority was minted and whether a target receipt exists.
-- Derive boundary stage and non-domain disposition from authority/receipt custody and fault
-  semantics, not error names.
+- Record whether target authority was minted and whether the invocation returned to the executor's
+  retained private completion seal.
+- Derive boundary stage and non-domain disposition from affine-authority consumption, completion
+  progress, and fault semantics, not error names.
 - Project every surviving error into `DidNotEnter`, `Indeterminate`, or `NonDomainFailure`.
 - Preserve independent executor ledger, resource stream, target authorization, target observation,
   frontier, tombstone, and fence.
@@ -1550,10 +1535,9 @@ silently reinterpreted.
   cutover gates, and affected product capability documents.
 - Update the recoverability annex and corpus for the new observation schema.
 - Regenerate every positive and negative golden vector.
-- Update `POST_RFC_TODO.md` so PRF-003 points to the accepted RFC or is removed when complete.
 - Do not retain contradictory descriptions of the old distributed obligation.
 
-## Verification Plan
+## Verification Requirements
 
 ### Compile-fail boundaries
 
@@ -1569,9 +1553,10 @@ silently reinterpreted.
 ### Runtime unit and conformance tests
 
 - Every `PlannedRunStep` variant is exhaustively interpreted.
-- Every access kind passes through `Runtime::execute_access<K>`.
-- Every `AuthorizationStep<K>` variant is exhaustively interpreted.
-- Only `AuthorizationStep::Fresh` dispatches a live invoker.
+- Every access kind passes through `Runtime::perform_access` and
+  `Runtime::commit_observation<K>`.
+- Every authorization append outcome is exhaustively interpreted.
+- Only a directly acknowledged `NewlyAppended::Authorization` dispatches a live invoker.
 - `Advanced`, `Replan`, rejection, and unresolved acknowledgement never mint live authority.
 - Every persistable outcome variant produces exactly one linked pending observation.
 - `NonDomainFailure` is never state-consumable.
@@ -1661,7 +1646,8 @@ operation is legal, and whether recovery repeats IO.
 
 - Only the private runtime execution module uses the passive writer or calls mutation APIs.
 - Scheduler, decision, callback, and replay modules cannot import the passive writer.
-- Only `Runtime::execute_access<K>` can dispatch a registered live invoker.
+- Only `Runtime::perform_access` and its private kind-specific methods can dispatch a registered
+  live invoker.
 - Planned access is one closed concrete sum and no erased invoker can supply an append lifecycle.
 - App has no admission or drive append call.
 - Separately assembled runtime workers may each receive a non-cloneable mutation handle under the
@@ -1670,16 +1656,17 @@ operation is legal, and whether recovery repeats IO.
 - Concrete storage depends only on the raw sealed backend contract.
 - Runtime and replay do not construct competing folds.
 
-## Acceptance Criteria
+## Acceptance State
 
-The RFC implementation is complete only when all of the following are true:
+The implementation satisfies the following accepted criteria:
 
 - production run-history mutation has one code-path/type owner;
 - `Runtime` is the sole active interpreter and mutation code-path owner while independently
   assembled runtimes remain legal under the same qualified writer fence;
 - any separate writer type is passive and non-cloneable;
 - admission and post-admission mutation pass through that owner;
-- every live access kind uses one staged `Runtime::execute_access<K>` path;
+- every live access kind uses the staged `Runtime::perform_access` and
+  `Runtime::commit_observation<K>` path;
 - no runtime-facing live invocation returns an outer error after accepting `Authorized<K>`;
 - every surviving return totalizes into one non-escaping `PendingObservation<K>`;
 - no normal successful drive path can contain a pending observation;
@@ -1765,7 +1752,7 @@ Not selected.
 
 A one-use continuation could make a normally returned success impossible without calling the
 continuation, but it moves persistence waiting and failure handling into the capability future.
-The private `Runtime::execute_access<K>` bracket provides the same normal-return guarantee while
+The private runtime access bracket and shared `commit_observation<K>` provide the same normal-return guarantee while
 preserving the capability boundary.
 
 ### Use `Drop` or `#[must_use]` to force observation
@@ -1790,7 +1777,7 @@ It could retain a completion outside the run journal before process return, but 
 durable writer, recovery protocol, fence, replay relationship, and obligation owner. It also cannot
 atomically cover a remote operation that does not participate in its protocol.
 
-The baseline proposal instead guarantees no successful escape without committed observation and
+The implemented baseline guarantees no successful escape without committed observation and
 uses unmatched authorization for interruption.
 
 ### Treat journaling as best-effort telemetry
@@ -1809,7 +1796,8 @@ Merging it into run semantic authority would weaken ownership and recovery bound
 
 ## Security Considerations
 
-Centralization increases the impact of `Runtime::execute_step` and `Runtime::execute_access`, so
+Centralization increases the impact of the `drive_once` selected-action match,
+`Runtime::perform_access`, and `Runtime::commit_observation`, so
 their accepted plan and persistable outcome algebras must remain deliberately small and closed.
 
 The runtime protocol must:
@@ -1845,7 +1833,7 @@ Strict audit availability remains part of live-operation availability. If author
 commit, live access must not occur. If observation cannot commit, the access step cannot report
 success.
 
-Observation retry must avoid repeating external IO. A definite exact-head conflict should retain
+Observation retry cannot repeat external IO. A definite exact-head conflict retains
 the pending observation and prepare a new physical attempt against the new head. Acknowledgement
 ambiguity must resolve the unchanged old attempt before any such rebase.
 
@@ -1864,7 +1852,7 @@ independently meaningful operation and prove partial-return and cancellation sem
 6. update audit/export projections;
 7. explicitly reject old current data;
 8. inventory and export any evidence that must survive reset; and
-9. remove recoverability-v2 as a current reader/writer.
+9. remove v1 and v2 as production readers/writers.
 
 No persisted bytes are rewritten in place. No dual reader, dual writer, fallback decoder, alias, or
 compatibility mode is permitted.
@@ -1897,8 +1885,8 @@ compatibility mode is permitted.
 - retain pending material across stale-head rebase and resolve acknowledgement ambiguity against
   the unchanged original attempt;
 - totalize `CompletedFactScan` before any observation candidate consumes its affine proof;
-- replace separate read, ensure, and fact-selection lifecycle implementations with
-  `Runtime::execute_access<K>`;
+- route read, ensure, and fact-selection through `Runtime::perform_access` and the shared
+  `Runtime::commit_observation<K>` implementation;
 - perform the inseparable journal/store/replay/schema/golden-vector cutover;
 - update EVM wallet execution and public audit projection;
 - add the complete crash/failure matrix;
@@ -1910,7 +1898,7 @@ compatibility mode is permitted.
 Each commit must leave one coherent current design. Verification is selected by changed boundary,
 not by commit creation, and broad gates must not be redundantly run before `.#ci`.
 
-## Discussion And Decision Gates
+## Accepted Decisions And Closure
 
 The following decisions are accepted by this RFC:
 
@@ -1928,40 +1916,27 @@ The following decisions are accepted by this RFC:
 - completion algebra, shared access composition, observation retry, and persisted-schema changes
   are one inseparable implementation commit.
 
-Implementation must not begin until the remaining decisions are explicit:
+The implementation closes every former decision gate:
 
-1. Can app assembly relinquish every mutation-capable store handle to `Runtime` without creating a
-   cycle?
-2. Can fact selection totalize its affine `CompletedFactScan` into stable pending material without
-   weakening its scan permit, source closure, or attestation rules?
-3. What closed fault-code vocabulary and allowed entry-status/disposition relation does
-   `NonDomainFailure` use?
-4. What exact entry-stage and disposition proof accompanies each executor failure?
-5. Can `Runtime::admit` commit an app-authored `AuthorizedAdmissionPlan` without absorbing
-   authentication, configuration, or certification policy?
-6. Are any deployed recoverability-v2 histories required after the cutover?
-7. What public audit projection, if any, exposes non-domain outcomes and their disposition?
-
-Resolving these questions may change the persisted outcome schema or facade ownership, but must not
-reintroduce multiple mutation owners.
+- app assembly gives mutation custody to `Runtime` and exposes purpose-specific readers elsewhere;
+- fact selection consumes its affine scan into one sealed pending result before observation
+  preparation, so stale-head retry never rescans;
+- the v3 annex freezes the complete `NonDomainFailure` code, entry-status, disposition, and
+  contextual-layer relation;
+- runtime-facing executor adapters classify fresh material separately from retained-history
+  corruption and use exact affine-authority consumption and completion progress;
+- app policy produces an authorized admission plan while runtime alone commits it;
+- production readers accept only the destructive v3 lineage; v1 and v2 are archive-only; and
+- CLI, REST, replay, trace, and audit expose the reviewed non-domain projection without provider
+  text or secret-bearing detail.
 
 ## Material Uncertainties
 
-| Choice or assumption | Why it is uncertain | Consequence if wrong | Resolution or validation |
-| --- | --- | --- | --- |
-| A private passive mutation capability per assembled runtime can exclude app/read/replay mutation without merging runtime and store crates or forbidding multiple workers. | Current app services and purpose authorities share one cloneable concrete store, while Rust crate visibility cannot express a friend-only store API. | Other trusted code may retain a mutation path, or an over-literal singleton handle may weaken concurrency and failover. | Prototype consuming one handle into each assembled `Runtime` while issuing read-only purpose facades; prove app/read mutation fails to compile and independently assembled fenced runtime workers still append through CAS. |
-| Store APIs can resolve stable observation content separately from predecessor-bound append idempotency. | Current append resolution binds append request id, predecessor, candidate digest, and candidate body, while observation uniqueness is a separate authorization logical key. | Reusing one append id after rebase conflicts, while abandoning an outcome-unknown attempt can duplicate or lose authority. | Prototype memory and PostgreSQL flows for absent, identical, changed, stale, and outcome-unknown observations. Require unchanged-attempt resolution before rebase and parity across backends. |
-| One closed concrete `PreparedAccess` sum and generic bracket can cover read, ensure, and fact selection without erasing required differences. | Fact selection has a store-owned affine scan permit and attestation, while ensure carries executor-retained evidence and reads use classifier-bound diagnostics. | A generic hook could hide a safety predicate or recreate a per-kind append lifecycle. | Prototype all three concrete variants. Keep kind-specific proof/material/invocation types while sharing only authorization, invocation/totalization, and observation-persistence sequencing. |
-| `CompletedFactScan` can totalize once into stable immutable pending material before candidate preparation. | It currently owns affine scan authority, selected-source closure, and attestation inputs and is consumed by observation preparation. | A stale head may force rescanning, discard a surviving result, or duplicate an affine proof. | Define the exact consuming conversion, then inject stale and ambiguous observation outcomes and prove no rescan, reinvocation, omission, or attestation substitution. |
-| The exact `NonDomainFailure` fault-code and allowed entry-status/disposition taxonomy is complete and minimal. | The exhaustive live-boundary-through-totalization error inventory has not yet mapped every operational, identity, codec, contract, fact-store scan, and executor failure. | Missing codes recreate an outer escape; broad codes weaken audit meaning; a wrong disposition can permanently wedge a transient outage or retry corruption. | Inventory every surviving live-boundary and returned-value-totalization failure, derive status from actual authority/receipt custody, justify retryability independently, and freeze one closed redaction-safe relation before the schema cutover. |
-| Runtime-facing executor outcomes can be classified using exact boundary stage and non-domain disposition. | Current `ExecutorError` variants do not themselves prove whether target authority was minted, target entry occurred, a target receipt returned, or a failure is safely retryable. | Runtime could falsely record non-entry, retry an integrity failure, or permanently block an operational outage. | Trace authority and receipt custody across every executor await/append/target boundary and inject failure at each point. Make stage and disposition proof part of the closed adapter result. |
-| Returning `AccessInterrupted` after journal failure has an explicit cancellation/liveness contract. | The baseline accepts loss of an in-memory pending observation, but “retry while the task lives” does not by itself define deadlines, shutdown, or definite backend failure behavior. | A normal error return could become an undocumented policy for discarding a surviving result, or the call could wait forever. | Specify which conditions keep retrying, which caller cancellation ends the task, and what public error is returned. Inject store loss before preparation, before commit, and during acknowledgement resolution. |
-| Runtime-owned admission preserves dependency direction. | Application currently owns authentication, immutable configuration resolution, certification, and admission append. | Runtime could absorb app policy, or leaving append in app would retain a second mutation owner. | Prototype `AuthorizedAdmissionPlan`: app owns authentication and immutable preparation; `Runtime::admit` validates and commits only. Recheck crate dependency direction and authority privacy. |
-| A new current schema may reject all recoverability-v2 histories. | The repository policy permits breaking changes, but deployments may contain evidence that must remain accessible. | New binaries cannot read existing histories, while retaining a dual reader violates the one-current-design rule. | Inventory deployed data before implementation. Export required evidence or define a clean reset boundary, then reject old bytes explicitly with no compatibility reader. |
+none
 
-## Proposed Decision Summary
+## Current Decision Summary
 
-The proposed current-design replacement is:
+The implemented current design is:
 
 - one `Runtime` type as the sole active state-machine interpreter and run-history mutation
   code-path owner;
@@ -1999,7 +1974,7 @@ The proposed current-design replacement is:
 - one ordered two-commit cutover with complete failure, crash, replay, PostgreSQL, architecture,
   and no-secret verification.
 
-The proposal deliberately centralizes obligation in the existing runtime rather than introducing
+The design centralizes obligation in the existing runtime rather than introducing
 another active coordinator or merely centralizing storage. It preserves the distributed-systems
 boundary that requires separate authorization and observation commits, while making a normal
 unrecorded completion impossible to represent outside the one runtime protocol that owns both.

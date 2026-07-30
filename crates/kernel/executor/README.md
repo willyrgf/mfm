@@ -7,8 +7,8 @@ effects. It provides:
 - strict executor-contract descriptors bound to exactly one verified binding;
 - an append-only effect and resource ledger contract;
 - bounded predecessor-linked delivery-audit frontiers;
-- affine target-entry authorization and a non-clone `TargetOperationReceipt` consumed by immutable
-  observation;
+- affine target-entry authorization whose private completion seal normalizes and binds an opaque
+  target outcome before immutable observation;
 - terminal tombstones;
 - a memory conformance backend;
 - account-sequence and finite-inventory resource-policy examples; and
@@ -52,8 +52,9 @@ safe failure, and every retained closure relation to the one shared
 contract. Domain values remain reachable through the shared producer-bound `mfm.value-ref.v1`
 journal object; this crate defines no substitute `ValueRef`. A `CommittedEffectRequest` fixes data
 identity but grants no target access.
-`TargetEntryAuthority` is the one-shot authorization, and only the corresponding
-`TargetOperationReceipt` can append its observation.
+`TargetEntryAuthority` exposes only the four durable entry coordinates needed by a target. The
+ledger retains the corresponding affine completion seal, normalizes the opaque target outcome, and
+binds it to those coordinates before appending its observation.
 
 Resource allocation retains and revalidates the exact policy and policy-configuration reference
 pair on every refold. `verify_ensure_result` reconstructs one predecessor-linked delivery audit,

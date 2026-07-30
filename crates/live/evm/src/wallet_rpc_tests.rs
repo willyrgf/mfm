@@ -67,7 +67,7 @@ fn request() -> EvmSubmitTransactionRequest {
         reference("finality-policy"),
         reference("assurance-policy"),
         EvmWalletConvergencePlan::new(2, 2, 2, 2, 2, 16 * 1024).expect("plan"),
-        EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024).expect("bounds"),
+        EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 32 * 1024, 2, 32 * 1024).expect("bounds"),
     )
     .expect("policy");
     let template_ref = {

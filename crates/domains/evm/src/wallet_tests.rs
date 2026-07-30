@@ -48,7 +48,7 @@ fn policy() -> EvmWalletPolicy {
         reference("finality-policy"),
         reference("assurance-policy"),
         EvmWalletConvergencePlan::new(1, 1, 1, 1, 1, 8 * 1024).expect("plan"),
-        EvidenceBounds::new(8, 32, 4 * 1024 * 1024, 2, 8 * 1024).expect("bounds"),
+        EvidenceBounds::new(8, 32, 4 * 1024 * 1024, 16 * 1024, 2, 16 * 1024).expect("bounds"),
     )
     .expect("policy")
 }
@@ -380,10 +380,36 @@ fn convergence_budget_must_fit_executor_bounds_at_construction() {
         reference("finality"),
         reference("assurance"),
         EvmWalletConvergencePlan::new(1, 1, 1, 1, 1, 4096).expect("plan"),
-        EvidenceBounds::new(4, 32, 1024 * 1024, 2, 4096).expect("bounds"),
+        EvidenceBounds::new(4, 32, 1024 * 1024, 4096, 2, 4096).expect("bounds"),
     );
     assert_eq!(
         result,
         Err(EvmWalletError::BoundExceeded("evidence_attempts"))
+    );
+}
+
+#[test]
+fn completion_bounds_are_bound_without_a_rough_domain_wrapper_allowance() {
+    let result = EvmWalletPolicy::new(
+        reference("wallet-domain"),
+        TenantScopeId::new("mfm.tenant_scope.v1:00000000000000000000000000000001").expect("tenant"),
+        reference("route"),
+        1,
+        SENDER,
+        reference("signer"),
+        reference("nonce-policy"),
+        0,
+        reference("nonce"),
+        fee_schedule(),
+        reference("known"),
+        reference("finality"),
+        reference("assurance"),
+        EvmWalletConvergencePlan::new(1, 1, 1, 1, 1, 8 * 1024).expect("plan"),
+        EvidenceBounds::new(8, 32, 1024 * 1024, 8 * 1024, 2, 8 * 1024).expect("bounds"),
+    )
+    .expect("pure policy binds the exact generic completion contract");
+    assert_eq!(
+        result.evidence_bounds().max_completion_record_bytes(),
+        8 * 1024
     );
 }

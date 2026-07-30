@@ -2,13 +2,15 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2};
+use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContractV3};
 use mfm_executor::{
-    AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome, CommittedEffectRequest,
-    ContentRef, EvidenceBounds, ExecutorBinding, ExecutorContractDescriptor, ExecutorDeployment,
-    ExecutorError, ExecutorLedgerStoreIdentity, ExecutorRetainedClosureContract,
-    KeyedExecutorLedger, ResourceOwnership, ResourcePolicyBinding, RetainedValueContract,
-    SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
+    reference_safe_failure, AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome,
+    BoundaryStage, CommittedEffectRequest, ContentRef, DeliveryAttemptOutcome, EvidenceBounds,
+    ExecuteTargetOutcome, ExecutorBinding, ExecutorContractDescriptor, ExecutorDeployment,
+    ExecutorError, ExecutorLedgerStoreIdentity, ExecutorRetainedClosureContract, FailureClass,
+    KeyedExecutorLedger, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
+    NonDomainFailureCode, ReferenceFailureCode, ResourceOwnership, ResourcePolicyBinding,
+    RetainedValueContract, SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
@@ -30,8 +32,8 @@ struct Fixture {
     tenant_scope_id: TenantScopeId,
 }
 
-fn contract() -> &'static RecoverabilityContractV2 {
-    RecoverabilityContractV2::embedded().expect("recoverability contract")
+fn contract() -> &'static RecoverabilityContractV3 {
+    RecoverabilityContractV3::embedded().expect("recoverability contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -77,11 +79,11 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -89,15 +91,15 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v1",
+            "mfm.executor-terminal-tombstone.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v1",
+            "mfm.executor-reference-terminal-proof.v2",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
-            "mfm.executor-reference-queue-result.v1",
+            "mfm.executor-reference-queue-result.v2",
         ),
     )
     .expect("retained closure")
@@ -134,7 +136,7 @@ fn fixture(label: &str) -> Fixture {
         retained_closure_contract(label),
         reviewed_ref(&format!("{label}.safe-failure-contract")),
         reviewed_ref(&format!("{label}.destination-domain")),
-        EvidenceBounds::new(64, 256, 4_000_000, 2, 16_384).expect("bounds"),
+        EvidenceBounds::new(64, 256, 4_000_000, 16_384, 2, 16_384).expect("bounds"),
         Some(resource_domain_ref),
         Vec::new(),
     )
@@ -193,6 +195,64 @@ fn committed(
     .expect("committed effect")
 }
 
+fn adversarial_delivery_outcomes(fixture: &Fixture) -> [(&'static str, DeliveryAttemptOutcome); 4] {
+    let wrong_outcome_tuple = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            fixture
+                .binding
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BoundaryEntry,
+        )
+        .expect("structurally valid wrong outcome tuple"),
+    )
+    .expect("wrong tuple candidate");
+    let illegal_fact_layer = DeliveryAttemptOutcome::non_domain_failure(
+        NonDomainFailure::new(
+            NonDomainEntryStatus::MayHaveEntered,
+            NonDomainDisposition::RetryableOperational,
+            NonDomainFailureCode::FactStoreUnavailable,
+        )
+        .expect("globally valid fact-layer failure"),
+    )
+    .expect("fact-layer candidate");
+    let wrong_safe_failure_contract = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            reviewed_ref("postgres.hostile.safe-failure-contract"),
+            ReferenceFailureCode::GenerationFenced,
+            FailureClass::Authorization,
+            BoundaryStage::BeforeBoundaryEntry,
+        )
+        .expect("wrong-contract safe failure"),
+    )
+    .expect("wrong-contract candidate");
+    let wrong_returned_schema =
+        DeliveryAttemptOutcome::returned(reviewed_value("postgres.hostile.returned-schema"))
+            .expect("wrong-schema returned candidate");
+    [
+        ("wrong-outcome-tuple", wrong_outcome_tuple),
+        ("illegal-fact-layer", illegal_fact_layer),
+        ("wrong-safe-failure-contract", wrong_safe_failure_contract),
+        ("wrong-returned-schema", wrong_returned_schema),
+    ]
+}
+
+fn assert_adapter_contract_violation(outcome: &DeliveryAttemptOutcome) {
+    assert!(outcome.returned_outcome().is_none());
+    assert!(outcome.did_not_enter_failure().is_none());
+    assert!(outcome.indeterminate_failure().is_none());
+    let fields = outcome
+        .non_domain_failure_value()
+        .expect("adapter failure outcome")
+        .fields();
+    assert_eq!(fields.entry_status, NonDomainEntryStatus::MayHaveEntered);
+    assert_eq!(fields.disposition, NonDomainDisposition::IntegrityBlocked);
+    assert_eq!(fields.code, NonDomainFailureCode::AdapterContractViolation);
+}
+
 struct TestDatabase {
     admin_pool: PgPool,
     pool: PgPool,
@@ -241,6 +301,28 @@ impl TestDatabase {
         let sibling = Self::create().await;
         assert_eq!(sibling.database_url, self.database_url);
         sibling
+    }
+
+    async fn set_retired_schema_contract_version(&self) {
+        sqlx::query(
+            "ALTER TABLE executor_schema_metadata \
+             DISABLE TRIGGER ALL, \
+             DROP CONSTRAINT executor_schema_metadata_version_v1",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("remove executor metadata guards");
+        sqlx::query(
+            "UPDATE executor_schema_metadata \
+             SET schema_contract_version = 'mfm.executor-postgres.v1'",
+        )
+        .execute(&self.pool)
+        .await
+        .expect("retain retired executor schema version");
+        sqlx::query("ALTER TABLE executor_schema_metadata ENABLE TRIGGER ALL")
+            .execute(&self.pool)
+            .await
+            .expect("restore executor metadata mutation guard");
     }
 
     async fn database_identity(&self) -> (String, u32) {
@@ -394,6 +476,26 @@ async fn fenced_postgres_executor_qualification_matrix() {
     .await
     .expect("public-schema isolation probe"));
     let primary_fixture = fixture("postgres-qualified");
+
+    let retired = original.create_sibling().await;
+    retired.set_retired_schema_contract_version().await;
+    let retired_fence = ModeledFence::new(
+        &retired,
+        ExecutorLedgerStoreIdentity::from_binding(&primary_fixture.binding),
+    )
+    .await;
+    assert_eq!(
+        open_executor_store(
+            retired.pool.clone(),
+            primary_fixture.binding.clone(),
+            retired_fence,
+        )
+        .await
+        .expect_err("retired executor baseline must not qualify"),
+        PostgresExecutorStoreError::SchemaAuthorityMismatch
+    );
+    retired.cleanup().await;
+
     let identity = ExecutorLedgerStoreIdentity::from_binding(&primary_fixture.binding);
     let fence = ModeledFence::new(&original, identity).await;
     let store = open_executor_store(
@@ -412,7 +514,17 @@ async fn fenced_postgres_executor_qualification_matrix() {
     hostile_bind_concurrency(&engine, &primary_fixture, &original).await;
     exact_nonce_resource_cas(&engine, &primary_fixture, &original).await;
     ambiguity_never_returns_target_authority(&engine, &store, &primary_fixture, &original).await;
+    oversized_target_result_survives_strict_reopen(&engine, &primary_fixture, &original, &fence)
+        .await;
+    affine_completion_normalizes_all_unbound_outcomes_across_postgres_reopen(
+        &engine,
+        &primary_fixture,
+        &original,
+        &fence,
+    )
+    .await;
     application_role_cannot_mutate_authority(&original).await;
+    hostile_content_inventory_is_rejected(&original, &primary_fixture).await;
 
     open_executor_store(
         original.pool.clone(),
@@ -608,18 +720,35 @@ async fn ambiguity_never_returns_target_authority(
         .bind_effect(request.identity())
         .await
         .expect("bind ambiguous request");
+    let target_operation = reviewed_value("postgres.target-operation");
+    let head = engine
+        .effect_view(request.identity())
+        .await
+        .expect("load bound request")
+        .expect("bound request")
+        .delivery_audit()
+        .head_ref()
+        .expect("head");
+    let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let invoked_by_target = Arc::clone(&invoked);
     store.inject_qualification_fault(PostgresExecutorFaultPoint::AfterCommitBeforeAcknowledgement);
     assert_eq!(
         engine
-            .authorize_target(
+            .execute_target_once(
                 request.identity(),
-                reviewed_value("postgres.target-operation"),
+                &head,
+                target_operation.clone(),
                 None,
+                move |_| {
+                    invoked_by_target.store(true, Ordering::SeqCst);
+                    async { unreachable!("ambiguous authorization cannot invoke the target") }
+                },
             )
             .await
             .expect_err("ambiguous commit cannot return target authority"),
         ExecutorError::DurableAppendOutcomeUnknown
     );
+    assert!(!invoked.load(Ordering::SeqCst));
     let view = engine
         .effect_view(request.identity())
         .await
@@ -627,20 +756,54 @@ async fn ambiguity_never_returns_target_authority(
         .expect("ambiguous effect exists");
     assert_eq!(view.delivery_audit().attempt_count(), 1);
 
-    let authority = engine
-        .authorize_target(
+    let head = view.delivery_audit().head_ref().expect("ambiguous head");
+    let safe_failure = reference_safe_failure(
+        reviewed_ref("postgres.safe-failure"),
+        ReferenceFailureCode::DestinationUnavailable,
+        FailureClass::Transport,
+        BoundaryStage::BeforeBoundaryEntry,
+    )
+    .expect("safe failure");
+    let outcome =
+        DeliveryAttemptOutcome::did_not_enter(safe_failure).expect("target failure outcome");
+    let attempt_id = Arc::new(Mutex::new(None));
+    let target_attempt_id = Arc::clone(&attempt_id);
+    let target_invocations = Arc::new(AtomicU64::new(0));
+    let invocations = Arc::clone(&target_invocations);
+    let store_for_observation = store.clone();
+    let target = engine
+        .execute_target_once(
             request.identity(),
-            reviewed_value("postgres.target-operation"),
+            &head,
+            target_operation.clone(),
             None,
+            move |authority| {
+                *target_attempt_id.lock().expect("attempt lock") =
+                    Some(authority.attempt_id().clone());
+                async move {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    store_for_observation.inject_qualification_fault(
+                        PostgresExecutorFaultPoint::AfterCommitBeforeAcknowledgement,
+                    );
+                    outcome
+                }
+            },
         )
         .await
-        .expect("fresh positively acknowledged authority");
+        .expect("target survives an ambiguous observation acknowledgement");
+    assert!(matches!(target, ExecuteTargetOutcome::Observed(_)));
+    assert_eq!(target_invocations.load(Ordering::SeqCst), 1);
+    let attempt_id = attempt_id
+        .lock()
+        .expect("attempt lock")
+        .clone()
+        .expect("target invocation");
     assert_eq!(
         engine
-            .target_operation(request.identity(), authority.attempt_id())
+            .target_operation(request.identity(), &attempt_id)
             .await
             .expect("recover retained target operation"),
-        reviewed_value("postgres.target-operation")
+        target_operation
     );
     let lock_name = format!(
         "mfm.executor-postgres.effect.v1:{}",
@@ -670,7 +833,148 @@ async fn ambiguity_never_returns_target_authority(
     .execute(&database.admin_pool)
     .await
     .expect("release test advisory lock");
-    drop(authority);
+}
+
+async fn oversized_target_result_survives_strict_reopen(
+    engine: &KeyedExecutorLedger<mfm_storage_executor_postgres::QualifiedPostgresExecutorStore>,
+    fixture: &Fixture,
+    database: &TestDatabase,
+    fence: &ModeledFence,
+) {
+    let request = committed(fixture, 5, "postgres.oversized-result");
+    let initial = engine
+        .bind_effect(request.identity())
+        .await
+        .expect("bind oversized-result request");
+    let expected_head = initial.delivery_audit().head_ref().expect("head");
+    let mut oversized_bytes = Vec::with_capacity((32 * 1024) + 2);
+    oversized_bytes.push(b'"');
+    oversized_bytes.extend(std::iter::repeat_n(b'x', 32 * 1024));
+    oversized_bytes.push(b'"');
+    let oversized = SchemaQualifiedCanonicalValue::new(
+        fixture
+            .binding
+            .contract()
+            .retained_closure_contract()
+            .domain_evidence_contract()
+            .schema_id()
+            .clone(),
+        &oversized_bytes,
+    )
+    .expect("oversized schema-qualified result");
+    let oversized = DeliveryAttemptOutcome::returned(oversized).expect("returned outcome");
+    let observed = engine
+        .execute_target_once(
+            request.identity(),
+            &expected_head,
+            reviewed_value("postgres.oversized-result-target"),
+            None,
+            move |_authority| async move { oversized },
+        )
+        .await
+        .expect("bounded observation");
+    let ExecuteTargetOutcome::Observed(view) = observed else {
+        panic!("fresh authorization must be observed")
+    };
+    assert_result_unrepresentable(&view);
+
+    let reopened_store = open_executor_store(
+        database.pool.clone(),
+        fixture.binding.clone(),
+        fence.clone(),
+    )
+    .await
+    .expect("strict reopen after totalized oversized result");
+    let reopened = KeyedExecutorLedger::new(reopened_store, fixture.binding.clone())
+        .expect("reopened keyed executor ledger");
+    let view = reopened
+        .effect_view(request.identity())
+        .await
+        .expect("reopened effect")
+        .expect("persisted effect");
+    assert_result_unrepresentable(&view);
+}
+
+async fn affine_completion_normalizes_all_unbound_outcomes_across_postgres_reopen(
+    engine: &KeyedExecutorLedger<mfm_storage_executor_postgres::QualifiedPostgresExecutorStore>,
+    fixture: &Fixture,
+    database: &TestDatabase,
+    fence: &ModeledFence,
+) {
+    let invocations = Arc::new(AtomicU64::new(0));
+    let mut identities = Vec::new();
+
+    for (index, (label, hostile)) in adversarial_delivery_outcomes(fixture)
+        .into_iter()
+        .enumerate()
+    {
+        let seed = u8::try_from(6 + index).expect("test seed");
+        let request = committed(fixture, seed, label);
+        identities.push(request.identity().clone());
+        let initial = engine
+            .bind_effect(request.identity())
+            .await
+            .expect("bind adversarial request");
+        let expected_head = initial.delivery_audit().head_ref().expect("head");
+        let invoked = Arc::clone(&invocations);
+        let observed = engine
+            .execute_target_once(
+                request.identity(),
+                &expected_head,
+                reviewed_value(&format!("postgres.{label}.target")),
+                None,
+                move |_authority| async move {
+                    invoked.fetch_add(1, Ordering::SeqCst);
+                    hostile
+                },
+            )
+            .await
+            .expect("sealed observation");
+        let ExecuteTargetOutcome::Observed(view) = observed else {
+            panic!("fresh target authority must be observed")
+        };
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1, "{label}");
+        assert_adapter_contract_violation(attempts[0].outcome().expect("one exact observation"));
+    }
+    assert_eq!(invocations.load(Ordering::SeqCst), 4);
+
+    let reopened_store = open_executor_store(
+        database.pool.clone(),
+        fixture.binding.clone(),
+        fence.clone(),
+    )
+    .await
+    .expect("strict reopen after adversarial outcome normalization");
+    let reopened = KeyedExecutorLedger::new(reopened_store, fixture.binding.clone())
+        .expect("reopened keyed executor ledger");
+    for identity in identities {
+        let view = reopened
+            .effect_view(&identity)
+            .await
+            .expect("reopened view")
+            .expect("persisted effect");
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_adapter_contract_violation(
+            attempts[0].outcome().expect("reopened exact observation"),
+        );
+    }
+}
+
+fn assert_result_unrepresentable(view: &mfm_executor::EffectEntryView) {
+    let attempts = view.delivery_audit().attempts().expect("attempts");
+    let failure = attempts
+        .last()
+        .expect("attempt")
+        .outcome()
+        .expect("outcome")
+        .indeterminate_failure()
+        .expect("oversized result must be totalized");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
 }
 
 async fn application_role_cannot_mutate_authority(database: &TestDatabase) {
@@ -710,6 +1014,124 @@ async fn application_role_cannot_mutate_authority(database: &TestDatabase) {
     .await
     .expect("role separation");
     assert!(!executor_is_store_member);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HostileContentMutation {
+    Missing,
+    Extra,
+    Conflicting,
+}
+
+async fn hostile_content_inventory_is_rejected(source: &TestDatabase, fixture: &Fixture) {
+    for mutation in [
+        HostileContentMutation::Missing,
+        HostileContentMutation::Extra,
+        HostileContentMutation::Conflicting,
+    ] {
+        let hostile = source.create_sibling().await;
+        hostile.copy_authority_from(source, true).await;
+        mutate_content_inventory(&hostile, mutation).await;
+        let fence = ModeledFence::new(
+            &hostile,
+            ExecutorLedgerStoreIdentity::from_binding(&fixture.binding),
+        )
+        .await;
+        assert_eq!(
+            open_executor_store(hostile.pool.clone(), fixture.binding.clone(), fence,)
+                .await
+                .expect_err("strict reopen must reject a hostile content inventory"),
+            PostgresExecutorStoreError::CorruptLedger,
+            "mutation {mutation:?}"
+        );
+        hostile.cleanup().await;
+    }
+}
+
+async fn mutate_content_inventory(database: &TestDatabase, mutation: HostileContentMutation) {
+    let replacement = reviewed_value("postgres.hostile.content");
+    let replacement_ref = replacement.reference().expect("replacement ref");
+    match mutation {
+        HostileContentMutation::Missing => {
+            disable_content_immutability(database).await;
+            let result = sqlx::query(AssertSqlSafe(format!(
+                "DELETE FROM {}.executor_content_records \
+                 WHERE (schema_id, content_digest) = ( \
+                     SELECT schema_id, content_digest \
+                     FROM {}.executor_content_records \
+                     ORDER BY schema_id, content_digest \
+                     LIMIT 1 \
+                 )",
+                database.schema, database.schema
+            )))
+            .execute(&database.admin_pool)
+            .await
+            .expect("delete retained content");
+            assert_eq!(result.rows_affected(), 1);
+            enable_content_immutability(database).await;
+        }
+        HostileContentMutation::Extra => {
+            let result = sqlx::query(AssertSqlSafe(format!(
+                "INSERT INTO {}.executor_content_records \
+                 (schema_id, content_digest, canonical_bytes) \
+                 VALUES ($1, $2, $3)",
+                database.schema
+            )))
+            .bind(replacement_ref.schema_id().as_str())
+            .bind(replacement_ref.content_digest().as_str())
+            .bind(replacement.as_bytes())
+            .execute(&database.admin_pool)
+            .await
+            .expect("insert unreachable retained content");
+            assert_eq!(result.rows_affected(), 1);
+        }
+        HostileContentMutation::Conflicting => {
+            disable_content_immutability(database).await;
+            let result = sqlx::query(AssertSqlSafe(format!(
+                "UPDATE {}.executor_content_records \
+                 SET canonical_bytes = $1 \
+                 WHERE (schema_id, content_digest) = ( \
+                     SELECT schema_id, content_digest \
+                     FROM {}.executor_content_records \
+                     WHERE schema_id = $2 \
+                       AND content_digest <> $3 \
+                     ORDER BY content_digest \
+                     LIMIT 1 \
+                 )",
+                database.schema, database.schema
+            )))
+            .bind(replacement.as_bytes())
+            .bind(replacement_ref.schema_id().as_str())
+            .bind(replacement_ref.content_digest().as_str())
+            .execute(&database.admin_pool)
+            .await
+            .expect("replace retained content under a conflicting digest");
+            assert_eq!(result.rows_affected(), 1);
+            enable_content_immutability(database).await;
+        }
+    }
+}
+
+async fn disable_content_immutability(database: &TestDatabase) {
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {}.executor_content_records \
+         DISABLE TRIGGER executor_content_records_no_update",
+        database.schema
+    )))
+    .execute(&database.admin_pool)
+    .await
+    .expect("disable content immutability trigger");
+}
+
+async fn enable_content_immutability(database: &TestDatabase) {
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {}.executor_content_records \
+         ENABLE TRIGGER executor_content_records_no_update",
+        database.schema
+    )))
+    .execute(&database.admin_pool)
+    .await
+    .expect("reenable content immutability trigger");
 }
 
 async fn corrupt_frontier_payload(database: &TestDatabase) {

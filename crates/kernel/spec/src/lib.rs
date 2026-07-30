@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Canonical recoverability-v2 program, planning, and execution contracts.
+//! Canonical recoverability-v3 program, planning, and execution contracts.
 //!
 //! This crate contains value contracts only. It does not author programs, run
 //! planners, execute states, bind live capabilities, or grant admission
@@ -28,7 +28,7 @@ pub enum SpecError {
     RetainedValueContract(#[from] mfm_values::ValueError),
     /// A journal-owned retained-value contract could not be reconstructed.
     #[error(transparent)]
-    Journal(#[from] mfm_journal::v1::JournalError),
+    Journal(#[from] mfm_journal::v2::JournalError),
 }
 
 impl From<IdentityError> for SpecError {
@@ -61,7 +61,7 @@ pub fn exact_content_ref(
     .map_err(Into::into)
 }
 
-/// Frozen recoverability-v2 planning and graph values.
+/// Frozen recoverability-v3 planning and graph values.
 pub mod v1;
 
 pub use v1::*;

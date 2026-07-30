@@ -29,6 +29,10 @@ use std::collections::BTreeSet;
 use mfm_canonical::sha256_digest_bytes;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
 use mfm_ids::{DigestAlgorithm, EffectKind, EffectVersion, NameToken};
+pub use non_domain_failure::{
+    NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure, NonDomainFailureCode,
+    NonDomainFailureError, NonDomainFailureFields, NonDomainFailureLayer,
+};
 pub use provider_diagnostic::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
@@ -40,6 +44,7 @@ pub use safe_failure::{
     SAFE_FAILURE_CLASSIFIER_DESCRIPTOR_VERSION,
 };
 
+mod non_domain_failure;
 mod provider_diagnostic;
 mod safe_failure;
 

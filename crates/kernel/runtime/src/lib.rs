@@ -8,6 +8,7 @@
 //! semantic callbacks, and value-only views remain owned by `mfm-program`.
 
 mod access;
+mod access_protocol;
 mod admission;
 mod append_id;
 mod callback_material;

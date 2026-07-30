@@ -1,8 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
-use mfm_capabilities::{BoundaryStage, FailureClass};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
+use mfm_capabilities::{
+    BoundaryStage, FailureClass, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
+    NonDomainFailureCode,
+};
 use mfm_ids::{AttemptId, ContentRef, RequestDigest};
 
 use crate::codec::{Decoder, Encoder};
@@ -10,12 +13,12 @@ use crate::contract::{
     canonical_object, encode, validate_reference_effect_identifier, CanonicalExecutorRequest,
     CommittedEffectRequest, SchemaQualifiedCanonicalValue,
 };
-use crate::engine::{ExecutorLedgerStore, KeyedExecutorLedger};
+use crate::engine::{ExecuteTargetOutcome, ExecutorLedgerStore, KeyedExecutorLedger};
 use crate::frontier::{
     reference_safe_failure, DeliveryAttemptOutcome, DeliveryAudit, ReferenceFailureCode,
     ReferenceTerminalProof, ReturnedOutcome, TerminalTombstone,
 };
-use crate::ledger::{EffectEntryView, TargetEntryAuthority, TargetOperationReceipt};
+use crate::ledger::{EffectEntryView, TargetEntryAuthority};
 use crate::retained::{
     verify_ensure_result, ExecutorEnsureResultClaim, ExecutorRetainedClosureClaim,
     ExecutorTerminalEvidenceClaim, ProofBasis, VerifiedEnsureResult,
@@ -23,7 +26,7 @@ use crate::retained::{
 use crate::{ExecutorError, Result};
 
 const REFERENCE_REQUEST_SCHEMA: &str = "mfm.executor-reference-queue-request.v1";
-const REFERENCE_RESULT_SCHEMA: &str = "mfm.executor-reference-queue-result.v1";
+const REFERENCE_RESULT_SCHEMA: &str = "mfm.executor-reference-queue-result.v2";
 const VALUE_REF_SCHEMA: &str = "mfm.value-ref.v1";
 const STABLE_ID_SCHEMA: &str = "mfm.primitive-stable_id.v1";
 const DESTINATION_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMEDQ02";
@@ -33,7 +36,7 @@ const MAX_DESTINATION_ITEMS: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceRequest {
     external_operation_identity: String,
-    payload_ref: ValidatedCanonicalValueV2,
+    payload_ref: ValidatedCanonicalValueV3,
     canonical: SchemaQualifiedCanonicalValue,
 }
 
@@ -42,7 +45,7 @@ impl ReferenceRequest {
     /// object.
     pub fn new(
         external_operation_identity: impl Into<String>,
-        payload_ref: ValidatedCanonicalValueV2,
+        payload_ref: ValidatedCanonicalValueV3,
     ) -> Result<Self> {
         if payload_ref.schema_contract() != VALUE_REF_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
@@ -76,7 +79,7 @@ impl ReferenceRequest {
     }
 
     /// Strictly reconstructs a request from the exact frozen queue schema.
-    pub fn from_validated(validated: ValidatedCanonicalValueV2) -> Result<Self> {
+    pub fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
         if validated.schema_contract() != REFERENCE_REQUEST_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
         }
@@ -109,7 +112,7 @@ impl ReferenceRequest {
     }
 
     /// Returns the complete producer-bound payload reference.
-    pub const fn payload_ref(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn payload_ref(&self) -> &ValidatedCanonicalValueV3 {
         &self.payload_ref
     }
 }
@@ -129,6 +132,8 @@ pub struct ReferenceContract {
     terminal_outcome: String,
     assurance_policy_ref: ContentRef,
     safe_failure_contract_ref: ContentRef,
+    adapter_failure: DeliveryAttemptOutcome,
+    result_encoding_failure: DeliveryAttemptOutcome,
 }
 
 impl ReferenceContract {
@@ -146,6 +151,22 @@ impl ReferenceContract {
             &CanonicalValue::String(terminal_outcome.clone()),
         )?;
         let enqueue_operation_ref = enqueue_operation.reference()?;
+        let adapter_failure = DeliveryAttemptOutcome::non_domain_failure(
+            NonDomainFailure::new(
+                NonDomainEntryStatus::MayHaveEntered,
+                NonDomainDisposition::IntegrityBlocked,
+                NonDomainFailureCode::AdapterContractViolation,
+            )
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?,
+        )?;
+        let result_encoding_failure = DeliveryAttemptOutcome::non_domain_failure(
+            NonDomainFailure::new(
+                NonDomainEntryStatus::MayHaveEntered,
+                NonDomainDisposition::IntegrityBlocked,
+                NonDomainFailureCode::ResultEncodingFailure,
+            )
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?,
+        )?;
         Ok(Self {
             destination_domain_ref,
             enqueue_operation,
@@ -153,6 +174,8 @@ impl ReferenceContract {
             terminal_outcome,
             assurance_policy_ref,
             safe_failure_contract_ref,
+            adapter_failure,
+            result_encoding_failure,
         })
     }
 
@@ -185,6 +208,15 @@ impl ReferenceContract {
     pub const fn safe_failure_contract_ref(&self) -> &ContentRef {
         &self.safe_failure_contract_ref
     }
+
+    /// Returns the reviewed unbound adapter-failure outcome used when a
+    /// destination wrapper cannot represent its result.
+    pub fn adapter_failure_return(&self) -> ReferenceDestinationReturn {
+        ReferenceDestinationReturn {
+            outcome: self.adapter_failure.clone(),
+            safe_result: None,
+        }
+    }
 }
 
 /// Conformance behavior selected below the reference target boundary.
@@ -202,26 +234,26 @@ pub enum ReferenceTargetBehavior {
     CancelledDuringEntry,
 }
 
-/// One destination call's receipt plus any exact safe queue-result object.
+/// One destination call's unbound outcome plus any exact safe queue-result object.
 pub struct ReferenceDestinationReturn {
-    receipt: TargetOperationReceipt,
-    safe_result: Option<ValidatedCanonicalValueV2>,
+    outcome: DeliveryAttemptOutcome,
+    safe_result: Option<ValidatedCanonicalValueV3>,
 }
 
 impl ReferenceDestinationReturn {
-    /// Returns the affine exact-attempt receipt.
-    pub const fn receipt(&self) -> &TargetOperationReceipt {
-        &self.receipt
+    /// Returns the structurally reviewed outcome candidate.
+    pub const fn outcome(&self) -> &DeliveryAttemptOutcome {
+        &self.outcome
     }
 
     /// Returns the exact safe queue result when one survived.
-    pub const fn safe_result(&self) -> Option<&ValidatedCanonicalValueV2> {
+    pub const fn safe_result(&self) -> Option<&ValidatedCanonicalValueV3> {
         self.safe_result.as_ref()
     }
 
-    /// Consumes the wrapper into its one-shot target receipt.
-    pub fn into_target_receipt(self) -> TargetOperationReceipt {
-        self.receipt
+    /// Consumes the wrapper into its unbound outcome candidate.
+    pub fn into_outcome(self) -> DeliveryAttemptOutcome {
+        self.outcome
     }
 }
 
@@ -229,7 +261,7 @@ impl std::fmt::Debug for ReferenceDestinationReturn {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ReferenceDestinationReturn")
-            .field("receipt", &self.receipt)
+            .field("outcome", &self.outcome)
             .field("has_safe_result", &self.safe_result.is_some())
             .finish()
     }
@@ -244,7 +276,7 @@ pub trait ReferenceDestination: Clone + Send + Sync + 'static {
         request: &'a ReferenceRequest,
         contract: &'a ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> crate::ExecutorFuture<'a, Result<ReferenceDestinationReturn>>;
+    ) -> crate::ExecutorFuture<'a, ReferenceDestinationReturn>;
 }
 
 #[derive(Debug, Clone)]
@@ -444,7 +476,54 @@ impl MemoryConvergentDestination {
         request: &ReferenceRequest,
         contract: &ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> Result<ReferenceDestinationReturn> {
+    ) -> ReferenceDestinationReturn {
+        self.enter_with_finalizer(authority, request, contract, behavior, |_| Ok(()))
+    }
+
+    /// Enters the target and returns an outcome only after a durable wrapper
+    /// finalizer succeeds or is totalized to the reviewed adapter failure.
+    ///
+    /// The finalizer receives the already-mutated destination but never the
+    /// affine authority or the ledger's private completion seal.
+    pub fn enter_with_finalizer<Finalize>(
+        &self,
+        authority: TargetEntryAuthority,
+        request: &ReferenceRequest,
+        contract: &ReferenceContract,
+        behavior: ReferenceTargetBehavior,
+        finalize: Finalize,
+    ) -> ReferenceDestinationReturn
+    where
+        Finalize: FnOnce(&Self) -> Result<()>,
+    {
+        let result = self.try_enter(&authority, request, contract, behavior);
+        let (mut outcome, mut safe_result) = match result {
+            Ok(result) => result,
+            Err(
+                ExecutorError::TargetAuthorityConsumed
+                | ExecutorError::TargetOperationMismatch
+                | ExecutorError::InvalidReferenceEffectIdentifier
+                | ExecutorError::InvalidSafeFailure,
+            ) => (contract.adapter_failure.clone(), None),
+            Err(_) => (contract.result_encoding_failure.clone(), None),
+        };
+        if finalize(self).is_err() {
+            outcome = contract.adapter_failure.clone();
+            safe_result = None;
+        }
+        ReferenceDestinationReturn {
+            outcome,
+            safe_result,
+        }
+    }
+
+    fn try_enter(
+        &self,
+        authority: &TargetEntryAuthority,
+        request: &ReferenceRequest,
+        contract: &ReferenceContract,
+        behavior: ReferenceTargetBehavior,
+    ) -> Result<(DeliveryAttemptOutcome, Option<ValidatedCanonicalValueV3>)> {
         if authority.target_operation_ref() != contract.enqueue_operation_ref() {
             return Err(ExecutorError::TargetOperationMismatch);
         }
@@ -465,10 +544,7 @@ impl MemoryConvergentDestination {
                     FailureClass::Transport,
                     BoundaryStage::BeforeBoundaryEntry,
                 )?)?;
-                return Ok(ReferenceDestinationReturn {
-                    receipt: authority.complete(outcome),
-                    safe_result: None,
-                });
+                return Ok((outcome, None));
             }
             ReferenceTargetBehavior::UnavailableDuringEntry => {
                 let outcome = DeliveryAttemptOutcome::indeterminate(failure(
@@ -476,10 +552,7 @@ impl MemoryConvergentDestination {
                     FailureClass::Transport,
                     BoundaryStage::BoundaryEntry,
                 )?)?;
-                return Ok(ReferenceDestinationReturn {
-                    receipt: authority.complete(outcome),
-                    safe_result: None,
-                });
+                return Ok((outcome, None));
             }
             ReferenceTargetBehavior::CancelledBeforeEntry => {
                 let outcome = DeliveryAttemptOutcome::did_not_enter(failure(
@@ -487,10 +560,7 @@ impl MemoryConvergentDestination {
                     FailureClass::Cancellation,
                     BoundaryStage::BeforeBoundaryEntry,
                 )?)?;
-                return Ok(ReferenceDestinationReturn {
-                    receipt: authority.complete(outcome),
-                    safe_result: None,
-                });
+                return Ok((outcome, None));
             }
             ReferenceTargetBehavior::CancelledDuringEntry => {
                 let outcome = DeliveryAttemptOutcome::indeterminate(failure(
@@ -498,10 +568,7 @@ impl MemoryConvergentDestination {
                     FailureClass::Cancellation,
                     BoundaryStage::BoundaryEntry,
                 )?)?;
-                return Ok(ReferenceDestinationReturn {
-                    receipt: authority.complete(outcome),
-                    safe_result: None,
-                });
+                return Ok((outcome, None));
             }
             ReferenceTargetBehavior::Available => {}
         }
@@ -517,10 +584,7 @@ impl MemoryConvergentDestination {
                 FailureClass::Authorization,
                 BoundaryStage::BeforeBoundaryEntry,
             )?)?;
-            return Ok(ReferenceDestinationReturn {
-                receipt: authority.complete(outcome),
-                safe_result: None,
-            });
+            return Ok((outcome, None));
         }
         if guard.seen_attempts.contains(authority.attempt_id()) {
             return Err(ExecutorError::TargetAuthorityConsumed);
@@ -571,10 +635,7 @@ impl MemoryConvergentDestination {
             }
         };
         *guard = staged;
-        Ok(ReferenceDestinationReturn {
-            receipt: authority.complete(outcome),
-            safe_result: Some(safe_result),
-        })
+        Ok((outcome, Some(safe_result)))
     }
 }
 
@@ -585,7 +646,7 @@ impl ReferenceDestination for MemoryConvergentDestination {
         request: &'a ReferenceRequest,
         contract: &'a ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> crate::ExecutorFuture<'a, Result<ReferenceDestinationReturn>> {
+    ) -> crate::ExecutorFuture<'a, ReferenceDestinationReturn> {
         Box::pin(async move { self.enter(authority, request, contract, behavior) })
     }
 }
@@ -593,10 +654,8 @@ impl ReferenceDestination for MemoryConvergentDestination {
 /// Deterministic conformance crash boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReferenceCrashPoint {
-    /// Authorization committed but the target was not entered.
+    /// The process stopped before opening the target bracket.
     BeforeTargetEntry,
-    /// Queue mutation committed but the receipt was lost.
-    AfterTargetMutationBeforeObservation,
     /// Returned observation committed but no tombstone committed.
     AfterObservationBeforeTombstone,
     /// Tombstone committed but the executor response was lost.
@@ -674,62 +733,75 @@ where
         crash_point: Option<ReferenceCrashPoint>,
     ) -> Result<ReferenceDriveOutcome> {
         let identity = request.identity();
-        let view = self.ledger.bind_effect(identity).await?;
-        if view.terminal_tombstone().is_some() {
-            return Ok(ReferenceDriveOutcome::Returned(Box::new(
-                self.terminal_return(view)?,
-            )));
-        }
-
-        let authority = match self
-            .ledger
-            .authorize_target(identity, self.contract.enqueue_operation().clone(), None)
-            .await
-        {
-            Ok(authority) => authority,
-            Err(ExecutorError::EvidenceBoundsExhausted) => {
-                let view = self
-                    .ledger
-                    .effect_view(identity)
-                    .await?
-                    .ok_or(ExecutorError::EffectNotBound)?;
-                return Ok(ReferenceDriveOutcome::Returned(Box::new(pending_return(
-                    view,
-                    self.ledger.exact_binding(),
-                )?)));
-            }
-            Err(ExecutorError::EffectAlreadyTerminal) => {
-                let view = self
-                    .ledger
-                    .effect_view(identity)
-                    .await?
-                    .ok_or(ExecutorError::EffectNotBound)?;
+        let view = loop {
+            let view = self.ledger.bind_effect(identity).await?;
+            if view.terminal_tombstone().is_some() {
                 return Ok(ReferenceDriveOutcome::Returned(Box::new(
                     self.terminal_return(view)?,
                 )));
             }
-            Err(error) => return Err(error),
+
+            let expected_head = view.delivery_audit().head_ref()?;
+            if crash_point == Some(ReferenceCrashPoint::BeforeTargetEntry) {
+                return Ok(ReferenceDriveOutcome::Crashed(
+                    ReferenceCrashPoint::BeforeTargetEntry,
+                ));
+            }
+            let destination = &self.destination;
+            let contract = &self.contract;
+            let target = self
+                .ledger
+                .execute_target_once(
+                    identity,
+                    &expected_head,
+                    self.contract.enqueue_operation().clone(),
+                    None,
+                    |authority| async move {
+                        destination
+                            .enqueue(authority, request.request(), contract, behavior)
+                            .await
+                            .into_outcome()
+                    },
+                )
+                .await;
+            match target {
+                Ok(ExecuteTargetOutcome::Observed(view)) => break *view,
+                Ok(ExecuteTargetOutcome::Contended) => continue,
+                Err(ExecutorError::EvidenceBoundsExhausted) => {
+                    let view = self
+                        .ledger
+                        .effect_view(identity)
+                        .await?
+                        .ok_or(ExecutorError::EffectNotBound)?;
+                    return Ok(ReferenceDriveOutcome::Returned(Box::new(pending_return(
+                        view,
+                        self.ledger.exact_binding(),
+                    )?)));
+                }
+                Err(ExecutorError::EffectAlreadyTerminal) => {
+                    let view = self
+                        .ledger
+                        .effect_view(identity)
+                        .await?
+                        .ok_or(ExecutorError::EffectNotBound)?;
+                    return Ok(ReferenceDriveOutcome::Returned(Box::new(
+                        self.terminal_return(view)?,
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
         };
-        if crash_point == Some(ReferenceCrashPoint::BeforeTargetEntry) {
-            return Ok(ReferenceDriveOutcome::Crashed(
-                ReferenceCrashPoint::BeforeTargetEntry,
-            ));
-        }
-
-        let destination_return = self
-            .destination
-            .enqueue(authority, request.request(), &self.contract, behavior)
-            .await?;
-        if crash_point == Some(ReferenceCrashPoint::AfterTargetMutationBeforeObservation) {
-            return Ok(ReferenceDriveOutcome::Crashed(
-                ReferenceCrashPoint::AfterTargetMutationBeforeObservation,
-            ));
-        }
-
-        let receipt = destination_return.into_target_receipt();
-        let attempt_id = receipt.attempt_id().clone();
-        let returned = receipt.outcome().returned_outcome().cloned();
-        let view = self.ledger.observe_target(receipt).await?;
+        let attempt = view
+            .delivery_audit()
+            .attempts()?
+            .into_iter()
+            .last()
+            .ok_or(ExecutorError::InvalidDeliveryObservation)?;
+        let attempt_id = attempt.attempt_id().clone();
+        let returned = attempt
+            .outcome()
+            .and_then(DeliveryAttemptOutcome::returned_outcome)
+            .cloned();
         let Some(returned) = returned else {
             return Ok(ReferenceDriveOutcome::Returned(Box::new(pending_return(
                 view,
@@ -838,10 +910,10 @@ fn returned_observation_ref(
         .into_iter()
         .find(|attempt| {
             attempt.attempt_id() == attempt_id
-                && matches!(
-                    attempt.outcome(),
-                    Some(DeliveryAttemptOutcome::Returned(candidate)) if candidate == returned
-                )
+                && attempt
+                    .outcome()
+                    .and_then(DeliveryAttemptOutcome::returned_outcome)
+                    == Some(returned)
         })
         .and_then(|attempt| attempt.returned_observation_ref().cloned())
         .ok_or(ExecutorError::TerminalProofMismatch)
@@ -850,7 +922,7 @@ fn returned_observation_ref(
 fn enqueued_result(
     destination_key: &str,
     queue_position: u64,
-) -> Result<ValidatedCanonicalValueV2> {
+) -> Result<ValidatedCanonicalValueV3> {
     encode(
         REFERENCE_RESULT_SCHEMA,
         &canonical_object([
@@ -867,7 +939,7 @@ fn enqueued_result(
     )
 }
 
-fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalValueV2> {
+fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalValueV3> {
     encode(
         REFERENCE_RESULT_SCHEMA,
         &canonical_object([
@@ -885,12 +957,12 @@ fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalVa
 
 fn request_conflict_result(
     failure: &crate::ReferenceSafeFailure,
-) -> Result<ValidatedCanonicalValueV2> {
+) -> Result<ValidatedCanonicalValueV3> {
     let outcome = DeliveryAttemptOutcome::indeterminate(failure.clone())?;
-    let DeliveryAttemptOutcome::Indeterminate(failure) = outcome else {
-        return Err(ExecutorError::InvalidSafeFailure);
-    };
-    let safe_failure = crate::frontier::validated_safe_failure_for_result(&failure)?;
+    let failure = outcome
+        .indeterminate_failure()
+        .ok_or(ExecutorError::InvalidSafeFailure)?;
+    let safe_failure = crate::frontier::validated_safe_failure_for_result(failure)?;
     encode(
         REFERENCE_RESULT_SCHEMA,
         &canonical_object([

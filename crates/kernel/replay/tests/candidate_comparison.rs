@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use mfm_canonical::{CanonicalBytes, PlainCanonicalJsonBytes, RecoverabilityContractV2};
+use mfm_canonical::{CanonicalBytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
 use mfm_ids::{AppendRequestId, RunId, StableId, StoreEpoch, StoreScopeId};
 use mfm_program::{QualifiedCandidateIdentity, QualifiedProgramRegistry};
 use mfm_qualified_run_test_support::{
@@ -14,7 +14,7 @@ use mfm_replay::trace_export::{
     verify_portable_run_export_stream, write_portable_run_export_stream, ExportKind,
     PortableRunExportMetadata, VerifiedExportStream,
 };
-use mfm_replay::v1::{
+use mfm_replay::v2::{
     compare_current, required_export_source_run_ids, verify_recorded_history, ReplayErrorKind,
 };
 use mfm_runtime::{AuthorizedAdmissionPlan, DriveOutcome, Runtime};
@@ -313,7 +313,7 @@ async fn bind_portable_history(
     metadata: PortableRunExportMetadata,
 ) -> VerifiedExportStream {
     assert_stream_framing(&bytes);
-    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
     assert_eq!(
         metadata.content_digest(),
         &contract.raw_content_digest(&bytes)
@@ -321,7 +321,7 @@ async fn bind_portable_history(
     assert_eq!(
         metadata.schema_id(),
         contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("portable stream schema")
     );
     let offline = verify_portable_run_export_stream(bytes.as_slice(), metadata.content_ref())
@@ -413,10 +413,10 @@ fn assert_stream_framing(bytes: &[u8]) {
 }
 
 fn stream_ref(bytes: &[u8]) -> mfm_ids::ContentRef {
-    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
     mfm_ids::ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("portable stream schema")
             .clone(),
         contract.raw_content_digest(bytes),
@@ -424,7 +424,7 @@ fn stream_ref(bytes: &[u8]) -> mfm_ids::ContentRef {
     .expect("portable stream reference")
 }
 
-fn parse_result(result: &mfm_replay::v1::CanonicalReplayResult) -> serde_json::Value {
+fn parse_result(result: &mfm_replay::v2::CanonicalReplayResult) -> serde_json::Value {
     serde_json::from_slice(result.as_bytes()).expect("canonical candidate result JSON")
 }
 
@@ -570,12 +570,12 @@ async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
         .expect("terminal record separator");
     let terminal = &first[last_record_start..];
     let duplicate_field_record =
-        raw_record(br#"{"kind":"end","kind":"end","version":"mfm.portable-run-export-frame.v1"}"#);
+        raw_record(br#"{"kind":"end","kind":"end","version":"mfm.portable-run-export-frame.v2"}"#);
     let unknown_field_record = raw_record(
-        br#"{"kind":"end","unknown":true,"version":"mfm.portable-run-export-frame.v1"}"#,
+        br#"{"kind":"end","unknown":true,"version":"mfm.portable-run-export-frame.v2"}"#,
     );
     let non_jcs_record =
-        raw_record(br#"{"version":"mfm.portable-run-export-frame.v1","kind":"end"}"#);
+        raw_record(br#"{"version":"mfm.portable-run-export-frame.v2","kind":"end"}"#);
     let malformed = [
         (
             "byte-order-mark",

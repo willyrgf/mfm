@@ -5,12 +5,12 @@ use mfm_ids::{
     JournalCommitDigest, JournalRecordHash, ObjectEvidenceDigest, RecordId, RunId, SchemaId,
     SpecHash, TenantScopeId,
 };
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     ArtifactAdmissionIntent, ArtifactAdmissionMode, AuthorityUse, CandidateRecordEnvelope,
     CommitEnvelope, JournalHead, JournalPredecessor, ObjectPathBinding, RunJournalRecord,
     RunJournalRecordFields, TenantFactCoordinate, TenantFactCoordinateFields, ValueRef,
 };
-use mfm_store::v1::{
+use mfm_store::v2::{
     CommittedJournalCommit, CommittedJournalRecord, CommittedObject, StoreIdentity,
 };
 use sqlx::{PgConnection, Row};
@@ -307,7 +307,7 @@ fn decode_records(
             ))?;
         let schema_id = parse_required::<SchemaId>(&row, "record_schema_id")?;
         let logical_key =
-            mfm_journal::v1::RecordLogicalKey::strict_decode(&required_bytes(&row, "logical_key")?)
+            mfm_journal::v2::RecordLogicalKey::strict_decode(&required_bytes(&row, "logical_key")?)
                 .map_err(|_| PostgresStoreError::Corruption("journal logical key is invalid"))?;
         let payload = RunJournalRecord::strict_decode(&required_bytes(&row, "canonical_payload")?)
             .map_err(|_| PostgresStoreError::Corruption("journal payload is invalid"))?;

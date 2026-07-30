@@ -188,7 +188,7 @@ async fn replay_stream_request_requires_exact_headers_and_preserves_raw_bytes() 
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_static(
-            "application/vnd.mfm.run-export-stream.v1+json-seq; charset=utf-8",
+            "application/vnd.mfm.run-export-stream.v2+json-seq; charset=utf-8",
         ),
     );
     assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
@@ -861,10 +861,10 @@ fn replay_response() -> mfm_app::ReplayResponse {
 
 fn replay_export_ref(bytes: &[u8]) -> ContentRef {
     let contract =
-        mfm_canonical::RecoverabilityContractV2::embedded().expect("recoverability annex");
+        mfm_canonical::RecoverabilityContractV3::embedded().expect("recoverability annex");
     ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("portable export stream schema")
             .clone(),
         contract.raw_content_digest(bytes),

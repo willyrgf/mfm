@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
 use mfm_ids::{ContentRef, EffectKey};
 
 use crate::contract::{canonical_object, content_ref, content_ref_value, encode};
@@ -68,7 +68,7 @@ impl ResourcePolicyBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyDecision<Allocation> {
     pub(crate) allocation: Allocation,
-    pub(crate) allocation_state: ValidatedCanonicalValueV2,
+    pub(crate) allocation_state: ValidatedCanonicalValueV3,
     pub(crate) fencing_ref: Option<FencingRef>,
 }
 
@@ -76,7 +76,7 @@ impl<Allocation> PolicyDecision<Allocation> {
     /// Constructs one pure typed allocation decision and its reviewed state.
     pub fn new(
         allocation: Allocation,
-        allocation_state: ValidatedCanonicalValueV2,
+        allocation_state: ValidatedCanonicalValueV3,
         fencing_ref: Option<FencingRef>,
     ) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl<Allocation> PolicyDecision<Allocation> {
     }
 
     /// Returns the exact annex-validated allocation state.
-    pub const fn allocation_state(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn allocation_state(&self) -> &ValidatedCanonicalValueV3 {
         &self.allocation_state
     }
 
@@ -116,7 +116,7 @@ pub trait TypedResourcePolicy: Send + Sync {
     fn resource_key_value(
         &self,
         request: &Self::Request,
-    ) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError>;
+    ) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError>;
 
     /// Derives the exact resource stream key for this request.
     fn resource_key(
@@ -230,7 +230,7 @@ impl AccountSequencePolicy {
         account: &str,
         sequence: u64,
         effect_key: &EffectKey,
-    ) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
         let mut fields = vec![
             (
                 "account".to_owned(),
@@ -272,7 +272,7 @@ impl TypedResourcePolicy for AccountSequencePolicy {
     fn resource_key_value(
         &self,
         request: &Self::Request,
-    ) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
         account_resource_key_value(request)
     }
 
@@ -373,7 +373,7 @@ impl TypedResourcePolicy for AccountSequencePolicy {
 
 fn account_resource_key_value(
     request: &AccountSequenceRequest,
-) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
     encode(
         ACCOUNT_RESOURCE_KEY_SCHEMA,
         &canonical_object([
@@ -494,7 +494,7 @@ impl FiniteInventoryPolicy {
         &self,
         item: &str,
         effect_key: &EffectKey,
-    ) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
         encode(
             INVENTORY_ALLOCATION_SCHEMA,
             &canonical_object([
@@ -531,7 +531,7 @@ impl TypedResourcePolicy for FiniteInventoryPolicy {
     fn resource_key_value(
         &self,
         request: &Self::Request,
-    ) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+    ) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
         if request.inventory_namespace != self.inventory_namespace
             || !self.capacities.contains_key(&request.item)
         {
@@ -625,7 +625,7 @@ impl TypedResourcePolicy for FiniteInventoryPolicy {
 
 fn inventory_resource_key_value(
     request: &FiniteInventoryRequest,
-) -> std::result::Result<ValidatedCanonicalValueV2, PolicyError> {
+) -> std::result::Result<ValidatedCanonicalValueV3, PolicyError> {
     encode(
         INVENTORY_RESOURCE_KEY_SCHEMA,
         &canonical_object([
@@ -645,7 +645,7 @@ fn inventory_resource_key_value(
 }
 
 fn json_string_field(
-    value: &ValidatedCanonicalValueV2,
+    value: &ValidatedCanonicalValueV3,
     field: &str,
 ) -> std::result::Result<String, PolicyError> {
     let json: serde_json::Value =
@@ -657,7 +657,7 @@ fn json_string_field(
 }
 
 fn json_decimal_u64_field(
-    value: &ValidatedCanonicalValueV2,
+    value: &ValidatedCanonicalValueV3,
     field: &str,
 ) -> std::result::Result<u64, PolicyError> {
     json_string_field(value, field)?

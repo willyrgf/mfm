@@ -315,17 +315,56 @@ impl ReferenceDestination for FileConvergentDestination {
         request: &'a ReferenceRequest,
         contract: &'a ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> ExecutorFuture<'a, Result<ReferenceDestinationReturn>> {
+    ) -> ExecutorFuture<'a, ReferenceDestinationReturn> {
         let destination = self.clone();
         let request = request.clone();
         let contract = contract.clone();
         Box::pin(async move {
-            tokio::task::spawn_blocking(move || {
-                destination
-                    .transaction(|memory| memory.enter(authority, &request, &contract, behavior))
+            let fallback_contract = contract.clone();
+            let lock_failure_contract = contract.clone();
+            let join_failure_contract = contract.clone();
+            let returned = tokio::task::spawn_blocking(move || {
+                destination.snapshots.with_lock_input(
+                    authority,
+                    |directory, authority| {
+                        let latest = match directory.latest() {
+                            Ok(Some(latest)) => latest,
+                            Ok(None) | Err(_) => {
+                                return fallback_contract.adapter_failure_return();
+                            }
+                        };
+                        let checkpoint =
+                            match MemoryDestinationCheckpoint::from_durable_bytes(&latest.bytes) {
+                                Ok(checkpoint) => checkpoint,
+                                Err(_) => {
+                                    return fallback_contract.adapter_failure_return();
+                                }
+                            };
+                        let memory = MemoryConvergentDestination::restore(checkpoint);
+                        memory.enter_with_finalizer(
+                            authority,
+                            &request,
+                            &contract,
+                            behavior,
+                            |memory| {
+                                let after = memory.checkpoint()?.to_durable_bytes()?;
+                                if after != latest.bytes {
+                                    directory.publish(&after)?;
+                                }
+                                Ok(())
+                            },
+                        )
+                    },
+                    |_authority| lock_failure_contract.adapter_failure_return(),
+                )
             })
-            .await
-            .map_err(|_| ExecutorError::DurableBackendUnavailable)?
+            .await;
+            match returned {
+                Ok(returned) => returned,
+                // The engine retains the private completion seal, so a
+                // wrapper failure can return only an unbound adapter outcome.
+                Err(_) => join_failure_contract.adapter_failure_return(),
+            }
         })
     }
 }
@@ -375,6 +414,24 @@ impl SnapshotDirectory {
         &self,
         operation: impl FnOnce(&LockedSnapshotDirectory<'_>) -> Result<Output>,
     ) -> Result<Output> {
+        let _lock_file = self.lock_file()?;
+        operation(&LockedSnapshotDirectory { owner: self })
+    }
+
+    fn with_lock_input<Input, Output>(
+        &self,
+        input: Input,
+        operation: impl FnOnce(&LockedSnapshotDirectory<'_>, Input) -> Output,
+        lock_failure: impl FnOnce(Input) -> Output,
+    ) -> Output {
+        let _lock_file = match self.lock_file() {
+            Ok(lock_file) => lock_file,
+            Err(_) => return lock_failure(input),
+        };
+        operation(&LockedSnapshotDirectory { owner: self }, input)
+    }
+
+    fn lock_file(&self) -> Result<File> {
         let lock_path = self.path.join(format!("{}.lock", self.prefix));
         reject_symlink_or_nonregular_if_present(&lock_path)?;
         let lock_file = OpenOptions::new()
@@ -395,7 +452,7 @@ impl SnapshotDirectory {
         lock_file
             .lock_exclusive()
             .map_err(|_| ExecutorError::DurableBackendUnavailable)?;
-        operation(&LockedSnapshotDirectory { owner: self })
+        Ok(lock_file)
     }
 }
 

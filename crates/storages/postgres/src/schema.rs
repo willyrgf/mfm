@@ -8,13 +8,13 @@ use crate::error::{database_error, PostgresStoreError, Result};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.recoverability-postgres.v1";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.recoverability-postgres.v2";
 pub(crate) const APPLICATION_ROLE: &str = "mfm_store_application";
 const OWNER_ROLE: &str = "mfm_store_owner";
 const AUTHORITY_CATALOG_DEFINITION_SHA256: &str =
-    "f9fc1e32f85cc6c3e8f338a519313fc3fd2dbe3a6714d8e1b38777f445a58392";
+    "7d71e470fd829c00e3c4df655a1823b245e0cefa0332f0a488e83cf03556c198";
 
-/// Administrative schema management for the destructive recoverability-v2 baseline.
+/// Administrative schema management for the destructive recoverability-v3 baseline.
 pub struct PostgresSchema;
 
 impl PostgresSchema {
@@ -44,7 +44,7 @@ pub(crate) async fn migrate_pool(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "parity-tests"))]
 pub(crate) async fn validate_authoritative_schema(pool: &PgPool) -> Result<ValidatedStoreIdentity> {
     validate_authoritative_schema_inner(pool, None).await
 }
@@ -470,7 +470,8 @@ async fn validate_catalog_definitions(connection: &mut PgConnection) -> Result<(
             fingerprint.extend_from_slice(value.as_bytes());
         }
     }
-    if sha256_digest_bytes(&fingerprint).to_string() != AUTHORITY_CATALOG_DEFINITION_SHA256 {
+    let actual = sha256_digest_bytes(&fingerprint).to_string();
+    if actual != AUTHORITY_CATALOG_DEFINITION_SHA256 {
         return Err(PostgresStoreError::SchemaAuthorityMismatch);
     }
     Ok(())

@@ -29,7 +29,7 @@ use mfm_evm::{
     EVM_TOKEN_DECIMALS_OPERATION_ID,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, FieldPath, SchemaId, SemanticTypeId, StableId};
-use mfm_journal::v1::ReadCapabilityBinding;
+use mfm_journal::v2::ReadCapabilityBinding;
 use mfm_program::{
     boundary_content_ref, QualifiedProgramRegistryBuilder, QualifiedReadEntry,
     QualifiedReadOperationContract,

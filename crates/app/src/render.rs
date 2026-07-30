@@ -117,6 +117,19 @@ fn access_audit_entry_json(entry: &AccessAuditEntry) -> Result<Value, PublicErro
         .failure()
         .map(|value| canonical_json(value.as_bytes()))
         .transpose()?;
+    let non_domain_failure = entry
+        .non_domain_failure()
+        .map(|value| {
+            let persisted =
+                mfm_journal::v2::PersistedNonDomainFailure::new(value).map_err(|_| {
+                    PublicError::internal(
+                        "PublicResponseRenderingFailed",
+                        "A public response could not be rendered",
+                    )
+                })?;
+            canonical_json(persisted.as_bytes())
+        })
+        .transpose()?;
     let delivery_audit_ref = entry
         .delivery_audit_ref()
         .map(|value| canonical_json(value.as_bytes()))
@@ -135,6 +148,7 @@ fn access_audit_entry_json(entry: &AccessAuditEntry) -> Result<Value, PublicErro
         "status": entry.status().as_str(),
         "result_ref": result_ref,
         "failure": failure,
+        "non_domain_failure": non_domain_failure,
         "effect_key": entry.effect_key().map(|value| value.as_str()),
         "delivery_audit_ref": delivery_audit_ref,
         "delivery_audit_terminal": entry.delivery_audit_terminal(),

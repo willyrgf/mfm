@@ -4,14 +4,22 @@ use std::fmt;
 use std::str::FromStr;
 
 use alloy_primitives::Address;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
 use mfm_evm::{
     evm_wallet_assurance_policy_ref, evm_wallet_finality_policy_ref, evm_wallet_nonce_policy_ref,
-    EvmRoutingGenerationRef, EvmSubmitTransactionRequest, EvmWalletInitialNonceDescriptor,
-    EvmWalletReference,
+    EvmRoutingGenerationRef, EvmSubmitTransactionRequest, EvmWalletAttemptResult,
+    EvmWalletInitialNonceDescriptor, EvmWalletReference, EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+    EVM_WALLET_REVERTED_TERMINAL_OUTCOME, EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
 };
-use mfm_executor::{ResourcePolicyBinding, VerifiedExecutorBinding};
-use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId};
+use mfm_executor::{
+    observation_completion_closure_bytes, tombstone_completion_closure_bytes,
+    DeliveryAttemptOutcome, DeliveryAuditFrontierRef, EffectIdentity, ReferenceTerminalProof,
+    ResourcePolicyBinding, ReturnedOutcome, SchemaQualifiedCanonicalValue, TerminalTombstone,
+    VerifiedExecutorBinding,
+};
+use mfm_ids::{
+    AttemptId, ContentDigest, ContentRef, DigestAlgorithm, EffectKey, RequestDigest, SchemaId,
+};
 use mfm_program::boundary_content_ref;
 use mfm_signing::{
     GenerationGuardedSignerDescriptor, VerifiedGenerationGuardedSignerBinding,
@@ -20,7 +28,10 @@ use mfm_signing::{
 use serde_json::json;
 
 use crate::transport::EvmJsonRpcTransport;
-use crate::{evm_already_known_classifier_ref, EvmWalletLiveError};
+use crate::{
+    evm_already_known_classifier_ref, wallet_rpc::PreparedWalletOutcomes, EvmWalletLiveError,
+};
+use mfm_values::MfmValue;
 
 /// Sealed qualification that exactly matches one wallet deployment.
 ///
@@ -209,6 +220,7 @@ impl EvmWalletRequestQualification {
                 "completion_reserve_bytes": bounds.completion_reserve_bytes().to_string(),
                 "completion_reserve_records": bounds.completion_reserve_records(),
                 "max_attempts": bounds.max_attempts(),
+                "max_completion_record_bytes": bounds.max_completion_record_bytes().to_string(),
                 "max_records": bounds.max_records(),
                 "max_retained_bytes": bounds.max_retained_bytes().to_string(),
             },
@@ -319,6 +331,7 @@ impl EvmWalletRequestQualification {
         {
             return Err(EvmWalletLiveError::InvalidContract);
         }
+        validate_completion_capacity(&self.executor_binding, request)?;
         Ok(())
     }
 
@@ -410,6 +423,142 @@ impl EvmWalletRequestQualification {
     pub const fn reference(&self) -> &ContentRef {
         &self.reference
     }
+}
+
+fn validate_completion_capacity(
+    binding: &VerifiedExecutorBinding,
+    request: &EvmSubmitTransactionRequest,
+) -> Result<(), EvmWalletLiveError> {
+    let (max_observation, max_tombstone) = calculated_completion_maxima(binding, request)?;
+    let admitted = binding
+        .contract()
+        .evidence_bounds()
+        .max_completion_record_bytes();
+    if max_observation > admitted || max_tombstone > admitted {
+        return Err(EvmWalletLiveError::InvalidContract);
+    }
+    Ok(())
+}
+
+fn calculated_completion_maxima(
+    binding: &VerifiedExecutorBinding,
+    request: &EvmSubmitTransactionRequest,
+) -> Result<(usize, usize), EvmWalletLiveError> {
+    let identity = EffectIdentity::reconstruct(
+        binding,
+        binding.deployment().tenant_scope_id().clone(),
+        binding.binding_ref().clone(),
+        EffectKey::from_digest(sha256_digest_bytes(b"evm-completion-effect")),
+        RequestDigest::from_digest(sha256_digest_bytes(b"evm-completion-request")),
+    )
+    .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let predecessor = DeliveryAuditFrontierRef::from_content_ref(dummy_content_ref(
+        "mfm.executor-delivery-frontier.v2",
+        b"evm-completion-predecessor",
+    )?)
+    .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let attempt_id = AttemptId::from_digest(sha256_digest_bytes(b"evm-completion-attempt"));
+    let proof_ref = binding.deployment().evidence_authority_ref().clone();
+    let safe_result = maximum_attempt_result(request)?;
+    let returned = DeliveryAttemptOutcome::returned(safe_result.clone())
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let fixed =
+        PreparedWalletOutcomes::new(binding.contract().safe_failure_contract_ref().clone())?;
+    let mut max_observation = observation_completion_closure_bytes(
+        &identity,
+        predecessor.clone(),
+        attempt_id.clone(),
+        returned,
+        proof_ref.clone(),
+    )
+    .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    for outcome in fixed.completion_outcomes() {
+        max_observation = max_observation.max(
+            observation_completion_closure_bytes(
+                &identity,
+                predecessor.clone(),
+                attempt_id.clone(),
+                outcome.clone(),
+                proof_ref.clone(),
+            )
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+        );
+    }
+
+    let returned =
+        ReturnedOutcome::new(safe_result).map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let observation_ref = dummy_content_ref(
+        "mfm.executor-delivery-attempt-observed.v2",
+        b"evm-completion-observation",
+    )?;
+    let terminal_proof = ReferenceTerminalProof::new(attempt_id, returned, observation_ref)
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let mut max_tombstone = 0_usize;
+    for outcome in [
+        EVM_WALLET_SUCCEEDED_TERMINAL_OUTCOME,
+        EVM_WALLET_REVERTED_TERMINAL_OUTCOME,
+    ] {
+        let tombstone = TerminalTombstone::new(
+            EVM_SUBMIT_TRANSACTION_OPERATION_ID,
+            outcome,
+            terminal_proof.clone(),
+        )
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+        max_tombstone = max_tombstone.max(
+            tombstone_completion_closure_bytes(
+                &identity,
+                predecessor.clone(),
+                tombstone,
+                proof_ref.clone(),
+            )
+            .map_err(|_| EvmWalletLiveError::InvalidContract)?,
+        );
+    }
+    Ok((max_observation, max_tombstone))
+}
+
+#[cfg(test)]
+pub(crate) fn calculated_completion_maxima_for_test(
+    binding: &VerifiedExecutorBinding,
+    request: &EvmSubmitTransactionRequest,
+) -> Result<(usize, usize), EvmWalletLiveError> {
+    calculated_completion_maxima(binding, request)
+}
+
+fn maximum_attempt_result(
+    request: &EvmSubmitTransactionRequest,
+) -> Result<SchemaQualifiedCanonicalValue, EvmWalletLiveError> {
+    let bytes = usize::try_from(request.policy().convergence().max_attempt_result_bytes())
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?;
+    let canonical = match bytes {
+        0 => return Err(EvmWalletLiveError::InvalidContract),
+        1 => vec![b'0'],
+        _ => {
+            let mut canonical = Vec::with_capacity(bytes);
+            canonical.push(b'"');
+            canonical.resize(bytes - 1, b'x');
+            canonical.push(b'"');
+            canonical
+        }
+    };
+    SchemaQualifiedCanonicalValue::new(
+        EvmWalletAttemptResult::schema_id().map_err(|_| EvmWalletLiveError::InvalidContract)?,
+        &canonical,
+    )
+    .map_err(|_| EvmWalletLiveError::InvalidContract)
+}
+
+fn dummy_content_ref(schema_contract: &str, seed: &[u8]) -> Result<ContentRef, EvmWalletLiveError> {
+    let schema_id = RecoverabilityContractV3::embedded()
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?
+        .schema_id(schema_contract)
+        .map_err(|_| EvmWalletLiveError::InvalidContract)?
+        .clone();
+    ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(seed)),
+    )
+    .map_err(|_| EvmWalletLiveError::InvalidContract)
 }
 
 impl PartialEq for EvmWalletRequestQualification {
