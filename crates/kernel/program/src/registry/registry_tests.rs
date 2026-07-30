@@ -155,8 +155,8 @@ fn semantic_entry_or_configured_contract_difference_is_not_comparable() {
         fixture_ref("planner-implementation-recorded"),
         vec![fixture_ref("policy-a"), fixture_ref("policy-b")],
         "same",
-        "mfm.access-audit-entry.v1",
-        "mfm.access-audit-entry.v1",
+        "mfm.access-audit-entry.v2",
+        "mfm.access-audit-entry.v2",
     );
     let configured = retained_contract("configured");
 
@@ -219,7 +219,7 @@ fn entry(
         planner_implementation,
         policies,
         parameters,
-        "mfm.access-audit-entry.v1",
+        "mfm.access-audit-entry.v2",
         "mfm.input-manifest.v1",
     )
 }

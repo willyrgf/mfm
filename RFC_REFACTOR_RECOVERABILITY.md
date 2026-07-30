@@ -9,13 +9,15 @@ replay, facts, framework enforcement, execution catalogs, and app status
 
 This RFC records the breaking replacement of the former event, projection, attempt, side-effect,
 and generic saga machinery. Its architecture and fixed contract choices are the implemented core
-authority, with repository evidence and remaining gate classification recorded in the versioned
-[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v2.md). The
+authority. Repository evidence and the original gate classification remain in the versioned
+[recoverability cutover gate and inventory](docs/recoverability-cutover-gates-v2.md); the sole
+current byte-level authority is
+[`contracts/recoverability/v3`](contracts/recoverability/v3/README.md). The
 [design contract](docs/design.md), [architecture guide](docs/architecture.md), affected companion
-documents, code, schemas, and tests now implement this design together. The retained prototypes
-and inventories closed the contract-shaping evidence gate; the commit-2 annex and shared corpus
-closed the identity, schema, and golden-vector gate; and the atomic vertical cutover closed the
-core implementation gate. The final qualification change registers EVM transaction submission only
+documents, code, schemas, and tests implement this design together. The retained prototypes and
+inventories closed the contract-shaping evidence gate; the current annex and shared corpus close
+the identity, schema, and golden-vector gate; and the atomic vertical cutover closed the core
+implementation gate. The final qualification change registers EVM transaction submission only
 through the independently fenced durable wallet executor. Deployment rollout approvals remain
 deployment-specific and cannot create an alternate schema, compatibility reader, optional audit
 mode, or unfenced mutation path.
@@ -2208,14 +2210,14 @@ commitments. The exact executor contract defines each record schema and proof re
 Before target boundary entry, the executor durably appends `DeliveryAttemptAuthorized` to the exact
 keyed ledger. Only a positively acknowledged new append mints executor-internal authority for zero
 or one target operation; reloading an old record or resolving an ambiguous append mints none. A
-successful target entry returns a durable receipt naming the exact attempt that entered or
-returned from the destination. Only that receipt can identify the corresponding
-`DeliveryAttemptObserved`; neither delivery order nor the latest unobserved authorization may be
-used to infer it. A surviving result durably appends at most one exact linked observation. An
-unmatched authorization remains ambiguous and is never rewritten to “not called.” A
-convergence-safe repeat uses a new ordinal and attempt identity. A returned delivery-audit chain is
-never empty: an effect with no delivery authorization still returns its chain beginning at the
-single `EffectBound`.
+surviving target return supplies only an unbound closed outcome. The executor retains a private
+affine completion seal that alone binds the current identity, attempt, operation, and generation
+to the corresponding `DeliveryAttemptObserved`; neither callback-authored metadata, delivery
+order, nor the latest unobserved authorization may identify it. A surviving result durably appends
+at most one exact linked observation. An unmatched authorization remains ambiguous and is never
+rewritten to “not called.” A convergence-safe repeat uses a new ordinal and attempt identity. A
+returned delivery-audit chain is never empty: an effect with no delivery authorization still
+returns its chain beginning at the single `EffectBound`.
 
 Every `Returned(Pending { .. })` and `Returned(Terminal { .. })` result supplies the complete
 content-addressed suffix needed to reach its frontier. Every returned chain descends from exactly
@@ -4360,49 +4362,42 @@ provider-controlled content.
 
 ## Canonical Schema and Golden-Vector Gate
 
-Gate status: **closed for the implemented recoverability v2 core** by the corrected
-recoverability v2 artifact set:
+Gate status: **closed for the implemented recoverability v3 core** by the sole current artifact
+set:
 
-- `contracts/recoverability/v2/annex.json` — the normative machine-readable schema registry;
-- `contracts/recoverability/v2/corpus.json` — the shared positive/negative canonical-vector
+- `contracts/recoverability/v3/annex.json` — the normative machine-readable schema registry;
+- `contracts/recoverability/v3/corpus.json` — the shared positive/negative canonical-vector
   corpus; and
-- `contracts/recoverability/v2/README.md` — the non-normative artifact index and consumer guide.
+- `contracts/recoverability/v3/README.md` — the non-normative artifact index and consumer guide.
 
 The artifacts are the byte-level authority consumed by the current memory, PostgreSQL, runtime,
 replay, app, CLI, and REST implementation. They prohibit later changes to bytes, identities, tags,
 or semantics without a new version.
 
-The initial C11 v2 ledger is superseded because its certified-settlement schema named the absent
-`emission_ordinal` item field as the ordering key for `fact_slots`, rejecting every nonempty
-`fact_slots` value. That v2 artifact set existed only in a local, unpublished commit and no v2 data
-had been persisted, so the correction is an in-place v2 re-freeze rather than a v3 or compatibility
-path. The corrected bytes below are the sole frozen v2 authority; v1 remains byte-identical.
+The complete v1 and v2 artifact directories remain byte-identical archival and hostile-input
+references only. Production consumers reject both. The v3 lineage cutover is destructive: there is
+no compatibility parser, database migration, checkpoint upgrade, dual reader, or fallback.
 
-Exact artifact metadata derived from the corrected bytes is:
+Exact artifact metadata derived from the current bytes is:
 
 ```text
-RECOVERABILITY_V2_ARTIFACT_METADATA
-annex_sha256: bf1065f32a8249f69b9a82f19be2a221d1db5b683fa439ec6f701c42666b3ff8
-corpus_sha256: a2b249e054e7c6e85edfd91a6f3c6c9fc9588f65a9f3dfbfe0eac08f9f0be7a9
-readme_sha256: 2adb381aca75c126746fdca28b2b84105dee5144c4e49c35cef6e899d9fc5217
-annex_byte_count: 223652
-corpus_byte_count: 1728876
+RECOVERABILITY_V3_ARTIFACT_METADATA
+annex_sha256: 50cbcaa6185c36ebc652277a178108a8a3785285a5871f5d720e48d2c16dd0d7
+corpus_sha256: ec9220cca6dd0e7da1cfda485006d58353baa3470c3474aba20d782058efc942
+readme_sha256: c28d306b06fe4ab7f3ac1f40444103246c4830b942dad03030c1aeed67c45cf2
+annex_byte_count: 227880
+corpus_byte_count: 1741323
 annex_domain_count: 26
-annex_schema_count: 258
-annex_invariant_clause_count: 233
-corpus_positive_case_count: 434
-corpus_negative_case_count: 60
+annex_schema_count: 262
+annex_invariant_clause_count: 248
+corpus_positive_case_count: 441
+corpus_negative_case_count: 62
 corpus_relational_case_count: 84
-corpus_total_case_count: 578
-corpus_schema_acceptance_case_count: 380
+corpus_total_case_count: 587
+corpus_schema_acceptance_case_count: 387
 corpus_codec_rejection_case_count: 28
-corpus_relational_rejection_case_count: 32
+corpus_relational_rejection_case_count: 33
 ```
-
-The corrected corpus includes the ordered
-`schema/mfm.certified-settlement-contract.v1/nonempty-fact-slots` positive vector and the reversed
-`codec/invalid-order/certified-fact-slots` rejection. Both execute through all nine mandatory
-consumers.
 
 The logical schemas in this RFC obtain their frozen current encoding only through the versioned
 canonical schema annex. Rust layout, serde defaults, database column order, and backend-specific
@@ -4428,8 +4423,8 @@ The annex freezes:
 - the whole-executable component qualification, its shared evidence/profile contracts, and the
   composite planner semantic and sole-callback surfaces;
 - object-path bindings and artifact-admission intents;
-- the `mfm.portable-run-export-stream.v1` framed sequence and its closed
-  `mfm.portable-run-export-frame.v1` union, exact RS/canonical-JSON/LF framing, ordering,
+- the `mfm.portable-run-export-stream.v2` framed sequence and its closed
+  `mfm.portable-run-export-frame.v2` union, exact RS/canonical-JSON/LF framing, ordering,
   frame/chunk bounds, terminal EOF, and external raw-byte digest;
 - enum tags, field names, integer widths, ordering, optional absence, explicit null where legal,
   empty strings, empty collections, and union discriminants; and
@@ -4444,7 +4439,7 @@ advancement; publication without facts; fact emission without publication order;
 mismatch; candidate exclusion and final commit-digest inclusion of assigned coordinates; and
 admission under a changed executable identity.
 Canonical, ids, certifier, executor, memory store, PostgreSQL store, runtime, replay, and trace
-export execute all 578 vectors through the same corpus and shared domain-free
+export execute all 587 vectors through the same corpus and shared domain-free
 codec/digest/fold implementation.
 
 Schema freeze followed every contract-shaping prototype and inventory retained as core-gate
@@ -4453,8 +4448,8 @@ including framework/executor expansion, production reads, request totality, the 
 executor/resource policies, fact selection, admission probes, evidence and fact consumers, legacy
 history export, and historical-executable isolation. Those results shaped the frozen schemas; later
 implementation changes cannot silently add a field or reinterpret a tag. A deliberate
-persisted-contract change after this corrective unpublished re-freeze requires a new version and,
-under this pre-production contract, explicit rejection rather than a compatibility reader.
+persisted-contract change after this destructive v3 cutover requires a new version and explicit
+rejection rather than a compatibility reader.
 
 ## Store and Postgres Shape
 
@@ -4726,7 +4721,7 @@ separately authorized trace inspection may expose:
 - result, outputs, facts, and evidence; and
 - closure identity when terminal.
 
-The v1 public surface has no store-wide fact catalog/query/reference API and no cross-run run
+The current public surface has no store-wide fact catalog/query/reference API and no cross-run run
 list/watch API. The cutover deleted the CLI fact commands, `/v1/facts/*`, `GET /v1/runs`, and their
 app DTOs/services without a compatibility alias. Certified states consume same-run facts through
 graph edges and prior-run facts only through the reserved audited capability. Entry-point
@@ -4754,7 +4749,7 @@ delivery history only when the bound verifier proves a sealed terminal frontier 
 another target-attempt record. An unmatched MFM authorization, asynchronous work after
 `Returned(Pending)`, or later evidence strengthening can all make a newer frontier arrive.
 
-The portable representation is one `mfm.portable-run-export-stream.v1` JSON text sequence. Each
+The portable representation is one `mfm.portable-run-export-stream.v2` JSON text sequence. Each
 record is exact RS, one canonical closed-union frame, and LF; the first frame is `header`, the last
 is `end` followed immediately by EOF. Runs are root first and then dependencies by canonical
 `RunId`; journals are dense; object payloads are ordered and transferred once; and every logical
@@ -5495,10 +5490,10 @@ contract. All six steps of the fixed sequence are closed:
    every generic evidence-bag producer/consumer, pre-admission semantic probe, fact consumer,
    published entry point/profile, and retained legacy history/export requirement. The atomic
    cutover completed the corresponding code-level deletion.
-3. **Identity and schema freeze — closed:** the commit-2 artifact set fixes node-occurrence
+3. **Identity and schema freeze — closed:** the current artifact set fixes node-occurrence
    derivation, terminal/dependency contracts, every canonical persisted schema, and the complete
    golden-vector corpus. Exact artifact hashes and counts are recorded in the searchable
-   `RECOVERABILITY_V2_ARTIFACT_METADATA` ledger above.
+   `RECOVERABILITY_V3_ARTIFACT_METADATA` ledger above.
 4. **Implementation package plan — closed:** crate ownership, dependency order, deletion
    checkpoints, focused verification, and final integration responsibility were assigned for every
    package below.

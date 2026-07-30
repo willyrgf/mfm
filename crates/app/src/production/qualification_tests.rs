@@ -472,6 +472,7 @@ fn evm_live_binding_closes_over_the_one_fixed_adapter_and_dynamic_contracts() {
                 "completion_reserve_bytes": bounds.completion_reserve_bytes().to_string(),
                 "completion_reserve_records": bounds.completion_reserve_records(),
                 "max_attempts": bounds.max_attempts(),
+                "max_completion_record_bytes": bounds.max_completion_record_bytes().to_string(),
                 "max_records": bounds.max_records(),
                 "max_retained_bytes": bounds.max_retained_bytes().to_string(),
             },
@@ -1214,12 +1215,12 @@ fn test_executor_material_with_safe_failure(
         ),
         test_executor_retained(
             "delivery-audit",
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
             evidence_ref.clone(),
         ),
         test_executor_retained(
             "executor-frontier",
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
             evidence_ref.clone(),
         ),
         test_executor_retained(
@@ -1229,12 +1230,12 @@ fn test_executor_material_with_safe_failure(
         ),
         test_executor_retained(
             "terminal-tombstone",
-            "mfm.executor-terminal-tombstone.v1",
+            "mfm.executor-terminal-tombstone.v2",
             evidence_ref.clone(),
         ),
         test_executor_retained(
             "terminal-proof",
-            "mfm.executor-reference-terminal-proof.v1",
+            "mfm.executor-reference-terminal-proof.v2",
             evidence_ref.clone(),
         ),
         value_contracts.attempt_result().clone(),
@@ -1250,7 +1251,7 @@ fn test_executor_material_with_safe_failure(
         retained,
         safe_failure_contract_ref,
         target_surface.clone(),
-        mfm_executor::EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 2, 16 * 1024)
+        mfm_executor::EvidenceBounds::new(20, 64, 8 * 1024 * 1024, 32 * 1024, 2, 32 * 1024)
             .expect("evidence bounds"),
         Some(resource_domain_ref.clone()),
         vec![

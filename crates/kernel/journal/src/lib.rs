@@ -1,8 +1,8 @@
 #![warn(missing_docs)]
-//! Frozen recoverability-v2 journal values.
+//! Frozen recoverability-v3 journal values.
 //!
 //! Every public persisted value in this crate is backed by
-//! [`mfm_canonical::ValidatedCanonicalValueV2`]. Construction and decoding
+//! [`mfm_canonical::ValidatedCanonicalValueV3`]. Construction and decoding
 //! always use the embedded recoverability annex; Rust serialization is not a
 //! second wire authority.
 //!
@@ -12,12 +12,12 @@
 //! The superseded lifecycle event algebra has no compatibility surface:
 //!
 //! ```compile_fail
-//! use mfm_journal::v1::KernelEventPayload;
+//! use mfm_journal::v2::KernelEventPayload;
 //! ```
 //!
 //! ```compile_fail
-//! use mfm_journal::v1::StateAttemptStarted;
+//! use mfm_journal::v2::StateAttemptStarted;
 //! ```
 
-/// Frozen recoverability-v2 journal values and codecs.
-pub mod v1;
+/// Frozen recoverability-v3 journal values and codecs.
+pub mod v2;

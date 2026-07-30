@@ -48,10 +48,10 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV2};
+use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
 use mfm_ids::{ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId};
-use mfm_journal::v1::{JournalHead, RecordRef, TransitionRef};
-use mfm_replay::v1::{
+use mfm_journal::v2::{JournalHead, RecordRef, TransitionRef};
+use mfm_replay::v2::{
     ExactReproduction as ReplayExactReproduction, ExactReproductionPlan, ReproductionFuture,
     ReproductionResolver,
 };
@@ -1023,7 +1023,7 @@ fn executable_identity_for_bytes(bytes: &[u8]) -> io::Result<String> {
         ("sha256", CanonicalValue::String(raw_sha256)),
     ])
     .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let contract = RecoverabilityContractV2::embedded()
+    let contract = RecoverabilityContractV3::embedded()
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
     let descriptor = contract
         .encode(EXECUTABLE_DESCRIPTOR_CONTRACT, &identity)
@@ -1038,7 +1038,7 @@ fn exact_plan_for_adapter(
     artifact: &RetainedExecutable,
     transitions: &[TransitionRef],
 ) -> ExactReproductionPlan {
-    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
     let run_id = RunId::from_str(
         "run:sha256-jcs-v1:\
          0000000000000000000000000000000000000000000000000000000000000000",
@@ -1052,7 +1052,7 @@ fn exact_plan_for_adapter(
     let semantic_head = JournalHead::new(2, &commit_digest).expect("semantic head");
     let portable_export_ref = ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("portable schema")
             .clone(),
         ContentDigest::from_str(

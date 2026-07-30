@@ -157,6 +157,7 @@ fn audit_renderer_uses_only_the_frozen_verified_projection_fields() {
         "status",
         "result_ref",
         "failure",
+        "non_domain_failure",
         "effect_key",
         "delivery_audit_ref",
         "delivery_audit_terminal",

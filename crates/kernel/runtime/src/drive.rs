@@ -6,27 +6,34 @@ use std::sync::Arc;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_facts::FactSelectionRequest;
 use mfm_ids::{ContentRef, EffectKey, NodeId, RequestDigest, StableId};
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     AuthorizationRef, AuthorizationScopeFields, CapabilityBindingRef, ClosureRef,
-    FactSelectionScanContract, FrozenReadIntent, InputManifestRef, NodePhase,
+    FactSelectionScanContract, FrozenReadIntent, InputManifestRef, JournalHead, JournalPredecessor,
+    NodePhase, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure, NonDomainFailureCode,
     ReadCapabilityBinding, RunPhase, TransitionBodyFields, TransitionRef, ValueRef,
 };
 use mfm_program::{
     CandidateCertificationError, CandidateCertificationErrorKind, ProposedValueMaterial,
     QualifiedAdmittedProgram, QualifiedAuthoredRequest, QualifiedCandidateStateCallbacks,
     QualifiedEffectEntry, QualifiedEvidenceVerdict, QualifiedProgramRegistry, QualifiedReadEntry,
-    QualifiedSettlement, VerifiedReadOutcome, VerifiedStateFrameMaterial,
+    QualifiedSettlement, QualifiedStateEntry, VerifiedReadOutcome, VerifiedStateFrameMaterial,
     VerifiedTerminalEffectView, VerifiedValueMaterial,
 };
 use mfm_spec::{CertifiedNodeContract, CertifiedStateExecution, RetainedValueContract};
 use mfm_store::{
-    AppendOutcome, AppendRejection, AuthorizationMaterial, Drive, ExistingRunAppendMaterial,
-    FactScanBackend, FactSelectionAuthorizationOutcome, NewlyAppended, NodeTerminalOutcome,
-    ObjectGraphProposal, ObservationMaterial, PreparedFrame, PreparedJournalAppend,
-    ProducedObjectRoot, ReadObservationMaterial, RunAccessAuthority, RunHistoryWriter,
-    TransitionMaterial, VerifiedNodeAccessHistory, VerifiedRunView, FACT_SELECTION_OPERATION_ID,
+    AppendOutcome, AppendRejection, AuthorizationMaterial, Drive, ExactResolution,
+    ExistingRunAppendMaterial, FactScanBackend, FactScanFailureProvenance,
+    FactSelectionAuthorizationOutcome, NewlyAppended, NodeTerminalOutcome, ObjectGraphProposal,
+    ObservationMaterial, PreparedFrame, PreparedJournalAppend, ProducedObjectRoot,
+    ReadObservationMaterial, RunAccessAuthority, RunHistoryWriter, SealedFactSelectionObservation,
+    StoreError, StoreErrorInspection, TransitionMaterial, VerifiedNodeAccessHistory,
+    VerifiedRunView, FACT_SELECTION_OPERATION_ID,
 };
 
+use crate::access_protocol::{
+    AccessKind, Authorized, CommittedObservation, Ensure, FactSelection, PendingObservation,
+    Prepared, PreparedAccess, Read,
+};
 use crate::append_id::append_request_id;
 use crate::callback_material::{settlement_material, verified_callback_frame};
 use crate::capability_registry::{
@@ -41,7 +48,7 @@ use crate::materialization::{frame_readiness, FrameReadiness};
 use crate::observation_material::{
     committed_read_observation, committed_terminal_observation, CommittedEffectResolver,
 };
-use crate::runtime_error::map_store_error;
+use crate::runtime_error::{map_store_error, non_domain_failure};
 use crate::{DriveOutcome, DriveWaitReason, Result, RuntimeError};
 
 /// Stateless interpreter over one authoritative run-journal store.
@@ -67,14 +74,14 @@ enum SettlementAction {
     Read {
         frame: Box<PreparedFrame>,
         request_ref: ValueRef,
-        observation_ref: mfm_journal::v1::ObservationRef,
+        observation_ref: mfm_journal::v2::ObservationRef,
         settlement: QualifiedSettlement,
         settlement_contract: mfm_spec::CertifiedSettlementContract,
     },
     Effect {
         node_id: NodeId,
         request_transition_ref: TransitionRef,
-        observation_ref: mfm_journal::v1::ObservationRef,
+        observation_ref: mfm_journal::v2::ObservationRef,
         settlement: QualifiedSettlement,
         settlement_contract: mfm_spec::CertifiedSettlementContract,
     },
@@ -101,37 +108,85 @@ enum LocalActionMaterial {
     },
 }
 
-enum AccessActionMaterial {
-    Read(Box<ReadAccessAction>),
-    FactSelection(Box<FactSelectionAccessAction>),
-    Ensure(Box<EnsureAccessAction>),
-}
-
-struct ReadAccessAction {
+pub(crate) struct ReadAccessAction {
     node_id: NodeId,
-    state_contract_ref: ContentRef,
     frame: PreparedFrame,
     request_contract: RetainedValueContract,
     returned_contract: RetainedValueContract,
     safe_failure_contract: RetainedValueContract,
-    binding_ref: ContentRef,
-    operation_id: StableId,
+    result_encoder: QualifiedStateEntry,
+    invoker: RuntimeReadInvoker,
+    safe_failure_contract_ref: ContentRef,
     request: RoutedReadRequest,
+    result_encoding_failure: NonDomainFailure,
 }
 
-struct FactSelectionAccessAction {
+pub(crate) struct FactSelectionAccessAction {
     node_id: NodeId,
     frame: PreparedFrame,
     request_contract: RetainedValueContract,
     routing_generation_ref: ContentRef,
     request: FactSelectionRequest,
     proposed: ProposedValueMaterial,
+    store_unavailable_failure: NonDomainFailure,
+    history_invalid_failure: NonDomainFailure,
+    adapter_contract_failure: NonDomainFailure,
 }
 
-struct EnsureAccessAction {
+pub(crate) struct EnsureAccessAction {
     node_id: NodeId,
     intent: EffectIntent,
+    invoker: RuntimeEffectInvoker,
+    invocation_context: EffectInvocationContext,
     request: QualifiedAuthoredRequest,
+}
+
+impl AccessKind for Read {
+    type PreparedInvocation = Box<ReadAccessAction>;
+    type BoundaryReturn = mfm_store::NewlyAppendedAuthorization;
+    type PendingMaterial = EncodedReadObservation;
+}
+
+impl AccessKind for Ensure {
+    type PreparedInvocation = Box<EnsureAccessAction>;
+    type BoundaryReturn = mfm_store::NewlyAppendedAuthorization;
+    type PendingMaterial = crate::capability_registry::ErasedEnsureObservation;
+}
+
+impl AccessKind for FactSelection {
+    type PreparedInvocation = Box<FactSelectionAccessAction>;
+    type BoundaryReturn = mfm_store::FactScanPermit;
+    type PendingMaterial = FactSelectionObservation;
+}
+
+#[derive(Clone)]
+enum FactSelectionObservationOutcome {
+    Returned(Box<SealedFactSelectionObservation>),
+    NonDomainFailure(NonDomainFailure),
+}
+
+#[derive(Clone)]
+pub(crate) struct FactSelectionObservation {
+    authorization_ref: AuthorizationRef,
+    outcome: FactSelectionObservationOutcome,
+}
+
+impl FactSelectionObservation {
+    fn material(&self) -> ObservationMaterial {
+        match &self.outcome {
+            FactSelectionObservationOutcome::Returned(sealed) => {
+                ObservationMaterial::FactSelection {
+                    sealed: sealed.clone(),
+                }
+            }
+            FactSelectionObservationOutcome::NonDomainFailure(failure) => {
+                ObservationMaterial::FactSelectionFailure {
+                    authorization_ref: self.authorization_ref.clone(),
+                    failure: *failure,
+                }
+            }
+        }
+    }
 }
 
 enum DeferredAccessDerivation {
@@ -162,7 +217,7 @@ impl DeferredAccessDerivation {
     }
 }
 
-struct EncodedReadObservation {
+pub(crate) struct EncodedReadObservation {
     authorization_ref: AuthorizationRef,
     outcome: EncodedReadOutcome,
 }
@@ -177,6 +232,7 @@ enum EncodedReadOutcome {
         diagnostic: Option<ProducedObjectRoot>,
         metadata: mfm_store::SafeFailureMetadata,
     },
+    NonDomainFailure(NonDomainFailure),
 }
 
 impl EncodedReadObservation {
@@ -199,6 +255,9 @@ impl EncodedReadObservation {
                 diagnostic_root: diagnostic.clone(),
                 metadata: metadata.clone(),
             },
+            EncodedReadOutcome::NonDomainFailure(failure) => {
+                ReadObservationMaterial::NonDomainFailure { failure: *failure }
+            }
         }
     }
 }
@@ -227,6 +286,386 @@ enum IntegrityFinding {
 enum ActionResult {
     Outcome(DriveOutcome),
     Retry,
+}
+
+struct ObservationRetryBackoff {
+    next_delay_ms: u64,
+}
+
+impl ObservationRetryBackoff {
+    const fn new() -> Self {
+        Self { next_delay_ms: 10 }
+    }
+
+    const fn reset(&mut self) {
+        self.next_delay_ms = 10;
+    }
+
+    fn take_delay(&mut self) -> std::time::Duration {
+        let delay = std::time::Duration::from_millis(self.next_delay_ms);
+        self.next_delay_ms = self.next_delay_ms.saturating_mul(2).min(1_000);
+        delay
+    }
+
+    async fn wait(&mut self) {
+        tokio::time::sleep(self.take_delay()).await;
+    }
+}
+
+trait ObservationRetry {
+    fn reset(&mut self);
+
+    async fn wait(&mut self);
+}
+
+impl ObservationRetry for ObservationRetryBackoff {
+    fn reset(&mut self) {
+        ObservationRetryBackoff::reset(self);
+    }
+
+    async fn wait(&mut self) {
+        ObservationRetryBackoff::wait(self).await;
+    }
+}
+
+enum ObservationLogicalResolution<ObservationRef, Head> {
+    Absent,
+    Identical {
+        observation_ref: ObservationRef,
+        journal_head: Head,
+    },
+    Conflict,
+    Retry,
+}
+
+enum ObservationPhysicalResolution {
+    AbsentAtCurrentHead,
+    StalePredecessor,
+    Occupied,
+    Retry,
+}
+
+enum ObservationPreparation<PreparedAppend, LogicalIdentity, PhysicalIdentity> {
+    Prepared {
+        append: PreparedAppend,
+        logical: LogicalIdentity,
+        physical: PhysicalIdentity,
+    },
+    AlreadyCommitted,
+    Retry,
+}
+
+enum ObservationAppendAttempt {
+    Progress,
+    StalePredecessor,
+    Conflict,
+    Retry,
+}
+
+trait ObservationCommitDriver {
+    type View;
+    type Head: Clone + PartialEq;
+    type LogicalIdentity: PartialEq;
+    type PhysicalIdentity: PartialEq;
+    type PreparedAppend;
+    type ObservationRef;
+    type Material;
+
+    async fn load_verified(&mut self) -> std::result::Result<Self::View, ()>;
+
+    fn head<'a>(&self, view: &'a Self::View) -> &'a Self::Head;
+
+    fn resolve_logical(
+        &mut self,
+        view: &Self::View,
+        logical: &Self::LogicalIdentity,
+    ) -> ObservationLogicalResolution<Self::ObservationRef, Self::Head>;
+
+    fn resolve_physical(
+        &mut self,
+        view: &Self::View,
+        physical: &Self::PhysicalIdentity,
+    ) -> ObservationPhysicalResolution;
+
+    fn prepare(
+        &mut self,
+        view: &Self::View,
+        physical: Option<&Self::PhysicalIdentity>,
+        material: Self::Material,
+    ) -> ObservationPreparation<Self::PreparedAppend, Self::LogicalIdentity, Self::PhysicalIdentity>;
+
+    fn logical_is_expected(&self, logical: &Self::LogicalIdentity) -> bool;
+
+    async fn append(&mut self, append: Self::PreparedAppend) -> ObservationAppendAttempt;
+}
+
+struct StoreObservationCommitDriver<'a, B> {
+    writer: &'a RunHistoryWriter<B>,
+    authority: &'a RunAccessAuthority<Drive>,
+    node_id: &'a NodeId,
+    append_purpose: &'static str,
+    authorization_ref: &'a AuthorizationRef,
+}
+
+impl<B> ObservationCommitDriver for StoreObservationCommitDriver<'_, B>
+where
+    B: FactScanBackend,
+{
+    type View = VerifiedRunView;
+    type Head = JournalHead;
+    type LogicalIdentity = mfm_store::LogicalObservationIdentity;
+    type PhysicalIdentity = mfm_store::PhysicalAppendIdentity;
+    type PreparedAppend = PreparedJournalAppend;
+    type ObservationRef = mfm_journal::v2::ObservationRef;
+    type Material = ObservationMaterial;
+
+    async fn load_verified(&mut self) -> std::result::Result<Self::View, ()> {
+        self.writer
+            .load_for_drive(self.authority)
+            .await
+            .map_err(|_| ())?
+            .verify_recorded_history()
+            .map_err(|_| ())
+    }
+
+    fn head<'a>(&self, view: &'a Self::View) -> &'a Self::Head {
+        view.journal_head()
+    }
+
+    fn resolve_logical(
+        &mut self,
+        view: &Self::View,
+        logical: &Self::LogicalIdentity,
+    ) -> ObservationLogicalResolution<Self::ObservationRef, Self::Head> {
+        match view.resolve_logical_observation(logical) {
+            Ok(ExactResolution::Absent) => ObservationLogicalResolution::Absent,
+            Ok(ExactResolution::Identical(committed)) => ObservationLogicalResolution::Identical {
+                observation_ref: committed.observation_ref().clone(),
+                journal_head: committed.journal_head().clone(),
+            },
+            Ok(ExactResolution::Conflict) => ObservationLogicalResolution::Conflict,
+            Err(_) => ObservationLogicalResolution::Retry,
+        }
+    }
+
+    fn resolve_physical(
+        &mut self,
+        view: &Self::View,
+        physical: &Self::PhysicalIdentity,
+    ) -> ObservationPhysicalResolution {
+        let resolution = match view.resolve_physical_append(physical) {
+            Ok(resolution) => resolution,
+            Err(_) => return ObservationPhysicalResolution::Retry,
+        };
+        match resolution.exact() {
+            ExactResolution::Identical(_) | ExactResolution::Conflict => {
+                ObservationPhysicalResolution::Occupied
+            }
+            ExactResolution::Absent => {
+                let current_predecessor =
+                    match JournalPredecessor::journal_head(resolution.current_head()) {
+                        Ok(predecessor) => predecessor,
+                        Err(_) => return ObservationPhysicalResolution::Retry,
+                    };
+                if physical.expected_predecessor() == &current_predecessor {
+                    ObservationPhysicalResolution::AbsentAtCurrentHead
+                } else {
+                    ObservationPhysicalResolution::StalePredecessor
+                }
+            }
+        }
+    }
+
+    fn prepare(
+        &mut self,
+        view: &Self::View,
+        physical: Option<&Self::PhysicalIdentity>,
+        material: ObservationMaterial,
+    ) -> ObservationPreparation<Self::PreparedAppend, Self::LogicalIdentity, Self::PhysicalIdentity>
+    {
+        let append_id = match physical {
+            Some(physical) => physical.append_request_id().clone(),
+            None => match append_request_id(
+                self.append_purpose,
+                view.journal_head(),
+                Some(self.node_id),
+            ) {
+                Ok(append_id) => append_id,
+                Err(_) => return ObservationPreparation::Retry,
+            },
+        };
+        let append = match physical {
+            Some(_) => self.writer.prepare_append(
+                self.authority,
+                view,
+                append_id,
+                ExistingRunAppendMaterial::Observation(Box::new(material)),
+            ),
+            None => self.writer.prepare_observation_resolution(
+                self.authority,
+                view,
+                append_id,
+                material,
+            ),
+        };
+        let append = match append {
+            Ok(append) => append,
+            Err(StoreError::ObservationAlreadyCommitted) => {
+                return ObservationPreparation::AlreadyCommitted;
+            }
+            Err(_) => return ObservationPreparation::Retry,
+        };
+        let logical = match append.logical_observation_identity() {
+            Ok(Some(logical)) => logical,
+            Ok(None) | Err(_) => return ObservationPreparation::Retry,
+        };
+        let physical = append.physical_identity();
+        ObservationPreparation::Prepared {
+            append,
+            logical,
+            physical,
+        }
+    }
+
+    fn logical_is_expected(&self, logical: &Self::LogicalIdentity) -> bool {
+        logical.authorization_ref() == self.authorization_ref
+    }
+
+    async fn append(&mut self, append: Self::PreparedAppend) -> ObservationAppendAttempt {
+        match self.writer.append(self.authority, append).await {
+            Ok(
+                AppendOutcome::NewlyAppended(NewlyAppended::Observation(_))
+                | AppendOutcome::AlreadyCommitted(_),
+            ) => ObservationAppendAttempt::Progress,
+            Ok(AppendOutcome::Rejected(AppendRejection::StaleHead { .. })) => {
+                ObservationAppendAttempt::StalePredecessor
+            }
+            Ok(AppendOutcome::Rejected(AppendRejection::AppendRequestConflict)) => {
+                ObservationAppendAttempt::Conflict
+            }
+            Ok(
+                AppendOutcome::OutcomeUnknown
+                | AppendOutcome::Rejected(
+                    AppendRejection::AdmissionConflict | AppendRejection::RunClosed,
+                )
+                | AppendOutcome::NewlyAppended(
+                    NewlyAppended::RunAdmitted(_)
+                    | NewlyAppended::Transition(_)
+                    | NewlyAppended::Authorization(_),
+                ),
+            )
+            | Err(_) => ObservationAppendAttempt::Retry,
+        }
+    }
+}
+
+async fn commit_observation_loop<K, F, Driver, Retry>(
+    driver: &mut Driver,
+    pending: &mut PendingObservation<K, Driver::LogicalIdentity, Driver::PhysicalIdentity>,
+    mut material: F,
+    retry: &mut Retry,
+) -> Result<CommittedObservation<K, Driver::Head, Driver::ObservationRef>>
+where
+    K: AccessKind,
+    F: FnMut(&K::PendingMaterial) -> Driver::Material,
+    Driver: ObservationCommitDriver,
+    Retry: ObservationRetry,
+{
+    let mut last_verified_head: Option<Driver::Head> = None;
+    loop {
+        let view = match driver.load_verified().await {
+            Ok(view) => view,
+            Err(()) => {
+                retry.wait().await;
+                continue;
+            }
+        };
+        let loaded_head = driver.head(&view).clone();
+        if last_verified_head
+            .as_ref()
+            .is_some_and(|head| head != &loaded_head)
+        {
+            retry.reset();
+        }
+        last_verified_head = Some(loaded_head);
+
+        if let Some(logical) = pending.logical_identity() {
+            match driver.resolve_logical(&view, logical) {
+                ObservationLogicalResolution::Absent => {}
+                ObservationLogicalResolution::Identical {
+                    observation_ref,
+                    journal_head,
+                } => {
+                    return Ok(CommittedObservation::new(observation_ref, journal_head));
+                }
+                ObservationLogicalResolution::Conflict => {
+                    return Err(RuntimeError::ObservationConflict);
+                }
+                ObservationLogicalResolution::Retry => {
+                    retry.wait().await;
+                    continue;
+                }
+            }
+        }
+
+        if let Some(physical) = pending.physical_identity() {
+            match driver.resolve_physical(&view, physical) {
+                ObservationPhysicalResolution::AbsentAtCurrentHead => {}
+                ObservationPhysicalResolution::StalePredecessor => {
+                    pending.discard_stale_physical();
+                    retry.reset();
+                    continue;
+                }
+                ObservationPhysicalResolution::Occupied => {
+                    return Err(RuntimeError::ObservationConflict);
+                }
+                ObservationPhysicalResolution::Retry => {
+                    retry.wait().await;
+                    continue;
+                }
+            }
+        }
+
+        let first_physical_attempt = pending.physical_identity().is_none();
+        let candidate_material = material(pending.material());
+        let prepared = driver.prepare(&view, pending.physical_identity(), candidate_material);
+        let (append, logical, physical) = match prepared {
+            ObservationPreparation::Prepared {
+                append,
+                logical,
+                physical,
+            } => (append, logical, physical),
+            ObservationPreparation::AlreadyCommitted => {
+                retry.reset();
+                continue;
+            }
+            ObservationPreparation::Retry => {
+                retry.wait().await;
+                continue;
+            }
+        };
+        if !driver.logical_is_expected(&logical) {
+            return Err(RuntimeError::ObservationConflict);
+        }
+        pending.remember_prepared(logical, physical)?;
+
+        // Freeze and resolve the logical identity before the first physical append.
+        if first_physical_attempt {
+            continue;
+        }
+
+        match driver.append(append).await {
+            ObservationAppendAttempt::Progress => retry.reset(),
+            ObservationAppendAttempt::StalePredecessor => {
+                pending.discard_stale_physical();
+                retry.reset();
+            }
+            ObservationAppendAttempt::Conflict => {
+                return Err(RuntimeError::ObservationConflict);
+            }
+            ObservationAppendAttempt::Retry => retry.wait().await,
+        }
+    }
 }
 
 impl<B> Runtime<B>
@@ -262,8 +701,7 @@ where
                     self.commit_local(&authority, &view, candidate).await?
                 }
                 SelectedAction::Access { candidate, .. } => {
-                    self.perform_access(&authority, &view, &admitted, candidate)
-                        .await?
+                    self.perform_access(&authority, &view, candidate).await?
                 }
                 SelectedAction::Closed => ActionResult::Outcome(DriveOutcome::Closed {
                     closure_ref: closure_ref(&view)?,
@@ -291,12 +729,7 @@ where
         view: &VerifiedRunView,
         admitted: &QualifiedAdmittedProgram,
     ) -> Result<
-        DecisionInput<
-            SettlementAction,
-            LocalActionMaterial,
-            AccessActionMaterial,
-            IntegrityFinding,
-        >,
+        DecisionInput<SettlementAction, LocalActionMaterial, PreparedAccess, IntegrityFinding>,
     > {
         let candidate_callbacks = self.program_registry.candidate_callbacks(
             admitted.candidate_identity(),
@@ -753,7 +1186,7 @@ where
                                 occurrences[index].access = Some((
                                     authorization_count,
                                     AccessAction::Read,
-                                    AccessActionMaterial::FactSelection(Box::new(
+                                    PreparedAccess::FactSelection(Prepared::new(Box::new(
                                         FactSelectionAccessAction {
                                             node_id: node.node_id().clone(),
                                             frame: *frame,
@@ -761,8 +1194,23 @@ where
                                             routing_generation_ref,
                                             request,
                                             proposed,
+                                            store_unavailable_failure: non_domain_failure(
+                                                NonDomainEntryStatus::MayHaveEntered,
+                                                NonDomainDisposition::RetryableOperational,
+                                                NonDomainFailureCode::FactStoreUnavailable,
+                                            )?,
+                                            history_invalid_failure: non_domain_failure(
+                                                NonDomainEntryStatus::MayHaveEntered,
+                                                NonDomainDisposition::IntegrityBlocked,
+                                                NonDomainFailureCode::FactHistoryInvalid,
+                                            )?,
+                                            adapter_contract_failure: non_domain_failure(
+                                                NonDomainEntryStatus::MayHaveEntered,
+                                                NonDomainDisposition::IntegrityBlocked,
+                                                NonDomainFailureCode::AdapterContractViolation,
+                                            )?,
                                         },
-                                    )),
+                                    ))),
                                 ));
                                 break;
                             }
@@ -783,7 +1231,17 @@ where
                             operationally_blocked = true;
                             continue;
                         };
-                        let invoker = RuntimeReadInvoker::from_entry(entry)?;
+                        let invoker = RuntimeReadInvoker::from_entry(entry)?.clone();
+                        let Some(result_encoder) = self
+                            .program_registry
+                            .state(node.state_contract_ref())
+                            .cloned()
+                        else {
+                            operationally_blocked = true;
+                            continue;
+                        };
+                        let safe_failure_contract_ref =
+                            entry.binding().fields()?.safe_failure_contract_ref;
                         match invoker.route_request(entry, authored) {
                             Ok(request) => {
                                 if let Some(baseline) = baseline.as_ref() {
@@ -796,17 +1254,24 @@ where
                                 occurrences[index].access = Some((
                                     authorization_count,
                                     AccessAction::Read,
-                                    AccessActionMaterial::Read(Box::new(ReadAccessAction {
-                                        node_id: node.node_id().clone(),
-                                        state_contract_ref: node.state_contract_ref().clone(),
-                                        frame: *frame,
-                                        request_contract: request_contract.clone(),
-                                        returned_contract: returned_contract.clone(),
-                                        safe_failure_contract: safe_failure_contract.clone(),
-                                        binding_ref: capability_binding_ref.clone(),
-                                        operation_id: capability_operation_id.clone(),
-                                        request,
-                                    })),
+                                    PreparedAccess::Read(Prepared::new(Box::new(
+                                        ReadAccessAction {
+                                            node_id: node.node_id().clone(),
+                                            frame: *frame,
+                                            request_contract: request_contract.clone(),
+                                            returned_contract: returned_contract.clone(),
+                                            safe_failure_contract: safe_failure_contract.clone(),
+                                            result_encoder,
+                                            invoker,
+                                            safe_failure_contract_ref,
+                                            request,
+                                            result_encoding_failure: non_domain_failure(
+                                                NonDomainEntryStatus::MayHaveEntered,
+                                                NonDomainDisposition::IntegrityBlocked,
+                                                NonDomainFailureCode::ResultEncodingFailure,
+                                            )?,
+                                        },
+                                    ))),
                                 ));
                                 break;
                             }
@@ -843,6 +1308,7 @@ where
                         operationally_blocked = true;
                         continue;
                     };
+                    let invoker = RuntimeEffectInvoker::from_entry(entry)?.clone();
                     let retained = verified_retained_value(
                         view,
                         &intent.semantic_request_ref,
@@ -859,14 +1325,30 @@ where
                         integrity_blocks.push(integrity(occurrences[index].certified_order, 0));
                         break;
                     }
+                    let invocation_context = EffectInvocationContext {
+                        binding: entry.binding().clone(),
+                        operation_id: executor_operation_id.clone(),
+                        request_type: entry.request_type(),
+                        response_type: entry.response_type(),
+                        failure_type: entry.failure_type(),
+                        tenant_scope_id: view.tenant_scope_id().clone(),
+                        store_scope_id: view.store_identity().store_scope_id().clone(),
+                        run_id: view.run_id().clone(),
+                        node_id: node.node_id().clone(),
+                        effect_key: intent.effect_key.clone(),
+                        request_digest: intent.request_digest.clone(),
+                        adapter_may_have_entered: invoker.adapter_may_have_entered(),
+                    };
                     occurrences[index].access = Some((
                         authorization_count,
                         AccessAction::Ensure,
-                        AccessActionMaterial::Ensure(Box::new(EnsureAccessAction {
+                        PreparedAccess::Ensure(Prepared::new(Box::new(EnsureAccessAction {
                             node_id: node.node_id().clone(),
                             intent: *intent,
+                            invoker,
+                            invocation_context,
                             request,
-                        })),
+                        }))),
                     ));
                     break;
                 }
@@ -1023,18 +1505,20 @@ where
         &self,
         authority: &RunAccessAuthority<Drive>,
         view: &VerifiedRunView,
-        admitted: &QualifiedAdmittedProgram,
-        action: AccessActionMaterial,
+        action: PreparedAccess,
     ) -> Result<ActionResult> {
         match action {
-            AccessActionMaterial::Read(action) => {
-                self.perform_read(authority, view, admitted, *action).await
+            PreparedAccess::Read(action) => {
+                self.perform_read(authority, view, *action.into_invocation())
+                    .await
             }
-            AccessActionMaterial::FactSelection(action) => {
-                self.perform_fact_selection(authority, view, *action).await
+            PreparedAccess::FactSelection(action) => {
+                self.perform_fact_selection(authority, view, *action.into_invocation())
+                    .await
             }
-            AccessActionMaterial::Ensure(action) => {
-                self.perform_ensure(authority, view, *action).await
+            PreparedAccess::Ensure(action) => {
+                self.perform_ensure(authority, view, *action.into_invocation())
+                    .await
             }
         }
     }
@@ -1043,10 +1527,8 @@ where
         &self,
         authority: &RunAccessAuthority<Drive>,
         view: &VerifiedRunView,
-        admitted: &QualifiedAdmittedProgram,
         action: ReadAccessAction,
     ) -> Result<ActionResult> {
-        let input_manifest_ref = action.frame.input_manifest_ref().clone();
         let routing_generation_ref = action.request.routing_generation_ref().clone();
         let immutable_request_root = ProducedObjectRoot::new(
             action.request_contract.clone(),
@@ -1067,8 +1549,16 @@ where
                 routing_generation_ref: routing_generation_ref.clone(),
             })),
         )?;
-        let (expected_request_ref, frozen_read_intent_ref) =
-            prepared_read_authorization_refs(&append)?;
+        let expected_request_ref = prepared_authorization_request_ref(&append)?;
+        let prepared_invocation = action.invoker.prepare_call(
+            expected_request_ref,
+            ReadInvocationContext {
+                routing_generation_ref,
+                safe_failure_contract_ref: action.safe_failure_contract_ref,
+                adapter_may_have_entered: action.invoker.adapter_may_have_entered(),
+            },
+            action.request,
+        )?;
         let outcome = self
             .writer
             .append(authority, append)
@@ -1090,160 +1580,101 @@ where
             AppendOutcome::OutcomeUnknown => return Err(RuntimeError::OutcomeUnknown),
             AppendOutcome::NewlyAppended(_) => return Err(RuntimeError::InvalidCallbackResult),
         };
-        let authorized_head = witness.committed().journal_head().clone();
-        let Some(entry) = exact_read_entry(
-            &self.program_registry,
-            &action.binding_ref,
-            &action.operation_id,
-            &action.request_contract,
-            &action.returned_contract,
-            &action.safe_failure_contract,
-        ) else {
-            return Err(RuntimeError::CatalogSelection);
-        };
-        let safe_failure_contract_ref = entry.binding().fields()?.safe_failure_contract_ref;
-        let invoker = RuntimeReadInvoker::from_entry(entry)?;
-        let observation = invoker
-            .call(
-                *witness,
-                expected_request_ref,
-                ReadInvocationContext {
-                    binding_ref: action.binding_ref,
-                    operation_id: action.operation_id,
-                    node_id: action.node_id.clone(),
-                    input_manifest_ref,
-                    frozen_read_intent_ref,
-                    routing_generation_ref,
-                    safe_failure_contract_ref,
-                },
-                action.request,
-            )
-            .await?;
+        let witness = Authorized::<Read>::new(*witness).into_invocation();
+        let node_id = action.node_id.clone();
+        let observation = prepared_invocation.invoke_and_totalize(witness).await;
         let material = self.encode_read_observation(
-            admitted,
-            &action.state_contract_ref,
+            &action.result_encoder,
             &action.returned_contract,
             &action.safe_failure_contract,
             observation,
+            action.result_encoding_failure,
         );
-        let material = match material {
-            Ok(material) => material,
-            Err(RuntimeError::CandidateCertification(error)) => {
-                return candidate_failure_at_head(authorized_head, error)
-                    .map(ActionResult::Outcome);
-            }
-            Err(error) => return Err(error),
-        };
-        self.append_read_observation(authority, &action.node_id, material)
-            .await
+        let mut pending = PendingObservation::<Read>::new(material);
+        let pending_authorization_ref = pending.material().authorization_ref.clone();
+        let committed = self
+            .commit_observation(
+                authority,
+                &node_id,
+                "read_observation",
+                &pending_authorization_ref,
+                &mut pending,
+                |observation| ObservationMaterial::Read {
+                    authorization_ref: observation.authorization_ref.clone(),
+                    outcome: Box::new(observation.material()),
+                },
+            )
+            .await?;
+        Ok(ActionResult::Outcome(advanced(committed.outcome().clone())))
     }
 
     fn encode_read_observation(
         &self,
-        admitted: &QualifiedAdmittedProgram,
-        state_contract_ref: &ContentRef,
+        result_encoder: &QualifiedStateEntry,
         returned_contract: &RetainedValueContract,
         safe_failure_contract: &RetainedValueContract,
         observation: ErasedReadObservation,
-    ) -> Result<EncodedReadObservation> {
-        let candidate_callbacks = self.program_registry.candidate_callbacks(
-            admitted.candidate_identity(),
-            admitted.recorded_operation_id(),
-        )?;
-        if candidate_callbacks.state(state_contract_ref).is_none() {
-            return Err(RuntimeError::CatalogSelection);
-        }
-        let callbacks = self
-            .program_registry
-            .state(state_contract_ref)
-            .ok_or(RuntimeError::CatalogSelection)?
-            .callbacks();
-        let outcome = match observation.outcome {
-            ErasedReadOutcome::Returned(value) => {
-                let proposed = callbacks.encode_read_returned(value.as_ref())?;
-                EncodedReadOutcome::Returned(ProducedObjectRoot::new(
-                    returned_contract.clone(),
-                    proposed.canonical().clone(),
-                ))
-            }
-            ErasedReadOutcome::DidNotEnter {
-                diagnostic,
-                metadata,
-            } => {
-                let diagnostic = diagnostic
-                    .as_ref()
-                    .map(|diagnostic| {
-                        let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
-                        Ok::<_, RuntimeError>(ProducedObjectRoot::new(
-                            safe_failure_contract.clone(),
-                            proposed.canonical().clone(),
-                        ))
-                    })
-                    .transpose()?;
-                EncodedReadOutcome::DidNotEnter {
+        result_encoding_failure: NonDomainFailure,
+    ) -> EncodedReadObservation {
+        let authorization_ref = observation.authorization_ref;
+        let encoded = (|| -> Result<EncodedReadOutcome> {
+            let callbacks = result_encoder.callbacks();
+            Ok(match observation.outcome {
+                ErasedReadOutcome::Returned(value) => {
+                    let proposed = callbacks.encode_read_returned(value.as_ref())?;
+                    EncodedReadOutcome::Returned(ProducedObjectRoot::new(
+                        returned_contract.clone(),
+                        proposed.canonical().clone(),
+                    ))
+                }
+                ErasedReadOutcome::DidNotEnter {
                     diagnostic,
                     metadata,
+                } => {
+                    let diagnostic = diagnostic
+                        .as_ref()
+                        .map(|diagnostic| {
+                            let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
+                            Ok::<_, RuntimeError>(ProducedObjectRoot::new(
+                                safe_failure_contract.clone(),
+                                proposed.canonical().clone(),
+                            ))
+                        })
+                        .transpose()?;
+                    EncodedReadOutcome::DidNotEnter {
+                        diagnostic,
+                        metadata,
+                    }
                 }
-            }
-            ErasedReadOutcome::Indeterminate {
-                diagnostic,
-                metadata,
-            } => {
-                let diagnostic = diagnostic
-                    .as_ref()
-                    .map(|diagnostic| {
-                        let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
-                        Ok::<_, RuntimeError>(ProducedObjectRoot::new(
-                            safe_failure_contract.clone(),
-                            proposed.canonical().clone(),
-                        ))
-                    })
-                    .transpose()?;
-                EncodedReadOutcome::Indeterminate {
+                ErasedReadOutcome::Indeterminate {
                     diagnostic,
                     metadata,
+                } => {
+                    let diagnostic = diagnostic
+                        .as_ref()
+                        .map(|diagnostic| {
+                            let proposed = callbacks.encode_read_diagnostic(diagnostic.as_ref())?;
+                            Ok::<_, RuntimeError>(ProducedObjectRoot::new(
+                                safe_failure_contract.clone(),
+                                proposed.canonical().clone(),
+                            ))
+                        })
+                        .transpose()?;
+                    EncodedReadOutcome::Indeterminate {
+                        diagnostic,
+                        metadata,
+                    }
                 }
-            }
-        };
-        Ok(EncodedReadObservation {
-            authorization_ref: observation.authorization_ref,
-            outcome,
-        })
-    }
-
-    async fn append_read_observation(
-        &self,
-        authority: &RunAccessAuthority<Drive>,
-        node_id: &NodeId,
-        observation: EncodedReadObservation,
-    ) -> Result<ActionResult> {
-        loop {
-            let journal = self
-                .writer
-                .load_for_drive(authority)
-                .await
-                .map_err(|error| map_store_error(&error))?;
-            let view = journal.verify_recorded_history()?;
-            let append_id =
-                append_request_id("read_observation", view.journal_head(), Some(node_id))?;
-            let append = self.writer.prepare_append(
-                authority,
-                &view,
-                append_id,
-                ExistingRunAppendMaterial::Observation(Box::new(ObservationMaterial::Read {
-                    authorization_ref: observation.authorization_ref.clone(),
-                    outcome: Box::new(observation.material()),
-                })),
-            )?;
-            let result = self
-                .writer
-                .append(authority, append)
-                .await
-                .map_err(|error| map_store_error(&error))?;
-            match observation_append_outcome(result)? {
-                ActionResult::Retry => {}
-                outcome => return Ok(outcome),
-            }
+                ErasedReadOutcome::NonDomainFailure(failure) => {
+                    EncodedReadOutcome::NonDomainFailure(failure)
+                }
+            })
+        })();
+        EncodedReadObservation {
+            authorization_ref,
+            outcome: encoded.unwrap_or(EncodedReadOutcome::NonDomainFailure(
+                result_encoding_failure,
+            )),
         }
     }
 
@@ -1253,33 +1684,6 @@ where
         view: &VerifiedRunView,
         action: EnsureAccessAction,
     ) -> Result<ActionResult> {
-        let node = view
-            .certified_spec()
-            .nodes()
-            .iter()
-            .find(|node| node.node_id() == &action.node_id)
-            .ok_or(RuntimeError::CatalogSelection)?;
-        let CertifiedStateExecution::Effect {
-            executor_operation_id,
-            executor_binding_ref,
-            request_contract,
-            ensure_result_contract,
-            terminal_evidence_contract,
-            ..
-        } = node.execution()
-        else {
-            return Err(RuntimeError::CatalogSelection);
-        };
-        let Some(entry) = exact_effect_entry(
-            &self.program_registry,
-            executor_binding_ref,
-            executor_operation_id,
-            request_contract,
-            ensure_result_contract,
-            terminal_evidence_contract,
-        ) else {
-            return Err(RuntimeError::CatalogSelection);
-        };
         let append_id = append_request_id(
             "ensure_authorization",
             view.journal_head(),
@@ -1296,6 +1700,11 @@ where
             )),
         )?;
         let expected_request_ref = prepared_authorization_request_ref(&append)?;
+        let prepared_invocation = action.invoker.prepare_ensure(
+            expected_request_ref,
+            action.invocation_context,
+            action.request,
+        )?;
         let outcome = self
             .writer
             .append(authority, append)
@@ -1317,68 +1726,49 @@ where
             AppendOutcome::OutcomeUnknown => return Err(RuntimeError::OutcomeUnknown),
             AppendOutcome::NewlyAppended(_) => return Err(RuntimeError::InvalidCallbackResult),
         };
-        let invoker = RuntimeEffectInvoker::from_entry(entry)?;
-        let observation = invoker
-            .ensure(
-                *witness,
-                expected_request_ref,
-                EffectInvocationContext {
-                    binding: entry.binding().clone(),
-                    operation_id: executor_operation_id.clone(),
-                    request_type: entry.request_type(),
-                    response_type: entry.response_type(),
-                    failure_type: entry.failure_type(),
-                    tenant_scope_id: view.tenant_scope_id().clone(),
-                    store_scope_id: view.store_identity().store_scope_id().clone(),
-                    run_id: view.run_id().clone(),
-                    node_id: action.node_id.clone(),
-                    request_transition_ref: action.intent.request_transition_ref,
-                    effect_key: action.intent.effect_key,
-                    request_digest: action.intent.request_digest,
+        let witness = Authorized::<Ensure>::new(*witness).into_invocation();
+        let node_id = action.node_id.clone();
+        let observation = prepared_invocation.invoke_and_totalize(witness).await;
+        let mut pending = PendingObservation::<Ensure>::new(observation);
+        let pending_authorization_ref = pending.material().authorization_ref.clone();
+        let committed = self
+            .commit_observation(
+                authority,
+                &node_id,
+                "effect_observation",
+                &pending_authorization_ref,
+                &mut pending,
+                |observation| ObservationMaterial::EnsureEffect {
+                    authorization_ref: observation.authorization_ref.clone(),
+                    outcome: Box::new(observation.outcome.clone()),
                 },
-                action.request,
             )
             .await?;
-        self.append_effect_observation(authority, &action.node_id, observation)
-            .await
+        Ok(ActionResult::Outcome(advanced(committed.outcome().clone())))
     }
 
-    async fn append_effect_observation(
+    async fn commit_observation<K, F>(
         &self,
         authority: &RunAccessAuthority<Drive>,
         node_id: &NodeId,
-        observation: crate::capability_registry::ErasedEnsureObservation,
-    ) -> Result<ActionResult> {
-        loop {
-            let journal = self
-                .writer
-                .load_for_drive(authority)
-                .await
-                .map_err(|error| map_store_error(&error))?;
-            let view = journal.verify_recorded_history()?;
-            let append_id =
-                append_request_id("effect_observation", view.journal_head(), Some(node_id))?;
-            let append = self.writer.prepare_append(
-                authority,
-                &view,
-                append_id,
-                ExistingRunAppendMaterial::Observation(Box::new(
-                    ObservationMaterial::EnsureEffect {
-                        authorization_ref: observation.authorization_ref.clone(),
-                        outcome: Box::new(observation.outcome.clone()),
-                    },
-                )),
-            )?;
-            let result = self
-                .writer
-                .append(authority, append)
-                .await
-                .map_err(|error| map_store_error(&error))?;
-            match observation_append_outcome(result)? {
-                ActionResult::Retry => {}
-                outcome => return Ok(outcome),
-            }
-        }
+        append_purpose: &'static str,
+        authorization_ref: &AuthorizationRef,
+        pending: &mut PendingObservation<K>,
+        material: F,
+    ) -> Result<CommittedObservation<K, JournalHead>>
+    where
+        K: AccessKind,
+        F: FnMut(&K::PendingMaterial) -> ObservationMaterial,
+    {
+        let mut driver = StoreObservationCommitDriver {
+            writer: &self.writer,
+            authority,
+            node_id,
+            append_purpose,
+            authorization_ref,
+        };
+        let mut backoff = ObservationRetryBackoff::new();
+        commit_observation_loop(&mut driver, pending, material, &mut backoff).await
     }
 
     async fn perform_fact_selection(
@@ -1387,6 +1777,7 @@ where
         view: &VerifiedRunView,
         action: FactSelectionAccessAction,
     ) -> Result<ActionResult> {
+        let node_id = action.node_id.clone();
         let append_id = append_request_id(
             "fact-selection-authorize",
             view.journal_head(),
@@ -1430,34 +1821,36 @@ where
                 return Err(RuntimeError::OutcomeUnknown);
             }
         };
-        let completed = self
-            .writer
-            .scan_fact_selection(permit)
-            .await
-            .map_err(|error| map_store_error(&error))?;
-        let journal = self
-            .writer
-            .load_for_drive(authority)
-            .await
-            .map_err(|error| map_store_error(&error))?;
-        let view = journal.verify_recorded_history()?;
-        let append_id = append_request_id(
-            "fact_selection_observation",
-            view.journal_head(),
-            Some(&action.node_id),
-        )?;
-        let append = self.writer.prepare_append(
-            authority,
-            &view,
-            append_id,
-            completed.into_observation_material(),
-        )?;
-        let result = self
-            .writer
-            .append(authority, append)
-            .await
-            .map_err(|error| map_store_error(&error))?;
-        observation_append_outcome(result)
+        let permit = Authorized::<FactSelection>::new(permit).into_invocation();
+        let authorization_ref = permit.authorization_ref().clone();
+        let outcome = match self.writer.scan_fact_selection(permit).await {
+            Ok(completed) => FactSelectionObservationOutcome::Returned(Box::new(completed.seal())),
+            Err(error) => FactSelectionObservationOutcome::NonDomainFailure(
+                match error.fact_scan_failure_provenance() {
+                    FactScanFailureProvenance::StoreUnavailable => action.store_unavailable_failure,
+                    FactScanFailureProvenance::HistoryInvalid => action.history_invalid_failure,
+                    FactScanFailureProvenance::AdapterContractViolation => {
+                        action.adapter_contract_failure
+                    }
+                },
+            ),
+        };
+        let mut pending = PendingObservation::<FactSelection>::new(FactSelectionObservation {
+            authorization_ref,
+            outcome,
+        });
+        let pending_authorization_ref = pending.material().authorization_ref.clone();
+        let committed = self
+            .commit_observation(
+                authority,
+                &node_id,
+                "fact_selection_observation",
+                &pending_authorization_ref,
+                &mut pending,
+                FactSelectionObservation::material,
+            )
+            .await?;
+        Ok(ActionResult::Outcome(advanced(committed.outcome().clone())))
     }
 }
 
@@ -1583,24 +1976,31 @@ fn fact_selection_observation_refs(
     history: &VerifiedNodeAccessHistory<'_>,
     returned_contract: &RetainedValueContract,
     safe_failure_contract: &RetainedValueContract,
-) -> Result<Vec<mfm_journal::v1::ObservationRef>> {
-    history
-        .observed_suffix()
-        .map(|observed| {
-            let observation_ref = observed.observation_ref().clone();
-            let committed = committed_read_observation(
-                view,
-                &observed,
-                returned_contract,
-                safe_failure_contract,
-                true,
-            )?;
-            if !matches!(committed.outcome(), VerifiedReadOutcome::Returned(_)) {
-                return Err(RuntimeError::InvalidCallbackResult);
+) -> Result<Vec<mfm_journal::v2::ObservationRef>> {
+    let mut references = Vec::new();
+    for observed in history.observed_suffix() {
+        if let Some(disposition) = observed_non_domain_disposition(&observed)? {
+            match disposition {
+                NonDomainDisposition::RetryableOperational => continue,
+                NonDomainDisposition::IntegrityBlocked => {
+                    return Err(RuntimeError::InvalidCallbackResult);
+                }
             }
-            Ok(observation_ref)
-        })
-        .collect()
+        }
+        let observation_ref = observed.observation_ref().clone();
+        let committed = committed_read_observation(
+            view,
+            &observed,
+            returned_contract,
+            safe_failure_contract,
+            true,
+        )?;
+        if !matches!(committed.outcome(), VerifiedReadOutcome::Returned(_)) {
+            return Err(RuntimeError::InvalidCallbackResult);
+        }
+        references.push(observation_ref);
+    }
+    Ok(references)
 }
 
 fn scan_read_suffix(
@@ -1614,7 +2014,7 @@ fn scan_read_suffix(
 ) -> Result<
     EvidenceScan<(
         ValueRef,
-        mfm_journal::v1::ObservationRef,
+        mfm_journal::v2::ObservationRef,
         QualifiedSettlement,
     )>,
 > {
@@ -1623,6 +2023,14 @@ fn scan_read_suffix(
         .map(|observed| {
             let audit = observed.audit();
             let request_ref = audit.request_ref().clone();
+            if let Some(disposition) = observed_non_domain_disposition(&observed)? {
+                return Ok(match disposition {
+                    NonDomainDisposition::RetryableOperational => {
+                        ObservationVerdict::InsufficientEvidence
+                    }
+                    NonDomainDisposition::IntegrityBlocked => ObservationVerdict::InvalidEvidence,
+                });
+            }
             let verdict = match committed_read_observation(
                 view,
                 &observed,
@@ -1656,7 +2064,7 @@ fn scan_read_suffix(
 
 fn terminal_consumed_observations(
     view: &VerifiedRunView,
-) -> Result<BTreeMap<NodeId, mfm_journal::v1::ObservationRef>> {
+) -> Result<BTreeMap<NodeId, mfm_journal::v2::ObservationRef>> {
     let mut consumed = BTreeMap::new();
     for entry in view.transition_entries() {
         let fields = entry.transition().fields()?;
@@ -1732,10 +2140,18 @@ fn scan_effect_suffix(
     intent: &EffectIntent,
     ensure_result_contract: &RetainedValueContract,
     terminal_evidence_contract: &RetainedValueContract,
-) -> Result<EvidenceScan<(mfm_journal::v1::ObservationRef, QualifiedSettlement)>> {
+) -> Result<EvidenceScan<(mfm_journal::v2::ObservationRef, QualifiedSettlement)>> {
     let verdicts = history
         .observed_suffix()
         .map(|observed| {
+            if let Some(disposition) = observed_non_domain_disposition(&observed)? {
+                return Ok(match disposition {
+                    NonDomainDisposition::RetryableOperational => {
+                        ObservationVerdict::InsufficientEvidence
+                    }
+                    NonDomainDisposition::IntegrityBlocked => ObservationVerdict::InvalidEvidence,
+                });
+            }
             let verdict = match committed_terminal_observation(
                 view,
                 &observed,
@@ -1776,6 +2192,16 @@ fn scan_effect_suffix(
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(scan_observations(verdicts))
+}
+
+fn observed_non_domain_disposition(
+    observed: &mfm_store::VerifiedObservedAccess<'_>,
+) -> Result<Option<NonDomainDisposition>> {
+    observed
+        .audit()
+        .non_domain_failure()
+        .map(|failure| failure.fields().disposition)
+        .map_or(Ok(None), |disposition| Ok(Some(disposition)))
 }
 
 fn qualify_fact_selection_request(
@@ -1880,19 +2306,6 @@ fn verified_retained_value(
     ))
 }
 
-fn prepared_read_authorization_refs(
-    append: &PreparedJournalAppend,
-) -> Result<(ValueRef, ValueRef)> {
-    let PreparedJournalAppend::AuthorizeExternalAccess(append) = append else {
-        return Err(RuntimeError::InvalidCallbackResult);
-    };
-    let fields = append.authorization().fields()?;
-    let frozen = fields
-        .frozen_read_intent_ref
-        .ok_or(RuntimeError::InvalidCallbackResult)?;
-    Ok((fields.request_ref, frozen))
-}
-
 fn prepared_authorization_request_ref(append: &PreparedJournalAppend) -> Result<ValueRef> {
     let PreparedJournalAppend::AuthorizeExternalAccess(append) = append else {
         return Err(RuntimeError::InvalidCallbackResult);
@@ -1903,21 +2316,6 @@ fn prepared_authorization_request_ref(append: &PreparedJournalAppend) -> Result<
 fn transition_append_outcome(outcome: AppendOutcome) -> Result<ActionResult> {
     match outcome {
         AppendOutcome::NewlyAppended(NewlyAppended::Transition(committed))
-        | AppendOutcome::AlreadyCommitted(committed) => Ok(ActionResult::Outcome(advanced(
-            committed.journal_head().clone(),
-        ))),
-        AppendOutcome::Rejected(AppendRejection::StaleHead { .. } | AppendRejection::RunClosed) => {
-            Ok(ActionResult::Retry)
-        }
-        AppendOutcome::Rejected(rejection) => Err(rejection_error(rejection)),
-        AppendOutcome::OutcomeUnknown => Err(RuntimeError::OutcomeUnknown),
-        AppendOutcome::NewlyAppended(_) => Err(RuntimeError::InvalidCallbackResult),
-    }
-}
-
-fn observation_append_outcome(outcome: AppendOutcome) -> Result<ActionResult> {
-    match outcome {
-        AppendOutcome::NewlyAppended(NewlyAppended::Observation(committed))
         | AppendOutcome::AlreadyCommitted(committed) => Ok(ActionResult::Outcome(advanced(
             committed.journal_head().clone(),
         ))),
@@ -1950,7 +2348,7 @@ fn integrity(certified_order: usize, observation_order: usize) -> IntegrityBlock
     }
 }
 
-fn advanced(journal_head: mfm_journal::v1::JournalHead) -> DriveOutcome {
+fn advanced(journal_head: mfm_journal::v2::JournalHead) -> DriveOutcome {
     DriveOutcome::Advanced { journal_head }
 }
 
@@ -1966,7 +2364,7 @@ fn candidate_failure_outcome(
 }
 
 fn candidate_failure_at_head(
-    journal_head: mfm_journal::v1::JournalHead,
+    journal_head: mfm_journal::v2::JournalHead,
     error: CandidateCertificationError,
 ) -> Result<DriveOutcome> {
     match error.kind() {
@@ -1985,7 +2383,7 @@ fn candidate_failure_at_head(
 }
 
 fn waiting_at_head(
-    journal_head: mfm_journal::v1::JournalHead,
+    journal_head: mfm_journal::v2::JournalHead,
     reason: DriveWaitReason,
 ) -> DriveOutcome {
     DriveOutcome::Waiting {
@@ -1999,4 +2397,991 @@ fn closure_ref(view: &VerifiedRunView) -> Result<ClosureRef> {
         .find_map(|entry| entry.closure_ref())
         .cloned()
         .ok_or(RuntimeError::InvalidCallbackResult)
+}
+
+#[cfg(test)]
+mod observation_retry_tests {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use mfm_store::{
+        open_in_memory,
+        test_support::{FactScanConformanceFixture, LegalAdmissionFixture},
+        ObservationMaterial,
+    };
+
+    use crate::access_protocol::{FactSelection, ObservationCommitProbe, PendingObservation};
+    use crate::RuntimeError;
+
+    use super::{
+        commit_observation_loop, FactSelectionObservation, FactSelectionObservationOutcome,
+        ObservationAppendAttempt, ObservationCommitDriver, ObservationLogicalResolution,
+        ObservationPhysicalResolution, ObservationPreparation, ObservationRetry,
+        ObservationRetryBackoff,
+    };
+
+    #[derive(Clone, PartialEq, Eq)]
+    struct TestLogicalIdentity {
+        id: u64,
+        expected_authorization: bool,
+    }
+
+    struct TestView {
+        head: u64,
+    }
+
+    struct TestPreparedAppend {
+        physical_id: u64,
+    }
+
+    enum LogicalOutcome {
+        Absent,
+        Identical {
+            observation_ref: u64,
+            journal_head: u64,
+        },
+        Conflict,
+        Retry,
+    }
+
+    enum PhysicalOutcome {
+        AbsentAtCurrentHead,
+        StalePredecessor,
+        Occupied,
+        Retry,
+    }
+
+    enum PrepareOutcome {
+        Prepared {
+            logical_id: u64,
+            expected_authorization: bool,
+            physical_id: u64,
+        },
+        AlreadyCommitted,
+        Retry,
+    }
+
+    enum AppendOutcome {
+        Progress,
+        StalePredecessor,
+        Conflict,
+        Retry,
+    }
+
+    enum WriterEvent {
+        Load(std::result::Result<u64, ()>),
+        ResolveLogical {
+            expected_id: u64,
+            outcome: LogicalOutcome,
+        },
+        ResolvePhysical {
+            expected_id: u64,
+            outcome: PhysicalOutcome,
+        },
+        Prepare {
+            expected_physical_id: Option<u64>,
+            expected_material: u64,
+            outcome: PrepareOutcome,
+        },
+        Append {
+            expected_physical_id: u64,
+            outcome: AppendOutcome,
+        },
+    }
+
+    struct InjectedWriter<Material = u64> {
+        events: VecDeque<WriterEvent>,
+        load_count: usize,
+        prepared_physical_ids: Vec<Option<u64>>,
+        appended_physical_ids: Vec<u64>,
+        assert_material: fn(&Material, u64),
+    }
+
+    impl InjectedWriter<u64> {
+        fn new(events: impl IntoIterator<Item = WriterEvent>) -> Self {
+            Self {
+                events: events.into_iter().collect(),
+                load_count: 0,
+                prepared_physical_ids: Vec::new(),
+                appended_physical_ids: Vec::new(),
+                assert_material: |material, expected| assert_eq!(*material, expected),
+            }
+        }
+    }
+
+    impl<Material> InjectedWriter<Material> {
+        fn with_material_assertion(
+            events: impl IntoIterator<Item = WriterEvent>,
+            assert_material: fn(&Material, u64),
+        ) -> Self {
+            Self {
+                events: events.into_iter().collect(),
+                load_count: 0,
+                prepared_physical_ids: Vec::new(),
+                appended_physical_ids: Vec::new(),
+                assert_material,
+            }
+        }
+
+        fn next_event(&mut self) -> WriterEvent {
+            self.events
+                .pop_front()
+                .expect("the actual observation loop made an unexpected writer call")
+        }
+
+        fn assert_exhausted(&self) {
+            assert!(
+                self.events.is_empty(),
+                "the actual observation loop skipped an expected writer call"
+            );
+        }
+    }
+
+    impl<Material> ObservationCommitDriver for InjectedWriter<Material> {
+        type View = TestView;
+        type Head = u64;
+        type LogicalIdentity = TestLogicalIdentity;
+        type PhysicalIdentity = u64;
+        type PreparedAppend = TestPreparedAppend;
+        type ObservationRef = u64;
+        type Material = Material;
+
+        async fn load_verified(&mut self) -> std::result::Result<Self::View, ()> {
+            self.load_count += 1;
+            let WriterEvent::Load(result) = self.next_event() else {
+                panic!("the observation loop loaded where another writer operation was expected")
+            };
+            result.map(|head| TestView { head })
+        }
+
+        fn head<'a>(&self, view: &'a Self::View) -> &'a Self::Head {
+            &view.head
+        }
+
+        fn resolve_logical(
+            &mut self,
+            _view: &Self::View,
+            logical: &Self::LogicalIdentity,
+        ) -> ObservationLogicalResolution<Self::ObservationRef, Self::Head> {
+            let WriterEvent::ResolveLogical {
+                expected_id,
+                outcome,
+            } = self.next_event()
+            else {
+                panic!("the observation loop skipped an expected logical resolution")
+            };
+            assert_eq!(logical.id, expected_id);
+            match outcome {
+                LogicalOutcome::Absent => ObservationLogicalResolution::Absent,
+                LogicalOutcome::Identical {
+                    observation_ref,
+                    journal_head,
+                } => ObservationLogicalResolution::Identical {
+                    observation_ref,
+                    journal_head,
+                },
+                LogicalOutcome::Conflict => ObservationLogicalResolution::Conflict,
+                LogicalOutcome::Retry => ObservationLogicalResolution::Retry,
+            }
+        }
+
+        fn resolve_physical(
+            &mut self,
+            _view: &Self::View,
+            physical: &Self::PhysicalIdentity,
+        ) -> ObservationPhysicalResolution {
+            let WriterEvent::ResolvePhysical {
+                expected_id,
+                outcome,
+            } = self.next_event()
+            else {
+                panic!("the observation loop skipped an expected physical resolution")
+            };
+            assert_eq!(physical, &expected_id);
+            match outcome {
+                PhysicalOutcome::AbsentAtCurrentHead => {
+                    ObservationPhysicalResolution::AbsentAtCurrentHead
+                }
+                PhysicalOutcome::StalePredecessor => {
+                    ObservationPhysicalResolution::StalePredecessor
+                }
+                PhysicalOutcome::Occupied => ObservationPhysicalResolution::Occupied,
+                PhysicalOutcome::Retry => ObservationPhysicalResolution::Retry,
+            }
+        }
+
+        fn prepare(
+            &mut self,
+            _view: &Self::View,
+            physical: Option<&Self::PhysicalIdentity>,
+            material: Self::Material,
+        ) -> ObservationPreparation<
+            Self::PreparedAppend,
+            Self::LogicalIdentity,
+            Self::PhysicalIdentity,
+        > {
+            let WriterEvent::Prepare {
+                expected_physical_id,
+                expected_material,
+                outcome,
+            } = self.next_event()
+            else {
+                panic!("the observation loop skipped an expected preparation")
+            };
+            assert_eq!(physical.copied(), expected_physical_id);
+            (self.assert_material)(&material, expected_material);
+            self.prepared_physical_ids.push(physical.copied());
+            match outcome {
+                PrepareOutcome::Prepared {
+                    logical_id,
+                    expected_authorization,
+                    physical_id,
+                } => ObservationPreparation::Prepared {
+                    append: TestPreparedAppend { physical_id },
+                    logical: TestLogicalIdentity {
+                        id: logical_id,
+                        expected_authorization,
+                    },
+                    physical: physical_id,
+                },
+                PrepareOutcome::AlreadyCommitted => ObservationPreparation::AlreadyCommitted,
+                PrepareOutcome::Retry => ObservationPreparation::Retry,
+            }
+        }
+
+        fn logical_is_expected(&self, logical: &Self::LogicalIdentity) -> bool {
+            logical.expected_authorization
+        }
+
+        async fn append(&mut self, append: Self::PreparedAppend) -> ObservationAppendAttempt {
+            let WriterEvent::Append {
+                expected_physical_id,
+                outcome,
+            } = self.next_event()
+            else {
+                panic!("the observation loop skipped an expected append")
+            };
+            assert_eq!(append.physical_id, expected_physical_id);
+            self.appended_physical_ids.push(append.physical_id);
+            match outcome {
+                AppendOutcome::Progress => ObservationAppendAttempt::Progress,
+                AppendOutcome::StalePredecessor => ObservationAppendAttempt::StalePredecessor,
+                AppendOutcome::Conflict => ObservationAppendAttempt::Conflict,
+                AppendOutcome::Retry => ObservationAppendAttempt::Retry,
+            }
+        }
+    }
+
+    struct RecordingRetry {
+        backoff: ObservationRetryBackoff,
+        delays: Vec<Duration>,
+        resets: usize,
+    }
+
+    impl RecordingRetry {
+        const fn new() -> Self {
+            Self {
+                backoff: ObservationRetryBackoff::new(),
+                delays: Vec::new(),
+                resets: 0,
+            }
+        }
+    }
+
+    impl ObservationRetry for RecordingRetry {
+        fn reset(&mut self) {
+            self.resets += 1;
+            self.backoff.reset();
+        }
+
+        async fn wait(&mut self) {
+            self.delays.push(self.backoff.take_delay());
+            tokio::task::yield_now().await;
+        }
+    }
+
+    struct NeverCompletingRetry {
+        entered: Arc<AtomicBool>,
+        completed: Arc<AtomicBool>,
+    }
+
+    impl ObservationRetry for NeverCompletingRetry {
+        fn reset(&mut self) {}
+
+        async fn wait(&mut self) {
+            self.entered.store(true, Ordering::SeqCst);
+            std::future::pending::<()>().await;
+            self.completed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn pending_after_boundary(
+        boundary_invocations: &AtomicUsize,
+    ) -> PendingObservation<ObservationCommitProbe, TestLogicalIdentity, u64> {
+        boundary_invocations.fetch_add(1, Ordering::SeqCst);
+        PendingObservation::new(71)
+    }
+
+    fn logical(id: u64) -> TestLogicalIdentity {
+        TestLogicalIdentity {
+            id,
+            expected_authorization: true,
+        }
+    }
+
+    fn prepared(logical_id: u64, physical_id: u64) -> PrepareOutcome {
+        PrepareOutcome::Prepared {
+            logical_id,
+            expected_authorization: true,
+            physical_id,
+        }
+    }
+
+    #[test]
+    fn retry_backoff_is_capped_and_resets_after_progress() {
+        let mut backoff = ObservationRetryBackoff::new();
+        let delays = (0..10).map(|_| backoff.take_delay()).collect::<Vec<_>>();
+        assert_eq!(
+            delays,
+            [10, 20, 40, 80, 160, 320, 640, 1_000, 1_000, 1_000].map(Duration::from_millis)
+        );
+
+        backoff.reset();
+        assert_eq!(backoff.take_delay(), Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn actual_loop_rebases_a_stale_predecessor_without_reinvoking_the_boundary() {
+        let boundary_invocations = AtomicUsize::new(0);
+        let mut pending = pending_after_boundary(&boundary_invocations);
+        let materializations = AtomicUsize::new(0);
+        let mut writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(1, 10),
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 10,
+                outcome: PhysicalOutcome::StalePredecessor,
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(1, 11),
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 11,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(11),
+                expected_material: 71,
+                outcome: prepared(1, 11),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 11,
+                outcome: AppendOutcome::Progress,
+            },
+            WriterEvent::Load(Ok(3)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 91,
+                    journal_head: 3,
+                },
+            },
+        ]);
+        let mut retry = RecordingRetry::new();
+
+        let committed = commit_observation_loop(
+            &mut writer,
+            &mut pending,
+            |material| {
+                materializations.fetch_add(1, Ordering::SeqCst);
+                *material
+            },
+            &mut retry,
+        )
+        .await
+        .expect("rebased observation");
+
+        assert_eq!(committed.observation_ref(), &91);
+        assert_eq!(committed.outcome(), &3);
+        assert_eq!(boundary_invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(materializations.load(Ordering::SeqCst), 3);
+        assert_eq!(writer.prepared_physical_ids, [None, None, Some(11)]);
+        assert_eq!(writer.appended_physical_ids, [11]);
+        assert_eq!(retry.resets, 4);
+        writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn actual_loop_retries_the_same_physical_candidate_across_ack_ambiguity() {
+        let read_callback_invocations = AtomicUsize::new(0);
+        let mut read_pending = pending_after_boundary(&read_callback_invocations);
+        let mut before_commit_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(1, 20),
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 20,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(20),
+                expected_material: 71,
+                outcome: prepared(1, 20),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 20,
+                outcome: AppendOutcome::Retry,
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 20,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(20),
+                expected_material: 71,
+                outcome: prepared(1, 20),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 20,
+                outcome: AppendOutcome::Progress,
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 1,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 92,
+                    journal_head: 2,
+                },
+            },
+        ]);
+        let mut before_commit_retry = RecordingRetry::new();
+        commit_observation_loop(
+            &mut before_commit_writer,
+            &mut read_pending,
+            |material| *material,
+            &mut before_commit_retry,
+        )
+        .await
+        .expect("retry absent pre-commit candidate");
+        assert_eq!(before_commit_writer.appended_physical_ids, [20, 20]);
+        assert_eq!(
+            before_commit_writer.prepared_physical_ids,
+            [None, Some(20), Some(20)]
+        );
+        assert_eq!(before_commit_retry.delays, [Duration::from_millis(10)]);
+        assert_eq!(read_callback_invocations.load(Ordering::SeqCst), 1);
+        before_commit_writer.assert_exhausted();
+
+        let effect_callback_invocations = AtomicUsize::new(0);
+        let mut effect_pending = pending_after_boundary(&effect_callback_invocations);
+        let mut after_commit_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(2, 30),
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 2,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 30,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(30),
+                expected_material: 71,
+                outcome: prepared(2, 30),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 30,
+                outcome: AppendOutcome::Retry,
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 2,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 93,
+                    journal_head: 2,
+                },
+            },
+        ]);
+        let mut after_commit_retry = RecordingRetry::new();
+        commit_observation_loop(
+            &mut after_commit_writer,
+            &mut effect_pending,
+            |material| *material,
+            &mut after_commit_retry,
+        )
+        .await
+        .expect("resolve committed acknowledgement loss");
+        assert_eq!(after_commit_writer.appended_physical_ids, [30]);
+        assert_eq!(after_commit_writer.prepared_physical_ids, [None, Some(30)]);
+        assert_eq!(after_commit_retry.delays, [Duration::from_millis(10)]);
+        assert_eq!(effect_callback_invocations.load(Ordering::SeqCst), 1);
+        after_commit_writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn actual_loop_distinguishes_logical_missing_identical_and_conflict() {
+        let mut identical_pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        identical_pending
+            .remember_prepared(logical(5), 50)
+            .expect("seed identical pending identity");
+        let mut identical_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 5,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 95,
+                    journal_head: 2,
+                },
+            },
+        ]);
+        let mut identical_retry = RecordingRetry::new();
+        let identical = commit_observation_loop(
+            &mut identical_writer,
+            &mut identical_pending,
+            |material| *material,
+            &mut identical_retry,
+        )
+        .await
+        .expect("identical logical observation");
+        assert_eq!(identical.observation_ref(), &95);
+        assert_eq!(identical.outcome(), &2);
+        identical_writer.assert_exhausted();
+
+        let mut missing_pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        missing_pending
+            .remember_prepared(logical(6), 60)
+            .expect("seed missing pending identity");
+        let mut missing_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 6,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 60,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(60),
+                expected_material: 71,
+                outcome: prepared(6, 60),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 60,
+                outcome: AppendOutcome::Progress,
+            },
+            WriterEvent::Load(Ok(3)),
+            WriterEvent::ResolveLogical {
+                expected_id: 6,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 96,
+                    journal_head: 3,
+                },
+            },
+        ]);
+        let mut missing_retry = RecordingRetry::new();
+        commit_observation_loop(
+            &mut missing_writer,
+            &mut missing_pending,
+            |material| *material,
+            &mut missing_retry,
+        )
+        .await
+        .expect("missing logical observation is appended");
+        assert_eq!(missing_writer.appended_physical_ids, [60]);
+        missing_writer.assert_exhausted();
+
+        let mut conflict_pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        conflict_pending
+            .remember_prepared(logical(7), 70)
+            .expect("seed conflicting pending identity");
+        let mut conflict_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 7,
+                outcome: LogicalOutcome::Conflict,
+            },
+        ]);
+        let mut conflict_retry = RecordingRetry::new();
+        assert!(matches!(
+            commit_observation_loop(
+                &mut conflict_writer,
+                &mut conflict_pending,
+                |material| *material,
+                &mut conflict_retry,
+            )
+            .await,
+            Err(RuntimeError::ObservationConflict)
+        ));
+        assert!(conflict_writer.appended_physical_ids.is_empty());
+        conflict_writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn actual_loop_caps_backoff_and_resets_it_after_commit_progress() {
+        let mut events = (0..10)
+            .map(|_| WriterEvent::Load(Err(())))
+            .collect::<Vec<_>>();
+        events.extend([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(8, 80),
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 8,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 80,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(80),
+                expected_material: 71,
+                outcome: prepared(8, 80),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 80,
+                outcome: AppendOutcome::Progress,
+            },
+            WriterEvent::Load(Err(())),
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 8,
+                outcome: LogicalOutcome::Identical {
+                    observation_ref: 98,
+                    journal_head: 2,
+                },
+            },
+        ]);
+        let mut writer = InjectedWriter::new(events);
+        let mut pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        let mut retry = RecordingRetry::new();
+        commit_observation_loop(&mut writer, &mut pending, |material| *material, &mut retry)
+            .await
+            .expect("eventual observation");
+
+        assert_eq!(
+            retry.delays,
+            [10, 20, 40, 80, 160, 320, 640, 1_000, 1_000, 1_000, 10,].map(Duration::from_millis)
+        );
+        assert_eq!(retry.resets, 2);
+        writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn actual_loop_classifies_transient_and_conflicting_writer_results() {
+        let mut pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        pending
+            .remember_prepared(logical(10), 100)
+            .expect("seed pending identities");
+        let mut writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Retry,
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 100,
+                outcome: PhysicalOutcome::Retry,
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 100,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(100),
+                expected_material: 71,
+                outcome: PrepareOutcome::Retry,
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 100,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(100),
+                expected_material: 71,
+                outcome: PrepareOutcome::AlreadyCommitted,
+            },
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 100,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(100),
+                expected_material: 71,
+                outcome: prepared(10, 100),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 100,
+                outcome: AppendOutcome::StalePredecessor,
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: None,
+                expected_material: 71,
+                outcome: prepared(10, 101),
+            },
+            WriterEvent::Load(Ok(2)),
+            WriterEvent::ResolveLogical {
+                expected_id: 10,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 101,
+                outcome: PhysicalOutcome::AbsentAtCurrentHead,
+            },
+            WriterEvent::Prepare {
+                expected_physical_id: Some(101),
+                expected_material: 71,
+                outcome: prepared(10, 101),
+            },
+            WriterEvent::Append {
+                expected_physical_id: 101,
+                outcome: AppendOutcome::Conflict,
+            },
+        ]);
+        let mut retry = RecordingRetry::new();
+        assert!(matches!(
+            commit_observation_loop(&mut writer, &mut pending, |material| *material, &mut retry,)
+                .await,
+            Err(RuntimeError::ObservationConflict)
+        ));
+        assert_eq!(retry.delays, [10, 20, 40].map(Duration::from_millis));
+        assert_eq!(writer.appended_physical_ids, [100, 101]);
+        writer.assert_exhausted();
+
+        let mut occupied_pending =
+            PendingObservation::<ObservationCommitProbe, TestLogicalIdentity, u64>::new(71);
+        occupied_pending
+            .remember_prepared(logical(11), 110)
+            .expect("seed occupied physical identity");
+        let mut occupied_writer = InjectedWriter::new([
+            WriterEvent::Load(Ok(1)),
+            WriterEvent::ResolveLogical {
+                expected_id: 11,
+                outcome: LogicalOutcome::Absent,
+            },
+            WriterEvent::ResolvePhysical {
+                expected_id: 110,
+                outcome: PhysicalOutcome::Occupied,
+            },
+        ]);
+        let mut occupied_retry = RecordingRetry::new();
+        assert!(matches!(
+            commit_observation_loop(
+                &mut occupied_writer,
+                &mut occupied_pending,
+                |material| *material,
+                &mut occupied_retry,
+            )
+            .await,
+            Err(RuntimeError::ObservationConflict)
+        ));
+        occupied_writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn cancelling_the_actual_loop_drops_only_the_pending_retry() {
+        let boundary_invocations = AtomicUsize::new(0);
+        let mut pending = pending_after_boundary(&boundary_invocations);
+        let mut writer = InjectedWriter::new([WriterEvent::Load(Err(()))]);
+        let entered = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let mut retry = NeverCompletingRetry {
+            entered: Arc::clone(&entered),
+            completed: Arc::clone(&completed),
+        };
+        let mut commit = Box::pin(commit_observation_loop(
+            &mut writer,
+            &mut pending,
+            |material| *material,
+            &mut retry,
+        ));
+        tokio::select! {
+            biased;
+            _ = &mut commit => panic!("retry unexpectedly completed"),
+            () = async {
+                while !entered.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        drop(commit);
+
+        assert_eq!(boundary_invocations.load(Ordering::SeqCst), 1);
+        assert_eq!(writer.load_count, 1);
+        assert!(!completed.load(Ordering::SeqCst));
+        writer.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn sealed_fact_scan_pending_material_is_never_rescanned_by_retries() {
+        let completed_fact_scan_count = AtomicUsize::new(0);
+        let namespace = LegalAdmissionFixture::new(210).expect("fixture namespace");
+        let fixture = FactScanConformanceFixture::new(
+            namespace.store_identity().clone(),
+            namespace.tenant_scope_id().clone(),
+            211,
+            212,
+            213,
+        )
+        .expect("fact scan fixture");
+        let (store, issuer) = open_in_memory(namespace.store_identity().clone());
+        fixture
+            .producer()
+            .provision_in_memory(&store)
+            .expect("producer configured value");
+        fixture
+            .consumer()
+            .provision_in_memory(&store)
+            .expect("consumer configured value");
+        completed_fact_scan_count.fetch_add(1, Ordering::SeqCst);
+        let completed = fixture
+            .completed_scan_on(store, &issuer)
+            .await
+            .expect("genuine completed fact scan");
+        let authorization_ref = completed.authorization_ref().clone();
+        let mut pending = PendingObservation::<FactSelection, TestLogicalIdentity, u64>::new(
+            FactSelectionObservation {
+                authorization_ref,
+                outcome: FactSelectionObservationOutcome::Returned(Box::new(completed.seal())),
+            },
+        );
+        let mut writer = InjectedWriter::with_material_assertion(
+            [
+                WriterEvent::Load(Err(())),
+                WriterEvent::Load(Err(())),
+                WriterEvent::Load(Ok(1)),
+                WriterEvent::Prepare {
+                    expected_physical_id: None,
+                    expected_material: 71,
+                    outcome: prepared(9, 90),
+                },
+                WriterEvent::Load(Ok(1)),
+                WriterEvent::ResolveLogical {
+                    expected_id: 9,
+                    outcome: LogicalOutcome::Absent,
+                },
+                WriterEvent::ResolvePhysical {
+                    expected_id: 90,
+                    outcome: PhysicalOutcome::AbsentAtCurrentHead,
+                },
+                WriterEvent::Prepare {
+                    expected_physical_id: Some(90),
+                    expected_material: 71,
+                    outcome: prepared(9, 90),
+                },
+                WriterEvent::Append {
+                    expected_physical_id: 90,
+                    outcome: AppendOutcome::Retry,
+                },
+                WriterEvent::Load(Ok(2)),
+                WriterEvent::ResolveLogical {
+                    expected_id: 9,
+                    outcome: LogicalOutcome::Identical {
+                        observation_ref: 99,
+                        journal_head: 2,
+                    },
+                },
+            ],
+            |material: &ObservationMaterial, expected| {
+                assert_eq!(expected, 71);
+                assert!(matches!(
+                    material,
+                    ObservationMaterial::FactSelection { .. }
+                ));
+            },
+        );
+        let mut retry = RecordingRetry::new();
+        commit_observation_loop(
+            &mut writer,
+            &mut pending,
+            FactSelectionObservation::material,
+            &mut retry,
+        )
+        .await
+        .expect("resolve sealed fact-selection observation");
+
+        assert_eq!(
+            completed_fact_scan_count.load(Ordering::SeqCst),
+            1,
+            "CompletedFactScan is consumed into pending material once, before this loop"
+        );
+        writer.assert_exhausted();
+    }
 }

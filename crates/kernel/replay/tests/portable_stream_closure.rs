@@ -1,13 +1,13 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV2};
+use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV3};
 use mfm_ids::{ContentRef, RunId};
 use mfm_replay::trace_export::{
     verify_portable_run_export_stream, write_portable_run_export_stream, ExportKind,
     OfflineFactCompleteness,
 };
-use mfm_replay::v1::{required_export_source_run_ids, ReplayErrorKind};
-use mfm_store::v1::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
+use mfm_replay::v2::{required_export_source_run_ids, ReplayErrorKind};
+use mfm_store::v2::test_support::{LegalAdmissionFixture, PreparedLegalAdmission};
 use mfm_store::{
     open_in_memory, AppendOutcome, ExistingRunAppendMaterial, InMemoryRunJournalBackend,
     NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
@@ -383,6 +383,15 @@ async fn recursive_source_closure_is_canonical_complete_and_callback_free() {
     coordinate["containing_commit_digest"] = serde_json::Value::String(changed);
     assert_invalid(&join_frames(&coordinate_tamper), "root coordinate mismatch").await;
 
+    let mut retired_version = frames.clone();
+    retired_version[0]["version"] =
+        serde_json::Value::String("mfm.portable-run-export-frame.v1".to_owned());
+    assert_invalid(
+        &join_frames(&retired_version),
+        "retired portable stream frame version",
+    )
+    .await;
+
     let mut kind_tamper = frames;
     kind_tamper[0]["export_kind"] = serde_json::Value::String("audit".to_owned());
     assert_invalid(&join_frames(&kind_tamper), "root kind mismatch").await;
@@ -577,10 +586,10 @@ async fn assert_invalid(bytes: &[u8], reason: &str) {
 }
 
 fn stream_ref(bytes: &[u8]) -> ContentRef {
-    let contract = RecoverabilityContractV2::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
     ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v1")
+            .schema_id("mfm.portable-run-export-stream.v2")
             .expect("stream schema")
             .clone(),
         contract.raw_content_digest(bytes),

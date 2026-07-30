@@ -1,16 +1,16 @@
-//! Frozen recoverability-v2 planning and graph values.
+//! Frozen recoverability-v3 planning and graph values.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV2,
-    ValidatedCanonicalValueV2,
+    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3,
+    ValidatedCanonicalValueV3,
 };
 pub use mfm_ids::EntryPointId;
 use mfm_ids::{
     ContentRef, DigestAlgorithm, FieldPath, NodeId, SchemaId, SemanticTypeId, SpecHash, StableId,
 };
-use mfm_journal::v1::{FactClaimEnvelope, FrozenReadIntent, InputManifest, ValueRef};
+use mfm_journal::v2::{FactClaimEnvelope, FrozenReadIntent, InputManifest, ValueRef};
 use mfm_values::component_object_evidence_contract_ref;
 pub use mfm_values::RetainedValueContract;
 use serde::de::DeserializeOwned;
@@ -51,8 +51,8 @@ fn admission_retained_contract(
     )?)
 }
 
-fn contract() -> Result<&'static RecoverabilityContractV2> {
-    RecoverabilityContractV2::embedded().map_err(Into::into)
+fn contract() -> Result<&'static RecoverabilityContractV3> {
+    RecoverabilityContractV3::embedded().map_err(Into::into)
 }
 
 fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
@@ -62,7 +62,7 @@ fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| SpecError::Contract(error.to_string()))
 }
 
-fn validated<T: Serialize>(schema_contract: &str, value: &T) -> Result<ValidatedCanonicalValueV2> {
+fn validated<T: Serialize>(schema_contract: &str, value: &T) -> Result<ValidatedCanonicalValueV3> {
     let canonical = canonical(value)?;
     contract()?
         .strict_decode(schema_contract, canonical.as_bytes())

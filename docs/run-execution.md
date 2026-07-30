@@ -47,9 +47,11 @@ flowchart TD
     R --> V["Load and verify journal"]
     V --> D["Derive one legal action"]
     D -->|local transition or settlement| ST["Append state transition"]
-    D -->|read or ensure| AU["Append access authorization"]
-    AU --> CAP["One capability operation"]
-    CAP --> OB["Append access observation"]
+    D -->|read, fact selection, or ensure| PRE["Prepare exact access"]
+    PRE --> AU["Append access authorization"]
+    AU --> CAP["One affine capability operation"]
+    CAP --> PEND["Totalize exact pending observation"]
+    PEND --> OB["Commit or exactly resolve access observation"]
 
     RA --> J["One authoritative run journal"]
     ST --> J
@@ -461,19 +463,55 @@ Two different authorizations are involved.
 
 Before runtime enters a live capability, it:
 
-1. purely authors the immutable typed request;
+1. purely authors the immutable typed request and preflights its exact binding, codecs, contracts,
+   routing, and result encoder into private `Prepared<K>`;
 2. appends `ExternalAccessAuthorized`;
 3. receives a one-use permit only for a directly acknowledged new append;
-4. converts it into private affine `AuthorizedAccess`;
-5. invokes at most one application-protocol operation; and
-6. appends `ExternalAccessObserved` for every surviving wrapper result.
+4. converts it into private affine `Authorized<K>`;
+5. invokes at most one application-protocol operation;
+6. totalizes every surviving return into private `PendingObservation<K>`; and
+7. commits or byte-identically resolves `ExternalAccessObserved`, producing private
+   `CommittedObservation<K>` before returning normal success.
+
+The in-process order is fixed:
+
+```text
+Prepared<K>
+  -> Authorized<K>
+  -> PendingObservation<K>
+  -> CommittedObservation<K>
+```
+
+No state callback, application response, or successful post-invocation drive result can receive a
+pending observation. `CommittedObservation<K>` can be constructed only by a positive store commit
+or exact identical-content resolution under that authorization.
 
 The capability wrapper consumes the one-use authority. A stale driver that loses the authorization
 append race receives no permit and cannot call the provider.
 
+The pending value remains stable while physical observation appends are retried. Runtime reloads
+the verified history and resolves the authorization key before each physical attempt. If the
+committed content is identical, it completes without another append; changed content is an
+integrity conflict. A definite stale predecessor replaces only the predecessor-bound append
+attempt. An acknowledgement-ambiguous append is resolved unchanged before any rebase. None of
+these paths invokes the capability again.
+
+While the task still owns a pending observation, operational store failures use capped
+10-to-1,000-millisecond exponential backoff; verified head progress resets the delay. Cancellation
+does not launch detached completion work. If the task or process disappears, the pending value is
+lost and the unmatched authorization remains the complete durable fact.
+
 An authorization proves that an operation was permitted before any possible entry. It does not
 prove that entry occurred. If a process disappears before the observation commits, the unmatched
 authorization is `CrashAmbiguous`: zero or one physical invocation may have occurred.
+
+Every observation outcome is one of `Returned`, `DidNotEnter`, `Indeterminate`, or
+`NonDomainFailure`. The first three retain the reviewed state-facing result/safe-failure contract.
+A non-domain failure instead carries only conservative entry status, a fixed
+`RetryableOperational | IntegrityBlocked` disposition, and a closed redaction-safe platform code.
+It is audit-only and cannot enter state logic or become a domain failure. A retryable operational
+record can permit a later fresh authorization after it commits; an integrity-blocked record stops
+automatic progress.
 
 ## Why A Read Usually Needs Two Drives
 
@@ -484,7 +522,8 @@ first drive:
   author request
   -> append authorization
   -> perform one capability operation
-  -> append observation
+  -> retain exact pending observation across any append retry
+  -> commit or exactly resolve observation
   -> return Advanced
 
 later drive:
@@ -783,7 +822,9 @@ The design guarantees:
 - one certified graph and one authoritative append-only journal per run;
 - exact-head atomic appends;
 - one authorization before every MFM-controlled semantic external operation;
-- one observation for every surviving capability result;
+- no normal post-invocation success before every surviving capability result is totalized and its
+  exact observation commits or resolves identically;
+- non-domain platform failures remain audit-only and state-nonconsumable;
 - no hidden capability retry, source rotation, or fallback;
 - deterministic action selection and input lineage;
 - process-independent recovery; and

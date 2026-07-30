@@ -528,10 +528,10 @@ mod tests {
         let sidecar = directory.path().join("run.export.ref");
         let bytes = b"\x1e{\"kind\":\"end\"}\n".to_vec();
         let contract =
-            mfm_canonical::RecoverabilityContractV2::embedded().expect("recoverability contract");
+            mfm_canonical::RecoverabilityContractV3::embedded().expect("recoverability contract");
         let content_ref = mfm_ids::ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v1")
+                .schema_id("mfm.portable-run-export-stream.v2")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(&bytes),
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(
             published_ref.schema_id(),
             contract
-                .schema_id("mfm.portable-run-export-stream.v1")
+                .schema_id("mfm.portable-run-export-stream.v2")
                 .expect("stream schema")
         );
     }

@@ -91,7 +91,7 @@ mfm.portfolio/snapshot@1
 ```
 
 The entry-point identities match the
-[`mfm.recoverability-app-surface.v2`](recoverability-app-surface-v2.md#published-entry-points-and-planning-profiles)
+[`mfm.recoverability-app-surface.v3`](recoverability-app-surface-v3.md#published-entry-points-and-planning-profiles)
 contract for that mapping: the versioned start id, stable slash-form operation id, and dot-form
 Rust operation name cannot substitute for one another. The current application additionally
 publishes the independently qualified `mfm.evm/submit-transaction@1` mapping described by the same

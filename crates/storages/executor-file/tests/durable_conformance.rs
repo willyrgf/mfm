@@ -2,21 +2,24 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV2, ValidatedCanonicalValueV2,
+    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV3, ValidatedCanonicalValueV3,
 };
 use mfm_executor::{
-    verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest, AllocationOutcome,
-    CommittedEffectRequest, ContentRef, Ensure, EvidenceBounds, ExecutorBinding,
-    ExecutorContractDescriptor, ExecutorDeployment, ExecutorEnsureResultClaim, ExecutorError,
-    ExecutorFuture, ExecutorRetainedClosureClaim, ExecutorRetainedClosureContract,
-    KeyedExecutorLedger, MemoryConvergentDestination, ReferenceContract, ReferenceDestination,
-    ReferenceDestinationReturn, ReferenceExecutor, ReferenceRequest, ReferenceTargetBehavior,
-    ReferenceTerminalProof, ResourceOwnership, ResourcePolicyBinding, RetainedValueContract,
-    SchemaQualifiedCanonicalValue, TargetEntryAuthority, TerminalTombstone, TypedResourcePolicy,
-    VerifiedExecutorBinding,
+    reference_safe_failure, verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest,
+    AllocationOutcome, BoundaryStage, CommittedEffectRequest, ContentRef, DeliveryAttemptOutcome,
+    Ensure, EvidenceBounds, ExecuteTargetOutcome, ExecutorBinding, ExecutorContractDescriptor,
+    ExecutorDeployment, ExecutorEnsureResultClaim, ExecutorError, ExecutorFuture,
+    ExecutorRetainedClosureClaim, ExecutorRetainedClosureContract, FailureClass,
+    KeyedExecutorLedger, MemoryConvergentDestination, NonDomainDisposition, NonDomainEntryStatus,
+    NonDomainFailure, NonDomainFailureCode, ReferenceContract, ReferenceDestination,
+    ReferenceDestinationReturn, ReferenceExecutor, ReferenceFailureCode, ReferenceRequest,
+    ReferenceTargetBehavior, ReferenceTerminalProof, ResourceOwnership, ResourcePolicyBinding,
+    RetainedValueContract, SchemaQualifiedCanonicalValue, TargetEntryAuthority, TerminalTombstone,
+    TypedResourcePolicy, VerifiedExecutorBinding,
 };
 use mfm_ids::{
     DigestAlgorithm, NodeId, RunId, SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
@@ -26,7 +29,7 @@ use tempfile::TempDir;
 
 const CORPUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../contracts/recoverability/v2/corpus.json"
+    "/../../../contracts/recoverability/v3/corpus.json"
 ));
 const WORKER_ROOT: &str = "MFM_EXECUTOR_FILE_WORKER_ROOT";
 const WORKER_COUNT: usize = 8;
@@ -39,8 +42,8 @@ struct Fixture {
     destination_domain_ref: ContentRef,
 }
 
-fn contract() -> &'static RecoverabilityContractV2 {
-    RecoverabilityContractV2::embedded().expect("contract")
+fn contract() -> &'static RecoverabilityContractV3 {
+    RecoverabilityContractV3::embedded().expect("contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -86,11 +89,11 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v1",
+            "mfm.executor-delivery-frontier.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -98,15 +101,15 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v1",
+            "mfm.executor-terminal-tombstone.v2",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v1",
+            "mfm.executor-reference-terminal-proof.v2",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
-            "mfm.executor-reference-queue-result.v1",
+            "mfm.executor-reference-queue-result.v2",
         ),
     )
     .expect("retained closure contract")
@@ -180,7 +183,7 @@ fn fixture(label: &str, resource_owner: bool) -> Fixture {
 }
 
 fn bounds() -> EvidenceBounds {
-    EvidenceBounds::new(64, 256, 4_000_000, 2, 16_384).expect("bounds")
+    EvidenceBounds::new(64, 256, 4_000_000, 16_384, 2, 16_384).expect("bounds")
 }
 
 fn reference_contract(fixture: &Fixture) -> ReferenceContract {
@@ -192,6 +195,64 @@ fn reference_contract(fixture: &Fixture) -> ReferenceContract {
         reviewed_ref("file.safe-failure"),
     )
     .expect("reference contract")
+}
+
+fn adversarial_delivery_outcomes(fixture: &Fixture) -> [(&'static str, DeliveryAttemptOutcome); 4] {
+    let wrong_outcome_tuple = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            fixture
+                .binding
+                .contract()
+                .safe_failure_contract_ref()
+                .clone(),
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BoundaryEntry,
+        )
+        .expect("structurally valid wrong outcome tuple"),
+    )
+    .expect("wrong tuple candidate");
+    let illegal_fact_layer = DeliveryAttemptOutcome::non_domain_failure(
+        NonDomainFailure::new(
+            NonDomainEntryStatus::MayHaveEntered,
+            NonDomainDisposition::RetryableOperational,
+            NonDomainFailureCode::FactStoreUnavailable,
+        )
+        .expect("globally valid fact-layer failure"),
+    )
+    .expect("fact-layer candidate");
+    let wrong_safe_failure_contract = DeliveryAttemptOutcome::did_not_enter(
+        reference_safe_failure(
+            reviewed_ref("file.hostile.safe-failure-contract"),
+            ReferenceFailureCode::GenerationFenced,
+            FailureClass::Authorization,
+            BoundaryStage::BeforeBoundaryEntry,
+        )
+        .expect("wrong-contract safe failure"),
+    )
+    .expect("wrong-contract candidate");
+    let wrong_returned_schema =
+        DeliveryAttemptOutcome::returned(reviewed_value("file.hostile.returned-schema"))
+            .expect("wrong-schema returned candidate");
+    [
+        ("wrong-outcome-tuple", wrong_outcome_tuple),
+        ("illegal-fact-layer", illegal_fact_layer),
+        ("wrong-safe-failure-contract", wrong_safe_failure_contract),
+        ("wrong-returned-schema", wrong_returned_schema),
+    ]
+}
+
+fn assert_adapter_contract_violation(outcome: &DeliveryAttemptOutcome) {
+    assert!(outcome.returned_outcome().is_none());
+    assert!(outcome.did_not_enter_failure().is_none());
+    assert!(outcome.indeterminate_failure().is_none());
+    let fields = outcome
+        .non_domain_failure_value()
+        .expect("adapter failure outcome")
+        .fields();
+    assert_eq!(fields.entry_status, NonDomainEntryStatus::MayHaveEntered);
+    assert_eq!(fields.disposition, NonDomainDisposition::IntegrityBlocked);
+    assert_eq!(fields.code, NonDomainFailureCode::AdapterContractViolation);
 }
 
 fn committed(
@@ -273,33 +334,41 @@ fn terminalize_allocated_effect(
         .activate_generation(fixture.generation_ref.clone())
         .expect("activate generation");
     let contract = reference_contract(fixture);
-    let authority = block_on(ledger.authorize_target(
+    let view = block_on(ledger.effect_view(request.identity()))
+        .expect("allocated effect")
+        .expect("allocated effect");
+    let expected_head = view.delivery_audit().head_ref().expect("head");
+    let target = block_on(ledger.execute_target_once(
         request.identity(),
+        &expected_head,
         contract.enqueue_operation().clone(),
         Some(policy_binding),
-    ))
-    .expect("allocated target authority");
-    let returned = block_on(destination.enqueue(
-        authority,
-        request.request(),
-        &contract,
-        ReferenceTargetBehavior::Available,
+        |authority| async {
+            destination
+                .enqueue(
+                    authority,
+                    request.request(),
+                    &contract,
+                    ReferenceTargetBehavior::Available,
+                )
+                .await
+                .into_outcome()
+        },
     ))
     .expect("allocated target");
-    let attempt_id = returned.receipt().attempt_id().clone();
-    let returned_outcome = returned
-        .receipt()
+    let ExecuteTargetOutcome::Observed(view) = target else {
+        panic!("uncontended target");
+    };
+    let attempts = view.delivery_audit().attempts().expect("folded attempts");
+    let attempt = attempts.last().expect("attempt");
+    let attempt_id = attempt.attempt_id().clone();
+    let returned_outcome = attempt
         .outcome()
-        .returned_outcome()
+        .and_then(mfm_executor::DeliveryAttemptOutcome::returned_outcome)
         .cloned()
         .expect("returned outcome");
-    let view = block_on(ledger.observe_target(returned.into_target_receipt()))
-        .expect("allocated observation");
-    let attempts = view.delivery_audit().attempts().expect("folded attempts");
-    let observation_ref = attempts
-        .iter()
-        .find(|attempt| attempt.attempt_id() == &attempt_id)
-        .and_then(mfm_executor::DeliveryAttemptView::returned_observation_ref)
+    let observation_ref = attempt
+        .returned_observation_ref()
         .cloned()
         .expect("returned observation ref");
     let proof = ReferenceTerminalProof::new(attempt_id, returned_outcome, observation_ref)
@@ -323,14 +392,10 @@ fn restart_and_every_executor_crash_boundary_converge() {
         (1, mfm_executor::ReferenceCrashPoint::BeforeTargetEntry),
         (
             2,
-            mfm_executor::ReferenceCrashPoint::AfterTargetMutationBeforeObservation,
-        ),
-        (
-            3,
             mfm_executor::ReferenceCrashPoint::AfterObservationBeforeTombstone,
         ),
         (
-            4,
+            3,
             mfm_executor::ReferenceCrashPoint::AfterTombstoneBeforeReturn,
         ),
     ] {
@@ -366,11 +431,11 @@ fn restart_and_every_executor_crash_boundary_converge() {
             "each distinct semantic key mutates once"
         );
     }
-    assert_eq!(destination.semantic_mutation_count().expect("mutations"), 4);
+    assert_eq!(destination.semantic_mutation_count().expect("mutations"), 3);
 }
 
 #[test]
-fn publication_failures_never_return_authority_or_receipt() {
+fn publication_failures_remain_inside_the_target_bracket() {
     let temp = TempDir::new().expect("temp");
     let fixture = fixture("publication", false);
     let (ledger, destination, executor) = open_executor(temp.path(), &fixture);
@@ -380,15 +445,29 @@ fn publication_failures_never_return_authority_or_receipt() {
     ledger
         .store()
         .inject_next_fault(FileFaultPoint::BeforeSnapshotPublish);
+    let head = block_on(ledger.effect_view(request.identity()))
+        .expect("view")
+        .expect("effect")
+        .delivery_audit()
+        .head_ref()
+        .expect("head");
+    let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let invoked_by_target = Arc::clone(&invoked);
     assert_eq!(
-        block_on(ledger.authorize_target(
+        block_on(ledger.execute_target_once(
             request.identity(),
+            &head,
             reference_contract(&fixture).enqueue_operation().clone(),
             None,
+            move |_| {
+                invoked_by_target.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { unreachable!("definite pre-target failure cannot invoke target") }
+            },
         ))
         .expect_err("pre-publish fault"),
         ExecutorError::DurableBackendUnavailable
     );
+    assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(
         block_on(ledger.effect_view(request.identity()))
             .expect("view")
@@ -401,15 +480,29 @@ fn publication_failures_never_return_authority_or_receipt() {
     ledger
         .store()
         .inject_next_fault(FileFaultPoint::AfterSnapshotPublishBeforeAck);
+    let head = block_on(ledger.effect_view(request.identity()))
+        .expect("view")
+        .expect("effect")
+        .delivery_audit()
+        .head_ref()
+        .expect("head");
+    let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let invoked_by_target = Arc::clone(&invoked);
     assert_eq!(
-        block_on(ledger.authorize_target(
+        block_on(ledger.execute_target_once(
             request.identity(),
+            &head,
             reference_contract(&fixture).enqueue_operation().clone(),
             None,
+            move |_| {
+                invoked_by_target.store(true, std::sync::atomic::Ordering::SeqCst);
+                async { unreachable!("ambiguous pre-target append cannot invoke target") }
+            },
         ))
         .expect_err("lost append ack"),
         ExecutorError::DurableAppendOutcomeUnknown
     );
+    assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(
         block_on(ledger.effect_view(request.identity()))
             .expect("view")
@@ -421,23 +514,45 @@ fn publication_failures_never_return_authority_or_receipt() {
     );
     assert_eq!(destination.target_entry_count().expect("entries"), 0);
 
-    let authority = block_on(ledger.authorize_target(
-        request.identity(),
-        reference_contract(&fixture).enqueue_operation().clone(),
-        None,
-    ))
-    .expect("fresh authority");
+    let contract = reference_contract(&fixture);
+    let head = block_on(ledger.effect_view(request.identity()))
+        .expect("view")
+        .expect("effect")
+        .delivery_audit()
+        .head_ref()
+        .expect("head");
     destination.inject_next_fault(FileFaultPoint::AfterSnapshotPublishBeforeAck);
-    assert_eq!(
-        block_on(destination.enqueue(
-            authority,
-            request.request(),
-            &reference_contract(&fixture),
-            ReferenceTargetBehavior::Available,
-        ))
-        .expect_err("lost destination ack"),
-        ExecutorError::DurableBackendUnavailable
-    );
+    let ledger_store = ledger.store().clone();
+    let invocations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let target_invocations = Arc::clone(&invocations);
+    let destination_for_target = &destination;
+    let request_for_target = &request;
+    let contract_for_target = &contract;
+    let target = block_on(ledger.execute_target_once(
+        request.identity(),
+        &head,
+        contract.enqueue_operation().clone(),
+        None,
+        |authority| {
+            let ledger_store = ledger_store.clone();
+            async move {
+                target_invocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let returned = destination_for_target
+                    .enqueue(
+                        authority,
+                        request_for_target.request(),
+                        contract_for_target,
+                        ReferenceTargetBehavior::Available,
+                    )
+                    .await;
+                ledger_store.inject_next_fault(FileFaultPoint::AfterSnapshotPublishBeforeAck);
+                returned.into_outcome()
+            }
+        },
+    ))
+    .expect("lost destination and observation acknowledgements are sealed");
+    assert!(matches!(target, ExecuteTargetOutcome::Observed(_)));
+    assert_eq!(invocations.load(std::sync::atomic::Ordering::SeqCst), 1);
     assert_eq!(
         destination
             .semantic_mutation_count()
@@ -447,6 +562,117 @@ fn publication_failures_never_return_authority_or_receipt() {
     let terminal = block_on(executor.drive(&request)).expect("retry");
     assert!(matches!(terminal.outcome(), Ensure::Terminal { .. }));
     assert_eq!(destination.semantic_mutation_count().expect("mutations"), 1);
+}
+
+#[test]
+fn oversized_target_result_totalizes_and_survives_file_restart() {
+    let temp = TempDir::new().expect("temp");
+    let fixture = fixture("oversized-result", false);
+    let (ledger, _, _) = open_executor(temp.path(), &fixture);
+    let request = committed(&fixture, 11, "file.oversized-result", "payload");
+    let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+    let expected_head = initial.delivery_audit().head_ref().expect("head");
+    let oversized_bytes =
+        serde_json::to_vec(&"x".repeat(32 * 1024)).expect("canonical JSON string");
+    let oversized = SchemaQualifiedCanonicalValue::new(
+        fixture
+            .binding
+            .contract()
+            .retained_closure_contract()
+            .domain_evidence_contract()
+            .schema_id()
+            .clone(),
+        &oversized_bytes,
+    )
+    .expect("oversized schema-qualified result");
+    let oversized = DeliveryAttemptOutcome::returned(oversized).expect("returned outcome");
+
+    let observed = block_on(ledger.execute_target_once(
+        request.identity(),
+        &expected_head,
+        reviewed_value("file.oversized-result-target"),
+        None,
+        move |_authority| async move { oversized },
+    ))
+    .expect("bounded observation");
+    let ExecuteTargetOutcome::Observed(view) = observed else {
+        panic!("fresh authorization must be observed")
+    };
+    assert_result_unrepresentable(&view);
+    drop(ledger);
+
+    let (reopened, _, _) = open_executor(temp.path(), &fixture);
+    let view = block_on(reopened.effect_view(request.identity()))
+        .expect("reopened effect")
+        .expect("persisted effect");
+    assert_result_unrepresentable(&view);
+}
+
+#[test]
+fn affine_completion_normalizes_all_unbound_outcomes_across_file_reopen() {
+    let temp = TempDir::new().expect("temp");
+    let fixture = fixture("completion-binding-seal", false);
+    let (ledger, _, _) = open_executor(temp.path(), &fixture);
+    let invocations = Arc::new(AtomicUsize::new(0));
+    let mut identities = Vec::new();
+
+    for (index, (label, hostile)) in adversarial_delivery_outcomes(&fixture)
+        .into_iter()
+        .enumerate()
+    {
+        let seed = u8::try_from(20 + index).expect("test seed");
+        let request = committed(&fixture, seed, label, "binding-seal");
+        identities.push(request.identity().clone());
+        let initial = block_on(ledger.bind_effect(request.identity())).expect("bind");
+        let expected_head = initial.delivery_audit().head_ref().expect("head");
+        let invoked = Arc::clone(&invocations);
+        let observed = block_on(ledger.execute_target_once(
+            request.identity(),
+            &expected_head,
+            reviewed_value(&format!("file.{label}.target")),
+            None,
+            move |_authority| async move {
+                invoked.fetch_add(1, Ordering::SeqCst);
+                hostile
+            },
+        ))
+        .expect("sealed observation");
+        let ExecuteTargetOutcome::Observed(view) = observed else {
+            panic!("fresh target authority must be observed")
+        };
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1, "{label}");
+        assert_adapter_contract_violation(attempts[0].outcome().expect("one exact observation"));
+    }
+    assert_eq!(invocations.load(Ordering::SeqCst), 4);
+    drop(ledger);
+
+    let (reopened, _, _) = open_executor(temp.path(), &fixture);
+    for identity in identities {
+        let view = block_on(reopened.effect_view(&identity))
+            .expect("reopened view")
+            .expect("persisted effect");
+        let attempts = view.delivery_audit().attempts().expect("attempts");
+        assert_eq!(attempts.len(), 1);
+        assert_adapter_contract_violation(
+            attempts[0].outcome().expect("reopened exact observation"),
+        );
+    }
+}
+
+fn assert_result_unrepresentable(view: &mfm_executor::EffectEntryView) {
+    let attempts = view.delivery_audit().attempts().expect("attempts");
+    let failure = attempts
+        .last()
+        .expect("attempt")
+        .outcome()
+        .expect("outcome")
+        .indeterminate_failure()
+        .expect("oversized result must be totalized");
+    assert_eq!(
+        failure.stable_code(),
+        &ReferenceFailureCode::ResultUnrepresentable
+    );
 }
 
 #[test]
@@ -690,11 +916,7 @@ fn cross_process_drives_share_one_immutable_history() {
         .expect("view")
         .expect("effect")
         .delivery_audit()
-        .verify(
-            request.identity(),
-            &bounds(),
-            fixture.binding.deployment().evidence_authority_ref(),
-        )
+        .verify(request.identity(), &fixture.binding)
         .expect("audit");
 }
 
@@ -711,7 +933,7 @@ impl ReferenceDestination for SecretFileDestination {
         request: &'a ReferenceRequest,
         contract: &'a ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> ExecutorFuture<'a, mfm_executor::Result<ReferenceDestinationReturn>> {
+    ) -> ExecutorFuture<'a, ReferenceDestinationReturn> {
         let _credential_used_below_boundary = self.credential.as_bytes();
         self.inner.enqueue(authority, request, contract, behavior)
     }
@@ -759,7 +981,7 @@ fn file_snapshots_never_retain_below_boundary_credentials() {
     }
 }
 
-fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV2 {
+fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV3 {
     let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus");
     let vector = corpus["positive_vectors"]
         .as_array()

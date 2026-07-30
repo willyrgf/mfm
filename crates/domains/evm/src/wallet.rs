@@ -39,8 +39,6 @@ pub const EVM_WALLET_REPLACEMENT_LIMIT: usize = 32;
 pub const EVM_WALLET_RECEIPT_LOG_LIMIT: usize = 4_096;
 /// Maximum unindexed bytes retained in one receipt log.
 pub const EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
-/// Conservative retained wrapper allowance per executor evidence record.
-pub const EVM_WALLET_EXECUTOR_RECORD_OVERHEAD_BYTES: u64 = 4 * 1024;
 /// Exact version of the selected EVM account-sequence policy descriptor.
 pub const EVM_WALLET_NONCE_POLICY_VERSION: &str = "mfm.evm.wallet-nonce-policy.v1";
 /// Exact version of one deployment-attested initial nonce descriptor.
@@ -825,6 +823,7 @@ struct EvmWalletPolicyWire {
     evidence_max_attempts: u32,
     evidence_max_records: u32,
     evidence_max_retained_bytes: String,
+    evidence_max_completion_record_bytes: String,
     evidence_completion_reserve_records: u32,
     evidence_completion_reserve_bytes: String,
 }
@@ -874,6 +873,9 @@ impl EvmWalletPolicy {
             evidence_max_attempts: evidence_bounds.max_attempts(),
             evidence_max_records: evidence_bounds.max_records(),
             evidence_max_retained_bytes: evidence_bounds.max_retained_bytes().to_string(),
+            evidence_max_completion_record_bytes: evidence_bounds
+                .max_completion_record_bytes()
+                .to_string(),
             evidence_completion_reserve_records: evidence_bounds.completion_reserve_records(),
             evidence_completion_reserve_bytes: evidence_bounds
                 .completion_reserve_bytes()
@@ -997,6 +999,11 @@ impl EvmWalletPolicy {
             || self.wire.evidence_max_records != self.evidence_bounds.max_records()
             || self.wire.evidence_max_retained_bytes
                 != self.evidence_bounds.max_retained_bytes().to_string()
+            || self.wire.evidence_max_completion_record_bytes
+                != self
+                    .evidence_bounds
+                    .max_completion_record_bytes()
+                    .to_string()
             || self.wire.evidence_completion_reserve_records
                 != self.evidence_bounds.completion_reserve_records()
             || self.wire.evidence_completion_reserve_bytes
@@ -1019,31 +1026,7 @@ impl EvmWalletPolicy {
         if records > self.evidence_bounds.max_records() {
             return Err(EvmWalletError::BoundExceeded("evidence_records"));
         }
-        let attempt_bytes = u64::from(attempts)
-            .checked_mul(self.wire.convergence.max_attempt_result_bytes)
-            .ok_or(EvmWalletError::BoundExceeded("evidence_bytes"))?;
-        let wrapper_bytes = u64::from(records)
-            .checked_mul(EVM_WALLET_EXECUTOR_RECORD_OVERHEAD_BYTES)
-            .ok_or(EvmWalletError::BoundExceeded("evidence_bytes"))?;
-        let lineage_copies = u64::try_from(self.wire.replacement.fee_candidates().len() + 1)
-            .map_err(|_| EvmWalletError::BoundExceeded("evidence_bytes"))?;
-        let request_bytes = u64::try_from(request_bytes)
-            .map_err(|_| EvmWalletError::BoundExceeded("evidence_bytes"))?
-            .checked_mul(lineage_copies)
-            .ok_or(EvmWalletError::BoundExceeded("evidence_bytes"))?;
-        let required = attempt_bytes
-            .checked_add(wrapper_bytes)
-            .and_then(|value| value.checked_add(request_bytes))
-            .and_then(|value| {
-                value.checked_add(
-                    u64::try_from(self.evidence_bounds.completion_reserve_bytes()).ok()?,
-                )
-            })
-            .ok_or(EvmWalletError::BoundExceeded("evidence_bytes"))?;
-        if required
-            > u64::try_from(self.evidence_bounds.max_retained_bytes())
-                .map_err(|_| EvmWalletError::BoundExceeded("evidence_bytes"))?
-        {
+        if request_bytes > self.evidence_bounds.max_retained_bytes() {
             return Err(EvmWalletError::BoundExceeded("evidence_bytes"));
         }
         Ok(())
@@ -1069,6 +1052,10 @@ impl<'de> Deserialize<'de> for EvmWalletPolicy {
             .evidence_max_retained_bytes
             .parse::<u64>()
             .map_err(de::Error::custom)?;
+        let max_completion_record_bytes = wire
+            .evidence_max_completion_record_bytes
+            .parse::<u64>()
+            .map_err(de::Error::custom)?;
         let completion_reserve_bytes = wire
             .evidence_completion_reserve_bytes
             .parse::<u64>()
@@ -1077,6 +1064,7 @@ impl<'de> Deserialize<'de> for EvmWalletPolicy {
             wire.evidence_max_attempts,
             wire.evidence_max_records,
             max_retained_bytes,
+            max_completion_record_bytes,
             wire.evidence_completion_reserve_records,
             completion_reserve_bytes,
         )

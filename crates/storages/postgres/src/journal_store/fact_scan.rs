@@ -1,8 +1,8 @@
 use mfm_ids::RunId;
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     AuthorizationRef, JournalHead, ObservationRef, RunJournalRecordFields, ValueRef,
 };
-use mfm_store::v1::{
+use mfm_store::v2::{
     FactAttestationLoadVerifier, FactScanPage, FactScanPageVerifier, PersistedFactScanAttestation,
     StoreError,
 };
@@ -267,7 +267,7 @@ fn record_at(
     loaded: &LoadedRun,
     run_sequence: u64,
     ordinal: u32,
-) -> Result<&mfm_store::v1::CommittedJournalRecord> {
+) -> Result<&mfm_store::v2::CommittedJournalRecord> {
     let commit_index = usize::try_from(run_sequence.checked_sub(1).ok_or(
         PostgresStoreError::Corruption("fact record sequence is not positive"),
     )?)

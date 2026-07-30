@@ -275,6 +275,7 @@ impl QualifiedPostgresExecutorStore {
         {
             return Err(ExecutorError::WrongExecutorBinding);
         }
+        append.validate_for_store_identity(&self.inner.identity)?;
         let prepared = PreparedAppend::new(&append)?;
 
         // Fence verification is intentionally complete before opening the write transaction.

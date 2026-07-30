@@ -1,4 +1,4 @@
-use mfm_store::v1::{StoreError, StoreErrorInspection};
+use mfm_store::v2::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
 
 /// Error returned by the qualified PostgreSQL journal store.
 #[derive(Debug, thiserror::Error)]
@@ -69,10 +69,51 @@ impl StoreErrorInspection for PostgresStoreError {
             | Self::Corruption(_) => None,
         }
     }
+
+    fn fact_scan_failure_provenance(&self) -> FactScanFailureProvenance {
+        match self {
+            Self::Connection | Self::Database(_) => FactScanFailureProvenance::StoreUnavailable,
+            Self::SchemaAuthorityMismatch
+            | Self::MigrationChecksumMismatch
+            | Self::WriterRequired
+            | Self::WriterFenceRejected
+            | Self::Corruption(_) => FactScanFailureProvenance::HistoryInvalid,
+            Self::OutcomeUnknown => FactScanFailureProvenance::AdapterContractViolation,
+            Self::Store(error) => error.fact_scan_failure_provenance(),
+        }
+    }
 }
 
-impl From<mfm_journal::v1::JournalError> for PostgresStoreError {
-    fn from(error: mfm_journal::v1::JournalError) -> Self {
+impl From<mfm_journal::v2::JournalError> for PostgresStoreError {
+    fn from(error: mfm_journal::v2::JournalError) -> Self {
         Self::from(StoreError::from(error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mfm_store::v2::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
+
+    use super::PostgresStoreError;
+
+    #[test]
+    fn fact_scan_failure_provenance_does_not_depend_on_database_text() {
+        assert_eq!(
+            PostgresStoreError::Database("bounded context").fact_scan_failure_provenance(),
+            FactScanFailureProvenance::StoreUnavailable
+        );
+        assert_eq!(
+            PostgresStoreError::Corruption("bounded context").fact_scan_failure_provenance(),
+            FactScanFailureProvenance::HistoryInvalid
+        );
+        assert_eq!(
+            PostgresStoreError::OutcomeUnknown.fact_scan_failure_provenance(),
+            FactScanFailureProvenance::AdapterContractViolation
+        );
+        assert_eq!(
+            PostgresStoreError::Store(Box::new(StoreError::FactScanBindingMismatch))
+                .fact_scan_failure_provenance(),
+            FactScanFailureProvenance::AdapterContractViolation
+        );
     }
 }

@@ -1,18 +1,18 @@
 use std::collections::BTreeSet;
 
-#[path = "../../../../tests/support/recoverability_v2.rs"]
-mod recoverability_v2_support;
+#[path = "../../../../tests/support/recoverability_v3.rs"]
+mod recoverability_v3_support;
 
-use recoverability_v2_support::{
+use recoverability_v3_support::{
     assert_lower_layer_owner_vector, for_each_vector, run_consumer, CorpusVector, OwnerVector,
 };
 
 const CONSUMER: &str = "mfm-store-memory";
-const TOTAL_VECTOR_COUNT: usize = 578;
-const OWNER_VECTOR_COUNT: usize = 116;
+const TOTAL_VECTOR_COUNT: usize = 587;
+const OWNER_VECTOR_COUNT: usize = 117;
 
 #[test]
-fn memory_store_executes_all_578_frozen_recoverability_vectors() {
+fn memory_store_executes_all_587_frozen_recoverability_vectors() {
     let mut vector_ids = BTreeSet::new();
     for_each_vector(|vector| {
         assert_store_vector_binding(vector);

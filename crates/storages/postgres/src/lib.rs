@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! PostgreSQL representation of the recoverability-v2 committed journal.
+//! PostgreSQL representation of the recoverability-v3 committed journal.
 //!
 //! Authority-bearing use starts only through [`open_authoritative`]. Schema migration uses the
 //! separate owner path exposed by [`PostgresSchema`].

@@ -36,12 +36,12 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use ring::digest::{digest, Context, SHA256};
 use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
-mod recoverability_v2;
+mod recoverability_v3;
 
-pub use recoverability_v2::{
-    CanonicalReferencePathV2, RecoverabilityContractV2, RecoverabilityError,
-    RecoverabilityErrorCode, ReferenceTerminalKindV2, SchemaReferenceEdgeV2,
-    ValidatedCanonicalValueV2,
+pub use recoverability_v3::{
+    CanonicalReferencePathV3, RecoverabilityContractV3, RecoverabilityError,
+    RecoverabilityErrorCode, ReferenceTerminalKindV3, SchemaReferenceEdgeV3,
+    ValidatedCanonicalValueV3,
 };
 
 /// Result type for canonicalization operations.
@@ -58,11 +58,11 @@ pub struct CanonicalError {
 /// Incremental raw retained-content digest fixed to `sha256-v1`.
 ///
 /// Construction is available only through
-/// [`RecoverabilityContractV2::raw_content_digest_hasher`]. The hasher is
+/// [`RecoverabilityContractV3::raw_content_digest_hasher`]. The hasher is
 /// intentionally non-cloneable and exposes no generic algorithm selection.
 ///
 /// ```compile_fail
-/// let contract = mfm_canonical::RecoverabilityContractV2::embedded().unwrap();
+/// let contract = mfm_canonical::RecoverabilityContractV3::embedded().unwrap();
 /// let hasher = contract.raw_content_digest_hasher();
 /// let _duplicate = hasher.clone();
 /// ```

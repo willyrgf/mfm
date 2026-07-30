@@ -1,6 +1,6 @@
 # MFM REST API
 
-`mfm-rest-api` is the HTTP adapter for the recoverability-v2 `mfm_app::Application` facade. The
+`mfm-rest-api` is the HTTP adapter for the recoverability-v3 `mfm_app::Application` facade. The
 router owns request decoding, bearer extraction, status mapping, and response envelopes only.
 Storage, authentication policy, tenant derivation, run authority, planning, runtime, and replay
 remain behind the application facade.
@@ -95,7 +95,7 @@ POST /v1/runs/{run_id}/replay?mode=compare_current
 as the request body and exactly one value for each header:
 
 ```http
-Content-Type: application/vnd.mfm.run-export-stream.v1+json-seq
+Content-Type: application/vnd.mfm.run-export-stream.v2+json-seq
 Mfm-Content-Digest: content:sha256-v1:<64 lowercase hex>
 ```
 
@@ -127,7 +127,8 @@ as a source denied by grant or tenant. A fresh source `AuthenticationRequired` d
 page with `401`.
 Each audit entry exposes exactly `authorization_ref`, `observation_ref`,
 `authorization_journal_head`, `observation_journal_head`, `capability_binding_ref`,
-`capability_operation_id`, `request_ref`, `status`, `result_ref`, `failure`, `effect_key`,
+`capability_operation_id`, `request_ref`, `status`, `result_ref`, `failure`,
+`non_domain_failure`, `effect_key`,
 `delivery_audit_ref`, and `delivery_audit_terminal`. The last field is `true` for a verified
 terminal returned ensure, `false` for a verified pending returned ensure, and `null` for reads or
 when no returned ensure is verified at the page head. It is presentation-only; the journal
@@ -135,7 +136,7 @@ persists only `delivery_audit_ref`.
 
 Export accepts `{"kind":"semantic"}` or `{"kind":"audit"}`. It is the only non-envelope success:
 the response body lazily streams the exact framed portable-export bytes, `Content-Type` is
-`application/vnd.mfm.run-export-stream.v1+json-seq`, and `Mfm-Content-Digest` is SHA-256 over every
+`application/vnd.mfm.run-export-stream.v2+json-seq`, and `Mfm-Content-Digest` is SHA-256 over every
 record separator, canonical frame byte, and line feed. A body-reader failure exposes only the
 fixed `export stream unavailable` body error, never a private path or backend diagnostic.
 
@@ -151,4 +152,4 @@ policy, run-store writer fence, exact wallet deployment, and independent executo
 writer-generation fence, wraps it in `AppState::new`, and passes that state to `make_app`.
 
 The frozen application and wire contract is
-[`docs/recoverability-app-surface-v2.md`](../../docs/recoverability-app-surface-v2.md).
+[`docs/recoverability-app-surface-v3.md`](../../docs/recoverability-app-surface-v3.md).

@@ -7,7 +7,7 @@ use crate::{PostgresExecutorStoreError, Result};
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub(crate) const APPLICATION_ROLE: &str = "mfm_executor_application";
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.executor-postgres.v1";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.executor-postgres.v2";
 
 /// Administrative migration surface for the dedicated executor schema.
 pub struct PostgresExecutorSchema;

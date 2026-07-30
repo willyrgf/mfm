@@ -3,7 +3,7 @@
 Callback-free recorded-history inspection and portable export for MFM.
 
 The sole current codec and portable-stream registry is
-`contracts/recoverability/v2/annex.json`.
+`contracts/recoverability/v3/annex.json`.
 `docs/design.md` is the normative authority contract. Every store-backed operation borrows a
 cloneable `RunHistoryReader<B>`, accepts the exact store-owned purpose authority for replay,
 transition trace, access audit, or export, and loads one fresh head-bound
@@ -53,8 +53,11 @@ they are not persisted journal entries. The journal retains only `delivery_audit
 public projection annotates a verified returned ensure as pending or terminal without decoding
 retained values in the application. Replay accepts only the store seam's decoded head, start index,
 and limit and returns the next scalar index; the application alone owns opaque transport cursors.
+The fourth observation outcome, `NonDomainFailure`, remains callback-free audit-only evidence:
+replay validates its closed code/status/disposition relation, projects it through
+`non_domain_failure`, and never supplies it to semantic settlement.
 
-Portable transfer is one `mfm.portable-run-export-stream.v1` JSON text sequence. The header fixes
+Portable transfer is one `mfm.portable-run-export-stream.v2` JSON text sequence. The header fixes
 the root and coordinate; run frames are root first and then dependencies by canonical `RunId`;
 journal payloads are dense; object payloads are ordered and transferred once; and every logical
 `ValueRef` authority follows its payload in canonical order. The final `end` frame is followed

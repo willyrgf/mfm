@@ -1,4 +1,5 @@
 use super::*;
+use mfm_canonical::CanonicalValue;
 use mfm_ids::{DigestAlgorithm, DigestBytes};
 
 fn assert_effect<E: EffectSpec>(
@@ -197,5 +198,88 @@ fn capability_role_strings_are_stable() {
     assert_eq!(
         CapabilityRole::ExternalMutationAuthority.as_str(),
         "external_mutation_authority"
+    );
+}
+
+#[test]
+fn non_domain_failures_round_trip_through_capability_owned_canonical_values() {
+    use NonDomainDisposition::{IntegrityBlocked, RetryableOperational};
+    use NonDomainEntryStatus::{MayHaveEntered, ProvenNotEntered};
+    use NonDomainFailureCode::{
+        AdapterContractViolation, ExecutorCapacityExhausted, ExecutorContention,
+        ExecutorHistoryInvalid, ExecutorStoreUnavailable, FactHistoryInvalid, FactStoreUnavailable,
+        ResultEncodingFailure,
+    };
+
+    for (entry_status, disposition, code) in [
+        (ProvenNotEntered, IntegrityBlocked, AdapterContractViolation),
+        (MayHaveEntered, IntegrityBlocked, ResultEncodingFailure),
+        (MayHaveEntered, RetryableOperational, FactStoreUnavailable),
+        (MayHaveEntered, IntegrityBlocked, FactHistoryInvalid),
+        (
+            ProvenNotEntered,
+            RetryableOperational,
+            ExecutorStoreUnavailable,
+        ),
+        (MayHaveEntered, RetryableOperational, ExecutorContention),
+        (MayHaveEntered, IntegrityBlocked, ExecutorHistoryInvalid),
+        (
+            ProvenNotEntered,
+            IntegrityBlocked,
+            ExecutorCapacityExhausted,
+        ),
+    ] {
+        let failure =
+            NonDomainFailure::new(entry_status, disposition, code).expect("valid closed relation");
+        let canonical = failure.canonical_value().expect("canonical value");
+        assert_eq!(
+            NonDomainFailure::from_canonical_value(&canonical).expect("canonical round trip"),
+            failure
+        );
+    }
+}
+
+#[test]
+fn non_domain_failure_canonical_projection_rejects_open_or_invalid_relations() {
+    let open = CanonicalValue::object([
+        (
+            "entry_status",
+            CanonicalValue::String("may_have_entered".to_owned()),
+        ),
+        (
+            "disposition",
+            CanonicalValue::String("retryable_operational".to_owned()),
+        ),
+        (
+            "code",
+            CanonicalValue::String("executor_contention".to_owned()),
+        ),
+        ("diagnostic", CanonicalValue::String("forbidden".to_owned())),
+    ])
+    .expect("canonical object");
+    assert_eq!(
+        NonDomainFailure::from_canonical_value(&open).expect_err("open object"),
+        NonDomainFailureError::InvalidValue
+    );
+
+    let invalid_relation = CanonicalValue::object([
+        (
+            "entry_status",
+            CanonicalValue::String("proven_not_entered".to_owned()),
+        ),
+        (
+            "disposition",
+            CanonicalValue::String("integrity_blocked".to_owned()),
+        ),
+        (
+            "code",
+            CanonicalValue::String("fact_store_unavailable".to_owned()),
+        ),
+    ])
+    .expect("canonical object");
+    assert_eq!(
+        NonDomainFailure::from_canonical_value(&invalid_relation)
+            .expect_err("invalid closed relation"),
+        NonDomainFailureError::InvalidRelation
     );
 }

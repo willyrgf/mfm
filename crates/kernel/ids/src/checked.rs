@@ -226,14 +226,14 @@ checked_string_type!(
     StableId,
     "recoverability stable id",
     validate_stable_id,
-    "Stable identifier using the frozen recoverability-v2 primitive grammar."
+    "Stable identifier using the frozen recoverability-v3 primitive grammar."
 );
 
 checked_string_type!(
     EntryPointId,
     "recoverability entry-point id",
     validate_entry_point_id,
-    "Versioned public entry-point identifier using the frozen recoverability-v2 grammar."
+    "Versioned public entry-point identifier using the frozen recoverability-v3 grammar."
 );
 
 checked_string_type!(

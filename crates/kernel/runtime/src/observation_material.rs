@@ -2,7 +2,7 @@
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{EffectKey, FieldPath, RequestDigest};
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     AuthorizationRef, CapabilityBindingRef, ExecutorEnsureResult, ExecutorEnsureResultFields,
     ObservationOutcomeFields, ProducerBindingFields, TerminalEffectEvidence, ValueRef,
 };
@@ -12,7 +12,7 @@ use mfm_program::{
 use mfm_spec::RetainedValueContract;
 use mfm_store::{VerifiedObservedAccess, VerifiedRunView};
 
-use crate::access::CommittedObservation;
+use crate::access_protocol::{CommittedObservation, Ensure, Read};
 use crate::{Result, RuntimeError};
 
 const ENSURE_RESULT_PATH: &str = "executor.ensure_result";
@@ -40,7 +40,7 @@ pub(crate) fn committed_read_observation(
     returned_contract: &RetainedValueContract,
     safe_failure_contract: &RetainedValueContract,
     requires_fact_selection_attestation: bool,
-) -> Result<CommittedObservation<VerifiedReadOutcome>> {
+) -> Result<CommittedObservation<Read, VerifiedReadOutcome>> {
     let audit = observed.audit();
     let observation_ref = observed.observation_ref();
     let observation = observed.observation();
@@ -87,6 +87,9 @@ pub(crate) fn committed_read_observation(
                 diagnostic,
             }
         }
+        ObservationOutcomeFields::NonDomainFailure { .. } => {
+            return Err(RuntimeError::InvalidCallbackResult);
+        }
     };
     Ok(CommittedObservation::new(observation_ref.clone(), outcome))
 }
@@ -94,7 +97,7 @@ pub(crate) fn committed_read_observation(
 fn verified_safe_failure(
     view: &VerifiedRunView,
     authorization_ref: &AuthorizationRef,
-    failure: &mfm_journal::v1::SafeFailure,
+    failure: &mfm_journal::v2::SafeFailure,
     contract: &RetainedValueContract,
 ) -> Result<(
     mfm_store::SafeFailureMetadata,
@@ -154,7 +157,7 @@ pub(crate) fn committed_terminal_observation(
     request_digest: &RequestDigest,
     ensure_result_contract: &RetainedValueContract,
     terminal_evidence_contract: &RetainedValueContract,
-) -> Result<Option<CommittedObservation<CommittedTerminalEvidence>>> {
+) -> Result<Option<CommittedObservation<Ensure, CommittedTerminalEvidence>>> {
     let audit = observed.audit();
     let observation_ref = observed.observation_ref();
     let observation = observed.observation();

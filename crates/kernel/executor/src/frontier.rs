@@ -1,37 +1,42 @@
 use std::collections::BTreeMap;
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
-use mfm_capabilities::{
-    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureCode, SafeFailureOutcome,
+use mfm_canonical::{
+    CanonicalJsonBytes, CanonicalValue, PlainCanonicalJsonBytes, ValidatedCanonicalValueV3,
 };
-use mfm_ids::{AttemptId, ContentRef, EffectKey, RequestDigest, SemanticDigest, StableId};
+use mfm_capabilities::{
+    BoundaryStage, CoarseSizeClass, FailureClass, NonDomainFailure, NonDomainFailureLayer,
+    SafeFailure, SafeFailureCode, SafeFailureOutcome,
+};
+use mfm_ids::{
+    AttemptId, ContentRef, EffectKey, RequestDigest, SchemaId, SemanticDigest, StableId,
+};
 
 use crate::codec::{Decoder, Encoder, MAX_DURABLE_SNAPSHOT_BYTES};
 use crate::contract::{
     canonical_object, content_ref, content_ref_value, effect_key_value, encode,
-    recoverability_contract, semantic_digest_value, validate_reference_effect_identifier,
-    AllocationStateRef, ExecutorBindingRef, FencingRef, ResourceKeyRef, ResourceOwnershipRef,
-    SchemaQualifiedCanonicalValue,
+    plain_json_to_canonical_value, recoverability_contract, semantic_digest_value,
+    validate_reference_effect_identifier, AllocationStateRef, ExecutorBindingRef, FencingRef,
+    ResourceKeyRef, ResourceOwnershipRef, SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
 };
 use crate::{EffectIdentity, ExecutorError, Result};
 
 const ATTEMPT_PREIMAGE_SCHEMA: &str = "mfm.executor-attempt-id-preimage.v1";
 const ATTEMPT_DOMAIN: &str = "mfm.executor-delivery-attempt.v1";
 const RETURNED_OUTCOME_SCHEMA: &str = "mfm.executor-returned-outcome.v1";
-const SAFE_FAILURE_SCHEMA: &str = "mfm.executor-reference-safe-failure.v1";
-const ATTEMPT_OUTCOME_SCHEMA: &str = "mfm.executor-attempt-outcome.v1";
+const SAFE_FAILURE_SCHEMA: &str = "mfm.executor-reference-safe-failure.v2";
+const ATTEMPT_OUTCOME_SCHEMA: &str = "mfm.executor-attempt-outcome.v2";
 const EFFECT_BOUND_SCHEMA: &str = "mfm.executor-effect-bound.v1";
 const RESOURCE_ALLOCATED_SCHEMA: &str = "mfm.executor-resource-allocated.v1";
 const ATTEMPT_AUTHORIZED_SCHEMA: &str = "mfm.executor-delivery-attempt-authorized.v1";
-const ATTEMPT_OBSERVED_SCHEMA: &str = "mfm.executor-delivery-attempt-observed.v1";
-pub(crate) const TERMINAL_PROOF_SCHEMA: &str = "mfm.executor-reference-terminal-proof.v1";
-pub(crate) const TERMINAL_TOMBSTONE_SCHEMA: &str = "mfm.executor-terminal-tombstone.v1";
-const EVIDENCE_RECORD_SCHEMA: &str = "mfm.executor-evidence-record.v1";
-const RECORD_PREIMAGE_SCHEMA: &str = "mfm.executor-record-preimage.v1";
-const RECORD_DOMAIN: &str = "mfm.executor-record.v1";
-pub(crate) const DELIVERY_FRONTIER_SCHEMA: &str = "mfm.executor-delivery-frontier.v1";
-const FRONTIER_PREIMAGE_SCHEMA: &str = "mfm.executor-frontier-preimage.v1";
-const FRONTIER_DOMAIN: &str = "mfm.executor-frontier.v1";
+const ATTEMPT_OBSERVED_SCHEMA: &str = "mfm.executor-delivery-attempt-observed.v2";
+pub(crate) const TERMINAL_PROOF_SCHEMA: &str = "mfm.executor-reference-terminal-proof.v2";
+pub(crate) const TERMINAL_TOMBSTONE_SCHEMA: &str = "mfm.executor-terminal-tombstone.v2";
+const EVIDENCE_RECORD_SCHEMA: &str = "mfm.executor-evidence-record.v2";
+const RECORD_PREIMAGE_SCHEMA: &str = "mfm.executor-record-preimage.v2";
+const RECORD_DOMAIN: &str = "mfm.executor-record.v2";
+pub(crate) const DELIVERY_FRONTIER_SCHEMA: &str = "mfm.executor-delivery-frontier.v2";
+const FRONTIER_PREIMAGE_SCHEMA: &str = "mfm.executor-frontier-preimage.v2";
+const FRONTIER_DOMAIN: &str = "mfm.executor-frontier.v2";
 const EVIDENCE_BOUNDS_SCHEMA: &str = "mfm.evidence-bounds.v1";
 const FRONTIER_DURABLE_MAGIC: &[u8; 8] = b"MFMEFR01";
 
@@ -48,6 +53,8 @@ pub enum ReferenceFailureCode {
     AccessCancelled,
     /// No more specific safe classification survived.
     UnclassifiedFailure,
+    /// A target response could not be retained within the reviewed result contract.
+    ResultUnrepresentable,
 }
 
 impl SafeFailureCode for ReferenceFailureCode {
@@ -58,6 +65,7 @@ impl SafeFailureCode for ReferenceFailureCode {
             Self::RequestConflict => "request_conflict",
             Self::AccessCancelled => "access_cancelled",
             Self::UnclassifiedFailure => "unclassified_failure",
+            Self::ResultUnrepresentable => "result_unrepresentable",
         }
     }
 
@@ -92,6 +100,10 @@ impl SafeFailureCode for ReferenceFailureCode {
             ) | (
                 Self::UnclassifiedFailure,
                 FailureClass::Unclassified,
+                BoundaryStage::BoundaryObservation
+            ) | (
+                Self::ResultUnrepresentable,
+                FailureClass::UnrepresentableResponse,
                 BoundaryStage::BoundaryObservation
             )
         )
@@ -144,6 +156,7 @@ pub fn verify_reference_safe_failure_tuple(
         "request_conflict" => ReferenceFailureCode::RequestConflict,
         "access_cancelled" => ReferenceFailureCode::AccessCancelled,
         "unclassified_failure" => ReferenceFailureCode::UnclassifiedFailure,
+        "result_unrepresentable" => ReferenceFailureCode::ResultUnrepresentable,
         _ => return Err(ExecutorError::InvalidSafeFailure),
     };
     let failure = reference_safe_failure(
@@ -152,18 +165,70 @@ pub fn verify_reference_safe_failure_tuple(
         failure_class,
         boundary_stage,
     )?;
-    match outcome {
-        SafeFailureOutcome::DidNotEnter => {
-            DeliveryAttemptOutcome::did_not_enter(failure.clone())?;
-        }
-        SafeFailureOutcome::Indeterminate => {
-            DeliveryAttemptOutcome::indeterminate(failure.clone())?;
-        }
-    }
+    validate_safe_failure_outcome(&failure, outcome)?;
     Ok(failure)
 }
 
-fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCanonicalValueV2> {
+fn validate_safe_failure_outcome(
+    failure: &ReferenceSafeFailure,
+    outcome: SafeFailureOutcome,
+) -> Result<()> {
+    let legal = matches!(
+        (
+            outcome,
+            failure.stable_code(),
+            failure.failure_class(),
+            failure.boundary_stage()
+        ),
+        (
+            SafeFailureOutcome::DidNotEnter,
+            ReferenceFailureCode::GenerationFenced,
+            FailureClass::Authorization,
+            BoundaryStage::BeforeBoundaryEntry
+        ) | (
+            SafeFailureOutcome::DidNotEnter,
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BeforeBoundaryEntry
+        ) | (
+            SafeFailureOutcome::DidNotEnter,
+            ReferenceFailureCode::AccessCancelled,
+            FailureClass::Cancellation,
+            BoundaryStage::BeforeBoundaryEntry
+        ) | (
+            SafeFailureOutcome::Indeterminate,
+            ReferenceFailureCode::DestinationUnavailable,
+            FailureClass::Transport,
+            BoundaryStage::BoundaryEntry
+        ) | (
+            SafeFailureOutcome::Indeterminate,
+            ReferenceFailureCode::RequestConflict,
+            FailureClass::Destination,
+            BoundaryStage::BoundaryObservation
+        ) | (
+            SafeFailureOutcome::Indeterminate,
+            ReferenceFailureCode::AccessCancelled,
+            FailureClass::Cancellation,
+            BoundaryStage::BoundaryEntry
+        ) | (
+            SafeFailureOutcome::Indeterminate,
+            ReferenceFailureCode::UnclassifiedFailure,
+            FailureClass::Unclassified,
+            BoundaryStage::BoundaryObservation
+        ) | (
+            SafeFailureOutcome::Indeterminate,
+            ReferenceFailureCode::ResultUnrepresentable,
+            FailureClass::UnrepresentableResponse,
+            BoundaryStage::BoundaryObservation
+        )
+    );
+    if !legal {
+        return Err(ExecutorError::InvalidSafeFailure);
+    }
+    Ok(())
+}
+
+fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCanonicalValueV3> {
     encode(
         SAFE_FAILURE_SCHEMA,
         &canonical_object([
@@ -195,7 +260,7 @@ fn validated_safe_failure(failure: &ReferenceSafeFailure) -> Result<ValidatedCan
 
 pub(crate) fn validated_safe_failure_for_result(
     failure: &ReferenceSafeFailure,
-) -> Result<ValidatedCanonicalValueV2> {
+) -> Result<ValidatedCanonicalValueV3> {
     validated_safe_failure(failure)
 }
 
@@ -229,7 +294,7 @@ impl ReturnedOutcome {
     }
 
     /// Returns the exact canonical returned-outcome object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         encode(
             RETURNED_OUTCOME_SCHEMA,
             &canonical_object([(
@@ -240,96 +305,187 @@ impl ReturnedOutcome {
     }
 }
 
-/// Safe retained outcome of one authorized target operation.
+/// Candidate safe outcome of one authorized target operation.
+///
+/// The representation is opaque so callers cannot bypass the reviewed
+/// constructors. Constructors establish structural safety; the ledger's
+/// affine completion seal additionally binds the exact executor coordinates
+/// before observation.
+///
+/// ```compile_fail
+/// # use mfm_executor::{DeliveryAttemptOutcome, ReturnedOutcome};
+/// # fn cannot_construct(returned: ReturnedOutcome) {
+/// let _ = DeliveryAttemptOutcome::Returned(returned);
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DeliveryAttemptOutcome {
-    /// A reviewed non-secret result survived.
+pub struct DeliveryAttemptOutcome {
+    kind: DeliveryAttemptOutcomeKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeliveryAttemptOutcomeKind {
     Returned(ReturnedOutcome),
-    /// The executor positively proves target entry did not occur.
     DidNotEnter(ReferenceSafeFailure),
-    /// Target entry or outcome remains ambiguous.
     Indeterminate(ReferenceSafeFailure),
+    NonDomainFailure(mfm_capabilities::NonDomainFailure),
 }
 
 impl DeliveryAttemptOutcome {
-    /// Constructs a returned outcome.
+    /// Constructs a structurally reviewed returned-outcome candidate.
+    ///
+    /// The exact admitted domain-evidence schema is checked when fresh target
+    /// authority is consumed and again whenever delivery history is refolded.
     pub fn returned(safe_result: SchemaQualifiedCanonicalValue) -> Result<Self> {
-        Ok(Self::Returned(ReturnedOutcome::new(safe_result)?))
+        Ok(Self {
+            kind: DeliveryAttemptOutcomeKind::Returned(ReturnedOutcome::new(safe_result)?),
+        })
     }
 
-    /// Constructs a did-not-enter outcome under the exact code relation.
+    /// Constructs a structurally reviewed did-not-enter candidate.
+    ///
+    /// Outcome-specific tuple compatibility and the exact safe-failure
+    /// contract are checked by the affine completion seal.
     pub fn did_not_enter(failure: ReferenceSafeFailure) -> Result<Self> {
-        let legal = matches!(
-            (
-                failure.stable_code(),
-                failure.failure_class(),
-                failure.boundary_stage()
-            ),
-            (
-                ReferenceFailureCode::GenerationFenced,
-                FailureClass::Authorization,
-                BoundaryStage::BeforeBoundaryEntry
-            ) | (
-                ReferenceFailureCode::DestinationUnavailable,
-                FailureClass::Transport,
-                BoundaryStage::BeforeBoundaryEntry
-            ) | (
-                ReferenceFailureCode::AccessCancelled,
-                FailureClass::Cancellation,
-                BoundaryStage::BeforeBoundaryEntry
-            )
-        );
-        if !legal {
-            return Err(ExecutorError::InvalidSafeFailure);
-        }
         validated_safe_failure(&failure)?;
-        Ok(Self::DidNotEnter(failure))
+        Ok(Self {
+            kind: DeliveryAttemptOutcomeKind::DidNotEnter(failure),
+        })
     }
 
-    /// Constructs an indeterminate outcome under the exact code relation.
+    /// Constructs a structurally reviewed indeterminate candidate.
+    ///
+    /// Outcome-specific tuple compatibility and the exact safe-failure
+    /// contract are checked by the affine completion seal.
     pub fn indeterminate(failure: ReferenceSafeFailure) -> Result<Self> {
-        let legal = matches!(
-            (
-                failure.stable_code(),
-                failure.failure_class(),
-                failure.boundary_stage()
-            ),
-            (
-                ReferenceFailureCode::DestinationUnavailable,
-                FailureClass::Transport,
-                BoundaryStage::BoundaryEntry
-            ) | (
-                ReferenceFailureCode::RequestConflict,
-                FailureClass::Destination,
-                BoundaryStage::BoundaryObservation
-            ) | (
-                ReferenceFailureCode::AccessCancelled,
-                FailureClass::Cancellation,
-                BoundaryStage::BoundaryEntry
-            ) | (
-                ReferenceFailureCode::UnclassifiedFailure,
-                FailureClass::Unclassified,
-                BoundaryStage::BoundaryObservation
-            )
-        );
-        if !legal {
+        validated_safe_failure(&failure)?;
+        Ok(Self {
+            kind: DeliveryAttemptOutcomeKind::Indeterminate(failure),
+        })
+    }
+
+    /// Constructs a structurally reviewed audit-only failure candidate.
+    ///
+    /// The globally closed status/disposition relation is already owned by
+    /// [`mfm_capabilities::NonDomainFailure`]. Executor-target layer legality
+    /// is checked by the affine completion seal.
+    pub fn non_domain_failure(failure: NonDomainFailure) -> Result<Self> {
+        let canonical = failure
+            .canonical_value()
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?;
+        if NonDomainFailure::from_canonical_value(&canonical)
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?
+            != failure
+        {
             return Err(ExecutorError::InvalidSafeFailure);
         }
-        validated_safe_failure(&failure)?;
-        Ok(Self::Indeterminate(failure))
+        Ok(Self {
+            kind: DeliveryAttemptOutcomeKind::NonDomainFailure(failure),
+        })
     }
 
     /// Returns the returned target result when present.
     pub const fn returned_outcome(&self) -> Option<&ReturnedOutcome> {
-        match self {
-            Self::Returned(outcome) => Some(outcome),
-            Self::DidNotEnter(_) | Self::Indeterminate(_) => None,
+        match &self.kind {
+            DeliveryAttemptOutcomeKind::Returned(outcome) => Some(outcome),
+            DeliveryAttemptOutcomeKind::DidNotEnter(_)
+            | DeliveryAttemptOutcomeKind::Indeterminate(_)
+            | DeliveryAttemptOutcomeKind::NonDomainFailure(_) => None,
         }
     }
 
-    fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
-        let value = match self {
-            Self::Returned(outcome) => canonical_object([
+    /// Returns the did-not-enter failure candidate when present.
+    pub const fn did_not_enter_failure(&self) -> Option<&ReferenceSafeFailure> {
+        match &self.kind {
+            DeliveryAttemptOutcomeKind::DidNotEnter(failure) => Some(failure),
+            DeliveryAttemptOutcomeKind::Returned(_)
+            | DeliveryAttemptOutcomeKind::Indeterminate(_)
+            | DeliveryAttemptOutcomeKind::NonDomainFailure(_) => None,
+        }
+    }
+
+    /// Returns the indeterminate failure candidate when present.
+    pub const fn indeterminate_failure(&self) -> Option<&ReferenceSafeFailure> {
+        match &self.kind {
+            DeliveryAttemptOutcomeKind::Indeterminate(failure) => Some(failure),
+            DeliveryAttemptOutcomeKind::Returned(_)
+            | DeliveryAttemptOutcomeKind::DidNotEnter(_)
+            | DeliveryAttemptOutcomeKind::NonDomainFailure(_) => None,
+        }
+    }
+
+    /// Returns the audit-only failure candidate when present.
+    pub const fn non_domain_failure_value(&self) -> Option<&NonDomainFailure> {
+        match &self.kind {
+            DeliveryAttemptOutcomeKind::NonDomainFailure(failure) => Some(failure),
+            DeliveryAttemptOutcomeKind::Returned(_)
+            | DeliveryAttemptOutcomeKind::DidNotEnter(_)
+            | DeliveryAttemptOutcomeKind::Indeterminate(_) => None,
+        }
+    }
+
+    pub(crate) fn validate_for_binding(&self, binding: &VerifiedExecutorBinding) -> Result<()> {
+        self.validate_for_contract(
+            binding.contract().safe_failure_contract_ref(),
+            binding
+                .contract()
+                .retained_closure_contract()
+                .domain_evidence_contract()
+                .schema_id(),
+        )
+    }
+
+    pub(crate) fn validate_for_contract(
+        &self,
+        safe_failure_contract_ref: &ContentRef,
+        domain_evidence_schema_id: &SchemaId,
+    ) -> Result<()> {
+        match &self.kind {
+            DeliveryAttemptOutcomeKind::Returned(returned) => {
+                let reconstructed = ReturnedOutcome::new(returned.safe_result().clone())?;
+                if &reconstructed != returned
+                    || returned.safe_result().schema_id() != domain_evidence_schema_id
+                {
+                    return Err(ExecutorError::SchemaReferenceMismatch);
+                }
+            }
+            DeliveryAttemptOutcomeKind::DidNotEnter(failure) => {
+                validate_bound_safe_failure(
+                    failure,
+                    SafeFailureOutcome::DidNotEnter,
+                    safe_failure_contract_ref,
+                )?;
+            }
+            DeliveryAttemptOutcomeKind::Indeterminate(failure) => {
+                validate_bound_safe_failure(
+                    failure,
+                    SafeFailureOutcome::Indeterminate,
+                    safe_failure_contract_ref,
+                )?;
+            }
+            DeliveryAttemptOutcomeKind::NonDomainFailure(failure) => {
+                let fields = failure.fields();
+                let reconstructed =
+                    NonDomainFailure::new(fields.entry_status, fields.disposition, fields.code)
+                        .map_err(|_| ExecutorError::InvalidSafeFailure)?;
+                if &reconstructed != failure {
+                    return Err(ExecutorError::InvalidSafeFailure);
+                }
+                reconstructed
+                    .validate_layer(NonDomainFailureLayer::ExecutorTarget)
+                    .map_err(|_| ExecutorError::InvalidSafeFailure)?;
+            }
+        }
+        Ok(())
+    }
+
+    const fn kind(&self) -> &DeliveryAttemptOutcomeKind {
+        &self.kind
+    }
+
+    fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+        let value = match &self.kind {
+            DeliveryAttemptOutcomeKind::Returned(outcome) => canonical_object([
                 ("kind", CanonicalValue::String("returned".to_owned())),
                 (
                     "returned_outcome",
@@ -339,7 +495,7 @@ impl DeliveryAttemptOutcome {
                         .map_err(crate::contract::contract_error)?,
                 ),
             ])?,
-            Self::DidNotEnter(failure) => canonical_object([
+            DeliveryAttemptOutcomeKind::DidNotEnter(failure) => canonical_object([
                 ("kind", CanonicalValue::String("did_not_enter".to_owned())),
                 (
                     "safe_failure",
@@ -348,7 +504,7 @@ impl DeliveryAttemptOutcome {
                         .map_err(crate::contract::contract_error)?,
                 ),
             ])?,
-            Self::Indeterminate(failure) => canonical_object([
+            DeliveryAttemptOutcomeKind::Indeterminate(failure) => canonical_object([
                 ("kind", CanonicalValue::String("indeterminate".to_owned())),
                 (
                     "safe_failure",
@@ -357,9 +513,38 @@ impl DeliveryAttemptOutcome {
                         .map_err(crate::contract::contract_error)?,
                 ),
             ])?,
+            DeliveryAttemptOutcomeKind::NonDomainFailure(failure) => canonical_object([
+                (
+                    "kind",
+                    CanonicalValue::String("non_domain_failure".to_owned()),
+                ),
+                (
+                    "non_domain_failure",
+                    failure
+                        .canonical_value()
+                        .map_err(|_| ExecutorError::CanonicalEncoding)?,
+                ),
+            ])?,
         };
         encode(ATTEMPT_OUTCOME_SCHEMA, &value)
     }
+}
+
+fn validate_bound_safe_failure(
+    failure: &ReferenceSafeFailure,
+    outcome: SafeFailureOutcome,
+    expected_contract_ref: &ContentRef,
+) -> Result<()> {
+    let reconstructed = reference_safe_failure(
+        failure.safe_failure_contract_ref().clone(),
+        *failure.stable_code(),
+        failure.failure_class(),
+        failure.boundary_stage(),
+    )?;
+    if &reconstructed != failure || failure.safe_failure_contract_ref() != expected_contract_ref {
+        return Err(ExecutorError::InvalidSafeFailure);
+    }
+    validate_safe_failure_outcome(failure, outcome)
 }
 
 /// Derives one immutable delivery-attempt identity through the frozen domain.
@@ -439,7 +624,7 @@ impl ReferenceTerminalProof {
     }
 
     /// Returns the exact canonical proof object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         encode(
             TERMINAL_PROOF_SCHEMA,
             &canonical_object([
@@ -514,7 +699,7 @@ impl TerminalTombstone {
     }
 
     /// Returns the exact canonical tombstone object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         encode(
             TERMINAL_TOMBSTONE_SCHEMA,
             &canonical_object([
@@ -654,7 +839,7 @@ impl ResourceAllocatedRecord {
 
 impl ExecutorEvidenceRecord {
     /// Returns the exact canonical wrapper object retained in a frontier.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         let (kind, record) = match self {
             Self::EffectBound {
                 executor_binding_ref,
@@ -852,15 +1037,16 @@ fn append_outcome_content(
     values.push(SchemaQualifiedCanonicalValue::from_validated(
         &outcome.validated()?,
     )?);
-    match outcome {
-        DeliveryAttemptOutcome::Returned(returned) => append_returned_content(values, returned),
-        DeliveryAttemptOutcome::DidNotEnter(failure)
-        | DeliveryAttemptOutcome::Indeterminate(failure) => {
+    match outcome.kind() {
+        DeliveryAttemptOutcomeKind::Returned(returned) => append_returned_content(values, returned),
+        DeliveryAttemptOutcomeKind::DidNotEnter(failure)
+        | DeliveryAttemptOutcomeKind::Indeterminate(failure) => {
             values.push(SchemaQualifiedCanonicalValue::from_validated(
                 &validated_safe_failure(failure)?,
             )?);
             Ok(())
         }
+        DeliveryAttemptOutcomeKind::NonDomainFailure(_) => Ok(()),
     }
 }
 
@@ -873,6 +1059,62 @@ fn append_returned_content(
     )?);
     values.push(returned.safe_result().clone());
     Ok(())
+}
+
+fn canonical_content_closure_bytes(values: &[SchemaQualifiedCanonicalValue]) -> Result<usize> {
+    let mut objects = BTreeMap::<ContentRef, &SchemaQualifiedCanonicalValue>::new();
+    let mut bytes = 0_usize;
+    for value in values {
+        let reference = value.reference()?;
+        match objects.get(&reference) {
+            Some(existing) if *existing != value => {
+                return Err(ExecutorError::RetainedObjectMismatch);
+            }
+            Some(_) => {}
+            None => {
+                bytes = bytes
+                    .checked_add(value.as_bytes().len())
+                    .ok_or(ExecutorError::EvidenceBoundsExhausted)?;
+                objects.insert(reference, value);
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+#[derive(Default)]
+struct CanonicalContentClosure {
+    objects: BTreeMap<ContentRef, SchemaQualifiedCanonicalValue>,
+    bytes: usize,
+}
+
+impl CanonicalContentClosure {
+    fn extend(
+        &mut self,
+        values: impl IntoIterator<Item = SchemaQualifiedCanonicalValue>,
+    ) -> Result<()> {
+        for value in values {
+            let reference = value.reference()?;
+            match self.objects.get(&reference) {
+                Some(existing) if existing != &value => {
+                    return Err(ExecutorError::RetainedObjectMismatch);
+                }
+                Some(_) => {}
+                None => {
+                    self.bytes = self
+                        .bytes
+                        .checked_add(value.as_bytes().len())
+                        .ok_or(ExecutorError::EvidenceBoundsExhausted)?;
+                    self.objects.insert(reference, value);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    const fn bytes(&self) -> usize {
+        self.bytes
+    }
 }
 
 /// Semantic identity of one immutable executor ledger record.
@@ -968,7 +1210,7 @@ impl DeliveryAuditFrontier {
     }
 
     /// Returns the exact canonical frontier object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         let records = self
             .appended_records
             .iter()
@@ -1013,9 +1255,9 @@ impl DeliveryAuditFrontier {
         Ok(DeliveryAuditFrontierRef(content_ref(&self.validated()?)?))
     }
 
-    /// Returns the exact retained canonical byte length.
+    /// Returns the exact deduplicated executor-owned canonical content-closure length.
     pub fn retained_bytes(&self) -> Result<usize> {
-        Ok(self.validated()?.as_bytes().len())
+        canonical_content_closure_bytes(&self.content_objects()?)
     }
 
     /// Encodes this exact frontier into a bounded checksummed backend payload.
@@ -1124,12 +1366,51 @@ impl DeliveryAuditFrontierRef {
     }
 }
 
+/// Computes the exact deduplicated canonical content-closure bytes for one
+/// candidate observed-attempt append.
+pub fn observation_completion_closure_bytes(
+    identity: &EffectIdentity,
+    predecessor_frontier_ref: DeliveryAuditFrontierRef,
+    attempt_id: AttemptId,
+    outcome: DeliveryAttemptOutcome,
+    proof_ref: ContentRef,
+) -> Result<usize> {
+    DeliveryAuditFrontier::append(
+        identity,
+        Some(predecessor_frontier_ref),
+        vec![ExecutorEvidenceRecord::DeliveryAttemptObserved {
+            attempt_id,
+            outcome,
+        }],
+        proof_ref,
+    )?
+    .retained_bytes()
+}
+
+/// Computes the exact deduplicated canonical content-closure bytes for one
+/// candidate terminal-tombstone append.
+pub fn tombstone_completion_closure_bytes(
+    identity: &EffectIdentity,
+    predecessor_frontier_ref: DeliveryAuditFrontierRef,
+    tombstone: TerminalTombstone,
+    proof_ref: ContentRef,
+) -> Result<usize> {
+    DeliveryAuditFrontier::append(
+        identity,
+        Some(predecessor_frontier_ref),
+        vec![ExecutorEvidenceRecord::TerminalTombstone(tombstone)],
+        proof_ref,
+    )?
+    .retained_bytes()
+}
+
 /// Finite bounds fixed by an executor contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceBounds {
     max_attempts: u32,
     max_records: u32,
     max_retained_bytes: usize,
+    max_completion_record_bytes: usize,
     completion_reserve_records: u32,
     completion_reserve_bytes: usize,
 }
@@ -1140,10 +1421,13 @@ impl EvidenceBounds {
         max_attempts: u32,
         max_records: u32,
         max_retained_bytes: u64,
+        max_completion_record_bytes: u64,
         completion_reserve_records: u32,
         completion_reserve_bytes: u64,
     ) -> Result<Self> {
         let max_retained_bytes = usize::try_from(max_retained_bytes)
+            .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?;
+        let max_completion_record_bytes = usize::try_from(max_completion_record_bytes)
             .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?;
         let completion_reserve_bytes = usize::try_from(completion_reserve_bytes)
             .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?;
@@ -1152,9 +1436,16 @@ impl EvidenceBounds {
             || max_retained_bytes == 0
             || max_retained_bytes > MAX_DURABLE_SNAPSHOT_BYTES
             || completion_reserve_records > max_records
+            || max_completion_record_bytes > completion_reserve_bytes
             || completion_reserve_bytes > max_retained_bytes
+            || (max_attempts == 0
+                && (max_completion_record_bytes != 0
+                    || completion_reserve_records != 0
+                    || completion_reserve_bytes != 0))
             || (max_attempts > 0
-                && (completion_reserve_records < 2 || completion_reserve_bytes == 0))
+                && (max_completion_record_bytes == 0
+                    || completion_reserve_records != 2
+                    || completion_reserve_bytes == 0))
         {
             return Err(ExecutorError::EvidenceBoundsExhausted);
         }
@@ -1162,6 +1453,7 @@ impl EvidenceBounds {
             max_attempts,
             max_records,
             max_retained_bytes,
+            max_completion_record_bytes,
             completion_reserve_records,
             completion_reserve_bytes,
         };
@@ -1194,6 +1486,7 @@ impl EvidenceBounds {
             u32::try_from(unsigned("max_records")?)
                 .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?,
             decimal("max_retained_bytes")?,
+            decimal("max_completion_record_bytes")?,
             u32::try_from(unsigned("completion_reserve_records")?)
                 .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?,
             decimal("completion_reserve_bytes")?,
@@ -1219,7 +1512,12 @@ impl EvidenceBounds {
         self.max_retained_bytes
     }
 
-    /// Returns the structural completion reserve for one unmatched attempt.
+    /// Returns the hard canonical content-closure ceiling for one completion append.
+    pub const fn max_completion_record_bytes(&self) -> usize {
+        self.max_completion_record_bytes
+    }
+
+    /// Returns the fixed observation-plus-shared-tombstone structural envelope.
     pub const fn completion_reserve_records(&self) -> u32 {
         self.completion_reserve_records
     }
@@ -1230,7 +1528,7 @@ impl EvidenceBounds {
     }
 
     /// Returns the exact canonical evidence-bounds object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         encode(
             EVIDENCE_BOUNDS_SCHEMA,
             &canonical_object([
@@ -1245,6 +1543,10 @@ impl EvidenceBounds {
                 (
                     "max_attempts",
                     CanonicalValue::Unsigned(u64::from(self.max_attempts)),
+                ),
+                (
+                    "max_completion_record_bytes",
+                    CanonicalValue::String(self.max_completion_record_bytes.to_string()),
                 ),
                 (
                     "max_records",
@@ -1430,17 +1732,40 @@ impl DeliveryAudit {
         Ok(attempts)
     }
 
-    /// Returns the exact total canonical retained frontier bytes.
+    /// Returns the exact deduplicated executor-owned canonical content-closure length.
     pub fn retained_bytes(&self) -> Result<usize> {
-        self.frontiers.iter().try_fold(0_usize, |total, frontier| {
-            total
-                .checked_add(frontier.retained_bytes()?)
-                .ok_or(ExecutorError::EvidenceBoundsExhausted)
-        })
+        let mut closure = CanonicalContentClosure::default();
+        for frontier in &self.frontiers {
+            closure.extend(frontier.content_objects()?)?;
+        }
+        Ok(closure.bytes())
     }
 
-    /// Verifies identity, predecessor, proof, algebra, exact receipts, and bounds.
+    /// Verifies the complete audit under one exact executor binding.
     pub fn verify(
+        &self,
+        identity: &EffectIdentity,
+        binding: &VerifiedExecutorBinding,
+    ) -> Result<()> {
+        if identity.executor_binding_ref() != binding.binding_ref()
+            || identity.tenant_scope_id() != binding.deployment().tenant_scope_id()
+        {
+            return Err(ExecutorError::WrongExecutorBinding);
+        }
+        self.verify_structure(
+            identity,
+            binding.contract().evidence_bounds(),
+            binding.deployment().evidence_authority_ref(),
+        )?;
+        for record in self.records() {
+            if let ExecutorEvidenceRecord::DeliveryAttemptObserved { outcome, .. } = record {
+                outcome.validate_for_binding(binding)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn verify_structure(
         &self,
         identity: &EffectIdentity,
         bounds: &EvidenceBounds,
@@ -1451,7 +1776,7 @@ impl DeliveryAudit {
         }
         let mut previous = None;
         let mut record_index = 0_usize;
-        let mut retained_bytes = 0_usize;
+        let mut retained_closure = CanonicalContentClosure::default();
         let mut resource_count = 0_u8;
         let mut next_attempt_ordinal = 0_u32;
         let mut attempts = BTreeMap::<AttemptId, AttemptFold>::new();
@@ -1467,6 +1792,16 @@ impl DeliveryAudit {
                 return Err(ExecutorError::InvalidFrontier);
             }
             frontier.verify_proof()?;
+            let is_completion = frontier.appended_records.iter().any(|record| {
+                matches!(
+                    record,
+                    ExecutorEvidenceRecord::DeliveryAttemptObserved { .. }
+                        | ExecutorEvidenceRecord::TerminalTombstone(_)
+                )
+            });
+            if is_completion && frontier.appended_records.len() != 1 {
+                return Err(ExecutorError::InvalidFrontier);
+            }
 
             for record in &frontier.appended_records {
                 if tombstone.is_some()
@@ -1550,12 +1885,13 @@ impl DeliveryAudit {
                         let Some(attempt) = attempts.get(proof.attempt_id()) else {
                             return Err(ExecutorError::TerminalProofMismatch);
                         };
-                        let Some((DeliveryAttemptOutcome::Returned(outcome), observation_ref)) =
-                            attempt.observed.as_ref()
-                        else {
+                        let Some((outcome, observation_ref)) = attempt.observed.as_ref() else {
                             return Err(ExecutorError::TerminalProofMismatch);
                         };
-                        if outcome != proof.returned_outcome()
+                        let Some(returned) = outcome.returned_outcome() else {
+                            return Err(ExecutorError::TerminalProofMismatch);
+                        };
+                        if returned != proof.returned_outcome()
                             || observation_ref != proof.returned_observation_ref()
                         {
                             return Err(ExecutorError::TerminalProofMismatch);
@@ -1569,16 +1905,21 @@ impl DeliveryAudit {
                     .ok_or(ExecutorError::EvidenceBoundsExhausted)?;
             }
 
-            retained_bytes = retained_bytes
-                .checked_add(frontier.retained_bytes()?)
-                .ok_or(ExecutorError::EvidenceBoundsExhausted)?;
+            let frontier_content = frontier.content_objects()?;
+            if is_completion
+                && canonical_content_closure_bytes(&frontier_content)?
+                    > bounds.max_completion_record_bytes
+            {
+                return Err(ExecutorError::EvidenceBoundsExhausted);
+            }
+            retained_closure.extend(frontier_content)?;
             let unmatched = attempts
                 .values()
                 .filter(|attempt| attempt.observed.is_none())
                 .count();
             bounds.ensure_completion_capacity(
                 record_index,
-                retained_bytes,
+                retained_closure.bytes(),
                 unmatched,
                 tombstone.is_none(),
             )?;
@@ -1622,10 +1963,25 @@ impl DeliveryAuditAccumulator {
         &mut self,
         candidate: DeliveryAudit,
         identity: &EffectIdentity,
+        binding: &VerifiedExecutorBinding,
+    ) -> Result<AdmitFrontier> {
+        candidate.verify(identity, binding)?;
+        self.admit_verified(candidate)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admit_structure(
+        &mut self,
+        candidate: DeliveryAudit,
+        identity: &EffectIdentity,
         bounds: &EvidenceBounds,
         expected_proof_ref: &ContentRef,
     ) -> Result<AdmitFrontier> {
-        candidate.verify(identity, bounds, expected_proof_ref)?;
+        candidate.verify_structure(identity, bounds, expected_proof_ref)?;
+        self.admit_verified(candidate)
+    }
+
+    fn admit_verified(&mut self, candidate: DeliveryAudit) -> Result<AdmitFrontier> {
         let Some(greatest) = self.greatest.as_ref() else {
             self.greatest = Some(candidate);
             return Ok(AdmitFrontier::Advanced);
@@ -1747,18 +2103,25 @@ pub(crate) fn decode_evidence_record(decoder: &mut Decoder<'_>) -> Result<Execut
 }
 
 fn encode_outcome(encoder: &mut Encoder, outcome: &DeliveryAttemptOutcome) -> Result<()> {
-    match outcome {
-        DeliveryAttemptOutcome::Returned(returned) => {
+    match outcome.kind() {
+        DeliveryAttemptOutcomeKind::Returned(returned) => {
             encoder.u8(0);
             encoder.schema_qualified(returned.safe_result())?;
         }
-        DeliveryAttemptOutcome::DidNotEnter(failure) => {
+        DeliveryAttemptOutcomeKind::DidNotEnter(failure) => {
             encoder.u8(1);
             encode_safe_failure(encoder, failure)?;
         }
-        DeliveryAttemptOutcome::Indeterminate(failure) => {
+        DeliveryAttemptOutcomeKind::Indeterminate(failure) => {
             encoder.u8(2);
             encode_safe_failure(encoder, failure)?;
+        }
+        DeliveryAttemptOutcomeKind::NonDomainFailure(failure) => {
+            encoder.u8(3);
+            let canonical = failure
+                .canonical_value()
+                .map_err(|_| ExecutorError::CanonicalEncoding)?;
+            encoder.bytes(CanonicalJsonBytes::from_value(&canonical).as_bytes())?;
         }
     }
     Ok(())
@@ -1769,6 +2132,19 @@ fn decode_outcome(decoder: &mut Decoder<'_>) -> Result<DeliveryAttemptOutcome> {
         0 => DeliveryAttemptOutcome::returned(decoder.schema_qualified()?),
         1 => DeliveryAttemptOutcome::did_not_enter(decode_safe_failure(decoder)?),
         2 => DeliveryAttemptOutcome::indeterminate(decode_safe_failure(decoder)?),
+        3 => {
+            let bytes = decoder.canonical_bytes()?;
+            PlainCanonicalJsonBytes::from_canonical_json_slice(&bytes)
+                .map_err(|_| ExecutorError::InvalidDurableSnapshot)?;
+            let json = serde_json::from_slice(&bytes)
+                .map_err(|_| ExecutorError::InvalidDurableSnapshot)?;
+            let canonical = plain_json_to_canonical_value(json)
+                .map_err(|_| ExecutorError::InvalidDurableSnapshot)?;
+            DeliveryAttemptOutcome::non_domain_failure(
+                NonDomainFailure::from_canonical_value(&canonical)
+                    .map_err(|_| ExecutorError::InvalidDurableSnapshot)?,
+            )
+        }
         _ => Err(ExecutorError::InvalidDurableSnapshot),
     }
 }
@@ -1781,6 +2157,7 @@ fn encode_safe_failure(encoder: &mut Encoder, failure: &ReferenceSafeFailure) ->
         ReferenceFailureCode::RequestConflict => 2,
         ReferenceFailureCode::AccessCancelled => 3,
         ReferenceFailureCode::UnclassifiedFailure => 4,
+        ReferenceFailureCode::ResultUnrepresentable => 5,
     });
     encoder.u8(match failure.failure_class() {
         FailureClass::Authorization => 0,
@@ -1788,6 +2165,7 @@ fn encode_safe_failure(encoder: &mut Encoder, failure: &ReferenceSafeFailure) ->
         FailureClass::Destination => 2,
         FailureClass::Cancellation => 3,
         FailureClass::Unclassified => 4,
+        FailureClass::UnrepresentableResponse => 5,
         _ => return Err(ExecutorError::InvalidSafeFailure),
     });
     encoder.u8(match failure.boundary_stage() {
@@ -1806,6 +2184,7 @@ fn decode_safe_failure(decoder: &mut Decoder<'_>) -> Result<ReferenceSafeFailure
         2 => ReferenceFailureCode::RequestConflict,
         3 => ReferenceFailureCode::AccessCancelled,
         4 => ReferenceFailureCode::UnclassifiedFailure,
+        5 => ReferenceFailureCode::ResultUnrepresentable,
         _ => return Err(ExecutorError::InvalidDurableSnapshot),
     };
     let class = match decoder.u8()? {
@@ -1814,6 +2193,7 @@ fn decode_safe_failure(decoder: &mut Decoder<'_>) -> Result<ReferenceSafeFailure
         2 => FailureClass::Destination,
         3 => FailureClass::Cancellation,
         4 => FailureClass::Unclassified,
+        5 => FailureClass::UnrepresentableResponse,
         _ => return Err(ExecutorError::InvalidDurableSnapshot),
     };
     let stage = match decoder.u8()? {

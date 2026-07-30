@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::{sha256_digest_bytes, CanonicalJsonBytes, CanonicalValue};
 use mfm_ids::{InvocationIdentity, RunId, SpecHash, StableId, TenantScopeId};
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     ArtifactAdmissionMode, JournalHead, JournalPredecessor, JournalPredecessorFields,
     RunJournalRecordFields, TenantFactCoordinate, TenantFactCoordinateFields, TenantFactFrontier,
     ValueRef,
 };
-use mfm_store::v1::{
+use mfm_store::v2::{
     AppendOutcome, AppendRejection, AssignedJournalAppend, CommittedJournalCommit, CommittedObject,
     JournalAppendVerifier, PendingFactScanAttestation, PersistedFactScanAttestation,
     PreparedAppendKind, PreparedObjectGraph, StoreError, StoreIdentity, SuccessorDisposition,
@@ -575,7 +575,7 @@ async fn admit_objects(
 
 async fn load_object_authority(
     transaction: &mut Transaction<'_, Postgres>,
-    value_ref: &mfm_journal::v1::ValueRef,
+    value_ref: &mfm_journal::v2::ValueRef,
 ) -> Result<Option<CommittedObject>> {
     let row = sqlx::query(
         "SELECT admission.canonical_value_ref, blob.bytes \
@@ -591,7 +591,7 @@ async fn load_object_authority(
         let evidence = row
             .try_get::<Vec<u8>, _>("canonical_value_ref")
             .map_err(|_| PostgresStoreError::Corruption("object evidence is invalid"))?;
-        let value_ref = mfm_journal::v1::ValueRef::strict_decode(&evidence)
+        let value_ref = mfm_journal::v2::ValueRef::strict_decode(&evidence)
             .map_err(|_| PostgresStoreError::Corruption("object evidence is invalid"))?;
         let bytes = row
             .try_get::<Vec<u8>, _>("bytes")
@@ -613,7 +613,7 @@ fn ensure_object_key(object: &CommittedObject, expected: &ValueRef) -> Result<()
 
 fn ensure_object_matches_payload(
     object: &CommittedObject,
-    value_ref: &mfm_journal::v1::ValueRef,
+    value_ref: &mfm_journal::v2::ValueRef,
     bytes: &[u8],
 ) -> Result<()> {
     if object.value_ref().as_bytes() != value_ref.as_bytes() || object.bytes() != bytes {
@@ -627,7 +627,7 @@ fn ensure_object_matches_payload(
 
 async fn insert_object_authority(
     transaction: &mut Transaction<'_, Postgres>,
-    value_ref: &mfm_journal::v1::ValueRef,
+    value_ref: &mfm_journal::v2::ValueRef,
     bytes: &[u8],
 ) -> Result<()> {
     let fields = value_ref.fields()?;
@@ -929,7 +929,7 @@ async fn load_fact_scan_attestation(
     .await
     .map_err(|error| database_error("load exact fact scan attestation", error))?;
     row.map(|row| {
-        let authorization_ref = mfm_journal::v1::AuthorizationRef::strict_decode(
+        let authorization_ref = mfm_journal::v2::AuthorizationRef::strict_decode(
             &row.try_get::<Vec<u8>, _>("authorization_ref")
                 .map_err(|_| {
                     PostgresStoreError::Corruption("fact scan authorization reference is invalid")
@@ -938,7 +938,7 @@ async fn load_fact_scan_attestation(
         .map_err(|_| {
             PostgresStoreError::Corruption("fact scan authorization reference is invalid")
         })?;
-        let attestation_ref = mfm_journal::v1::ValueRef::strict_decode(
+        let attestation_ref = mfm_journal::v2::ValueRef::strict_decode(
             &row.try_get::<Vec<u8>, _>("attestation_ref").map_err(|_| {
                 PostgresStoreError::Corruption("fact scan attestation reference is invalid")
             })?,
@@ -946,7 +946,7 @@ async fn load_fact_scan_attestation(
         .map_err(|_| {
             PostgresStoreError::Corruption("fact scan attestation reference is invalid")
         })?;
-        let observation_ref = mfm_journal::v1::ObservationRef::strict_decode(
+        let observation_ref = mfm_journal::v2::ObservationRef::strict_decode(
             &row.try_get::<Vec<u8>, _>("observation_ref").map_err(|_| {
                 PostgresStoreError::Corruption("fact scan observation reference is invalid")
             })?,
@@ -954,7 +954,7 @@ async fn load_fact_scan_attestation(
         .map_err(|_| {
             PostgresStoreError::Corruption("fact scan observation reference is invalid")
         })?;
-        let containing_head = mfm_journal::v1::JournalHead::strict_decode(
+        let containing_head = mfm_journal::v2::JournalHead::strict_decode(
             &row.try_get::<Vec<u8>, _>("containing_journal_head")
                 .map_err(|_| {
                     PostgresStoreError::Corruption("fact scan containing head is invalid")

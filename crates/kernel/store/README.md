@@ -1,6 +1,6 @@
 # mfm-store
 
-`mfm-store` owns the recoverability-v2 run-journal boundary.
+`mfm-store` owns the recoverability-v3 run-journal boundary.
 
 Its public surface has one current model:
 
@@ -52,8 +52,9 @@ persisted or public.
 The generic observation append atomically persists the returned response, its source-closure
 attestation, all exact object bindings, and one private attestation-routing row. Live reducer entry
 after compatible evidence selection and replay completeness load that row against an exact verified
-view and share the backend completeness predicate. `CompletedFactScan` consumes itself into that
-generic material and derives its sealed authorization reference internally.
+view and share the backend completeness predicate. `CompletedFactScan` consumes its affine permit
+into immutable pending observation material, which can be reused only to persist the same logical
+response and derives its sealed authorization reference internally.
 
 The selected-source and transport graph remains unbound `RequireExisting` material, while the
 response and attestation are the two bound `AdmitOrVerifyExact` products. Physical replay may

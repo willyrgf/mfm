@@ -1,24 +1,30 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 
-use mfm_canonical::ValidatedCanonicalValueV2;
-use mfm_ids::{AttemptId, ContentRef, EffectKey, TenantScopeId};
+use mfm_canonical::ValidatedCanonicalValueV3;
+use mfm_capabilities::{
+    BoundaryStage, FailureClass, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
+    NonDomainFailureCode,
+};
+use mfm_ids::{AttemptId, ContentRef, EffectKey, SchemaId, TenantScopeId};
 
 use crate::contract::{
     content_ref, ExecutorBindingRef, ExecutorFuture, ResourceKeyRef, ResourceOwnershipRef,
     SchemaQualifiedCanonicalValue, VerifiedExecutorBinding,
 };
 use crate::frontier::{
+    observation_completion_closure_bytes, reference_safe_failure, DeliveryAttemptOutcome,
     DeliveryAudit, DeliveryAuditFrontier, DeliveryAuditFrontierRef, EvidenceBounds,
-    ExecutorEvidenceRecord, ResourceAllocatedRecord, TerminalTombstone,
+    ExecutorEvidenceRecord, ReferenceFailureCode, ResourceAllocatedRecord, TerminalTombstone,
 };
 use crate::ledger::{
     AllocationOutcome, EffectEntryView, ResourceLedgerRecord, ResourceLedgerRecordRef,
-    ResourceStreamView, TargetEntryAuthority, TargetOperationReceipt,
+    ResourceStreamView, TargetEntryAuthority,
 };
 use crate::policy::{ResourcePolicyBinding, TypedResourcePolicy};
 use crate::{EffectIdentity, ExecutorError, Result};
 
-const MAX_LOCAL_CAS_RETRIES: usize = 64;
+const MAX_LOCAL_CAS_ATTEMPTS: usize = 64;
 
 /// Exact non-secret authority identity fixed by one raw executor store.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +34,8 @@ pub struct ExecutorLedgerStoreIdentity {
     durable_ledger_generation_ref: ContentRef,
     evidence_authority_ref: ContentRef,
     resource_ownership_ref: Option<ResourceOwnershipRef>,
+    safe_failure_contract_ref: ContentRef,
+    domain_evidence_schema_id: SchemaId,
 }
 
 impl ExecutorLedgerStoreIdentity {
@@ -38,6 +46,8 @@ impl ExecutorLedgerStoreIdentity {
         durable_ledger_generation_ref: ContentRef,
         evidence_authority_ref: ContentRef,
         resource_ownership_ref: Option<ResourceOwnershipRef>,
+        safe_failure_contract_ref: ContentRef,
+        domain_evidence_schema_id: SchemaId,
     ) -> Self {
         Self {
             binding_ref,
@@ -45,6 +55,8 @@ impl ExecutorLedgerStoreIdentity {
             durable_ledger_generation_ref,
             evidence_authority_ref,
             resource_ownership_ref,
+            safe_failure_contract_ref,
+            domain_evidence_schema_id,
         }
     }
 
@@ -59,6 +71,13 @@ impl ExecutorLedgerStoreIdentity {
                 .clone(),
             evidence_authority_ref: binding.deployment().evidence_authority_ref().clone(),
             resource_ownership_ref: binding.deployment().resource_ownership_ref().cloned(),
+            safe_failure_contract_ref: binding.contract().safe_failure_contract_ref().clone(),
+            domain_evidence_schema_id: binding
+                .contract()
+                .retained_closure_contract()
+                .domain_evidence_contract()
+                .schema_id()
+                .clone(),
         }
     }
 
@@ -85,6 +104,16 @@ impl ExecutorLedgerStoreIdentity {
     /// Returns the admitted resource owner, when resource coordination is enabled.
     pub const fn resource_ownership_ref(&self) -> Option<&ResourceOwnershipRef> {
         self.resource_ownership_ref.as_ref()
+    }
+
+    /// Returns the exact safe-failure contract admitted by the binding.
+    pub const fn safe_failure_contract_ref(&self) -> &ContentRef {
+        &self.safe_failure_contract_ref
+    }
+
+    /// Returns the only admitted target-return schema.
+    pub const fn domain_evidence_schema_id(&self) -> &SchemaId {
+        &self.domain_evidence_schema_id
     }
 }
 
@@ -317,6 +346,28 @@ impl ExecutorLedgerAppend {
     pub fn content_objects(&self) -> &[SchemaQualifiedCanonicalValue] {
         &self.content
     }
+
+    /// Reconstructs and validates every supplied target outcome against the
+    /// exact raw-store binding before persistence.
+    pub fn validate_for_store_identity(
+        &self,
+        store_identity: &ExecutorLedgerStoreIdentity,
+    ) -> Result<()> {
+        if self.identity.executor_binding_ref() != store_identity.binding_ref()
+            || self.identity.tenant_scope_id() != store_identity.tenant_scope_id()
+        {
+            return Err(ExecutorError::WrongExecutorBinding);
+        }
+        for record in self.effect_frontier.appended_records() {
+            if let ExecutorEvidenceRecord::DeliveryAttemptObserved { outcome, .. } = record {
+                outcome.validate_for_contract(
+                    store_identity.safe_failure_contract_ref(),
+                    store_identity.domain_evidence_schema_id(),
+                )?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Durable result of one raw compare-and-append request.
@@ -378,6 +429,109 @@ where
     bounds: EvidenceBounds,
 }
 
+/// Closed result of one exact target-authorization and observation bracket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteTargetOutcome {
+    /// Fresh target authority returned an outcome and its exact sealed observation is durable.
+    Observed(Box<EffectEntryView>),
+    /// Another writer advanced the pre-target frontier; no target authority was minted.
+    Contended,
+}
+
+struct TargetObservationBackoff {
+    next_delay_ms: u64,
+}
+
+struct AuthorizedTarget {
+    authority: TargetEntryAuthority,
+    completion_seal: TargetCompletionSeal,
+}
+
+struct TargetCompletionSealParts {
+    identity: EffectIdentity,
+    attempt_id: AttemptId,
+    target_operation_ref: ContentRef,
+    durable_ledger_generation_ref: ContentRef,
+    observation_predecessor_ref: DeliveryAuditFrontierRef,
+    evidence_authority_ref: ContentRef,
+    max_completion_record_bytes: usize,
+    safe_failure_contract_ref: ContentRef,
+    domain_evidence_schema_id: SchemaId,
+    adapter_contract_violation: DeliveryAttemptOutcome,
+    result_unrepresentable: DeliveryAttemptOutcome,
+}
+
+/// Private affine completion authority retained across one target callback.
+///
+/// The callback receives only [`TargetEntryAuthority`] and can return only an
+/// unbound [`DeliveryAttemptOutcome`]. This seal cannot leave the crate and is
+/// the sole operation that binds a surviving outcome to the current target
+/// authorization.
+pub(crate) struct TargetCompletionSeal {
+    parts: TargetCompletionSealParts,
+}
+
+struct BoundTargetObservation {
+    identity: EffectIdentity,
+    attempt_id: AttemptId,
+    target_operation_ref: ContentRef,
+    durable_ledger_generation_ref: ContentRef,
+    outcome: DeliveryAttemptOutcome,
+}
+
+impl TargetCompletionSeal {
+    fn new(parts: TargetCompletionSealParts) -> Self {
+        Self { parts }
+    }
+
+    fn bind(self, outcome: DeliveryAttemptOutcome) -> BoundTargetObservation {
+        let parts = self.parts;
+        let outcome = if outcome
+            .validate_for_contract(
+                &parts.safe_failure_contract_ref,
+                &parts.domain_evidence_schema_id,
+            )
+            .is_err()
+        {
+            parts.adapter_contract_violation
+        } else if observation_completion_closure_bytes(
+            &parts.identity,
+            parts.observation_predecessor_ref,
+            parts.attempt_id.clone(),
+            outcome.clone(),
+            parts.evidence_authority_ref,
+        )
+        .is_ok_and(|bytes| bytes <= parts.max_completion_record_bytes)
+        {
+            outcome
+        } else {
+            parts.result_unrepresentable
+        };
+        BoundTargetObservation {
+            identity: parts.identity,
+            attempt_id: parts.attempt_id,
+            target_operation_ref: parts.target_operation_ref,
+            durable_ledger_generation_ref: parts.durable_ledger_generation_ref,
+            outcome,
+        }
+    }
+}
+
+impl TargetObservationBackoff {
+    const fn new() -> Self {
+        Self { next_delay_ms: 10 }
+    }
+
+    const fn reset(&mut self) {
+        self.next_delay_ms = 10;
+    }
+
+    async fn wait(&mut self) {
+        tokio::time::sleep(std::time::Duration::from_millis(self.next_delay_ms)).await;
+        self.next_delay_ms = self.next_delay_ms.saturating_mul(2).min(1_000);
+    }
+}
+
 impl<Store> KeyedExecutorLedger<Store>
 where
     Store: ExecutorLedgerStore,
@@ -414,7 +568,7 @@ where
     /// Idempotently binds one exact effect/request identity.
     pub async fn bind_effect(&self, identity: &EffectIdentity) -> Result<EffectEntryView> {
         self.require_identity(identity)?;
-        for _ in 0..MAX_LOCAL_CAS_RETRIES {
+        for _ in 0..MAX_LOCAL_CAS_ATTEMPTS {
             if let Some(snapshot) = self.load_effect(identity).await? {
                 return fold_effect(&snapshot);
             }
@@ -431,7 +585,12 @@ where
                 }
             }
         }
-        Err(ExecutorError::DurableBackendUnavailable)
+        self.load_effect(identity)
+            .await?
+            .as_ref()
+            .map(fold_effect)
+            .transpose()?
+            .ok_or(ExecutorError::LocalContention)
     }
 
     /// Loads one folded immutable effect view under the exact identity.
@@ -485,8 +644,9 @@ where
             .resource_key_value(request)
             .map_err(ExecutorError::ResourcePolicy)?;
         let resource_key_ref = ResourceKeyRef::from_reviewed(content_ref(&resource_key_value)?);
+        let mut final_applied = None;
 
-        for _ in 0..MAX_LOCAL_CAS_RETRIES {
+        for attempt in 0..MAX_LOCAL_CAS_ATTEMPTS {
             let existing_effect = self.load_effect(identity).await?;
             if let Some(snapshot) = &existing_effect {
                 if let Some(record) = snapshot.allocation() {
@@ -562,11 +722,16 @@ where
             )?;
             match self.store.compare_and_append(append).await? {
                 ExecutorAppendOutcome::Applied => {
-                    return Ok(AllocationOutcome::Allocated {
+                    let allocated = AllocationOutcome::Allocated {
                         allocation: decision.allocation,
                         evidence,
                         resource_head,
-                    });
+                    };
+                    if attempt + 1 == MAX_LOCAL_CAS_ATTEMPTS {
+                        final_applied = Some(allocated);
+                    } else {
+                        return Ok(allocated);
+                    }
                 }
                 ExecutorAppendOutcome::AlreadyApplied | ExecutorAppendOutcome::Conflict => {}
                 ExecutorAppendOutcome::OutcomeUnknown => {
@@ -574,81 +739,33 @@ where
                 }
             }
         }
-        Err(ExecutorError::DurableBackendUnavailable)
-    }
-
-    /// Appends a new authorization and returns affine target authority.
-    pub async fn authorize_target(
-        &self,
-        identity: &EffectIdentity,
-        target_operation: SchemaQualifiedCanonicalValue,
-        policy_binding: Option<&ResourcePolicyBinding>,
-    ) -> Result<TargetEntryAuthority> {
-        self.require_identity(identity)?;
-        if target_operation.as_bytes().len() > self.bounds.max_retained_bytes() {
-            return Err(ExecutorError::EvidenceBoundsExhausted);
-        }
-        let target_operation_ref = target_operation.reference()?;
-        for _ in 0..MAX_LOCAL_CAS_RETRIES {
-            let snapshot = self
-                .load_effect(identity)
-                .await?
-                .ok_or(ExecutorError::EffectNotBound)?;
-            let view = fold_effect(&snapshot)?;
-            if view.terminal_tombstone().is_some() {
-                return Err(ExecutorError::EffectAlreadyTerminal);
+        let existing_effect = self.load_effect(identity).await?;
+        if let Some(snapshot) = &existing_effect {
+            if let Some(record) = snapshot.allocation() {
+                let existing = self
+                    .restore_existing_allocation(
+                        identity,
+                        &resource_key_ref,
+                        &resource_key_value,
+                        policy,
+                        request,
+                        record,
+                    )
+                    .await?;
+                return Ok(final_applied.unwrap_or(existing));
             }
-            match (view.allocation(), policy_binding) {
-                (None, None) => {}
-                (Some((_, evidence)), Some(candidate))
-                    if evidence.policy_binding() == candidate => {}
-                _ => return Err(ExecutorError::ResourcePolicyNotRevalidated),
-            }
-            if let Some(allocation) = snapshot.allocation() {
-                self.require_linked_allocation(allocation).await?;
-            }
-            let ordinal = u32::try_from(view.delivery_audit().attempt_count())
-                .map_err(|_| ExecutorError::EvidenceBoundsExhausted)?;
-            if ordinal >= self.bounds.max_attempts() {
-                return Err(ExecutorError::EvidenceBoundsExhausted);
-            }
-            let attempt_id = crate::derive_attempt_id(identity, ordinal, &target_operation_ref)?;
-            let expected_head = snapshot.head()?;
-            let frontier = self.next_frontier(
-                identity,
-                Some(&snapshot),
-                vec![ExecutorEvidenceRecord::DeliveryAttemptAuthorized {
-                    attempt_ordinal: ordinal,
-                    attempt_id: attempt_id.clone(),
-                    target_operation_ref: target_operation_ref.clone(),
-                }],
-            )?;
-            let append = ExecutorLedgerAppend::new(
-                identity.clone(),
-                Some(expected_head),
-                frontier,
-                None,
-                vec![target_operation.clone()],
-            )?;
-            match self.store.compare_and_append(append).await? {
-                ExecutorAppendOutcome::Applied => {
-                    return Ok(TargetEntryAuthority::new(
-                        identity.clone(),
-                        attempt_id,
-                        target_operation_ref,
-                        self.binding
-                            .deployment()
-                            .durable_ledger_generation_ref()
-                            .clone(),
-                    ));
-                }
-                ExecutorAppendOutcome::AlreadyApplied | ExecutorAppendOutcome::Conflict => {}
-                ExecutorAppendOutcome::OutcomeUnknown => {
-                    return Err(ExecutorError::DurableAppendOutcomeUnknown);
-                }
+            let audit = DeliveryAudit::from_ledger(snapshot.frontiers.clone());
+            if audit.attempt_count() != 0 {
+                return Err(ExecutorError::ResourceAllocationConflict);
             }
         }
-        Err(ExecutorError::DurableBackendUnavailable)
+        let (resource, _) = self
+            .load_resource_history(&ownership_ref, &resource_key_ref)
+            .await?;
+        if resource.head()?.as_ref() != expected_resource_head {
+            return Err(ExecutorError::ResourceCasMismatch);
+        }
+        Err(ExecutorError::LocalContention)
     }
 
     /// Attempts one authorization against the exact delivery head used to plan it.
@@ -656,13 +773,13 @@ where
     /// `Ok(None)` means another writer advanced the effect before this caller
     /// committed its authority. The caller must refold and replan; it must not
     /// enter the target boundary from the stale decision.
-    pub async fn try_authorize_target(
+    async fn try_authorize_target(
         &self,
         identity: &EffectIdentity,
         expected_head: &DeliveryAuditFrontierRef,
         target_operation: SchemaQualifiedCanonicalValue,
         policy_binding: Option<&ResourcePolicyBinding>,
-    ) -> Result<Option<TargetEntryAuthority>> {
+    ) -> Result<Option<AuthorizedTarget>> {
         self.require_identity(identity)?;
         if target_operation.as_bytes().len() > self.bounds.max_retained_bytes() {
             return Err(ExecutorError::EvidenceBoundsExhausted);
@@ -693,6 +810,23 @@ where
             return Err(ExecutorError::EvidenceBoundsExhausted);
         }
         let attempt_id = crate::derive_attempt_id(identity, ordinal, &target_operation_ref)?;
+        let result_unrepresentable =
+            DeliveryAttemptOutcome::indeterminate(reference_safe_failure(
+                self.binding.contract().safe_failure_contract_ref().clone(),
+                ReferenceFailureCode::ResultUnrepresentable,
+                FailureClass::UnrepresentableResponse,
+                BoundaryStage::BoundaryObservation,
+            )?)?;
+        let adapter_contract_violation = DeliveryAttemptOutcome::non_domain_failure(
+            NonDomainFailure::new(
+                NonDomainEntryStatus::MayHaveEntered,
+                NonDomainDisposition::IntegrityBlocked,
+                NonDomainFailureCode::AdapterContractViolation,
+            )
+            .map_err(|_| ExecutorError::InvalidSafeFailure)?,
+        )?;
+        result_unrepresentable.validate_for_binding(&self.binding)?;
+        adapter_contract_violation.validate_for_binding(&self.binding)?;
         let frontier = self.next_frontier(
             identity,
             Some(&snapshot),
@@ -702,6 +836,19 @@ where
                 target_operation_ref: target_operation_ref.clone(),
             }],
         )?;
+        let observation_predecessor_ref = frontier.reference()?;
+        for fallback in [&result_unrepresentable, &adapter_contract_violation] {
+            let fallback_bytes = observation_completion_closure_bytes(
+                identity,
+                observation_predecessor_ref.clone(),
+                attempt_id.clone(),
+                fallback.clone(),
+                self.binding.deployment().evidence_authority_ref().clone(),
+            )?;
+            if fallback_bytes > self.bounds.max_completion_record_bytes() {
+                return Err(ExecutorError::EvidenceBoundsExhausted);
+            }
+        }
         let append = ExecutorLedgerAppend::new(
             identity.clone(),
             Some(expected_head.clone()),
@@ -710,20 +857,91 @@ where
             vec![target_operation],
         )?;
         match self.store.compare_and_append(append).await? {
-            ExecutorAppendOutcome::Applied => Ok(Some(TargetEntryAuthority::new(
-                identity.clone(),
-                attempt_id,
-                target_operation_ref,
-                self.binding
+            ExecutorAppendOutcome::Applied => {
+                let durable_ledger_generation_ref = self
+                    .binding
                     .deployment()
                     .durable_ledger_generation_ref()
-                    .clone(),
-            ))),
+                    .clone();
+                let authority = TargetEntryAuthority::new(
+                    identity.clone(),
+                    attempt_id.clone(),
+                    target_operation_ref.clone(),
+                    durable_ledger_generation_ref.clone(),
+                );
+                let completion_seal = TargetCompletionSeal::new(TargetCompletionSealParts {
+                    identity: identity.clone(),
+                    attempt_id,
+                    target_operation_ref,
+                    durable_ledger_generation_ref,
+                    observation_predecessor_ref,
+                    evidence_authority_ref: self
+                        .binding
+                        .deployment()
+                        .evidence_authority_ref()
+                        .clone(),
+                    max_completion_record_bytes: self.bounds.max_completion_record_bytes(),
+                    safe_failure_contract_ref: self
+                        .binding
+                        .contract()
+                        .safe_failure_contract_ref()
+                        .clone(),
+                    domain_evidence_schema_id: self
+                        .binding
+                        .contract()
+                        .retained_closure_contract()
+                        .domain_evidence_contract()
+                        .schema_id()
+                        .clone(),
+                    adapter_contract_violation,
+                    result_unrepresentable,
+                });
+                Ok(Some(AuthorizedTarget {
+                    authority,
+                    completion_seal,
+                }))
+            }
             ExecutorAppendOutcome::AlreadyApplied | ExecutorAppendOutcome::Conflict => Ok(None),
             ExecutorAppendOutcome::OutcomeUnknown => {
                 Err(ExecutorError::DurableAppendOutcomeUnknown)
             }
         }
+    }
+
+    /// Authorizes, invokes, and durably observes exactly one target operation.
+    ///
+    /// The invoker is called only after a fresh target authorization append.
+    /// A pre-target compare-and-swap conflict returns [`ExecuteTargetOutcome::Contended`]
+    /// without minting authority. The private affine completion seal remains
+    /// in this method while the invoker receives only the public four-field
+    /// authority and returns an unbound outcome. Once the invoker returns,
+    /// completion is infallibly normalized and this method owns observation
+    /// persistence until the identical outcome is durably resolved. Dropping
+    /// this future before callback return or during persistence is the only
+    /// unmatched target path.
+    pub async fn execute_target_once<Invoke, Invocation>(
+        &self,
+        identity: &EffectIdentity,
+        expected_head: &DeliveryAuditFrontierRef,
+        target_operation: SchemaQualifiedCanonicalValue,
+        policy_binding: Option<&ResourcePolicyBinding>,
+        invoke: Invoke,
+    ) -> Result<ExecuteTargetOutcome>
+    where
+        Invoke: FnOnce(TargetEntryAuthority) -> Invocation,
+        Invocation: Future<Output = DeliveryAttemptOutcome>,
+    {
+        let Some(authorized) = self
+            .try_authorize_target(identity, expected_head, target_operation, policy_binding)
+            .await?
+        else {
+            return Ok(ExecuteTargetOutcome::Contended);
+        };
+        let outcome = invoke(authorized.authority).await;
+        let observation = authorized.completion_seal.bind(outcome);
+        Ok(ExecuteTargetOutcome::Observed(Box::new(
+            self.observe_target(observation).await,
+        )))
     }
 
     /// Loads the exact retained target-operation descriptor for one attempt.
@@ -754,60 +972,123 @@ where
         Ok(value)
     }
 
-    /// Consumes a target receipt into at most one exact observation.
-    pub async fn observe_target(&self, receipt: TargetOperationReceipt) -> Result<EffectEntryView> {
-        let (identity, attempt_id, target_operation_ref, generation_ref, outcome) =
-            receipt.into_parts();
-        self.require_identity(&identity)?;
-        if generation_ref != *self.binding.deployment().durable_ledger_generation_ref() {
-            return Err(ExecutorError::LedgerGenerationMismatch);
-        }
-        for _ in 0..MAX_LOCAL_CAS_RETRIES {
-            let snapshot = self
-                .load_effect(&identity)
-                .await?
-                .ok_or(ExecutorError::EffectNotBound)?;
-            let audit = DeliveryAudit::from_ledger(snapshot.frontiers.clone());
-            let attempt = audit
-                .attempts()?
-                .into_iter()
-                .find(|attempt| attempt.attempt_id() == &attempt_id)
-                .ok_or(ExecutorError::InvalidDeliveryObservation)?;
-            if attempt.target_operation_ref() != &target_operation_ref {
-                return Err(ExecutorError::InvalidDeliveryObservation);
-            }
-            if let Some(existing) = attempt.outcome() {
-                if existing != &outcome {
-                    return Err(ExecutorError::InvalidDeliveryObservation);
+    /// Consumes one privately bound target result into exactly one observation view.
+    ///
+    /// Once entered, every load, projection, construction, and append failure
+    /// is treated as unresolved persistence and retried. A non-identical
+    /// existing observation is also unresolved here: no second callback is
+    /// invoked and cancellation remains the only escape from a permanently
+    /// hostile backend.
+    async fn observe_target(&self, observation: BoundTargetObservation) -> EffectEntryView {
+        let BoundTargetObservation {
+            identity,
+            attempt_id,
+            target_operation_ref,
+            durable_ledger_generation_ref: _durable_ledger_generation_ref,
+            outcome,
+        } = observation;
+        let mut last_verified_head: Option<DeliveryAuditFrontierRef> = None;
+        let mut backoff = TargetObservationBackoff::new();
+        loop {
+            let snapshot = match self.load_effect(&identity).await {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) | Err(_) => {
+                    backoff.wait().await;
+                    continue;
                 }
-                return fold_effect(&snapshot);
+            };
+            let loaded_head = match snapshot.head() {
+                Ok(head) => head,
+                Err(_) => {
+                    backoff.wait().await;
+                    continue;
+                }
+            };
+            if last_verified_head
+                .as_ref()
+                .is_some_and(|head| head != &loaded_head)
+            {
+                backoff.reset();
             }
-            let expected_head = snapshot.head()?;
-            let frontier = self.next_frontier(
+            last_verified_head = Some(loaded_head);
+            let audit = DeliveryAudit::from_ledger(snapshot.frontiers.clone());
+            let existing = match audit.attempts() {
+                Ok(attempts) => {
+                    let Some(attempt) = attempts
+                        .into_iter()
+                        .find(|attempt| attempt.attempt_id() == &attempt_id)
+                    else {
+                        backoff.wait().await;
+                        continue;
+                    };
+                    if attempt.target_operation_ref() != &target_operation_ref {
+                        backoff.wait().await;
+                        continue;
+                    }
+                    attempt.outcome().cloned()
+                }
+                Err(_) => {
+                    backoff.wait().await;
+                    continue;
+                }
+            };
+            if let Some(existing) = existing {
+                if existing != outcome {
+                    backoff.wait().await;
+                    continue;
+                }
+                match fold_effect(&snapshot) {
+                    Ok(view) => return view,
+                    Err(_) => {
+                        backoff.wait().await;
+                        continue;
+                    }
+                }
+            }
+            let expected_head = match snapshot.head() {
+                Ok(head) => head,
+                Err(_) => {
+                    backoff.wait().await;
+                    continue;
+                }
+            };
+            let frontier = match self.next_frontier(
                 &identity,
                 Some(&snapshot),
                 vec![ExecutorEvidenceRecord::DeliveryAttemptObserved {
                     attempt_id: attempt_id.clone(),
                     outcome: outcome.clone(),
                 }],
-            )?;
-            let append = ExecutorLedgerAppend::new(
+            ) {
+                Ok(frontier) => frontier,
+                Err(_) => {
+                    backoff.wait().await;
+                    continue;
+                }
+            };
+            let append = match ExecutorLedgerAppend::new(
                 identity.clone(),
                 Some(expected_head),
                 frontier,
                 None,
                 Vec::new(),
-            )?;
-            match self.store.compare_and_append(append).await? {
-                ExecutorAppendOutcome::Applied
-                | ExecutorAppendOutcome::AlreadyApplied
-                | ExecutorAppendOutcome::Conflict => {}
-                ExecutorAppendOutcome::OutcomeUnknown => {
-                    return Err(ExecutorError::DurableAppendOutcomeUnknown);
+            ) {
+                Ok(append) => append,
+                Err(_) => {
+                    backoff.wait().await;
+                    continue;
+                }
+            };
+            match self.store.compare_and_append(append).await {
+                Ok(ExecutorAppendOutcome::Applied | ExecutorAppendOutcome::AlreadyApplied) => {
+                    backoff.reset()
+                }
+                Ok(ExecutorAppendOutcome::Conflict | ExecutorAppendOutcome::OutcomeUnknown)
+                | Err(_) => {
+                    backoff.wait().await;
                 }
             }
         }
-        Err(ExecutorError::DurableBackendUnavailable)
     }
 
     /// Appends one immutable tombstone or returns the identical existing one.
@@ -817,7 +1098,7 @@ where
         tombstone: TerminalTombstone,
     ) -> Result<EffectEntryView> {
         self.require_identity(identity)?;
-        for _ in 0..MAX_LOCAL_CAS_RETRIES {
+        for _ in 0..MAX_LOCAL_CAS_ATTEMPTS {
             let snapshot = self
                 .load_effect(identity)
                 .await?
@@ -851,7 +1132,16 @@ where
                 }
             }
         }
-        Err(ExecutorError::DurableBackendUnavailable)
+        let snapshot = self
+            .load_effect(identity)
+            .await?
+            .ok_or(ExecutorError::LocalContention)?;
+        let view = fold_effect(&snapshot)?;
+        match view.terminal_tombstone() {
+            Some((_, existing)) if existing == &tombstone => Ok(view),
+            Some(_) => Err(ExecutorError::TerminalTombstoneConflict),
+            None => Err(ExecutorError::LocalContention),
+        }
     }
 
     /// Strictly refolds a backend-private complete store enumeration.
@@ -970,7 +1260,7 @@ where
         &self,
         identity: &EffectIdentity,
         resource_key_ref: &ResourceKeyRef,
-        resource_key_value: &ValidatedCanonicalValueV2,
+        resource_key_value: &ValidatedCanonicalValueV3,
         policy: &Policy,
         request: &Policy::Request,
         allocation_record: &ResourceLedgerRecord,
@@ -1091,11 +1381,8 @@ where
             }
         }
         let view = fold_effect(snapshot)?;
-        view.delivery_audit().verify(
-            snapshot.identity(),
-            &self.bounds,
-            self.binding.deployment().evidence_authority_ref(),
-        )?;
+        view.delivery_audit()
+            .verify(snapshot.identity(), &self.binding)?;
         Ok(())
     }
 
@@ -1167,11 +1454,7 @@ where
             .map(|snapshot| snapshot.frontiers.clone())
             .unwrap_or_default();
         complete.push(frontier.clone());
-        DeliveryAudit::from_ledger(complete).verify(
-            identity,
-            &self.bounds,
-            self.binding.deployment().evidence_authority_ref(),
-        )?;
+        DeliveryAudit::from_ledger(complete).verify(identity, &self.binding)?;
         Ok(frontier)
     }
 

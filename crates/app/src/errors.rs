@@ -177,9 +177,9 @@ impl From<mfm_storage_postgres::PostgresStoreError> for PublicError {
     }
 }
 
-impl From<mfm_store::v1::StoreError> for PublicError {
-    fn from(error: mfm_store::v1::StoreError) -> Self {
-        use mfm_store::v1::StoreError;
+impl From<mfm_store::v2::StoreError> for PublicError {
+    fn from(error: mfm_store::v2::StoreError) -> Self {
+        use mfm_store::v2::StoreError;
 
         match error {
             StoreError::RunNotFound | StoreError::AppendRunNotFound { .. } => Self::run_not_found(),
@@ -273,7 +273,8 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
             | RuntimeError::Executor(_)
             | RuntimeError::InvalidCallbackResult
             | RuntimeError::AuthorityMismatch
-            | RuntimeError::EffectIdentityMismatch => Self::backend(
+            | RuntimeError::EffectIdentityMismatch
+            | RuntimeError::ObservationConflict => Self::backend(
                 ErrorClass::Internal,
                 "RunExecutionInvalid",
                 "The run action failed integrity verification",
@@ -282,9 +283,9 @@ impl From<mfm_runtime::RuntimeError> for PublicError {
     }
 }
 
-impl From<mfm_replay::v1::ReplayError> for PublicError {
-    fn from(error: mfm_replay::v1::ReplayError) -> Self {
-        use mfm_replay::v1::ReplayErrorKind;
+impl From<mfm_replay::v2::ReplayError> for PublicError {
+    fn from(error: mfm_replay::v2::ReplayError) -> Self {
+        use mfm_replay::v2::ReplayErrorKind;
 
         match error.kind() {
             ReplayErrorKind::RunNotFound => Self::run_not_found(),
@@ -326,23 +327,23 @@ mod tests {
 
     #[test]
     fn replay_run_not_found_uses_the_tenant_indistinguishable_contract() {
-        let error: PublicError = mfm_replay::v1::ReplayError::RunNotFound.into();
+        let error: PublicError = mfm_replay::v2::ReplayError::RunNotFound.into();
         assert_eq!(error, PublicError::run_not_found());
     }
 
     #[test]
     fn replay_dependency_denial_uses_the_export_specific_contract() {
-        let error: PublicError = mfm_replay::v1::ReplayError::SourceRunExportDenied.into();
+        let error: PublicError = mfm_replay::v2::ReplayError::SourceRunExportDenied.into();
         assert_eq!(error, PublicError::source_run_export_denied());
     }
 
     #[test]
     fn replay_integrity_failures_share_one_redacted_contract() {
         for replay_error in [
-            mfm_replay::v1::ReplayError::InvalidRecordedHistory,
-            mfm_replay::v1::ReplayError::CandidateExecutionFailed,
-            mfm_replay::v1::ReplayError::ComparisonIntegrityFailed,
-            mfm_replay::v1::ReplayError::InvalidExport,
+            mfm_replay::v2::ReplayError::InvalidRecordedHistory,
+            mfm_replay::v2::ReplayError::CandidateExecutionFailed,
+            mfm_replay::v2::ReplayError::ComparisonIntegrityFailed,
+            mfm_replay::v2::ReplayError::InvalidExport,
         ] {
             let error: PublicError = replay_error.into();
             assert_eq!(error, PublicError::replay_verification_failed());
@@ -351,7 +352,7 @@ mod tests {
 
     #[test]
     fn unavailable_candidate_uses_the_existing_runtime_catalog_contract() {
-        let error: PublicError = mfm_replay::v1::ReplayError::CandidateUnavailable.into();
+        let error: PublicError = mfm_replay::v2::ReplayError::CandidateUnavailable.into();
         assert_eq!(error, PublicError::runtime_catalog_unavailable());
         assert_eq!(error.class, ErrorClass::ServiceUnavailable);
         assert_eq!(error.code, "RuntimeCatalogUnavailable");

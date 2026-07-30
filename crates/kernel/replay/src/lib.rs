@@ -11,11 +11,11 @@
 //! ```
 //! use mfm_program::QualifiedProgramRegistry;
 //! use mfm_replay::trace_export::VerifiedExportStream;
-//! use mfm_replay::v1::{
+//! use mfm_replay::v2::{
 //!     compare_current, verify_recorded_history, CanonicalReplayResult, Result,
 //!     VerifiedHistoryResult,
 //! };
-//! use mfm_store::v1::{FactScanBackend, Replay, RunAccessAuthority, RunHistoryReader};
+//! use mfm_store::v2::{FactScanBackend, Replay, RunAccessAuthority, RunHistoryReader};
 //!
 //! async fn verify<B: FactScanBackend>(
 //!     reader: &RunHistoryReader<B>,
@@ -35,5 +35,5 @@
 /// Deterministic trace and portable-export canonicalization.
 pub mod trace_export;
 
-/// Recoverability-v1 replay and inspection contracts.
-pub mod v1;
+/// Recoverability-v3 replay and inspection contracts.
+pub mod v2;

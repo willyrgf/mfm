@@ -6,14 +6,15 @@ Status: contract-closure and schema-freeze evidence for
 Contract id: `mfm.recoverability-cutover-gates.v2`
 
 Companion app and transport contract:
-[`recoverability-app-surface-v2.md`](recoverability-app-surface-v2.md)
+[`recoverability-app-surface-v3.md`](recoverability-app-surface-v3.md)
 
 This document records the repository inventory and fixed disposition that closed before the
 recoverability schema freeze. The frozen target artifacts are
 `contracts/recoverability/v2/annex.json`, `contracts/recoverability/v2/corpus.json`, and
-`contracts/recoverability/v2/README.md`; their exact metadata is recorded by the searchable
-`C11_ARTIFACT_METADATA` block in the RFC's
-[Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate).
+`contracts/recoverability/v2/README.md`; their historical exact metadata remains recorded in that
+archival README. The RFC's
+[Canonical Schema and Golden-Vector Gate](../RFC_REFACTOR_RECOVERABILITY.md#canonical-schema-and-golden-vector-gate)
+records the sole current v3 artifact metadata.
 This is retained closure and deletion evidence, not a second runtime or persisted-data contract.
 [`design.md`](design.md) and [`architecture.md`](architecture.md) are authoritative for the current
 implementation.
@@ -192,7 +193,7 @@ empty ordered policy list, executor-contract selection, and byte-identical indep
 The inventoried pre-cutover store had no portable run export. Its internal
 `CommittedRunJournal`/`VerifiedRunView` authority is deliberately non-serializable and does not by
 itself carry cross-run source closure, deployment metadata, or historical executable bytes. The
-current PostgreSQL v1 authority is concentrated in
+pre-cutover PostgreSQL v1 authority was concentrated in
 `crates/storages/postgres/migrations/0001_store.sql`: commits/events, artifact
 blobs/admissions/bindings, fact descriptor/query projections, operational lanes/cursors, and
 current configured values.
@@ -281,7 +282,7 @@ derived telemetry.
   parity.
 - Generic retained-object fact-response materialization plus deterministic fact-scan and portable
   source-closure continuation evidence in
-  [`recoverability-predicate-owners-v2.md`](recoverability-predicate-owners-v2.md#current-recoverability-evidence).
+  [`recoverability-predicate-owners-v3.md`](recoverability-predicate-owners-v3.md#current-recoverability-evidence).
   The gate requires prefixes/closures larger than one work step to complete without total-size
   rejection, and requires discarded scratch to restart without minting partial authority.
 - One retained historical executable reproducing in the selected OS-enforced capability-free
@@ -289,8 +290,8 @@ derived telemetry.
   before schema freeze without deciding the production retention horizon.
 - Canonical schema annex and shared positive/negative golden vectors, frozen in
   `contracts/recoverability/v2/annex.json` and `contracts/recoverability/v2/corpus.json` and indexed
-  by `contracts/recoverability/v2/README.md`. Exact artifact hashes and counts are recorded in the
-  RFC's `C11_ARTIFACT_METADATA` ledger.
+  by `contracts/recoverability/v2/README.md`. Historical artifact hashes and counts remain recorded
+  in that archival README; current v3 metadata is recorded in the RFC.
 - EVM read and wallet-mutation capability conformance, plus explicit absence of the unqualified
   Bitcoin registration.
 

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV2};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
 use mfm_ids::{AttemptId, ContentRef, EffectKey, TenantScopeId};
 
 use crate::codec::{Decoder, Encoder};
@@ -16,16 +16,15 @@ use crate::engine::{
     KeyedExecutorLedger,
 };
 use crate::frontier::{
-    decode_evidence_record, encode_evidence_record, DeliveryAttemptOutcome, DeliveryAudit,
-    DeliveryAuditFrontier, EvidenceBounds, ExecutorEvidenceRecord, TerminalTombstone,
-    TerminalTombstoneRef,
+    decode_evidence_record, encode_evidence_record, DeliveryAudit, DeliveryAuditFrontier,
+    EvidenceBounds, ExecutorEvidenceRecord, TerminalTombstone, TerminalTombstoneRef,
 };
 use crate::policy::ResourcePolicyBinding;
 use crate::{ExecutorError, Result};
 
 const RESOURCE_LEDGER_RECORD_SCHEMA: &str = "mfm.executor-resource-ledger-record.v1";
 const RESOURCE_ALLOCATED_SCHEMA: &str = "mfm.executor-resource-allocated.v1";
-const LEDGER_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMELG04";
+const LEDGER_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMELG05";
 const RESOURCE_RECORD_DURABLE_MAGIC: &[u8; 8] = b"MFMERR01";
 const MAX_SNAPSHOT_ITEMS: usize = 1_000_000;
 
@@ -33,9 +32,9 @@ const MAX_SNAPSHOT_ITEMS: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceAllocationEvidence {
     resource_key_ref: ResourceKeyRef,
-    resource_key_value: ValidatedCanonicalValueV2,
+    resource_key_value: ValidatedCanonicalValueV3,
     typed_allocation_state_ref: AllocationStateRef,
-    typed_allocation_state: ValidatedCanonicalValueV2,
+    typed_allocation_state: ValidatedCanonicalValueV3,
     policy_binding: ResourcePolicyBinding,
     fencing_ref: Option<FencingRef>,
 }
@@ -47,7 +46,7 @@ impl ResourceAllocationEvidence {
     }
 
     /// Returns the exact annex-validated resource-key object.
-    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV3 {
         &self.resource_key_value
     }
 
@@ -57,7 +56,7 @@ impl ResourceAllocationEvidence {
     }
 
     /// Returns the exact annex-validated allocation state.
-    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV3 {
         &self.typed_allocation_state
     }
 
@@ -100,11 +99,11 @@ pub enum AllocationOutcome<Allocation> {
 pub struct ResourceLedgerRecord {
     pub(crate) resource_ownership_ref: ResourceOwnershipRef,
     pub(crate) resource_key_ref: ResourceKeyRef,
-    pub(crate) resource_key_value: ValidatedCanonicalValueV2,
+    pub(crate) resource_key_value: ValidatedCanonicalValueV3,
     pub(crate) predecessor: Option<ResourceLedgerRecordRef>,
     pub(crate) effect_key: EffectKey,
     pub(crate) typed_allocation_state_ref: AllocationStateRef,
-    pub(crate) typed_allocation_state: ValidatedCanonicalValueV2,
+    pub(crate) typed_allocation_state: ValidatedCanonicalValueV3,
     pub(crate) policy_binding: ResourcePolicyBinding,
     pub(crate) fencing_ref: Option<FencingRef>,
 }
@@ -121,7 +120,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated resource-key object.
-    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV3 {
         &self.resource_key_value
     }
 
@@ -141,7 +140,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated allocation state.
-    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV2 {
+    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV3 {
         &self.typed_allocation_state
     }
 
@@ -156,7 +155,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated resource-ledger record.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV2> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
         let value = if self.predecessor.is_none() {
             let mut allocated = vec![
                 (
@@ -403,7 +402,24 @@ impl EffectEntryView {
 /// Affine authority for zero or one target-boundary entry.
 ///
 /// The value is intentionally not `Clone`. Reloading a committed
-/// authorization cannot reconstruct this authority.
+/// authorization cannot reconstruct this authority. It carries only the four
+/// public target-entry fields; completion binding remains private to
+/// [`KeyedExecutorLedger::execute_target_once`].
+///
+/// The authority has no public completion operation:
+///
+/// ```compile_fail
+/// # use mfm_executor::{DeliveryAttemptOutcome, TargetEntryAuthority};
+/// # fn cannot_complete(authority: TargetEntryAuthority, outcome: DeliveryAttemptOutcome) {
+/// let _ = authority.complete(outcome);
+/// # }
+/// ```
+///
+/// No public target receipt exists:
+///
+/// ```compile_fail
+/// use mfm_executor::TargetOperationReceipt;
+/// ```
 pub struct TargetEntryAuthority {
     identity: EffectIdentity,
     attempt_id: AttemptId,
@@ -445,91 +461,12 @@ impl TargetEntryAuthority {
     pub const fn durable_ledger_generation_ref(&self) -> &ContentRef {
         &self.durable_ledger_generation_ref
     }
-
-    /// Consumes this authority into the exact target-operation receipt.
-    pub fn complete(self, outcome: DeliveryAttemptOutcome) -> TargetOperationReceipt {
-        TargetOperationReceipt {
-            identity: self.identity,
-            attempt_id: self.attempt_id,
-            target_operation_ref: self.target_operation_ref,
-            durable_ledger_generation_ref: self.durable_ledger_generation_ref,
-            outcome,
-        }
-    }
 }
 
 impl std::fmt::Debug for TargetEntryAuthority {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("TargetEntryAuthority")
-            .field("effect_key", self.identity.effect_key())
-            .field("attempt_id", &self.attempt_id)
-            .field("target_operation_ref", &self.target_operation_ref)
-            .finish_non_exhaustive()
-    }
-}
-
-/// Affine receipt binding a surviving target result to one exact attempt.
-///
-/// The value is intentionally not `Clone`; only the ledger can consume it
-/// into an observation append.
-pub struct TargetOperationReceipt {
-    identity: EffectIdentity,
-    attempt_id: AttemptId,
-    target_operation_ref: ContentRef,
-    durable_ledger_generation_ref: ContentRef,
-    outcome: DeliveryAttemptOutcome,
-}
-
-impl TargetOperationReceipt {
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        EffectIdentity,
-        AttemptId,
-        ContentRef,
-        ContentRef,
-        DeliveryAttemptOutcome,
-    ) {
-        (
-            self.identity,
-            self.attempt_id,
-            self.target_operation_ref,
-            self.durable_ledger_generation_ref,
-            self.outcome,
-        )
-    }
-
-    /// Returns the exact immutable effect identity.
-    pub const fn identity(&self) -> &EffectIdentity {
-        &self.identity
-    }
-
-    /// Returns the exact attempt that reached a surviving wrapper result.
-    pub const fn attempt_id(&self) -> &AttemptId {
-        &self.attempt_id
-    }
-
-    /// Returns the reviewed target operation family.
-    pub const fn target_operation_ref(&self) -> &ContentRef {
-        &self.target_operation_ref
-    }
-
-    /// Returns the durable ledger generation used at target entry.
-    pub const fn durable_ledger_generation_ref(&self) -> &ContentRef {
-        &self.durable_ledger_generation_ref
-    }
-
-    /// Returns the safe retained target outcome.
-    pub const fn outcome(&self) -> &DeliveryAttemptOutcome {
-        &self.outcome
-    }
-}
-
-impl std::fmt::Debug for TargetOperationReceipt {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TargetOperationReceipt")
             .field("effect_key", self.identity.effect_key())
             .field("attempt_id", &self.attempt_id)
             .field("target_operation_ref", &self.target_operation_ref)
@@ -880,6 +817,7 @@ impl MemoryExecutorStore {
 
     fn apply_append(&self, append: ExecutorLedgerAppend) -> Result<ExecutorAppendOutcome> {
         self.require_identity(append.identity())?;
+        append.validate_for_store_identity(&self.identity)?;
         let mut guard = self.lock_state()?;
         let actual_effect_head = guard
             .effects
@@ -1024,7 +962,11 @@ fn append_effect_records(
     let frontier =
         DeliveryAuditFrontier::append(&stream.identity, predecessor, records, proof_ref.clone())?;
     stream.frontiers.push(frontier);
-    DeliveryAudit::from_ledger(stream.frontiers.clone()).verify(&stream.identity, bounds, proof_ref)
+    DeliveryAudit::from_ledger(stream.frontiers.clone()).verify_structure(
+        &stream.identity,
+        bounds,
+        proof_ref,
+    )
 }
 
 fn attach_allocations(
@@ -1113,6 +1055,7 @@ fn encode_bounds(encoder: &mut Encoder, bounds: &EvidenceBounds) -> Result<()> {
     encoder.u32(bounds.max_attempts());
     encoder.u32(bounds.max_records());
     encoder.usize(bounds.max_retained_bytes())?;
+    encoder.usize(bounds.max_completion_record_bytes())?;
     encoder.u32(bounds.completion_reserve_records());
     encoder.usize(bounds.completion_reserve_bytes())
 }
@@ -1121,6 +1064,7 @@ fn decode_bounds(decoder: &mut Decoder<'_>) -> Result<EvidenceBounds> {
     EvidenceBounds::new(
         decoder.u32()?,
         decoder.u32()?,
+        decoder.u64()?,
         decoder.u64()?,
         decoder.u32()?,
         decoder.u64()?,
@@ -1160,7 +1104,7 @@ fn validate_checkpoint_state(checkpoint: &MemoryLedgerCheckpoint) -> Result<()> 
         {
             return Err(ExecutorError::InvalidDurableSnapshot);
         }
-        DeliveryAudit::from_ledger(stream.frontiers.clone()).verify(
+        DeliveryAudit::from_ledger(stream.frontiers.clone()).verify_structure(
             &stream.identity,
             &checkpoint.bounds,
             &checkpoint.proof_ref,
@@ -1253,6 +1197,9 @@ fn validate_binding_state(
         state: state.clone(),
     };
     validate_checkpoint_state(&checkpoint)?;
+    for stream in state.effects.values() {
+        DeliveryAudit::from_ledger(stream.frontiers.clone()).verify(&stream.identity, binding)?;
+    }
     let admitted_owner = binding.deployment().resource_ownership_ref();
     if state
         .resources

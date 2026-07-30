@@ -291,7 +291,7 @@ impl<'de> Deserialize<'de> for StoreScopeId {
 
 /// Store generation used to fence append writers.
 ///
-/// The recoverability-v2 wire form is a canonical decimal `u64` JSON string.
+/// The recoverability-v3 wire form is a canonical decimal `u64` JSON string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreEpoch(u64);
 
@@ -538,6 +538,9 @@ where
             require_part_count(K::PREFIX, &parts, 5)?;
             validate_token("name", parts[1])?;
             validate_token("version", parts[2])?;
+            if K::POSITIVE_CANONICAL_U64_VERSION {
+                validate_positive_canonical_u64_version(parts[2])?;
+            }
             if K::REQUIRED_VERSION.is_some_and(|version| version != parts[2]) {
                 return Err(IdentityError::new(
                     "identity version is not admitted for this category",
@@ -610,6 +613,21 @@ fn require_part_count(prefix: &str, parts: &[&str], expected: usize) -> Result<(
 
 fn validate_token(field: &'static str, value: &str) -> Result<()> {
     validate_name_token(field, value).map_err(IdentityError::from)
+}
+
+fn validate_positive_canonical_u64_version(value: &str) -> Result<()> {
+    if value.starts_with('0')
+        || value
+            .parse::<u64>()
+            .ok()
+            .filter(|version| *version > 0)
+            .is_none()
+    {
+        return Err(IdentityError::new(
+            "identity version must use positive canonical u64 spelling",
+        ));
+    }
+    Ok(())
 }
 
 fn decode_hex_nibble(byte: u8) -> Result<u8> {
@@ -978,6 +996,7 @@ mod private {
         const LAYOUT: IdentityLayout;
         const ALGORITHM: Option<DigestAlgorithm>;
         const REQUIRED_VERSION: Option<&'static str>;
+        const POSITIVE_CANONICAL_U64_VERSION: bool;
     }
 
     pub trait DigestOnlyCategory: IdentityCategory {}
@@ -1002,6 +1021,7 @@ macro_rules! impl_identity_category {
             const LAYOUT: private::IdentityLayout = private::IdentityLayout::$layout;
             const ALGORITHM: Option<DigestAlgorithm> = Some(DigestAlgorithm::Sha256JcsV1);
             const REQUIRED_VERSION: Option<&'static str> = None;
+            const POSITIVE_CANONICAL_U64_VERSION: bool = false;
         }
     };
 }
@@ -1020,6 +1040,7 @@ macro_rules! impl_unrestricted_digest_only_category {
             const LAYOUT: private::IdentityLayout = private::IdentityLayout::DigestOnly;
             const ALGORITHM: Option<DigestAlgorithm> = None;
             const REQUIRED_VERSION: Option<&'static str> = None;
+            const POSITIVE_CANONICAL_U64_VERSION: bool = false;
         }
         impl private::DigestOnlyCategory for $marker {}
     };
@@ -1030,7 +1051,8 @@ impl private::IdentityCategory for SchemaKind {
     const PREFIX: &'static str = "schema";
     const LAYOUT: private::IdentityLayout = private::IdentityLayout::NameVersionDigest;
     const ALGORITHM: Option<DigestAlgorithm> = Some(DigestAlgorithm::Sha256JcsV1);
-    const REQUIRED_VERSION: Option<&'static str> = Some("1");
+    const REQUIRED_VERSION: Option<&'static str> = None;
+    const POSITIVE_CANONICAL_U64_VERSION: bool = true;
 }
 impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
 impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);

@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV2,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV3,
 };
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, GenesisDigest,
     InvocationIdentity, RunId, RunSemanticStateDigest, SemanticTypeId, SpecHash, StableId,
     StoreScopeId, TenantScopeId,
 };
-use mfm_journal::v1::{
+use mfm_journal::v2::{
     ArtifactIdPreimage, BatchPurpose, ConfiguredValueBinding, ConfiguredValueKey,
     JournalPredecessor, ObjectEvidencePreimage, ProducerBinding, RecordLogicalKey, RunAdmitted,
     RunAdmittedFields, RunJournalRecord, RunJournalRecordFields, TenantFactCoordinateFields,
@@ -22,15 +22,15 @@ use mfm_runtime::{
     RuntimeError,
 };
 use mfm_spec::v1::RetainedValueContract;
-use mfm_store::v1::test_support::{
+use mfm_store::v2::test_support::{
     FactScanConformanceFixture, LegalAdmissionFixture, PreparedLegalAdmission,
 };
-use mfm_store::v1::{
-    AdmissionMaterial, AppendOutcome, ExistingRunAppendMaterial, FactSelectionAuthorizationOutcome,
-    NewlyAppended, ObjectGraphProposal, ProducedObjectRoot, ProducedOutputSlot,
-    ProposedAdmissionInput, QualifiedRunStore, QualifiedSupportGraph, QualifiedSupportMember,
-    RunAccessAuthorityIssuer, RunHistoryWriter, SettlementMaterial, StoreError, TransitionMaterial,
-    TransitionTracePageRequest, VerifiedRunView,
+use mfm_store::v2::{
+    open_in_memory, AdmissionMaterial, AppendOutcome, ExistingRunAppendMaterial,
+    FactSelectionAuthorizationOutcome, NewlyAppended, ObjectGraphProposal, ProducedObjectRoot,
+    ProducedOutputSlot, ProposedAdmissionInput, QualifiedRunStore, QualifiedSupportGraph,
+    QualifiedSupportMember, RunAccessAuthorityIssuer, RunHistoryWriter, SettlementMaterial,
+    StoreError, TransitionMaterial, TransitionTracePageRequest, VerifiedRunView,
 };
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Postgres, Row, Transaction};
@@ -451,7 +451,7 @@ async fn readiness_rejects_missing_schema_metadata_singleton() {
 }
 
 #[tokio::test]
-async fn readiness_rejects_a_changed_schema_contract_version() {
+async fn readiness_rejects_the_retired_schema_contract_version() {
     let _serial = DATABASE_TEST_LOCK.lock().await;
     let database = TestDatabase::create("readiness_version").await;
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
@@ -468,7 +468,7 @@ async fn readiness_rejects_a_changed_schema_contract_version() {
     .expect("remove metadata guards for readiness simulation");
     sqlx::query(
         "UPDATE store_schema_metadata \
-         SET schema_contract_version = 'mfm.recoverability-postgres.invalid'",
+         SET schema_contract_version = 'mfm.recoverability-postgres.v1'",
     )
     .execute(&database.pool)
     .await
@@ -1656,7 +1656,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     let output = PlainCanonicalJsonBytes::from_json_str(r#"{"value":43}"#)
         .expect("canonical genuine output");
     let output_schema_id = output_contract.schema_id().clone();
-    let output_digest = RecoverabilityContractV2::embedded()
+    let output_digest = RecoverabilityContractV3::embedded()
         .expect("embedded recoverability contract")
         .raw_content_digest(output.as_bytes());
     let successor_append_request_id =
@@ -1803,7 +1803,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         .await
         .expect("read genuine public run")
         .into_validated();
-    assert_eq!(public.schema_contract(), "mfm.public-run-view.v1");
+    assert_eq!(public.schema_contract(), "mfm.public-run-view.v2");
     let public: serde_json::Value =
         serde_json::from_slice(public.as_bytes()).expect("decode genuine public run");
     assert_eq!(public["status"], "succeeded");
@@ -2487,6 +2487,102 @@ async fn qualified_support_graph_is_atomic_exact_and_producer_complete() {
 }
 
 #[tokio::test]
+async fn artifact_admissions_accept_positive_schema_versions_with_memory_parity() {
+    let _serial = DATABASE_TEST_LOCK.lock().await;
+    let database = TestDatabase::create("artifact_schema_versions").await;
+    let (postgres, postgres_issuer) =
+        open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
+            .await
+            .expect("qualify PostgreSQL support store");
+    let (memory, memory_issuer) = open_in_memory(postgres.store_identity().clone());
+    let scope = semantic_type("versioned-qualified-support");
+    let path = FieldPath::new("support.versioned").expect("versioned support path");
+    let postgres_authority = postgres_issuer.authorize_qualified_deployment(scope.clone());
+    let memory_authority = memory_issuer.authorize_qualified_deployment(scope.clone());
+
+    let postgres_admitted = postgres
+        .admit_support_graph(&postgres_authority, versioned_support_graph(&scope, &path))
+        .await
+        .expect("admit versioned PostgreSQL support");
+    let memory_admitted = memory
+        .admit_support_graph(&memory_authority, versioned_support_graph(&scope, &path))
+        .await
+        .expect("admit versioned memory support");
+    let postgres_member = postgres_admitted
+        .member(&path)
+        .expect("PostgreSQL versioned member");
+    let memory_member = memory_admitted
+        .member(&path)
+        .expect("memory versioned member");
+    assert_eq!(postgres_member.value_ref(), memory_member.value_ref());
+    assert_eq!(postgres_member.bytes(), memory_member.bytes());
+
+    let value_fields = postgres_member
+        .value_ref()
+        .fields()
+        .expect("versioned value fields");
+    let row = sqlx::query(
+        "SELECT schema_id, evidence_contract_schema_id \
+           FROM artifact_admissions \
+          WHERE canonical_value_ref = $1",
+    )
+    .bind(postgres_member.value_ref().as_bytes())
+    .fetch_one(&database.pool)
+    .await
+    .expect("load admitted schema versions");
+    let schema_id = row
+        .try_get::<String, _>("schema_id")
+        .expect("decode admitted schema id");
+    let evidence_contract_schema_id = row
+        .try_get::<String, _>("evidence_contract_schema_id")
+        .expect("decode admitted evidence-contract schema id");
+    assert_eq!(schema_id, value_fields.schema_id.as_str());
+    assert_eq!(
+        evidence_contract_schema_id,
+        value_fields.evidence_contract_ref.schema_id().as_str()
+    );
+    assert!(schema_id.contains(":2:sha256-jcs-v1:"));
+    assert!(evidence_contract_schema_id.contains(":2:sha256-jcs-v1:"));
+
+    for (column, valid, hostile_version, tag) in [
+        ("schema_id", schema_id.as_str(), "0", 1_u8),
+        ("schema_id", schema_id.as_str(), "02", 2_u8),
+        (
+            "evidence_contract_schema_id",
+            evidence_contract_schema_id.as_str(),
+            "0",
+            3_u8,
+        ),
+        (
+            "evidence_contract_schema_id",
+            evidence_contract_schema_id.as_str(),
+            "02",
+            4_u8,
+        ),
+    ] {
+        assert_hostile_artifact_schema_version_rejected(
+            &database.pool,
+            postgres_member.value_ref().as_bytes(),
+            column,
+            &replace_schema_version(valid, hostile_version),
+            tag,
+        )
+        .await;
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM artifact_admissions")
+            .fetch_one(&database.pool)
+            .await
+            .expect("count versioned artifact admissions"),
+        1
+    );
+
+    drop(postgres);
+    drop(memory);
+    database.cleanup().await;
+}
+
+#[tokio::test]
 async fn configured_values_resolve_only_the_exact_immutable_admission_key() {
     let _serial = DATABASE_TEST_LOCK.lock().await;
     let database = TestDatabase::create("configured_value").await;
@@ -3100,7 +3196,7 @@ fn semantic_type(label: &str) -> SemanticTypeId {
 
 fn retained_contract(label: &str) -> RetainedValueContract {
     let recoverability =
-        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
     let evidence = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -3122,6 +3218,43 @@ fn retained_contract(label: &str) -> RetainedValueContract {
     .expect("test retained contract")
 }
 
+fn versioned_retained_contract() -> RetainedValueContract {
+    let recoverability =
+        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+    let evidence = recoverability
+        .encode(
+            "mfm.executor-reference-failure-code.v2",
+            &CanonicalValue::String("request_conflict".to_owned()),
+        )
+        .expect("versioned evidence contract");
+    RetainedValueContract::new(
+        recoverability
+            .schema_id("mfm.executor-reference-failure-code.v2")
+            .expect("versioned retained schema")
+            .clone(),
+        semantic_type("versioned-qualified-support-value"),
+        StableId::new("versioned-qualified-support-value").expect("versioned retained role"),
+        "application/json",
+        recoverability
+            .content_ref(&evidence)
+            .expect("versioned evidence contract reference"),
+    )
+    .expect("versioned retained contract")
+}
+
+fn versioned_support_graph(scope: &SemanticTypeId, path: &FieldPath) -> QualifiedSupportGraph {
+    QualifiedSupportGraph::new(
+        scope.clone(),
+        [QualifiedSupportMember::new(
+            path.clone(),
+            PlainCanonicalJsonBytes::from_json_str(r#""destination_unavailable""#)
+                .expect("versioned support bytes"),
+            versioned_retained_contract(),
+        )],
+    )
+    .expect("versioned support graph")
+}
+
 fn support_graph(scope: &SemanticTypeId, members: &[(&str, &str)]) -> QualifiedSupportGraph {
     QualifiedSupportGraph::new(
         scope.clone(),
@@ -3136,13 +3269,68 @@ fn support_graph(scope: &SemanticTypeId, members: &[(&str, &str)]) -> QualifiedS
     .expect("test support graph")
 }
 
+fn replace_schema_version(schema_id: &str, version: &str) -> String {
+    let marker = ":2:sha256-jcs-v1:";
+    assert!(
+        schema_id.contains(marker),
+        "versioned test schema must be v2"
+    );
+    schema_id.replacen(marker, &format!(":{version}:sha256-jcs-v1:"), 1)
+}
+
+async fn assert_hostile_artifact_schema_version_rejected(
+    pool: &PgPool,
+    canonical_value_ref: &[u8],
+    column: &str,
+    hostile_schema_id: &str,
+    tag: u8,
+) {
+    const INSERT_WITH_HOSTILE_VALUE_SCHEMA: &str = "INSERT INTO artifact_admissions \
+            (artifact_id, evidence_hash, content_digest, schema_id, semantic_type_id, role, \
+             byte_length, media_type, evidence_contract_schema_id, \
+             evidence_contract_content_digest, canonical_value_ref) \
+         SELECT artifact_id, evidence_hash, content_digest, $1, semantic_type_id, role, \
+                byte_length, media_type, evidence_contract_schema_id, \
+                evidence_contract_content_digest, canonical_value_ref || $2::bytea \
+           FROM artifact_admissions \
+          WHERE canonical_value_ref = $3";
+    const INSERT_WITH_HOSTILE_EVIDENCE_SCHEMA: &str = "INSERT INTO artifact_admissions \
+            (artifact_id, evidence_hash, content_digest, schema_id, semantic_type_id, role, \
+             byte_length, media_type, evidence_contract_schema_id, \
+             evidence_contract_content_digest, canonical_value_ref) \
+         SELECT artifact_id, evidence_hash, content_digest, schema_id, semantic_type_id, role, \
+                byte_length, media_type, $1, evidence_contract_content_digest, \
+                canonical_value_ref || $2::bytea \
+           FROM artifact_admissions \
+          WHERE canonical_value_ref = $3";
+    let statement = match column {
+        "schema_id" => INSERT_WITH_HOSTILE_VALUE_SCHEMA,
+        "evidence_contract_schema_id" => INSERT_WITH_HOSTILE_EVIDENCE_SCHEMA,
+        _ => panic!("unknown hostile artifact schema column"),
+    };
+    let error = sqlx::query(statement)
+        .bind(hostile_schema_id)
+        .bind(vec![tag])
+        .bind(canonical_value_ref)
+        .execute(pool)
+        .await
+        .expect_err("zero and leading-zero schema versions must be rejected");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23514")
+    );
+}
+
 fn derive_value_ref(
     contract: &RetainedValueContract,
     producer: &ProducerBinding,
     bytes: &[u8],
 ) -> ValueRef {
     let recoverability =
-        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),
@@ -3181,7 +3369,7 @@ fn derive_value_ref(
 
 fn admission_reference() -> ContentRef {
     let recoverability =
-        RecoverabilityContractV2::embedded().expect("embedded recoverability contract");
+        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
     let value = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -3839,8 +4027,8 @@ async fn insert_record_row(
     let seed = format!("{}:{}", input.run_id, input.run_sequence);
     let record_id = format!("record:sha256-jcs-v1:{}", digest_hex(seed.as_bytes()));
     let schema_id = format!(
-        "schema:mfm.test.record:1:sha256-jcs-v1:{}",
-        digest_hex(b"mfm.test.record.v1")
+        "schema:mfm.test.record:2:sha256-jcs-v1:{}",
+        digest_hex(b"mfm.test.record.v2")
     );
     let spec_hash = format!("spec:sha256-jcs-v1:{}", digest_hex(b"mfm.test.spec.v1"));
     let record_hash = semantic_digest(format!("{seed}:record").as_bytes());

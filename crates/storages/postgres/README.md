@@ -1,6 +1,6 @@
 # mfm-storage-postgres
 
-PostgreSQL authority for the recoverability-v2 committed run journal.
+PostgreSQL authority for the recoverability-v3 committed run journal.
 
 The public runtime entry point is `open_authoritative`. It consumes a writer
 pool and a deployment-owned `AuthoritativeWriterFence`, qualifies the exact
@@ -205,10 +205,10 @@ cannot be mutated by the application role.
 Use the repository-owned task, which provisions a disposable PostgreSQL schema:
 
 ```sh
-nix run .#run -- --task recoverability-postgres-v2
+nix run .#run -- --task recoverability-postgres-v3
 ```
 
-The dedicated `recoverability-v2` target runs all 578 shared corpus vectors through
+The dedicated `recoverability-v3` target runs the shared corpus vectors through
 a physical blob round trip. Package tests cover the closed catalog,
 qualification, privileges, rollback/head integrity, advisory-lock behavior,
 idempotency, independent qualified-writer reconciliation, and backend parity.

@@ -195,7 +195,7 @@ fn test_contract(label: &str) -> ContentRef {
     let json =
         serde_json::to_string(&serde_json::json!({ "test": label })).expect("test contract json");
     mfm_spec::exact_content_ref(
-        schema_id("mfm.access-audit-entry.v1").expect("schema"),
+        schema_id("mfm.access-audit-entry.v2").expect("schema"),
         &mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json).expect("canonical"),
     )
     .expect("content ref")

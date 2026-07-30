@@ -27,10 +27,10 @@ mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 thiserror = { workspace = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
 mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
-mfm-store = { path = "../store", features = ["test-support"] }
+mfm-store = { path = "../store", features = ["backend-conformance"] }
 serde_json = { workspace = true }
-tokio = { workspace = true }
