@@ -312,10 +312,20 @@ observation authority.
 The non-domain codes are exactly `adapter_contract_violation`, `result_encoding_failure`,
 `fact_store_unavailable`, `fact_history_invalid`, `executor_store_unavailable`,
 `executor_contention`, `executor_history_invalid`, and `executor_capacity_exhausted`. Store and
-replay validate each code's permitted access layer, entry status, and disposition. A retryable
-operational outcome may permit a later separately authorized call only after its observation
-commits. An integrity-blocked outcome blocks progress. Neither form is passed to a state callback,
-and neither can satisfy a read or effect settlement.
+replay derive the access layer from committed history and validate each code's permitted layer,
+entry status, and disposition.
+
+Every normally returned provider or transport fault takes exactly one reviewed route: a certified
+state-facing `SafeFailure`, or the closed audit-only non-domain relation. The linked authorization
+identifies the exact qualified operation, request, and binding, so the resulting classification is
+stable and queryable without provider-controlled text. No outer error may bypass both routes.
+Panic, abort, task loss, and process loss instead leave an unmatched authorization.
+
+A retryable operational outcome may permit a later separately authorized call only after its
+observation commits. The disposition defines no code-specific retry scheduling, backoff,
+circuit-breaking, provider failover, or hidden adapter retry. An integrity-blocked outcome blocks
+progress. Neither form is passed to a state callback, and neither can satisfy a read or effect
+settlement.
 
 ### `RunClosed`
 

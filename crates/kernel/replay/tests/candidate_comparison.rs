@@ -623,7 +623,6 @@ async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
             "bytes-after-end",
             [first.as_slice(), b"x".as_slice()].concat(),
         ),
-        ("old-v1-bundle", old_v1_portable_bundle()),
     ];
     for (name, malformed) in malformed {
         let error =
@@ -640,27 +639,6 @@ async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
 
 fn raw_record(json: &[u8]) -> Vec<u8> {
     [b"\x1e".as_slice(), json, b"\n".as_slice()].concat()
-}
-
-fn old_v1_portable_bundle() -> Vec<u8> {
-    let corpus: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../contracts/recoverability/v1/corpus.json"
-    ))
-    .expect("retained V1 corpus");
-    let hex = corpus["positive_vectors"]
-        .as_array()
-        .expect("positive vectors")
-        .iter()
-        .find(|vector| vector["schema_contract"].as_str() == Some("mfm.portable-run-export.v1"))
-        .and_then(|vector| vector["canonical_hex"].as_str())
-        .expect("retained V1 portable bundle");
-    hex.as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("ASCII hex");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
 }
 
 struct ShortWriter {

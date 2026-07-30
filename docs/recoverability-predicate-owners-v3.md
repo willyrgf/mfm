@@ -7,12 +7,9 @@ Contract id: `mfm.recoverability-predicate-owners.v3`
 This document records the current predicate-ownership inventory. The frozen target encodings and
 shared vectors are `contracts/recoverability/v3/annex.json`,
 `contracts/recoverability/v3/corpus.json`, and `contracts/recoverability/v3/README.md`.
-It incorporates the access-obligation design accepted in
-[`RFC_RUNTIME_HISTORY_CHOKE_POINT.md`](../RFC_RUNTIME_HISTORY_CHOKE_POINT.md) without creating a
-second runtime or persisted-data contract.
 [`design.md`](design.md) and [`architecture.md`](architecture.md) are authoritative for the current
-implementation. Retained gates and deletion inventory stay in
-[`recoverability-cutover-gates-v2.md`](recoverability-cutover-gates-v2.md).
+implementation. This inventory specializes their access-obligation rules without creating a second
+runtime or persisted-data contract.
 
 ## How to read the matrix
 
@@ -307,11 +304,10 @@ frozen schema and golden vectors, or satisfy the deployment-specific rollout gat
   `P-RV-01`–`P-RV-03`.
 - The current [shared executor conformance](../crates/kernel/executor/tests/conformance.rs) and
   [managed PostgreSQL qualification](../crates/storages/executor-postgres/tests/qualification.rs)
-  close the logical
-  [durable reference-executor gate](../RFC_REFACTOR_RECOVERABILITY.md#durable-reference-executor-gate)
-  for `P-EX-04`–`P-EX-08`. They cover immutable effect/resource streams, atomic compare-and-swap,
-  positive-only target-entry authority, the one `execute_target_once` bracket, crash-boundary
-  convergence without a second target call, exact target observation and terminal
+  provide the current durable reference-executor evidence for `P-EX-04`–`P-EX-08`. They cover
+  immutable effect/resource streams, atomic compare-and-swap, positive-only target-entry authority,
+  the one `execute_target_once` bracket, crash-boundary convergence without a second target call,
+  exact target observation and terminal
   proof/tombstone relations, `ResultUnrepresentable`, two materially different resource policies,
   strict refold, bounded hostile decoding, secret-free retained surfaces, injected acknowledgement ambiguity, and modeled
   stale/sibling/rollback fencing. Memory and file stores remain supporting conformance evidence
@@ -349,7 +345,5 @@ not persisted semantic limits or public continuation positions. Lost scan state 
 ordinary unmatched-authorization retry path and a fresh scan; lost portable-verifier scratch
 restarts from immutable inputs.
 
-The rollout-only privacy, capacity, long-term executable-retention, and deployment-specific HA
-qualification gates remain classified in
-[`recoverability-cutover-gates-v2.md`](recoverability-cutover-gates-v2.md); they constrain
-deployment but do not authorize an alternate predicate owner.
+Rollout-only privacy, capacity, long-term executable-retention, and deployment-specific HA
+qualification remain deployment constraints; they do not authorize an alternate predicate owner.

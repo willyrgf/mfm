@@ -220,8 +220,13 @@ non-domain outcomes; they cannot escape as an unjournaled `Result`. The adapter 
 lifecycle. Reusable transports do not expose or depend on MFM runtime authority.
 
 `NonDomainFailure` is never sent to state code. Its closed entry-status, disposition, and code
-relation is verified by store and replay. `RetryableOperational` permits only a later separately
-authorized attempt after the audit record commits; `IntegrityBlocked` blocks semantic progress.
+relation is verified by store and replay, which derive its access layer from committed history.
+Together with the linked authorization's exact operation, request, and binding, that relation
+provides the sole audit classification for a normally returned provider or transport fault that is
+not admitted by the certified `SafeFailure` contract. No outer error can bypass both routes.
+`RetryableOperational` permits only a later separately authorized attempt after the audit record
+commits; it defines no code-specific scheduling, backoff, circuit breaking, failover, or hidden
+adapter retry. `IntegrityBlocked` blocks semantic progress.
 
 Every required live bootstrap, including source and chain validation, is its own audited state
 after `RunAdmitted`. App admission may bind one immutable non-secret routing generation but cannot
