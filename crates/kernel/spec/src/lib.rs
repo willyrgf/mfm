@@ -4,6 +4,12 @@
 //! This crate contains value contracts only. It does not author programs, run
 //! planners, execute states, bind live capabilities, or grant admission
 //! authority.
+//!
+//! Versioned Rust module aliases are deliberately absent:
+//!
+//! ```compile_fail
+//! use mfm_spec::v1::AuthoredProgram;
+//! ```
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityError};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, IdentityError, SchemaId};
@@ -28,7 +34,7 @@ pub enum SpecError {
     RetainedValueContract(#[from] mfm_values::ValueError),
     /// A journal-owned retained-value contract could not be reconstructed.
     #[error(transparent)]
-    Journal(#[from] mfm_journal::v2::JournalError),
+    Journal(#[from] mfm_journal::JournalError),
 }
 
 impl From<IdentityError> for SpecError {
@@ -61,7 +67,6 @@ pub fn exact_content_ref(
     .map_err(Into::into)
 }
 
-/// Frozen recoverability-v3 planning and graph values.
-pub mod v1;
+mod model;
 
-pub use v1::*;
+pub use model::*;

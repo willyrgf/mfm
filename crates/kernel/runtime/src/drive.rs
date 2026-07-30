@@ -6,7 +6,7 @@ use std::sync::Arc;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_facts::FactSelectionRequest;
 use mfm_ids::{ContentRef, EffectKey, NodeId, RequestDigest, StableId};
-use mfm_journal::v2::{
+use mfm_journal::{
     AuthorizationRef, AuthorizationScopeFields, CapabilityBindingRef, ClosureRef,
     FactSelectionScanContract, FrozenReadIntent, InputManifestRef, JournalHead, JournalPredecessor,
     NodePhase, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure, NonDomainFailureCode,
@@ -74,14 +74,14 @@ enum SettlementAction {
     Read {
         frame: Box<PreparedFrame>,
         request_ref: ValueRef,
-        observation_ref: mfm_journal::v2::ObservationRef,
+        observation_ref: mfm_journal::ObservationRef,
         settlement: QualifiedSettlement,
         settlement_contract: mfm_spec::CertifiedSettlementContract,
     },
     Effect {
         node_id: NodeId,
         request_transition_ref: TransitionRef,
-        observation_ref: mfm_journal::v2::ObservationRef,
+        observation_ref: mfm_journal::ObservationRef,
         settlement: QualifiedSettlement,
         settlement_contract: mfm_spec::CertifiedSettlementContract,
     },
@@ -416,7 +416,7 @@ where
     type LogicalIdentity = mfm_store::LogicalObservationIdentity;
     type PhysicalIdentity = mfm_store::PhysicalAppendIdentity;
     type PreparedAppend = PreparedJournalAppend;
-    type ObservationRef = mfm_journal::v2::ObservationRef;
+    type ObservationRef = mfm_journal::ObservationRef;
     type Material = ObservationMaterial;
 
     async fn load_verified(&mut self) -> std::result::Result<Self::View, ()> {
@@ -1976,7 +1976,7 @@ fn fact_selection_observation_refs(
     history: &VerifiedNodeAccessHistory<'_>,
     returned_contract: &RetainedValueContract,
     safe_failure_contract: &RetainedValueContract,
-) -> Result<Vec<mfm_journal::v2::ObservationRef>> {
+) -> Result<Vec<mfm_journal::ObservationRef>> {
     let mut references = Vec::new();
     for observed in history.observed_suffix() {
         if let Some(disposition) = observed_non_domain_disposition(&observed)? {
@@ -2011,13 +2011,7 @@ fn scan_read_suffix(
     returned_contract: &RetainedValueContract,
     safe_failure_contract: &RetainedValueContract,
     requires_fact_selection_attestation: bool,
-) -> Result<
-    EvidenceScan<(
-        ValueRef,
-        mfm_journal::v2::ObservationRef,
-        QualifiedSettlement,
-    )>,
-> {
+) -> Result<EvidenceScan<(ValueRef, mfm_journal::ObservationRef, QualifiedSettlement)>> {
     let verdicts = history
         .observed_suffix()
         .map(|observed| {
@@ -2064,7 +2058,7 @@ fn scan_read_suffix(
 
 fn terminal_consumed_observations(
     view: &VerifiedRunView,
-) -> Result<BTreeMap<NodeId, mfm_journal::v2::ObservationRef>> {
+) -> Result<BTreeMap<NodeId, mfm_journal::ObservationRef>> {
     let mut consumed = BTreeMap::new();
     for entry in view.transition_entries() {
         let fields = entry.transition().fields()?;
@@ -2140,7 +2134,7 @@ fn scan_effect_suffix(
     intent: &EffectIntent,
     ensure_result_contract: &RetainedValueContract,
     terminal_evidence_contract: &RetainedValueContract,
-) -> Result<EvidenceScan<(mfm_journal::v2::ObservationRef, QualifiedSettlement)>> {
+) -> Result<EvidenceScan<(mfm_journal::ObservationRef, QualifiedSettlement)>> {
     let verdicts = history
         .observed_suffix()
         .map(|observed| {
@@ -2348,7 +2342,7 @@ fn integrity(certified_order: usize, observation_order: usize) -> IntegrityBlock
     }
 }
 
-fn advanced(journal_head: mfm_journal::v2::JournalHead) -> DriveOutcome {
+fn advanced(journal_head: mfm_journal::JournalHead) -> DriveOutcome {
     DriveOutcome::Advanced { journal_head }
 }
 
@@ -2364,7 +2358,7 @@ fn candidate_failure_outcome(
 }
 
 fn candidate_failure_at_head(
-    journal_head: mfm_journal::v2::JournalHead,
+    journal_head: mfm_journal::JournalHead,
     error: CandidateCertificationError,
 ) -> Result<DriveOutcome> {
     match error.kind() {
@@ -2383,7 +2377,7 @@ fn candidate_failure_at_head(
 }
 
 fn waiting_at_head(
-    journal_head: mfm_journal::v2::JournalHead,
+    journal_head: mfm_journal::JournalHead,
     reason: DriveWaitReason,
 ) -> DriveOutcome {
     DriveOutcome::Waiting {

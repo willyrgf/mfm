@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
+use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_ids::{InvocationIdentity, StableId, StoreScopeId, TenantScopeId};
 
 #[test]
@@ -49,7 +49,7 @@ fn derive_run_id(
         ),
     ])
     .expect("run-id preimage");
-    let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     let validated = contract
         .encode("mfm.run-id-preimage.v1", &preimage)
         .expect("validated run-id preimage");

@@ -1,4 +1,4 @@
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContractV3, ValidatedCanonicalValueV3};
+use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContract, ValidatedCanonicalValue};
 use mfm_ids::{ContentRef, SchemaId, SemanticTypeId, StableId};
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -23,7 +23,7 @@ pub fn component_object_evidence_contract_canonical() -> Result<PlainCanonicalJs
 /// Returns the annex-derived identity of the common component-object-evidence contract.
 pub fn component_object_evidence_contract_ref() -> Result<ContentRef> {
     let canonical = component_object_evidence_contract_canonical()?;
-    let recoverability = RecoverabilityContractV3::embedded()?;
+    let recoverability = RecoverabilityContract::embedded()?;
     ContentRef::new(
         recoverability
             .schema_id(COMPONENT_OBJECT_EVIDENCE_CONTRACT_SCHEMA)?
@@ -77,13 +77,13 @@ impl RetainedValueContract {
 
     /// Strictly decodes exact canonical JSON under the frozen annex.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-        let validated = RecoverabilityContractV3::embedded()?
+        let validated = RecoverabilityContract::embedded()?
             .strict_decode(RETAINED_VALUE_CONTRACT_SCHEMA, bytes)?;
         Self::from_validated(validated)
     }
 
     /// Reconstructs this contract from exact annex-validated authority.
-    pub fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    pub fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         if validated.schema_contract() != RETAINED_VALUE_CONTRACT_SCHEMA {
             return Err(ValueError::RetainedValueContract);
         }
@@ -123,11 +123,11 @@ impl RetainedValueContract {
     }
 
     /// Returns exact annex-validated authority for canonical embedding.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         let json = serde_json::to_string(self).map_err(|_| ValueError::RetainedValueContract)?;
         let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
             .map_err(|_| ValueError::RetainedValueContract)?;
-        RecoverabilityContractV3::embedded()?
+        RecoverabilityContract::embedded()?
             .strict_decode(RETAINED_VALUE_CONTRACT_SCHEMA, canonical.as_bytes())
             .map_err(Into::into)
     }

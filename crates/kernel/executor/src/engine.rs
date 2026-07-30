@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
-use mfm_canonical::ValidatedCanonicalValueV3;
+use mfm_canonical::ValidatedCanonicalValue;
 use mfm_capabilities::{
     BoundaryStage, FailureClass, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
     NonDomainFailureCode,
@@ -1260,7 +1260,7 @@ where
         &self,
         identity: &EffectIdentity,
         resource_key_ref: &ResourceKeyRef,
-        resource_key_value: &ValidatedCanonicalValueV3,
+        resource_key_value: &ValidatedCanonicalValue,
         policy: &Policy,
         request: &Policy::Request,
         allocation_record: &ResourceLedgerRecord,

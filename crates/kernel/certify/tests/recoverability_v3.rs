@@ -1,7 +1,7 @@
 #[path = "../../../../tests/support/recoverability_v3.rs"]
 mod recoverability_v3_support;
 
-use mfm_canonical::RecoverabilityContractV3;
+use mfm_canonical::RecoverabilityContract;
 use mfm_spec::{CanonicalExpansionPath, CanonicalExpansionStep};
 use recoverability_v3_support::{
     assert_lower_layer_owner_vector, for_each_vector, hex_field, run_consumer, string,
@@ -69,7 +69,7 @@ fn assert_certify_owner_vector(owner: OwnerVector<'_>) {
 
 #[test]
 fn correction_identity_is_a_private_conformance_fixture_only() {
-    let contract = RecoverabilityContractV3::embedded().expect("embedded annex");
+    let contract = RecoverabilityContract::embedded().expect("embedded annex");
     let mut matched = 0;
     for_each_vector(|vector| {
         let CorpusVector::Positive(value) = vector else {

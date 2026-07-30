@@ -8,7 +8,7 @@ use std::sync::Arc;
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_executor::{RequiredPlanExpansion, VerifiedExecutorBinding};
 use mfm_ids::{ContentRef, EntryPointId, FieldPath, FieldSegment, StableAuthorKey, StableId};
-use mfm_journal::v2::{
+use mfm_journal::{
     ConfiguredValueBinding, ConfiguredValueKey, FactSelectionScanContract, ReadCapabilityBinding,
     ValueRef,
 };
@@ -3895,7 +3895,7 @@ fn is_reserved_fact_selection_binding(
 
 struct QualifiedReservedFactSelectionContract {
     capability_contract_ref: ContentRef,
-    contract: mfm_journal::v2::FactSelectionScanContractFields,
+    contract: mfm_journal::FactSelectionScanContractFields,
 }
 
 fn reserved_fact_selection_contract(

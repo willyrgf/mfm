@@ -1,7 +1,7 @@
 //! Deterministic EVM-only portfolio snapshot graph authoring.
 
 use mfm_ids::{ContentRef, FieldPath, StableId};
-use mfm_journal::v2::ValueRef;
+use mfm_journal::ValueRef;
 use mfm_program::{AuthoredHandle, AuthoredProgramBuilder, Operation, StateBindings};
 use mfm_program_derive::MfmValue;
 use mfm_spec::{

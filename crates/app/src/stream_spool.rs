@@ -155,7 +155,7 @@ mod tests {
     use std::sync::Arc;
     use std::task::{Context, Poll};
 
-    use mfm_canonical::RecoverabilityContractV3;
+    use mfm_canonical::RecoverabilityContract;
     use mfm_ids::ContentRef;
     use static_assertions::assert_not_impl_any;
     use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
@@ -201,7 +201,7 @@ mod tests {
     }
 
     fn input(reader: ExportAsyncReader) -> ExportStreamInput {
-        let contract = RecoverabilityContractV3::embedded().expect("recoverability contract");
+        let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         let content_ref = ContentRef::new(
             contract
                 .schema_id("mfm.portable-run-export-stream.v2")

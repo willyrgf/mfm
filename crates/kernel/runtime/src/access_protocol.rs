@@ -136,7 +136,7 @@ impl<K: AccessKind, LogicalIdentity, PhysicalIdentity>
 pub(crate) struct CommittedObservation<
     K: AccessKind,
     T,
-    ObservationRef = mfm_journal::v2::ObservationRef,
+    ObservationRef = mfm_journal::ObservationRef,
 > {
     observation_ref: ObservationRef,
     outcome: T,

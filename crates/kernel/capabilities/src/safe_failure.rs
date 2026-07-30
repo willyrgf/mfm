@@ -742,7 +742,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
+    use mfm_canonical::{CanonicalValue, RecoverabilityContract};
     use mfm_ids::{DigestBytes, SchemaVersion, SemanticTypeId};
     use mfm_values::{FieldDescriptor, SchemaShape};
 
@@ -777,7 +777,7 @@ mod tests {
     }
 
     fn reviewed_ref() -> ContentRef {
-        let contract = RecoverabilityContractV3::embedded().expect("contract");
+        let contract = RecoverabilityContract::embedded().expect("contract");
         let value = contract
             .encode(
                 "mfm.primitive-stable_id.v1",

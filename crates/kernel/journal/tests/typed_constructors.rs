@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContractV3};
-use mfm_journal::v2::*;
+use mfm_canonical::{CanonicalValue, RecoverabilityContract};
+use mfm_journal::*;
 use mfm_values::component_object_evidence_contract_ref;
 use serde_json::Value;
 
@@ -363,11 +363,11 @@ fn journal_runtime_retained_contract_factories_are_exact_and_deterministic() {
         schema_contract: &'static str,
         semantic_type_id: &'static str,
         role: &'static str,
-        factory: fn() -> mfm_journal::v2::Result<RetainedValueContract>,
+        factory: fn() -> mfm_journal::Result<RetainedValueContract>,
     }
 
     let recoverability =
-        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+        RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let evidence_ref =
         component_object_evidence_contract_ref().expect("component object evidence ref");
     let cases = [

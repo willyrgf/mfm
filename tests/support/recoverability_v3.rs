@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3, RecoverabilityErrorCode,
+    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract, RecoverabilityErrorCode,
 };
 use serde_json::Value;
 
@@ -113,7 +113,7 @@ pub fn for_each_vector(mut visit: impl FnMut(CorpusVector<'_>)) {
 /// relational vector and every relational rejection. It must assert the
 /// consumer-owned invariant or rejection; returning means that vector passed.
 pub fn run_consumer(consumer: &str, mut execute_owner_vector: impl FnMut(OwnerVector<'_>)) {
-    let contract = RecoverabilityContractV3::embedded().expect("embedded recoverability annex");
+    let contract = RecoverabilityContract::embedded().expect("embedded recoverability annex");
     assert_artifact_bindings(contract);
     let corpus = corpus();
     assert_eq!(string(&corpus, "contract"), "mfm.recoverability-corpus.v3");
@@ -225,7 +225,7 @@ fn assert_corpus_vector(vector: CorpusVector<'_>) {
 /// Higher-layer owners should call this from their mandatory callback and then
 /// assert their own storage, replay, authority, or runtime invariant.
 pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
-    let contract = RecoverabilityContractV3::embedded().expect("embedded recoverability annex");
+    let contract = RecoverabilityContract::embedded().expect("embedded recoverability annex");
     let vector = owner.vector();
     let id = owner.id();
     match owner {
@@ -609,7 +609,7 @@ fn assert_read_verdict_metadata(vector: &Value, id: &str) {
     );
 }
 
-fn assert_typed_failure(contract: &RecoverabilityContractV3, vector: &Value, id: &str) {
+fn assert_typed_failure(contract: &RecoverabilityContract, vector: &Value, id: &str) {
     let schema_id = string(vector, "expected_typed_failure_schema_id");
     let parts = schema_id.split(':').collect::<Vec<_>>();
     assert_eq!(parts.len(), 5, "typed failure schema id");
@@ -644,7 +644,7 @@ fn canonical_json_value(value: &Value) -> Vec<u8> {
         .to_vec()
 }
 
-fn assert_artifact_bindings(contract: &RecoverabilityContractV3) {
+fn assert_artifact_bindings(contract: &RecoverabilityContract) {
     assert_eq!(ANNEX_BYTES.len(), ANNEX_BYTE_LENGTH);
     assert_eq!(CORPUS_BYTES.len(), CORPUS_BYTE_LENGTH);
     assert_eq!(
@@ -656,8 +656,7 @@ fn assert_artifact_bindings(contract: &RecoverabilityContractV3) {
         CORPUS_SHA256_HEX
     );
     assert_eq!(contract.annex_bytes(), ANNEX_BYTES);
-    RecoverabilityContractV3::validate_annex_candidate(ANNEX_BYTES)
-        .expect("frozen annex candidate");
+    RecoverabilityContract::validate_annex_candidate(ANNEX_BYTES).expect("frozen annex candidate");
     PlainCanonicalJsonBytes::from_canonical_json_slice(ANNEX_BYTES)
         .expect("canonical frozen annex");
     PlainCanonicalJsonBytes::from_canonical_json_slice(CORPUS_BYTES)
@@ -670,7 +669,7 @@ fn assert_artifact_bindings(contract: &RecoverabilityContractV3) {
     );
 }
 
-fn execute_positive(contract: &RecoverabilityContractV3, vector: &Value) {
+fn execute_positive(contract: &RecoverabilityContract, vector: &Value) {
     let id = string(vector, "id");
     match string(vector, "kind") {
         "schema_acceptance" => {
@@ -792,9 +791,9 @@ fn execute_positive(contract: &RecoverabilityContractV3, vector: &Value) {
 }
 
 fn derive_frozen_domain_identity(
-    contract: &RecoverabilityContractV3,
+    contract: &RecoverabilityContract,
     domain: &str,
-    value: &mfm_canonical::ValidatedCanonicalValueV3,
+    value: &mfm_canonical::ValidatedCanonicalValue,
 ) -> String {
     macro_rules! derive {
         ($method:ident) => {
@@ -851,17 +850,17 @@ fn derive_frozen_domain_identity(
 }
 
 fn execute_codec_rejection(
-    contract: &RecoverabilityContractV3,
+    contract: &RecoverabilityContract,
     vector: &Value,
     known_domain: &Value,
-    known_preimage: &mfm_canonical::ValidatedCanonicalValueV3,
-    known_content: &mfm_canonical::ValidatedCanonicalValueV3,
+    known_preimage: &mfm_canonical::ValidatedCanonicalValue,
+    known_content: &mfm_canonical::ValidatedCanonicalValue,
 ) {
     let id = string(vector, "id");
     let expected = error_code(string(vector, "expected_error"));
     let input = hex_field(vector, "input_hex");
     let result = match id {
-        "codec/invalid-annex" => RecoverabilityContractV3::validate_annex_candidate(&input),
+        "codec/invalid-annex" => RecoverabilityContract::validate_annex_candidate(&input),
         "codec/schema-mismatch/cross-run-source-redaction" => contract
             .strict_decode(string(vector, "target"), &input)
             .and_then(|value| {

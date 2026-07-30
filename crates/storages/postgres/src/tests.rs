@@ -3,14 +3,14 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV3,
+    sha256_digest_bytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContract,
 };
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, GenesisDigest,
     InvocationIdentity, RunId, RunSemanticStateDigest, SemanticTypeId, SpecHash, StableId,
     StoreScopeId, TenantScopeId,
 };
-use mfm_journal::v2::{
+use mfm_journal::{
     ArtifactIdPreimage, BatchPurpose, ConfiguredValueBinding, ConfiguredValueKey,
     JournalPredecessor, ObjectEvidencePreimage, ProducerBinding, RecordLogicalKey, RunAdmitted,
     RunAdmittedFields, RunJournalRecord, RunJournalRecordFields, TenantFactCoordinateFields,
@@ -21,11 +21,11 @@ use mfm_runtime::{
     AdmissionDisposition, AuthorizedAdmissionPlan, DriveOutcome, DriveWaitReason, Runtime,
     RuntimeError,
 };
-use mfm_spec::v1::RetainedValueContract;
-use mfm_store::v2::test_support::{
+use mfm_spec::RetainedValueContract;
+use mfm_store::test_support::{
     FactScanConformanceFixture, LegalAdmissionFixture, PreparedLegalAdmission,
 };
-use mfm_store::v2::{
+use mfm_store::{
     open_in_memory, AdmissionMaterial, AppendOutcome, ExistingRunAppendMaterial,
     FactSelectionAuthorizationOutcome, NewlyAppended, ObjectGraphProposal, ProducedObjectRoot,
     ProducedOutputSlot, ProposedAdmissionInput, QualifiedRunStore, QualifiedSupportGraph,
@@ -1656,7 +1656,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
     let output = PlainCanonicalJsonBytes::from_json_str(r#"{"value":43}"#)
         .expect("canonical genuine output");
     let output_schema_id = output_contract.schema_id().clone();
-    let output_digest = RecoverabilityContractV3::embedded()
+    let output_digest = RecoverabilityContract::embedded()
         .expect("embedded recoverability contract")
         .raw_content_digest(output.as_bytes());
     let successor_append_request_id =
@@ -3196,7 +3196,7 @@ fn semantic_type(label: &str) -> SemanticTypeId {
 
 fn retained_contract(label: &str) -> RetainedValueContract {
     let recoverability =
-        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+        RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let evidence = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",
@@ -3220,7 +3220,7 @@ fn retained_contract(label: &str) -> RetainedValueContract {
 
 fn versioned_retained_contract() -> RetainedValueContract {
     let recoverability =
-        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+        RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let evidence = recoverability
         .encode(
             "mfm.executor-reference-failure-code.v2",
@@ -3330,7 +3330,7 @@ fn derive_value_ref(
     bytes: &[u8],
 ) -> ValueRef {
     let recoverability =
-        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+        RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),
@@ -3369,7 +3369,7 @@ fn derive_value_ref(
 
 fn admission_reference() -> ContentRef {
     let recoverability =
-        RecoverabilityContractV3::embedded().expect("embedded recoverability contract");
+        RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let value = recoverability
         .encode(
             "mfm.primitive-stable_id.v1",

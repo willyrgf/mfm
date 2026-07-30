@@ -1,4 +1,4 @@
-use mfm_store::v2::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
+use mfm_store::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
 
 /// Error returned by the qualified PostgreSQL journal store.
 #[derive(Debug, thiserror::Error)]
@@ -84,15 +84,15 @@ impl StoreErrorInspection for PostgresStoreError {
     }
 }
 
-impl From<mfm_journal::v2::JournalError> for PostgresStoreError {
-    fn from(error: mfm_journal::v2::JournalError) -> Self {
+impl From<mfm_journal::JournalError> for PostgresStoreError {
+    fn from(error: mfm_journal::JournalError) -> Self {
         Self::from(StoreError::from(error))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use mfm_store::v2::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
+    use mfm_store::{FactScanFailureProvenance, StoreError, StoreErrorInspection};
 
     use super::PostgresStoreError;
 

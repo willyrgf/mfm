@@ -1,6 +1,6 @@
 //! Pure dependency-source resolution for exact input materialization.
 
-use mfm_journal::v2::NodePhase;
+use mfm_journal::NodePhase;
 use mfm_spec::{CertifiedNodeContract, CertifiedSourceSelector};
 use mfm_store::VerifiedRunView;
 

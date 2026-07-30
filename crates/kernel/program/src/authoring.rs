@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 
 use mfm_ids::{ContentRef, FieldPath, StableId};
-use mfm_journal::v2::ValueRef;
+use mfm_journal::ValueRef;
 use mfm_spec::{
     AuthoredBaseKind, AuthoredInputBinding, AuthoredNode, AuthoredPublicOutputBinding,
     AuthoredSourceSelector, CanonicalAuthoredProgram,

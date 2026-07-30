@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 
 use mfm_canonical::{
-    sha256_digest_bytes, CanonicalValue, RecoverabilityContractV3, ValidatedCanonicalValueV3,
+    sha256_digest_bytes, CanonicalValue, RecoverabilityContract, ValidatedCanonicalValue,
 };
 use mfm_executor::{
     reference_safe_failure, verify_ensure_result, AccountSequencePolicy, AccountSequenceRequest,
@@ -324,8 +324,8 @@ struct BindingFixture {
     destination_domain_ref: ContentRef,
 }
 
-fn contract() -> &'static RecoverabilityContractV3 {
-    RecoverabilityContractV3::embedded().expect("embedded contract")
+fn contract() -> &'static RecoverabilityContract {
+    RecoverabilityContract::embedded().expect("embedded contract")
 }
 
 fn reviewed_ref(label: &str) -> ContentRef {
@@ -3231,7 +3231,7 @@ fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
     }
 }
 
-fn payload_value_ref(role: &str) -> ValidatedCanonicalValueV3 {
+fn payload_value_ref(role: &str) -> ValidatedCanonicalValue {
     let corpus: serde_json::Value = serde_json::from_str(CORPUS).expect("corpus");
     let vector = corpus["positive_vectors"]
         .as_array()

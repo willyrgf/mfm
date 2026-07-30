@@ -93,7 +93,7 @@ fn parses_and_rejects_base64url_bytes() {
 
 #[test]
 fn incremental_raw_content_hashing_matches_the_one_shot_contract() {
-    let contract = mfm_canonical::RecoverabilityContractV3::embedded()
+    let contract = mfm_canonical::RecoverabilityContract::embedded()
         .expect("embedded recoverability contract");
     let fixture = b"portable export stream digest fixture";
 

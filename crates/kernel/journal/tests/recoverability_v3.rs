@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use mfm_canonical::CanonicalValue;
 use mfm_facts::FactSelectionRequest;
 use mfm_ids::{FactQueryDigest, JournalRecordHash};
-use mfm_journal::v2::*;
+use mfm_journal::*;
 use serde_json::Value;
 
 const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/corpus.json");
@@ -43,8 +43,7 @@ fn decode_retained_value_contract(bytes: &[u8]) -> Result<Decoded> {
     let validated = decoded.validated()?;
     let canonical = validated.as_bytes().to_vec();
     let schema_id = validated.schema_id().as_str().to_owned();
-    let content_ref =
-        mfm_canonical::RecoverabilityContractV3::embedded()?.content_ref(&validated)?;
+    let content_ref = mfm_canonical::RecoverabilityContract::embedded()?.content_ref(&validated)?;
     assert_eq!(content_ref.schema_id().as_str(), schema_id);
 
     let round_trip = RetainedValueContract::from_validated(validated)?;
@@ -1147,16 +1146,16 @@ fn wrong_schema_unknown_fields_and_legacy_records_fail_closed() {
 #[test]
 fn source_and_manifest_contain_no_legacy_event_api() {
     let source = [
-        include_str!("../src/v2/mod.rs"),
-        include_str!("../src/v2/access.rs"),
-        include_str!("../src/v2/codec.rs"),
-        include_str!("../src/v2/commit.rs"),
-        include_str!("../src/v2/fact.rs"),
-        include_str!("../src/v2/input.rs"),
-        include_str!("../src/v2/object.rs"),
-        include_str!("../src/v2/record.rs"),
-        include_str!("../src/v2/refs.rs"),
-        include_str!("../src/v2/transition.rs"),
+        include_str!("../src/lib.rs"),
+        include_str!("../src/access.rs"),
+        include_str!("../src/codec.rs"),
+        include_str!("../src/commit.rs"),
+        include_str!("../src/fact.rs"),
+        include_str!("../src/input.rs"),
+        include_str!("../src/object.rs"),
+        include_str!("../src/record.rs"),
+        include_str!("../src/refs.rs"),
+        include_str!("../src/transition.rs"),
         include_str!("../Cargo.toml"),
     ]
     .join("\n");

@@ -8,7 +8,7 @@ use mfm_executor::{
     CanonicalExecutorRequest, CommittedEffectRequest, EffectExecutorOutcome, ExecutorFuture,
 };
 use mfm_ids::ContentRef;
-use mfm_journal::v2::ValueRef;
+use mfm_journal::ValueRef;
 use mfm_store::SafeFailureMetadata;
 
 enum ReadAccess {}

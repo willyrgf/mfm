@@ -258,14 +258,14 @@ frozen schema and golden vectors, or satisfy the deployment-specific rollout gat
   [portfolio graph tests](../crates/domains/portfolio/src/operation_tests.rs) cover the exact
   planner contract and references, deterministic authored paths, validator-owned admitted roots,
   fan-out/fan-in edges, public outputs, and required terminal shapes for `P-TC-04` and `P-TC-05`.
-- The current [sealed append contract](../crates/kernel/store/src/v2/append.rs),
-  [observation-verification tests](../crates/kernel/store/src/v2/observation_verification_tests.rs),
+- The current [sealed append contract](../crates/kernel/store/src/append.rs),
+  [observation-verification tests](../crates/kernel/store/src/observation_verification_tests.rs),
   and [memory conformance target](../crates/kernel/store/tests/memory_conformance.rs) cover the
   frozen store vectors, exact retained-object and authorization/observation relations,
   positive-only live authority, purpose-bound access, closure, and replay rejection for
   `P-AR-01`, `P-ST-03`, `P-ST-05`–`P-ST-08`, and `P-ACL-02`.
 - Production
-  [fact-scan core tests](../crates/kernel/store/src/v2/fact_scan_tests.rs) exercise the exact
+  [fact-scan core tests](../crates/kernel/store/src/fact_scan_tests.rs) exercise the exact
   4,096-publication and 8,192-emission step boundaries, including 4,097 single-fact publications,
   4,096 two-fact publications, and 4,097 three-fact publications whose first page continues within
   publication 2,731 at ordinal two. They verify explicit terminal state at `u64::MAX`,
@@ -273,7 +273,7 @@ frozen schema and golden vectors, or satisfy the deployment-specific rollout gat
   logical ranges, selected-source closure rejection, and private restart behavior for `P-HB-03`,
   `P-FA-02`, `P-TC-09`, and `P-ACL-03`.
   The shared
-  [genuine scan workflow](../crates/kernel/store/src/v2/test_support/fact_scan.rs) runs against
+  [genuine scan workflow](../crates/kernel/store/src/test_support/fact_scan.rs) runs against
   memory and the
   [managed PostgreSQL store](../crates/storages/postgres/src/tests.rs): one three-fact publication
   crosses a two-emission page, an abandoned authorization writes no attestation, a fresh

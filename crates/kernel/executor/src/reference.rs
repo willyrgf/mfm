@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValue};
 use mfm_capabilities::{
     BoundaryStage, FailureClass, NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure,
     NonDomainFailureCode,
@@ -36,7 +36,7 @@ const MAX_DESTINATION_ITEMS: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReferenceRequest {
     external_operation_identity: String,
-    payload_ref: ValidatedCanonicalValueV3,
+    payload_ref: ValidatedCanonicalValue,
     canonical: SchemaQualifiedCanonicalValue,
 }
 
@@ -45,7 +45,7 @@ impl ReferenceRequest {
     /// object.
     pub fn new(
         external_operation_identity: impl Into<String>,
-        payload_ref: ValidatedCanonicalValueV3,
+        payload_ref: ValidatedCanonicalValue,
     ) -> Result<Self> {
         if payload_ref.schema_contract() != VALUE_REF_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
@@ -79,7 +79,7 @@ impl ReferenceRequest {
     }
 
     /// Strictly reconstructs a request from the exact frozen queue schema.
-    pub fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    pub fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         if validated.schema_contract() != REFERENCE_REQUEST_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
         }
@@ -112,7 +112,7 @@ impl ReferenceRequest {
     }
 
     /// Returns the complete producer-bound payload reference.
-    pub const fn payload_ref(&self) -> &ValidatedCanonicalValueV3 {
+    pub const fn payload_ref(&self) -> &ValidatedCanonicalValue {
         &self.payload_ref
     }
 }
@@ -237,7 +237,7 @@ pub enum ReferenceTargetBehavior {
 /// One destination call's unbound outcome plus any exact safe queue-result object.
 pub struct ReferenceDestinationReturn {
     outcome: DeliveryAttemptOutcome,
-    safe_result: Option<ValidatedCanonicalValueV3>,
+    safe_result: Option<ValidatedCanonicalValue>,
 }
 
 impl ReferenceDestinationReturn {
@@ -247,7 +247,7 @@ impl ReferenceDestinationReturn {
     }
 
     /// Returns the exact safe queue result when one survived.
-    pub const fn safe_result(&self) -> Option<&ValidatedCanonicalValueV3> {
+    pub const fn safe_result(&self) -> Option<&ValidatedCanonicalValue> {
         self.safe_result.as_ref()
     }
 
@@ -523,7 +523,7 @@ impl MemoryConvergentDestination {
         request: &ReferenceRequest,
         contract: &ReferenceContract,
         behavior: ReferenceTargetBehavior,
-    ) -> Result<(DeliveryAttemptOutcome, Option<ValidatedCanonicalValueV3>)> {
+    ) -> Result<(DeliveryAttemptOutcome, Option<ValidatedCanonicalValue>)> {
         if authority.target_operation_ref() != contract.enqueue_operation_ref() {
             return Err(ExecutorError::TargetOperationMismatch);
         }
@@ -919,10 +919,7 @@ fn returned_observation_ref(
         .ok_or(ExecutorError::TerminalProofMismatch)
 }
 
-fn enqueued_result(
-    destination_key: &str,
-    queue_position: u64,
-) -> Result<ValidatedCanonicalValueV3> {
+fn enqueued_result(destination_key: &str, queue_position: u64) -> Result<ValidatedCanonicalValue> {
     encode(
         REFERENCE_RESULT_SCHEMA,
         &canonical_object([
@@ -939,7 +936,7 @@ fn enqueued_result(
     )
 }
 
-fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalValueV3> {
+fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalValue> {
     encode(
         REFERENCE_RESULT_SCHEMA,
         &canonical_object([
@@ -957,7 +954,7 @@ fn already_enqueued_result(destination_key: &str) -> Result<ValidatedCanonicalVa
 
 fn request_conflict_result(
     failure: &crate::ReferenceSafeFailure,
-) -> Result<ValidatedCanonicalValueV3> {
+) -> Result<ValidatedCanonicalValue> {
     let outcome = DeliveryAttemptOutcome::indeterminate(failure.clone())?;
     let failure = outcome
         .indeterminate_failure()

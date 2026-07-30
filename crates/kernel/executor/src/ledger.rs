@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValue};
 use mfm_ids::{AttemptId, ContentRef, EffectKey, TenantScopeId};
 
 use crate::codec::{Decoder, Encoder};
@@ -32,9 +32,9 @@ const MAX_SNAPSHOT_ITEMS: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceAllocationEvidence {
     resource_key_ref: ResourceKeyRef,
-    resource_key_value: ValidatedCanonicalValueV3,
+    resource_key_value: ValidatedCanonicalValue,
     typed_allocation_state_ref: AllocationStateRef,
-    typed_allocation_state: ValidatedCanonicalValueV3,
+    typed_allocation_state: ValidatedCanonicalValue,
     policy_binding: ResourcePolicyBinding,
     fencing_ref: Option<FencingRef>,
 }
@@ -46,7 +46,7 @@ impl ResourceAllocationEvidence {
     }
 
     /// Returns the exact annex-validated resource-key object.
-    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV3 {
+    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValue {
         &self.resource_key_value
     }
 
@@ -56,7 +56,7 @@ impl ResourceAllocationEvidence {
     }
 
     /// Returns the exact annex-validated allocation state.
-    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV3 {
+    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValue {
         &self.typed_allocation_state
     }
 
@@ -99,11 +99,11 @@ pub enum AllocationOutcome<Allocation> {
 pub struct ResourceLedgerRecord {
     pub(crate) resource_ownership_ref: ResourceOwnershipRef,
     pub(crate) resource_key_ref: ResourceKeyRef,
-    pub(crate) resource_key_value: ValidatedCanonicalValueV3,
+    pub(crate) resource_key_value: ValidatedCanonicalValue,
     pub(crate) predecessor: Option<ResourceLedgerRecordRef>,
     pub(crate) effect_key: EffectKey,
     pub(crate) typed_allocation_state_ref: AllocationStateRef,
-    pub(crate) typed_allocation_state: ValidatedCanonicalValueV3,
+    pub(crate) typed_allocation_state: ValidatedCanonicalValue,
     pub(crate) policy_binding: ResourcePolicyBinding,
     pub(crate) fencing_ref: Option<FencingRef>,
 }
@@ -120,7 +120,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated resource-key object.
-    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValueV3 {
+    pub const fn resource_key_value(&self) -> &ValidatedCanonicalValue {
         &self.resource_key_value
     }
 
@@ -140,7 +140,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated allocation state.
-    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValueV3 {
+    pub const fn typed_allocation_state(&self) -> &ValidatedCanonicalValue {
         &self.typed_allocation_state
     }
 
@@ -155,7 +155,7 @@ impl ResourceLedgerRecord {
     }
 
     /// Returns the exact annex-validated resource-ledger record.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         let value = if self.predecessor.is_none() {
             let mut allocated = vec![
                 (

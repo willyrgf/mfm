@@ -1,13 +1,13 @@
 use std::pin::Pin;
 
 use mfm_canonical::{
-    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV3,
-    ValidatedCanonicalValueV3,
+    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContract,
+    ValidatedCanonicalValue,
 };
 use mfm_ids::{ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId};
-use mfm_journal::v2::JournalHead;
+use mfm_journal::JournalHead;
 pub use mfm_replay::trace_export::{ExportKind, PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE};
-pub use mfm_replay::v2::{
+pub use mfm_replay::{
     AccessAuditEntry, CanonicalReplayResult as ReplayResponse, CanonicalTransitionTrace,
 };
 pub use mfm_spec::{EntryPointContract, PlanningProfile};
@@ -34,8 +34,8 @@ pub const DEFAULT_PAGE_LIMIT: u16 = 100;
 /// Maximum number of entries returned by trace and audit inspection.
 pub const MAX_PAGE_LIMIT: u16 = 500;
 
-fn recoverability_contract() -> Result<&'static RecoverabilityContractV3, PublicError> {
-    RecoverabilityContractV3::embedded().map_err(|_| {
+fn recoverability_contract() -> Result<&'static RecoverabilityContract, PublicError> {
+    RecoverabilityContract::embedded().map_err(|_| {
         PublicError::internal(
             "RecoverabilityContractUnavailable",
             "The recoverability contract is unavailable",
@@ -61,7 +61,7 @@ fn checked_value(
     value: CanonicalValue,
     code: &'static str,
     message: &'static str,
-) -> Result<ValidatedCanonicalValueV3, PublicError> {
+) -> Result<ValidatedCanonicalValue, PublicError> {
     recoverability_contract()?
         .encode(contract, &value)
         .map_err(|_| invalid_request(code, message))
@@ -144,9 +144,9 @@ pub(crate) fn decode_access_audit_page_request(
 pub(crate) fn decode_transition_trace_page_request(
     run_id: &RunId,
     request: &PageRequest,
-) -> Result<mfm_store::v2::TransitionTracePageRequest, PublicError> {
+) -> Result<mfm_store::TransitionTracePageRequest, PublicError> {
     let position = decode_inspection_page_request(run_id, request, InspectionPurpose::Trace)?;
-    mfm_store::v2::TransitionTracePageRequest::new(
+    mfm_store::TransitionTracePageRequest::new(
         position.complete_as_of_journal_head,
         position.start,
         position.limit,
@@ -207,7 +207,7 @@ impl TransitionTracePage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_transition_trace_page(
-    page: mfm_replay::v2::TransitionTracePage,
+    page: mfm_replay::TransitionTracePage,
 ) -> Result<TransitionTracePage, PublicError> {
     let (run_id, at_journal_head, transitions, has_more, next_index) = page.into_parts();
     let next_cursor = match (has_more, next_index) {
@@ -261,7 +261,7 @@ impl AccessAuditPage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_access_audit_page(
-    page: mfm_replay::v2::AccessAuditPage,
+    page: mfm_replay::AccessAuditPage,
 ) -> Result<AccessAuditPage, PublicError> {
     let (run_id, complete_as_of_journal_head, entries, has_more, next_index) = page.into_parts();
     let next_cursor = match (has_more, next_index) {
@@ -429,7 +429,7 @@ fn page_cursor_encoding_failed() -> PublicError {
 /// and invalid checked identities before authorization.
 #[derive(Clone)]
 pub struct AdmitRunRequest {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
     entry_point_id: EntryPointId,
     invocation_identity: InvocationIdentity,
     input: mfm_spec::CanonicalJsonValue,
@@ -616,7 +616,7 @@ macro_rules! canonical_response {
         #[doc = $description]
         #[derive(Clone, PartialEq, Eq)]
         pub struct $name {
-            validated: ValidatedCanonicalValueV3,
+            validated: ValidatedCanonicalValue,
         }
 
         impl $name {
@@ -677,7 +677,7 @@ canonical_response!(
 
 impl PublicRunView {
     pub(crate) fn from_verified(
-        verified: mfm_store::v2::VerifiedPublicRunView,
+        verified: mfm_store::VerifiedPublicRunView,
     ) -> Result<Self, PublicError> {
         let validated = verified.into_validated();
         if validated.schema_contract() != PUBLIC_RUN_VIEW_CONTRACT {
@@ -808,7 +808,7 @@ impl DriveResponse {
     }
 }
 
-fn journal_value_error(_error: mfm_journal::v2::JournalError) -> PublicError {
+fn journal_value_error(_error: mfm_journal::JournalError) -> PublicError {
     PublicError::internal(
         "CanonicalResponseConstructionFailed",
         "A canonical response could not be constructed",
@@ -1029,9 +1029,9 @@ impl std::fmt::Debug for ExportedRun {
 #[cfg(test)]
 mod tests {
     use mfm_ids::JournalCommitDigest;
-    use mfm_journal::v2::JournalHead;
-    use mfm_store::v2::test_support::LegalAdmissionFixture;
-    use mfm_store::v2::{open_in_memory, AppendOutcome, NewlyAppended};
+    use mfm_journal::JournalHead;
+    use mfm_store::test_support::LegalAdmissionFixture;
+    use mfm_store::{open_in_memory, AppendOutcome, NewlyAppended};
     use serde::Deserialize;
     use static_assertions::assert_not_impl_any;
 
@@ -1039,7 +1039,7 @@ mod tests {
         decode_access_audit_page_request, decode_transition_trace_page_request,
         encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse, ContentRef,
         DriveResponse, ExportStreamInput, ExportedRun, InspectionPurpose, PageRequest,
-        PublicRunView, RecoverabilityContractV3, ReplayMode, ReplayRequest, RunId,
+        PublicRunView, RecoverabilityContract, ReplayMode, ReplayRequest, RunId,
         DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX, MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
     };
 
@@ -1260,7 +1260,7 @@ mod tests {
 
     #[test]
     fn portable_replay_input_binds_an_unpolled_affine_reader() {
-        let contract = RecoverabilityContractV3::embedded().expect("annex");
+        let contract = RecoverabilityContract::embedded().expect("annex");
         let content_ref = ContentRef::new(
             contract
                 .schema_id("mfm.portable-run-export-stream.v2")

@@ -14,7 +14,7 @@ pub enum RuntimeError {
     StoreBackendUnavailable,
     /// Frozen journal construction or projection failed.
     #[error(transparent)]
-    Journal(#[from] mfm_journal::v2::JournalError),
+    Journal(#[from] mfm_journal::JournalError),
     /// A checked runtime-owned stable identity could not be derived.
     #[error(transparent)]
     Identity(#[from] mfm_ids::IdentityError),
@@ -60,11 +60,11 @@ pub enum RuntimeError {
 }
 
 pub(crate) fn non_domain_failure(
-    entry_status: mfm_journal::v2::NonDomainEntryStatus,
-    disposition: mfm_journal::v2::NonDomainDisposition,
-    code: mfm_journal::v2::NonDomainFailureCode,
-) -> Result<mfm_journal::v2::NonDomainFailure> {
-    mfm_journal::v2::NonDomainFailure::new(entry_status, disposition, code)
+    entry_status: mfm_journal::NonDomainEntryStatus,
+    disposition: mfm_journal::NonDomainDisposition,
+    code: mfm_journal::NonDomainFailureCode,
+) -> Result<mfm_journal::NonDomainFailure> {
+    mfm_journal::NonDomainFailure::new(entry_status, disposition, code)
         .map_err(|_| RuntimeError::InvalidCallbackResult)
 }
 

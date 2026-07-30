@@ -528,7 +528,7 @@ mod tests {
         let sidecar = directory.path().join("run.export.ref");
         let bytes = b"\x1e{\"kind\":\"end\"}\n".to_vec();
         let contract =
-            mfm_canonical::RecoverabilityContractV3::embedded().expect("recoverability contract");
+            mfm_canonical::RecoverabilityContract::embedded().expect("recoverability contract");
         let content_ref = mfm_ids::ContentRef::new(
             contract
                 .schema_id("mfm.portable-run-export-stream.v2")

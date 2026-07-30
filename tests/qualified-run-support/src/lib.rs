@@ -8,13 +8,13 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContractV3};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_certify::CompositeCertificationFactory;
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, FieldPath, InvocationIdentity,
     ObjectEvidenceDigest, SchemaId, SemanticTypeId, StableId, TenantScopeId,
 };
-use mfm_journal::v2::{
+use mfm_journal::{
     ArtifactIdPreimage, ConfiguredValueBinding, ConfiguredValueKey, ObjectEvidencePreimage,
     ProducerBinding, ValueRef,
 };
@@ -78,7 +78,7 @@ pub enum QualifiedRunFixtureError {
     Canonical(#[from] mfm_canonical::RecoverabilityError),
     /// A journal-owned value could not be constructed.
     #[error(transparent)]
-    Journal(#[from] mfm_journal::v2::JournalError),
+    Journal(#[from] mfm_journal::JournalError),
     /// A qualified program contract was invalid.
     #[error(transparent)]
     Program(#[from] ProgramError),
@@ -1256,7 +1256,7 @@ fn component_object_evidence_ref() -> Result<ContentRef, QualifiedRunFixtureErro
 }
 
 fn primitive_canonical_schema() -> Result<SchemaId, QualifiedRunFixtureError> {
-    Ok(RecoverabilityContractV3::embedded()?
+    Ok(RecoverabilityContract::embedded()?
         .schema_id("mfm.primitive-canonical_value.v1")?
         .clone())
 }
@@ -1340,7 +1340,7 @@ fn derive_value_ref(
     producer: &ProducerBinding,
     bytes: &[u8],
 ) -> Result<ValueRef, QualifiedRunFixtureError> {
-    let recoverability = RecoverabilityContractV3::embedded()?;
+    let recoverability = RecoverabilityContract::embedded()?;
     let content_digest = recoverability.raw_content_digest(bytes);
     let artifact_id = ArtifactIdPreimage::new(
         contract.schema_id(),

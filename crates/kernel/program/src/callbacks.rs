@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{ContentRef, FieldPath};
-use mfm_journal::v2::ValueRef;
+use mfm_journal::ValueRef;
 use mfm_spec::RetainedValueContract;
 use mfm_values::StateInput;
 

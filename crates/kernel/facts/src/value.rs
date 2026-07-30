@@ -1,4 +1,4 @@
-use mfm_canonical::{CanonicalValue, ValidatedCanonicalValueV3};
+use mfm_canonical::{CanonicalValue, ValidatedCanonicalValue};
 use mfm_ids::{ContentRef, SchemaId};
 
 use crate::codec;
@@ -9,7 +9,7 @@ const CANONICAL_VALUE_CONTRACT: &str = "mfm.primitive-canonical_value.v1";
 /// One bounded, float-free scalar usable as exact fact subject material.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactScalar {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
 }
 
 impl FactScalar {
@@ -67,7 +67,7 @@ impl FactScalar {
 /// Exact canonical subject material used by a fact descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSubject {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
 }
 
 impl FactSubject {
@@ -122,7 +122,7 @@ impl FactSubject {
 /// state, not a mutable or store-injected query language.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalFactPredicate {
-    validated: ValidatedCanonicalValueV3,
+    validated: ValidatedCanonicalValue,
 }
 
 impl CanonicalFactPredicate {

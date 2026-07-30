@@ -7,7 +7,7 @@ mod support;
 #[cfg(all(test, feature = "parity-tests"))]
 pub(crate) use append::run_advisory_lock_key;
 
-use mfm_store::v2::{
+use mfm_store::{
     AdmissionSourceBackend, AdmissionSourceVerifier, AdmittedSupportGraph, AppendOutcome,
     AsyncStoreFuture, CommittedRunJournal, FactAttestationLoadVerifier, FactScanBackend,
     FactScanPage, FactScanPageVerifier, JournalAppendVerifier, JournalLoadVerifier,
@@ -15,7 +15,7 @@ use mfm_store::v2::{
     StoreAuthorityContext, SupportBackend, SupportGraphAdmissionVerifier, VerifiedAdmissionSources,
 };
 #[cfg(any(test, feature = "parity-tests"))]
-use mfm_store::v2::{RunHistoryAdmissionLockTestBackend, RunHistoryCommitFailureBackend};
+use mfm_store::{RunHistoryAdmissionLockTestBackend, RunHistoryCommitFailureBackend};
 
 use crate::error::PostgresStoreError;
 use crate::store::PostgresRunJournalBackend;
@@ -23,7 +23,7 @@ use crate::store::PostgresRunJournalBackend;
 #[cfg(all(test, feature = "parity-tests"))]
 pub(crate) async fn verify_persisted_run_for_test(
     connection: &mut sqlx::PgConnection,
-    store_identity: &mfm_store::v2::StoreIdentity,
+    store_identity: &mfm_store::StoreIdentity,
     tenant_scope_id: &mfm_ids::TenantScopeId,
     run_id: &mfm_ids::RunId,
 ) -> crate::Result<()> {
@@ -107,7 +107,7 @@ impl RunHistoryCommitFailureBackend for PostgresRunJournalBackend {
     fn backend_inject_commit_failure(
         &self,
         run_id: mfm_ids::RunId,
-        batch_purpose: mfm_journal::v2::BatchPurpose,
+        batch_purpose: mfm_journal::BatchPurpose,
         point: Self::FailurePoint,
     ) -> Result<(), Self::Error> {
         self.inject_commit_failure(run_id, batch_purpose, point)
@@ -120,7 +120,7 @@ impl RunHistoryCommitFailureBackend for PostgresRunJournalBackend {
     fn backend_take_commit_failure(
         &self,
         run_id: &mfm_ids::RunId,
-        batch_purpose: mfm_journal::v2::BatchPurpose,
+        batch_purpose: mfm_journal::BatchPurpose,
     ) -> Result<Option<Self::FailurePoint>, Self::Error> {
         self.take_commit_failure(run_id, batch_purpose)
     }

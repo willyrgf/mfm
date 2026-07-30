@@ -11,11 +11,11 @@
 //! ```
 //! use mfm_program::QualifiedProgramRegistry;
 //! use mfm_replay::trace_export::VerifiedExportStream;
-//! use mfm_replay::v2::{
+//! use mfm_replay::{
 //!     compare_current, verify_recorded_history, CanonicalReplayResult, Result,
 //!     VerifiedHistoryResult,
 //! };
-//! use mfm_store::v2::{FactScanBackend, Replay, RunAccessAuthority, RunHistoryReader};
+//! use mfm_store::{FactScanBackend, Replay, RunAccessAuthority, RunHistoryReader};
 //!
 //! async fn verify<B: FactScanBackend>(
 //!     reader: &RunHistoryReader<B>,
@@ -31,9 +31,32 @@
 //!     compare_current(historical, registry)
 //! }
 //! ```
+//!
+//! Versioned Rust module aliases are deliberately absent:
+//!
+//! ```compile_fail
+//! use mfm_replay::v2::verify_recorded_history;
+//! ```
 
 /// Deterministic trace and portable-export canonicalization.
 pub mod trace_export;
 
-/// Recoverability-v3 replay and inspection contracts.
-pub mod v2;
+mod error;
+mod inspection;
+mod reproduction;
+mod service;
+
+pub(crate) use self::error::store_error;
+pub use self::error::{ReplayError, ReplayErrorKind, Result};
+pub use self::inspection::{
+    AccessAuditEntry, AccessAuditPage, CanonicalTransitionTrace, TransitionTracePage,
+};
+pub use self::reproduction::{
+    compare_current, reproduce_exact, CanonicalReplayResult, ExactReproduction,
+    ExactReproductionPlan, ReproductionFuture, ReproductionResolver, VerifiedHistoryResult,
+};
+pub use self::service::{
+    discover_transition_trace_sources, inspect_access_audit, inspect_transition_trace,
+    required_export_source_run_ids, verify_recorded_history,
+};
+pub use mfm_store::{TransitionTracePageRequest, TransitionTraceSourceRequirements};

@@ -3,8 +3,8 @@ use std::pin::Pin;
 use std::str::FromStr;
 
 use mfm_canonical::{
-    CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContractV3, RecoverabilityError,
-    ValidatedCanonicalValueV3,
+    CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContract, RecoverabilityError,
+    ValidatedCanonicalValue,
 };
 use mfm_ids::{
     ContentRef, EffectKey, NodeId, RequestDigest, RunId, SchemaId, SemanticDigest, StoreScopeId,
@@ -33,8 +33,8 @@ const STABLE_ID_SCHEMA: &str = "mfm.primitive-stable_id.v1";
 const MAX_REFERENCE_EFFECT_IDENTIFIER_BYTES: usize = 256;
 const MAX_SCHEMA_QUALIFIED_VALUE_BYTES: usize = 16 * 1024 * 1024;
 
-pub(crate) fn recoverability_contract() -> Result<&'static RecoverabilityContractV3> {
-    RecoverabilityContractV3::embedded().map_err(contract_error)
+pub(crate) fn recoverability_contract() -> Result<&'static RecoverabilityContract> {
+    RecoverabilityContract::embedded().map_err(contract_error)
 }
 
 pub(crate) fn contract_error(error: RecoverabilityError) -> ExecutorError {
@@ -44,13 +44,13 @@ pub(crate) fn contract_error(error: RecoverabilityError) -> ExecutorError {
 pub(crate) fn encode(
     schema_contract: &str,
     value: &CanonicalValue,
-) -> Result<ValidatedCanonicalValueV3> {
+) -> Result<ValidatedCanonicalValue> {
     recoverability_contract()?
         .encode(schema_contract, value)
         .map_err(contract_error)
 }
 
-pub(crate) fn content_ref(value: &ValidatedCanonicalValueV3) -> Result<ContentRef> {
+pub(crate) fn content_ref(value: &ValidatedCanonicalValue) -> Result<ContentRef> {
     recoverability_contract()?
         .content_ref(value)
         .map_err(contract_error)
@@ -58,7 +58,7 @@ pub(crate) fn content_ref(value: &ValidatedCanonicalValueV3) -> Result<ContentRe
 
 /// Exact float-free canonical JSON paired with its externally admitted schema.
 ///
-/// Unlike [`ValidatedCanonicalValueV3`], this type is not restricted to the
+/// Unlike [`ValidatedCanonicalValue`], this type is not restricted to the
 /// frozen recoverability annex. The schema identity must already have been
 /// admitted by the caller's certified contract; this value proves only exact
 /// bytes and their lightweight content identity.
@@ -84,7 +84,7 @@ impl SchemaQualifiedCanonicalValue {
     }
 
     /// Lifts one annex-validated value into the general executor value type.
-    pub fn from_validated(value: &ValidatedCanonicalValueV3) -> Result<Self> {
+    pub fn from_validated(value: &ValidatedCanonicalValue) -> Result<Self> {
         Self::new(value.schema_id().clone(), value.as_bytes())
     }
 
@@ -376,7 +376,7 @@ impl ExecutorDeployment {
     }
 
     /// Returns the exact canonical deployment object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         encode(
             EXECUTOR_DEPLOYMENT_SCHEMA,
             &canonical_object([
@@ -501,7 +501,7 @@ impl ResourceOwnership {
     }
 
     /// Returns the exact canonical ownership object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         encode(
             RESOURCE_OWNERSHIP_SCHEMA,
             &canonical_object([
@@ -574,7 +574,7 @@ impl RequiredPlanExpansion {
         &self.expansion_contract_ref
     }
 
-    fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    fn validated(&self) -> Result<ValidatedCanonicalValue> {
         encode(
             REQUIRED_PLAN_EXPANSION_SCHEMA,
             &canonical_object([
@@ -651,7 +651,7 @@ impl ExecutorRetainedClosureContract {
     }
 
     /// Reconstructs a closure contract from an annex-validated value.
-    pub fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    pub fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         if validated.schema_contract() != EXECUTOR_RETAINED_CLOSURE_CONTRACT_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
         }
@@ -700,7 +700,7 @@ impl ExecutorRetainedClosureContract {
     }
 
     /// Returns the exact canonical executor retained-closure contract.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         encode(
             EXECUTOR_RETAINED_CLOSURE_CONTRACT_SCHEMA,
             &self.canonical_value()?,
@@ -849,7 +849,7 @@ impl ExecutorContractDescriptor {
     }
 
     /// Reconstructs a descriptor from an already annex-validated value.
-    pub fn from_validated(validated: ValidatedCanonicalValueV3) -> Result<Self> {
+    pub fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
         if validated.schema_contract() != EXECUTOR_CONTRACT_DESCRIPTOR_SCHEMA {
             return Err(ExecutorError::SchemaReferenceMismatch);
         }
@@ -952,7 +952,7 @@ impl ExecutorContractDescriptor {
     }
 
     /// Returns the exact canonical descriptor object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         let expansions = self
             .required_plan_expansions
             .iter()
@@ -1091,7 +1091,7 @@ impl ExecutorBinding {
     }
 
     /// Returns the exact canonical binding object.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValueV3> {
+    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
         encode(
             EXECUTOR_BINDING_SCHEMA,
             &canonical_object([

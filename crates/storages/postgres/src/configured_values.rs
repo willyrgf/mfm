@@ -1,5 +1,5 @@
-use mfm_journal::v2::ConfiguredValueBinding;
-use mfm_store::v2::{
+use mfm_journal::ConfiguredValueBinding;
+use mfm_store::{
     AsyncStoreFuture, ConfiguredValueBackend, ConfiguredValueResolveVerifier, StoreError,
     VerifiedConfiguredValue,
 };
