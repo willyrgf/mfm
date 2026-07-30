@@ -1,4 +1,4 @@
--- MFM recoverability-v3 PostgreSQL authority.
+-- MFM recoverability-v1 PostgreSQL authority.
 --
 -- This is a destructive pre-production baseline, not an upgrade from the retired event,
 -- projection, global-order, lane, or fact-query schemas. A database carrying an earlier
@@ -60,7 +60,7 @@ CREATE TABLE store_schema_metadata (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.recoverability-postgres.v2'
+        schema_contract_version = 'mfm.recoverability-postgres.v1'
     ),
     CONSTRAINT store_schema_metadata_singleton_v1 CHECK (singleton)
 );
@@ -88,7 +88,7 @@ SELECT
 FROM identity_parts;
 
 INSERT INTO store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.recoverability-postgres.v2');
+VALUES (TRUE, 'mfm.recoverability-postgres.v1');
 
 CREATE TABLE tenant_fact_order_heads (
     tenant_scope_id TEXT PRIMARY KEY,
@@ -267,7 +267,7 @@ CREATE TABLE journal_records (
     ),
     CONSTRAINT journal_records_schema_id_v1 CHECK (
         octet_length(record_schema_id) BETWEEN 90 AND 512
-        AND record_schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:2:sha256-jcs-v1:[0-9a-f]{64}$'
+        AND record_schema_id ~ '^schema:[a-z0-9][a-z0-9._/-]*:1:sha256-jcs-v1:[0-9a-f]{64}$'
     ),
     CONSTRAINT journal_records_spec_hash_v1 CHECK (
         spec_hash ~ '^spec:sha256-jcs-v1:[0-9a-f]{64}$'

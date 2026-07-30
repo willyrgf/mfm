@@ -18,7 +18,7 @@ use crate::{
     RawContentDigestHasher,
 };
 
-const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/annex.json");
+const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/annex.json");
 const MAX_ANNEX_BYTES: usize = 16_777_216;
 const MAX_SCHEMA_DEPTH: usize = 256;
 
@@ -26,7 +26,7 @@ static EMBEDDED_CONTRACT: OnceLock<
     std::result::Result<RecoverabilityContract, RecoverabilityError>,
 > = OnceLock::new();
 
-/// Stable machine-readable failure code for the recoverability-v3 codec.
+/// Stable machine-readable failure code for the recoverability-v1 codec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RecoverabilityErrorCode {
     /// The embedded annex is not canonical or violates its closed meta-contract.
@@ -84,7 +84,7 @@ impl fmt::Display for RecoverabilityErrorCode {
     }
 }
 
-/// Redaction-safe error returned by the recoverability-v3 contract.
+/// Redaction-safe error returned by the recoverability-v1 contract.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{code}: {message}")]
 pub struct RecoverabilityError {
@@ -111,7 +111,7 @@ impl RecoverabilityError {
     }
 }
 
-/// One schema-checked canonical value from the recoverability-v3 annex.
+/// One schema-checked canonical value from the recoverability-v1 annex.
 ///
 /// Construction is private to [`RecoverabilityContract`], so callers cannot
 /// pair claimed bytes with an unrelated schema identity.
@@ -259,7 +259,7 @@ macro_rules! digest_only_domain_derivation {
     };
 }
 
-/// Embedded, closed recoverability-v3 schema, codec, and digest authority.
+/// Embedded, closed recoverability-v1 schema, codec, and digest authority.
 #[derive(Debug)]
 pub struct RecoverabilityContract {
     annex: PlainCanonicalJsonBytes,
@@ -537,7 +537,7 @@ impl RecoverabilityContract {
 
     branded_domain_derivation!(
         derive_executor_frontier_digest,
-        "mfm.executor-frontier.v2",
+        "mfm.executor-frontier.v1",
         "semantic_digest",
         ExecutorFrontierDigest,
         "Derives the frozen digest of one executor frontier."
@@ -545,7 +545,7 @@ impl RecoverabilityContract {
 
     branded_domain_derivation!(
         derive_executor_record_digest,
-        "mfm.executor-record.v2",
+        "mfm.executor-record.v1",
         "semantic_digest",
         ExecutorRecordDigest,
         "Derives the frozen digest of one executor-owned record."
@@ -585,7 +585,7 @@ impl RecoverabilityContract {
 
     branded_domain_derivation!(
         derive_journal_candidate_digest,
-        "mfm.journal-candidate.v2",
+        "mfm.journal-candidate.v1",
         "semantic_digest",
         JournalCandidateDigest,
         "Derives the frozen digest of one unassigned journal candidate."
@@ -609,7 +609,7 @@ impl RecoverabilityContract {
 
     branded_domain_derivation!(
         derive_journal_record_hash,
-        "mfm.journal-record.v2",
+        "mfm.journal-record.v1",
         "semantic_digest",
         JournalRecordHash,
         "Derives the frozen semantic hash of one journal record."
@@ -1256,7 +1256,7 @@ impl RecoverabilityContract {
             return Err(value_error(
                 RecoverabilityErrorCode::OutOfBounds,
                 path,
-                "schema recursion exceeds the recoverability-v3 bound",
+                "schema recursion exceeds the recoverability-v1 bound",
             ));
         }
         let definition = shape.as_object().ok_or_else(|| {
@@ -2467,10 +2467,10 @@ fn validate_annex_root(root: &Map<String, Value>) -> std::result::Result<(), Rec
         "annex root",
     )?;
     let contract = required_string(root, "contract", RecoverabilityErrorCode::InvalidAnnex)?;
-    if contract != "mfm.recoverability-annex.v3" {
+    if contract != "mfm.recoverability-annex.v1" {
         return Err(RecoverabilityError::new(
             RecoverabilityErrorCode::InvalidAnnex,
-            "annex does not declare the recoverability-v3 contract",
+            "annex does not declare the recoverability-v1 contract",
         ));
     }
     for field in [
@@ -2727,7 +2727,7 @@ fn validate_annex_metadata(
     if actual_transient != expected_transient {
         return Err(RecoverabilityError::new(
             RecoverabilityErrorCode::InvalidAnnex,
-            "transient authority registry does not match recoverability-v3",
+            "transient authority registry does not match recoverability-v1",
         ));
     }
     validate_logical_key_registry(required_object(root, "logical_keys")?)?;
@@ -3226,14 +3226,14 @@ fn validate_shape_definition(
                 object,
                 "frame_contract",
                 RecoverabilityErrorCode::InvalidAnnex,
-            )? != "mfm.portable-run-export-frame.v2"
+            )? != "mfm.portable-run-export-frame.v1"
                 || required_string(
                     object,
                     "max_frame_canonical_json_bytes",
                     RecoverabilityErrorCode::InvalidAnnex,
                 )? != "16777216"
                 || required_string(object, "media_type", RecoverabilityErrorCode::InvalidAnnex)?
-                    != "application/vnd.mfm.run-export-stream.v2+json-seq"
+                    != "application/vnd.mfm.run-export-stream.v1+json-seq"
                 || required_string(
                     object,
                     "record_prefix_hex",
@@ -3251,7 +3251,7 @@ fn validate_shape_definition(
                 ));
             }
             let frame = schemas
-                .get("mfm.portable-run-export-frame.v2")
+                .get("mfm.portable-run-export-frame.v1")
                 .ok_or_else(|| {
                     RecoverabilityError::new(
                         RecoverabilityErrorCode::InvalidAnnex,
@@ -3735,7 +3735,7 @@ mod entry_point_id_grammar_tests {
         assert!(is_entry_point_id("mfm.portfolio/snapshot@1"));
         assert!(is_entry_point_id("mfm.a/b@1"));
         assert!(is_entry_point_id(
-            "mfm.portfolio.v2/snapshot_report@18446744073709551615"
+            "mfm.portfolio.v1/snapshot_report@18446744073709551615"
         ));
 
         for rejected in [

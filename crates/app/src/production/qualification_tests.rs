@@ -1215,12 +1215,12 @@ fn test_executor_material_with_safe_failure(
         ),
         test_executor_retained(
             "delivery-audit",
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
             evidence_ref.clone(),
         ),
         test_executor_retained(
             "executor-frontier",
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
             evidence_ref.clone(),
         ),
         test_executor_retained(
@@ -1230,12 +1230,12 @@ fn test_executor_material_with_safe_failure(
         ),
         test_executor_retained(
             "terminal-tombstone",
-            "mfm.executor-terminal-tombstone.v2",
+            "mfm.executor-terminal-tombstone.v1",
             evidence_ref.clone(),
         ),
         test_executor_retained(
             "terminal-proof",
-            "mfm.executor-reference-terminal-proof.v2",
+            "mfm.executor-reference-terminal-proof.v1",
             evidence_ref.clone(),
         ),
         value_contracts.attempt_result().clone(),

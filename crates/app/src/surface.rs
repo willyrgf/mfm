@@ -20,7 +20,7 @@ use crate::{ErrorClass, PublicError};
 const ADMIT_RUN_REQUEST_CONTRACT: &str = "mfm.admit-run-request.v1";
 const ADMIT_RUN_RESPONSE_CONTRACT: &str = "mfm.admit-run-response.v1";
 const DRIVE_RESPONSE_CONTRACT: &str = "mfm.drive-response.v1";
-const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v2";
+const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v1";
 const REPLAY_MODE_CONTRACT: &str = "mfm.replay-mode.v1";
 const INSPECTION_CURSOR_CONTRACT: &str = "mfm.primitive-canonical_value.v1";
 const INSPECTION_CURSOR_PREFIX: &str = "mfm.inspection-cursor.v1.";
@@ -883,7 +883,7 @@ impl ExportStreamInput {
         reader: ExportAsyncReader,
     ) -> Result<Self, PublicError> {
         let expected_schema = recoverability_contract()?
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .map_err(|_| {
                 PublicError::internal(
                     "RecoverabilityContractUnavailable",
@@ -1062,7 +1062,7 @@ mod tests {
     fn app_owned_wire_values_round_trip_the_frozen_corpus_bytes() {
         let corpus: Corpus = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v3/corpus.json"
+            "/../../contracts/recoverability/v1/corpus.json"
         )))
         .expect("frozen corpus");
 
@@ -1099,7 +1099,7 @@ mod tests {
             );
         }
 
-        let public = vector_bytes(&corpus, "schema/mfm.public-run-view.v2/minimum");
+        let public = vector_bytes(&corpus, "schema/mfm.public-run-view.v1/minimum");
         assert_eq!(
             PublicRunView::strict_decode(&public)
                 .expect("public run view")
@@ -1263,7 +1263,7 @@ mod tests {
         let contract = RecoverabilityContract::embedded().expect("annex");
         let content_ref = ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v2")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("portable schema")
                 .clone(),
             contract.raw_content_digest(b"stream"),
@@ -1320,7 +1320,7 @@ mod tests {
     fn drive_response_rejects_the_superseded_outcome_discriminator() {
         let corpus: Corpus = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v3/corpus.json"
+            "/../../contracts/recoverability/v1/corpus.json"
         )))
         .expect("frozen corpus");
         let canonical = vector_bytes(&corpus, "schema/mfm.drive-response.v1/minimum");

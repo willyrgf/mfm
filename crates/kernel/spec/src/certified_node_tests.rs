@@ -14,7 +14,7 @@ use crate::{
 
 fn retained(role: &str) -> RetainedValueContract {
     RetainedValueContract::new(
-        schema_id("mfm.access-audit-entry.v2").expect("schema"),
+        schema_id("mfm.access-audit-entry.v1").expect("schema"),
         SemanticTypeId::new(
             "mfm.test",
             role,
@@ -35,7 +35,7 @@ fn content_ref(label: &str) -> ContentRef {
         PlainCanonicalJsonBytes::from_json_str(&serde_json::json!({"fixture": label}).to_string())
             .expect("canonical fixture");
     exact_content_ref(
-        schema_id("mfm.access-audit-entry.v2").expect("schema"),
+        schema_id("mfm.access-audit-entry.v1").expect("schema"),
         &canonical,
     )
     .expect("content ref")

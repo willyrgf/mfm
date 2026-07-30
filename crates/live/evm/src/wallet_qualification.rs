@@ -453,7 +453,7 @@ fn calculated_completion_maxima(
     )
     .map_err(|_| EvmWalletLiveError::InvalidContract)?;
     let predecessor = DeliveryAuditFrontierRef::from_content_ref(dummy_content_ref(
-        "mfm.executor-delivery-frontier.v2",
+        "mfm.executor-delivery-frontier.v1",
         b"evm-completion-predecessor",
     )?)
     .map_err(|_| EvmWalletLiveError::InvalidContract)?;
@@ -488,7 +488,7 @@ fn calculated_completion_maxima(
     let returned =
         ReturnedOutcome::new(safe_result).map_err(|_| EvmWalletLiveError::InvalidContract)?;
     let observation_ref = dummy_content_ref(
-        "mfm.executor-delivery-attempt-observed.v2",
+        "mfm.executor-delivery-attempt-observed.v1",
         b"evm-completion-observation",
     )?;
     let terminal_proof = ReferenceTerminalProof::new(attempt_id, returned, observation_ref)

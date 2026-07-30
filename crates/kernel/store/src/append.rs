@@ -484,7 +484,7 @@ impl ObserveExternalAccess {
     }
 }
 
-/// The only four append variants accepted by a recoverability-v3 run journal.
+/// The only four append variants accepted by a recoverability-v1 run journal.
 pub enum PreparedJournalAppend {
     /// The sole immutable root.
     AdmitRun(AdmitRun),

@@ -5,7 +5,7 @@ Typed kernel crate for canonical bytes, canonical JSON, and digest contracts.
 `docs/design.md` is the normative typed-core authority contract.
 This crate is framework-owned and must remain domain-free.
 
-The recoverability v3 target embeds the sole current versioned annex and exposes
+The recoverability v1 target embeds the sole current versioned annex and exposes
 its strict codec and registered-domain digest operations through
 `RecoverabilityContract`.
 Callers select annex contracts by name; they do not supply local schema

@@ -321,7 +321,7 @@ async fn bind_portable_history(
     assert_eq!(
         metadata.schema_id(),
         contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("portable stream schema")
     );
     let offline = verify_portable_run_export_stream(bytes.as_slice(), metadata.content_ref())
@@ -416,7 +416,7 @@ fn stream_ref(bytes: &[u8]) -> mfm_ids::ContentRef {
     let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     mfm_ids::ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("portable stream schema")
             .clone(),
         contract.raw_content_digest(bytes),
@@ -570,12 +570,12 @@ async fn portable_stream_is_deterministic_and_rejects_structural_tampering() {
         .expect("terminal record separator");
     let terminal = &first[last_record_start..];
     let duplicate_field_record =
-        raw_record(br#"{"kind":"end","kind":"end","version":"mfm.portable-run-export-frame.v2"}"#);
+        raw_record(br#"{"kind":"end","kind":"end","version":"mfm.portable-run-export-frame.v1"}"#);
     let unknown_field_record = raw_record(
-        br#"{"kind":"end","unknown":true,"version":"mfm.portable-run-export-frame.v2"}"#,
+        br#"{"kind":"end","unknown":true,"version":"mfm.portable-run-export-frame.v1"}"#,
     );
     let non_jcs_record =
-        raw_record(br#"{"version":"mfm.portable-run-export-frame.v2","kind":"end"}"#);
+        raw_record(br#"{"version":"mfm.portable-run-export-frame.v1","kind":"end"}"#);
     let malformed = [
         (
             "byte-order-mark",

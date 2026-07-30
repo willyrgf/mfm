@@ -200,7 +200,7 @@ fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectF
     );
     let delivery_audit_contract = retained_contract(
         contract
-            .schema_id("mfm.executor-delivery-frontier.v2")
+            .schema_id("mfm.executor-delivery-frontier.v1")
             .expect("delivery-frontier schema")
             .clone(),
         "effect-delivery-audit",
@@ -208,7 +208,7 @@ fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectF
     );
     let executor_frontier_contract = retained_contract(
         contract
-            .schema_id("mfm.executor-delivery-frontier.v2")
+            .schema_id("mfm.executor-delivery-frontier.v1")
             .expect("executor-frontier schema")
             .clone(),
         "effect-executor-frontier",
@@ -224,7 +224,7 @@ fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectF
     );
     let terminal_tombstone_contract = retained_contract(
         contract
-            .schema_id("mfm.executor-terminal-tombstone.v2")
+            .schema_id("mfm.executor-terminal-tombstone.v1")
             .expect("terminal-tombstone schema")
             .clone(),
         "effect-terminal-tombstone",
@@ -232,7 +232,7 @@ fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectF
     );
     let terminal_proof_contract = retained_contract(
         contract
-            .schema_id("mfm.executor-reference-terminal-proof.v2")
+            .schema_id("mfm.executor-reference-terminal-proof.v1")
             .expect("terminal-proof schema")
             .clone(),
         "effect-terminal-proof",
@@ -240,7 +240,7 @@ fn effect_fixture_contracts(tenant_scope_id: &mfm_ids::TenantScopeId) -> EffectF
     );
     let domain_result_contract = retained_contract(
         contract
-            .schema_id("mfm.executor-reference-queue-result.v2")
+            .schema_id("mfm.executor-reference-queue-result.v1")
             .expect("domain-result schema")
             .clone(),
         "effect-domain-result",
@@ -3698,7 +3698,7 @@ async fn effect_terminal_seals_and_replays_exact_identity_and_complete_closure()
     let extra_validated = RecoverabilityContract::embedded()
         .expect("recoverability contract")
         .strict_decode(
-            "mfm.executor-reference-queue-result.v2",
+            "mfm.executor-reference-queue-result.v1",
             extra_bytes.as_bytes(),
         )
         .expect("extra domain evidence");

@@ -1,4 +1,4 @@
-//! Authoritative legal recoverability-v3 fixtures for backend and runtime conformance tests.
+//! Authoritative legal recoverability-v1 fixtures for backend and runtime conformance tests.
 
 pub(super) mod fact_scan;
 
@@ -1253,7 +1253,7 @@ mod tests {
             .await
             .expect("read active public view")
             .into_validated();
-        assert_eq!(open_public.schema_contract(), "mfm.public-run-view.v2");
+        assert_eq!(open_public.schema_contract(), "mfm.public-run-view.v1");
         let open_public: serde_json::Value =
             serde_json::from_slice(open_public.as_bytes()).expect("decode active public view");
         assert_eq!(open_public["status"], "active");

@@ -1,13 +1,13 @@
-# Recoverability App, CLI, and REST Surface v3
+# Recoverability App, CLI, and REST Surface v1
 
 Status: implemented schema-frozen current contract
 
-Contract id: `mfm.recoverability-app-surface.v3`
+Contract id: `mfm.recoverability-app-surface.v1`
 
-This document records the frozen minimal application and transport surface for recoverability v3.
+This document records the frozen minimal application and transport surface for recoverability v1.
 Its current encodings and vectors are fixed by
-`contracts/recoverability/v3/annex.json`, `contracts/recoverability/v3/corpus.json`, and
-`contracts/recoverability/v3/README.md`.
+`contracts/recoverability/v1/annex.json`, `contracts/recoverability/v1/corpus.json`, and
+`contracts/recoverability/v1/README.md`.
 It is the exact current application and transport contract. No compatibility commands, routes,
 DTOs, or readers survive.
 
@@ -408,7 +408,7 @@ outputs through separate paths.
 
 ```text
 PublicRunView {
-    version: "mfm.public-run-view.v2",
+    version: "mfm.public-run-view.v1",
     run_id,
     status: "active" | "succeeded" | "failed",
     journal_head: Head,
@@ -481,7 +481,7 @@ ExportStreamInput {
 ```
 
 Construction verifies that `content_ref.schema_id` is the current annex-derived
-`mfm.portable-run-export-stream.v2` schema without polling the affine reader. The stream is not
+`mfm.portable-run-export-stream.v1` schema without polling the affine reader. The stream is not
 cloneable and can be consumed only once. Framing, canonical frames, and decoded chunks are
 individually bounded: one frame contains at most 16,777,216 canonical JSON bytes and one chunk
 carries at most 65,536 decoded bytes. Total frames, sources, objects, authorities, bytes, steps,
@@ -489,7 +489,7 @@ and elapsed time have no validity ceiling.
 
 REST requires exactly `?mode=verify|reproduce|compare_current`. Verify requires an empty body.
 Either non-verify mode requires the raw stream body, an exact parameter-free
-`Content-Type: application/vnd.mfm.run-export-stream.v2+json-seq`, and exactly one syntactically
+`Content-Type: application/vnd.mfm.run-export-stream.v1+json-seq`, and exactly one syntactically
 valid `Mfm-Content-Digest`; the adapter derives the current stream schema rather than accepting a
 caller-supplied schema id. CLI non-verify modes open the export lazily and require a strictly
 canonical current-stream `ContentRef` sidecar bounded to 4,096 bytes.
@@ -696,7 +696,7 @@ The rendered `schema_id`, `digest`, and `media_type` are the exact verified refe
 base64url. Invalid JSON never falls back to the byte variant.
 
 `consumed_observation` is not the returned or diagnostic object alone. For `ReadSettled` and
-`EffectSettled`, it is the exact consumed `mfm.external-access-observed.v2` journal payload wrapped
+`EffectSettled`, it is the exact consumed `mfm.external-access-observed.v1` journal payload wrapped
 for this trace as a `RetainedValue`: that contract's annex schema id, the raw content digest of the
 payload's exact canonical bytes, media type `application/json`, and canonical-JSON content. This
 preserves the `Returned`, `DidNotEnter`, `Indeterminate`, or `NonDomainFailure` outcome and its
@@ -976,9 +976,9 @@ ExportedRun {
 }
 ```
 
-The canonical schema annex freezes `mfm.portable-run-export-stream.v2` as a JSON text sequence.
+The canonical schema annex freezes `mfm.portable-run-export-stream.v1` as a JSON text sequence.
 Every record is exact byte `0x1e`, one canonical
-`mfm.portable-run-export-frame.v2` JSON value, and byte `0x0a`. The first frame is `header`; the
+`mfm.portable-run-export-frame.v1` JSON value, and byte `0x0a`. The first frame is `header`; the
 last is `end` followed immediately by EOF. Between them, runs are root first and then dependencies
 by canonical `RunId`; journals are dense; commit and record payloads are emitted in journal order;
 object payloads are ordered by schema and digest and transferred once; and every logical
@@ -990,7 +990,7 @@ No frame contains a stream digest. Once the final byte is written, the app retur
 `SHA-256(every record separator, canonical frame byte, and line feed)` in the stream
 `ContentRef`. That external value is transport metadata, not a frame field. REST returns it only
 in the exact `Mfm-Content-Digest` header and uses the exact
-`application/vnd.mfm.run-export-stream.v2+json-seq` content type. There is no manifest, member
+`application/vnd.mfm.run-export-stream.v1+json-seq` content type. There is no manifest, member
 path, internal digest, domain-hashed export identity, compatibility checksum, base64 wrapper, or
 second serialized byte-wrapper.
 

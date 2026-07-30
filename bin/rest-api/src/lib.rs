@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! HTTP transport for the recoverability-v3 application facade.
+//! HTTP transport for the recoverability-v1 application facade.
 //!
 //! Every protected route accepts only one `Authorization: Bearer` credential and delegates a
 //! purpose-specific call to [`mfm_app::Application`]. Entry-point discovery and health/readiness
@@ -528,7 +528,7 @@ fn replay_stream_request(
         .and_then(|value| ContentDigest::parse(value).ok())
         .ok_or_else(PublicError::replay_artifact_invalid)?;
     let schema_id = mfm_canonical::RecoverabilityContract::embedded()
-        .and_then(|contract| contract.schema_id("mfm.portable-run-export-stream.v2"))
+        .and_then(|contract| contract.schema_id("mfm.portable-run-export-stream.v1"))
         .map_err(|_| {
             PublicError::internal(
                 "RecoverabilityContractUnavailable",

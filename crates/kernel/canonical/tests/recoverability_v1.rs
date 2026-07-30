@@ -8,15 +8,15 @@ use mfm_ids::{
 };
 use serde_json::Value;
 
-#[path = "../../../../tests/support/recoverability_v3.rs"]
-mod recoverability_v3_support;
+#[path = "../../../../tests/support/recoverability_v1.rs"]
+mod recoverability_v1_support;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
 
 #[test]
 fn canonical_executes_every_frozen_recoverability_vector() {
-    recoverability_v3_support::run_consumer("mfm-canonical", |vector| {
-        recoverability_v3_support::assert_lower_layer_owner_vector(vector);
+    recoverability_v1_support::run_consumer("mfm-canonical", |vector| {
+        recoverability_v1_support::assert_lower_layer_owner_vector(vector);
     });
 }
 
@@ -466,7 +466,7 @@ fn hostile_candidate_and_value_text_never_enters_public_errors() {
         .as_array_mut()
         .expect("schemas")
         .iter_mut()
-        .find(|schema| schema["contract"] == "mfm.access-audit-entry.v2")
+        .find(|schema| schema["contract"] == "mfm.access-audit-entry.v1")
         .expect("object schema");
     descriptor["shape"]["fields"][0]["name"] = Value::String(CANARY.to_owned());
     let error =

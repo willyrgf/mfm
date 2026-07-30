@@ -24,11 +24,11 @@ define_schema_value! {
     /// Closed logical key attached to one record candidate.
     pub struct RecordLogicalKey => "mfm.record-logical-key.v1";
     /// Unassigned candidate record envelope.
-    pub struct CandidateRecordEnvelope => "mfm.candidate-record-envelope.v2";
+    pub struct CandidateRecordEnvelope => "mfm.candidate-record-envelope.v1";
     /// Complete unassigned commit candidate preimage.
-    pub struct CommitCandidatePreimage => "mfm.commit-candidate-preimage.v2";
+    pub struct CommitCandidatePreimage => "mfm.commit-candidate-preimage.v1";
     /// Assigned record semantic-hash preimage.
-    pub struct RecordHashPreimage => "mfm.record-hash-preimage.v2";
+    pub struct RecordHashPreimage => "mfm.record-hash-preimage.v1";
     /// Assigned record-identity preimage.
     pub struct RecordIdPreimage => "mfm.record-id-preimage.v1";
     /// Assigned commit semantic-digest preimage.
@@ -36,7 +36,7 @@ define_schema_value! {
     /// Complete assigned commit envelope.
     pub struct CommitEnvelope => "mfm.commit-envelope.v1";
     /// Closed structurally legal record batch.
-    pub struct LegalCommitBatch => "mfm.legal-commit-batch.v2";
+    pub struct LegalCommitBatch => "mfm.legal-commit-batch.v1";
     /// Per-run genesis semantic-digest preimage.
     pub struct GenesisPreimage => "mfm.genesis-preimage.v1";
 }
@@ -426,7 +426,7 @@ impl CommitCandidatePreimage {
 
     /// Derives the frozen journal-candidate semantic digest.
     pub fn candidate_digest(&self) -> Result<JournalCandidateDigest> {
-        domain_digest("mfm.journal-candidate.v2", self)
+        domain_digest("mfm.journal-candidate.v1", self)
             .map(JournalCandidateDigest::from_semantic_digest)
     }
 }
@@ -463,7 +463,7 @@ impl RecordHashPreimage {
 
     /// Derives the frozen journal-record semantic hash.
     pub fn record_hash(&self) -> Result<JournalRecordHash> {
-        domain_digest("mfm.journal-record.v2", self).map(JournalRecordHash::from_semantic_digest)
+        domain_digest("mfm.journal-record.v1", self).map(JournalRecordHash::from_semantic_digest)
     }
 }
 

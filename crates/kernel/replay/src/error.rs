@@ -9,14 +9,14 @@ pub type Result<T> = std::result::Result<T, ReplayError>;
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
     /// The frozen canonical contract rejected a replay or export value.
-    #[error("recoverability-v3 canonical replay value is invalid")]
+    #[error("recoverability-v1 canonical replay value is invalid")]
     Recoverability {
         /// Source-preserving codec failure.
         #[source]
         source: RecoverabilityError,
     },
     /// An annex-backed journal value could not be projected.
-    #[error("recoverability-v3 journal value is invalid")]
+    #[error("recoverability-v1 journal value is invalid")]
     Journal {
         /// Source-preserving journal failure.
         #[source]

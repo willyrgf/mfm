@@ -5,7 +5,7 @@ use mfm_journal::*;
 use mfm_values::component_object_evidence_contract_ref;
 use serde_json::Value;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
 
 fn corpus() -> Value {
     serde_json::from_slice(CORPUS_BYTES).expect("frozen corpus must decode")
@@ -175,7 +175,7 @@ fn every_added_codec_strictly_rejects_open_fields() {
         ExternalAccessAuthorized::strict_decode,
     );
     assert_unknown_field_rejected(
-        "mfm.external-access-observed.v2",
+        "mfm.external-access-observed.v1",
         ExternalAccessObserved::strict_decode,
     );
     assert_unknown_field_rejected(
@@ -1378,7 +1378,7 @@ fn fact_scan_attestation_and_observation_constructors_preserve_authority_links()
     assert_exact_rebuild(&original_attestation, &rebuilt_attestation);
 
     let mut saw_attested_return = false;
-    for bytes in schema_goldens("mfm.external-access-observed.v2") {
+    for bytes in schema_goldens("mfm.external-access-observed.v1") {
         let original = ExternalAccessObserved::strict_decode(&bytes).expect("external observation");
         let fields = original.fields().expect("typed external observation");
         saw_attested_return |= fields.fact_selection_scan_attestation_ref.is_some();
@@ -1594,7 +1594,7 @@ fn every_executor_ensure_result_constructor_matches_its_frozen_union_variant() {
 
 #[test]
 fn access_audit_delivery_head_is_present_only_for_returned_ensure() {
-    let audit = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v2"))
+    let audit = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v1"))
         .expect("access audit");
     let authorization_ref = audit
         .fields()

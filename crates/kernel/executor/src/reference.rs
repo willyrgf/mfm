@@ -26,10 +26,10 @@ use crate::retained::{
 use crate::{ExecutorError, Result};
 
 const REFERENCE_REQUEST_SCHEMA: &str = "mfm.executor-reference-queue-request.v1";
-const REFERENCE_RESULT_SCHEMA: &str = "mfm.executor-reference-queue-result.v2";
+const REFERENCE_RESULT_SCHEMA: &str = "mfm.executor-reference-queue-result.v1";
 const VALUE_REF_SCHEMA: &str = "mfm.value-ref.v1";
 const STABLE_ID_SCHEMA: &str = "mfm.primitive-stable_id.v1";
-const DESTINATION_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMEDQ02";
+const DESTINATION_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMEDQ01";
 const MAX_DESTINATION_ITEMS: usize = 1_000_000;
 
 /// Pure request used by the convergence-safe reference queue.
@@ -791,18 +791,24 @@ where
                 Err(error) => return Err(error),
             }
         };
-        let attempt = view
+        if view.terminal_tombstone().is_some() {
+            return Ok(ReferenceDriveOutcome::Returned(Box::new(
+                self.terminal_return(view)?,
+            )));
+        }
+        let returned_attempt = view
             .delivery_audit()
             .attempts()?
             .into_iter()
-            .last()
-            .ok_or(ExecutorError::InvalidDeliveryObservation)?;
-        let attempt_id = attempt.attempt_id().clone();
-        let returned = attempt
-            .outcome()
-            .and_then(DeliveryAttemptOutcome::returned_outcome)
-            .cloned();
-        let Some(returned) = returned else {
+            .rev()
+            .find_map(|attempt| {
+                attempt
+                    .outcome()
+                    .and_then(DeliveryAttemptOutcome::returned_outcome)
+                    .cloned()
+                    .map(|returned| (attempt.attempt_id().clone(), returned))
+            });
+        let Some((attempt_id, returned)) = returned_attempt else {
             return Ok(ReferenceDriveOutcome::Returned(Box::new(pending_return(
                 view,
                 self.ledger.exact_binding(),
@@ -814,11 +820,6 @@ where
             ));
         }
 
-        if view.terminal_tombstone().is_some() {
-            return Ok(ReferenceDriveOutcome::Returned(Box::new(
-                self.terminal_return(view)?,
-            )));
-        }
         let observation_ref =
             returned_observation_ref(view.delivery_audit(), &attempt_id, &returned)?;
         let proof = ReferenceTerminalProof::new(attempt_id, returned, observation_ref)?;

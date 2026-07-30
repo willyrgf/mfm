@@ -479,7 +479,7 @@ mod tests {
             AccessAuditStatus::NonDomainFailure,
             None,
             None,
-            Some(non_domain_failure.clone()),
+            Some(non_domain_failure),
             unobserved.effect_key().cloned(),
             None,
             None,

@@ -79,11 +79,11 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -91,15 +91,15 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v2",
+            "mfm.executor-terminal-tombstone.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v2",
+            "mfm.executor-reference-terminal-proof.v1",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
-            "mfm.executor-reference-queue-result.v2",
+            "mfm.executor-reference-queue-result.v1",
         ),
     )
     .expect("retained closure")
@@ -303,7 +303,7 @@ impl TestDatabase {
         sibling
     }
 
-    async fn set_retired_schema_contract_version(&self) {
+    async fn set_invalid_schema_contract_identity(&self) {
         sqlx::query(
             "ALTER TABLE executor_schema_metadata \
              DISABLE TRIGGER ALL, \
@@ -314,11 +314,11 @@ impl TestDatabase {
         .expect("remove executor metadata guards");
         sqlx::query(
             "UPDATE executor_schema_metadata \
-             SET schema_contract_version = 'mfm.executor-postgres.v1'",
+             SET schema_contract_version = 'mfm.invalid-executor-postgres.v1'",
         )
         .execute(&self.pool)
         .await
-        .expect("retain retired executor schema version");
+        .expect("replace the executor schema contract identity");
         sqlx::query("ALTER TABLE executor_schema_metadata ENABLE TRIGGER ALL")
             .execute(&self.pool)
             .await
@@ -477,24 +477,24 @@ async fn fenced_postgres_executor_qualification_matrix() {
     .expect("public-schema isolation probe"));
     let primary_fixture = fixture("postgres-qualified");
 
-    let retired = original.create_sibling().await;
-    retired.set_retired_schema_contract_version().await;
-    let retired_fence = ModeledFence::new(
-        &retired,
+    let invalid = original.create_sibling().await;
+    invalid.set_invalid_schema_contract_identity().await;
+    let invalid_fence = ModeledFence::new(
+        &invalid,
         ExecutorLedgerStoreIdentity::from_binding(&primary_fixture.binding),
     )
     .await;
     assert_eq!(
         open_executor_store(
-            retired.pool.clone(),
+            invalid.pool.clone(),
             primary_fixture.binding.clone(),
-            retired_fence,
+            invalid_fence,
         )
         .await
-        .expect_err("retired executor baseline must not qualify"),
+        .expect_err("invalid executor contract identity must not qualify"),
         PostgresExecutorStoreError::SchemaAuthorityMismatch
     );
-    retired.cleanup().await;
+    invalid.cleanup().await;
 
     let identity = ExecutorLedgerStoreIdentity::from_binding(&primary_fixture.binding);
     let fence = ModeledFence::new(&original, identity).await;

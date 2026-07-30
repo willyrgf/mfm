@@ -1,12 +1,12 @@
-# Recoverability Predicate Owners v3
+# Recoverability Predicate Owners v1
 
 Status: schema-frozen predicate-ownership inventory for the current contract
 
-Contract id: `mfm.recoverability-predicate-owners.v3`
+Contract id: `mfm.recoverability-predicate-owners.v1`
 
 This document records the current predicate-ownership inventory. The frozen target encodings and
-shared vectors are `contracts/recoverability/v3/annex.json`,
-`contracts/recoverability/v3/corpus.json`, and `contracts/recoverability/v3/README.md`.
+shared vectors are `contracts/recoverability/v1/annex.json`,
+`contracts/recoverability/v1/corpus.json`, and `contracts/recoverability/v1/README.md`.
 [`design.md`](design.md) and [`architecture.md`](architecture.md) are authoritative for the current
 implementation. This inventory specializes their access-obligation rules without creating a second
 runtime or persisted-data contract.
@@ -175,7 +175,7 @@ failure becomes `result_encoding_failure/MayHaveEntered/IntegrityBlocked`.
 | `P-ACL-01` | An authenticated principal may receive a particular `Admit`, `Drive`, `Replay`, `ReadPublic`, `InspectTrace`, `InspectAudit`, or `Export` grant for an exact store/tenant/run or admission candidate. | App authentication and authorization policy. | App mints a sealed, non-serializable `RunAccessAuthority<Grant>`; credentials, principals, and ACL snapshots do not enter the journal. | Kernel/store validate only token type and binding. They never consult another policy oracle or broaden a grant. Revocation prevents future minting rather than rewriting history. |
 | `P-ACL-02` | A presented run authority's grant, store scope, tenant, run/admission identity, and requested operation match exactly. | Kernel/store sealed authority-binding validator. | Every authority-bearing entry point validates before loading records, objects, or constructing drive/replay authority. | Purpose-specific app services may precheck for UX, but cannot mint a positive result when the sealed binding fails. |
 | `P-ACL-03` | Each grant dereferences only objects reachable in its reviewed closure: the single folded aggregate `PublicOutputAssembly` for `ReadPublic`; exact run history for `Replay`; reviewed trace/audit/export closure for privileged grants; no arbitrary object, producer-output, source-run, or unselected-fact access. | The purpose-specific app/store reader. | Reachability is checked before each record/object load and result construction; public-output subtrees are projected in certified binding order from the aggregate, and record ids, digests, fact refs, run ids, portable stream headers, and export content references are not bearer tokens. | Trace/export/replay codecs recheck closure membership. Cross-run source dereference requires its own authority except the sealed non-disclosing fact verifier. |
-| `P-ACL-04` | An offline `mfm.portable-run-export-stream.v2` sequence may be verified only from its supplied frames and external `ContentRef` and conveys no live store/object dereference, drive, append, or same-store completeness authority. No frame contains a stream digest. Its sole transport integrity value is `SHA-256(every record separator, canonical frame byte, and line feed)`, returned externally as transport metadata and `Mfm-Content-Digest`. | The offline verification and purpose-bound export entry points. | Export authorizes and verifies the complete deterministic closure before writing any byte; verification checks the external digest, exact framing/order/EOF, and complete closure before constructing only a callback-free view with portable fact assurance and no store handle or run token. | API/compile-time tests keep live store methods and `AuthorizedAccess` unreachable and reject internal digests, legacy schemas, missing/extra/reordered frames or authorities, truncated streams, trailing bytes, or partial closure. |
+| `P-ACL-04` | An offline `mfm.portable-run-export-stream.v1` sequence may be verified only from its supplied frames and external `ContentRef` and conveys no live store/object dereference, drive, append, or same-store completeness authority. No frame contains a stream digest. Its sole transport integrity value is `SHA-256(every record separator, canonical frame byte, and line feed)`, returned externally as transport metadata and `Mfm-Content-Digest`. | The offline verification and purpose-bound export entry points. | Export authorizes and verifies the complete deterministic closure before writing any byte; verification checks the external digest, exact framing/order/EOF, and complete closure before constructing only a callback-free view with portable fact assurance and no store handle or run token. | API/compile-time tests keep live store methods and `AuthorizedAccess` unreachable and reject internal digests, legacy schemas, missing/extra/reordered frames or authorities, truncated streams, trailing bytes, or partial closure. |
 | `P-ACL-05` | Ordinary public status exposes only `active|succeeded|failed` plus reviewed active/public-output fields; trace, audit, facts, cross-run list/watch, arbitrary objects, and manual semantic overrides are absent without separate contracts. | App public-surface contract, rendered by CLI/REST. | Opaque facade methods require `ReadPublic` and return closed DTOs; binaries only decode and render. | CLI/REST contract tests reject deleted fact/list/watch routes, implementation construction, generic object access, and “mark successful/not applied” endpoints. |
 
 ## PostgreSQL, database ACL, and deployment fencing
@@ -283,7 +283,7 @@ frozen schema and golden vectors, or satisfy the deployment-specific rollout gat
   yields exactly one `SameStoreVerified` result. PostgreSQL exercises its real page loader,
   barrier, row decoding, atomic observation/attestation write, and nonempty attestation loader.
 - The current [runtime access protocol](../crates/kernel/runtime/src/access_protocol.rs) and
-  [recoverability conformance](../crates/kernel/runtime/tests/recoverability_v3.rs) cover the
+  [recoverability conformance](../crates/kernel/runtime/tests/recoverability_v1.rs) cover the
   private prepared/authorized/pending/committed stage types, exact logical observation resolution,
   definite stale-head rebasing, unchanged acknowledgement-ambiguity resolution, capped
   10-to-1,000-millisecond backoff with reset on head progress, conflicting-content rejection, and
@@ -326,7 +326,7 @@ constraint, and vector named the `P-*` row it enforces. During implementation, a
 with no row is either:
 
 1. a missing predicate that requires a deliberate new contract version rather than a silent
-   change to recoverability v3;
+   change to recoverability v1;
 2. non-authoritative defense or telemetry that must be labeled as such; or
 3. a duplicate authority path that must be deleted.
 

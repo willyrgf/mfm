@@ -204,7 +204,7 @@ mod tests {
         let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         let content_ref = ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v2")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(b"snapshot"),

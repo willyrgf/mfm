@@ -695,12 +695,12 @@ impl Fixture {
             ),
             retained_contract(
                 "delivery-audit",
-                "mfm.executor-delivery-frontier.v2",
+                "mfm.executor-delivery-frontier.v1",
                 &object_evidence_ref,
             ),
             retained_contract(
                 "executor-frontier",
-                "mfm.executor-delivery-frontier.v2",
+                "mfm.executor-delivery-frontier.v1",
                 &object_evidence_ref,
             ),
             retained_contract(
@@ -710,12 +710,12 @@ impl Fixture {
             ),
             retained_contract(
                 "terminal-tombstone",
-                "mfm.executor-terminal-tombstone.v2",
+                "mfm.executor-terminal-tombstone.v1",
                 &object_evidence_ref,
             ),
             retained_contract(
                 "terminal-proof",
-                "mfm.executor-reference-terminal-proof.v2",
+                "mfm.executor-reference-terminal-proof.v1",
                 &object_evidence_ref,
             ),
             value_contracts.attempt_result().clone(),

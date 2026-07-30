@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Frozen recoverability-v3 journal values.
+//! Frozen recoverability-v1 journal values.
 //!
 //! Every public persisted value in this crate is backed by
 //! [`mfm_canonical::ValidatedCanonicalValue`]. Construction and decoding
@@ -8,22 +8,6 @@
 //!
 //! Store atomicity, structural folding, scheduling, replay, callbacks, and
 //! ambient access are deliberately outside this crate.
-//!
-//! The superseded lifecycle event algebra has no compatibility surface:
-//!
-//! ```compile_fail
-//! use mfm_journal::KernelEventPayload;
-//! ```
-//!
-//! ```compile_fail
-//! use mfm_journal::StateAttemptStarted;
-//! ```
-//!
-//! Versioned Rust module aliases are deliberately absent:
-//!
-//! ```compile_fail
-//! use mfm_journal::v2::ValueRef;
-//! ```
 
 mod access;
 mod codec;

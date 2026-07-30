@@ -5,12 +5,12 @@ use mfm_canonical::{
 };
 use serde_json::Value;
 
-const ANNEX_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v3/annex.json");
-const CORPUS_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v3/corpus.json");
+const ANNEX_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v1/annex.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../contracts/recoverability/v1/corpus.json");
 const ANNEX_BYTE_LENGTH: usize = 227_880;
 const CORPUS_BYTE_LENGTH: usize = 1_741_323;
-const ANNEX_SHA256_HEX: &str = "50cbcaa6185c36ebc652277a178108a8a3785285a5871f5d720e48d2c16dd0d7";
-const CORPUS_SHA256_HEX: &str = "ec9220cca6dd0e7da1cfda485006d58353baa3470c3474aba20d782058efc942";
+const ANNEX_SHA256_HEX: &str = "13d4b2c721daa20599c342d3bebd7bffcac9c44be4a09f998dce5f9081d50e6d";
+const CORPUS_SHA256_HEX: &str = "0af20cbb3d4217e1579f84c3fede302b0ceb2525bb6bed1c57beac02e75501ff";
 const POSITIVE_VECTOR_COUNT: usize = 441;
 const NEGATIVE_VECTOR_COUNT: usize = 62;
 const RELATIONAL_VECTOR_COUNT: usize = 84;
@@ -116,7 +116,7 @@ pub fn run_consumer(consumer: &str, mut execute_owner_vector: impl FnMut(OwnerVe
     let contract = RecoverabilityContract::embedded().expect("embedded recoverability annex");
     assert_artifact_bindings(contract);
     let corpus = corpus();
-    assert_eq!(string(&corpus, "contract"), "mfm.recoverability-corpus.v3");
+    assert_eq!(string(&corpus, "contract"), "mfm.recoverability-corpus.v1");
     let coverage = object(&corpus, "coverage");
     let mandatory_consumers: BTreeSet<&str> = array(coverage, "mandatory_consumers")
         .iter()
@@ -124,7 +124,7 @@ pub fn run_consumer(consumer: &str, mut execute_owner_vector: impl FnMut(OwnerVe
         .collect();
     assert!(
         mandatory_consumers.contains(consumer),
-        "{consumer} is not a mandatory recoverability-v3 consumer"
+        "{consumer} is not a mandatory recoverability-v1 consumer"
     );
 
     let positives = array(&corpus, "positive_vectors");
@@ -260,7 +260,7 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
             "commit_coordinate_separation" => {
                 let candidate = contract
                     .strict_decode(
-                        "mfm.commit-candidate-preimage.v2",
+                        "mfm.commit-candidate-preimage.v1",
                         &hex_field(vector, "candidate_hex"),
                     )
                     .unwrap_or_else(|error| panic!("{id}: {error}"));
@@ -301,7 +301,7 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
                 let stream = hex_field(vector, "stream_hex");
                 assert_eq!(
                     string(vector, "media_type"),
-                    "application/vnd.mfm.run-export-stream.v2+json-seq",
+                    "application/vnd.mfm.run-export-stream.v1+json-seq",
                     "{id}"
                 );
                 assert_eq!(
@@ -311,7 +311,7 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
                 );
                 assert_eq!(
                     contract
-                        .schema_id("mfm.portable-run-export-stream.v2")
+                        .schema_id("mfm.portable-run-export-stream.v1")
                         .unwrap_or_else(|error| panic!("{id}: {error}"))
                         .as_str(),
                     string(vector, "expected_schema_id"),
@@ -324,7 +324,7 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
                         .strip_suffix(b"\n")
                         .unwrap_or_else(|| panic!("{id}: frame lacks LF suffix"));
                     let frame = contract
-                        .strict_decode("mfm.portable-run-export-frame.v2", frame_bytes)
+                        .strict_decode("mfm.portable-run-export-frame.v1", frame_bytes)
                         .unwrap_or_else(|error| panic!("{id}: {error}"));
                     frames.push(
                         serde_json::from_slice::<Value>(frame.as_bytes())
@@ -457,19 +457,19 @@ pub fn assert_lower_layer_owner_vector(owner: OwnerVector<'_>) {
             "relational_acceptance" => {
                 let observation = contract
                     .strict_decode(
-                        "mfm.executor-delivery-attempt-observed.v2",
+                        "mfm.executor-delivery-attempt-observed.v1",
                         &hex_field(vector, "observation_hex"),
                     )
                     .unwrap_or_else(|error| panic!("{id}: {error}"));
                 let proof = contract
                     .strict_decode(
-                        "mfm.executor-reference-terminal-proof.v2",
+                        "mfm.executor-reference-terminal-proof.v1",
                         &hex_field(vector, "proof_hex"),
                     )
                     .unwrap_or_else(|error| panic!("{id}: {error}"));
                 let tombstone = contract
                     .strict_decode(
-                        "mfm.executor-terminal-tombstone.v2",
+                        "mfm.executor-terminal-tombstone.v1",
                         &hex_field(vector, "tombstone_hex"),
                     )
                     .unwrap_or_else(|error| panic!("{id}: {error}"));
@@ -733,7 +733,7 @@ fn execute_positive(contract: &RecoverabilityContract, vector: &Value) {
         }
         "legal_batch" => {
             let batch = contract
-                .strict_decode("mfm.legal-commit-batch.v2", &hex_field(vector, "batch_hex"))
+                .strict_decode("mfm.legal-commit-batch.v1", &hex_field(vector, "batch_hex"))
                 .unwrap_or_else(|error| panic!("{id}: {error}"));
             let coordinate = contract
                 .strict_decode(
@@ -812,8 +812,8 @@ fn derive_frozen_domain_identity(
         }
         "mfm.effect-key.v1" => derive!(derive_effect_key),
         "mfm.executor-delivery-attempt.v1" => derive!(derive_attempt_id),
-        "mfm.executor-frontier.v2" => derive!(derive_executor_frontier_digest),
-        "mfm.executor-record.v2" => derive!(derive_executor_record_digest),
+        "mfm.executor-frontier.v1" => derive!(derive_executor_frontier_digest),
+        "mfm.executor-record.v1" => derive!(derive_executor_record_digest),
         "mfm.fact-content-identity.v1" => {
             derive!(derive_fact_content_identity_digest)
         }
@@ -822,10 +822,10 @@ fn derive_frozen_domain_identity(
         }
         "mfm.fact-query.v1" => derive!(derive_fact_query_digest),
         "mfm.genesis.v1" => derive!(derive_genesis_digest),
-        "mfm.journal-candidate.v2" => derive!(derive_journal_candidate_digest),
+        "mfm.journal-candidate.v1" => derive!(derive_journal_candidate_digest),
         "mfm.journal-commit.v1" => derive!(derive_journal_commit_digest),
         "mfm.journal-record-id.v1" => derive!(derive_record_id),
-        "mfm.journal-record.v2" => derive!(derive_journal_record_hash),
+        "mfm.journal-record.v1" => derive!(derive_journal_record_hash),
         "mfm.node-occurrence.v1" => derive!(derive_node_id),
         "mfm.object-evidence.v1" => derive!(derive_object_evidence_digest),
         "mfm.output-logical-identity.v1" => {

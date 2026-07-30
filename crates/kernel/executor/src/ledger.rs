@@ -24,7 +24,7 @@ use crate::{ExecutorError, Result};
 
 const RESOURCE_LEDGER_RECORD_SCHEMA: &str = "mfm.executor-resource-ledger-record.v1";
 const RESOURCE_ALLOCATED_SCHEMA: &str = "mfm.executor-resource-allocated.v1";
-const LEDGER_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMELG05";
+const LEDGER_CHECKPOINT_MAGIC: &[u8; 8] = b"MFMELG01";
 const RESOURCE_RECORD_DURABLE_MAGIC: &[u8; 8] = b"MFMERR01";
 const MAX_SNAPSHOT_ITEMS: usize = 1_000_000;
 

@@ -27,12 +27,6 @@
 //! // Raw JSON is intentionally not a typed persisted-value canonicalizer.
 //! let _ = mfm_canonical::CanonicalJsonBytes::from_json_str("{}");
 //! ```
-//!
-//! Version-suffixed recoverability type aliases are deliberately absent:
-//!
-//! ```compile_fail
-//! use mfm_canonical::RecoverabilityContractV3;
-//! ```
 
 use std::cmp::Ordering;
 use std::collections::BTreeSet;

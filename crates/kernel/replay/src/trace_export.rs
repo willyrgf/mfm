@@ -32,7 +32,7 @@ use crate::{store_error, ReplayError, Result};
 
 /// Exact media type of portable run export streams.
 pub const PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE: &str =
-    "application/vnd.mfm.run-export-stream.v2+json-seq";
+    "application/vnd.mfm.run-export-stream.v1+json-seq";
 /// Maximum canonical JSON byte length of one stream frame.
 pub const MAX_STREAM_FRAME_JSON_BYTES: usize = 16_777_216;
 /// Maximum decoded byte length carried by one chunk frame.
@@ -44,9 +44,9 @@ pub const CLOSURE_STEP_SOURCES: usize = 256;
 /// Maximum retained objects processed before cooperatively yielding.
 pub const CLOSURE_STEP_OBJECTS: usize = 512;
 
-const PORTABLE_STREAM_CONTRACT: &str = "mfm.portable-run-export-stream.v2";
-const PORTABLE_FRAME_CONTRACT: &str = "mfm.portable-run-export-frame.v2";
-const PORTABLE_FRAME_VERSION: &str = "mfm.portable-run-export-frame.v2";
+const PORTABLE_STREAM_CONTRACT: &str = "mfm.portable-run-export-stream.v1";
+const PORTABLE_FRAME_CONTRACT: &str = "mfm.portable-run-export-frame.v1";
+const PORTABLE_FRAME_VERSION: &str = "mfm.portable-run-export-frame.v1";
 const RECORD_SEPARATOR: u8 = 0x1e;
 const RECORD_SUFFIX: u8 = 0x0a;
 
@@ -2344,7 +2344,7 @@ mod tests {
         assert!(!error.to_string().contains("/private/path"));
         assert_eq!(
             PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE,
-            "application/vnd.mfm.run-export-stream.v2+json-seq"
+            "application/vnd.mfm.run-export-stream.v1+json-seq"
         );
     }
 
@@ -2677,7 +2677,7 @@ mod tests {
         session.prior_payload = None;
         let schema_id = RecoverabilityContract::embedded()
             .expect("recoverability contract")
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("stream schema")
             .clone();
         counts.unique_payloads = CLOSURE_STEP_OBJECTS;
@@ -2754,7 +2754,7 @@ mod tests {
     fn every_authority_is_retained_without_counting_as_another_payload() {
         let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.access-audit-entry.v2")
+            .schema_id("mfm.access-audit-entry.v1")
             .expect("authority payload schema")
             .clone();
         let mut session = test_session();
@@ -3007,7 +3007,7 @@ mod tests {
         let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v2")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(bytes),
@@ -3227,7 +3227,7 @@ mod tests {
     fn test_session() -> ClosureVerificationSession<&'static [u8]> {
         let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("stream schema")
             .clone();
         ClosureVerificationSession::new(
@@ -3241,7 +3241,7 @@ mod tests {
     fn configured_partial_session(bytes: &[u8]) -> Box<ClosureVerificationSession<&[u8]>> {
         let contract = RecoverabilityContract::embedded().expect("recoverability contract");
         let schema_id = contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("stream schema")
             .clone();
         let mut session = ClosureVerificationSession::new(

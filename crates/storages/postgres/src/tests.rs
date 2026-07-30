@@ -451,7 +451,7 @@ async fn readiness_rejects_missing_schema_metadata_singleton() {
 }
 
 #[tokio::test]
-async fn readiness_rejects_the_retired_schema_contract_version() {
+async fn readiness_rejects_an_invalid_schema_contract_identity() {
     let _serial = DATABASE_TEST_LOCK.lock().await;
     let database = TestDatabase::create("readiness_version").await;
     let (store, issuer) = open_authoritative(database.pool.clone(), TestAuthoritativeWriterFence)
@@ -468,11 +468,11 @@ async fn readiness_rejects_the_retired_schema_contract_version() {
     .expect("remove metadata guards for readiness simulation");
     sqlx::query(
         "UPDATE store_schema_metadata \
-         SET schema_contract_version = 'mfm.recoverability-postgres.v1'",
+         SET schema_contract_version = 'mfm.invalid-recoverability-postgres.v1'",
     )
     .execute(&database.pool)
     .await
-    .expect("change retained schema contract version");
+    .expect("replace the schema contract identity");
     sqlx::query("ALTER TABLE store_schema_metadata ENABLE TRIGGER ALL")
         .execute(&database.pool)
         .await
@@ -1803,7 +1803,7 @@ async fn admission_retry_and_successor_serialize_on_the_existing_run_without_dea
         .await
         .expect("read genuine public run")
         .into_validated();
-    assert_eq!(public.schema_contract(), "mfm.public-run-view.v2");
+    assert_eq!(public.schema_contract(), "mfm.public-run-view.v1");
     let public: serde_json::Value =
         serde_json::from_slice(public.as_bytes()).expect("decode genuine public run");
     assert_eq!(public["status"], "succeeded");
@@ -2541,8 +2541,8 @@ async fn artifact_admissions_accept_positive_schema_versions_with_memory_parity(
         evidence_contract_schema_id,
         value_fields.evidence_contract_ref.schema_id().as_str()
     );
-    assert!(schema_id.contains(":2:sha256-jcs-v1:"));
-    assert!(evidence_contract_schema_id.contains(":2:sha256-jcs-v1:"));
+    assert!(schema_id.contains(":1:sha256-jcs-v1:"));
+    assert!(evidence_contract_schema_id.contains(":1:sha256-jcs-v1:"));
 
     for (column, valid, hostile_version, tag) in [
         ("schema_id", schema_id.as_str(), "0", 1_u8),
@@ -3223,13 +3223,13 @@ fn versioned_retained_contract() -> RetainedValueContract {
         RecoverabilityContract::embedded().expect("embedded recoverability contract");
     let evidence = recoverability
         .encode(
-            "mfm.executor-reference-failure-code.v2",
+            "mfm.executor-reference-failure-code.v1",
             &CanonicalValue::String("request_conflict".to_owned()),
         )
         .expect("versioned evidence contract");
     RetainedValueContract::new(
         recoverability
-            .schema_id("mfm.executor-reference-failure-code.v2")
+            .schema_id("mfm.executor-reference-failure-code.v1")
             .expect("versioned retained schema")
             .clone(),
         semantic_type("versioned-qualified-support-value"),
@@ -3270,10 +3270,10 @@ fn support_graph(scope: &SemanticTypeId, members: &[(&str, &str)]) -> QualifiedS
 }
 
 fn replace_schema_version(schema_id: &str, version: &str) -> String {
-    let marker = ":2:sha256-jcs-v1:";
+    let marker = ":1:sha256-jcs-v1:";
     assert!(
         schema_id.contains(marker),
-        "versioned test schema must be v2"
+        "versioned test schema must use the current v1 identity"
     );
     schema_id.replacen(marker, &format!(":{version}:sha256-jcs-v1:"), 1)
 }
@@ -4027,8 +4027,8 @@ async fn insert_record_row(
     let seed = format!("{}:{}", input.run_id, input.run_sequence);
     let record_id = format!("record:sha256-jcs-v1:{}", digest_hex(seed.as_bytes()));
     let schema_id = format!(
-        "schema:mfm.test.record:2:sha256-jcs-v1:{}",
-        digest_hex(b"mfm.test.record.v2")
+        "schema:mfm.test.record:1:sha256-jcs-v1:{}",
+        digest_hex(b"mfm.test.record.v1")
     );
     let spec_hash = format!("spec:sha256-jcs-v1:{}", digest_hex(b"mfm.test.spec.v1"));
     let record_hash = semantic_digest(format!("{seed}:record").as_bytes());

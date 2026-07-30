@@ -112,7 +112,7 @@ fn frozen_values_reject_partial_or_noncanonical_inputs() {
 #[test]
 fn state_manifest_uses_the_frozen_content_ref_wire_order() {
     let schema_first_but_wire_last = ContentRef::new(
-        schema_id("mfm.access-audit-entry.v2").expect("first registered schema"),
+        schema_id("mfm.access-audit-entry.v1").expect("first registered schema"),
         ContentDigest::parse(format!("content:sha256-v1:{}", "ff".repeat(32)))
             .expect("last content digest"),
     )

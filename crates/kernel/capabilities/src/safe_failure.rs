@@ -40,7 +40,7 @@ pub enum FailureClass {
 }
 
 impl FailureClass {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Authorization => "authorization",
@@ -70,7 +70,7 @@ pub enum BoundaryStage {
 }
 
 impl BoundaryStage {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BeforeBoundaryEntry => "before_boundary_entry",
@@ -622,7 +622,7 @@ pub enum SafeFailureClassifierError {
 }
 
 impl CoarseSizeClass {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Zero => "zero",

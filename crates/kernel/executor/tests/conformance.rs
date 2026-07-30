@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 
 use mfm_canonical::{
     sha256_digest_bytes, CanonicalValue, RecoverabilityContract, ValidatedCanonicalValue,
@@ -30,10 +30,10 @@ use mfm_ids::{
     TenantScopeId,
 };
 
-#[path = "../../../../tests/support/recoverability_v3.rs"]
-mod recoverability_v3;
+#[path = "../../../../tests/support/recoverability_v1.rs"]
+mod recoverability_v1;
 
-const CORPUS: &str = include_str!("../../../../contracts/recoverability/v3/corpus.json");
+const CORPUS: &str = include_str!("../../../../contracts/recoverability/v1/corpus.json");
 
 #[derive(Clone)]
 struct RetryingObservationStore {
@@ -374,11 +374,11 @@ fn retained_closure_contract_with_domain(
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -386,11 +386,11 @@ fn retained_closure_contract_with_domain(
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v2",
+            "mfm.executor-terminal-tombstone.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v2",
+            "mfm.executor-reference-terminal-proof.v1",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
@@ -413,7 +413,7 @@ fn binding_fixture_with_bounds(
         label,
         with_resource_owner,
         evidence_bounds,
-        "mfm.executor-reference-queue-result.v2",
+        "mfm.executor-reference-queue-result.v1",
         reviewed_ref("reference.safe-failure"),
     )
 }
@@ -649,6 +649,56 @@ fn reference_fixture(
     let executor =
         ReferenceExecutor::new(ledger, destination.clone(), reference_contract(&fixture));
     (fixture, destination, executor)
+}
+
+#[derive(Clone)]
+struct HeldFollowerDestination {
+    inner: MemoryConvergentDestination,
+    authorized: Arc<Barrier>,
+    followers_released: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl HeldFollowerDestination {
+    fn new(inner: MemoryConvergentDestination, worker_count: usize) -> Self {
+        Self {
+            inner,
+            authorized: Arc::new(Barrier::new(worker_count)),
+            followers_released: Arc::new((Mutex::new(false), Condvar::new())),
+        }
+    }
+
+    fn release_followers(&self) {
+        let (released, wake) = &*self.followers_released;
+        *released.lock().expect("follower release lock") = true;
+        wake.notify_all();
+    }
+}
+
+impl ReferenceDestination for HeldFollowerDestination {
+    fn enqueue<'a>(
+        &'a self,
+        authority: TargetEntryAuthority,
+        request: &'a ReferenceRequest,
+        contract: &'a ReferenceContract,
+        behavior: ReferenceTargetBehavior,
+    ) -> ExecutorFuture<'a, ReferenceDestinationReturn> {
+        let first_attempt = mfm_executor::derive_attempt_id(
+            authority.identity(),
+            0,
+            authority.target_operation_ref(),
+        )
+        .expect("first attempt identity");
+        let is_first_attempt = authority.attempt_id() == &first_attempt;
+        self.authorized.wait();
+        if !is_first_attempt {
+            let (released, wake) = &*self.followers_released;
+            let mut released = released.lock().expect("follower release lock");
+            while !*released {
+                released = wake.wait(released).expect("follower release wait");
+            }
+        }
+        self.inner.enqueue(authority, request, contract, behavior)
+    }
 }
 
 fn block_on<Future>(future: Future) -> Future::Output
@@ -1212,21 +1262,60 @@ fn retained_closure_is_binding_qualified_complete_and_exact() {
 
 #[test]
 fn concurrent_delayed_and_post_terminal_drives_converge() {
-    let (fixture, destination, executor) = reference_fixture(64);
+    const WORKER_COUNT: usize = 4;
+
+    let fixture = binding_fixture("reference", false, 64);
+    let destination = MemoryConvergentDestination::new();
+    destination
+        .activate_generation(fixture.generation_ref.clone())
+        .expect("activate generation");
+    let controlled_destination = HeldFollowerDestination::new(destination.clone(), WORKER_COUNT);
+    let store = MemoryExecutorStore::new(&fixture.binding);
+    let ledger =
+        KeyedExecutorLedger::new(store, fixture.binding.clone()).expect("keyed executor ledger");
+    let executor = ReferenceExecutor::new(
+        ledger,
+        controlled_destination.clone(),
+        reference_contract(&fixture),
+    );
     let request = committed(&fixture, 3, "operation.concurrent", "payload");
-    let barrier = Arc::new(Barrier::new(12));
+    let barrier = Arc::new(Barrier::new(WORKER_COUNT));
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
     let mut workers = Vec::new();
-    for _ in 0..12 {
+    for _ in 0..WORKER_COUNT {
         let barrier = Arc::clone(&barrier);
         let executor = executor.clone();
         let request = request.clone();
+        let result_sender = result_sender.clone();
         workers.push(std::thread::spawn(move || {
             barrier.wait();
-            block_on(executor.drive(&request))
+            result_sender
+                .send(block_on(executor.drive(&request)))
+                .expect("send drive result");
         }));
     }
+    drop(result_sender);
+    let first = match result_receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+        Ok(result) => result,
+        Err(error) => {
+            controlled_destination.release_followers();
+            panic!("first observed drive did not complete: {error}");
+        }
+    };
+    controlled_destination.release_followers();
+    let mut results = vec![first];
+    for _ in 1..WORKER_COUNT {
+        results.push(
+            result_receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("receive follower drive result"),
+        );
+    }
     for worker in workers {
-        let result = worker.join().expect("worker").expect("drive");
+        worker.join().expect("worker");
+    }
+    for result in results {
+        let result = result.expect("drive");
         assert!(matches!(result.outcome(), Ensure::Terminal { .. }));
     }
     assert_eq!(destination.semantic_mutation_count().expect("mutations"), 1);
@@ -2054,7 +2143,7 @@ fn cross_contract_schema_and_generation_swaps_normalize_under_each_local_seal() 
         "cross-outcome-second",
         false,
         bounds(8),
-        "mfm.executor-reference-failure-code.v2",
+        "mfm.executor-reference-failure-code.v1",
         reviewed_ref("cross-outcome-second.safe-failure"),
     );
     assert_ne!(
@@ -2136,7 +2225,7 @@ fn cross_contract_schema_and_generation_swaps_normalize_under_each_local_seal() 
     )
     .expect("first contract outcome");
     let second_schema_outcome = domain_outcome(
-        "mfm.executor-reference-failure-code.v2",
+        "mfm.executor-reference-failure-code.v1",
         CanonicalValue::String("destination_unavailable".to_owned()),
     );
     let barrier = Arc::new(Barrier::new(2));
@@ -3011,14 +3100,14 @@ fn checkpoints_reject_corruption_and_restore_only_contract_bounds() {
             .expect_err("truncated"),
         ExecutorError::InvalidDurableSnapshot
     );
-    let mut legacy = bytes.clone();
-    legacy[..8].copy_from_slice(b"MFMELG04");
-    let payload_end = legacy.len() - 32;
-    let legacy_digest = sha256_digest_bytes(&legacy[..payload_end]);
-    legacy[payload_end..].copy_from_slice(legacy_digest.as_bytes());
+    let mut wrong_family = bytes.clone();
+    wrong_family[..8].copy_from_slice(b"MFMBAD01");
+    let payload_end = wrong_family.len() - 32;
+    let wrong_family_digest = sha256_digest_bytes(&wrong_family[..payload_end]);
+    wrong_family[payload_end..].copy_from_slice(wrong_family_digest.as_bytes());
     assert_eq!(
-        MemoryLedgerCheckpoint::from_durable_bytes(&legacy)
-            .expect_err("retired checkpoint generation"),
+        MemoryLedgerCheckpoint::from_durable_bytes(&wrong_family)
+            .expect_err("wrong checkpoint family"),
         ExecutorError::InvalidDurableSnapshot
     );
     let checkpoint = MemoryLedgerCheckpoint::from_durable_bytes(&bytes).expect("decode");
@@ -3124,34 +3213,34 @@ fn credentials_injected_below_target_entry_never_reach_retained_surfaces() {
 
 #[test]
 fn all_587_frozen_vectors_are_consumed_by_the_shared_authority() {
-    recoverability_v3::run_consumer("mfm-executor", |owner| {
-        recoverability_v3::assert_lower_layer_owner_vector(owner);
+    recoverability_v1::run_consumer("mfm-executor", |owner| {
+        recoverability_v1::assert_lower_layer_owner_vector(owner);
         assert_executor_owner_vector(owner);
     });
 }
 
-fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
+fn assert_executor_owner_vector(owner: recoverability_v1::OwnerVector<'_>) {
     let vector = owner.vector();
     match owner {
-        recoverability_v3::OwnerVector::RelationalPositive(_) => match owner.kind() {
+        recoverability_v1::OwnerVector::RelationalPositive(_) => match owner.kind() {
             "frontier_order" => assert_eq!(
-                recoverability_v3::string(vector, "expected"),
+                recoverability_v1::string(vector, "expected"),
                 "ancestor_or_equal_does_not_regress_descendant_advances"
             ),
             "relational_acceptance" => assert_eq!(
-                recoverability_v3::string(vector, "expected"),
+                recoverability_v1::string(vector, "expected"),
                 "exact_returned_observation_matches"
             ),
             "request_identity" => assert_eq!(
-                recoverability_v3::string(vector, "expected"),
+                recoverability_v1::string(vector, "expected"),
                 "different_request_digest"
             ),
             "resource_refold" => assert_eq!(
-                recoverability_v3::string(vector, "expected"),
+                recoverability_v1::string(vector, "expected"),
                 "restored_policy_and_configuration_match_before_authorization"
             ),
             "type_separation" => assert_eq!(
-                recoverability_v3::string(vector, "expected"),
+                recoverability_v1::string(vector, "expected"),
                 "non_substitutable"
             ),
             "commit_coordinate_separation"
@@ -3168,9 +3257,9 @@ fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
                 owner.id()
             ),
         },
-        recoverability_v3::OwnerVector::RelationalRejection(_) => {
-            let target = recoverability_v3::string(vector, "target");
-            let expected = recoverability_v3::string(vector, "expected_error");
+        recoverability_v1::OwnerVector::RelationalRejection(_) => {
+            let target = recoverability_v1::string(vector, "target");
+            let expected = recoverability_v1::string(vector, "expected_error");
             let mapped = match (target, expected) {
                 ("mfm.initial-binding.v1", "binding_conflict") => {
                     Some(ExecutorError::EffectBindingConflict)
@@ -3178,14 +3267,14 @@ fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
                 ("mfm.evidence-bounds.v1", "reserve_exhausted") => {
                     Some(ExecutorError::EvidenceBoundsExhausted)
                 }
-                ("mfm.executor-delivery-frontier.v2", "evidence_chain_fork") => {
+                ("mfm.executor-delivery-frontier.v1", "evidence_chain_fork") => {
                     Some(ExecutorError::FrontierFork)
                 }
                 (
-                    "mfm.executor-reference-terminal-proof.v2",
+                    "mfm.executor-reference-terminal-proof.v1",
                     "attempt_observation_mismatch" | "receipt_link_missing",
                 )
-                | ("mfm.executor-terminal-tombstone.v2", "tombstone_proof_mismatch") => {
+                | ("mfm.executor-terminal-tombstone.v1", "tombstone_proof_mismatch") => {
                     Some(ExecutorError::TerminalProofMismatch)
                 }
                 ("mfm.executor-resource-ledger-record.v1", "resource_policy_mismatch") => {
@@ -3210,7 +3299,7 @@ fn assert_executor_owner_vector(owner: recoverability_v3::OwnerVector<'_>) {
                     | "mfm.fact-publication-routing.v1"
                     | "mfm.fact-selection-completeness.v1"
                     | "mfm.journal-predecessor.v1"
-                    | "mfm.legal-commit-batch.v2"
+                    | "mfm.legal-commit-batch.v1"
                     | "mfm.non-domain-failure.v1"
                     | "recoverability_annex"
                     | "schema_algebra"
