@@ -6,7 +6,7 @@ use mfm_ids::{FactQueryDigest, JournalRecordHash};
 use mfm_journal::*;
 use serde_json::Value;
 
-const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v3/corpus.json");
+const CORPUS_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/corpus.json");
 
 #[derive(Debug)]
 struct Decoded {
@@ -78,7 +78,7 @@ macro_rules! owned_codec {
                 PersistedNonDomainFailure::strict_decode,
                 PersistedNonDomainFailure::from_canonical_value,
             )),
-            "mfm.access-audit-entry.v2" => Some(decode_with(
+            "mfm.access-audit-entry.v1" => Some(decode_with(
                 $bytes,
                 AccessAuditEntry::strict_decode,
                 AccessAuditEntry::from_canonical_value,
@@ -128,7 +128,7 @@ macro_rules! owned_codec {
                 BlockingSource::strict_decode,
                 BlockingSource::from_canonical_value,
             )),
-            "mfm.candidate-record-envelope.v2" => Some(decode_with(
+            "mfm.candidate-record-envelope.v1" => Some(decode_with(
                 $bytes,
                 CandidateRecordEnvelope::strict_decode,
                 CandidateRecordEnvelope::from_canonical_value,
@@ -143,7 +143,7 @@ macro_rules! owned_codec {
                 ClosureRef::strict_decode,
                 ClosureRef::from_canonical_value,
             )),
-            "mfm.commit-candidate-preimage.v2" => Some(decode_with(
+            "mfm.commit-candidate-preimage.v1" => Some(decode_with(
                 $bytes,
                 CommitCandidatePreimage::strict_decode,
                 CommitCandidatePreimage::from_canonical_value,
@@ -198,7 +198,7 @@ macro_rules! owned_codec {
                 ExternalAccessAuthorized::strict_decode,
                 ExternalAccessAuthorized::from_canonical_value,
             )),
-            "mfm.external-access-observed.v2" => Some(decode_with(
+            "mfm.external-access-observed.v1" => Some(decode_with(
                 $bytes,
                 ExternalAccessObserved::strict_decode,
                 ExternalAccessObserved::from_canonical_value,
@@ -313,7 +313,7 @@ macro_rules! owned_codec {
                 JournalPredecessor::strict_decode,
                 JournalPredecessor::from_canonical_value,
             )),
-            "mfm.legal-commit-batch.v2" => Some(decode_with(
+            "mfm.legal-commit-batch.v1" => Some(decode_with(
                 $bytes,
                 LegalCommitBatch::strict_decode,
                 LegalCommitBatch::from_canonical_value,
@@ -338,7 +338,7 @@ macro_rules! owned_codec {
                 ObjectPathBinding::strict_decode,
                 ObjectPathBinding::from_canonical_value,
             )),
-            "mfm.observation-outcome.v2" => Some(decode_with(
+            "mfm.observation-outcome.v1" => Some(decode_with(
                 $bytes,
                 ObservationOutcome::strict_decode,
                 ObservationOutcome::from_canonical_value,
@@ -358,7 +358,7 @@ macro_rules! owned_codec {
                 OutputRef::strict_decode,
                 OutputRef::from_canonical_value,
             )),
-            "mfm.pending-effect.v2" => Some(decode_with(
+            "mfm.pending-effect.v1" => Some(decode_with(
                 $bytes,
                 PendingEffect::strict_decode,
                 PendingEffect::from_canonical_value,
@@ -378,7 +378,7 @@ macro_rules! owned_codec {
                 ReadCapabilityBinding::strict_decode,
                 ReadCapabilityBinding::from_canonical_value,
             )),
-            "mfm.record-hash-preimage.v2" => Some(decode_with(
+            "mfm.record-hash-preimage.v1" => Some(decode_with(
                 $bytes,
                 RecordHashPreimage::strict_decode,
                 RecordHashPreimage::from_canonical_value,
@@ -414,7 +414,7 @@ macro_rules! owned_codec {
                 RunClosed::strict_decode,
                 RunClosed::from_canonical_value,
             )),
-            "mfm.run-journal-record.v2" => Some(decode_with(
+            "mfm.run-journal-record.v1" => Some(decode_with(
                 $bytes,
                 RunJournalRecord::strict_decode,
                 RunJournalRecord::from_canonical_value,
@@ -611,7 +611,7 @@ fn tagged_records_bodies_and_legal_batches_cover_the_closed_algebras() {
         .expect("positive vector array")
     {
         match (vector["kind"].as_str(), vector["schema_contract"].as_str()) {
-            (Some("schema_acceptance"), Some("mfm.run-journal-record.v2")) => {
+            (Some("schema_acceptance"), Some("mfm.run-journal-record.v1")) => {
                 let bytes = hex_bytes(vector["canonical_hex"].as_str().expect("canonical hex"));
                 let record = RunJournalRecord::strict_decode(&bytes).expect("record golden");
                 let name = match record.fields().expect("typed record") {
@@ -838,7 +838,7 @@ fn typed_identity_helpers_match_the_frozen_domain_vectors() {
                 .genesis_digest()
                 .expect("genesis digest")
                 .to_string(),
-            "mfm.journal-candidate.v2" => CommitCandidatePreimage::strict_decode(&bytes)
+            "mfm.journal-candidate.v1" => CommitCandidatePreimage::strict_decode(&bytes)
                 .expect("candidate preimage")
                 .candidate_digest()
                 .expect("candidate digest")
@@ -853,7 +853,7 @@ fn typed_identity_helpers_match_the_frozen_domain_vectors() {
                 .record_id()
                 .expect("record id")
                 .to_string(),
-            "mfm.journal-record.v2" => RecordHashPreimage::strict_decode(&bytes)
+            "mfm.journal-record.v1" => RecordHashPreimage::strict_decode(&bytes)
                 .expect("record preimage")
                 .record_hash()
                 .expect("record hash")
@@ -967,12 +967,12 @@ fn typed_references_and_object_relations_round_trip_without_identity_substitutio
     );
 
     let candidate =
-        CandidateRecordEnvelope::strict_decode(&schema_golden("mfm.candidate-record-envelope.v2"))
+        CandidateRecordEnvelope::strict_decode(&schema_golden("mfm.candidate-record-envelope.v1"))
             .expect("candidate record golden");
     let record_preimage =
         RecordHashPreimage::from_candidate(&candidate).expect("record-hash preimage");
     let frozen_preimage =
-        RecordHashPreimage::strict_decode(&schema_golden("mfm.record-hash-preimage.v2"))
+        RecordHashPreimage::strict_decode(&schema_golden("mfm.record-hash-preimage.v1"))
             .expect("record-hash golden");
     assert_eq!(record_preimage.as_bytes(), frozen_preimage.as_bytes());
     assert_eq!(
@@ -1054,7 +1054,7 @@ fn fact_response_and_access_audit_relations_are_explicitly_checked() {
     ));
 
     let observed =
-        ExternalAccessObserved::strict_decode(&schema_golden("mfm.external-access-observed.v2"))
+        ExternalAccessObserved::strict_decode(&schema_golden("mfm.external-access-observed.v1"))
             .expect("observation golden");
     let observed_fields = observed.fields().expect("observation fields");
     let observation_record =
@@ -1074,7 +1074,7 @@ fn fact_response_and_access_audit_relations_are_explicitly_checked() {
         .validate_observation(&observation_ref, &observed)
         .expect("audit links exact authorization and observation");
 
-    let unobserved = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v2"))
+    let unobserved = AccessAuditEntry::strict_decode(&schema_golden("mfm.access-audit-entry.v1"))
         .expect("unobserved audit golden");
     let authorization_ref = unobserved.fields().expect("audit fields").authorization_ref;
     unobserved

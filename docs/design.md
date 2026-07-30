@@ -4,7 +4,7 @@ Status: authoritative typed-core design contract
 
 This document defines the one current runtime, journal, store, replay, and application design. The
 canonical recoverability schemas and identities are frozen in
-`contracts/recoverability/v3/annex.json` and `contracts/recoverability/v3/corpus.json`. Where this
+`contracts/recoverability/v1/annex.json` and `contracts/recoverability/v1/corpus.json`. Where this
 document summarizes a frozen encoding, the annex is authoritative.
 The typed-core cutover is implemented and no pre-cutover lifecycle remains. Production EVM reads
 are current audited graph nodes. EVM transaction submission is a registered recoverable effect
@@ -947,14 +947,14 @@ are separately authorized. There is no arbitrary object reader or tenant-wide di
 The access-audit projection exposes the optional closed `non_domain_failure` value and never
 recasts it as `failure`, a returned value, or a domain result.
 
-Portable run transfer is the annex-defined `mfm.portable-run-export-stream.v2` framed JSON text
+Portable run transfer is the annex-defined `mfm.portable-run-export-stream.v1` framed JSON text
 sequence. It begins with one header, carries root-first journals and deduplicated object payloads
 with every logical `ValueRef` authority, and ends with one terminal frame followed immediately by
 EOF. The external content digest is SHA-256 over every exact record separator, canonical frame
 byte, and line feed; no frame contains a self-digest.
 
 The exact DTOs, disclosure rules, pagination, authentication, and portable-export contract are in
-`docs/recoverability-app-surface-v3.md`.
+`docs/recoverability-app-surface-v1.md`.
 
 ## Security And Redaction
 

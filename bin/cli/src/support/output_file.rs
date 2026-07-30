@@ -531,7 +531,7 @@ mod tests {
             mfm_canonical::RecoverabilityContract::embedded().expect("recoverability contract");
         let content_ref = mfm_ids::ContentRef::new(
             contract
-                .schema_id("mfm.portable-run-export-stream.v2")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("stream schema")
                 .clone(),
             contract.raw_content_digest(&bytes),
@@ -562,7 +562,7 @@ mod tests {
         assert_eq!(
             published_ref.schema_id(),
             contract
-                .schema_id("mfm.portable-run-export-stream.v2")
+                .schema_id("mfm.portable-run-export-stream.v1")
                 .expect("stream schema")
         );
     }

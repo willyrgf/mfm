@@ -37,9 +37,9 @@ define_schema_value! {
     /// Durable authorization of exactly one ambient operation.
     pub struct ExternalAccessAuthorized => "mfm.external-access-authorized.v1";
     /// Closed observed outcome of one authorized ambient operation.
-    pub struct ObservationOutcome => "mfm.observation-outcome.v2";
+    pub struct ObservationOutcome => "mfm.observation-outcome.v1";
     /// Durable observation linked to exactly one authorization.
-    pub struct ExternalAccessObserved => "mfm.external-access-observed.v2";
+    pub struct ExternalAccessObserved => "mfm.external-access-observed.v1";
     /// Frozen retained-value contracts for the reserved fact-selection read.
     pub struct FactSelectionScanContract => "mfm.fact-selection-scan-contract.v1";
     /// Store-authored proof of one complete fact-selection scan.
@@ -55,9 +55,9 @@ define_schema_value! {
     /// Immutable admitted read-capability binding.
     pub struct ReadCapabilityBinding => "mfm.read-capability-binding.v1";
     /// Redaction-safe audit entry derived from authorization and observation.
-    pub struct AccessAuditEntry => "mfm.access-audit-entry.v2";
+    pub struct AccessAuditEntry => "mfm.access-audit-entry.v1";
     /// Folded pending effect summary.
-    pub struct PendingEffect => "mfm.pending-effect.v2";
+    pub struct PendingEffect => "mfm.pending-effect.v1";
     /// Complete terminal effect evidence observed through audited access.
     pub struct TerminalEffectEvidence => "mfm.terminal-effect-evidence.v1";
     /// Frozen terminal-effect semantic identity preimage.
@@ -773,7 +773,7 @@ impl ExternalAccessObserved {
         Self::from_canonical_value(object([
             (
                 "version",
-                CanonicalValue::String("mfm.external-access-observed.v2".to_owned()),
+                CanonicalValue::String("mfm.external-access-observed.v1".to_owned()),
             ),
             ("authorization_ref", authorization_ref.canonical_value()?),
             ("outcome", outcome.canonical_value()?),
@@ -1265,7 +1265,7 @@ impl AccessAuditEntry {
         Self::from_canonical_value(object([
             (
                 "version",
-                CanonicalValue::String("mfm.access-audit-entry.v2".to_owned()),
+                CanonicalValue::String("mfm.access-audit-entry.v1".to_owned()),
             ),
             ("authorization_ref", authorization_ref.canonical_value()?),
             (

@@ -1039,7 +1039,7 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
         .expect("generation")
         .1;
     for (field, hostile) in [
-        ("version", json!("mfm.evm.routing-generation.v2")),
+        ("version", json!("mfm.invalid.routing-generation.v1")),
         ("provider_class", json!("unreviewed-provider")),
         ("route_policy_id", json!("fallback-policy")),
         ("route_policy_version", json!("2")),

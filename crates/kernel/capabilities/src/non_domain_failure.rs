@@ -10,7 +10,7 @@ pub enum NonDomainEntryStatus {
 }
 
 impl NonDomainEntryStatus {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ProvenNotEntered => "proven_not_entered",
@@ -18,7 +18,7 @@ impl NonDomainEntryStatus {
         }
     }
 
-    /// Parses the frozen recoverability-v3 spelling.
+    /// Parses the frozen recoverability-v1 spelling.
     pub fn parse(value: &str) -> Result<Self, NonDomainFailureError> {
         match value {
             "proven_not_entered" => Ok(Self::ProvenNotEntered),
@@ -38,7 +38,7 @@ pub enum NonDomainDisposition {
 }
 
 impl NonDomainDisposition {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RetryableOperational => "retryable_operational",
@@ -46,7 +46,7 @@ impl NonDomainDisposition {
         }
     }
 
-    /// Parses the frozen recoverability-v3 spelling.
+    /// Parses the frozen recoverability-v1 spelling.
     pub fn parse(value: &str) -> Result<Self, NonDomainFailureError> {
         match value {
             "retryable_operational" => Ok(Self::RetryableOperational),
@@ -78,7 +78,7 @@ pub enum NonDomainFailureCode {
 }
 
 impl NonDomainFailureCode {
-    /// Returns the frozen recoverability-v3 spelling.
+    /// Returns the frozen recoverability-v1 spelling.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AdapterContractViolation => "adapter_contract_violation",
@@ -92,7 +92,7 @@ impl NonDomainFailureCode {
         }
     }
 
-    /// Parses the frozen recoverability-v3 spelling.
+    /// Parses the frozen recoverability-v1 spelling.
     pub fn parse(value: &str) -> Result<Self, NonDomainFailureError> {
         match value {
             "adapter_contract_violation" => Ok(Self::AdapterContractViolation),

@@ -1,10 +1,10 @@
 #[path = "../src/decision.rs"]
 mod runtime_decision;
 
-#[path = "../../../../tests/support/recoverability_v3.rs"]
-mod recoverability_v3_support;
+#[path = "../../../../tests/support/recoverability_v1.rs"]
+mod recoverability_v1_support;
 
-use recoverability_v3_support::{assert_lower_layer_owner_vector, run_consumer, OwnerVector};
+use recoverability_v1_support::{assert_lower_layer_owner_vector, run_consumer, OwnerVector};
 use runtime_decision::{
     scan_observations, select_action, DecisionInput, EvidenceScan, IntegrityBlock,
     ObservationVerdict, SelectedAction,
@@ -80,7 +80,7 @@ fn assert_runtime_positive(owner: OwnerVector<'_>) {
 
 fn assert_runtime_read_verdict(owner: OwnerVector<'_>) {
     let expected =
-        recoverability_v3_support::string(owner.vector(), "expected_reproduction_verdict");
+        recoverability_v1_support::string(owner.vector(), "expected_reproduction_verdict");
     let actual = match expected {
         "committed_typed_terminal" => {
             scan_observations([ObservationVerdict::Settlement(owner.id())])

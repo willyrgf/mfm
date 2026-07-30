@@ -1,9 +1,9 @@
-#[path = "../../../../tests/support/recoverability_v3.rs"]
-mod recoverability_v3_support;
+#[path = "../../../../tests/support/recoverability_v1.rs"]
+mod recoverability_v1_support;
 
 use mfm_canonical::RecoverabilityContract;
 use mfm_spec::{CanonicalExpansionPath, CanonicalExpansionStep};
-use recoverability_v3_support::{
+use recoverability_v1_support::{
     assert_lower_layer_owner_vector, for_each_vector, hex_field, run_consumer, string,
     CorpusVector, OwnerVector,
 };

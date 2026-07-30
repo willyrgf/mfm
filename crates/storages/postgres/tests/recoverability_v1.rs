@@ -7,10 +7,10 @@ use mfm_storage_postgres::{open_authoritative, TestAuthoritativeWriterFence};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, PgPool, Row};
 
-#[path = "../../../../tests/support/recoverability_v3.rs"]
-mod recoverability_v3;
+#[path = "../../../../tests/support/recoverability_v1.rs"]
+mod recoverability_v1;
 
-use recoverability_v3::{
+use recoverability_v1::{
     array, assert_lower_layer_owner_vector, for_each_vector, run_consumer, string, CorpusVector,
     OwnerVector,
 };

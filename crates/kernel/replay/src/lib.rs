@@ -31,12 +31,6 @@
 //!     compare_current(historical, registry)
 //! }
 //! ```
-//!
-//! Versioned Rust module aliases are deliberately absent:
-//!
-//! ```compile_fail
-//! use mfm_replay::v2::verify_recorded_history;
-//! ```
 
 /// Deterministic trace and portable-export canonicalization.
 pub mod trace_export;

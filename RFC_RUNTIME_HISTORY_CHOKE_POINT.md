@@ -1,15 +1,14 @@
 # RFC: Runtime History Choke Point
 
-Status: accepted and implemented current recoverability-v3 contract
+Status: accepted and implemented current recoverability-v1 contract
 
 Scope: run-history ownership, runtime mutation authority, external-access orchestration, typed
 completion, state-transition boundaries, store append APIs, replay, and application admission
 
 This RFC records the accepted breaking internal architecture that enforces the external-access
-audit contract established by `RFC_REFACTOR_RECOVERABILITY.md`. It is implemented by the current
-code, `docs/design.md`, `docs/architecture.md`, and the sole production
-`contracts/recoverability/v3` annex and corpus. The byte-identical v1 and v2 artifacts are archival
-and hostile-input references only; no production reader accepts them.
+audit contract. It is implemented by the current code, `docs/design.md`, `docs/architecture.md`,
+and the sole production `contracts/recoverability/v1` annex and corpus. No superseded artifact or
+production reader is retained.
 
 This design does not weaken the existing requirements for append-only history, pre-access durable
 authorization, per-append atomicity, affine live authority, content addressing, callback-free
@@ -365,7 +364,7 @@ The stronger design must combine:
 - Treating `#[must_use]`, comments, code review, or architectural convention alone as the safety
   mechanism.
 - Adding best-effort audit mode or an unaudited fallback when the history store is unavailable.
-- Retaining recoverability v1 or v2 as a production reader after the v3 persisted-schema cutover.
+- Retaining a superseded production reader after a persisted-schema reset.
 
 ## Terminology
 
@@ -904,7 +903,7 @@ NonDomainFailure {
 the observation commits. `IntegrityBlocked` is non-consumable and deterministically blocks the run.
 Neither disposition fabricates a domain failure or safe failure.
 
-The current recoverability-v3 code vocabulary is:
+The current recoverability-v1 code vocabulary is:
 
 ```text
 NonDomainFailureCode =
@@ -1448,21 +1447,21 @@ The distinctions preserve:
 
 ### Retain one audit-only `NonDomainFailure` outcome
 
-The current v3 design includes `NonDomainFailure`. The former three outcomes had no clearly
+The current design includes `NonDomainFailure`. The former three outcomes had no clearly
 non-consumable representation for a surviving operational, protocol, integrity, or contract
 failure. Reusing `DidNotEnter` or `Indeterminate` could turn platform unavailability or corruption
 into state-consumable evidence.
 
 The completed cutover inventories every error reachable from the registered live boundary through
-pending-observation construction. The v3 annex freezes `NonDomainFailureCode`, the
+pending-observation construction. The annex freezes `NonDomainFailureCode`, the
 history-derived `NonDomainFailureLayer`, conservative entry status, and the
 `RetryableOperational | IntegrityBlocked` disposition relation. Provider and transport faults
 admitted by a certified `SafeFailure` contract remain in that separately closed
 code/class/stage/diagnostic relation; every other normally returned external fault must use the
 non-domain relation.
 
-The change created one current v3 schema lineage and corpus, explicitly rejects the v1 and v2
-archives, and has no dual reader or compatibility writer. Archived bytes cannot be silently
+The change reset one current v1 schema lineage and corpus, explicitly rejects every superseded
+artifact, and has no dual reader or compatibility writer. Superseded bytes cannot be silently
 reinterpreted.
 
 ## Ownership After Cutover
@@ -1921,7 +1920,7 @@ independently meaningful operation and prove partial-return and cancellation sem
 6. update audit/export projections;
 7. explicitly reject old current data;
 8. inventory and export any evidence that must survive reset; and
-9. remove v1 and v2 as production readers/writers.
+9. remove every superseded production reader and writer.
 
 No persisted bytes are rewritten in place. No dual reader, dual writer, fallback decoder, alias, or
 compatibility mode is permitted.
@@ -1929,7 +1928,7 @@ compatibility mode is permitted.
 Adding a provider- or transport-specific `NonDomainFailureCode`, changing a code's legal layer,
 entry status, or disposition, or adding an unknown-code fallback changes persisted semantics and
 requires a new current schema lineage, annex, corpus, store/replay validation, and public
-projection. The current v3 enum must not gain an open string, catch-all provider error, or
+projection. The current enum must not gain an open string, catch-all provider error, or
 compatibility interpretation.
 
 ## Logical Commit Sequence
@@ -1999,14 +1998,14 @@ The implementation closes every former decision gate:
 - app assembly gives mutation custody to `Runtime` and exposes purpose-specific readers elsewhere;
 - fact selection consumes its affine scan into one sealed pending result before observation
   preparation, so stale-head retry never rescans;
-- the v3 annex freezes the complete `NonDomainFailure` code, entry-status, disposition, and
+- the annex freezes the complete `NonDomainFailure` code, entry-status, disposition, and
   contextual-layer relation;
 - provider and transport failures are queryable through exact authorization linkage and one closed
   safe-failure or non-domain classification, never provider-controlled text;
 - runtime-facing executor adapters classify fresh material separately from retained-history
   corruption and use exact affine-authority consumption and completion progress;
 - app policy produces an authorized admission plan while runtime alone commits it;
-- production readers accept only the destructive v3 lineage; v1 and v2 are archive-only; and
+- production readers accept only the sole v1 lineage, with no retained archive reader; and
 - CLI, REST, replay, trace, and audit expose the reviewed non-domain projection without provider
   text or secret-bearing detail.
 

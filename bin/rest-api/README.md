@@ -1,6 +1,6 @@
 # MFM REST API
 
-`mfm-rest-api` is the HTTP adapter for the recoverability-v3 `mfm_app::Application` facade. The
+`mfm-rest-api` is the HTTP adapter for the recoverability-v1 `mfm_app::Application` facade. The
 router owns request decoding, bearer extraction, status mapping, and response envelopes only.
 Storage, authentication policy, tenant derivation, run authority, planning, runtime, and replay
 remain behind the application facade.
@@ -95,7 +95,7 @@ POST /v1/runs/{run_id}/replay?mode=compare_current
 as the request body and exactly one value for each header:
 
 ```http
-Content-Type: application/vnd.mfm.run-export-stream.v2+json-seq
+Content-Type: application/vnd.mfm.run-export-stream.v1+json-seq
 Mfm-Content-Digest: content:sha256-v1:<64 lowercase hex>
 ```
 
@@ -136,7 +136,7 @@ persists only `delivery_audit_ref`.
 
 Export accepts `{"kind":"semantic"}` or `{"kind":"audit"}`. It is the only non-envelope success:
 the response body lazily streams the exact framed portable-export bytes, `Content-Type` is
-`application/vnd.mfm.run-export-stream.v2+json-seq`, and `Mfm-Content-Digest` is SHA-256 over every
+`application/vnd.mfm.run-export-stream.v1+json-seq`, and `Mfm-Content-Digest` is SHA-256 over every
 record separator, canonical frame byte, and line feed. A body-reader failure exposes only the
 fixed `export stream unavailable` body error, never a private path or backend diagnostic.
 
@@ -152,4 +152,4 @@ policy, run-store writer fence, exact wallet deployment, and independent executo
 writer-generation fence, wraps it in `AppState::new`, and passes that state to `make_app`.
 
 The frozen application and wire contract is
-[`docs/recoverability-app-surface-v3.md`](../../docs/recoverability-app-surface-v3.md).
+[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).

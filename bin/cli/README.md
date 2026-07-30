@@ -30,7 +30,7 @@ The file is bounded to 64 KiB. The CLI removes at most one final LF or CRLF and 
 remaining opaque bytes in a consuming, zeroizing credential. There is no raw token argument,
 tenant option, tenant environment variable, cookie, or session.
 
-## Recoverability-v3 commands
+## Recoverability-v1 commands
 
 Entry-point discovery itself requires no credential:
 
@@ -116,4 +116,4 @@ files. Do not place private keys, mnemonics, passphrases, bearer credentials, or
 authorization values in command arguments, logs, configured values, or runtime configuration.
 
 The exact application/transport contract is
-[`docs/recoverability-app-surface-v3.md`](../../docs/recoverability-app-surface-v3.md).
+[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md).

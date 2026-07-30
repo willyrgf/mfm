@@ -50,12 +50,12 @@ CREATE TABLE executor_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT executor_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT executor_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.executor-postgres.v2'
+        schema_contract_version = 'mfm.executor-postgres.v1'
     )
 );
 
 INSERT INTO executor_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.executor-postgres.v2');
+VALUES (TRUE, 'mfm.executor-postgres.v1');
 
 CREATE TABLE executor_bindings (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
@@ -143,7 +143,7 @@ CREATE TABLE executor_effect_frontiers (
     CONSTRAINT executor_effect_frontiers_ordinal_v1 CHECK (ordinal >= 0),
     CONSTRAINT executor_effect_frontiers_schema_v1 CHECK (
         frontier_schema_id ~
-            '^schema:[a-z0-9][a-z0-9._/-]*:2:sha256-jcs-v1:[0-9a-f]{64}$'
+            '^schema:[a-z0-9][a-z0-9._/-]*:1:sha256-jcs-v1:[0-9a-f]{64}$'
     ),
     CONSTRAINT executor_effect_frontiers_digest_v1 CHECK (
         frontier_content_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'
@@ -158,7 +158,7 @@ CREATE TABLE executor_effect_frontiers (
         (
             ordinal > 0
             AND predecessor_schema_id ~
-                '^schema:[a-z0-9][a-z0-9._/-]*:2:sha256-jcs-v1:[0-9a-f]{64}$'
+                '^schema:[a-z0-9][a-z0-9._/-]*:1:sha256-jcs-v1:[0-9a-f]{64}$'
             AND predecessor_content_digest ~ '^content:sha256-v1:[0-9a-f]{64}$'
         )
     ),

@@ -26,7 +26,7 @@ define_schema_value! {
     /// Sole structural run closure record.
     pub struct RunClosed => "mfm.run-closed.v1";
     /// Closed five-record journal algebra.
-    pub struct RunJournalRecord => "mfm.run-journal-record.v2";
+    pub struct RunJournalRecord => "mfm.run-journal-record.v1";
     /// Post-commit semantic closure coordinate.
     pub struct SemanticClosureCoordinate => "mfm.semantic-closure-coordinate.v1";
     /// Canonical run semantic-state digest preimage.

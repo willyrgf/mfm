@@ -55,7 +55,7 @@ fn ops_list_uses_the_production_connection_surface_and_fails_closed_standalone()
 }
 
 #[test]
-fn run_help_has_only_the_recoverability_v3_commands() {
+fn run_help_has_only_the_recoverability_v1_commands() {
     let mut cmd = Command::cargo_bin("mfm_cli").unwrap();
     let output = cmd
         .args(["run", "--help"])

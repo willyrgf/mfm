@@ -5,7 +5,7 @@ use super::{
     objects::validate_value_contract, PendingEffectStatus, Result, StoreError, VerifiedRunView,
 };
 
-const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v2";
+const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v1";
 const CANONICAL_VALUE_CONTRACT: &str = "mfm.primitive-canonical_value.v1";
 
 /// One callback-free public projection produced from a completely verified run history.

@@ -1,15 +1,9 @@
 #![warn(missing_docs)]
-//! Canonical recoverability-v3 program, planning, and execution contracts.
+//! Canonical recoverability-v1 program, planning, and execution contracts.
 //!
 //! This crate contains value contracts only. It does not author programs, run
 //! planners, execute states, bind live capabilities, or grant admission
 //! authority.
-//!
-//! Versioned Rust module aliases are deliberately absent:
-//!
-//! ```compile_fail
-//! use mfm_spec::v1::AuthoredProgram;
-//! ```
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityError};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, IdentityError, SchemaId};

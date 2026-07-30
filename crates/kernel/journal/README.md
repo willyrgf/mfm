@@ -1,6 +1,6 @@
 # mfm-journal
 
-Typed, domain-free persisted values for the recoverability-v3 run journal.
+Typed, domain-free persisted values for the recoverability-v1 run journal.
 
 The crate loads the frozen recoverability annex through `mfm-canonical`. Every
 value is structurally validated before it can be encoded, decoded, hashed, or

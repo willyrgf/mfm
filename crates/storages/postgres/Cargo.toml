@@ -27,6 +27,6 @@ serde_json = { workspace = true }
 parity-tests = []
 
 [[test]]
-name = "recoverability-v3"
-path = "tests/recoverability_v3.rs"
+name = "recoverability-v1"
+path = "tests/recoverability_v1.rs"
 required-features = ["parity-tests"]

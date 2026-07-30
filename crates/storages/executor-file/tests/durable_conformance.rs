@@ -29,7 +29,7 @@ use tempfile::TempDir;
 
 const CORPUS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../contracts/recoverability/v3/corpus.json"
+    "/../../../contracts/recoverability/v1/corpus.json"
 ));
 const WORKER_ROOT: &str = "MFM_EXECUTOR_FILE_WORKER_ROOT";
 const WORKER_COUNT: usize = 8;
@@ -89,11 +89,11 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.delivery-audit"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.executor-frontier"),
-            "mfm.executor-delivery-frontier.v2",
+            "mfm.executor-delivery-frontier.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-evidence"),
@@ -101,15 +101,15 @@ fn retained_closure_contract(label: &str) -> ExecutorRetainedClosureContract {
         ),
         retained_contract(
             &format!("{label}.terminal-tombstone"),
-            "mfm.executor-terminal-tombstone.v2",
+            "mfm.executor-terminal-tombstone.v1",
         ),
         retained_contract(
             &format!("{label}.terminal-proof"),
-            "mfm.executor-reference-terminal-proof.v2",
+            "mfm.executor-reference-terminal-proof.v1",
         ),
         retained_contract(
             &format!("{label}.domain-evidence"),
-            "mfm.executor-reference-queue-result.v2",
+            "mfm.executor-reference-queue-result.v1",
         ),
     )
     .expect("retained closure contract")

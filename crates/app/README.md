@@ -1,13 +1,13 @@
 # mfm-app
 
-`mfm-app` is the purpose-authorized application boundary for recoverability v3. Process
+`mfm-app` is the purpose-authorized application boundary for recoverability v1. Process
 transports receive one opaque `Application`; journal storage, authority issuance, planning,
 certification, runtime catalogs, replay readers, and live capabilities remain private to
 application composition.
 
 The frozen contract is documented in
-[`docs/recoverability-app-surface-v3.md`](../../docs/recoverability-app-surface-v3.md) and encoded
-by `contracts/recoverability/v3/annex.json`. There are no compatibility run, fact, stream, manual
+[`docs/recoverability-app-surface-v1.md`](../../docs/recoverability-app-surface-v1.md) and encoded
+by `contracts/recoverability/v1/annex.json`. There are no compatibility run, fact, stream, manual
 resolution, or arbitrary object APIs.
 
 ## Public run facade
@@ -33,7 +33,7 @@ decision, and mints one store-bound, purpose-specific authority. Credentials are
 not cloneable, serializable, or formattable; empty values and values larger than 64 KiB are
 rejected at this boundary.
 
-Recoverability v3 publishes exactly `mfm.portfolio/snapshot@1` and
+Recoverability v1 publishes exactly `mfm.portfolio/snapshot@1` and
 `mfm.evm/submit-transaction@1`. Admission accepts a caller-generated canonical UUIDv4 invocation
 identity and `{ "target": "..." }`. Portfolio targets resolve a `PortfolioConfig`; transaction
 targets resolve an immutable `EvmSubmitTransactionRequest` whose tenant and target must match the

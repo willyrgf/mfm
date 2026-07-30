@@ -1,4 +1,4 @@
-//! Frozen recoverability-v3 planning and graph values.
+//! Frozen recoverability-v1 planning and graph values.
 
 use std::collections::{BTreeMap, BTreeSet};
 

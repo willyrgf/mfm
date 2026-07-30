@@ -38,9 +38,9 @@ use crate::{
 pub const EVM_ALREADY_KNOWN_CLASSIFIER_VERSION: &str = "mfm.evm-live.already-known-classifier.v1";
 /// Exact five-method wallet target callback-surface version.
 pub const EVM_WALLET_TARGET_CALLBACK_SURFACE_VERSION: &str =
-    "mfm.evm-live.wallet-target-callback-surface.v2";
+    "mfm.evm-live.wallet-target-callback-surface.v1";
 /// Exact durable target-entry descriptor version.
-pub const EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION: &str = "mfm.evm-live.wallet-target-entry.v2";
+pub const EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION: &str = "mfm.evm-live.wallet-target-entry.v1";
 
 /// Redaction-safe local wallet target failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

@@ -669,7 +669,7 @@ Before merging, verify:
 
 - `docs/design.md`: normative semantic and authority contract
 - `docs/persisted-public-surfaces.md`: persisted/public no-secret inventory
-- `docs/recoverability-app-surface-v3.md`: exact app, CLI, REST, DTO, and disclosure contract
+- `docs/recoverability-app-surface-v1.md`: exact app, CLI, REST, DTO, and disclosure contract
 - `docs/portfolio-snapshot.md`: published product objective
 - `docs/evm-rpc-routing.md`: EVM routing generation and audited read graph
 - `docs/btc-rpc-routing.md`: unregistered Bitcoin qualification target

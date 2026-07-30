@@ -208,7 +208,7 @@ fn validator_rejects_target_route_and_order_disagreement() {
     assert!(validate_snapshot_selection(&extra_route).is_err());
 
     let mut invalid_version = selection_input();
-    invalid_version.routing_manifest.version = "mfm.portfolio.routing-manifest.v2".to_owned();
+    invalid_version.routing_manifest.version = "mfm.invalid.routing-manifest.v1".to_owned();
     assert!(validate_snapshot_selection(&invalid_version).is_err());
 }
 

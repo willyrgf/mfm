@@ -228,7 +228,7 @@ access; resume resolves the exact admitted generation without fallback.
 | Replay response | Frozen verified, reproduced, or candidate-comparison result. Reproduction `unavailable` has no reason field. |
 | Transition trace | Separately authorized exact transition lineage and retained values; cross-run denial uses redacted lineage. |
 | Access audit | Separately authorized safe authorization/observation chronology, including the optional closed `non_domain_failure` value for that exact outcome. |
-| Portable export | Framed `mfm.portable-run-export-stream.v2` JSON text sequence plus one external `ContentRef`. |
+| Portable export | Framed `mfm.portable-run-export-stream.v1` JSON text sequence plus one external `ContentRef`. |
 
 The portable stream begins with one header, emits root-first run material and deduplicated object
 payloads with every logical `ValueRef` authority, and ends with one terminal frame followed by

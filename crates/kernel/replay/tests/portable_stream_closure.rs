@@ -383,12 +383,12 @@ async fn recursive_source_closure_is_canonical_complete_and_callback_free() {
     coordinate["containing_commit_digest"] = serde_json::Value::String(changed);
     assert_invalid(&join_frames(&coordinate_tamper), "root coordinate mismatch").await;
 
-    let mut retired_version = frames.clone();
-    retired_version[0]["version"] =
-        serde_json::Value::String("mfm.portable-run-export-frame.v1".to_owned());
+    let mut invalid_version = frames.clone();
+    invalid_version[0]["version"] =
+        serde_json::Value::String("mfm.invalid-portable-run-export-frame.v1".to_owned());
     assert_invalid(
-        &join_frames(&retired_version),
-        "retired portable stream frame version",
+        &join_frames(&invalid_version),
+        "invalid portable stream frame identity",
     )
     .await;
 
@@ -589,7 +589,7 @@ fn stream_ref(bytes: &[u8]) -> ContentRef {
     let contract = RecoverabilityContract::embedded().expect("recoverability contract");
     ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("stream schema")
             .clone(),
         contract.raw_content_digest(bytes),

@@ -1052,7 +1052,7 @@ fn exact_plan_for_adapter(
     let semantic_head = JournalHead::new(2, &commit_digest).expect("semantic head");
     let portable_export_ref = ContentRef::new(
         contract
-            .schema_id("mfm.portable-run-export-stream.v2")
+            .schema_id("mfm.portable-run-export-stream.v1")
             .expect("portable schema")
             .clone(),
         ContentDigest::from_str(

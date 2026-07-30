@@ -8,13 +8,13 @@ use crate::error::{database_error, PostgresStoreError, Result};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.recoverability-postgres.v2";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.recoverability-postgres.v1";
 pub(crate) const APPLICATION_ROLE: &str = "mfm_store_application";
 const OWNER_ROLE: &str = "mfm_store_owner";
 const AUTHORITY_CATALOG_DEFINITION_SHA256: &str =
-    "7d71e470fd829c00e3c4df655a1823b245e0cefa0332f0a488e83cf03556c198";
+    "36cbc49057a8c061ddb9380fe9c0a02a03e05869253df9b9eadd1a2fa0e18498";
 
-/// Administrative schema management for the destructive recoverability-v3 baseline.
+/// Administrative schema management for the destructive recoverability-v1 baseline.
 pub struct PostgresSchema;
 
 impl PostgresSchema {

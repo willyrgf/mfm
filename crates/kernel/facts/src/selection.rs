@@ -16,7 +16,7 @@ const FACT_SELECTION_REQUEST_CONTRACT: &str = "mfm.fact-selection-request.v1";
 const REQUEST_VERSION: &str = "mfm.fact-selection-request.v1";
 const PRODUCER_SCOPE: &str = "other_runs_in_tenant_scope";
 
-/// Closed producer scope for recoverability-v3 fact selection.
+/// Closed producer scope for recoverability-v1 fact selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FactProducerScope {
     /// Facts emitted by other runs admitted in the same tenant scope.

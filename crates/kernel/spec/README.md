@@ -1,6 +1,6 @@
 # mfm-spec
 
-Frozen recoverability-v3 value contracts for authored programs, planning profiles, expanded
+Frozen recoverability-v1 value contracts for authored programs, planning profiles, expanded
 graphs, implementation manifests, and certificates.
 
 The crate owns canonical data and strict Annex-backed codecs only. It does not author programs,
