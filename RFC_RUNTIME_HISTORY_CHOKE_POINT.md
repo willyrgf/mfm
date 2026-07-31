@@ -1,6 +1,6 @@
 # RFC: Runtime History Choke Point
 
-Status: proposed target architecture; implementation has not started
+Status: ready for implementation planning; implementation has not started
 
 Scope: structured operation authoring and expansion, state execution kinds, typed failure
 handling, run-history ownership, deterministic scheduling, external-access recording, effect
@@ -45,8 +45,10 @@ the kernel's closed tagged-sum contract; a successful state output may supply th
 private `StateOutcome` discriminator itself is not a public `Match` input: the structured state
 binding exposes success as its output and routes a typed failure into its one exact structural
 failure continuation. That failure continuation's normally completing path reaches the designated
-handler. `FanOut` is the only place where more than one state may be eligible at once, and its
-lanes are initially restricted to bounded `Pure` and `Read` blocks with collect-all semantics.
+handler. `FanOut` is the only place where more than one state may be eligible at once. Its lanes
+are bounded `Pure` and `Read` blocks with collect-all semantics, and the initial certified contract
+allows nesting to depth two so the existing portfolio network fan-out may retain each child EVM
+operation's read fan-out.
 
 An arbitrary DAG is not an execution contract. A graph may be derived for diagnostics or
 visualization, but it is never admitted as scheduling authority.
@@ -93,19 +95,29 @@ Effect
 capability. Effects are forbidden inside the initial `FanOut` contract.
 
 Fallibility is a static contract property, not an inference from execution kind or implementation
-code. A state is infallible only when its exact certified failure-contract reference is
-`KERNEL_NEVER_FAILURE_CONTRACT_REF`; every other reference makes it fallible. The same rule
-applies to a fragment boundary. Every fallible state occurrence and fragment boundary has exactly
-one exhaustive failure continuation. Its lexical scope supplies a default typed failure-handler
-state when the scope failure-contract reference is not `KERNEL_NEVER_FAILURE_CONTRACT_REF` and the
-call site does not override it. A scope whose reference is the reserved `Never` contract instead
-requires explicit total recovery.
+code. One explicit certified sum owns it:
+
+```text
+FailureContract =
+    Never
+  | Typed(RetainedValueContract)
+```
+
+`Never` resolves only to `KERNEL_NEVER_FAILURE_CONTRACT_REF` and has no retained-value contract,
+codec, producer slot, or canonical value. Every `Typed` variant is fallible. The same rule applies
+to a fragment boundary. Every fallible state occurrence and fragment boundary has exactly one
+exhaustive failure continuation. A lexical scope may register a finite table of exact source
+failure contracts to ordinary typed failure-mapper states; `.or_default()` is legal only when
+exactly one entry matches. A scope whose failure contract is `Never` has no default and requires
+explicit total recovery.
 A wrapper may carry the protected failure only through its exact affine fragment boundary to that
-one call-site handler; it cannot insert a second handler or bypass the first. The default handler
-is `Pure`, infallible, consumes the exact producer-bound typed failure, and maps it into that
-operation or fan-out lane's declared failure contract. Reads, effects, retries, fallbacks, and
-compensations are explicit states in explicit branches; they are never hidden inside the default
-handler.
+one call-site handler; the protected failure's normal-control continuation cannot insert a second
+handler or directly bypass the first. A distinct failure newly committed by an intervening
+support state follows its own exact plan and may causally supersede the protected failure. The
+default handler is `Pure`, infallible, consumes the exact `FailurePlanBound` typed failure, and
+maps it into that operation or fan-out lane's declared failure contract. Reads, effects, retries,
+fallbacks, and compensations are explicit states in explicit branches; they are never hidden
+inside the default handler.
 
 `Read` and `Effect` use one private Runtime-owned access bracket:
 
@@ -119,8 +131,10 @@ Prepared<K>
   -> CommittedObservation<K>
        | Returned | SafeFailure
        |   -> state settlement
-       |       | StateOutcome
-       |       |   -> StateTransitionCommitted
+       |       | ProposedStateOutcome
+       |       |   -> exact-head transition append
+       |       |       -> StateTransitionCommitted
+       |       |       -> committed StateOutcome
        |       | InvalidEvidence
        |           -> blocked; no semantic transition
        | SupersededBeforeEntry                    [Effect only]
@@ -279,10 +293,13 @@ ordinary states and explicit control, not from bypassing them.
 - Make expansion finite, bounded, content-addressed, reproducible, and visible at admission.
 - Require one exhaustive typed failure continuation for every fallible state occurrence or
   fragment boundary.
-- Provide lexical operation- and lane-scoped default `Pure + Infallible` failure-handler states.
+- Provide lexical operation- and lane-scoped default `Pure + Never` failure-handler states.
 - Keep ordinary definite failures recoverable or terminal rather than indefinitely parked.
-- Restrict initial fan-out to bounded, declaration-ordered, collect-all `Pure` and `Read` lanes.
-- Make Runtime a cursor interpreter rather than a global graph scheduler.
+- Restrict initial fan-out to bounded, declaration-ordered, collect-all `Pure` and `Read` lanes
+  with certified nesting depth two.
+- Make Runtime the interpreter of one event-sourced structured state machine: the append-only fold
+  derives its current cursor, while Runtime executes only the state named by that cursor. It is
+  not a mutable in-process machine or a global graph scheduler.
 - Make every normal return after authorized access structurally pass through observation commit.
 - Preserve `Pure | Read | Effect` as certified semantic state kinds.
 - Keep effect-bearing states visible for audit, security analysis, and recovery.
@@ -319,21 +336,60 @@ ordinary states and explicit control, not from bypassing them.
 - Persisting credentials, private keys, signatures, raw signed envelopes, provider bodies, URLs,
   or unreviewed error strings.
 - Encoding authorization and observation as fake semantic transitions.
-- Defining an implementation plan before the material uncertainties and validation gates in this
-  RFC are resolved.
+- Letting an implementation plan weaken or reopen the frozen RFC contract without first amending
+  this RFC.
 
 ## Terminology
 
 ### Structured program
 
-The declaration-ordered authored and expanded forms:
+The declaration-ordered authored and expanded forms have one normal value channel and one lexical
+failure channel:
 
 ```text
 AuthoredProgram<Output, Failure> =
-    AuthoredOrderedBlock<
-        OperationOutcome<Output, Failure>,
-        OperationOutcome<Output, Failure>,
-    >
+    AuthoredFailureScope<Output, Failure> {
+        failure_contract: FailureContract<Failure>,
+        lexical_failure_mappings:
+            match failure_contract {
+                Never => EmptyExactMap,
+                Typed(ScopeFailureContract) =>
+                    ExactFiniteMap<
+                        SourceFailureContract,
+                        PureNeverMapper<
+                            SourceFailure,
+                            DefaultScopeFailureRoute<
+                                Failure,
+                                ScopeFailureContract,
+                            >,
+                        >,
+                    >,
+            },
+        body:
+            AuthoredOrderedBlock<
+                Output,
+                Failure,
+                OwnsFailureScope,
+            >,
+    }
+
+AuthoredOrderedBlock<Success, ScopeFailure, ScopeOwnership> {
+    failure_scope:
+        OwnsFailureScope
+      | InheritsFailureScope(ExactLexicalScopeToken),
+    declarations: [
+        AuthoredStateCall
+      | AuthoredOperationCall
+      | AuthoredMatch
+      | AuthoredFanOut
+    ],
+    tail:
+        AuthoredBlockTail<Success, ScopeFailure>,
+}
+
+AuthoredBlockTail<Success, ScopeFailure> =
+    Normal(TypedExpression<Success>)
+  | ScopeFailure(TypedExpression<ScopeFailure>)
 
 OperationOutcome<Output, Failure> =
     Success(Output)
@@ -342,167 +398,30 @@ OperationOutcome<Output, Failure> =
 LaneOutcome<Output, Failure> =
     Success(Output)
   | Failure(Failure)
-
-ArmResult<Value, EnclosingResult> =
-    Produced(Value) | ScopeResult(EnclosingResult)
-
-RecoveryResult<RecoveredOutput, FailureResult> =
-    ArmResult<RecoveredOutput, FailureResult>
-
-AuthoredLaneFailureResult<LaneFailureContractRef, LaneFailure> =
-    NoLaneFailure
-        when LaneFailureContractRef
-             == KERNEL_NEVER_FAILURE_CONTRACT_REF
-  | LaneOutcome::Failure(LaneFailure)
-        when LaneFailureContractRef
-             != KERNEL_NEVER_FAILURE_CONTRACT_REF
-
-AuthoredOrderedBlock<Result, FailureResult> {
-    lexical_default_handler:
-        Declared(handler)
-      | Inherited(scope_ref)
-      | UnavailableWhenScopeFailureIsNever,
-    declarations: [AuthoredBinding<Result, FailureResult>],
-    result: Result,
-}
-
-AuthoredFailureChoice<
-    FailureContractRef,
-    Failure,
-    RecoveredOutput,
-    FailureResult,
-> =
-    NoFailure
-        when FailureContractRef
-             == KERNEL_NEVER_FAILURE_CONTRACT_REF
-  | UseLexicalDefault
-        when FailureContractRef
-             != KERNEL_NEVER_FAILURE_CONTRACT_REF
-  | ExplicitPureNeverHandler<HandlerRoute> {
-        handler_call,
-        continuation: AuthoredHandlerContinuationBlock<
-            HandlerRoute,
-            RecoveredOutput,
-            FailureResult,
-        >,
-    }
-        when FailureContractRef
-             != KERNEL_NEVER_FAILURE_CONTRACT_REF
-
-AuthoredHandlerContinuationBlock<HandlerRoute, RecoveredOutput, FailureResult> = {
-    handler_output_local: TypedLocal<HandlerRoute>,
-    body: AuthoredOrderedBlock<
-        RecoveryResult<RecoveredOutput, FailureResult>,
-        FailureResult,
-    >,
-}
-
-AuthoredBinding<Result, FailureResult> =
-    StateCall {
-        output_local,
-        stable_label,
-        call,
-        failure: AuthoredFailureChoice<
-            call.failure_contract_ref,
-            call.Failure,
-            call.Output,
-            FailureResult,
-        >,
-    }
-  | OperationCall {
-        output_local,
-        stable_label,
-        child_operation,
-        typed_inputs,
-        success_contract,
-        failure_contract,
-        failure: AuthoredFailureChoice<
-            child_operation.failure_contract_ref,
-            child_operation.Failure,
-            child_operation.Output,
-            FailureResult,
-        >,
-    }
-  | Match {
-        output_local,
-        stable_label,
-        selector: ClosedSumValue,
-        exhaustive_arms: [
-            AuthoredTaggedArm {
-                canonical_tag,
-                stable_arm_label,
-                body: AuthoredOrderedBlock<
-                    ArmResult<Value, Result>,
-                    FailureResult,
-                >,
-            },
-        ],
-    }
-  | FanOut {
-        output_local,
-        stable_group_label,
-        bound,
-        homogeneous_contracts:
-            every lane output contract ref
-                == LaneOutputContractRef
-            and every lane failure contract ref
-                == LaneFailureContractRef,
-        ordered_lanes: [
-            AuthoredLane {
-                stable_lane_key,
-                declaration_ordinal,
-                lane_output_contract_ref,
-                lane_failure_contract_ref,
-                body: AuthoredOrderedBlock<
-                    LaneOutcome<LaneOutput, LaneFailure>,
-                    AuthoredLaneFailureResult<
-                        lane_failure_contract_ref,
-                        LaneFailure,
-                    >,
-                >,
-            },
-        ],
-    }
-
-OperationProgram<Output, Failure> =
-    OrderedBlock<
-        SequentialPolicy,
-        OperationOutcome<Output, Failure>,
-        OperationOutcome<Output, Failure>,
-    >
-
-OrderedBlock<Policy, Result, FailureResult> =
-    ordered [StateBinding<Policy, FailureResult>
-           | MatchBinding<Policy, Result, FailureResult>
-           | FanOutBinding
-           | FragmentBinding<Policy, FailureResult>]
-    followed by one lexical Result
 ```
 
-The `Output`, `Failure`, and other payload positions above denote typed lexical expressions that
-reference admission roots or dominating producer locals; they are not planning-time domain
-values. The block's `result` is its statically declared tail expression. Committed state outcomes
-and exhaustive `Match` selection determine which typed root expression becomes derivable at
-runtime. Reaching that expression requires no separate execution.
+`Normal` and `ScopeFailure` above describe the two structural tail channels of a lexical
+block. They are not bindings, instructions, scheduled occurrences, or author-visible `Return` and
+`Fail` forms. A normal branch arm produces the `Match` binding's declared value. A failure arm
+exits only its current lexical failure channel. There is no non-local successful completion:
+`ScopeResult`, `ArmResult`, `RecoveryResult`, and general early-enclosing-success paths are not
+part of the initial contract.
 
-`OperationCall` exists only in `AuthoredProgram`. Expansion replaces it with one
-`FragmentBinding` whose boundary has the same typed success/failure contract.
-Authored `Match` arms and `FanOut` lanes recursively contain authored ordered blocks; an operation
-or lane root declares its lexical default or proves that none can exist because its exact scope
-failure-contract reference is `KERNEL_NEVER_FAILURE_CONTRACT_REF`; nested branch arms inherit that
-exact choice.
-Expansion resolves every `UseLexicalDefault` and validates every explicit handler before
-constructing the sealed failure plans below. An explicit handler carries its typed continuation
-block: it may recover the protected call's output or produce the exact lexical failure result.
-Failure-mapping sugar supplies the trivial continuation ending in that scope's failure outcome or
-lane failure result; custom recovery declares its route `Match` and states in the continuation
-block. `AuthoredHandlerContinuationBlock` is authoring sugar that expands to the same constrained
-ordinary `MatchBinding` used below; it is not a second certified branch form. Branch, failure, and
-lane sub-blocks have narrower typed results as defined below.
-`FragmentBinding` is an internal lexical composition form produced by expansion, not a sixth
-author-visible structural form.
-Sequence is implicit in the ordered bindings of a block. There is no public arbitrary `Sequence`
-graph node or general jump instruction.
+The `Output`, `Failure`, and other payload positions denote typed lexical expressions that
+reference admission roots or dominating producer locals; they are not planning-time domain
+values. A block's normal result is its statically declared tail expression. A fallible binding's
+sealed continuation may recover that binding's output and continue, or produce the exact current
+scope failure. At the operation root, the fold nominally wraps the selected channel as
+`OperationOutcome`; at a lane boundary it nominally wraps it as `LaneOutcome`. Neither wrapper is
+an executable control form.
+
+`OperationCall` exists only in `AuthoredProgram`. Expansion replaces it with one internal
+`FragmentBinding` whose boundary has the same typed success and failure contracts. Authored
+`Match` arms and `FanOut` lanes recursively contain ordered blocks. Only operation, fragment, and
+lane constructors mint `OwnsFailureScope` and own exact failure maps. Match arms and handler-route
+blocks carry the unforgeable `InheritsFailureScope` token and cannot install or shadow a map.
+Sequence is implicit in ordered bindings. There is no public `Sequence` graph node, jump,
+non-local return, or general bytecode.
 
 ### Authored, expanded, and certified program
 
@@ -513,8 +432,98 @@ graph node or general jump instruction.
   their ordinary states. It contains no `OperationCall`.
 - `CertifiedProgram`: the validated, content-addressed execution authority admitted for a run.
 
-Admission retains the authored program, expansion profile and manifests, expanded program,
-certificate, and implementation closure.
+There is one canonical certification root:
+
+```text
+CertifiedProgramComponents {
+    certified_program_contract_ref,
+    entry_point_contract_ref,
+    qualified_entry_point_admission_policy_ref,
+    authored_program_ref,
+    expanded_program_ref,
+    expansion_profile_ref,
+    expansion_proof_ref,
+    policy_coverage_proof_ref,
+    public_input_output_failure_contract_refs,
+    certified_structural_bounds,
+    state_capability_adapter_signer_resource_manifest_closure_ref,
+    secret_free_implementation_manifest_closure_ref,
+    certification_predicate_set_ref,
+}
+
+CertifiedProgram {
+    components: CertifiedProgramComponents,
+    canonical_component_closure_digest,
+}
+
+canonical_component_closure =
+    discover from every ContentRef encoded in canonical
+    CertifiedProgramComponents field order:
+      walk(expected_object_type_domain_tag, exact_content_ref):
+        - reject exact_content_ref if it was previously encountered
+          under a different object-type domain tag;
+        - reject the pair if it is already on the active traversal stack;
+        - if the pair is completed, return without emitting it again;
+        - resolve the exact canonical object bytes and require the
+          expected registered object-type domain tag;
+        - add the pair to the active stack and immediately emit
+          (
+              expected_object_type_domain_tag,
+              exact_content_ref,
+              exact_canonical_object_bytes,
+          );
+        - enumerate outbound ContentRefs from registered reference
+          positions in schema field order, using declaration order for
+          sequences and canonical-key order for maps, and recursively
+          walk each pair in that order;
+        - remove the pair from the active stack and mark it completed;
+        - reject an absent object, a content-reference mismatch,
+          trailing/unparsed bytes, or an outbound reference in an
+          unregistered position.
+
+canonical_component_closure_digest =
+    domain_separated_hash(
+        "mfm.certified-program-closure.v1",
+        canonical bytes of CertifiedProgramComponents,
+        canonical_component_closure,
+    )
+
+CertifiedProgramRef =
+    content_ref(
+        domain_separated_canonical_bytes(
+            "mfm.certified-program.v1",
+            CertifiedProgram,
+        ),
+)
+```
+
+`CertifiedProgram`, `CertifiedProgramRef`, and `canonical_component_closure_digest` are not
+closure inputs and can never be reached as outbound component references. The digest preimage is
+therefore non-self-referential. Registered schema field order plus the stated sequence/map rules,
+active-stack cycle rejection, and first-visit deduplication make one canonical closure for a DAG,
+independent of object-store enumeration or map implementation.
+
+The expansion and policy-coverage proofs are components of this object closure; there is no
+separately admitted “certificate” that can authorize a different expanded program, profile,
+proof, manifest, or implementation closure. Admission retains `CertifiedProgramRef` and its
+complete content-addressed object closure. Any repeated authored, expanded, profile, proof, or
+manifest reference in `RunAdmitted` is an audit projection that must equal the exact value inside
+that root—it is never independent authority. The process-private qualified registry must exactly
+satisfy the root's secret-free implementation manifest closure before admission.
+
+The root does not choose its own certification rules. The process-qualified entry-point registry
+resolves the admitted entry-point identity to one immutable, secret-free admission-policy object
+that binds the exact `entry_point_contract_ref`, `certified_program_contract_ref`,
+`certification_predicate_set_ref`, required `expansion_profile_ref`, exact policy versions, and
+coverage obligations. Its content reference must equal
+`qualified_entry_point_admission_policy_ref`. Certification evaluates the exact bound predicate
+set, and the store's purpose-limited admission verifier revalidates that binding, re-evaluates
+every bound certification predicate over the complete closure, and verifies every included proof
+against the qualified policy before accepting `RunAdmitted`. A caller-selected policy or
+predicate set, a valid proof under a different set, and a stale or unqualified policy object are
+rejected. This verifier has no implementation-invocation, history-query, resource, or writer
+authority. Recorded verification consumes the same immutable public policy object and
+predicate-set semantics; it never trusts a root-selected verifier.
 
 ### Structural path and identities
 
@@ -559,6 +568,104 @@ A value handle names an admission root or an exact producer that lexically domin
 A branch-local value cannot escape its arm except through a certified same-type merge. A fan-out
 lane value cannot escape before the join and retains its lane provenance afterward.
 
+The certified program contains slots, not future content references:
+
+```text
+LexicalSlot<T> {
+    lexical_path,
+    complete_contract_ref,
+    exact_producer_shape,
+}
+
+ExistingLexicalSlot<T> =
+    one exact already defined LexicalSlot<T>;
+    it cannot introduce a new producer shape
+
+ExactStateFailureSlot<T, Contract, OccurrenceId> =
+    LexicalSlot<T> whose producer shape is
+        StateOutput(OccurrenceId, TypedFailure)
+    where Contract == FailureContract::Typed(TypedContract)
+    and whose complete_contract_ref == TypedContract.exact_ref
+
+ExactSelectorSlot<T> =
+    one ExistingLexicalSlot<T> whose complete contract is one
+    registered closed canonical tagged sum
+
+ExactVariantPayloadSlot<
+    T,
+    SelectorSlot,
+    CanonicalTag,
+    PayloadPath,
+> =
+    LexicalSlot<T> whose producer shape is
+        VariantPayload(
+            SelectorSlot,
+            CanonicalTag,
+            PayloadPath,
+        )
+    where SelectorSlot is ExactSelectorSlot<ClosedTaggedSum>
+    and SelectorContract is the exact registered closed-sum contract
+        object referenced by SelectorSlot.complete_contract_ref
+    and VariantEntry is the unique entry in
+        SelectorContract.exact_tag_payload_table at
+        (CanonicalTag, PayloadPath)
+    and T == VariantEntry.exact_payload_type
+    and whose complete_contract_ref
+        == VariantEntry.exact_payload_contract_ref
+
+ExactDominatingCallerSlot<T, BoundaryId> =
+    one ExistingLexicalSlot<T> in the caller region whose exact
+    producer path lexically dominates BoundaryId
+
+FragmentInputSlot<
+    T,
+    BoundaryId,
+    ChildRootId,
+    ChildRootContract,
+    SourceSlot,
+> =
+    LexicalSlot<T> whose producer shape is
+        FragmentInput(BoundaryId, ChildRootId, SourceSlot)
+    where SourceSlot is
+        ExactDominatingCallerSlot<T, BoundaryId>
+    and whose complete contract is exactly ChildRootContract
+
+ExactFragmentSuccessSlot<
+    T,
+    Contract,
+    BoundaryId,
+    SourceSlot,
+> =
+    LexicalSlot<T> whose producer shape is
+        FragmentBoundary(BoundaryId, SuccessOutput, SourceSlot)
+    and whose complete contract is exactly Contract
+
+ExactFragmentFailureSlot<
+    T,
+    Contract,
+    BoundaryId,
+    SourceSlot,
+> =
+    LexicalSlot<T> whose producer shape is
+        FragmentBoundary(BoundaryId, TypedFailure, SourceSlot)
+    where Contract == FailureContract::Typed(TypedContract)
+    and whose complete_contract_ref == TypedContract.exact_ref
+```
+
+A slot has no `ContentRef`, transition, or claim that execution already happened.
+`ExactVariantPayloadSlot`, `FragmentInputSlot`, and the two fragment-boundary slots are certified
+slot-to-slot derivation recipes; constructing one does not invoke the retained-reference
+constructors below. The
+callback-free fold resolves a slot to one `LexicalValueRef` only when the certified source is
+active and its exact value has been committed. It then applies the certified recipe to construct
+the corresponding `FragmentInputValueRef` or `FragmentBoundaryValueRef`. Admission,
+expansion, and certification compare slots; Runtime/store settlement compare the resolved
+references.
+For `ExactVariantPayloadSlot`, neither the payload type nor its nominal retained contract is an
+independent caller choice: both are looked up in the exact selector contract's certified
+`(CanonicalTag, PayloadPath)` table. Byte-identical payloads registered under different nominal
+contracts therefore cannot substitute for one another.
+
 The retained reference algebra is:
 
 ```text
@@ -582,13 +689,40 @@ LexicalValueRef<T> =
             ArmValue {
                 selected_arm_path,
                 source: LexicalValueRef<T>,
+                exact_contract:
+                    contract_ref == source.contract_ref,
+                exact_value_ref:
+                    value_ref == source.value_ref,
             }
           | VariantPayload {
                 selector: LexicalValueRef<ClosedSum>,
                 canonical_tag,
                 payload_path,
-                exact_payload_contract:
-                    payload_contract_ref == contract_ref(T),
+                exact_selector_entry:
+                    selector_contract =
+                        exact registered closed-sum contract object
+                        referenced by selector.contract_ref,
+                    variant_entry =
+                        selector_contract.exact_tag_payload_table[
+                            (canonical_tag, payload_path)
+                        ],
+                    T == variant_entry.exact_payload_type,
+                    contract_ref
+                        == variant_entry.exact_payload_contract_ref,
+                exact_value_ref:
+                    value_ref
+                        == content_ref(
+                               canonical_payload_bytes(
+                                   selector.value_ref,
+                                   canonical_tag,
+                                   payload_path,
+                               )
+                           ),
+            }
+          | FragmentInput {
+                boundary_id,
+                child_input_root_id,
+                source: LexicalValueRef<T>,
             }
           | FragmentBoundary {
                 boundary_id,
@@ -609,6 +743,13 @@ LexicalValueRef<T> =
                         every declared lane, no other source,
                         and every source has that group's exact
                         identity and output/failure contract refs,
+                exact_value_ref:
+                    value_ref
+                        == content_ref(
+                               canonical_declared_order_vector_bytes(
+                                   declaration_ordered_sources,
+                               )
+                           ),
             },
     }
 
@@ -628,6 +769,70 @@ LaneOutcomeRef<Output, Failure> =
         },
     >
 
+ArmValueRef<Arm, T>::from(source) =
+    LexicalValueRef<T>::StructuralValue {
+        structural_path: Arm.selected_arm_path,
+        value_ref: source.value_ref,
+        contract_ref: source.contract_ref,
+        derivation: ArmValue {
+            selected_arm_path: Arm.selected_arm_path,
+            source,
+        },
+    }
+
+VariantPayloadValueRef<
+    Selector,
+    CanonicalTag,
+    PayloadPath,
+    T,
+>::from(selector) =
+    LexicalValueRef<T>::StructuralValue {
+        require selector's exact retained canonical closed-sum object;
+        require selector.tag == CanonicalTag;
+        variant_entry =
+            selector.contract.exact_tag_payload_table[
+                (CanonicalTag, PayloadPath)
+            ];
+        require variant_entry.exact_payload_type == T;
+        payload_bytes =
+            exact canonical bytes at PayloadPath under CanonicalTag;
+        validate payload_bytes with the exact registered contract object
+            referenced by variant_entry.exact_payload_contract_ref;
+        structural_path:
+            Selector.structural_path + CanonicalTag + PayloadPath,
+        value_ref: content_ref(payload_bytes),
+        contract_ref: variant_entry.exact_payload_contract_ref,
+        derivation: VariantPayload {
+            selector,
+            canonical_tag: CanonicalTag,
+            payload_path: PayloadPath,
+        },
+    }
+
+FanOutJoinValueRef<Group, Output, Failure>::from(
+    declaration_ordered_sources
+) =
+    LexicalValueRef<
+        DeclaredOrderVector<LaneOutcome<Output, Failure>>,
+    >::StructuralValue {
+        require the exact non-empty lane bijection, group identity,
+        declaration order, and homogeneous contracts;
+        join_bytes =
+            canonical_declared_order_vector_bytes(
+                declaration_ordered_sources,
+            );
+        structural_path: Group.structural_path,
+        value_ref: content_ref(join_bytes),
+        contract_ref: Group.join_contract_ref,
+        derivation: FanOutJoin {
+            declaration_ordered_sources,
+            lane_output_contract_ref:
+                Group.output_contract_ref,
+            lane_failure_contract_ref:
+                Group.failure_contract_ref,
+        },
+    }
+
 FragmentBoundaryValueRef<Boundary, T>::from(source) =
     LexicalValueRef<T>::StructuralValue {
         exact_contract:
@@ -642,18 +847,51 @@ FragmentBoundaryValueRef<Boundary, T>::from(source) =
             source,
         },
     }
+
+FragmentInputValueRef<Boundary, ChildRoot, T>::from(source) =
+    LexicalValueRef<T>::StructuralValue {
+        exact_contract:
+            source.contract_ref == ChildRoot.contract_ref,
+        structural_path:
+            Boundary.body_region + ChildRoot.root_id,
+        value_ref: source.value_ref,
+        contract_ref: ChildRoot.contract_ref,
+        derivation: FragmentInput {
+            boundary_id: Boundary.boundary_id,
+            child_input_root_id: ChildRoot.root_id,
+            source,
+        },
+    }
 ```
 
-`Match`, fragment boundaries, and fan-out joins may derive a lexical value and its content
-reference, but they never become executable occurrences. The fold validates the complete
-derivation, selected arm, selector tag, payload path, source contracts, and lane order.
+All structural constructors are sealed fold operations. A variant-payload or join constructor
+binds its derived canonical object in the same atomic object closure that first needs it; it cannot
+name unbound bytes. `Match`, fragment boundaries, and fan-out joins may derive a lexical value and
+its content reference, but they never become executable occurrences. The fold validates the
+complete derivation, selected arm, selector tag, payload path, fragment-input substitution, source
+contracts, canonical derived bytes, content reference, and lane order.
 `ArmValue` retains a same-type value produced by the selected arm. `VariantPayload` extracts a
 typed payload from the exact retained closed-sum selector and requires its certified tag, payload
-path, and payload contract. A `ProducerBound<T>` used by state failure handlers is the narrower
-`StateOutput` or exact `FragmentBoundary` case tied to the certified failure-producing state
-occurrence or affine boundary. It excludes admission roots, arm aliases, payload projections, and
-fan-out joins; structural compatibility never substitutes for the exact producer role and
-identity.
+path, and selector-table-derived payload contract. Payload bytes are validated by that exact
+contract; their shape or byte identity never selects a nominal contract.
+
+`ProducerBound<T>` generically means one exact current-run resolved certified success slot whose
+allowed producer shape is `StateOutput(SuccessOutput)` or the exact
+`FragmentBoundary(SuccessOutput)` declared by that consumer. Its constructors are sealed. It
+excludes typed-failure producers, admission roots, arbitrary arm aliases, variant-payload
+projections, fan-out joins, and embedded references copied from another run. When a domain needs
+to consume such structural or embedded material, an explicit certified `Pure` state validates it
+and emits a new current-run `StateOutput`—as `BindCurrentWalletReservation` does.
+
+`FailurePlanBound<T, PlanIdentity>` is the separate sealed specialization available only inside
+the exact selected failure plan whose certified `plan_identity` equals `PlanIdentity`. The fold
+constructs it only by resolving that plan's exact current slot: initially the selected
+`StateOutput(TypedFailure)` or exact `FragmentBoundary(TypedFailure)`, and after an explicit mapper
+the `StateOutput(SuccessOutput)` from that exact `Pure + Never` mapper occurrence. Every mapper and
+the designated handler receives this sealed runtime view for the same plan identity; the
+certified program itself retains only the corresponding slots. No ordinary state input can
+request a typed-failure producer. Structural compatibility never substitutes for the exact
+producer shape, plan, and identity.
 
 A lane tail constructs exactly one canonical `LaneOutcomeRef` around its selected success or
 failure `LexicalValueRef`; its content-addressed bytes bind the fan-out group path, stable lane
@@ -665,13 +903,24 @@ executable occurrence identity.
 
 ### State outcome
 
-The semantic result of one state:
+A state callback can only propose semantic material:
 
 ```text
-StateOutcome<Output, Failure> =
+ProposedStateOutcome<Output, Failure> =
     Success(Output)
   | Failure(Failure)
+
+StateOutcome<OutputRef, FailureRef> =
+    Success(OutputRef)
+  | Failure(FailureRef)
 ```
+
+A proposal has no producer identity, lexical authority, or retained form. After validating and
+content-addressing the proposed value under the exact admitted contract, the store's accepted
+state-transition append alone constructs the nominal committed
+`StateOutcome<LexicalValueRef<Output>, LexicalValueRef<Failure>>`. A rejected candidate or
+callback result that never commits constructs no `StateOutcome`. For `FailureContract::Never`,
+both the proposed failure variant and the committed failure reference are structurally illegal.
 
 A state failure is typed domain truth. It selects a failure continuation; it is not automatically
 the terminal run result. Only the root `OperationOutcome` determines whether the run closes with
@@ -683,24 +932,30 @@ latter only at the operation root for `RunClosed`. Neither can be substituted fo
 schema shape.
 
 `StateOutcome` is a private state-bound lexical result and discriminator for the exact
-`StateBinding` or fragment boundary. The fold derives its sealed continuation from the variant;
+`StateBinding`. The fold derives its sealed continuation from the variant;
 the value is not a control instruction. Its failure variant can be consumed only by that
 boundary's sealed failure plan and never escapes through a fan-out join or ordinary author-visible
 `Match`. `LaneOutcome` is a distinct nominal lexical type produced only after lane-scoped
 handling; its identical two-tag shape does not make the two authority types interchangeable.
 
+These nominal kernel envelopes retain references rather than embedding an arbitrary
+`Failure` value. When the boundary failure contract is `Never`, the failure tag and reference slot
+are structurally illegal and no decoder for a failure payload exists. The success tag remains
+canonical. Thus an infallible operation or lane does not need a fictional retained schema for an
+uninhabited generic parameter.
+
 ### Fallible state
 
-Fallibility is determined from the exact certified failure-contract identity:
+Fallibility is determined from the explicit certified failure contract:
 
 ```text
 StateFallibility<S> =
     Infallible
-        when S.failure_contract_ref
-             == KERNEL_NEVER_FAILURE_CONTRACT_REF
+        when S.failure_contract == FailureContract::Never
   | Fallible<S.Failure>
-        when S.failure_contract_ref
-             != KERNEL_NEVER_FAILURE_CONTRACT_REF
+        when S.failure_contract == FailureContract::Typed(
+            S.failure_retained_value_contract
+        )
 ```
 
 This is a static property of the admitted state contract. It is not inferred from `Pure`, `Read`,
@@ -708,18 +963,23 @@ or `Effect`; from whether the Rust implementation happens to use an uninhabited 
 whether a particular occurrence fails at runtime. Any execution kind may be infallible or
 fallible.
 
-`KERNEL_NEVER_FAILURE_CONTRACT_REF` is one frozen, domain-separated reference whose semantic type
-and schema admit no canonical value. Rust `!`, `Infallible`, an empty enum, `()`, a structurally
-equivalent schema, a separately registered look-alike alias with a distinct certified reference,
-or an implementation that “never currently fails” does not prove infallibility. A source-language
-alias resolving to the same reserved reference does; only exact reference equality matters.
+`FailureContract::Never` resolves to one frozen, domain-separated
+`KERNEL_NEVER_FAILURE_CONTRACT_REF`, but it is deliberately not a `RetainedValueContract`: the
+current schema system has no honest uninhabited value schema. It has no decoder, `MfmValue`
+implementation, retained slot, or producer. Rust `!`, `Infallible`, `()`, an empty struct, a
+structurally similar schema, a separately registered look-alike alias, or an implementation that
+“never currently fails” does not prove infallibility. The kernel zero-variant `Never` source type
+is accepted only through the sealed `FailureContract::Never` registration path.
 
-Every other admitted failure contract is fallible. A fallible occurrence must carry one sealed
+Every `FailureContract::Typed` contract is fallible. Its `RetainedValueContract` remains the one
+producer-independent authority over schema, semantic type, retained role, media type, and evidence
+contract; its canonical content reference is the exact contract identity. A fallible occurrence
+must carry one sealed
 exhaustive `FailurePlan`; an infallible occurrence must carry `NoFailure` and cannot be given a
 handler. A dynamically committed `StateOutcome::Failure` is the event that selects the fallible
 occurrence's plan. Its producer-bound value must match the state's complete admitted failure
-contract—including semantic type, schema, retained-value rules, and producer role—by exact
-identity; structural compatibility or coercion is insufficient. Operational access outcomes,
+contract by exact identity, while `ValueRef` separately binds the exact state-failure producer
+role and occurrence. Structural compatibility or coercion is insufficient. Operational access outcomes,
 integrity faults, persistence failures, and possible-entry ambiguity remain outside this
 domain-failure classification.
 
@@ -729,14 +989,13 @@ changes the relevant manifests, expanded-program identity, and certification res
 
 The rule is orthogonal to execution kind:
 
-| State kind | Contract ref is exactly `KERNEL_NEVER_FAILURE_CONTRACT_REF` | Any other admitted failure contract |
+| State kind | `FailureContract::Never` | `FailureContract::Typed` |
 | --- | --- | --- |
 | `Pure` | `Infallible`; `NoFailure`; no handler | `Fallible<E>`; exactly one sealed failure plan |
 | `Read` | `Infallible`; access still uses the audited bracket; no handler | `Fallible<E>`; exactly one sealed failure plan |
 | `Effect` | `Infallible`; access and possible-entry rules still apply; no handler | `Fallible<E>`; exactly one sealed failure plan |
 
-For a `Read` or `Effect` whose failure-contract reference is
-`KERNEL_NEVER_FAILURE_CONTRACT_REF`, a committed `SafeFailure` cannot synthesize a typed failure or
+For a `Read` or `Effect` whose failure contract is `Never`, a committed `SafeFailure` cannot synthesize a typed failure or
 enter a handler. Capability/state qualification must prove an exhaustive deterministic disposition
 for every admitted `SafeFailure` variant. An infallible state may advertise such a variant only
 when every valid instance maps to its certified success output; a pairing that needs an ordinary
@@ -751,11 +1010,11 @@ from callback, codec, store, integrity, or crash faults.
 An ordinary injected `Pure` state that consumes the exact producer-bound state or fragment-boundary
 failure and returns one closed scope-defined failure route. It is infallible and performs no IO.
 
-An operation or fan-out lane scope whose failure-contract reference is not
-`KERNEL_NEVER_FAILURE_CONTRACT_REF` may supply a default that maps to that scope's failure. A scope
-with the reserved reference has no default and requires explicit total recovery for every
-fallible call. A custom handler may select an explicit recovery branch. The recovery states
-themselves are ordinary states.
+An operation, fragment, or fan-out lane with a typed failure contract may register an exact finite
+source-contract-to-mapper table. `.or_default()` selects exactly one matching `Pure + Never`
+mapper; it is rejected for zero or multiple matches. A `Never` scope has no table and requires
+explicit total recovery for every fallible call. A custom handler may select an explicit recovery
+branch. The recovery states themselves are ordinary states.
 
 ### Semantic execution kind
 
@@ -773,7 +1032,8 @@ This is semantic metadata, not three independent Runtime engines.
 An explicit bounded set of declaration-ordered lanes. Cardinality and lane identity are frozen
 before admission. Each lane contains only `Pure` and `Read` states, has no cross-lane references,
 and produces exactly one typed result. The containing block continues only after collect-all
-join.
+join. Fan-out may nest to certified depth two; the transitive `Pure | Read` restriction and global
+expanded-lane bound apply at both levels.
 
 Concurrency is permitted operationally; semantic result order is always declaration order.
 
@@ -867,18 +1127,20 @@ is present in the admitted program with exact structural identity and bindings.
 
 ### G-04: Every fallible boundary is handled
 
-Every state or fragment boundary whose certified failure-contract reference is not exactly
-`KERNEL_NEVER_FAILURE_CONTRACT_REF` has one sealed `FailurePlan` after expansion. That plan either
+Every state or fragment boundary whose certified failure contract is `Typed` has one sealed
+`FailurePlan` after expansion. That plan either
 enters its one explicit or lexical-default handler, or propagates through the exact affine
-fragment boundary to one eventual call-site handler. It cannot do both, bypass the handler, or
-escape to an unrelated scope. A source with that exact reserved reference has `NoFailure` and no
-handler.
+fragment boundary to one eventual call-site handler. Its protected failure cannot do both,
+directly bypass the handler through normal control, or escape to an unrelated scope. A distinct
+failure newly committed by an intervening pre/post/support state follows that state's own exact
+plan and may causally supersede the protected failure. A source with `FailureContract::Never` has
+`NoFailure` and no handler.
 
-An operation, lane, or fragment scope whose own failure-contract reference is
-`KERNEL_NEVER_FAILURE_CONTRACT_REF` cannot supply a mapper into that uninhabited failure contract.
+An operation, lane, or fragment scope whose own failure contract is `Never` cannot supply a mapper
+into that uninhabited failure contract.
 Every fallible boundary directly owned by such a scope must have an explicit total handler whose
-every route recovers. A nested fragment whose failure-contract reference is not reserved may
-handle its own internal failures, but its call-site failure in the reserved-`Never` scope must
+every route recovers. A nested fragment with a typed failure contract may
+handle its own internal failures, but its call-site failure in the `Never` scope must
 likewise recover explicitly. Certification rejects `.or_default()` and any failure-producing
 scope result where the lexical default is unavailable.
 
@@ -936,18 +1198,21 @@ authorization committed qualified `SupersededBeforeEntry` evidence and the fold 
 next `Refreshable` attempt ordinal. It must be prepared by a worker holding the currently
 qualified physical binding.
 
-Read recovery is a separate unresolved liveness contract because a new read cannot mutate the
-target but can produce a different time-varying value. This RFC authorizes no ad hoc read
-reauthorization until the Material Uncertainties section's selection rule is resolved.
+An unmatched Read authorization likewise remains the exact current access as
+`ReadCompletionUnknown`. The initial contract authorizes no same-occurrence re-read, timeout
+supersession, or synthetic completion: a later read could select a different time-varying value.
+A separately admitted run may execute independently. This is a selected conservative recovery
+policy, not an unresolved scheduling choice.
 
 ### G-12: Branch and fan-out control is deterministic
 
-The store derives a `Match` arm from the canonical tag of a committed closed sum. The certificate
-contains the exhaustive tag-to-arm table; the caller does not write a branch choice and the store
-runs no discriminator callback.
+The store derives a `Match` arm from the canonical tag of a committed closed sum. The exact
+`CertifiedProgram` closure contains the exhaustive tag-to-arm table; the caller does not write a
+branch choice and the store runs no discriminator callback.
 
 Fan-out lanes and joined results retain declaration order regardless of authorization, completion,
-or append order. Effects are rejected transitively inside fan-out.
+or append order. Effects are rejected transitively inside fan-out. Nesting beyond certified depth
+two is rejected.
 
 ### G-13: Non-domain evidence cannot become domain truth
 
@@ -982,15 +1247,17 @@ of using the protected EVM sender either uses that same authority or is permanen
 
 ### G-17: Normal resource rotation cannot poison semantics
 
-A resource request first resolves its exact permanent semantic operation key. An already committed
-byte-identical result is the original operation result even when the caller's physical binding has
-since become stale; internal `ExistingSame` resolution does not perform another mutation or create
-another Runtime authorization. If no exact result exists, a stale resource binding has only the
-atomic `SupersededBeforeEntry(public_lineage_head_ref)` outcome. That proof cannot construct state
-output, state failure, or semantic cursor advancement. The callback-free fold alone converts it
-into a sealed `Refreshable` state with the next attempt ordinal. Only a newly assembled worker
-holding the current private credential may prepare and authorize that attempt; the stale worker
-cannot self-upgrade.
+A protected resource `Effect` request first enters its exact physical target through a sealed
+current target-bound capability, then resolves its permanent semantic operation key before any new
+mutation. An already committed byte-identical result on that admitted target is the original
+operation result; internal `ExistingSame` resolution does not perform another mutation or create
+another Runtime authorization. A revoked or stale mutation capability, or a stale binding with no
+exact result, has only the atomic `SupersededBeforeEntry(public_lineage_head_ref)` outcome. That
+proof cannot construct state output, state failure, or semantic cursor advancement. The
+callback-free fold alone converts it into a sealed `Refreshable` state with the next attempt
+ordinal. Only a newly assembled worker holding the current target-bound capability may prepare and
+authorize that attempt; the stale worker cannot self-upgrade. Resource `Read` staleness follows its
+separate definite `SafeFailure` contract and never constructs `Refreshable`.
 
 ### G-18: No secrets
 
@@ -1001,8 +1268,9 @@ secret-bearing endpoints, or secret paths.
 
 ### G-19: No generic executor survives
 
-No executor history, fold, scheduler, fence, delivery plan, target authority, frontier, tombstone,
-or compatibility path remains after the cutover.
+No executor-owned history, fold, scheduler, generic resource fence, delivery plan, target
+authority, frontier, tombstone, or compatibility path remains after the cutover. The narrow
+deployment physical fence specified for the wallet-nonce authority is not an executor.
 
 ## Target Architecture
 
@@ -1011,7 +1279,7 @@ or compatibility path remains after the cutover.
 | Concern | Sole owner |
 | --- | --- |
 | Declaration order, branch/fan-out shape, child composition, operation failure contract | operation authoring |
-| Required expansion profile, versions, and security/control coverage | qualified entry-point admission policy |
+| Trusted program/predicate contracts, required expansion profile, versions, and security/control coverage | qualified entry-point admission policy |
 | Pure state and policy injection | deterministic expansion |
 | Static structure, type, bounds, capability closure, profile coverage, and provenance | certification |
 | Domain request authorship and observation interpretation | state |
@@ -1022,6 +1290,8 @@ or compatibility path remains after the cutover.
 | Protocol exchange | transport |
 | Signer generation and secret custody | qualified signer |
 | Cross-run sender/nonce uniqueness and physical generation | wallet-nonce authority |
+| Permanent wallet-domain activation binding and current store-incarnation head | qualified wallet-activation registry administrative plane |
+| Exclusive physical target, writer-epoch, and sender-path fencing across promotion | deployment-owned authoritative fence control plane |
 | EVM progression and terminal meaning | EVM states and expansion |
 | Recorded verification | store/replay over committed evidence |
 | Prior-run fact scan completeness | sealed purpose-limited RunHistory scanner |
@@ -1032,646 +1302,718 @@ No row is owned by an executor.
 
 ### Expanded and certified structured program algebra
 
-Conceptually:
+The certified representation is one recursively structured tree:
 
 ```text
 OperationProgram<Output, Failure> =
     OrderedBlock<
-        SequentialPolicy,
-        OperationOutcome<Output, Failure>,
-        OperationOutcome<Output, Failure>,
+        SequentialPolicy<fan_out_depth = 2>,
+        Output,
+        Failure,
     >
 
-SequentialPolicy {
+OrderedBlock<Policy, Success, ScopeFailure> {
+    ordered_bindings:
+        [Binding<Policy, ScopeFailure>],
+    tail:
+        BlockTail<Success, ScopeFailure>,
+}
+
+BlockTail<Success, ScopeFailure> =
+    Normal(TypedExpression<Success>)
+  | ScopeFailure(TypedExpression<ScopeFailure>)
+
+Binding<Policy, ScopeFailure> =
+    StateBinding
+  | MatchBinding
+  | FanOutBinding where Policy.remaining_fan_out_depth > 0
+  | FragmentBinding
+```
+
+Only `StateBinding` is executable. `MatchBinding`, `FanOutBinding`, and `FragmentBinding` are
+structural. Every nested block has exactly one normal result type and inherits one exact lexical
+failure channel. There is no independent general result axis, non-local successful result, jump,
+or executable outcome form.
+
+`BlockTail` is a structural expression selected only after the ordered bindings on its active
+path complete. It has no occurrence identity or history record. Specialized pre-handler and
+propagation blocks below deliberately expose narrower tails so they cannot take the general
+lexical-failure exit.
+
+The sealed policies are:
+
+```text
+SequentialPolicy<remaining_fan_out_depth> {
     allowed_state_kinds: Pure | Read | Effect,
-    fan_out: Allowed,
 }
 
-FanOutLanePolicy {
+FanOutPolicy<remaining_fan_out_depth> {
     allowed_state_kinds: Pure | Read,
-    fan_out: Forbidden,
 }
+```
 
-OrderedBlock<Policy, Result, FailureResult> {
-    declarations: [Binding<Policy, Result, FailureResult>],
-    result: Result,
-}
+Entering a fan-out lane changes `SequentialPolicy<D>` or `FanOutPolicy<D>` to
+`FanOutPolicy<D - 1>`. No constructor can increase the remaining depth or restore `Effect`.
+Certification additionally enforces the entry point's total expanded-occurrence, total-lane,
+branch-depth, and per-group bounds. The initial production limit is fan-out depth two.
 
-Binding<Policy, Result, FailureResult> =
-    StateBinding {
-        output_local,
-        stable_label,
-        call where call.Kind is in Policy.allowed_state_kinds,
-        failure: FailurePlan<
-            Policy,
-            ExactFailureRef<
-                call.Failure,
-                call.failure_contract_ref,
-                StateFailure,
-                call.occurrence_id,
-            >,
-            call.failure_contract_ref,
-            call.Failure,
-            call.Output,
-            FailureResult,
-        >,
-    }
-  | MatchBinding {
-        output_local,
-        stable_label,
-        selector: ClosedSumValue,
-        exhaustive_arms: [
-            TaggedArm {
-                canonical_tag,
-                stable_arm_label,
-                body: ArmBlock<
-                    Policy,
-                    Value,
-                    Result,
-                    FailureResult,
+A state binding is:
+
+```text
+StateBinding<Policy, ScopeFailure> {
+    output_local,
+    stable_label,
+    call where call.kind is in Policy.allowed_state_kinds,
+    failure_boundary:
+        NoFailure {
+            exact_contract: call.failure_contract
+                == FailureContract::Never,
+            no_failure_slot,
+            no_failure_plan,
+        }
+      | TypedFailure {
+            exact_contract: call.failure_contract
+                == FailureContract::Typed,
+            source_slot:
+                ExactStateFailureSlot<
+                    call.Failure,
+                    call.failure_contract,
+                    call.occurrence_id,
                 >,
-            },
-        ],
-    }
-  | FanOutBinding {
-        exact_policy: Policy.fan_out == Allowed,
-        output_local: TypedLocal<
+            plan:
+                FailurePlan<
+                    Policy,
+                    source_slot,
+                    call.Output,
+                    ScopeFailure,
+                >,
+        },
+}
+```
+
+Its success binds `output_local` and continues with the next declaration. Its typed failure enters
+the sealed plan. `StateOutcome` is private to this structural split and is never a public
+`Match` selector.
+
+A match binding is:
+
+```text
+MatchBinding<Policy, Value, ScopeFailure> {
+    output_local: TypedLocal<Value>,
+    stable_label,
+    selector: ExactSelectorSlot<ClosedTaggedSum>,
+    exhaustive_arms: [
+        TaggedArm {
+            canonical_tag,
+            stable_arm_label,
+            completion:
+                Continue {
+                    body: OrderedBlock<Policy, Value, ScopeFailure>,
+                }
+              | ScopeFailure {
+                    body:
+                        ConstrainedFailureBlock<
+                            Policy,
+                            ScopeFailure,
+                        >,
+                },
+        },
+    ],
+}
+```
+
+`Continue` and `ScopeFailure` are structural arm shapes, not instructions. A continuing arm
+produces the binding's one exact value contract. A failure arm produces only the current lexical
+scope's exact failure contract. No arm may complete an enclosing scope successfully. If a branch
+determines the operation's final successful value, that `Match` is placed at the lexical tail or
+the remaining sequence is nested under each continuing arm.
+
+A fan-out binding is:
+
+```text
+FanOutBinding<
+    Policy,
+    LaneOutput,
+    LaneFailure,
+    ScopeFailure,
+> {
+    exact_policy: Policy.remaining_fan_out_depth > 0,
+    output_local:
+        TypedLocal<
             DeclaredOrderVector<
                 LaneOutcome<LaneOutput, LaneFailure>,
             >,
         >,
-        homogeneous_contracts:
-            every lane success contract ref
-                == LaneOutputContractRef
-            and every lane failure contract ref
-                == LaneFailureContractRef,
-        stable_group_label,
-        bound,
-        ordered_lanes: [
-            Lane {
-                stable_lane_key,
-                declaration_ordinal,
-                body: LaneBlock<
-                    LaneOutputContractRef,
-                    LaneFailureContractRef,
+    stable_group_label,
+    nonzero_bound,
+    ordered_lanes: [
+        Lane {
+            stable_lane_key,
+            derived_declaration_ordinal,
+            body:
+                OrderedBlock<
+                    FanOutPolicy<
+                        Policy.remaining_fan_out_depth - 1,
+                    >,
                     LaneOutput,
                     LaneFailure,
                 >,
-            },
+        },
+    ],
+    exact_homogeneous_lane_contracts,
+}
+```
+
+Each lane normal result is nominally wrapped as `LaneOutcome::Success`; its lexical failure is
+nominally wrapped as `LaneOutcome::Failure`. The join produces exactly one wrapper per declared
+lane in declaration order. The wrappers and join are structural values, not occurrences.
+
+An expanded child call, semantic capability, or wrapper occupies one fragment binding:
+
+```text
+FragmentBinding<Policy, Input, Output, Failure, ScopeFailure> {
+    fresh_lexical_region,
+    output_local,
+    stable_label,
+    boundary:
+        FragmentBoundary<Input, Output, Failure>,
+    input_bindings:
+        declaration_ordered [
+            ChildInputRoot<T>
+                -> FragmentInputSlot<
+                    T,
+                    boundary.boundary_id,
+                    ChildInputRoot<T>.root_id,
+                    ChildInputRoot<T>.contract_ref,
+                    ExactDominatingCallerSlot<
+                        T,
+                        boundary.boundary_id,
+                    >,
+                >
         ],
+    body:
+        OrderedBlock<Policy, Output, Failure>,
+    success_slot:
+        ExactFragmentSuccessSlot<
+            Output,
+            boundary.success_contract,
+            boundary.boundary_id,
+            ExactNormalTailSlotOf<body>,
+        >,
+    failure_boundary:
+        NoFailure {
+            exact_contract: boundary.failure_contract
+                == FailureContract::Never,
+            no_failure_slot,
+            no_failure_plan,
+        }
+      | TypedFailure {
+            exact_contract: boundary.failure_contract
+                == FailureContract::Typed,
+            source_slot:
+                ExactFragmentFailureSlot<
+                    Failure,
+                    boundary.failure_contract,
+                    boundary.boundary_id,
+                    ExactFailureTailSlotOf<body>,
+                >,
+            plan:
+                FailurePlan<
+                    Policy,
+                    source_slot,
+                    Output,
+                    ScopeFailure,
+                >,
+        },
+}
+```
+
+Input binding covers every declared child/fragment input root exactly once, admits no extra root,
+requires exact contract equality, and preserves the caller source slot under the fresh body
+region. `ExactNormalTailSlotOf<body>` and, for a typed boundary,
+`ExactFailureTailSlotOf<body>` select the exact certified tail-expression slots; neither claims
+that a path is active or a value is committed. The success and failure slots bind those sources
+symmetrically to the exact boundary identity and role. The fragment body owns the exact failure
+mappings for states it injects. At fold time, normal completion resolves the certified success
+slot and binds the boundary output local. Its lexical failure resolves the certified failure slot
+and enters the call site's one plan. Entering or leaving a fragment creates no transition, copied
+value, or child `RunClosed`.
+
+The certified failure contract is:
+
+```text
+FailureContract<Failure> =
+    Never {
+        exact_type: Failure == kernel::Never,
+        exact_ref: KERNEL_NEVER_FAILURE_CONTRACT_REF,
+        no_retained_value_contract,
+        no_codec,
+        no_producer,
     }
-  | FragmentBinding {
-        fresh_lexical_region,
-        output_local,
-        stable_label,
-        boundary: FragmentBoundary<
-            fresh_lexical_region,
-            Input,
-            Output,
-            Failure,
-        >,
-        body: FragmentBlock<
-            Policy,
-            fresh_lexical_region,
-            boundary.failure_contract_ref,
-            Output,
-            Failure,
-        >,
-        failure: FailurePlan<
-            Policy,
-            ExactFailureRef<
-                Failure,
-                boundary.failure_contract_ref,
-                FragmentBoundaryFailure,
-                boundary.boundary_id,
+  | Typed {
+        exact_type: Failure implements MfmValue,
+        contract: RetainedValueContract<Failure>,
+        exact_ref:
+            content_ref(annex_canonical_bytes(contract)),
+    }
+```
+
+`RetainedValueContract` remains the sole producer-independent descriptor of an inhabited typed
+value. Producer shape and identity remain in certified `LexicalSlot` and resolved
+`LexicalValueRef`; no second failure descriptor duplicates them. The kernel source type for
+`Never` is a zero-variant enum without an `MfmValue` implementation. A normal unit, empty struct,
+empty-looking schema, or distinct contract alias is inhabited or has the wrong reference and is
+therefore not `Never`.
+
+Failure plans are:
+
+```text
+FailurePlanIdentity<
+    SourceBindingIdentity,
+    SourceFailureSlot,
+    PlanStructuralPath,
+> =
+    domain_separated_hash(
+        "mfm.failure-plan.v1",
+        SourceBindingIdentity,
+        SourceFailureSlot,
+        PlanStructuralPath,
+    )
+
+FailurePlan<Policy, SourceFailureSlot, RecoveredOutput, ScopeFailure> =
+    Handled {
+        lexical_region,
+        plan_structural_path,
+        plan_identity:
+            FailurePlanIdentity<
+                exact_binding_of(SourceFailureSlot),
+                SourceFailureSlot,
+                plan_structural_path,
             >,
-            boundary.failure_contract_ref,
-            Failure,
-            Output,
-            FailureResult,
-        >,
-    }
-
-OperationOutcome<Output, Failure> =
-    Success(Output) | Failure(Failure)
-
-LaneOutcome<Output, Failure> =
-    Success(Output) | Failure(Failure)
-
-ArmResult<Value, EnclosingResult> =
-    Produced(Value) | ScopeResult(EnclosingResult)
-
-ArmBlock<Policy, Value, EnclosingResult, FailureResult> =
-    OrderedBlock<
-        Policy,
-        ArmResult<Value, EnclosingResult>,
-        FailureResult,
-    >
-
-RecoveryResult<RecoveredOutput, FailureResult> =
-    ArmResult<RecoveredOutput, FailureResult>
-
-ExactRef<T, ContractRef, ProducerRole, ProducerIdentity> =
-    sealed lexical reference whose value type, contract,
-    producer role, and producer identity are exactly those
-    four parameters
-
-ExactFailureRef<
-    Failure,
-    FailureContractRef,
-    ProducerRole,
-    ProducerIdentity,
-> =
-    ExactRef<
-        Failure,
-        FailureContractRef,
-        ProducerRole,
-        ProducerIdentity,
-    >
-        where ProducerRole is exactly
-              StateFailure | FragmentBoundaryFailure
-
-ExactResultOf<Block> =
-    ExactRef<
-        value_type(Block.result),
-        contract_ref(Block.result),
-        producer_role(Block.result),
-        producer_identity(Block.result),
-    >
-        whose producer identity is Block.result_path
-
-ExactOutputOf<StateBinding> =
-    ExactRef<
-        StateBinding.call.Output,
-        StateBinding.call.output_contract_ref,
-        StateSuccess,
-        StateBinding.call.occurrence_id,
-    >
-
-FailurePlan<
-    Policy,
-    SourceFailureRef,
-    FailureContractRef,
-    Failure,
-    RecoveredOutput,
-    FailureResult,
-> =
-    Infallible {
-        exact_contract:
-            FailureContractRef
-                == KERNEL_NEVER_FAILURE_CONTRACT_REF,
-        continuation: NoFailure,
-    }
-  | Handled {
-        exact_contract:
-            FailureContractRef
-                != KERNEL_NEVER_FAILURE_CONTRACT_REF,
-        before_handler: PreHandlerBlock<
-            Policy,
-            SourceFailureRef,
-            FailureContractRef,
-            Failure,
-            FailureResult,
-        >,
-        handler: PureNeverHandlerBinding<
-            Policy,
-            ExactResultOf<before_handler>,
-            Failure,
-            HandlerRoute,
-        >,
-        after_handler: HandlerContinuationBlock<
-            Policy,
-            ExactOutputOf<handler>,
-            HandlerRoute,
-            RecoveredOutput,
-            FailureResult,
-        >,
+        before_handler:
+            ConstrainedPreHandlerBlock<
+                Policy,
+                plan_identity,
+                lexical_region,
+                SourceFailureSlot,
+                ScopeFailure,
+            >,
+        handler:
+            StateBinding<Policy, ScopeFailure> {
+                stable_label,
+                output_local,
+                call {
+                    kind: Pure,
+                    certified_input_slot:
+                        ExactResultSlotOf<before_handler>,
+                    output: ClosedHandlerRoute,
+                    failure_contract: Never,
+                },
+                failure_boundary: NoFailure,
+            },
+        route:
+            DefaultPropagation<ScopeFailureContract> {
+                exact_enclosing_scope_failure_contract:
+                    FailureContract::Typed(
+                        ScopeFailureContract,
+                    ),
+                exact_handler_output_type:
+                    handler.Output
+                        == DefaultScopeFailureRoute<
+                            ScopeFailure,
+                            ScopeFailureContract,
+                        >,
+                continuation:
+                    DefaultScopeFailureContinuation<
+                        Policy,
+                        ExactOutputSlotOf<handler>,
+                        ScopeFailure,
+                        ScopeFailureContract,
+                    >,
+            }
+          | CustomRecovery {
+                continuation:
+                    ExhaustiveHandlerRoute<
+                        Policy,
+                        ExactOutputSlotOf<handler>,
+                        RecoveredOutput,
+                        ScopeFailure,
+                    >,
+            },
     }
   | Propagate<
         LexicalRegion,
-        BoundaryFailureContractRef,
+        BoundaryId,
         BoundaryFailure,
+        BoundaryFailureContract,
     > {
-        exact_contract:
-            FailureContractRef
-                != KERNEL_NEVER_FAILURE_CONTRACT_REF,
-        boundary_contract:
-            BoundaryFailureContractRef
-                != KERNEL_NEVER_FAILURE_CONTRACT_REF,
-        exact_lexical_result:
-            FailureResult
-                == FragmentFailureResult<
-                    LexicalRegion,
-                    BoundaryFailureContractRef,
-                    BoundaryFailure,
-                >,
+        plan_structural_path,
+        plan_identity:
+            FailurePlanIdentity<
+                exact_binding_of(SourceFailureSlot),
+                SourceFailureSlot,
+                plan_structural_path,
+            >,
         affine_enclosing_boundary:
             EnclosingFragmentBoundaryToken<
                 LexicalRegion,
-                BoundaryFailureContractRef,
-                BoundaryFailure,
-            >,
-        continuation: PropagatingFailureBlock<
-            Policy,
-            LexicalRegion,
-            BoundaryFailureContractRef,
-            SourceFailureRef,
-            FailureContractRef,
-            Failure,
-            BoundaryFailure,
-        >,
-    }
-
-ExactAffineFailureMappingChain<
-    LexicalRegion,
-    SourceFailureRef,
-    BoundaryFailureRef,
-> {
-    source: SourceFailureRef,
-    final_output: BoundaryFailureRef,
-    links: NonEmpty[
-        ExactCommittedPureMapperTransition {
-            occurrence_id,
-            input_ref,
-            input_contract_ref,
-            output_ref,
-            output_contract_ref,
-            active_lexical_region: LexicalRegion,
-        },
-    ],
-    exact_adjacency:
-        first.input_ref == source
-        and every next.input_ref == previous.output_ref
-        and every next.input_contract_ref
-            == previous.output_contract_ref,
-    exact_final_output:
-        final_output is the FragmentBoundaryFailure affine
-        rebinding of last.output_ref,
-}
-  | ZeroLinkAffineRebind {
-        exact_contract:
-            contract_ref(SourceFailureRef)
-                == contract_ref(BoundaryFailureRef),
-        source: SourceFailureRef,
-        final_output:
-            BoundaryFailureRef
-                where BoundaryFailureRef is the affine
-                FragmentBoundaryFailure rebinding of source
-                in LexicalRegion,
-    }
-
-FragmentBoundaryFailureRef<
-    LexicalRegion,
-    FailureContractRef,
-    Failure,
-> =
-    exists <
-        SourceFailureRef,
-        SourceFailureContractRef,
-        SourceFailure,
-    > {
-        boundary:
-            EnclosingFragmentBoundaryToken<
-                LexicalRegion,
-                FailureContractRef,
-                Failure,
-            >,
-        source_failure_ref:
-            SourceFailureRef
-                where SourceFailureRef:
-                    ExactFailureRef<
-                        SourceFailure,
-                        SourceFailureContractRef,
-                        producer_role(SourceFailureRef),
-                        producer_identity(SourceFailureRef),
-                    >,
-        boundary_failure_ref:
-            ExactFailureRef<
-                Failure,
-                FailureContractRef,
-                FragmentBoundaryFailure,
-                boundary.boundary_id,
+                BoundaryId,
+                BoundaryFailureContract,
             >,
         mapping_chain:
-            ExactAffineFailureMappingChain<
+            ExactAffinePureMappingChain<
+                plan_identity,
                 LexicalRegion,
-                SourceFailureRef,
-                boundary_failure_ref,
+                SourceFailureSlot,
+                ExistingLexicalSlot<BoundaryFailure>,
             >,
-    }
-    implements ExactFailureRef<
-        Failure,
-        FailureContractRef,
-        FragmentBoundaryFailure,
-        boundary.boundary_id,
-    >
-
-FragmentFailureResult<
-    LexicalRegion,
-    FailureContractRef,
-    Failure,
-> =
-    StateOutcome::Failure(
-        FragmentBoundaryFailureRef<
-            LexicalRegion,
-            FailureContractRef,
-            Failure,
-        >,
-    )
-
-PreHandlerResult<
-    SourceFailureRef,
-    FailureContractRef,
-    Failure,
-> =
-    DesignatedHandlerInput(
-        SourceFailureRef
-            where SourceFailureRef:
-                ExactFailureRef<
-                    Failure,
-                    FailureContractRef,
-                    producer_role(SourceFailureRef),
-                    producer_identity(SourceFailureRef),
-                >
-    )
-
-PreHandlerBlock<
-    Policy,
-    SourceFailureRef,
-    FailureContractRef,
-    Failure,
-    FailureResult,
-> =
-    OrderedBlock<
-        Policy,
-        PreHandlerResult<
-            SourceFailureRef,
-            FailureContractRef,
-            Failure,
-        >,
-        FailureResult,
-    >
-
-PureNeverHandlerBinding<
-    Policy,
-    HandlerInputRef,
-    Failure,
-    HandlerRoute,
-> =
-    StateBinding {
-        exact_policy: Pure is in Policy.allowed_state_kinds,
-        output_local,
-        stable_label,
-        call: CertifiedStateCall {
-            kind: Pure,
-            input:
-                HandlerInputRef
-                    where HandlerInputRef:
-                        ExactRef<
-                            Failure,
-                            input_contract_ref,
-                            DesignatedHandlerInput,
-                            producer_identity(HandlerInputRef),
-                        >,
-            input_contract_ref,
-            output: HandlerRoute where HandlerRoute is a closed tagged sum,
-            output_contract_ref,
-            failure: Never,
-            failure_contract_ref:
-                KERNEL_NEVER_FAILURE_CONTRACT_REF,
-        },
-        failure: Infallible {
-            exact_contract:
-                call.failure_contract_ref
-                    == KERNEL_NEVER_FAILURE_CONTRACT_REF,
-            continuation: NoFailure,
-        },
-    }
-
-HandlerContinuationBlock<
-    Policy,
-    HandlerOutputRef,
-    HandlerRoute,
-    RecoveredOutput,
-    FailureResult,
-> =
-    MatchBinding<
-        Policy,
-        FailureResult,
-        FailureResult,
-    > {
-        output_local: TypedLocal<RecoveredOutput>,
-        stable_label,
-        selector:
-            HandlerOutputRef
-                where HandlerOutputRef:
-                    ExactRef<
-                        HandlerRoute,
-                        handler_output_contract_ref,
-                        StateSuccess,
-                        producer_identity(HandlerOutputRef),
-                    >,
-        exhaustive_arms: [
-          TaggedArm {
-            canonical_tag,
-            stable_route_label,
-            body: ArmBlock<
-                Policy,
-                RecoveredOutput,
-                FailureResult,
-                FailureResult,
-            >,
-          },
-        ],
-    }
-
-PropagatingFailureBlock<
-    Policy,
-    LexicalRegion,
-    BoundaryFailureContractRef,
-    SourceFailureRef,
-    SourceFailureContractRef,
-    SourceFailure,
-    BoundaryFailure,
-> =
-    OrderedBlock<
-        Policy,
-        StateOutcome::Failure(
-            FragmentBoundaryFailureRef<
-                LexicalRegion,
-                BoundaryFailureContractRef,
+        boundary_slot:
+            ExactFragmentFailureSlot<
                 BoundaryFailure,
-            > {
-                boundary:
-                    EnclosingFragmentBoundaryToken<
-                        LexicalRegion,
-                        BoundaryFailureContractRef,
-                        BoundaryFailure,
-                >,
-                source_failure_ref:
-                    SourceFailureRef
-                        where SourceFailureRef:
-                            ExactFailureRef<
-                                SourceFailure,
-                                SourceFailureContractRef,
-                                producer_role(SourceFailureRef),
-                                producer_identity(SourceFailureRef),
-                            >,
-                boundary_failure_ref:
-                    ExactFailureRef<
-                        BoundaryFailure,
-                        BoundaryFailureContractRef,
-                        FragmentBoundaryFailure,
-                        boundary.boundary_id,
-                    >,
-                mapping_chain:
-                    ExactAffineFailureMappingChain<
-                        LexicalRegion,
-                        SourceFailureRef,
-                        boundary_failure_ref,
-                    >,
-            },
-        ),
-        FragmentFailureResult<
-            LexicalRegion,
-            BoundaryFailureContractRef,
-            BoundaryFailure,
-        >,
-    >
-
-FragmentBlock<
-    Policy,
-    LexicalRegion,
-    FailureContractRef,
-    Output,
-    Failure,
-> =
-    OrderedBlock<
-        Policy,
-        StateOutcome<Output, Failure>,
-        FragmentFailureResult<
-            LexicalRegion,
-            FailureContractRef,
-            Failure,
-        >,
-    >
-
-LaneFailureResult<LaneFailureContractRef, LaneFailure> =
-    NoLaneFailure
-        when LaneFailureContractRef
-             == KERNEL_NEVER_FAILURE_CONTRACT_REF
-  | LaneOutcome::Failure(LaneFailure)
-        when LaneFailureContractRef
-             != KERNEL_NEVER_FAILURE_CONTRACT_REF
-
-NoLaneFailure =
-    sealed uninhabited result type with no constructor or
-    canonical value
-
-LaneBlock<
-    LaneOutputContractRef,
-    LaneFailureContractRef,
-    Output,
-    LaneFailure,
-> =
-    OrderedBlock<
-        FanOutLanePolicy,
-        LaneOutcome<Output, LaneFailure>,
-        LaneFailureResult<
-            LaneFailureContractRef,
-            LaneFailure,
-        >,
-    >
+                BoundaryFailureContract,
+                BoundaryId,
+                mapping_chain.target_slot,
+            >,
+        exact_target_contract:
+            contract_ref(mapping_chain.target_slot)
+                == BoundaryFailureContract.retained_contract_ref,
+        where BoundaryFailureContract == FailureContract::Typed,
+    }
 ```
 
-`FailurePlan` is a sealed disjoint certificate witness. Only exact equality with
-`KERNEL_NEVER_FAILURE_CONTRACT_REF` constructs `Infallible`. Every other admitted failure contract
-constructs either `Handled` or, only for a protected slot inside an affine fragment, `Propagate`.
-A handled plan's normal pre-handler result is exactly `DesignatedHandlerInput`; it cannot produce
-recovery or an enclosing scope result. A propagation plan's normal result names its exact
-enclosing fragment boundary and retains the source and mapped-failure provenance. Certification
-proves that finite nested propagation ends in exactly one handled call-site plan.
+The identity is derived, never author supplied. The exact source binding and its plan structural
+path therefore determine one plan even when another plan uses the same failure value contract.
+The `CertifiedProgram` contains only the displayed input slot. After the current committed failure
+selects this exact plan, the fold alone may resolve that slot as
+`FailurePlanBound<value_type(slot), plan_identity>` for the handler callback.
 
-`DesignatedHandlerInput` is a sealed structural brand over the same exact source failure
-reference, not a copied or newly selectable value. Its result contract is the exact source failure
-contract, its producer role is `DesignatedHandlerInput`, its producer identity is the
-pre-handler block's result path, and its derivation retains the source's exact failure role and
-identity. Therefore `ExactResultOf<before_handler>` closes the value type, contract, branded role,
-result path, and underlying source. `ExactOutputOf<handler>` closes the handler occurrence,
-success-output role, and exact output contract. A same-shaped failure or handler route from any
-other producer is not substitutable.
+The compact certified slot types used above are:
 
-Every non-zero `ExactAffineFailureMappingChain` begins at its exact source reference, ends at the
-exact boundary reference, contains only the exact committed `Pure` mapper transitions on the
-active lexical path, and has exact contract equality at every adjacent edge. A zero-link chain is
-legal only for exact source/boundary contract equality and records the affine fragment-boundary
-rebinding of that source. Merely presenting the right boundary type or a same-shaped mapper output
-does not close the chain.
+```text
+ConstrainedPreHandlerBlock<
+    Policy,
+    PlanIdentity,
+    LexicalRegion,
+    SourceFailureSlot,
+    ScopeFailure,
+> {
+    exact_plan_identity: PlanIdentity,
+    exact_lexical_region: LexicalRegion,
+    exact_source: SourceFailureSlot,
+    direct_scope_failure_tail: Forbidden,
+    ordered_bindings:
+        [PreHandlerBinding<Policy, ScopeFailure> whose normal structural paths
+         contain no ScopeFailure tail or arm],
+    protected_failure_chain:
+        ExactAffinePureMappingChain<
+            PlanIdentity,
+            LexicalRegion,
+            SourceFailureSlot,
+            ExistingLexicalSlot,
+        >,
+    only_normal_tail:
+        ExistingLexicalSlot {
+            result_slot:
+                protected_failure_chain.target_slot,
+            exact_source:
+                result_slot == SourceFailureSlot
+                    when protected_failure_chain is ZeroLink,
+            exact_mapper_output:
+                result_slot
+                    == protected_failure_chain.last.output_slot
+                    when the chain is NonEmpty,
+            exact_handler_input_contract:
+                contract_ref(result_slot)
+                    == enclosing_handled_plan
+                       .handler.call.input_contract_ref,
+        },
+    newly_committed_failure:
+        may leave only through that producing binding's exact
+        FailurePlan and is a distinct recorded causal failure,
+}
 
-Match tags and arm labels are unique and exhaustive for the certified closed sum. Fan-out group
-labels and lane keys are unique in their lexical scope; declaration ordinals freeze result order
-but are not substitutes for stable identity.
+PreHandlerBinding<Policy, ScopeFailure> =
+    the sealed subset of Binding<Policy, ScopeFailure>
+    whose recursively nested normal-control structure has no
+    direct ScopeFailure completion; any newly committed state
+    failure follows only that state's own exact FailurePlan
 
-`Policy` is a sealed type parameter, not descriptive metadata. `MatchBinding`, fragments, failure
-posts, and recovery routes retain the containing policy. Only `SequentialPolicy` constructs a
-`FanOutBinding`; entering a lane replaces it with `FanOutLanePolicy`, which removes `Effect` and
-nested `FanOut` constructors transitively. No child block can widen its policy.
+ExactResultSlotOf<PreHandlerBlock> =
+    PreHandlerBlock.only_normal_tail.result_slot
+        retaining the exact certified derivation from
+        PreHandlerBlock.exact_source through
+        PreHandlerBlock.protected_failure_chain
 
-Each `FragmentBinding` mints a fresh private lexical region and gives only its body the
-non-cloneable `EnclosingFragmentBoundaryToken` for that region. `Propagate` requires that exact
-token and a boundary contract whose reference is not `KERNEL_NEVER_FAILURE_CONTRACT_REF`, so it
-cannot name a sibling, ancestor, unrelated fragment, or zero-handler boundary. Its boundary
-failure is either the exact type-compatible source rebound with fragment provenance or the
-producer-bound output of an ordinary certified `Pure` failure-post mapping state; no hidden
-conversion callback exists.
+ExactOutputSlotOf<HandlerStateBinding> =
+    LexicalSlot<
+        HandlerStateBinding.Output,
+    > whose producer shape is
+        StateOutput(
+            HandlerStateBinding.occurrence_id,
+            SuccessOutput,
+        )
+      and whose complete contract equals
+        HandlerStateBinding.output_contract_ref
 
-The parameterized results are lexical values, not general jumps or executable instructions. A
-binding's successful value is assigned to its local and execution continues with the next
-declaration in that ordered block. Each lexical block fixes the result form available to failures
-of its fallible bindings. An operation failure path may recover or produce an operation outcome; a
-lane failure path may recover or produce the lane's typed failure, but cannot close the operation.
-`StateBinding` failure enters its sealed failure plan. A handled or propagating plan may contain
-certified failure-post states before its normal result. If a failure-post state itself fails, that
-new committed failure follows the post-state's own exact continuation; otherwise a handled source
-must enter its mapping handler before recovery or scope completion, while a propagation source
-must reach its exact affine fragment boundary.
+ClosedHandlerRoute =
+    one registered closed tagged sum whose tags are exhausted
+    by the exact continuation table
 
-`Produced` on a handler route supplies the original binding's output type and resumes the
-remaining declarations.
-An operation root instead produces exactly one `OperationOutcome`. A `Match` arm either produces
-its binding value or an enclosing-scope result explicitly allowed by its result type; a fallible
-binding inside that arm uses the separate exact `FailureResult`. Consequently a `Match` inside a
-pre-handler or propagation block cannot produce the containing scope's failure result and bypass
-its required handler or boundary. A lane has only its local typed `LaneOutcome`; an
-`OperationOutcome` is not constructible there.
+ExhaustiveHandlerRoute<
+    Policy,
+    HandlerOutputSlot,
+    RecoveredOutput,
+    ScopeFailure,
+> {
+    selector: HandlerOutputSlot,
+    selector_contract:
+        exact registered closed-sum contract object referenced by
+        HandlerOutputSlot.complete_contract_ref,
+    enclosing_scope_failure_contract:
+        exact enclosing owned scope FailureContract<ScopeFailure>,
+    exact_tag_table: [
+        tag -> Recover {
+            body:
+                OrderedBlock<
+                    Policy,
+                    RecoveredOutput,
+                    ScopeFailure,
+                >,
+        }
+      | tag -> ScopeFailure {
+            payload_path,
+            exact_variant_payload_slot:
+                ExactVariantPayloadSlot<
+                    ScopeFailure,
+                    HandlerOutputSlot,
+                    tag,
+                    payload_path,
+                >,
+            where enclosing_scope_failure_contract
+                == FailureContract::Typed(ScopeFailureContract)
+            and selector_contract.exact_tag_payload_table[
+                    (tag, payload_path)
+                ].exact_payload_type
+                == ScopeFailure
+            and selector_contract.exact_tag_payload_table[
+                    (tag, payload_path)
+                ].exact_payload_contract_ref
+                == ScopeFailureContract.exact_ref,
+            body:
+                ConstrainedFailureBlock<
+                    Policy,
+                    ScopeFailure,
+                >,
+        },
+    ],
+    when ScopeFailure == kernel::Never:
+        every tag is Recover,
+}
 
-`PureNeverHandlerBinding` is a complete ordinary `StateBinding`, including stable label, output
-local, structurally derived identities, and its `Infallible` plan. Its exact output is the selector
-of an exhaustive, stable-labelled route table; a continuation cannot ignore the handler output,
-match an unrelated value, or recover before selecting one of those routes.
-`HandlerContinuationBlock` is only a constrained ordinary `MatchBinding` whose selector is
-`ExactOutputOf<handler>`; it introduces no second branch construct, normalization rule, or
-certifier path.
+ConstrainedFailureBlock<Policy, ScopeFailure> {
+    ordered_bindings:
+        [Binding<Policy, ScopeFailure>],
+    tail_slot:
+        one exact ExistingLexicalSlot<ScopeFailure>
+        defined and active in this arm,
+    only_tail:
+        ScopeFailure(
+            ExactTypedExpression<
+                ScopeFailure,
+                tail_slot,
+            >
+        ),
+}
 
-`FragmentBinding` is the certified lexical composition form for a child operation, semantic
-capability expansion, or policy envelope. Its nested block produces one typed `StateOutcome`;
-success binds the output local and failure enters the call site's failure continuation. It is not
-an authored `OperationCall`, a Runtime action, or a new public control construct. The one shared
-continuation remains after the binding, so expansion neither duplicates it nor creates a jump.
-Its boundary freezes the semantic call identity and exact input, output, and failure contracts.
-Entering or leaving the fragment creates no fake semantic transition or copied value: the fold
-binds the boundary local to the exact existing producer reference while retaining both underlying
-and fragment-boundary provenance.
+DefaultScopeFailureRoute<
+    ScopeFailure,
+    ScopeFailureContract,
+> =
+    one registered closed tagged sum with exactly:
+        Propagate(ScopeFailure)
+    whose canonical Propagate payload entry has
+        exact_payload_type == ScopeFailure
+    and exact_payload_contract_ref == ScopeFailureContract.exact_ref
 
-This is a structured tree with lexically nested sub-blocks, not graph edges or general bytecode.
-Sub-blocks never name arbitrary program-counter IDs, alias a continuation, or jump into another
-block; the parent encodes its one lexical continuation once. An implementation may derive an
-indexed occurrence table as a process-local cache, but that table is not separately admitted or
-hashed.
+DefaultScopeFailureContinuation<
+    Policy,
+    HandlerOutputSlot,
+    ScopeFailure,
+    ScopeFailureContract,
+> {
+    selector: HandlerOutputSlot,
+    enclosing_scope_failure_contract:
+        exact enclosing owned scope
+        FailureContract::Typed(ScopeFailureContract),
+    selector_contract:
+        exact registered
+        DefaultScopeFailureRoute<
+            ScopeFailure,
+            ScopeFailureContract,
+        > contract object referenced by
+        HandlerOutputSlot.complete_contract_ref,
+    exact_tag_table having exactly:
+        Propagate -> ScopeFailure {
+            exact_payload_contract:
+                selector_contract.exact_tag_payload_table[
+                    (Propagate, canonical_propagate_payload_path)
+                ] == {
+                    exact_payload_type: ScopeFailure,
+                    exact_payload_contract_ref:
+                        ScopeFailureContract.exact_ref,
+                },
+            payload_slot:
+                ExactVariantPayloadSlot<
+                    ScopeFailure,
+                    HandlerOutputSlot,
+                    Propagate,
+                    canonical_propagate_payload_path,
+                >,
+            exact_scope_contract:
+                payload_slot.complete_contract_ref
+                    == ScopeFailureContract.exact_ref,
+            body.ordered_bindings: [],
+            body.tail_slot: payload_slot,
+            body.only_tail:
+                ScopeFailure(
+                    ExactTypedExpression<
+                        ScopeFailure,
+                        payload_slot,
+                    >
+                ),
+        }
+}
 
-Every syntactic path produces a result allowed by its lexical scope. There are no backedges,
-arbitrary jumps, dependency skips, required-success sets, outcome instructions, or implicit
-terminal nodes. The initial contract also rejects `FanOut` transitively inside a `LaneBlock`.
+EnclosingFragmentBoundaryToken<
+    LexicalRegion,
+    BoundaryId,
+    BoundaryFailureContract,
+> =
+    non-cloneable token minted only for that exact fragment body
+
+ExactAffinePureMappingChain<
+    PlanIdentity,
+    LexicalRegion,
+    SourceFailureSlot,
+    TargetFailureSlot,
+> =
+    ZeroLink {
+        exact_plan_identity: PlanIdentity,
+        exact_lexical_region: LexicalRegion,
+        exact_contract_equality:
+            contract_ref(SourceFailureSlot)
+                == contract_ref(TargetFailureSlot),
+        exact_target:
+            TargetFailureSlot == SourceFailureSlot,
+    }
+  | NonEmpty {
+        exact_plan_identity: PlanIdentity,
+        exact_lexical_region: LexicalRegion,
+        source: SourceFailureSlot,
+        links: [
+            CertifiedMapperBinding {
+                binding:
+                    StateBinding {
+                        kind: Pure,
+                        failure_boundary: NoFailure,
+                    },
+                exact_plan_identity: PlanIdentity,
+                active_lexical_region: LexicalRegion,
+                input_slot,
+                input_contract_ref,
+                output_slot,
+                output_contract_ref,
+            },
+        ],
+        exact_adjacency:
+            first.input_slot == source
+            and each next.input_slot == previous.output_slot
+            and every adjacent contract is exactly equal,
+        exact_final_output:
+            last.output_slot == TargetFailureSlot,
+    }
+```
+
+For either chain form, `target_slot` is exactly `TargetFailureSlot`; it never denotes a new
+producer kind. Every link belongs to the chain's one lexical region and one selected plan. The
+fold constructs a `FailurePlanBound<value_type(input_slot), PlanIdentity>` view only when that
+exact mapper is current, from that exact resolved input slot, and under that exact
+`PlanIdentity`; the view is not a certified-program field.
+
+`NoFailure` is constructible only from `FailureContract::Never`, contains no source slot or plan,
+and makes a failed transition invalid. `FailurePlan` exists only for a typed failure slot.
+`Handled` routes the exact resolved source slot into one ordinary `Pure + Never` handler state and
+exhaustively selects either recovery of the protected output or the current scope's exact failure
+channel. On the protected failure's own normal-control continuation, the pre-handler and route
+blocks cannot directly bypass the designated handler or ignore its exact output. A distinct
+failure newly committed by an intervening pre-handler binding causally supersedes the protected
+failure and follows only its own exact plan; this is not a direct escape by the protected source.
+`.or_default()` constructs only `DefaultPropagation`; its exact handler variant-payload slot is
+the exact failure tail. An explicitly authored handler constructs `CustomRecovery` and cannot
+masquerade as the default route.
+
+`Propagate` exists only inside a fresh expansion fragment. A non-cloneable token names that exact
+enclosing boundary, and the boundary slot uses the mapping chain's exact target as its source.
+The fields cannot name different same-typed boundaries or lexical regions. A source therefore
+cannot target a sibling, ancestor, unrelated fragment, lane, or operation root. A zero-link
+propagation is legal only when source and boundary contracts are exactly equal. Otherwise every
+mapping link is an ordinary certified `Pure + Never` state binding in the token's exact active
+lexical region, under the same plan identity, with exact adjacent input/output contract and
+producer equality. The `CertifiedProgram` contains only its slots and binding identity; the fold later
+requires the corresponding committed transitions, resolves their content references, and derives
+the exact fragment-boundary value. Finite nested propagation must end in exactly one handled
+call-site plan.
+
+A scope default is not one polymorphic implementation. It is a finite exact table:
+
+```text
+LexicalFailureMap<ScopeFailure> =
+    match enclosing_owned_scope.failure_contract {
+        Never =>
+            EmptyExactMap
+        Typed(ScopeFailureContract) =>
+            ExactFiniteMap {
+                SourceFailureContract
+                    -> RegisteredPureNeverMapper<
+                           SourceFailure,
+                           DefaultScopeFailureRoute<
+                               ScopeFailure,
+                               ScopeFailureContract,
+                           >,
+                       >
+            }
+    }
+```
+
+`.or_default()` resolves only when one exact table entry matches the complete source
+`RetainedValueContract`. Sources with the same exact contract may share an identity mapper.
+Heterogeneous sources use different mapper states. A child or expansion maps its internal leaf
+failures into its closed boundary before the parent sees it. A scope with
+`FailureContract::Never` has no table and must explicitly recover every owned fallible source.
+
+An outcome-affecting wrapper must preserve the protected call's exact success and failure
+boundary. A denial therefore requires an exact registered mapper into that typed failure
+contract. A denying wrapper cannot wrap a `Never` boundary. A non-denying observer may wrap
+`Never` only when every support state is also `Never`; otherwise the policy belongs at a fallible
+enclosing boundary. Certification rejects rather than silently widening an operation's declared
+failure sum.
+
+Match tags and stable arm labels are unique and exhaustive for the certified closed sum. Stable
+fan-out keys are unique in their group. Dense ordinals are derived from retained declaration
+order and govern execution and join order; authors do not supply them. Stable labels and keys
+anchor semantic identity and are not replaced by ordinals.
+
+This algebra is a structured tree. Sub-blocks cannot name arbitrary program counters, alias a
+continuation, jump into another block, construct the operation outcome from a lane, or expose an
+inactive branch value. An implementation may derive an indexed occurrence table as a
+process-local cache, but it is neither admitted nor hashed separately.
+
+Every syntactic path either produces the exact current block's normal result or its exact lexical
+failure. A committed state transition alone constructs `StateOutcome`; a lane tail constructs one
+nominal `LaneOutcome`; and the containing run root constructs one nominal `OperationOutcome`.
+A fragment directly rebinds its body's two structural channels to its exact boundary references;
+it constructs no outcome value. There are no result instructions, dependency skips,
+required-success sets, outcome nodes, or implicit terminal nodes.
 
 ### Operation DSL
 
@@ -1680,7 +2022,8 @@ sequence implicit:
 
 ```rust
 operation::<Snapshot, SnapshotFailure>("snapshot", |op| {
-    op.default_failure::<MapStateFailure>();
+    op.failure_map::<ReadAnchorFailure, MapReadAnchorFailure>();
+    op.failure_map::<ReadBalanceFailure, MapReadBalanceFailure>();
 
     let anchor = op
         .read::<ReadAnchor>("anchor", input)
@@ -1690,7 +2033,10 @@ operation::<Snapshot, SnapshotFailure>("snapshot", |op| {
         "balances",
         assets,
         |lane, asset| {
-            lane.default_failure::<MapBalanceFailureToLane>();
+            lane.failure_map::<
+                ReadBalanceFailure,
+                MapBalanceFailureToLane,
+            >();
 
             lane.read::<ReadBalance>(
                 "read",
@@ -1724,35 +2070,35 @@ This is illustrative, not a frozen Rust API. The required properties are:
 - a fan-out lane can produce only its declared lane outcome, never the containing operation's
   outcome.
 
-`succeed(value)` and any corresponding `fail(failure)` authoring helper set the root block's typed
-`OperationOutcome`; they do not append a binding or instruction. A builder must reject a second
-root outcome and any path for which no root outcome can be constructed.
+`succeed(value)` selects the root block's normal expression, and any corresponding
+`fail(failure)` helper selects its lexical failure channel. The fold later wraps the selected
+channel in the nominal `OperationOutcome`; neither helper appends a binding or instruction. A
+builder must reject a second root completion choice and any path for which neither channel is
+well-typed.
 
 More complex predicates are computed by an ordinary `Pure` state into a closed enum and then
-matched. Closed sums use the kernel-owned canonical tag encoding frozen in the certificate.
+matched. Closed sums use the kernel-owned canonical tag encoding frozen in the
+`CertifiedProgram`.
 Runtime and store never execute an unrecorded branch predicate or discriminator callback.
 
 ### Pure expansion
 
-An expansion replaces one typed call slot with a structured fragment having the same external
-boundary:
+Capability lowering consumes one abstract semantic call token and replaces it with a structured
+fragment having the same external boundary:
 
 ```text
-Expand<Call<Input, Output, Failure>>
-    -> Fragment<Input, StateOutcome<Output, Failure>>
+Lower<SemanticCall<Input, Output, Failure>>
+    -> Fragment<Input, Output, Failure>
 ```
 
-A wrapper receives an affine protected slot:
+A policy wrapper receives the already-lowered boundary and one affine `proceed` capability:
 
 ```text
-Around<S>:
-    Hole<S> -> Fragment<
-        S::Input,
-        StateOutcome<S::Output, S::Failure>,
-    >
+Around<Boundary<Input, Output, Failure>>:
+    Proceed<Boundary> -> Fragment<Input, Output, Failure>
 ```
 
-The hole occurs structurally once. A precondition may choose a branch that does not execute it,
+`proceed` occurs structurally once. A precondition may choose a branch that does not execute it,
 but no expansion can clone it, execute it twice, move it across sibling declarations, or capture
 it inside fan-out.
 
@@ -1796,64 +2142,144 @@ An expander may insert a finite, statically bounded sequence of distinct semanti
 replacement, or fallback occurrences. Their requests, branches, order, and bound are visible in
 the expanded program. No adapter or Runtime loop chooses additional occurrences.
 
-The expansion pipeline is:
+The frozen expansion pipeline and eligibility matrix is:
 
-1. recursively substitute authored `OperationCall`s;
-2. lower registered semantic capability requirements;
-3. apply the entry point's required framework/security policies in frozen profile order;
-4. insert an exact compatible default handler for each uncovered fallible state or fragment
-   boundary in a scope whose failure-contract reference is not the reserved `Never` reference;
-   require explicit total recovery in reserved-`Never` scopes, follow affine propagated boundaries
-   to their one outer call site, and reject every still-uncovered path;
-5. normalize, content-address, and certify the final structure.
+| Phase | Eligible input | May emit | Later eligibility |
+| --- | --- | --- | --- |
+| Child substitution | Authored `OperationCall` | Inlined authored blocks and calls | Capability lowering and policy wrapping |
+| Capability lowering | Authored or inlined abstract semantic call token with one exact registered requirement | One boundary-preserving fragment that consumes and replaces the token with executable support states | The preserved lowered boundary may receive policies; support states do not receive child/capability/policy expansion |
+| Policy wrapping | Eligible lowered semantic boundaries under the exact admitted profile | Bounded pre/post states and `Match` around one affine `proceed` boundary | No policy applies to its own or another policy's support states |
+| Failure completion | Every remaining typed-failure state or fragment boundary, including support states | One exact registered `Pure + Never` mapper/handler and its exhaustive route | Handler states are final leaves |
+| Normalization and certification | Fully expanded structure | One canonical `CertifiedProgram` root whose exact closure binds the `ExpandedProgram`, profile, proofs, manifests, bounds, contracts, and implementation closure | Nothing |
+
+Multiple policies compose in frozen profile order, outer-to-inner on entry and reverse on exit.
+Every policy applies once to the preserved semantic call boundary, not recursively to states
+injected by itself or another policy. Capability and policy fragments own the failure coverage,
+security obligations, and qualification of their support states. When one policy's support truly
+requires another policy, the registry must provide one explicit composite expansion; implicit
+fixed-point expansion is forbidden.
+
+The two affine transformations are distinct:
+
+```text
+Lower<SemanticCall<Input, Output, Failure>>:
+    consume the abstract call token exactly once
+      -> Fragment<Input, Output, Failure>
+
+Around<Boundary<Input, Output, Failure>>:
+    execute one affine proceed<Boundary> zero or one time
+      -> Fragment<Input, Output, Failure>
+
+composition:
+    policy_0(policy_1(lower(call)))
+```
+
+Capability lowering may replace a high-level abstract call such as EVM submission; it does not
+have to execute a nonexistent leaf state. Policy wrapping acts on the complete lowered semantic
+boundary, so an outer security precondition runs before nonce reservation or any other support
+state. A denying policy may choose not to invoke `proceed`; no policy may duplicate it.
+
+An outcome-affecting policy must preserve the protected boundary exactly. A denial requires an
+exact registered mapper into that boundary's typed failure contract; a denying policy is
+ineligible for `Never`. A non-denying wrapper over `Never` is legal only when every support state
+is also `Never`. The certifier rejects a policy that would silently widen an operation or fragment
+failure contract.
 
 Child substitution has one exact structural lowering:
 
 ```text
 LowerChildBoundary<Output, Failure>:
-    OperationOutcome::Success(child_ref)
-        -> StateOutcome::Success(
-               FragmentBoundaryValueRef<
-                   call_boundary.success,
-                   Output,
-               >::from(child_ref)
-           )
-    OperationOutcome::Failure(child_failure_ref)
-        -> StateOutcome::Failure(
-               FragmentBoundaryValueRef<
-                   call_boundary.failure,
-                   Failure,
-               >::from(child_failure_ref)
-           )
+    each child input root(child_root)
+        <- FragmentInputSlot<
+               child_root.Value,
+               call_boundary.boundary_id,
+               child_root.root_id,
+               child_root.contract_ref,
+               ExactDominatingCallerSlot<
+                   child_root.Value,
+                   call_boundary.boundary_id,
+               >,
+           >
+    child normal channel(child_success_slot)
+        -> ExactFragmentSuccessSlot<
+               Output,
+               call_boundary.success_contract,
+               call_boundary.boundary_id,
+               child_success_slot,
+           >
+    child lexical failure channel(child_failure_slot)
+        -> ExactFragmentFailureSlot<
+               Failure,
+               call_boundary.failure_contract,
+               call_boundary.boundary_id,
+               child_failure_slot,
+           >
 ```
 
-The fragment-boundary reference retains the same lexical value, nominal contract, child path, and
-source derivation under the call site's boundary identity. Lowering creates no `State`, `Match`,
+Every child input root is substituted exactly once from its declared call-site input; the
+certified fragment-input slot preserves caller provenance while rebinding lexical scope. The
+certified fragment success and failure slots likewise retain the exact source slot, nominal
+contract, child path, and call-site boundary identity. Only after an exact source value commits
+does the fold resolve those recipes into `FragmentInputValueRef` and
+`FragmentBoundaryValueRef`, preserving content and the complete source derivation. The inlined child
+constructs neither a child `OperationOutcome` nor `StateOutcome`; those nominal forms belong only
+to the containing run root and committed state transitions. Lowering creates no `State`, `Match`,
 transition, child `RunClosed`, or executable occurrence. The parent consumes boundary success as
 the call value and boundary failure through the call site's sealed failure plan. Certification
-requires exact child/call-site input, output, and failure contracts. Expansion preserves the
-child's lexical defaults internally and leaves no child call in `ExpandedProgram`.
-The failure reference is exactly
-`ExactFailureRef<Failure, call_boundary.failure_contract_ref, FragmentBoundaryFailure,
-call_boundary.failure.boundary_id>` and is eligible for that call site's failure plan; the success
-reference is not.
+requires a total bijection over child/call-site input roots plus exact output and failure
+contracts. Expansion preserves the child's lexical defaults internally and leaves no child call
+in `ExpandedProgram`.
+The certified failure slot is exactly
+`ExactFragmentFailureSlot<Failure, call_boundary.failure_contract,
+call_boundary.boundary_id, child_failure_slot>` and is eligible for that call site's
+failure plan. Its symmetric success slot is
+`ExactFragmentSuccessSlot<Output, call_boundary.success_contract,
+call_boundary.boundary_id, child_success_slot>` and is not failure-plan eligible. At
+execution, the fold resolves each only from its exact certified source and boundary role.
 
-A policy never reapplies to states it injects itself. Later phases or policies may cover injected
-states only through explicit provenance-based eligibility. Expansion dependencies are acyclic and
-subject to hard depth, occurrence, branch, and fan-out bounds.
+A policy never reapplies to states it injects, and injected support is never an implicit target
+for a later policy. Expansion dependencies are acyclic and subject to hard fragment-depth,
+occurrence, branch, fan-out-depth, lane, and total-expanded-program bounds.
 
-The qualified entry-point admission policy selects the required profile, exact policy versions,
-and coverage obligations. Certification proves that the expanded program matches them; admission
-rejects an empty, weaker, or caller-substituted profile. The registered semantic state/capability
-contract selects capability expansion. Runtime never discovers topology by inspecting which
-adapter or transport happens to implement an operation.
+Coverage is one closed structural proof:
+
+```text
+PolicyContract {
+    policy_ref,
+    exact_eligible_semantic_boundary_contracts,
+}
+
+CoverageProof =
+    ordered [
+        (
+            semantic_boundary_id,
+            required_profile_ordinal,
+            exact_policy_ref,
+        )
+    ]
+```
+
+For every admitted semantic boundary and every policy required by that entry point's exact profile,
+the proof has exactly one entry if and only if the boundary contract is eligible. Order matches
+the profile and wrapper nesting. Injected support states do not appear as independent coverage
+targets; their capability/policy expansion manifest owns them, or one explicit composite policy
+does. Certification rejects missing, duplicate, foreign, reordered, or ineligible entries.
+
+The qualified entry-point admission policy selects the trusted certified-program contract,
+certification predicate set, required profile, exact policy versions, and coverage obligations.
+Certification proves that the expanded program matches them; admission resolves the policy from
+the qualified entry-point identity and rejects a weaker, stale, or caller-substituted policy,
+predicate set, proof, or profile. An empty profile is legal exactly when the qualified entry point
+requires an empty profile. The registered semantic state/capability contract selects capability
+expansion. Runtime never discovers topology by inspecting which adapter or transport happens to
+implement an operation.
 
 ### Failure handlers and custom recovery
 
 After state settlement:
 
 ```text
-StateOutcome<Output, Failure>
+StateOutcome<LexicalValueRef<Output>, LexicalValueRef<Failure>>
     Success(output) -> success continuation
     Failure(failure) -> exact structural failure continuation
                          -> failure-post states, if any
@@ -1861,44 +2287,56 @@ StateOutcome<Output, Failure>
                          -> designated failure handler
 ```
 
-This split is part of `StateBinding` normalization, not an author-visible `Match`. No raw failure
-arm can bypass the certified failure continuation. If an intervening failure-post state fails, its
-new typed failure follows that state's own exact continuation.
+This split is part of `StateBinding` normalization, not an author-visible `Match`. The protected
+failure has no raw arm that can directly bypass its certified normal-control continuation. If an
+intervening failure-post state fails, its newly committed typed failure causally supersedes the
+protected failure and follows that state's own exact continuation.
 
-The default handler contract is:
+The default-handler registration is:
 
 ```text
-DefaultFailureRoute<ScopeFailure> =
-    Propagate(ScopeFailure)
-
-DefaultFailureHandler<Source, Scope>:
-    Kind    = Pure
-    SourceFailure =
-        ExactFailureRef<
-            Source.Failure,
-            Source.failure_contract_ref,
-            Source.failure_producer_role,
-            Source.identity,
-        >
-    Input   =
-        DesignatedHandlerInput<SourceFailure>
-        == ExactResultOf<before_handler>
-    Output  = DefaultFailureRoute<Scope::Failure>
-    FailureContractRef = KERNEL_NEVER_FAILURE_CONTRACT_REF
+LexicalFailureMap<ScopeFailure> {
+    when enclosing_owned_scope.failure_contract
+        == FailureContract::Typed(ScopeFailureContract),
+    exact entries:
+        SourceFailureRetainedValueContract
+          -> RegisteredMapper {
+                 Kind = Pure,
+                 Input = ExactResultSlotOf<before_handler>,
+                 Output = DefaultScopeFailureRoute<
+                     ScopeFailure,
+                     ScopeFailureContract,
+                 >,
+                 FailureContract = Never,
+             },
+}
 ```
 
-`Source` is a certified `StateBinding` or `FragmentBoundary`.
-`DefaultFailureRoute` is a nominal closed one-variant sum, so the default uses the same exhaustive
-handler-route algebra as a custom handler.
+The source is a certified `StateBinding` or `FragmentBoundary`. One monomorphic handler does not
+pretend to consume heterogeneous failures. Sources with identical complete contracts may share a
+mapper; distinct source contracts require distinct entries. `.or_default()` is admitted only
+when exactly one entry matches.
+
+`DefaultScopeFailureRoute<ScopeFailure, ScopeFailureContract>` is the default handler's registered
+`ClosedHandlerRoute`: it has one `Propagate(ScopeFailure)` tag.
+`DefaultScopeFailureContinuation` exposes the exact `ExactVariantPayloadSlot` derived from that
+handler output. The enclosing scope's exact typed failure contract, the registered `Propagate`
+payload entry, the derived payload slot, and the failure tail all carry the same nominal contract
+reference. The continuation permits no intervening binding and requires the scope-failure tail
+to use that slot. It cannot replace the payload with another dominating same-typed value or with
+byte-identical payload material registered under a different contract. The route is unavailable
+when `ScopeFailure == kernel::Never`. A custom handler may register a richer closed route, but its
+exact output remains the sole selector of the certified exhaustive table; another value cannot
+select an arm or bypass the handler output.
 
 For an operation scope, the normal default expansion is:
 
 ```text
 StateOutcome::Failure(f):
-    route = DefaultFailureHandler(f)
+    route = ExactRegisteredMapperFor(f)(f)
     match route {
         Propagate(operation_failure):
-            OperationOutcome::Failure(operation_failure)
+            exit the operation's lexical failure channel
     }
 ```
 
@@ -1911,9 +2349,9 @@ nor returns a generic `Retry` command.
 
 Defaults are lexical:
 
-- an operation owns defaults for calls it authors;
+- an operation owns a closed failure sum and exact mapper table for calls it authors;
 - a child operation owns its internal defaults;
-- an expansion owns failures from states it injects and maps them to the wrapped call boundary;
+- an expansion owns failures from every state it injects and maps them to its advertised boundary;
   and
 - certification rejects every uncovered fallible state or fragment boundary.
 
@@ -1935,23 +2373,27 @@ FanOut<MAX> {
         LaneFailure,
     >,
     transitive execution kinds: Pure | Read,
+    certified nesting depth: at most 2,
     join: collect all in declaration order,
 }
 ```
 
 Rules:
 
-- lane cardinality may derive from canonical planning input but not runtime-discovered values;
+- lane cardinality is non-zero and may derive from canonical planning input but not
+  runtime-discovered values;
 - lane keys are unique and stable;
 - lanes capture only immutable values that dominate the fan-out;
 - lanes cannot reference each other;
-- lanes cannot contain nested fan-out in the initial contract;
+- lanes may contain bounded fan-out only while the certified remaining depth is positive;
+- the initial maximum fan-out nesting depth is two, and global occurrence/lane bounds cover the
+  complete nested tree;
 - lanes cannot produce the containing `OperationOutcome`;
 - every lane produces exactly one typed outcome;
-- each lane is its own lexical failure scope; a non-reserved lane failure-contract reference may
-  use a compatible default pure handler to produce typed lane failure, while a reserved-`Never`
-  lane specializes its failure result to uninhabited `NoLaneFailure`, has no default, can construct
-  only lane success, and explicitly recovers every fallible source;
+- each lane is its own lexical failure scope; a typed lane failure contract may use a compatible
+  default pure handler to produce typed lane failure, while a `Never` lane has no failure slot,
+  no default, and no constructible `LaneOutcome::Failure`; it constructs only lane success and
+  explicitly recovers every fallible source;
 - any custom lane recovery remains transitively `Pure` or `Read`;
 - the join waits for every lane; and
 - the result vector uses declared lane order, never completion order.
@@ -1959,26 +2401,49 @@ Rules:
 An outer `Pure` state may summarize lane outcomes and select a normal operation branch. This avoids
 fail-fast cancellation, incomplete access histories, and nondeterministic “first failure” meaning.
 
-Runtime chooses the lowest declaration-ordered actionable lane. A concurrent driver may advance a
-different lane only after the earlier lane is durably waiting on a read observation. Exact-head
-CAS prevents two workers from authorizing the same lane at the same cursor.
+Runtime chooses the lexicographically lowest actionable lane path by nested declaration ordinal.
+A concurrent driver may authorize a different lane path only after every earlier path is durably
+waiting on a read observation or complete. Exact-head CAS prevents two workers from authorizing
+the same lane state at the same cursor. The store—not Runtime—derives and enforces the exact
+minimum actionable path for every semantic action. An observation may commit for any exact
+outstanding authorization because external completions need not arrive in lane order; its lane
+then becomes actionable for declaration-ordered settlement.
 
 ### Certified program and folded cursor
 
-The callback-free store fold derives:
+The callback-free store fold derives one recursive cursor:
 
 ```text
-FanOutLaneFoldState =
-    AtState(StateOccurrencePath)
-  | WaitingOnRead(StateOccurrencePath, AccessState)
+StateLeaf =
+    Ready
+  | Authorized(AccessKind, AccessAttemptId)
+  | ObservedForSettlement(AccessAttemptId, ObservationRef)
+  | Refreshable(NextAttemptOrdinal, PublicLineageHeadRef)
+  | EntryUnknown(AccessAttemptId)
+  | BlockedIntegrity(IntegrityObservationRef)
+
+LaneCursor =
+    AtState {
+        occurrence_path,
+        leaf: StateLeaf,
+    }
+  | InFanOut {
+        group_path,
+        declaration_ordered_lane_states:
+            [LaneCursor],
+    }
   | Completed(LaneOutcomeRef<LaneOutput, LaneFailure>)
 
 VerifiedProgramState {
     cursor:
-        AtState(StateOccurrencePath)
+        AtState {
+            occurrence_path,
+            leaf: StateLeaf,
+        }
       | InFanOut {
             group_path,
-            declaration_ordered_lane_states,
+            declaration_ordered_lane_states:
+                [LaneCursor],
         }
       | Closed {
             outcome_ref:
@@ -1991,7 +2456,6 @@ VerifiedProgramState {
         },
 
     live_lexical_bindings,
-    per_occurrence_access_state,
     journal_head,
     semantic_head,
     semantic_state_digest,
@@ -2003,7 +2467,17 @@ After admission or a semantic transition, the fold normalizes through sequence b
 occurrence or the root `OperationOutcome`.
 
 No mutable cursor/status row is semantic authority. A backend may materialize an index only when
-it is verified against the authoritative prefix and exact head.
+it is verified against the authoritative prefix and exact head. A process-local occurrence or
+access lookup table is only a cache over this cursor and cannot become a second phase map.
+
+`BlockedIntegrity` is fold-derived only from a committed
+`ExternalAccessObserved::IntegrityFault`; its observation reference is the durable cause. No sixth
+record family records a Runtime diagnostic. A `Pure` callback or codec/contract violation before a
+transition leaves the prior fold cursor unchanged and returns a repeatable attributed component
+fault. `settle -> InvalidEvidence` leaves the cursor at its already committed
+`ObservedForSettlement` reference and deterministically reports that fault again. An invalid
+append candidate is rejected without changing history. None of those detected faults can advance
+the program, but they do not pretend that an unrecorded diagnostic is a durable semantic leaf.
 
 ### Runtime action derivation
 
@@ -2018,10 +2492,53 @@ Waiting
 BlockedIntegrity
 ```
 
+The store computes one closed frontier algebra:
+
+| Cursor leaf | Frontier |
+| --- | --- |
+| `Ready<Pure>` | `Actions[(path, CommitLocalState)]` |
+| `Ready<Read | Effect>` | `Actions[(path, AuthorizeCurrentAccess)]` |
+| `ObservedForSettlement` | `Actions[(path, SettleCurrentObservation)]` |
+| `Refreshable<Effect>` | `Actions[(path, AuthorizeCurrentAccess)]` |
+| `Authorized<Read>` | `WaitingReads` |
+| `Authorized<Effect>` or `EntryUnknown` | `Barrier(PossibleEntry)` |
+| `BlockedIntegrity` | `Barrier(Integrity)` |
+| `Completed` | `Complete` |
+
+`Refreshable` for a Read or any Effect leaf inside fan-out is invalid before frontier derivation.
+For `InFanOut`, the fold scans lanes in declaration order:
+
+1. `Complete` and `WaitingReads` lanes permit scanning the next lane.
+2. The first lane returning `Actions` contributes its recursively derived action list and stops
+   the outer scan; no later outer lane is eligible yet.
+3. The first `Barrier` stops with that barrier; later lanes are not actionable.
+4. If every lane is `Complete`, callback-free normalization constructs the join rather than
+   exposing an action.
+5. If at least one lane is `WaitingReads` and every other lane is `Complete` or
+   `WaitingReads`, the group is `WaitingReads`.
+
+Nested fan-out applies the same recursion, so its returned action paths already obey all inner
+lane gates. `actionable_paths(cursor)` is exactly the ordered paths in the resulting `Actions`;
+for any other frontier it is empty. The semantic append path must equal the lexicographic minimum
+of that exact list. An observation append is not a semantic action: it may target any exact
+outstanding authorization and then causes frontier derivation to run again. This table is shared
+by every backend, Runtime view, and recorded replay.
+
 Inside fan-out, the current access names one eligible `Read` state occurrence within a lane; a lane
 or fan-out group itself is never an access target. There is no global node scan,
 authorization-count spreading, alternative-source readiness, dependency skip, or action-family
 fairness rule.
+
+For authorization and state settlement, the store accepts only:
+
+```text
+candidate.occurrence_path
+    == min_lexicographic(actionable_paths(verified.cursor))
+```
+
+An `Authorized` read is waiting rather than actionable, which permits a later lane to receive its
+authorization. Observation append is the sole exception: it may target any exact outstanding
+authorization, after which the ordinary minimum-path rule governs settlement.
 
 One `drive_once` performs at most one semantic transition or one audited access operation. Pure
 control normalization is folded into the transition commit that produced its discriminant; it
@@ -2030,10 +2547,14 @@ does not require fake state or control records.
 When a semantic transition makes the root `OperationOutcome` derivable, `RunClosed` is committed
 in the same atomic append with a reference to that outcome. If the root outcome is derivable during initial
 normalization without a state transition, admission atomically appends `RunAdmitted` and
-`RunClosed`. This includes an admission-root match or an empty fan-out whose join is already
-defined. The outcome expression is never a separately executable cursor position or independently
-appended control record. The same atomic append admits and binds exactly one canonical
-content-addressed outcome object, and the required `RunClosed` contains only its reference:
+`RunClosed`. Admission-only normalization may traverse a root expression, admission-root `Match`,
+or a non-empty state-free fan-out whose lane tails use only admission roots; there is no special
+empty-join path. The outcome expression is never a separately executable cursor position or
+independently appended control record. The same atomic append admits and binds exactly one root
+content-addressed `OperationOutcome` object. When normalization traverses a state-free fan-out, it
+also binds that root's complete structural object closure—every required lane wrapper, nested join,
+and lexical derivation—in the same atomic append. Those support objects do not become additional
+root outcomes. The required `RunClosed` contains only the one root outcome reference:
 
 ```text
 RunClosed {
@@ -2073,7 +2594,7 @@ Conceptually:
 ```text
 Pure:
     apply(StateFrame)
-      -> StateOutcome<Output, Failure>
+      -> ProposedStateOutcome<Output, Failure>
 
 Read:
     request(StateFrame)
@@ -2085,7 +2606,7 @@ Read:
             Returned(ReadResponse)
           | SafeFailure(ReadSafeFailure)
         >
-    ) -> StateOutcome<Output, Failure>
+    ) -> ProposedStateOutcome<Output, Failure>
        | InvalidEvidence
 
 Effect:
@@ -2098,9 +2619,14 @@ Effect:
             Returned(EffectResponse)
           | SafeFailure(EffectSafeFailure)
         >
-    ) -> StateOutcome<Output, Failure>
+    ) -> ProposedStateOutcome<Output, Failure>
        | InvalidEvidence
 ```
+
+The callback result is uncommitted proposal material. The exact-head append validates its variant
+against `FailureContract`, persists the selected canonical value and structural references, and
+constructs the nominal `StateOutcome` only as part of the accepted transition. No callback,
+adapter, or rejected append can construct committed state-outcome authority.
 
 Request authorship is total over the certified frame. A state that may terminate without external
 IO is preceded by an explicit `Pure` decision and `Match`, normally injected by expansion.
@@ -2174,8 +2700,8 @@ that occurrence.
 
 An unmatched read authorization remains folded as `Authorized<Read>`. A recovery view with no
 corresponding live affine token reports `ReadCompletionUnknown`, not `EntryUnknown`. The
-RFC deliberately defines no successor until the read-recovery policy recorded under Material
-Uncertainties is chosen. It must not be treated as an Effect ambiguity or silently reauthorized.
+selected initial policy deliberately defines no same-occurrence successor. It must not be treated
+as an Effect ambiguity, silently reauthorized, or synthesized into a domain result.
 
 `IntegrityFault` is audit-only and blocks. It never becomes state failure.
 
@@ -2220,11 +2746,18 @@ ordinal, structured cursor/semantic-head anchor, operation, immutable implementa
 current physical binding reference, and request digest. The first attempt has ordinal zero.
 
 A definitely rejected stale authorization candidate consumes no ordinal. Runtime reloads and may
-prepare that ordinal again; if a fan-out sibling changed the semantic anchor, the rebuilt attempt
-identity changes with it. Journal-only rebasing preserves the logical identity and content while
-changing only the predecessor-bound append envelope. An ambiguous acknowledgement must resolve
-the unchanged original identity before any rebuild. Once an authorization positively exists, its
-ordinal is consumed and its identity/content are immutable.
+prepare that ordinal again only if the exact occurrence remains the minimum actionable path and
+the fold still derives the same ordinal. Authorization or transition candidates are never blindly
+rebased. Any changed certified cursor or semantic-head anchor—including a fan-out sibling becoming
+observed—requires rebuilding the candidate and its identity; if only the predecessor envelope
+changed while the certified anchor is provably identical, only that envelope is rebuilt.
+
+The distinct rebase exception is an already linked `PendingObservation`: its authorization,
+attempt identity, request, and completion are immutable. If its append loses an exact-head race to
+unrelated history, Runtime may rebuild only the predecessor-bound envelope after the store proves
+that exact authorization is still outstanding; it never reinvokes the target. An ambiguous
+acknowledgement must resolve the unchanged original append identity before any rebuild. Once an
+authorization positively exists, its ordinal is consumed and its identity/content are immutable.
 
 Domain resource identities may additionally use a separately certified permanent semantic intent
 identity, but Runtime and the run-history store never inspect domain-specific fields.
@@ -2238,7 +2771,7 @@ ReadAttemptState =
     Ready<Read, AttemptOrdinal>
   | Authorized<Read, AccessAttemptId>
   | ObservedForSettlement<Read, AccessAttemptId, ObservationRef>
-  | BlockedIntegrity
+  | BlockedIntegrity<IntegrityObservationRef>
 
 EffectAttemptState =
     Ready<Effect, AttemptOrdinal>
@@ -2246,7 +2779,7 @@ EffectAttemptState =
   | ObservedForSettlement<Effect, AccessAttemptId, ObservationRef>
   | Refreshable<Effect, NextAttemptOrdinal, PublicLineageHeadRef>
   | EntryUnknown<AccessAttemptId>
-  | BlockedIntegrity
+  | BlockedIntegrity<IntegrityObservationRef>
 ```
 
 Only `Ready` and `Refreshable` expose the private preparation transition. Only a committed
@@ -2304,8 +2837,9 @@ For every current occurrence:
 An ordinary failure handler cannot rewind the cursor or mint access authority.
 
 The initial design performs no automatic same-occurrence Effect re-entry after an unmatched
-authorization. A later read after a definite result is a distinct explicit read occurrence;
-recovery of an unmatched read remains unresolved rather than inheriting the Effect rule.
+authorization. A later read after a definite result is a distinct explicit read occurrence.
+An unmatched read remains parked under the selected conservative initial policy; it is not
+reauthorized merely because reads are non-mutating.
 `EntryUnknown` cannot advance, close, or reach a later reconciliation state because it leaves the
 ambiguous effect current. No manual mutation of history is defined. Any future reconciliation
 must extend the same-occurrence access protocol under its own certified contract; it is not part
@@ -2316,14 +2850,14 @@ applied.
 
 | Evidence | State-consumable? | Required behavior |
 | --- | --- | --- |
-| `Returned(Response)` | Yes, through the state's pure settlement callback | Produce success, typed failure, or `InvalidEvidence`. |
-| `SafeFailure` | Yes, through the state's pure settlement callback | A valid admitted instance produces its qualified success or typed-failure disposition; only malformed/inconsistent evidence produces `InvalidEvidence`; never treat it as retry authority. |
-| `StateOutcome::Failure(S::Failure)` | Yes, only by the exact failure handler | Follow explicit/default failure path. |
+| `Returned(Response)` | Yes, through the state's pure settlement callback | Propose success, typed failure, or `InvalidEvidence`; only an accepted transition constructs committed outcome authority. |
+| `SafeFailure` | Yes, through the state's pure settlement callback | A valid admitted instance proposes its qualified success or typed-failure disposition; only malformed/inconsistent evidence produces `InvalidEvidence`; never treat it as retry authority. |
+| committed `StateOutcome::Failure(LexicalValueRef<S::Failure>)` | Yes, only by its exact `FailurePlanBound` mapper/handler input | Follow the one selected explicit/default failure plan. |
 | `SupersededBeforeEntry` | No | Keep the same semantic occurrence current; fold to `Refreshable` with the next ordinal. |
 | `EntryUnknown` or unmatched effect authorization | No | Keep the exact effect current with no legal successor in this RFC; a future same-occurrence protocol is required. |
-| Unmatched read authorization | No | Keep `Authorized<Read>` in the fold and report `ReadCompletionUnknown`; this RFC defines no successor until the read-recovery uncertainty is resolved. |
-| Integrity fault or invalid evidence | No | Block; never invent domain failure. |
-| Callback, codec, or contract violation | No | Block and attribute the responsible component. |
+| Unmatched read authorization | No | Keep `Authorized<Read>` in the fold and report `ReadCompletionUnknown`; the initial contract has no same-occurrence successor. |
+| Committed `ExternalAccessObserved::IntegrityFault` | No | Fold to `BlockedIntegrity(observation_ref)`; never invent domain failure. |
+| `InvalidEvidence`, callback, codec, contract, or rejected-candidate fault detected without a new record | No | Leave the authoritative prefix/cursor unchanged, report the repeatable attributed fault, and append no diagnostic event. |
 | Journal/store interruption | No | Resume the physical persistence protocol; do not fabricate an access result. |
 
 Production qualification must inventory every expected definite operational disposition as a
@@ -2334,7 +2868,7 @@ that the state can map into its typed outcome. Leaving such an expected definite
 audit-only non-domain evidence is an incomplete product contract.
 
 For every capability/state pairing, qualification proves an exhaustive mapping for each admitted
-`SafeFailure` variant. A state with `KERNEL_NEVER_FAILURE_CONTRACT_REF` may admit a variant only
+`SafeFailure` variant. A state with `FailureContract::Never` may admit a variant only
 when all valid evidence maps to success; if the expected disposition is negative, the state must
 declare a real typed failure contract or the pairing is rejected.
 
@@ -2360,6 +2894,12 @@ RunClosed
 These are typed events in the existing `run:*` stream family. Past records are never mutated or
 reinterpreted.
 
+“Five record families” means every durable run-history entry is exactly one of those five event
+shapes; it does not imply five mutable tables or five writers. “Exact-head atomic append” means a
+backend locks or compare-and-swaps against the exact current predecessor, validates the complete
+candidate against the authoritative prefix, and commits the whole candidate—including any
+required object/fact bindings and adjacent closure record—or commits none of it.
+
 Authorization and observation are audit records, not fake semantic transitions. They advance the
 journal head. `RunAdmitted` initializes:
 
@@ -2383,9 +2923,11 @@ separately hashed members of the same five-family algebra; either required pair 
 `RunAdmitted` binds:
 
 - tenant, store, run, invocation, and entry-point identity;
-- authored, expanded, and certified program references;
-- exact required admission-policy profile, coverage proof, and policy manifests;
-- state, capability, adapter, signer, and resource implementation manifests;
+- one `CertifiedProgramRef` plus its complete content-addressed component closure;
+- the exact qualified entry-point admission-policy reference that trust-anchors the program
+  contract, certification predicate set, expansion profile, policy versions, and coverage;
+- audit-projected authored/expanded/profile/proof/manifest references that must equal the
+  corresponding fields of that exact `CertifiedProgram`;
 - configuration, context roots, initial values, and prior-run source manifests;
 - immutable secret-free routing policy and stable resource-lineage references; and
 - the canonical genesis semantic-state digest.
@@ -2406,7 +2948,9 @@ The store fold verifies:
 - per-append atomicity and object closure;
 - content-addressed manifests, context snapshots, facts, outputs, and retained evidence;
 - unique logical keys and exact-content idempotency;
-- admitted program and implementation membership;
+- the one canonical `CertifiedProgramRef`, its complete component closure, exact audit
+  projections, qualified entry-point admission-policy and predicate-set binding, included proof
+  validity under that exact set, and process-qualified implementation membership;
 - exact current cursor and execution kind;
 - lexical value dominance and producer-bound references;
 - branch selection from the kernel's canonical closed-sum tags and certified arm table;
@@ -2428,8 +2972,9 @@ pure callbacks.
 Every backend rejects a candidate unless all of the following hold against the locked current
 prefix:
 
-- the transition names the current state occurrence or one legal current state occurrence inside
-  an active fan-out lane, never the lane or group itself;
+- an authorization or transition names exactly the lexicographically minimum actionable state
+  path derived from the recursive cursor, never merely any ready lane and never the lane or group
+  itself;
 - no earlier declaration on the exact certified lexical path was skipped;
 - the occurrence has not already settled;
 - the execution kind matches the certified state;
@@ -2437,6 +2982,8 @@ prefix:
 - no unresolved authorization for that occurrence already exists, except that a certified
   `Refreshable` state permits exactly its next attempt ordinal;
 - an observation names the exact authorization and immutable request;
+- an observation may name any exact outstanding authorization regardless of lane order, but it
+  cannot settle or advance that lane until the minimum actionable-path rule selects it;
 - every observation completion variant and schema belongs to the exact prepared and certified
   exhaustive `AccessCompletion<K>` contract for that capability/state pairing;
 - only those exact `Returned` and `SafeFailure` variants can become state-consumable observation
@@ -2449,8 +2996,8 @@ prefix:
 - a state success follows its structural success continuation;
 - a state or fragment failure follows its sealed `FailurePlan`;
 - a normally completing `Handled` pre-handler path can produce only its exact
-  `DesignatedHandlerInput`, and the handler's retained closed tag selects exactly one arm of its
-  exhaustive certified continuation;
+  `ExactResultSlotOf<before_handler>`, and the handler's retained closed tag selects exactly one
+  arm of its exhaustive certified continuation;
 - a `Propagate` path can produce only its exact affine enclosing fragment-boundary result,
   preserves the lexical-region token and source-to-boundary failure provenance, and belongs to a
   finite chain ending in exactly one `Handled` call-site plan;
@@ -2491,10 +3038,13 @@ sealed purpose-limited RunHistory fact scanner rather than a general database ad
 one canonical typed response through the normal access bracket; it receives no append or generic
 query authority.
 
-Certification freezes the selector and source contracts. The scanner proves bounded completeness
-against the admitted immutable source heads, and the run-history fold validates the resulting
-observation and producer references generically. No `FactSelection` execution kind, alternate
-history protocol, or ambient state callback is introduced.
+Certification freezes the selector and source contracts. Authorization atomically captures the
+current `TenantFactFrontier`; the store mints one affine scan permit; the sealed scanner proves
+bounded completeness through that exact frontier; and the response carries the attestation
+retained by observation persistence. The run-history fold validates the resulting observation and
+producer references generically. The existing barrier/frontier/completeness semantics survive
+behind the ordinary `Read` invoker. No `FactSelection` execution kind, alternate history protocol,
+generic query authority, or ambient state callback is introduced.
 
 ## Expansion For Control, Security, And Telemetry
 
@@ -2543,32 +3093,286 @@ Declaration order within one run cannot serialize two runs.
 The wallet-nonce authority owns one canonical physical namespace:
 
 ```text
+ChainInstanceDeclaration {
+    stable_chain_registry_id,
+    never_reused_instance_namespace_id,
+    chain_id,
+    genesis_block_hash,
+    immutable_finalized_fork_anchor {
+        block_number,
+        block_hash,
+    },
+}
+
+QualifiedChainInstanceId =
+    domain_separated_hash(
+        "mfm.evm.qualified-chain-instance.v1",
+        canonical_bytes(ChainInstanceDeclaration),
+    )
+
+EvmChainLineageId =
+    domain_separated_hash(
+        "mfm.evm.chain-lineage.v1",
+        QualifiedChainInstanceId,
+    )
+
 WalletNonceDomain =
-    canonical physical chain lineage
+    EvmChainLineageId
   + sender identity
 ```
 
-Tenant, wallet alias, route, and signer generation remain authorization and provenance qualifiers,
-but they cannot partition the uniqueness namespace unless qualification proves a one-to-one
-physical identity.
+The EVM domain owns the declaration type and verification rules. A production deployment's
+qualified chain-instance registry issues its immutable content reference, enforces a one-to-one
+mapping from the inventoried physical chain to one never-reused namespace, and is part of
+application qualification—not an RPC provider or Runtime. Assembly selects that reference;
+`RunAdmitted` retains it, and the wallet-nonce authority binds its exact current-schema domain
+activation record atomically with the first successful reservation and rejects rebinding.
 
-The writer credential is a monotonic private fencing capability over the same durable resource
-lineage. Rotation, restore, and promotion carry every reservation, completion, and high-water mark
-forward. The private credential is assembly-only and is not part of semantic reservation identity,
-request bytes, or history.
+Every admitted route generation proves membership by observing the declaration's chain ID,
+genesis, and finalized fork anchor. The registry collapses redundant routes to one declaration
+and assigns different namespaces to independently operated forks cloned from the same genesis.
+Creating or recognizing a distinct fork always issues a new declaration; a retired namespace is
+never reassigned. Production activation inventories the registry and rejects either two
+declarations for one physical instance or one declaration assigned to two independent instances.
+RPC identity alone is insufficient.
+
+Tenant, wallet alias, route, and physical signer generation remain authorization and provenance
+qualifiers, but they cannot partition the uniqueness namespace unless qualification proves a
+one-to-one physical identity. A stable `SemanticSignerId` and signing-profile contract name the
+public key/address and deterministic signing behavior required by the intent. Any admitted
+physical signer generation must prove that exact semantic identity and behavior; generation
+rotation cannot change transaction identity.
+
+The physical `WalletNonceStoreLineageId` and monotonic `WriterEpoch` are distinct from
+`EvmChainLineageId`. Qualified infrastructure permits exactly one actively fenced writable
+physical incarnation of one store lineage at an epoch:
+
+```text
+WalletNonceStoreIncarnation {
+    wallet_nonce_store_lineage_id,
+    writer_epoch,
+    physical_target_instance_id,
+    non_exportable_target_public_key_ref,
+    target_attestation_contract_ref,
+}
+
+QualifiedCurrentWalletNonceStoreIncarnation {
+    public_incarnation_binding_ref,
+    qualified_activation_registry_lineage_ref,
+    qualified_target_fence_lineage_ref,
+    private_target_bound_live_session,
+}
+```
+
+The physical target owns the private key behind
+`non_exportable_target_public_key_ref`; it is absent from database snapshots and backups, client
+credentials, application processes, registry records, and every persisted MFM surface. The
+deployment-owned `AuthoritativeWriterFence` issuer opens the sealed live session only for that
+exact target key, physical database identity, store lineage, and writer epoch. The session and its
+write capability are non-serializable and non-`Clone`; more importantly, the external fence makes
+them non-transferable to a sibling target.
+
+The deployment fence authority itself has one qualified non-rollback lineage with monotonically
+irreversible target/session revocation and sibling-issuer exclusion. Retaining an old target key
+cannot resurrect a revoked session. Every nonce-authority read atomically exercises its live
+session while opening the exact database transaction/snapshot that returns status. A mutation
+instead obtains a fresh, affine, non-replayable transaction permit bound to the exact database
+session and transaction, then revalidates the public incarnation under the domain lock. Both proof
+forms bind the qualified fence-authority lineage and its current irreversible head.
+
+A static signature, copyable token, in-process self-assertion, copied database, lineage ID, public
+attestation, client credential, registry row, replayed permit, rolled-back fence head, or sibling
+fence issuer cannot return semantic status or accept a write without the target-held key and live
+external fence. This is a qualified infrastructure guarantee with no production bypass, not a
+property claimed from Rust type privacy alone.
+
+Rotation, restore, and promotion carry a verified complete prefix containing every
+domain-activation binding and its complete record closure, reservation, candidate activation,
+completion, active-intent marker, permanent operation-key result, and high-water mark forward.
+The qualified infrastructure control plane first permanently revokes old-target and sender-path
+admission, then drains or aborts every old-epoch transaction, then captures and verifies the final
+exact prefix and head after quiescence. The fence proof and complete-prefix proof bind the same
+final old head. It hydrates and verifies the still-closed replacement from that prefix, publishes
+the next epoch and target key by registry CAS, and only then opens the replacement. A pre-fence
+snapshot, a snapshot without the complete final prefix, or a deployment unable to prove exclusive
+target and sender-path fencing cannot become the same lineage; it requires a new sender/domain.
+
+### Deployment cutover and virgin lineage
+
+The current tree contains no legacy-schema reader, decoder, migration, or certifier. Git history
+and an immutable export remain the audit archive; neither Runtime nor any current library,
+adapter, application, binary, feature, or maintenance target can parse the retired schema.
+
+Before activating the new wallet authority, deployment maintenance must stop old admissions,
+drain every old run and allocation to a definite terminal disposition, fence every signer,
+relayer, operator, stale deployment, and direct-submit path for the sender, rotate to a new
+issuer/idempotency namespace, and retain the retired database only as offline opaque audit
+material. The current deployment qualification registry admits the new
+`WalletNonceStoreLineageId`, `WriterEpoch`, `WalletNonceDomain`, chain declaration, sender,
+issuer-namespace contract, and exhaustive sender-path fence attestation as one immutable
+secret-free activation record. It does not interpret, import, or attest individual retired
+records.
+
+One qualified wallet-activation registry authority owns a non-rollback registry lineage and
+permanent, exact-key compare-and-append issuance. The PostgreSQL adapter's deployment-only
+administrative plane implements it behind a role/pool that Runtime and normal application
+assembly never receive. Its domain table permanently maps each `WalletNonceDomain` primary key to
+exactly one `WalletNonceStoreLineageId` and one globally unique activation-record identity. Its
+separate lineage table maps each `WalletNonceStoreLineageId` primary key to one monotonic current
+`WalletNonceStoreIncarnation` head. Exact same domain issuance resolves the original proof; a
+different lineage or activation identity conflicts. Exact same lineage-head publication resolves
+the original proof; a sibling target or non-next epoch conflicts. One store lineage may
+legitimately serve multiple domains, and all such domains share its one current incarnation, so
+this is not a domain-to-lineage bijection.
+
+Domain issuance and lineage promotion serialize on the exact lineage-table key. One
+`issue_domain_activation` registry transaction locks that key, creates the initial lineage head
+only when absent or validates the exact existing current head, compare-and-appends the domain row
+and globally unique activation-record identity, and emits one composite proof binding the domain
+row to the lineage head observed by that transaction. No crash or acknowledgement ambiguity can
+leave only one table mutation visible; exact resolution checks both keys and returns the original
+composite proof. A concurrent domain proposing a sibling initial target conflicts, and promotion
+cannot interleave between the lineage-head validation and domain-row commit.
+
+Promotion is the registry's only lineage-head advance operation. It requires the exact current
+lineage head, the old-target fence proof, the post-quiescence complete-prefix proof for every
+domain on that lineage bound to that same final head, the next writer epoch, the hydrated
+replacement's target-key attestation, and proof that the replacement remains closed before it
+atomically publishes the new lineage head. A crash before fencing completes leaves the old
+registry head current and no replacement writable; a crash after fencing but before publish is
+unavailable-safe and retries from the retained final head; exact replay after publish returns its
+original proof. The replacement opens only after that proof. The old target and every old signer,
+relayer, direct-submit path, session, and transaction can never regain write or submission
+reachability. If any fencing, prefix, hydration, or promotion proof cannot be established, the
+control plane fails closed and same-domain promotion is forbidden; a new sender/domain is
+required.
+
+Registry availability is required for deployment issuance and promotion, not for normal run reads
+or mutations. Each normal authority access instead uses the sealed target-bound
+current-incarnation session; a reusable public registry attestation alone is never read or write
+authority, and querying the registry on each access would neither close the check/use race nor
+replace the physical fence. The registry authority itself is admitted only on qualified
+infrastructure providing the same single-writable-target, non-exportable-key, non-rollback
+property.
+
+The registry rejects a sibling or second activation for that domain even when the original
+deployment is stopped or its writer is retired. Restore and promotion retain the same
+store-lineage identity and verified complete durable prefix; they never create another virgin
+lineage. Reinitialization under a new store lineage requires a new sender/domain.
+
+The first domain on a new lineage qualifies the closed target and its target-bound capability
+before the atomic composite issuance. A new domain on an existing lineage must instead verify and
+bind the exact already-current lineage head; it cannot propose another target. Only after composite
+issuance may the first local reservation bind that proof. A crash after registry issuance but
+before the first reservation permanently pins the domain to that lineage; only exact issuance
+replay on that lineage or a qualified promotion may proceed. A different lineage is never a
+recovery path.
+
+```text
+WalletNonceDomainActivationRecord {
+    activation_contract_ref,
+    qualified_activation_registry_lineage_ref,
+    wallet_nonce_store_lineage_id,
+    initial_store_incarnation_ref,
+    wallet_nonce_domain,
+    qualified_chain_instance_declaration_ref,
+    sender_identity,
+    issuer_namespace_contract_ref,
+    replay_exclusion_contract_ref,
+    replay_exclusion_disposition:
+        EveryPriorRequestReplayAndRetryIngressExcluded,
+    qualified_finalized_sender_nonce_floor {
+        finalized_block_number,
+        finalized_block_hash,
+        sender_nonce_at_finalized_block,
+        qualified_observation_proof_ref,
+    },
+    exhaustive_sender_path_inventory_digest,
+    exclusive_current_control:
+        EveryPriorWriterSignerRelayerOperatorStaleDeployment
+        AndDirectSubmitPathFenced,
+    prior_effect_disposition:
+        NoUnresolvedPossibleEntry,
+    prior_resource_disposition:
+        EveryPriorAllocationAndSubmittedCandidateTerminal,
+    new_idempotency_epoch,
+}
+
+QualifiedWalletNonceDomainActivation {
+    activation_record_ref,
+    qualified_activation_registry_lineage_ref,
+    composite_registry_issuance_proof_ref,
+    verified_current_schema_record,
+}
+```
+
+If operations cannot establish that every old effect is terminal, that replay/retry ingress is
+excluded, or that every sender path is fenced, the new release must use a new sender/domain. There
+is no high-water import escape. For a fully drained and fenced sender, the activation record binds
+a qualified current-chain observation of its nonce at one canonical finalized block. The new
+authority begins with a virgin retained lineage. Its first reservation still consumes a fresh
+qualified `eth_getTransactionCount(sender, "pending")`, requires that value to equal the
+activation record's finalized sender-nonce floor, and uses that pending value as the first
+candidate. A lower value is a lagging or wrong-chain observation; a higher value contradicts the
+qualified no-unresolved-effect and exclusive-control disposition. Either returns typed
+`NonceLineageDiverged` without mutation. A newly generated sender follows the same rule with the
+protocol initial nonce.
+
+On the first reservation under the domain lock, the authority validates and permanently binds the
+exact activation record before applying the ordinary virgin-lineage pending-floor algorithm.
+Concurrent first reservations serialize under that same lock. A different activation record,
+chain, sender, store lineage, issuer namespace, or fence attestation is an integrity conflict.
+There is no separate bootstrap mutation, credential, role, result, or retry protocol.
+
+The admitted `issuer_namespace_contract_ref` is immutable for the lifetime of that retained
+wallet-authority history. Compatible implementation and physical-writer upgrades preserve the
+same current schema, complete durable lineage, permanent operation-key results, and issuer
+namespace. Any incompatible wallet-authority persisted-schema or issuer-namespace cutover
+requires a new sender/domain. No same-sender legacy reader, dual schema, scalar import, or
+bijective compatibility migration is retained.
 
 ### Operations
 
-The narrow authority exposes idempotent operations conceptually equivalent to:
+During normal run execution, the narrow authority exposes three idempotent mutations and one
+purpose-limited read conceptually equivalent to:
 
 ```text
+read_status(
+    wallet_nonce_domain,
+    target_bound_current_store_read_session,
+    qualified_domain_activation,
+    semantic_reservation_key,
+    submission_intent_id,
+    transaction_intent_digest,
+    candidate_family_ref,
+) -> WalletNonceStatus
+   | SafeFailure
+   | IntegrityFault
+
 reserve(
     wallet_nonce_domain,
-    assembly_private_current_writer_credential,
+    target_bound_current_store_write_capability,
+    qualified_domain_activation,
     semantic_reservation_key,
+    submission_intent_id,
     transaction_intent_digest,
+    transaction_intent_object_closure,
+    candidate_family_ref,
+    candidate_family_object_closure,
     observed_pending_floor,
-) -> ReservedWalletNonce
+) -> ReserveWalletNonceResponse
+   | SupersededBeforeEntry(PublicLineageHeadRef)
+   | SafeFailure
+   | EntryUnknown
+   | IntegrityFault
+
+activate_candidate(
+    wallet_nonce_domain,
+    target_bound_current_store_write_capability,
+    semantic_candidate_operation_key,
+    next_candidate: ProducerBound<AttestedWalletCandidate>,
+    activation_permit: CandidateActivationPermit,
+) -> ActivateCandidateResponse
    | SupersededBeforeEntry(PublicLineageHeadRef)
    | SafeFailure
    | EntryUnknown
@@ -2576,38 +3380,106 @@ reserve(
 
 complete(
     wallet_nonce_domain,
-    assembly_private_current_writer_credential,
+    target_bound_current_store_write_capability,
     semantic_completion_key,
-    provenance_verified_reservation,
-    provenance_verified_terminal_evidence,
-) -> CompletedWalletNonce
+    provenance_verified_current_reservation,
+    canonical_terminal_outcome,
+    provenance_verified_terminal_witnesses,
+) -> CompleteWalletNonceResponse
    | SupersededBeforeEntry(PublicLineageHeadRef)
    | SafeFailure
    | EntryUnknown
    | IntegrityFault
+
+ReserveWalletNonceResponse =
+    Reserved(ReservedWalletNonce)
+  | NonceDomainBusy
+  | NonceLineageDiverged
+  | NonceCapacityExhausted
+
+ActivateCandidateResponse =
+    Activated(ActiveWalletCandidate)
+  | CandidateProgressionConflict
+
+CompleteWalletNonceResponse =
+    Completed(CompletedWalletNonce)
 ```
 
-Both are Runtime-authorized `Effect` accesses. Internal `Applied` versus `ExistingSame` status is
-not a semantic output.
+`read_status` is an ordinary Runtime-authorized `Read`. The three mutations are
+Runtime-authorized `Effect` accesses. The domain response sums are carried only inside generic
+`Returned(Response)`; they are not extra access-completion variants. Internal `Applied` versus
+`ExistingSame` status is not a semantic output.
 
-For each operation, the serialized resource transaction:
+The displayed target-bound session and write-capability arguments name assembly-private context
+retained by the registered invoker. They are not state-authored or canonical request fields and
+never enter programs, access records, histories, or replay.
 
-1. resolves an existing permanent semantic operation key first;
-2. acquires the domain's serializing lock and re-resolves that key to close the concurrent-insert
-   race;
-3. rejects a conflicting key, domain, intent, or evidence as integrity failure;
-4. validates the current non-rollback private writer credential;
-5. returns `SupersededBeforeEntry(public_lineage_head_ref)` if the caller is stale;
-6. otherwise performs the mutation and records the operation result atomically; and
-7. commits one byte-identical proof for future exact resolution.
+`read_status` atomically exercises the sealed target-bound live session while opening one
+transactionally consistent authority snapshot. It verifies the stable permanent domain binding
+maps the requested domain to this store lineage and activation record before it may return even
+`Absent`, then validates the expected intent identity and observes the reservation, complete
+activated prefix, current candidate, and completion at one linearization point. `Absent` and
+payload-free `Busy` are equally authoritative snapshot variants. A definitely stale or revoked
+session returns a reviewed `SafeFailure`; a stale replica, retired writer lineage, torn prefix, or
+malformed/unverified domain, chain, store, registry, or fence binding returns `IntegrityFault`.
+Neither case returns semantic status.
+An exact matching retained reservation or completion is resolved before considering another
+intent's active marker, so a historical same-intent `Completed` or `Reserved` result cannot be
+masked as foreign `Busy`.
+
+For each mutation, the serialized resource transaction:
+
+1. actively exercises the sealed target-bound session against the deployment
+   `AuthoritativeWriterFence` and obtains a fresh non-replayable permit bound to this exact physical
+   target, database session, transaction, store lineage, and writer epoch;
+2. returns `SupersededBeforeEntry(public_lineage_head_ref)` without target entry when the fence
+   proves that capability stale, or `EntryUnknown` when protected non-entry cannot be proved;
+3. resolves an existing permanent semantic operation key on the admitted target first;
+4. acquires the domain's serializing lock, revalidates the permit and exact current public
+   incarnation under that lock, and re-resolves the key to close the concurrent-insert race;
+5. validates the operation-specific permanent identity and semantic-equality rule, rejecting a
+   conflicting key, domain, intent, candidate, or terminal claim as integrity failure;
+6. otherwise performs an admitted mutation and records its canonical result atomically; and
+7. only for an applied mutation, commits one permanent semantic-key result proof for future exact
+   resolution.
+
+`NonceDomainBusy`, `NonceLineageDiverged`, `NonceCapacityExhausted`,
+`CandidateProgressionConflict`, `SupersededBeforeEntry`, and definite no-entry `SafeFailure`
+responses mutate nothing and do not occupy or poison the reservation, candidate, or completion
+operation key. They remain durably visible in that run's access observation. If a successful
+mutation already owns the key, exact existing resolution still returns its permanent original
+proof before considering any transient disposition.
+
+For an ambiguous database acknowledgement while the affine invoker remains live, the authority
+locks the current lineage and resolves the permanent key. A present key returns the original
+applied result. Confirmed absence proves that this operation made no mutation because mutation and
+key proof are atomic; the same invoker may re-execute the unchanged captured resource request and
+use the new serialized disposition. These bounded database attempts are retry-transparent
+internals of one affine invocation: no no-mutation disposition has semantic linearization or is
+returned outside the authority until that invocation obtains one definite response. Thus a lost
+unobserved `Busy` or conflict may be followed by a different final disposition, but two semantic
+responses cannot escape one invocation. This is physical commit resolution, not a new Runtime
+authorization, fresh provider observation, or semantic retry. Repeated acknowledgement ambiguity
+repeats only resolve-or-proven-absent within the bounded invocation; inability to establish either
+before its bound is `EntryUnknown`. A transient no-mutation response is therefore not cached
+forever merely to make its lost acknowledgement reproducible.
+
+Producer-bound precondition or witness references are not automatically part of permanent-key
+equality. Reservation treats the pending-floor observation as creation-only evidence. Completion
+compares the run-independent canonical terminal outcome and separately validates compatible
+terminal witnesses. Candidate activation compares the canonical candidate descriptor, semantic
+signer, and attested transaction hash; signer-attestation and replacement-evidence producer
+references are validation evidence, not equality identity. Exact re-resolution always returns the
+originally committed result proof; it does not rewrite that proof merely because a later caller
+supplied fresh compatible evidence.
 
 This ordering makes all rotation races explicit:
 
 - mutation before rotation resolves to the original result;
 - rotation before mutation proves that the protected mutation was not applied;
 - lost acknowledgement resolves by permanent operation key; and
-- a late old request is rejected before applying the protected mutation or resolves
-  `ExistingSame`.
+- a late old request whose target-bound capability was revoked is rejected before target entry,
+  while an exact request already admitted on the current target may resolve `ExistingSame`.
 
 `ExistingSame` is an internal resource-transaction resolution during the already authorized
 invoker; it never mints another Runtime authorization.
@@ -2616,18 +3488,21 @@ invoker; it never mints another Runtime authorization.
 protected-non-application outcome. The store leaves the semantic cursor at the resource state and
 folds to `Refreshable(next_attempt_ordinal, public_lineage_head_ref)`. A separately assembled
 current worker may authorize the same semantic request with its current physical binding and the
-new attempt identity. The stale worker receives no current credential and cannot retry itself.
+new attempt identity. The stale worker receives no current target-bound capability and cannot
+retry itself.
 
 ### Pending nonce observation and allocation
 
-Every new reservation consumes one fresh:
+After `ReadWalletNonceStatus` returns `Absent`, every attempt to create a new reservation consumes
+one fresh:
 
 ```text
 eth_getTransactionCount(sender, "pending")
 ```
 
-observation from an injected EVM `Read` state. The same pending RPC is used for first allocation
-and for every later local-next check. Its registered invoker strictly decodes the bounded JSON-RPC
+observation from an injected EVM `Read` state. A same-intent status hit reuses the existing
+reservation and does not allocate. The same pending RPC is used for first allocation and for every
+later new-intent local-next check. Its registered invoker strictly decodes the bounded JSON-RPC
 quantity; the `Read` settlement and an injected EVM `Pure` state validate the exact chain, sender,
 route-generation, and observation provenance, then bind the result to the admitted pending-floor
 policy. The RPC call and pure qualification happen before the resource transaction; no database
@@ -2637,55 +3512,251 @@ For domain `D`, EVM-derived semantic reservation key `K`, intent `I`, and qualif
 `Pq`, the resource transaction performs:
 
 ```text
+verify qualified_domain_activation uses the exact current schema,
+qualified registry lineage, permanent domain binding, D, store lineage,
+chain, sender, issuer namespace,
+replay-exclusion contract and exact exclusion disposition, canonical
+finalized sender-nonce floor, exhaustive terminal prior-resource
+disposition, and exhaustive target and sender-path fence disposition
+
+exercise the fresh transaction-bound target-fence permit
+require its target, database identity, store lineage, writer epoch, and
+public incarnation equal the assembly-private qualified current store
+incarnation
+
 resolve existing (D, K) first:
-    same intent and domain -> return original proof
-    conflict               -> integrity failure
+    same activation record, submission_intent_id, intent digest,
+    candidate family, and domain
+        -> return original proof
+    changed activation or intent under K
+        -> integrity failure
 
 lock and fence D
 re-resolve (D, K) under the lock:
-    same intent and domain -> return original proof
-    conflict               -> integrity failure
+    same activation record and exact intent -> return original proof
+    changed activation or intent            -> integrity failure
+
+if D has no retained activation record:
+    require a virgin retained lineage
+    stage qualified_domain_activation for the successful reservation commit
+otherwise:
+    require its exact retained activation record
+
+if another incomplete reservation exists for D:
+    return typed NonceDomainBusy without mutation
 
 if local_high_water is absent:
-    require a virgin retained lineage
+    require no reservation or completion record
+    require Pq is within the protocol-valid nonce range
+    require Pq
+        == qualified_domain_activation
+           .qualified_finalized_sender_nonce_floor
+           .sender_nonce_at_finalized_block
+        otherwise return typed NonceLineageDiverged without mutation
     candidate = Pq
 otherwise:
     local_next = checked_add(local_high_water, 1)
     candidate =
         local_next   if Pq <= local_next
-        Pq           if Pq > local_next
-                     and the exact admitted provider-ahead policy accepts the jump
-        no mutation  otherwise; return the policy's reviewed typed disposition
+        no mutation  if Pq > local_next;
+                     return typed NonceLineageDiverged
 
 insert reservation(
     D,
     K,
+    submission_intent_id,
     I,
+    candidate_family_ref,
     candidate,
     qualified_pending_observation_ref,
     pending_floor_policy_ref,
 )
+bind staged qualified_domain_activation, if any
 update local_high_water = candidate
 commit
 ```
 
-Two runs may observe the same `Pq`; the resource transaction serializes them to distinct
-monotonic nonces. A lagging provider cannot move local state backward.
+The qualified pending-floor reference is creation-only precondition evidence, not part of
+reservation identity. `WalletNonceDomainActivationRecord` and its content reference are stable
+domain identity. The composite registry-issuance proof and current-run producer references inside
+`QualifiedWalletNonceDomainActivation` are validation/creation evidence, not identity. Every call
+independently validates that evidence, then compares the exact
+activation-record reference with the retained record. In the race where two runs both observed
+`Absent`, the loser may present different valid registry, producer, and fresh pending-observation
+references; exact existing-key resolution compares the permanent activation record, domain, key,
+submission intent, intent digest, and candidate family and returns the original reservation
+without replacing its retained creation evidence. A changed permanent identity is an integrity
+conflict.
+
+Two runs for different completed intents may observe the same `Pq`; the resource transaction
+serializes their reservations to distinct monotonic nonces. Concurrent runs with the same exact
+intent resolve the same reservation. A lagging provider cannot move local state backward.
 
 An absent `local_high_water` is legal only for a virgin retained lineage with no reservation or
 completion records. Any disagreement between the high-water mark and retained resource history is
 an integrity fault.
 
-The implementation must reject overflow and policy mismatch and retain the exact qualified
-chain/sender/route, observation, and policy references. A provider-ahead jump is never adopted
-merely because one provider returned it. The exact bounded acceptance, disagreement, and
-integrity-review rules remain a material choice below; until selected, such a jump has no
-certifiable accepting policy. The provider is evidence for the pending floor, not allocation
-authority.
+The implementation rejects overflow as typed `NonceCapacityExhausted` and rejects policy or
+retained-history mismatch as an integrity fault. A qualified pending value above `local_next`
+always produces typed `NonceLineageDiverged` without mutation; the allowed provider-ahead jump is
+exactly zero. It is an alert-worthy definite disposition, not a parked Runtime integrity fault,
+so that run closes through its normal failure path and a later run may obtain fresh evidence.
+Under exclusive sender ownership, silent catch-up would conceal an out-of-band sender, wrong
+chain/route qualification, rollback, or provider disagreement. The provider is evidence for the
+pending floor, not allocation authority.
 
 Every sender-capable signer, relayer, operator path, stale deployment, and direct-submit path must
 use this authority or be permanently fenced out. A pending provider read cannot close a race with
 an uncoordinated actor.
+
+### Stable intent and candidate family
+
+The caller supplies a bounded idempotency token in an authenticated issuer namespace; it does not
+supply the durable semantic ID directly:
+
+```text
+AuthenticatedIntentIssuerId =
+    domain_separated_hash(
+        "mfm.evm.intent-issuer.v1",
+        admitted_tenant_id,
+        stable_authenticated_client_principal_id,
+        issuer_namespace_contract_ref,
+    )
+
+SubmissionIntentId =
+    domain_separated_hash(
+        "mfm.evm.submission-intent.v1",
+        WalletNonceDomain,
+        AuthenticatedIntentIssuerId,
+        bounded_caller_submission_token,
+    )
+```
+
+The stable authenticated client principal is mandatory, including a registered service principal
+for system-originated calls. `issuer_namespace_contract_ref` is the admitted application-level
+idempotency namespace and may span entry points only when qualification declares that sharing.
+Neither value is a session, credential generation, or route. This identity is globally
+collision-safe within the wallet-nonce domain even when tenants share a sender. The authenticated
+issuer prevents one tenant or client from claiming another's ordinary caller token, but neither
+issuer nor tenant partitions nonce allocation.
+The namespace reference is immutable for the retained authority epoch. Changing it is the explicit
+new-idempotency-epoch cutover and requires a new sender/domain; it is never an ordinary
+implementation-contract or physical-generation upgrade.
+
+The admitted request freezes one canonical `TransactionIntent` and one non-empty bounded
+`CandidateFamily`. Their canonical content digest covers:
+
+- the qualified chain instance and sender;
+- destination, value, calldata, access list, transaction type, gas limit, and every other
+  pre-reservation mutation or encoding field;
+- the declaration-ordered candidate fee schedule and replacement bounds;
+- the stable `SemanticSignerId` and exact deterministic signing-profile contract; and
+- the exact semantic submission/expansion contract that interprets those fields.
+
+It excludes `run_id`, occurrence and attempt identity, tenant routing, provider route, physical
+signer generation, nonce-store writer generation, and other replaceable physical bindings.
+Changing any semantic field changes the intent digest. Reusing one `SubmissionIntentId` with a
+different digest is a permanent integrity conflict.
+
+`TransactionIntent` and `CandidateFamily` are nonce-free templates: the authority-assigned nonce
+cannot be part of their pre-reservation digest. `ReservedWalletNonce` then binds that nonce, and
+every built/attested candidate includes it in the unsigned-candidate digest and transaction hash.
+The intent also freezes the candidate derivation/encoding contract and terminal-assurance policy.
+Each family member has one planning-fixed ordinal and differs only in the explicitly admitted fee
+and replacement fields. Every member uses the same allocated nonce and is certified
+mutation-equivalent: whichever member the chain accepts produces the same requested call
+semantics. Candidate descriptors are canonical and pairwise distinct; after binding the nonce and
+semantic signer, their unsigned digests and attested transaction hashes must also be pairwise
+distinct. Certification or activation rejects a duplicate, so one winning transaction hash names
+exactly one ordinal. The family bound makes every candidate, transaction hash, read, and branch
+statically representable in the expanded program.
+
+### Durable candidate progression
+
+Reservation does not implicitly select a candidate. Candidate activation is a separate serialized
+resource step:
+
+```text
+semantic_candidate_operation_key =
+    domain_separated_hash(
+        "mfm.evm.nonce-candidate.v1",
+        semantic_reservation_key,
+        candidate_ordinal,
+)
+```
+
+The activation request has one closed permit:
+
+```text
+CandidateActivationPermit =
+    Initial {
+        current_reservation:
+            ProducerBound<QualifiedCurrentWalletReservation>,
+        exact_empty_activated_prefix,
+        exact_next_ordinal: 0,
+    }
+  | Replacement {
+        nonce_domain,
+        semantic_reservation_key,
+        candidate_family_ref,
+        current_reservation:
+            ProducerBound<QualifiedCurrentWalletReservation>,
+        predecessor_activation_ref,
+        predecessor_ordinal,
+        exact_next_ordinal: predecessor_ordinal + 1,
+        replacement_policy_ref,
+        eligibility:
+            ProducerBound<CandidateReplacementEligibility>,
+    }
+
+CandidateReplacementEligibility {
+    nonce_domain,
+    semantic_reservation_key,
+    candidate_family_ref,
+    predecessor_activation_ref,
+    exact_observed_activated_prefix,
+    decision_chain_head,
+    declaration_ordered_no_terminal_observation_refs,
+    replacement_policy_ref,
+}
+```
+
+The eligibility value is produced by an exact registered EVM `Pure + Never` state from the
+current status snapshot and committed bounded transaction/receipt/head reads. It proves only that
+the frozen policy permits the statically next candidate at that observation point; it does not
+claim the intent can never complete. An unstructured optional value, caller boolean, wall clock,
+or adapter decision cannot authorize replacement.
+
+Before activation, an injected signer `Read` named `AttestCandidateIdentity` receives the exact
+unsigned candidate and produces only a secret-free attestation containing its unsigned digest and
+deterministically derived transaction hash. It retains no signature or signed transaction.
+Qualification proves that later `BroadcastExactCandidate` invocations under any admitted physical
+generation of the same semantic signer reproduce that hash byte-for-byte.
+
+Under the domain lock, `activate_candidate` enforces:
+
+- exact existing-key resolution returns the original activation only when the reservation,
+  ordinal, candidate bytes, semantic signer, and attested transaction hash agree;
+- the first activation consumes `Initial`, has ordinal zero, expects no current candidate, and
+  belongs to the frozen family;
+- a later activation is exactly `j + 1`, names current ordinal `j`, belongs to the same family,
+  and consumes `Replacement` with exact producer-bound committed EVM evidence accepted by the
+  frozen replacement policy;
+- the new canonical descriptor, unsigned digest, and attested transaction hash are each compared
+  under the lock with every retained prefix member; any duplicate or cross-ordinal identity is a
+  no-mutation integrity conflict;
+- after exact successful candidate-key resolution has been checked first, a stale expected
+  ordinal, competing progression, or already completed reservation returns typed
+  `CandidateProgressionConflict` without mutation so the run must read status again; and
+- every activation is retained permanently in ordinal order, while `current_candidate` names the
+  latest member.
+
+The authority validates the requested progression; it never chooses a fee, candidate, or
+replacement. An older already-authorized broadcast may race a newer activation, so correctness
+does not depend on only the latest member reaching the chain. All retained members are
+mutation-equivalent and their known hashes remain terminal candidates. A later run reads the
+complete bounded activated prefix, observes every relevant hash, and reproduces only the current
+candidate when another submission is needed.
 
 ### Typed provenance without EVM-aware Runtime
 
@@ -2706,36 +3777,131 @@ QualifiedPendingNonceFloor {
 
 EvmNonceReservationKey {
     semantic_reservation_key,
-    derivation_contract_ref,
+}
+
+EvmCandidateOperationKey {
+    semantic_candidate_operation_key,
+    candidate_ordinal,
 }
 
 EvmNonceCompletionKey {
     semantic_completion_key,
-    derivation_contract_ref,
+}
+
+ReadEvmWalletNonceStatusRequest {
+    nonce_domain,
+    qualified_domain_activation:
+        ProducerBound<QualifiedWalletNonceDomainActivation>,
+    semantic_reservation_key,
+    submission_intent_id,
+    transaction_intent_digest,
+    candidate_family_ref,
 }
 
 ReserveEvmNonceRequest {
     nonce_domain,
+    qualified_domain_activation:
+        ProducerBound<QualifiedWalletNonceDomainActivation>,
+    submission_intent_id,
     transaction_intent_digest,
+    transaction_intent_ref,
+    transaction_intent_object_closure,
+    candidate_family_ref,
+    candidate_family_object_closure,
     reservation_key: ProducerBound<EvmNonceReservationKey>,
     qualified_floor: ProducerBound<QualifiedPendingNonceFloor>,
 }
 
 ReservedWalletNonce {
     nonce_domain,
+    domain_activation_record_ref,
     nonce,
     semantic_reservation_key,
-    intent_digest,
+    submission_intent_id,
+    transaction_intent_digest,
+    transaction_intent_ref,
+    candidate_family_ref,
     observed_floor_ref,
     resource_lineage_ref,
     reservation_evidence_ref,
 }
 
+AttestedWalletCandidate {
+    semantic_reservation_key,
+    candidate_ordinal,
+    candidate_descriptor_ref,
+    unsigned_candidate_digest,
+    transaction_hash,
+    semantic_signer_id,
+    signing_profile_contract_ref,
+    signer_attestation_ref,
+}
+
+ActiveWalletCandidate {
+    attested_candidate,
+    activation_evidence_ref,
+}
+
+QualifiedCurrentWalletReservation {
+    status_observation_ref,
+    reservation,
+    transaction_intent_object_closure,
+    candidate_family_object_closure,
+    activated_candidates,
+    current_candidate: Option<ActiveWalletCandidate>,
+    resource_head_ref,
+}
+
+ActivateEvmCandidateRequest {
+    nonce_domain,
+    candidate_operation_key: ProducerBound<EvmCandidateOperationKey>,
+    next_candidate: ProducerBound<AttestedWalletCandidate>,
+    activation_permit: ProducerBound<CandidateActivationPermit>,
+}
+
+WalletNonceStatus =
+    Absent
+  | Busy
+  | Reserved {
+        reservation,
+        transaction_intent_object_closure,
+        candidate_family_object_closure,
+        activated_candidates,
+        current_candidate: Option<ActiveWalletCandidate>,
+        resource_head_ref,
+    }
+  | Completed {
+        reservation,
+        transaction_intent_object_closure,
+        candidate_family_object_closure,
+        activated_candidates,
+        canonical_terminal_outcome_object_closure,
+        completion_evidence_ref,
+        resource_head_ref,
+    }
+
+CanonicalTerminalOutcome {
+    nonce_domain,
+    semantic_reservation_key,
+    submission_intent_id,
+    transaction_intent_digest,
+    nonce,
+    winning_candidate_ordinal,
+    winning_activation_evidence_ref,
+    transaction_hash,
+    inclusion_block_identity,
+    terminal_assurance_contract_ref,
+    execution_disposition,
+    canonical_public_result_object_closure,
+}
+
 CompleteEvmNonceRequest {
     nonce_domain,
     completion_key: ProducerBound<EvmNonceCompletionKey>,
-    reservation: ProducerBound<ReservedWalletNonce>,
-    terminal_evidence: ProducerBound<TerminalEvidence>,
+    current_reservation:
+        ProducerBound<QualifiedCurrentWalletReservation>,
+    canonical_terminal_outcome: ProducerBound<CanonicalTerminalOutcome>,
+    terminal_witnesses: ProducerBound<TerminalWitnesses>,
 }
 
 CompletedWalletNonce {
@@ -2743,73 +3909,149 @@ CompletedWalletNonce {
     nonce,
     semantic_reservation_key,
     semantic_completion_key,
-    reservation_evidence_ref,
-    terminal_evidence_ref,
+    canonical_terminal_outcome_object_closure,
+    original_terminal_witnesses_ref,
     completion_evidence_ref,
 }
+
+CompletedProjection<Output, EvmSubmissionFailure> =
+    Success(Output)
+  | Failure(EvmSubmissionFailure)
 ```
 
-`DeriveEvmNonceReservationKey`, an injected EVM `Pure` state, derives:
+`WalletNonceStatus` is one closed returned value, not generic query authority. `Busy` reveals no
+other intent or reservation content. `Reserved` requires a contiguous bounded activated prefix and
+`current_candidate == last(activated_candidates)` or both absent. `Completed` seals that prefix
+and cannot coexist with an active marker. Its current Runtime-authorized `Read` observation is the
+producer for the whole returned object closure. Therefore a later run can validate and project the
+canonical completed result without dereferencing an arbitrary prior-run producer or teaching
+Runtime how EVM evidence works.
+
+Every `ReadEvmWalletNonceStatusRequest` carries only the stable permanent activation/domain-binding
+evidence produced by `QualifyEvmNonceDomain`. Current-incarnation and target-fence evidence remain
+assembly-private physical binding, so `SupersededBeforeEntry` refresh never changes canonical
+semantic request bytes.
+
+The reserve request carries the canonical `TransactionIntent` and `CandidateFamily` objects and
+their complete bounded closures, not merely references requiring a cross-authority lookup. The
+nonce authority verifies canonical bytes, digests, and reference equality and stores that closure
+in its own content-addressed resource transaction with the reservation. It receives no generic
+RunHistory object resolver.
+
+`BindCurrentWalletReservation`, an injected EVM `Pure + Never` state, is the only path from the
+`Reserved` variant to a resource mutation request. It consumes the exact current status
+observation and emits `QualifiedCurrentWalletReservation`, preserving the embedded resource proof,
+prefix, family, and status-observation reference under one current-run state-output producer.
+`ProjectCompletedWalletDisposition`, also `Pure + Never`, consumes the exact `Completed` status
+or completion response and emits one ordinary closed
+`CompletedProjection<Output, EvmSubmissionFailure>`. A following certified structural `Match`
+routes its success payload to the fragment normal channel or its failure payload to the fragment
+failure channel. The pure state itself never constructs `StateOutcome::Failure` and the closed sum
+is not an outcome instruction. A caller cannot lift an arbitrary embedded prior-run reservation or
+completion reference directly into either producer-bound input.
+
+Injected EVM `Pure` states derive stable operation keys:
 
 ```text
 semantic_reservation_key =
     domain_separated_hash(
         "mfm.evm.nonce-reservation.v1",
-        run_id,
-        protected_submission_semantic_call_id,
-        reservation_derivation_contract_ref,
         nonce_domain,
-        transaction_intent_digest,
+        submission_intent_id,
     )
-```
 
-The key is stable across physical attempt ordinals, exact re-resolution, and physical-binding
-refresh for that semantic occurrence. A new invocation's different `run_id` produces a different
-key; any future cross-run transfer or reuse requires the separate explicit policy recorded under
-Material Uncertainties. Runtime and the run-history store carry the key and producer references as
-opaque typed material and never derive them or inspect their EVM fields. The derivation state's
-inputs are exact admitted or producer-bound values, including `run_id`; it uses no ambient data.
+semantic_candidate_operation_key =
+    domain_separated_hash(
+        "mfm.evm.nonce-candidate.v1",
+        semantic_reservation_key,
+        candidate_ordinal,
+    )
 
-`DeriveEvmNonceCompletionKey`, also an injected EVM `Pure` state, derives:
-
-```text
 semantic_completion_key =
     domain_separated_hash(
         "mfm.evm.nonce-completion.v1",
-        run_id,
-        protected_submission_semantic_call_id,
-        completion_derivation_contract_ref,
-        nonce_domain,
         semantic_reservation_key,
-        reservation_evidence_ref,
     )
 ```
 
-The completion key names exactly one permanent completion operation for the reservation. The
-terminal evidence remains part of the completion request and committed result, not the key:
-repeating byte-identical evidence resolves the original proof, while different evidence under the
-same key is an integrity conflict rather than a second completion. The completion key has the same
-physical-attempt and binding-refresh stability as the reservation key.
+The formulas contain no implementation or derivation-contract reference, so an implementation
+upgrade cannot fork an in-flight semantic identity. The canonical request stores and validates
+the exact semantic intent/expansion and derivation contracts instead. All three keys are stable
+across physical attempt ordinals, exact re-resolution, binding refresh, and runs for the same
+submission intent. Runtime and the run-history store carry the values and producer references as
+opaque typed material and never derive them or inspect their EVM fields.
 
 EVM states validate field-level agreement. The wallet-nonce adapter validates its resource
-request and durable proof. Runtime and the run-history store validate only generic program,
-contract, occurrence, and producer-bound provenance.
+request, candidate progression, terminal claim, and durable proof. Runtime and the run-history
+store validate only generic program, contract, occurrence, and producer-bound provenance.
 
 Rust nominal types alone cannot prove chain/sender equality after deserialization. Private
 constructors, exact certified producers, canonical bytes, store validation, and adapter-side
 domain checks form the complete boundary.
 
-### Completion and abandoned reservations
+### Completion and incomplete reservations
 
-Completion binds exact terminal evidence to the reservation and is permanent and idempotent. It
-first resolves and re-resolves the exact semantic completion key under the same serialized
-resource transaction rules as reservation. It does not release or recycle the nonce.
+`CanonicalTerminalOutcome` is run-independent canonical content. It identifies one retained
+activation, its transaction hash, the transaction's canonical inclusion block, success or revert,
+the exact terminal-assurance policy, and the full canonical public projection value with its
+canonical bytes and complete content-addressed object closure. A commitment without the object is
+not a completable outcome. Later finalized-head observations are not part of canonical equality:
+they belong to
+`TerminalWitnesses` with the exact producer-bound receipt, head, inclusion, and finality evidence
+that proves the claim. The outcome contains no `run_id`, occurrence, observation, route, or
+physical-generation reference; its winning activation reference is the authority's permanent
+secret-free resource proof, not a run producer.
 
-The earlier run's failed history status never blocks admission or execution of a new run. The
-resource authority may reserve later monotonic nonces, subject to its independent invariants. A
-reservation that definitely never reached broadcast can nevertheless create an EVM nonce gap;
-cross-run reuse, transfer, or gap-fill policy is a separate material design choice recorded below.
-Timeouts never release a nonce.
+Completion first resolves and re-resolves the stable semantic completion key under the same
+serialized resource transaction rules as reservation. For an existing key:
+
+- byte-equal canonical terminal-outcome content causes the authority to validate the new
+  witnesses against that outcome and return the original `CompletedWalletNonce`, even when the
+  producer and observation references differ; and
+- a different canonical terminal outcome is an integrity conflict.
+
+For the first completion, the transaction holds the domain lock and must:
+
+1. require that the supplied reservation is still the domain's one active reservation;
+2. require the winning ordinal, activation proof, and transaction hash to equal any member of the
+   retained activated prefix, not necessarily its current last member;
+3. validate the canonical outcome and witnesses against the stored intent and terminal-assurance
+   policy;
+4. seal the complete activated prefix;
+5. persist the canonical terminal-outcome object closure, original witnesses, and permanent
+   completion proof; and
+6. clear the active marker while retaining the high-water mark.
+
+Those changes commit atomically. Completion does not release or recycle the nonce. A
+`WalletNonceStatus::Completed` read returns that object closure, so a racing or later run projects
+the already completed result rather than attempting a conflicting completion.
+
+The earlier run's failed or parked history status never blocks admission or execution of a new
+run. A later run with the same `SubmissionIntentId` and exact intent digest resolves and reuses
+the permanent reservation, activated prefix, and completion if present. A different intent
+receives typed `NonceDomainBusy` while any reservation is incomplete. The authority never
+allocates above incomplete work, so an ordinary failed run cannot silently create an EVM nonce
+gap.
+
+No timeout releases, transfers, or skips a reservation. This initial RFC completes only a
+qualified terminal inclusion or revert of one activated family member and defines no implicit
+transfer, cancellation, or gap-fill operation.
+
+An incomplete reservation permanently binds its exact intent, candidate, signing, decoding,
+replacement, and terminal-assurance contracts. A compatible software upgrade may resume it only
+when the new qualification registry still implements those exact contract references. Before an
+incompatible contract or schema cutover on the same sender, deployment activation must stop new
+admissions and use the old qualified release to drive every `Reserved` status to `Completed`.
+The new release refuses activation while any incompatible reservation is incomplete. If one
+cannot be completed, the deployment keeps the old qualified path isolated for that sender or
+moves the new contract to a new sender/domain; it does not reinterpret the record or accumulate a
+compatibility execution path in the new Runtime.
+
+Compatible implementation and physical-writer upgrades on the same sender retain the one current
+schema and complete readable lineage, including every permanent identity and operation-key result.
+An incompatible persisted-schema or issuer-namespace cutover always uses a new sender/domain.
+Resetting only high water on the same sender is forbidden because it would permit an old semantic
+intent to allocate again.
 
 ## EVM Without An Executor
 
@@ -2819,77 +4061,188 @@ An authored EVM submission call selects an exact semantic expansion contract. Th
 substitutes a structured fragment at that declaration slot, for example:
 
 ```text
-ObservePendingNonce            [Read]
-QualifyPendingNonceFloor       [Pure]
+DeriveTransactionIntent        [Pure]
+QualifyEvmNonceDomain          [Pure]
+DeriveSubmissionIntentId       [Pure]
 DeriveEvmNonceReservationKey   [Pure]
-ReserveWalletNonce             [Effect]
+ReadWalletNonceStatus          [Read]
+Match status
+  Completed ->
+    ProjectCompletedWalletDisposition [Pure]
+    Match completed disposition
+  Busy -> typed submission failure
+  Absent ->
+    ObservePendingNonce          [Read]
+    QualifyPendingNonceFloor     [Pure]
+    ReserveWalletNonce           [Effect]
+    ReadWalletNonceStatus        [Read]
+    Match post-reserve status
+      Completed ->
+        ProjectCompletedWalletDisposition [Pure]
+        Match completed disposition
+      Reserved -> continue
+      Busy -> typed submission failure
+      Absent -> exact prior no-mutation response path
+  Reserved -> continue
+BindCurrentWalletReservation  [Pure]
+Select current/next candidate
 BuildUnsignedCandidate         [Pure]
-BroadcastExactCandidate        [Effect]
-ObserveTransaction             [Read]
-ObserveReceipt                 [Read]
-ObserveFinalizedHead           [Read]
-VerifyCanonicalInclusion       [Pure]
-DeriveEvmNonceCompletionKey    [Pure]
-CompleteWalletNonce            [Effect]
-ProjectTransactionResult       [Pure]
+AttestCandidateIdentity        [Read]
+DeriveCandidateActivationPermit [Pure]
+DeriveEvmCandidateOperationKey [Pure]
+ActivateWalletCandidate        [Effect]
+Match activation response
+  Activated ->
+    BroadcastExactCandidate        [Effect]
+    ObserveActivatedTransactions   [bounded Read states]
+    ObserveReceiptsAndFinality     [bounded Read states]
+    VerifyCanonicalInclusion       [Pure]
+    ReadWalletNonceStatus          [Read, at every reconciliation point]
+    DeriveEvmNonceCompletionKey    [Pure]
+    CompleteWalletNonce            [Effect]
+    Match completion response
+      Completed ->
+        ProjectCompletedWalletDisposition [Pure]
+        Match completed disposition
+  CandidateProgressionConflict ->
+    ReadWalletNonceStatus          [Read]
+    Match reconciled status
 ```
 
-The exact program may use exhaustive branches for definite rejection, revert, reorganization, or
-a bounded replacement policy. Every changed nonce, fee, route, candidate, or semantic request is a
-new explicit occurrence.
+This is a shape, not an implicit loop. The exact expansion statically contains one exhaustive
+branch per bounded candidate-family ordinal and distinct state occurrences for every status read,
+candidate observation, replacement decision, and completion attempt. Every changed nonce, fee,
+route, candidate, or semantic request is therefore an explicit certified value or occurrence.
+
+At entry, status controls the path:
+
+- `Completed` projects the returned canonical outcome object closure through the pure closed
+  disposition and structural `Match` immediately;
+- `Busy` produces only the payload-free typed `NonceDomainBusy` submission failure;
+- `Reserved` rebuilds the exact current activated candidate and observes the complete activated
+  prefix before any new submission or replacement; and
+- `Absent` alone permits a fresh pending-floor observation and reservation.
+
+The `Absent` branch always re-reads status after `ReserveWalletNonce`: a same-intent run may have
+reserved, activated, or completed between the first status observation and the mutation. Existing
+reservation-key resolution may return the original reservation proof, while that required read
+returns the authoritative current aggregate. `Completed` and the exact same `Reserved` intent
+follow their normal paths; `Busy` exposes no foreign content and maps to its typed failure. A
+post-reserve `Absent` is legal only when the reserve response was a no-mutation disposition and
+follows that exact bounded failure/recovery branch. `Reserved(response) -> Absent`, a different
+same-key intent, or a torn prefix is integrity failure. If a reservation has no activated member,
+the fragment builds, attests, and activates ordinal zero. A replacement branch may activate only
+the statically next member after its exact committed eligibility evidence. A status read after
+`CandidateProgressionConflict` follows the winner's durable prefix or completed outcome.
 
 The expansion fragment owns failure handling for its injected states and preserves the authored
 call's external output/failure boundary. Runtime and store see only ordinary certified states and
 structured control.
+
+The authored submission boundary has one real closed `EvmSubmissionFailure` contract. Expansion
+owns a finite exact mapper table from every injected leaf failure into that boundary. It must
+include definite redaction-safe dispositions for unavailable transport/provider/signer,
+destination rejection, exhausted bounded observation/replacement policy, `NonceDomainBusy`,
+`NonceLineageDiverged`, and `NonceCapacityExhausted`. Malformed evidence, contract mismatch,
+possible entry, and resource-history corruption remain blocking or parked under their generic
+classification and cannot be mapped into that sum. The implementation plan freezes the exact
+payload-free variants and each leaf mapper before schema generation; this is a closed domain
+enumeration task, not an open ownership decision.
 
 Expansion is selected by the exact semantic EVM operation and capability requirement, not merely
 because a live implementation happens to use an EVM JSON-RPC transport.
 
 ### Signing and submission
 
-`BroadcastExactCandidate` is one authorized bounded effect. Its invoker passes the exact unsigned
-candidate to the qualified signer once, verifies the derived transaction identity, submits those
-exact bearer bytes once, discards them, and returns only secret-free proof such as:
+`BroadcastExactCandidate` is one authorized bounded effect. The qualified signing profile must
+certify deterministic RFC 6979 low-`s` signing: the same intent, nonce, candidate ordinal, unsigned
+envelope, `SemanticSignerId`, and signing-profile contract reproduce byte-identical bearer bytes
+and the same transaction hash across processes. Every physical signer generation admitted for
+that semantic signer proves the same public key/address and deterministic behavior.
+
+`AttestCandidateIdentity` invokes the qualified signer without submitting, verifies the semantic
+signer binding, discards the generated bearer bytes, and returns only the expected unsigned
+digest and transaction hash. `BroadcastExactCandidate` later passes the exact activated unsigned
+candidate to a qualified signer once, requires the derived hash to equal the retained attestation,
+submits those exact bearer bytes once, discards them, and returns only secret-free proof such as:
 
 ```text
 SubmittedCandidateProof {
+    candidate_ordinal,
     unsigned_candidate_digest,
     transaction_hash,
+    semantic_signer_id,
     signer_generation_ref,
     signing_contract_ref,
     submission_contract_ref,
 }
 ```
 
+`AttestCandidateIdentity` is admitted as `Read` only when qualification proves the signer
+operation is deterministic and has no externally meaningful semantic mutation; an internal HSM
+audit counter may be operational but cannot affect the returned identity. Consuming quota,
+approval tokens, anti-replay state, billing credit, rate-limit capacity, or any other externally
+meaningful state is semantic mutation and makes the signer operation ineligible for `Read`. A
+signer that cannot meet that contract is ineligible for this expansion—there is no fallback that
+silently reclassifies attestation as an `Effect` with different crash semantics.
+
 No signature or raw signed transaction enters retained state. There is no earlier
-`PrepareSignedCandidate` effect and no requirement to reproduce a signature or signed envelope
-later.
+`PrepareSignedCandidate` effect that retains bearer bytes. Deterministic reproduction plus durable
+candidate activation makes a later run's submission target-convergent: it observes every known
+activated transaction hash and, if submission is still required, repeating the exact current
+candidate's bearer bytes names the same EVM transaction. A signer that cannot qualify
+byte-identical reproduction is ineligible for this path.
 
 The adapter cannot choose another nonce, alter the candidate, replace fees, rotate semantic
 routes, poll, rebroadcast in a loop, or decide terminal run meaning.
 
-Process loss after broadcast authorization and before a committed observation leaves the
-submission occurrence possible-entry ambiguous. The initial design does not automatically
-rebroadcast. A future same-occurrence reconciliation extension must introduce or derive a stable
-transaction identity from pre-entry retained material, or use an authoritative idempotent wallet;
-it cannot assume that the transaction hash returned after submission survived process loss. A
-later program state is not reachable while the current occurrence remains ambiguous, and no
-hidden adapter loop is permitted.
+Process loss after broadcast authorization and before a committed observation leaves that run's
+submission occurrence possible-entry ambiguous. The initial design does not reauthorize that
+occurrence, and no later state in that run is reachable. A separately admitted run using the same
+intent reads the durable activated prefix and may converge by observing or submitting the current
+byte-identical candidate under the same nonce reservation; a different intent remains blocked by
+`NonceDomainBusy`. A concurrently submitted older activated member is still an admitted
+mutation-equivalent terminal candidate. No hidden adapter loop or run-history mutation is
+permitted.
 
 ### Reads and terminal meaning
 
-Transaction lookup, receipt lookup, and head observation are explicit `Read` states.
-`VerifyCanonicalInclusion` is a `Pure` state over their exact committed values; any additional
-network observation is a preceding explicit `Read`. A bounded “not yet available” result is a
-reviewed safe failure or closed output that feeds an explicit operation branch. Repeated polling
-is expressed as a finite expansion of distinct read occurrences.
+Transaction lookup, receipt lookup, and head observation are explicit bounded `Read` states over
+the declaration-ordered activated prefix. `VerifyCanonicalInclusion` is a `Pure` state over their
+exact committed values and can select only a retained activated hash; any additional network
+observation is a preceding explicit `Read`. A bounded “not yet available” result is a reviewed
+safe failure or closed output that feeds an explicit operation branch. Repeated polling is
+expressed as a finite expansion of distinct read occurrences.
 
-`CompleteWalletNonce` consumes the exact producer-bound completion key, reservation, and
-terminal-evidence references. It does not construct terminal evidence or decide terminality.
+Every branch that would map a definite candidate, provider, destination, observation, or bounded
+policy disposition to `EvmSubmissionFailure` first executes its own
+`ReadWalletNonceStatus` reconciliation state:
 
-`ProjectTransactionResult` and the operation terminal contract require the matching
-`CompletedWalletNonce`. No branch may close as success or revert after terminal transaction
-evidence but before exact resource completion.
+- `Completed` projects the permanent canonical result;
+- a changed current candidate or activated prefix follows the corresponding statically declared
+  branch and observes that prefix;
+- the unchanged incomplete status permits only that branch's exact reviewed failure mapping,
+  current-candidate resubmission, or next-candidate activation; and
+- a valid `ReadWalletNonceStatus` `SafeFailure` follows that Read state's exact settlement and
+  typed failure plan, while `IntegrityFault` blocks; neither can masquerade as a status snapshot
+  or bypass its certified continuation.
+
+The failure decision linearizes at that authoritative status snapshot. A completion or activation
+visible at or before the snapshot wins and must be followed. The read is not a lease and the
+separate wallet and RunHistory authorities do not claim cross-store atomicity: another run may
+complete after the snapshot but before this run commits its bounded failure. Such a failure means
+only “this run did not obtain the terminal result under its finite policy,” never that the shared
+intent cannot later complete. A subsequent run starts from the newer status and projects it.
+Reconciliation does not execute after a possible-entry effect in the same run; that run remains
+parked and a separately admitted run starts with status.
+
+`CompleteWalletNonce` consumes the exact producer-bound completion key, qualified current
+reservation, canonical terminal outcome, and terminal-witness references. It validates but does
+not invent terminality.
+The completion response or a later `WalletNonceStatus::Completed` object closure is the only input
+accepted by `ProjectCompletedWalletDisposition`; its closed output is then structurally matched
+into the fragment's normal/failure channels. No branch may close as success or revert after
+terminal transaction evidence but before exact resource completion.
 
 ## Store And PostgreSQL Boundary
 
@@ -2912,18 +4265,36 @@ Production assembly exposes separately scoped capabilities:
 
 ```text
 qualified infrastructure
+  -> deployment-only authoritative fence issuer
+       -> opens target-bound live sessions for an exact physical target/lineage/epoch
+  -> wallet-activation registry administrative role/scope
+       -> ActivationRegistryIssuerPromoter // deployment maintenance only
+  -> wallet-activation registry public role/scope
+       -> ActivationRegistryProofReader    // deployment/assembly only
   -> run-history database role/scope
        -> RunHistoryWriter   // consumed only by Runtime
        -> purpose-limited readers
        -> immutable physical-binding certificate verifier
   -> wallet-nonce database role/scope
-       -> WalletNonceAdapter // reachable only by its registered Runtime invoker
+       -> WalletNonceAdapter(
+            sealed target-bound live session,
+            OfflineActivationRegistryVerifier,
+            immutable public proof closure,
+          )                 // reachable only by its registered Runtime invoker
 ```
 
-The certificate verifier can prove only public binding membership and lineage; it cannot sign,
-invoke, or mutate a resource. The run-history role cannot mutate nonce authority, and the nonce
-role cannot mutate run history. No generic owner, application pool, or query capability survives
-assembly.
+`mfm-storage-evm-postgres` owns both the append-only activation-registry schema/admin CAS plus its
+deployment-only public proof reader/offline verifier and the distinct per-lineage nonce
+schema/adapter. They use separate roles and pools. Runtime and normal request execution receive no
+registry pool or role, registry administrative credential, or external fence issuer; the
+registered nonce invoker receives only the already sealed adapter, immutable proof closure, and
+offline verifier.
+
+The certificate verifiers can prove only public binding membership and lineage from the admitted
+immutable proof closure; they cannot query, sign, invoke, promote, or mutate a resource. The
+run-history role cannot mutate nonce authority, the nonce role cannot mutate the activation
+registry or run history, and the registry public role cannot mutate either. No generic owner,
+application pool, or query capability survives assembly.
 
 The two authorities may share one physical PostgreSQL deployment only when qualification proves
 non-rollback lineage, stale/sibling-writer exclusion, backup, restore, and promotion for both.
@@ -2931,8 +4302,10 @@ Physical co-location does not merge schemas, roles, fences, or semantic algebras
 
 ### Shared physical primitive, separate semantic authorities
 
-Run history and nonce reservations may share lower-level immutable objects, transactions, or a
-generic atomic compare-and-append primitive when that reduces code.
+Run history and nonce reservations may share lower-level immutable-object, transaction-helper, or
+compare-and-append implementation code when that reduces code. They never share one semantic
+transaction boundary, connection/role capability, lock, or callback spanning both authorities;
+no cross-store atomicity is implied.
 
 They retain separate semantic validators:
 
@@ -2970,7 +4343,7 @@ it and what completion that run observed.
 | Authorization append is rejected or stale | No new authorization | Reload the verified cursor; do not invoke. |
 | Authorization append acknowledgement is ambiguous | Authorization may exist | Resolve the original append identity; mint no authority from ambiguity. |
 | Authorization positively commits | `ExternalAccessAuthorized` | Mint one affine authority for the exact operation. |
-| Process dies before or during read invocation | Unmatched authorization | Preserve the exact waiting cursor; the read-recovery rule is unresolved, so do not invent an authorization or successor. |
+| Process dies before or during read invocation | Unmatched authorization | Preserve the exact waiting cursor and report `ReadCompletionUnknown`; the selected initial policy has no same-occurrence successor. |
 | Process dies before or during effect invocation | Unmatched `Authorized<Effect>` | Keep that fold state and report possible-entry ambiguity; do not authorize another effect attempt. |
 | Registered invoker returns | Authorization plus pending completion in memory | Totalize immediately and commit one linked observation before normal return. |
 | Observation loses an exact-head race | Authorization plus stable pending material | Rebase append without reinvoking. |
@@ -2982,10 +4355,12 @@ it and what completion that run observed.
 | Default handler commits | Handler transition and scope failure | In an operation scope, atomically close when the root result is `OperationOutcome::Failure`; in a lane, produce the typed lane failure. |
 | Custom handler selects recovery | Handler transition and closed route | Execute only the declared recovery branch. |
 | Definite ordinary error closes run | `RunClosed { outcome_ref }`, whose exact referenced object is `OperationOutcome::Failure(...)` | A new invocation may create and execute another run independently. |
-| Integrity evidence commits or is detected | Audit evidence or rejected candidate | Block; never construct domain failure. |
-| Resource binding is stale | `SupersededBeforeEntry(public_lineage_head_ref)` observation | Keep the same state current; fold to the next `Refreshable` ordinal. Only a current qualified worker may reauthorize. |
-| Resource acknowledgement is ambiguous while task lives | Run authorization; resource operation may exist | Resolve the permanent resource key internally. |
-| Process dies after a resource result exists but before run observation | Unmatched run authorization plus durable resource proof | Keep that run parked. Recovery of the durable proof requires a separately designed same-occurrence reconciliation contract. |
+| Access `IntegrityFault` observation commits | `ExternalAccessObserved::IntegrityFault` | Fold to durable `BlockedIntegrity`; never construct domain failure. |
+| Callback, codec, contract, invalid-evidence, or candidate fault is detected without a committed fault observation | Prior verified history only | Reject or report repeatably with component attribution; do not append a diagnostic event or alter the cursor. |
+| Protected resource `Effect` binding is proven stale before entry | `SupersededBeforeEntry(public_lineage_head_ref)` observation | Keep the same state current; fold to the next `Refreshable` ordinal. Only a current qualified worker may reauthorize. |
+| Resource `Read` target session is definitely stale or revoked | Reviewed `SafeFailure` observation | Settle through that Read state's exact typed failure contract; never construct `Refreshable`. |
+| Resource acknowledgement is ambiguous while task lives | Run authorization; resource operation may exist | Under the domain lock, return the permanent applied proof when its key exists; confirmed key absence proves no mutation and permits only the same affine invoker to re-execute the unchanged resource request. |
+| Process dies after a resource result exists but before run observation | Unmatched run authorization plus durable resource proof | Keep that run parked. The nonce authority's separately admitted status read lets another run consume the durable reservation, candidate prefix, or completion; same-occurrence recovery would still require a separate contract. |
 | Committed observation exists but process dies before settlement | Exact observation in history | Recompute settlement without live IO. |
 | Fan-out lanes complete in different physical orders | Ordered lane histories | Join results in declaration order. |
 | Current effect is possible-entry ambiguous | Open run at exact effect cursor | Keep it parked with no legal successor in this RFC; do not advance or duplicate. |
@@ -3006,7 +4381,7 @@ The cutover must make these properties structural:
 - exactly one root `OperationOutcome` is derivable on every completed path, and no lane or
   unrelated nested scope can forge the containing operation's outcome;
 - sealed block policies prevent lane fragments, matches, failure posts, and recovery routes from
-  widening `Pure | Read` or constructing nested fan-out;
+  widening `Pure | Read`, restoring `Effect`, or constructing fan-out beyond remaining depth;
 - expansion receives an affine protected slot and cannot duplicate an effect;
 - expansion dependencies, depth, occurrences, branches, and fan-out are bounded;
 - final certification contains no unresolved calls, wrappers, or unhandled fallible boundaries;
@@ -3026,15 +4401,36 @@ The cutover must make these properties structural:
 - certified failure plans consume only exact producer-bound typed state failures, admit only exact
   handler entry or affine fragment-boundary propagation, prove one eventual handler, and lower
   handlers to ordinary `Pure` state bindings;
-- effects cannot occur transitively inside fan-out;
+- effects cannot occur transitively inside fan-out, and nesting cannot exceed certified depth two;
 - branch selection is derived, not caller-authored;
 - fan-out results are joined in declaration order;
 - Runtime and store interpret no EVM, nonce, wrapper, handler-origin, or telemetry-specific
   semantics; they follow only ordinary certified structure and generic provenance;
 - all nonce-reserving workflows use the same qualified resource authority;
 - all sender-capable actors use that authority or are fenced out;
+- the permanent activation-registry domain key and unique activation-record identity admit only
+  exact replay, while its separate store-lineage key admits only exact replay or a qualified
+  current-incarnation promotion; domain issuance atomically binds both tables under the same
+  lineage serialization point used by promotion, and its administrative role never reaches
+  Runtime or normal request execution;
+- every nonce-authority status read carries stable permanent domain-binding evidence and
+  atomically opens its snapshot through the live target-bound session, and every mutation
+  additionally exercises a fresh transaction-bound external-fence permit;
+- the external fence authority has one non-rollback lineage, irreversible revocation, and
+  sibling-issuer exclusion; copied databases, credentials, public proofs, static tokens, and
+  replayed permits are not authority;
+- normal nonce reads and mutations perform no activation-registry IO or cross-authority lock;
+- one authenticated issuer-scoped caller token derives one domain-global submission intent, whose
+  stable reservation, candidate, and completion keys contain no `run_id` or physical generation;
+- one incomplete reservation retains one bounded mutation-equivalent candidate family and one
+  serialized activated prefix, so a later run observes every possible winning transaction hash;
+- terminal completion compares run-independent canonical outcome content while independently
+  validating producer-bound witnesses, and completed status returns the object closure required
+  for pure projection;
 - run-history and nonce database roles cannot cross-write;
-- adapters contain no history fold, next-plan selector, retry loop, or terminalizer; and
+- adapters contain no history fold, next-plan selector, semantic retry loop, or terminalizer;
+  the wallet authority's bounded physical resolve-or-proven-absent commit resolution is the sole
+  explicit exception and never mints Runtime authority; and
 - replay, telemetry, and applications receive read-only purpose capabilities.
 
 Architecture scans supplement but do not replace type privacy, crate dependency contracts,
@@ -3069,10 +4465,12 @@ An arbitrary DAG additionally requires cycle/reachability validation, alternativ
 materialization, global readiness, dependency skips, required-success sets, all-nodes-terminal
 closure, conflict analysis, and fairness rules.
 
-The current repository inventory has not identified a production operation that requires
-overlapping joins, arbitrary producer alternatives, or unstructured acyclic sharing; that claim
-must be verified before implementation. If a future use case does, it should first prove that the
-structured algebra cannot express the required semantics. It must not reintroduce a graph merely
+The repository-wide inventory found exactly three production `Operation` implementations plus
+linear test fixtures. None requires overlapping joins, arbitrary producer alternatives, or
+unstructured acyclic sharing. The portfolio operation compiles to a network fan-out containing
+each child EVM operation's read fan-out, within the selected depth-two bound. External consumers
+receive the declared breaking API. If a future use case needs more, it must first prove that the
+structured algebra cannot express the required semantics; it must not reintroduce a graph merely
 as an authoring convenience.
 
 ## Why Not Keep A Generic Executor?
@@ -3125,6 +4523,8 @@ This target changes persisted semantics:
 - stale resource binding becomes protected-non-application evidence and a fold-derived
   `Refreshable` attempt;
 - nonce reservation always consumes a fresh pending provider observation; and
+- EVM submission identity, candidate activation, and canonical completion become permanent
+  cross-run wallet-authority records; and
 - EVM topology becomes registered structured expansion.
 
 The implementation therefore requires one new sole current schema lineage, annex, corpus,
@@ -3144,7 +4544,8 @@ The completed cutover must:
 - replace arbitrary node bindings with lexical typed handles, branch merges, and fan-out joins;
 - rewrite pure operation, child-operation, framework, and capability expansion as typed structured
   substitution;
-- bind the exact required expansion profile and coverage policy at entry-point admission;
+- bind the exact trusted program and predicate contracts, required expansion profile, and coverage
+  policy at entry-point admission;
 - add exact expansion profile ordering, bounds, provenance, and affine protected slots;
 - add lexical operation/lane default failure-handler state contracts and producer-bound failure
   values;
@@ -3159,19 +4560,25 @@ The completed cutover must:
   tombstones, fences, and tests;
 - remove EVM wallet history folding and next-plan selection from the live layer;
 - add direct typed effect access under Runtime's private bracket;
-- add registered EVM structured expansions and the narrow wallet-nonce authority;
+- add registered EVM structured expansions and the narrow wallet-nonce authority, including stable
+  intent derivation, pending-floor allocation, serialized candidate activation, purpose-limited
+  status, and canonical terminal completion;
+- add the separately credentialed append-only wallet-activation registry admin CAS/read-only
+  verifier and the deployment-owned target-bound physical fence, with promotion ordered after
+  complete-prefix proof and irreversible old-target/sender-path fencing;
 - keep raw PostgreSQL pools private and expose separately scoped qualified authorities;
 - update `docs/design.md`, `docs/architecture.md`, run-execution documentation, persisted-surface
   inventories, qualification docs, app wiring, CLI/REST projections, and relevant READMEs;
 - reset the sole current persisted contract deliberately; and
 - delete all superseded dependencies, tasks, fixtures, migrations, tests, and terminology.
 
-Nothing in this scope authorizes implementation before the material uncertainties below are
-resolved.
+The readiness decisions below are frozen for the initial cutover. Environment-specific legacy
+deployment inventory remains an activation gate, not an implementation-design dependency.
 
-## Verification Required Before Implementation Planning
+## Implementation Acceptance Verification
 
-The design must first be validated with small models or tests, not a parallel production path:
+Implementation must validate the design with small models and boundary tests, not a parallel
+production path:
 
 - compile every current production operation into the structured algebra;
 - prove no current operation requires arbitrary DAG-only behavior;
@@ -3189,46 +4596,85 @@ The design must first be validated with small models or tests, not a parallel pr
   fragment, or unrelated lexical scope that attempts to forge the containing operation's outcome;
 - reject closure with the wrong `OperationOutcome` variant, nominal contract, lexical value
   derivation, inactive branch value, missing or unbound outcome object, second inline outcome
-  encoding, or delayed/standalone append;
+  encoding, or delayed/standalone append; for admission-only fan-out, require the complete
+  lane-wrapper/join object closure in the same append while retaining exactly one root outcome;
 - exercise both root variants over each applicable `LexicalValueRef` provenance kind—admission
-  root, state output, arm value, variant payload, fragment boundary, and fan-out join—and reject
-  cross-kind, wrong-source, wrong-selector, wrong-tag, wrong-payload-path, wrong-lane-order, and
-  wrong-contract substitution;
+  root, state output, arm value, variant payload, fragment input, fragment boundary, and fan-out
+  join—and reject cross-kind, wrong-source, wrong-selector, wrong-tag, wrong-payload-path,
+  wrong-child-root, wrong-lane-order, and wrong-contract substitution; for arm, variant-payload,
+  and fan-out-join derivations, also reject correct provenance paired with a wrong or unbound
+  content reference and recompute the one canonical reference from the sealed constructor; for a
+  variant payload, derive its type and nominal contract exclusively from the selector contract's
+  exact tag/path table and reject byte-identical payloads registered under a distinct contract;
+- prove child substitution binds every declared input root exactly once from its exact dominating
+  call-site slot, symmetrically binds exact child normal/failure tail slots to the one fragment
+  boundary, and rejects missing, duplicate, extra, inactive, wrong-role, or contract-substituted
+  inputs/boundaries; prove certification contains no resolved fragment value reference;
+- require every `Match` selector to be an exact already-defined closed-sum slot and reject a
+  future reference, non-dominating slot, or structurally similar non-registered sum;
 - reject omitted `RunClosed` when admission or a transition first derives the root outcome, and
   reject premature closure before it is derivable;
 - prove byte-identical expansion under registry and map iteration variation;
+- construct exactly one canonical `CertifiedProgramRef` over the complete expanded program,
+  profile, proof, manifest, contract, bound, and implementation closure; reject an independently
+  substituted component or audit projection even when every substituted object is otherwise
+  individually valid; prove the closure preimage excludes its digest and root, is stable under
+  object-store and map iteration variation, deduplicates a shared DAG object on first visit, and
+  rejects a transitive reference cycle, missing object, wrong object-type tag, or unregistered
+  outbound-reference position;
+- resolve the exact entry-point admission policy from qualified registry identity, require its
+  reference and every bound program/predicate/profile/policy field in the certified root, and
+  reject a caller-selected, stale, unqualified, or weaker policy or a valid proof evaluated under
+  a different predicate set;
 - prove exact wrapper nesting, affine core use, expansion termination, and hard bounds;
 - prove all injected fallible states and fragment boundaries receive exactly one handler;
 - prove only exact `KERNEL_NEVER_FAILURE_CONTRACT_REF` constructs `Infallible`, reject separately
-  registered look-alike uninhabited contracts and distinct-reference aliases, accept a
-  source-language alias resolving to the exact reserved reference, reject a handler on that
-  reserved contract, and require a plan for every other contract;
+  registered look-alike uninhabited contracts and distinct-reference aliases, accept only the
+  sealed kernel `Never` registration path (including a source type alias to that exact type),
+  reject a handler on the reserved contract, and require a plan for every typed contract;
+- prove `Never` constructs `NoFailure` with no failure slot, producer, or plan, while every
+  `FailurePlan` begins at an exact typed certified slot; reject a certified program containing
+  future content references or claimed committed transitions; reject state and fragment failure
+  slots with the correct Rust type but a different retained failure-contract reference;
 - for `Pure`, `Read`, and `Effect`, test both the reserved `Never` reference and other failure
   contracts; prove a `SafeFailure` cannot construct failure or handler entry for an infallible
   state;
-- reject every `StateOutcome::Failure` transition for an infallible `Pure`, `Read`, or `Effect`
-  occurrence regardless of callback source, and reject an infallible capability/state pairing
-  whose admitted `SafeFailure` needs a negative disposition;
+- reject every proposed failure and every `StateOutcome::Failure` transition for an infallible
+  `Pure`, `Read`, or `Effect` occurrence, prove a callback proposal has no committed nominal
+  authority before exact-head append, and reject an infallible capability/state pairing whose
+  admitted `SafeFailure` needs a negative disposition;
 - reject a default handler whose execution kind is not `Pure` or whose exact failure contract is
-  not `KERNEL_NEVER_FAILURE_CONTRACT_REF`;
+  not `KERNEL_NEVER_FAILURE_CONTRACT_REF`; require its one `Propagate` failure tail to use the
+  exact variant-payload slot derived from that handler output and reject a different dominating
+  same-typed value, intervening binding, wrong payload path, wrong content reference, or
+  byte-identical payload under a distinct nominal contract; require exact equality among the
+  enclosing scope failure contract, registered `Propagate` payload contract, derived payload
+  slot contract, and failure-tail contract;
 - for an operation, lane, or fragment scope with the reserved `Never` failure contract, reject
   `.or_default()`, reject construction of a scope/root/lane failure result, and require every
   explicit handler route for an owned fallible source to recover totally;
-- reject an enclosing-scope result produced before the designated handler, a forged affine
-  propagation target, and a propagation chain with zero or multiple eventual handlers;
-- reject an affine failure-mapping chain with the wrong source or final boundary output, a
-  non-`Pure`, foreign, or inactive-lexical-path mapper transition, broken adjacent contracts, or a
-  zero-link source/boundary contract mismatch;
-- reject substitution of a same-typed failure from another source for
-  `ExactResultOf<before_handler>` and substitution of another same-typed route for
-  `ExactOutputOf<handler>`;
+- reject every non-local successful scope escape, any direct normal-control escape that uses the
+  protected failure before its designated handler, a forged affine propagation target, and a
+  propagation chain with zero or multiple eventual handlers; separately prove that a distinct
+  newly committed pre/post/support-state failure follows its own exact plan and may causally
+  supersede the protected failure without reusing it;
+- reject an affine failure-mapping chain with the wrong source, plan identity, lexical region,
+  mapped target, or fragment-boundary rebind; a non-`Pure`, foreign, or inactive-path mapper
+  binding; broken adjacent slots/contracts; a future committed-reference claim; or a zero-link
+  source/boundary contract mismatch;
+- reject substitution of a same-typed failure slot from another source for
+  `ExactResultSlotOf<before_handler>` and substitution of another same-typed route slot for
+  `ExactOutputSlotOf<handler>`; prove the source binding plus structural plan path derives the one
+  plan identity and reject any author-supplied, cross-plan, or same-contract substituted
+  `FailurePlanBound`;
 - reject forward references, inactive-arm escape, cross-lane values, incompatible merges,
   effects in fan-out, operation outcomes in lane blocks, and unbounded fan-out;
-- reject an effect or nested fan-out hidden in a lane fragment, `Match` arm, failure-post path, or
-  custom recovery route;
+- reject an effect hidden anywhere inside fan-out and reject fan-out beyond certified depth two,
+  including through a fragment, `Match` arm, failure-post path, or custom recovery route;
 - prove collect-all fan-out under every physical completion-order permutation;
-- prove lane success and failure each construct exactly one canonical `LaneOutcomeRef`, and prove
-  deterministic empty and non-empty joins without a control transition or occurrence identity;
+- prove lane success and failure each construct exactly one canonical `LaneOutcomeRef`, prove
+  deterministic non-empty joins at both supported depths without a control transition or
+  occurrence identity, and reject an empty group;
 - reject an omitted, duplicate, foreign, misordered, or contract-substituted canonical lane
   wrapper, including when multiple lanes select byte-identical admission-root payloads;
 - prove store rejection of skipped pre/post/handler occurrences and forged branch selection;
@@ -3237,6 +4683,10 @@ The design must first be validated with small models or tests, not a parallel pr
 - reject observation variant, schema, and contract substitution; prove only the exact certified
   `Returned` or `SafeFailure` completion reaches settlement and that physical-control,
   possible-entry, and integrity evidence cannot be laundered into either variant;
+- prove only a committed `ExternalAccessObserved::IntegrityFault` derives durable
+  `BlockedIntegrity`; callback, codec, contract, settlement-invalid-evidence, and rejected-candidate
+  faults append no diagnostic record, preserve the authoritative cursor, and repeat with exact
+  component attribution;
 - crash at every authorization, invocation, observation, settlement, handler, branch, fan-out, and
   closure boundary;
 - for a fallible state under a non-reserved operation-scope default, prove a definite typed
@@ -3249,55 +4699,187 @@ The design must first be validated with small models or tests, not a parallel pr
 - fault-inject resource rotation versus mutation and prove `SupersededBeforeEntry` or exact
   internal `ExistingSame`;
 - prove only `SupersededBeforeEntry` creates `Refreshable`, exactly one next ordinal is possible,
-  stale workers cannot self-upgrade, and private writer credentials never persist;
+  stale workers cannot self-upgrade, and target-bound sessions, transaction permits, fence keys,
+  and private writer credentials never persist;
 - prove an initially derivable root outcome atomically appends `RunAdmitted` and `RunClosed`;
 - crash an unmatched read inside and outside fan-out and validate the selected read-recovery
   policy;
 - model concurrent runs observing the same pending nonce and prove unique monotonic reservations;
-- prove first-use and later reservation use the fresh pending-floor algorithm;
-- prove the EVM reservation and completion keys are stable across exact re-resolution and physical
-  refresh, change with a new `run_id`, and cannot be caller-substituted;
-- prove byte-identical nonce completion resolves one permanent result and conflicting reservation
-  or terminal evidence under that completion key is rejected;
+- prove first-use and later reservation use the fresh pending-floor algorithm, validate the virgin
+  value against the protocol nonce range, and treat a retry's different fresh observation as
+  creation-only evidence when the permanent reservation identity already matches;
+- prove reservation receives, validates, and atomically retains the canonical intent and candidate
+  family object closures plus the exact
+  `ProducerBound<QualifiedWalletNonceDomainActivation>` and its current-schema record closure in
+  the nonce authority without generic RunHistory query authority; reject a foreign-run,
+  wrong-producer, or same-shaped activation value;
+- prove every no-mutation nonce response leaves its permanent semantic operation key unoccupied,
+  while an already applied exact key resolves its original proof first;
+- lose acknowledgement for `NonceDomainBusy`, `NonceLineageDiverged`, and
+  `CandidateProgressionConflict`, change domain state, and prove key absence permits only the same
+  live affine invocation to re-execute the unchanged request without a second Runtime
+  authorization or fresh pending observation; prove those internal attempts have no semantic
+  linearization until one final disposition escapes and can never expose two responses;
+- prove independently operated forks sharing chain ID and genesis cannot qualify as one chain
+  instance, while redundant routes to one qualified instance do; reject registry aliases,
+  namespace reuse, wrong fork anchors, and route membership in two instances;
+- prove the current tree, dependency graph, features, binaries, and maintenance tasks contain no
+  retired-schema reader, decoder, migration, or certifier; retain an old export only as opaque
+  offline audit material and reject every retired byte sequence at every current boundary;
+- qualify the exact current-schema wallet-domain activation record and reject a wrong store
+  lineage, writer epoch, issuer namespace, chain/domain/sender, replay-exclusion disposition,
+  non-terminal prior allocation or submitted candidate, canonical finalized block or sender-nonce
+  floor, incomplete sender-path inventory, or writer/signer/relayer/direct-submit fence;
+- prove a reused sender activates only after every old effect is definitely terminal, every retry
+  ingress and sender path is fenced, and a new idempotency epoch is qualified; otherwise require a
+  new sender/domain; prove its first reservation binds that activation record and uses the
+  ordinary fresh virgin pending-floor algorithm without importing high water; require pending to
+  equal the qualified current-chain finalized sender-nonce floor and reject both lagging and
+  provider-ahead values without mutation;
+- race concurrent first reservations and reject a second or conflicting activation record; prove
+  there is no bootstrap mutation, credential, role, result, or retry path; and
+- race different store lineages for one unclaimed domain through the activation-registry CAS and
+  admit exactly one permanent lineage/activation identity; prove exact replay returns the original
+  composite proof, a different permanent binding always conflicts, one lineage may serve multiple
+  domains, and a crash after issuance pins the domain before its first local reservation;
+- race two new domains proposing sibling initial targets for one lineage, race domain issuance
+  against lineage promotion, and crash between each internal registry statement; prove one
+  lineage-key serialization point, all-or-nothing lineage-head plus domain-row visibility, no
+  partial binding, and exact composite-proof resolution after acknowledgement ambiguity;
+- copy the database, lineage, writer epoch, configuration, public incarnation proof, client
+  credential, and static attestation to two physical targets; prove only the target holding the
+  non-exportable key and live externally fenced session can return semantic status or reserve,
+  activate, or complete;
+- before a first local reservation, present a domain binding for another lineage or omit its
+  permanent proof and prove `read_status` cannot return `Absent`; prove every authoritative status
+  read atomically opens its snapshot through the live target session, every mutation uses a
+  distinct transaction-bound non-replayable fence permit, stale capabilities fail for all four
+  operations, and normal reads and mutations issue zero activation-registry calls;
+- race old/new target operations and crash before old-target fencing, after fencing but before
+  registry CAS, after CAS but before replacement opening, and after opening; prove unavailable-safe
+  exact retry and complete-prefix preservation; commit between a premature snapshot and fencing
+  and prove that snapshot cannot qualify because the accepted fence and prefix proofs must bind the
+  same post-quiescence final old head; prove the old target plus every old
+  writer/signer/relayer/direct-submit path and outstanding transaction can never regain
+  reachability; and
+- fault-inject activation-registry rollback/sibling writers and external-fence-authority
+  rollback/sibling issuers, stale-session resurrection, and replayed transaction permits;
+  qualification must fail closed, while any unprovable target fence, sender-path fence, or complete
+  prefix forbids same-domain promotion and requires a new sender/domain;
+- reject an issuer-namespace change or incompatible persisted schema as an ordinary same-sender
+  upgrade; require a new sender/domain, while compatible upgrades preserve the complete readable
+  current-schema lineage and permanent operation-key algebra;
+- prove authenticated issuers using the same caller token derive distinct collision-safe
+  submission IDs and cannot claim each other's intent;
+- prove the EVM reservation, per-ordinal candidate, and completion keys are stable across exact
+  re-resolution, implementation-contract upgrades, physical refresh, and different `run_id`
+  values for the same `SubmissionIntentId`; prove that a changed intent digest or candidate family
+  under that ID is an integrity conflict;
+- race candidate activation across runs and prove one serialized contiguous prefix, exact
+  `CandidateProgressionConflict`, no skipped ordinal, and no candidate outside the frozen
+  mutation-equivalent family; reject under the domain lock any descriptor, unsigned digest, or
+  transaction hash duplicated across ordinals;
+- reject a replacement without the exact closed `CandidateActivationPermit`, predecessor
+  activation, next ordinal, current status producer, policy, and committed eligibility evidence;
+- prove a later run receives the full activated prefix, observes every possible winning hash,
+  reproduces the current candidate, and can complete when an older activated replacement wins;
+- prove qualified physical signer generations implement one stable semantic signer and reproduce
+  each attested transaction hash; reject a changed public key, address, algorithm, or signing
+  profile, and reject `Read` qualification when attestation consumes quota, approval, anti-replay,
+  billing, rate-limit, or other semantic state;
+- prove byte-equal canonical completion resolves one permanent result when terminal witnesses have
+  different valid producer/provenance references, and reject a conflicting canonical outcome;
+- reject completion or completed status whose canonical public-result object or any required
+  object-closure member is absent even when its commitment is present;
+- under the domain lock, reject completion for a non-active reservation or non-activated
+  ordinal/hash and prove an older activated winner atomically seals the prefix, persists the
+  inclusion-block outcome, clears the active marker, and retains high-water;
+- race status against activation and completion; prove a changed prefix follows its exact static
+  branch, completed status supplies a current producer-bound object closure sufficient for pure
+  projection, any completion visible at the status linearization point wins, and a later
+  completion remains available to the next run rather than changing the earlier run's bounded
+  failure;
+- prove status comes from one current-lineage transactionally consistent snapshot; reject a stale
+  replica, torn prefix, non-last current candidate, completion with an active marker, or an
+  unqualified embedded reservation; prove only `BindCurrentWalletReservation` can mint the
+  current-run producer accepted by activation/completion;
 - test lagging, equal, and provider-ahead pending observations under the selected qualified policy,
   including rejection without mutation;
-- reject nonce-domain, intent, observation, reservation, terminal-evidence, and producer
+- prove one incomplete intent blocks a different intent without allocating a higher nonce and that
+  a same-intent later run resolves the original reservation, candidate prefix, or completion;
+- prove incompatible deployment activation is rejected while an incomplete intent binds a
+  retired semantic contract; permit only exact-contract-compatible resumption, complete under the
+  old qualified release, or a new sender/domain; even after completion, require a new
+  sender/domain for an incompatible persisted-schema or issuer-namespace change;
+- reject nonce-domain, qualified-chain-instance, issuer, intent, candidate-family, candidate,
+  semantic-signer, observation, reservation, canonical-outcome, terminal-witness, and producer
   substitution;
-- prove non-rollback resource lineage and stale/sibling-writer exclusion across restore,
-  promotion, and generation rotation;
+- prove non-rollback resource and activation-registry lineages plus stale/sibling-writer exclusion
+  across restore, promotion, and generation rotation; reject a restore that omits, rewrites, or
+  rebinds any immutable historical activation binding, incarnation, target-key record,
+  domain-activation record, permanent operation result, or member of their complete closure; allow
+  the current incarnation and target key to differ only as a newly appended qualified promotion
+  successor that retains the entire immutable prefix;
 - inventory every signer, relayer, operator, stale deployment, and direct-submit path;
-- prove run-history and nonce roles cannot cross-write and no generic pool survives assembly;
+- prove run-history, nonce, activation-registry admin, and activation-registry public roles cannot
+  cross-write; prove the registry admin and fence-issuer credentials cannot escape deployment
+  maintenance, and no generic pool survives assembly;
 - prove best-effort telemetry failure cannot affect a run;
-- prove purpose-limited prior-run fact reads are complete against their admitted source heads and
-  cannot obtain generic query or append authority;
-- prove `BroadcastExactCandidate` signs once, submits the exact derived envelope once, and retains
-  no bearer bytes;
+- prove purpose-limited prior-run fact reads are complete through the exact authorization-captured
+  `TenantFactFrontier` and cannot obtain generic query or append authority;
+- prove `AttestCandidateIdentity` retains only the expected hash, prove
+  `BroadcastExactCandidate` signs once and submits the exact derived envelope once, prove neither
+  retains bearer bytes, and reproduce byte-identical envelopes across processes for the same
+  intent and candidate ordinal;
 - use canary credentials/provider text to prove no secret-bearing value reaches programs,
   histories, objects, errors, traces, exports, or logs;
 - inventory every current executor predicate and assign it to expansion, certification, Runtime,
   store, resource authority, explicit state, or deletion; and
 - show that no required predicate remains ownerless.
 
-Only after these checks pass should the repository define the implementation's logical commit
-sequence and scope-driven verification plan.
+The implementation plan assigns these checks to the commit that first owns each boundary and to
+the final qualification hardening commit.
+
+## Readiness Decisions
+
+The repository audit, formal failure review, access/resource review, nonce review, and dedicated
+architecture review freeze the following initial-cutover choices:
+
+| Area | Frozen decision |
+| --- | --- |
+| Expected operational dispositions | Only reviewed `Returned` and redaction-safe `SafeFailure` evidence is state-consumable. Every valid expected negative disposition maps to a closed typed state failure. `SupersededBeforeEntry`, possible entry, malformed evidence, and integrity faults retain their distinct non-domain meanings. |
+| Failure defaults | Each typed-failure operation, fragment, or lane owns a finite exact source-contract-to-`Pure + Never` mapper table. `.or_default()` requires exactly one match. A `Never` scope has no default and explicitly recovers every owned fallible source. |
+| Expansion | Child substitution, capability lowering, policy wrapping, failure completion, then normalization/certification is the one acyclic pipeline. Support states are executable leaves and do not recursively expand; cross-policy support requires an explicit composite expansion. |
+| Security wrapper denial | A denying wrapper supplies an exact mapper into the protected typed failure boundary. It cannot wrap `Never` or widen a boundary. Non-denying `Never` wrappers contain only `Never` support states. |
+| Fan-out | Fan-out is planning-fixed, non-empty, collect-all, `Pure | Read`, homogeneous per group, and declaration ordered. It may nest to certified depth two under global lane/occurrence bounds, preserving the portfolio network fan-out and each child EVM read fan-out. |
+| Unmatched Read | The exact occurrence remains `Authorized<Read>` and reports `ReadCompletionUnknown`. The initial contract has no same-occurrence reauthorization, timeout supersession, synthetic completion, or interruption. A separate run may execute. |
+| Possible-entry Effect | The exact occurrence remains parked. Only qualified `SupersededBeforeEntry` creates `Refreshable`; no automatic re-entry or force-close exists. |
+| Structured-program coverage | All three repository production operations and the linear fixtures fit the structured algebra. External graph-authoring consumers receive the declared breaking API; no compatibility lowering exists. |
+| Certification authority | One canonical `CertifiedProgramRef` binds the exact authored/expanded programs, profile, proofs, contracts, bounds, manifests, and secret-free implementation closure. Its entry-point policy is resolved from qualified registry identity and trust-anchors the exact program contract and predicate set; the root cannot select weaker certification rules. Its closure digest excludes itself and the root and uses the registered tagged depth-first walk, active-stack cycle rejection, and first-visit DAG deduplication. Repeated admission fields are equality-checked audit projections, never independent authority. |
+| Lexical result algebra | Non-local successful `ScopeResult`, `ArmResult`, and `RecoveryResult` are deleted. Every block has one normal value channel and one lexical failure channel; root/lane/fragment outcomes are nominal structural wrappers, never instructions. |
+| Structural value references | Arm aliases reuse the exact source reference; variant payloads and fan-out joins derive one canonical content reference from their exact source objects. A variant payload's type and nominal contract come only from the exact selector contract's tag/path table, so byte identity cannot substitute another contract. Only sealed fold constructors can create these references. |
+| Child inputs | Child substitution bijectively rebinds every declared child input root from an exact dominating call-site slot through a structural `FragmentInput` derivation. It creates no state, copied object, or new producer. |
+| Failure contract authority | `RetainedValueContract` remains the sole descriptor of inhabited retained values; its canonical content reference is exact contract identity. Certified `LexicalSlot` and resolved `LexicalValueRef` separately own producer shape and identity. |
+| Default failure propagation | `.or_default()` uses one `Pure + Never` mapper whose sole `Propagate` payload is exposed as an exact variant-payload slot and is itself the scope-failure tail. The enclosing scope, route entry, payload slot, and tail carry one exact nominal contract; same-typed, byte-identical-distinct-contract substitution and intervening bindings are illegal. |
+| `Never` | `FailureContract::Never` is a kernel sentinel resolving only to `KERNEL_NEVER_FAILURE_CONTRACT_REF`. It is not a retained-value schema and has no `MfmValue`, codec, value slot, decoder, or producer. |
+| Integrity blocking | Only committed `ExternalAccessObserved::IntegrityFault` folds to durable `BlockedIntegrity`. Callback, codec, contract, invalid-evidence, and rejected-candidate faults leave the prefix unchanged and are repeatable attributed diagnostics; no sixth run event exists. |
+| Prior-run facts | Fact selection is an ordinary `Read`, while the existing authorization-captured `TenantFactFrontier`, affine scan permit, completeness attestation, and purpose-limited scanner remain authoritative behind its invoker. |
+| Pending nonce | Every reservation attempt first consumes a fresh qualified `eth_getTransactionCount(sender, "pending")`. Virgin lineage requires that pending equal the activation record's qualified current-chain finalized sender-nonce floor, then allocates that pending value. Later lineage uses `local_high_water + 1` when pending is equal or behind. Any first-use inequality and any later provider-ahead value return typed `NonceLineageDiverged` without mutation. |
+| Incomplete nonce reservation | An authenticated issuer plus bounded caller token derives a stable domain-global `SubmissionIntentId`; reservation, candidate, and completion keys exclude `run_id`, implementation-contract refs, and physical generations. One nonce domain permits one incomplete intent. Same ID plus exact intent reuses its nonce across runs; changed semantics conflict; another intent receives typed `NonceDomainBusy`; no timeout, higher-nonce skip, or implicit transfer exists. |
+| Candidate convergence | The admitted intent freezes one bounded mutation-equivalent candidate family. The authority serializes a permanent contiguous activated prefix and current ordinal; a closed initial/replacement permit proves every step. Later runs observe every activated hash and reproduce the current member; an older racing member remains a semantically valid winner. |
+| Signing convergence | A stable semantic signer fixes public key/address and deterministic RFC 6979 low-`s` behavior across qualified physical generations. Signer attestation records the expected hash before activation; broadcast reproduces and verifies it without retaining signature or bearer bytes. |
+| Status and reconciliation | Status is one linearizable current-lineage aggregate snapshot. Injected pure states bind its reservation/completion into current-run producers. A bounded failure linearizes at its last status snapshot; a completion after that point remains visible to a later run and does not retroactively change the earlier run. |
+| Terminal convergence | Completion compares a run-independent canonical inclusion-block outcome, not producer-bound witness or later finality-head identity. Compatible later witnesses return the original completion; a conflicting canonical claim is an integrity fault. Purpose-limited completed status returns the canonical object closure needed by a later run's pure projection. |
+| Wallet lineage | The nonce namespace is qualified physical chain instance plus sender. A deployment-qualified one-to-one chain registry binds chain ID, genesis, never-reused namespace, and finalized fork anchor so clones remain distinct and redundant routes converge. A separate permanent activation registry uses the wallet domain as primary key and a globally unique activation-record identity to bind exactly one store lineage/activation; a separate store-lineage primary key owns the one current-incarnation head shared by all domains on that lineage. Domain issuance atomically validates/creates that lineage head and inserts the domain row under the same lineage serialization point, returning one composite proof. Every status read carries that stable permanent binding and atomically opens its snapshot through the sealed live target session, every mutation additionally exercises a fresh transaction-bound external-fence permit, and restore/promotion preserves the post-quiescence complete prefix. |
+| Wallet-authority upgrades | An incomplete intent freezes its exact semantic contracts and blocks an incompatible release on that sender until the old qualified release completes it. Compatible implementation/physical upgrades preserve the one current schema and complete readable durable lineage. Every incompatible persisted-schema or issuer-namespace change uses a new sender/domain; scalar reset, migration reader, and compatibility interpreter are forbidden. |
+| PostgreSQL placement | The domain port and canonical request/evidence types live with EVM. The dedicated narrow `mfm-storage-evm-postgres` adapter owns both the separately credentialed append-only activation-registry admin CAS/deployment proof reader/offline verifier and the per-lineage nonce schema/adapter. Deployment owns the non-rollback external target-fence issuer; Runtime and normal request execution receive no registry role/pool, fence issuer, or registry-admin authority, and ordinary nonce access performs no registry IO. The generic RunHistory store remains EVM-neutral and receives no nonce authority. |
+| Telemetry | Logs, metrics, and spans are redacted best-effort observers. Required audit or business acknowledgement is an explicit state, fact, or effect and therefore semantic. |
+| Legacy deployment | Activation is a maintenance cutover: stop old admissions, attest every old allocation/submitted candidate terminal with no unresolved possible entry, fence every replay ingress and sender path, bind a qualified finalized-block sender-nonce floor, rotate to a new issuer/idempotency namespace, and retain the old database only as opaque offline audit. The current tree has no old-schema reader, decoder, migration, or certifier. A reused sender starts a virgin current-schema lineage only when fresh pending equals that floor; inability to prove terminality, replay exclusion, floor provenance, or exhaustive fencing requires a new sender/domain. |
+
+The exact field names of the closed EVM submission-failure variants, canonical sentinel bytes,
+stable semantic-key encodings, and generated schema hashes are implementation outputs constrained
+by these decisions. They do not reopen ownership, recovery, or scheduling policy.
 
 ## Material Uncertainties
 
-| Choice or assumption | Why uncertain | Consequence if wrong | Resolution or validation |
-| --- | --- | --- | --- |
-| Every expected definite state-facing operational disposition can be represented by a reviewed typed response or redaction-safe capability `SafeFailure` and interpreted deterministically; cases expected to fail or recover map to typed state failure. | Current fault vocabulary contains audit-only operational outcomes. | An expected ordinary error could still park a run, or unsafe diagnostics could be laundered into domain truth. | Inventory every capability completion and freeze its response, safe-failure, physical-control, possible-entry, and integrity classification before schema work. |
-| Each operation or lane whose failure-contract reference is not the reserved `Never` reference can receive every lexical default-handler mapping, including failures from child operations and injected states; each reserved-`Never` scope can explicitly and totally recover every owned fallible source. | Reusable states, lanes, and nested operations have heterogeneous failure types, while the reserved `Never` scope cannot accept a default mapping. | Expansion may need extra wrapper sums or duplicate mapping states, or an allegedly infallible scope may be impossible to certify. | Model one nested child operation, one lane failure, one framework precondition, one reserved-`Never` scope with total recovery, and one EVM injected-state failure end to end before freezing the handler API. |
-| The frozen expansion phase order covers every required security policy without recursive application. | Later policies may need to protect states injected by earlier policies. | Support states may be uncovered, or expansion may become cyclic and surprising. | Define the exact phase/eligibility matrix and certify coverage markers for representative nested policies. |
-| Planning-fixed, collect-all `Pure`/`Read` fan-out covers current latency and failure requirements. | Nested fan-out, runtime-discovered cardinality, partial results, or fail-fast behavior may be desired. | The cursor and late-observation contracts would need material expansion. | Compile and exercise the largest current portfolio operation, including one lane failure, before freezing the IR. |
-| The legal successor, if any, for an unmatched `Read` authorization has not been selected. | A read cannot mutate its target, so a certified abandonment/retry-selection rule may safely improve liveness, especially inside collect-all fan-out; however, a new read can return a different time-varying value. | A process crash can leave a read-heavy run or fan-out permanently open, while a hasty retry rule can make replayed selection nondeterministic. | Choose and model one explicit read policy before implementation: permanent wait, a qualified attempt-supersession record, or a typed run-level interruption. Do not reuse effect `EntryUnknown` and do not invent ad hoc reauthorization. |
-| The RFC's safety baseline leaves an unmatched or returned possible-entry effect at the exact current occurrence with no legal successor; the required deployment-time same-occurrence reconciliation contract, if any, is not selected. | Declaration order and typestate prevent overlap but cannot prove that a remote target was not entered after process loss. | Runs may remain open indefinitely, or implementation pressure may recreate overlapping attempts. | Inventory each effect's outcome-query or target-idempotency capability and freeze an explicit certified same-occurrence reconciliation/operator protocol where required. Do not authorize automatic re-entry without target-enforced proof. |
-| The structured algebra covers every production operation without DAG-only sharing. | The current inventory found no counterexample, but public or less-traveled consumers may rely on alternative producers, overlapping joins, or acyclic sharing. | The complete cutover could discover an operation that cannot be expressed without changing the IR. | Compile every production and public-library operation into the structured model and record any rejected graph shape before implementation planning. |
-| Nested blocks need the retained non-local successful `ScopeResult` form. | The current result algebra preserves early enclosing-scope success without executable return instructions, but no production requirement has yet proved it necessary. | Keeping it preserves avoidable result types and certification paths; deleting it could force awkward restructuring or lose required expressiveness. | Compile every current operation with a minimal two-sided lexical outcome per block. If none needs non-local success, delete `ArmResult`, `RecoveryResult`, and the separate `Result`/`FailureResult` parameters before implementation planning. |
-| The existing certified contract model has one reference that closes semantic failure type, schema, retained-value rules, and producer role. | This RFC requires exact complete-contract identity, but has not mapped that requirement to one current repository type. | Comparing only a schema ID would permit unsafe aliases; adding a duplicate descriptor would create two authorities. | Inventory the current contract objects and designate or extend exactly one content-addressed reference before freezing the certifier API. |
-| The canonical contract system can represent the reserved `Never` failure contract as admitting no value. | Some schema systems cannot encode a truly uninhabited value set even when the host language can. | A normal empty-looking schema could admit a forged failure and invalidate `Infallible`. | Prototype canonical decoding and hostile-value rejection for the reserved reference; if the schema language cannot express it, use one kernel sentinel contract that has no value decoder rather than an ordinary schema alias. |
-| Prior-run fact selection can preserve its completeness contract as an ordinary `Read` through the sealed RunHistory scanner. | Existing fact selection has store-specific source and completeness semantics. | Lowering it casually could lose completeness, create a hidden access kind, or expose generic history query authority. | Model one bounded selector against frozen source heads and prove identical live/recorded results plus capability isolation. |
-| The admitted policy for a qualified pending nonce above `local_high_water + 1` is not selected. | A jump may reflect legitimate external use, provider disagreement, rollback, wrong-chain binding, or a malicious/faulty provider. | Automatic adoption can create permanent gaps or exhaust the wallet; unconditional rejection can block a wallet after legitimate external use. | Define qualified provider selection, strict width/bounds, disagreement handling, and a bounded allowed-jump or integrity-review policy. Until then, provider-ahead input has no certifiable accepting policy. |
-| A failed run's unbroadcast reservation may remain permanently allocated while later runs reserve higher nonces. | A later Ethereum transaction cannot mine across an unfilled lower nonce. | Run-history liveness would improve while the wallet remains operationally wedged by a nonce gap. | Choose a cross-run semantic intent key, proven-never-exposed reservation transfer/reuse, or explicit gap-fill/cancellation operation. Never use timeout reuse. |
-| The wallet-nonce lineage remains non-rollback and exclusive across writer rotation, restore, promotion, and every sender-capable actor. | The guarantee spans database operations, deployment procedures, signers, relayers, and direct-submit paths. | A stale writer or out-of-band actor could reuse a nonce despite correct per-run history. | Produce an operational proof and failure-injection suite covering scoped roles, lineage transfer, and complete sender-path inventory. |
-| Operational telemetry can remain non-semantic while required audit evidence is fully derivable from history and facts. | Teams may expect best-effort logging to be both durable and invisible to run outcomes. | Observability availability may accidentally become business correctness, or required evidence may be lost. | Classify every proposed hook as semantic state/fact/effect or non-authoritative observer before adding expansion policies. |
-| Existing graph/executor histories and resource ledgers can be drained, exported, or reset outside the new production reader. | Repository policy permits a breaking cutover, but deployed state is not established here. | Removing old readers could strand active effects or operational evidence. | Inventory deployed environments and choose an explicit drain/export/reset procedure; add no compatibility execution path. |
+none
