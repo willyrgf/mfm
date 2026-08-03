@@ -39,13 +39,13 @@ const REQUIRED_TABLES: &[&str] = &[
 ];
 
 // These manifests cover every field returned by the corresponding catalog query. They are
-// generated from the sole compiled baseline under PostgreSQL 16, whose version is pinned by the
+// generated from the sole compiled baseline under PostgreSQL 18, whose version is pinned by the
 // development and verification environment. A same-name weakened constraint, trigger, function,
 // owner, or column therefore cannot pass qualification.
 const COLUMN_MANIFEST_SHA256: &str =
     "3c98650a03fafdfd43072de71528b8f00f620834caee26812fb7183fd1c97542";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "f2685f075dab63c2d088590533f20364c189ef329a9781b0672c8d3549d7f8ba";
+    "3a3ca3f07c64bd41d434f997b9b161e87af3191d2e6a52502422f11cc46eabcb";
 const TRIGGER_MANIFEST_SHA256: &str =
     "e19f09ad27003b64c8aa75c0a0ba0c3450414e9ca5a3f3487a227c4f0c3c1b22";
 const FUNCTION_MANIFEST_SHA256: &str =
