@@ -1,6 +1,8 @@
 use super::*;
 use mfm_program_derive::MfmValue;
-use mfm_spec::structured::{ClosedSumPayload, ClosedSumVariant, FailureScope};
+use mfm_spec::structured::{
+    structured_value_contract, ClosedSumPayload, ClosedSumVariant, FailureScope,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]

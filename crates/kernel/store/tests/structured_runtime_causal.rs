@@ -1,9 +1,8 @@
 //! Runtime causal proofs driving mutation only through assembled Runtime.
 //! Migrated from mfm-runtime store-backed suite after authority cutover.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::Notify;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
@@ -13,16 +12,11 @@ use mfm_capabilities::{
     ReadCapabilityContract, ReadCapabilityImplementation, Refreshable, ResourceAuthorityContract,
 };
 use mfm_certify::structured::{
-    AccessTargetSelection, PhysicalBindingSelection, ProgramRegistryBuilder,
-    QualifiedAccessCompletion, QualifiedProgramRegistry, ReadPhysicalBindingKind,
+    PhysicalBindingSelection, ProgramRegistryBuilder, QualifiedProgramRegistry,
     RuntimeEffectPhysicalBinding, RuntimeEffectPhysicalBindingSource, RuntimeReadPhysicalBinding,
     RuntimeReadPhysicalBindingSource,
 };
-use mfm_facts::{
-    CanonicalFactPredicate, FactOrdering, FactProposal, FactSelectionLimit, FactSelectionQuery,
-    FactSelectionReadFailure, FactSelectionReadFailureCode, FactSelectionReadResponse,
-    FactSelectionRequest, FactSelectionScanBounds, FactSet, FactTieBreak, ProposedFactValue,
-};
+use mfm_facts::{FactProposal, FactSet, ProposedFactValue};
 use mfm_ids::{
     AppendRequestId, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId, StoreEpoch,
     StoreScopeId, TenantScopeId,
@@ -30,25 +24,23 @@ use mfm_ids::{
 use mfm_journal::structured::{
     derive_commit_digest, derive_record_hash, domain_content_digest, AssignedRecord,
     CommitCandidate, CommittedBatch, HistoryObject, LexicalValueRef, ObservationOutcome,
-    PriorRunFactCompletenessMode, PriorRunFactScanAttestation, PriorRunFactSelectionResponse,
-    PriorRunFactSourceManifest, PriorRunFactSourceRule, RecordRef, RunRecord, TenantFactCoordinate,
-    TenantFactFrontier, ADMISSION_CONFIGURATION_OBJECT_TYPE,
-    ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
+    PriorRunFactSourceManifest, RecordRef, RunRecord, TenantFactCoordinate, TenantFactFrontier,
+    ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
+    ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
-    state_contract, AllowsExecution, ClosedSum, CommittedObservation, DefaultFailureMapper, Direct,
-    Effect, FanOutResults, Never, OperationBuilder, PriorRunFactSelectionCapability,
-    ProposedSuccessOutcome, Pure, Read, RefreshableBinding, RuntimeEffectAdapter,
-    RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority,
-    SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly, Sequential, State,
-    StateFrame, StateSettlement, StructuredStateCallbacks,
+    state_contract, AllowsExecution, ClosedSum, DefaultFailureMapper, Direct, Effect,
+    FanOutResults, Never, OperationBuilder, ProposedSuccessOutcome, Pure, Read, RefreshableBinding,
+    RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
+    RuntimeResourceAuthority, SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly,
+    Sequential, State, StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::history::{
     ProposedCanonicalValue, StructuredAdmissionCommand, StructuredAdmissionMaterial,
 };
 use mfm_runtime::structured::{
-    DriveOutcome, Runtime, RuntimeFaultCode, RuntimeFaultPhase, RuntimeStoreFaultKind,
+    DriveOutcome, RuntimeFaultCode, RuntimeFaultPhase, RuntimeStoreFaultKind,
 };
 use mfm_spec::structured::{
     OperationOutcome, ProposedStateOutcome, SecretFreeExecutableIdentity,
@@ -58,8 +50,8 @@ use mfm_spec::structured::{
 };
 use mfm_store::structured::{
     assemble_structured_runtime, BackendAppendOutcome, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, PhysicalBindingVerificationMode, PublicPhysicalBindingVerifier,
-    RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
+    PhysicalBindingSupersession, PublicPhysicalBindingVerifier, RawRunHistory,
+    StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
     StructuredStoreError, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
 };
 use serde::{Deserialize, Serialize};
@@ -230,24 +222,6 @@ impl State for FactState {
     }
 }
 
-struct PriorRunFactReadState;
-
-impl State for PriorRunFactReadState {
-    type Input = Value;
-    type Output = Value;
-    type Failure = Never;
-    type Request = FactSelectionRequest;
-    type Returned = FactSelectionReadResponse;
-    type SafeFailure = FactSelectionReadFailure;
-    type Execution = Read<PriorRunFactSelectionCapability>;
-    type SafeFailureDisposition = SafeFailureSuccessOnly;
-    type Capability = Direct;
-
-    fn semantic_state_id() -> mfm_program::Result<StableId> {
-        stable("mfm.runtime.fixture/prior-run-fact-read-state")
-    }
-}
-
 struct FixtureReadCapability;
 
 impl ReadCapabilityContract for FixtureReadCapability {
@@ -284,24 +258,6 @@ impl ReadCapabilityImplementation<FixtureReadCapability> for FixtureReadCapabili
         _failure: &Value,
     ) -> std::result::Result<(), CapabilityContractFault> {
         Ok(())
-    }
-}
-
-struct ReadState;
-
-impl State for ReadState {
-    type Input = Value;
-    type Output = Value;
-    type Failure = Never;
-    type Request = Value;
-    type Returned = Value;
-    type SafeFailure = Value;
-    type Execution = Read<FixtureReadCapability>;
-    type SafeFailureDisposition = SafeFailureSuccessOnly;
-    type Capability = Direct;
-
-    fn semantic_state_id() -> mfm_program::Result<StableId> {
-        stable("mfm.runtime.fixture/read-state")
     }
 }
 
@@ -476,39 +432,6 @@ impl RuntimeEffectPhysicalBinding<FixtureEffectCapability> for RotatingEffectAda
     }
 }
 
-struct CountingReadAdapter {
-    calls: Arc<AtomicUsize>,
-    last_request: Arc<AtomicU64>,
-    certificate: HistoryObject,
-}
-
-impl ReadAdapterInvoker<FixtureReadCapability> for CountingReadAdapter {
-    fn invoke<'a>(
-        &'a self,
-        request: &'a Value,
-    ) -> ComponentFuture<'a, ReadAdapterCompletion<Value, Value>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        self.last_request.store(request.value, Ordering::SeqCst);
-        Box::pin(async move {
-            ReadAdapterCompletion::Returned(Value {
-                value: request.value + 1,
-            })
-        })
-    }
-}
-
-impl RuntimeReadAdapter<FixtureReadCapability> for CountingReadAdapter {
-    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
-        read_adapter_contract()
-    }
-}
-
-impl RuntimeReadPhysicalBinding<FixtureReadCapability> for CountingReadAdapter {
-    fn public_certificate(&self) -> &HistoryObject {
-        &self.certificate
-    }
-}
-
 struct ConditionalFailureReadAdapter {
     calls: Arc<AtomicUsize>,
     certificate: HistoryObject,
@@ -591,36 +514,6 @@ impl PublicPhysicalBindingVerifier for ExactPublicBindingVerifier {
     }
 }
 
-struct ExactReadBindingSource {
-    binding: Arc<CountingReadAdapter>,
-    calls: Arc<AtomicUsize>,
-    selected_state_input: Arc<Mutex<Option<LexicalValueRef>>>,
-    available: bool,
-}
-
-impl RuntimeReadPhysicalBindingSource<FixtureReadCapability> for ExactReadBindingSource {
-    type Binding = CountingReadAdapter;
-
-    fn current_binding<'a>(
-        &'a self,
-        selection: PhysicalBindingSelection<'a>,
-        _request: &'a Value,
-    ) -> ComponentFuture<'a, Option<Arc<Self::Binding>>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        *self
-            .selected_state_input
-            .lock()
-            .expect("selected input lock") = Some(selection.state_input_ref.clone());
-        let binding = Arc::clone(&self.binding);
-        let available = self.available;
-        Box::pin(async move {
-            assert!(selection.minimum_lineage_head_ref.is_none());
-            assert!(selection.stable_resource_lineage_contract_ref.is_none());
-            available.then_some(binding)
-        })
-    }
-}
-
 struct RefreshBindingVerifier {
     lineage_ref: mfm_ids::ContentRef,
     first_certificate: HistoryObject,
@@ -661,80 +554,6 @@ impl PublicPhysicalBindingVerifier for RefreshBindingVerifier {
             && context.public_lineage_head_ref == &self.lineage_head.content_ref
             && public_lineage_head == &self.lineage_head
         {
-            Ok(())
-        } else {
-            Err(StructuredStoreError::Certification)
-        }
-    }
-}
-
-struct RestartedRefreshBindingVerifier {
-    lineage_ref: mfm_ids::ContentRef,
-    first_certificate: HistoryObject,
-    second_certificate: HistoryObject,
-    lineage_head: HistoryObject,
-    saw_retained_authorization: Arc<AtomicBool>,
-    saw_retained_supersession: Arc<AtomicBool>,
-    saw_current_descendant: Arc<AtomicBool>,
-}
-
-impl PublicPhysicalBindingVerifier for RestartedRefreshBindingVerifier {
-    fn verify_authorization(
-        &self,
-        context: &PhysicalBindingAuthorization<'_>,
-        certificate: &HistoryObject,
-    ) -> std::result::Result<(), StructuredStoreError> {
-        let common = context.access_kind == mfm_journal::structured::AccessKind::Effect
-            && context.stable_resource_lineage_contract_ref == Some(&self.lineage_ref);
-        let valid = match context.verification_mode {
-            PhysicalBindingVerificationMode::RetainedHistory => {
-                self.saw_retained_authorization
-                    .store(true, Ordering::SeqCst);
-                match context.minimum_lineage_head_ref {
-                    None => {
-                        context.previous_physical_binding_ref.is_none()
-                            && certificate == &self.first_certificate
-                    }
-                    Some(head) => {
-                        head == &self.lineage_head.content_ref
-                            && context.previous_physical_binding_ref
-                                == Some(&self.first_certificate.content_ref)
-                            && certificate == &self.second_certificate
-                    }
-                }
-            }
-            PhysicalBindingVerificationMode::CurrentCandidate => {
-                let valid = context.minimum_lineage_head_ref
-                    == Some(&self.lineage_head.content_ref)
-                    && context.previous_physical_binding_ref
-                        == Some(&self.first_certificate.content_ref)
-                    && certificate == &self.second_certificate;
-                if valid {
-                    self.saw_current_descendant.store(true, Ordering::SeqCst);
-                }
-                valid
-            }
-        };
-        if common && valid {
-            Ok(())
-        } else {
-            Err(StructuredStoreError::Certification)
-        }
-    }
-
-    fn verify_supersession(
-        &self,
-        context: &PhysicalBindingSupersession<'_>,
-        public_lineage_head: &HistoryObject,
-        _evidence: &HistoryObject,
-    ) -> std::result::Result<(), StructuredStoreError> {
-        let valid = context.verification_mode == PhysicalBindingVerificationMode::RetainedHistory
-            && context.stable_resource_lineage_contract_ref == &self.lineage_ref
-            && context.authorized_binding_ref == &self.first_certificate.content_ref
-            && context.public_lineage_head_ref == &self.lineage_head.content_ref
-            && public_lineage_head == &self.lineage_head;
-        if valid {
-            self.saw_retained_supersession.store(true, Ordering::SeqCst);
             Ok(())
         } else {
             Err(StructuredStoreError::Certification)
@@ -796,17 +615,9 @@ fn refresh_effect_binding_source(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectAppend {
     None,
-    ObservationStaleHead,
-    ObservationAcknowledgementUnknown,
-    ObservationLoadUnavailable,
-    ObservationAppendUnavailable,
-    ObservationResolveUnavailable,
-    ObservationReloadUnavailable,
-    ObservationConcurrentSame,
     ObservationConcurrentDifferent,
     ObservationSubstitutedPositive,
     AuthorizationAcknowledgementUnknown,
-    ObservationHoldAfterInvocation,
 }
 
 struct InjectingBackend {
@@ -815,8 +626,6 @@ struct InjectingBackend {
     stage: AtomicUsize,
     loads: Arc<AtomicUsize>,
     override_history: Mutex<Option<RawRunHistory>>,
-    observation_append_entered: Arc<Notify>,
-    observation_append_release: Arc<Notify>,
 }
 
 impl InjectingBackend {
@@ -827,8 +636,6 @@ impl InjectingBackend {
             stage: AtomicUsize::new(0),
             loads: Arc::new(AtomicUsize::new(0)),
             override_history: Mutex::new(None),
-            observation_append_entered: Arc::new(Notify::new()),
-            observation_append_release: Arc::new(Notify::new()),
         }
     }
 }
@@ -852,39 +659,7 @@ impl StructuredHistoryBackend for InjectingBackend {
                 Some(history) => Some(history),
                 None => self.inner.load(run_id).await?,
             };
-            let has_pending_observation = history.as_ref().is_some_and(|raw| {
-                let authorizations = raw
-                    .batches
-                    .iter()
-                    .flat_map(|batch| &batch.records)
-                    .filter(|record| {
-                        matches!(&record.record, RunRecord::ExternalAccessAuthorized(_))
-                    })
-                    .count();
-                let observations = raw
-                    .batches
-                    .iter()
-                    .flat_map(|batch| &batch.records)
-                    .filter(|record| matches!(&record.record, RunRecord::ExternalAccessObserved(_)))
-                    .count();
-                authorizations > observations
-            });
-            let unavailable = match self.injection {
-                InjectAppend::ObservationLoadUnavailable if has_pending_observation => self
-                    .stage
-                    .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok(),
-                InjectAppend::ObservationReloadUnavailable if has_pending_observation => self
-                    .stage
-                    .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok(),
-                _ => false,
-            };
-            if unavailable {
-                Err(StructuredStoreError::BackendUnavailable)
-            } else {
-                Ok(history)
-            }
+            Ok(history)
         })
     }
 
@@ -928,15 +703,8 @@ impl StructuredHistoryBackend for InjectingBackend {
             let should_inject = (is_observation
                 && matches!(
                     self.injection,
-                    InjectAppend::ObservationStaleHead
-                        | InjectAppend::ObservationAcknowledgementUnknown
-                        | InjectAppend::ObservationAppendUnavailable
-                        | InjectAppend::ObservationResolveUnavailable
-                        | InjectAppend::ObservationReloadUnavailable
-                        | InjectAppend::ObservationConcurrentSame
-                        | InjectAppend::ObservationConcurrentDifferent
+                    InjectAppend::ObservationConcurrentDifferent
                         | InjectAppend::ObservationSubstitutedPositive
-                        | InjectAppend::ObservationHoldAfterInvocation
                 ))
                 || (is_authorization
                     && self.injection == InjectAppend::AuthorizationAcknowledgementUnknown);
@@ -947,24 +715,8 @@ impl StructuredHistoryBackend for InjectingBackend {
                     .is_ok()
             {
                 match self.injection {
-                    InjectAppend::ObservationStaleHead
-                    | InjectAppend::ObservationReloadUnavailable => {
-                        return Ok(BackendAppendOutcome::StaleHead);
-                    }
-                    InjectAppend::ObservationAcknowledgementUnknown
-                    | InjectAppend::ObservationResolveUnavailable
-                    | InjectAppend::AuthorizationAcknowledgementUnknown => {
+                    InjectAppend::AuthorizationAcknowledgementUnknown => {
                         self.inner.acknowledge_next_commit_as_unknown()?;
-                    }
-                    InjectAppend::ObservationAppendUnavailable => {
-                        return Err(StructuredStoreError::BackendUnavailable);
-                    }
-                    InjectAppend::ObservationConcurrentSame => {
-                        let outcome = self.inner.append(batch).await?;
-                        if !matches!(outcome, BackendAppendOutcome::NewlyCommitted(_)) {
-                            return Err(StructuredStoreError::InvalidHistory);
-                        }
-                        return Ok(BackendAppendOutcome::StaleHead);
                     }
                     InjectAppend::ObservationConcurrentDifferent => {
                         let committed = conflicting_observation_batch(batch.into_committed())?;
@@ -987,11 +739,7 @@ impl StructuredHistoryBackend for InjectingBackend {
                                 .map_err(|_| StructuredStoreError::InvalidHistory)?;
                         return Ok(BackendAppendOutcome::NewlyCommitted(returned));
                     }
-                    InjectAppend::ObservationHoldAfterInvocation => {
-                        self.observation_append_entered.notify_one();
-                        self.observation_append_release.notified().await;
-                    }
-                    InjectAppend::None | InjectAppend::ObservationLoadUnavailable => {}
+                    InjectAppend::None => {}
                 }
             }
             self.inner.append(batch).await
@@ -1005,14 +753,6 @@ impl StructuredHistoryBackend for InjectingBackend {
         candidate_digest: &'a mfm_ids::ContentDigest,
     ) -> StructuredBackendFuture<'a, Option<mfm_journal::structured::CommittedBatch>> {
         Box::pin(async move {
-            if self.injection == InjectAppend::ObservationResolveUnavailable
-                && self
-                    .stage
-                    .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
-                    .is_ok()
-            {
-                return Err(StructuredStoreError::BackendUnavailable);
-            }
             self.inner
                 .resolve_append(run_id, append_request_id, candidate_digest)
                 .await
@@ -1398,7 +1138,6 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
         .into_document();
     let certificate = binding_object(35);
     let backend = StructuredMemoryBackend::new(store_identity(35));
-    let backend_probe = backend.clone();
     let assembled = assemble_structured_runtime(
         backend,
         registry,
@@ -1407,7 +1146,6 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
         }),
     );
     let runtime = &assembled.runtime;
-    let reader = &assembled.public_reader;
     let (run_id, _attempt) = runtime
         .admit_run(admission(operation_id, document, 4, "fan-out-admit"))
         .await
@@ -2297,7 +2035,6 @@ async fn admission_requires_the_exact_certified_resource_lineage_set() {
         }),
     );
     let runtime = assembled.runtime;
-    let reader = assembled.public_reader;
     let cases = [
         (41, Vec::new(), "missing-lineage"),
         (
@@ -2432,31 +2169,6 @@ fn codec_fault_program(operation_id: StableId) -> mfm_spec::structured::Authored
         .expect("infallible");
     let completion = builder.succeed(&output).expect("success");
     builder.finish(completion).expect("program")
-}
-
-fn fact_then_read_program(
-    operation_id: StableId,
-) -> mfm_spec::structured::AuthoredStructuredProgram {
-    let mut builder =
-        OperationBuilder::<Value, Never>::new(operation_id, stable("root").expect("root"))
-            .expect("builder");
-    let input = builder
-        .input::<Value>(stable("input").expect("input"))
-        .expect("input root");
-    let published = builder
-        .root()
-        .state::<FactState>(stable("publish").expect("publish state"), &input)
-        .expect("publish state")
-        .infallible()
-        .expect("infallible publish");
-    let selected = builder
-        .root()
-        .state::<PriorRunFactReadState>(stable("select").expect("select state"), &published)
-        .expect("select state")
-        .infallible()
-        .expect("infallible selection");
-    let completion = builder.succeed(&selected).expect("success");
-    builder.finish(completion).expect("fact-then-read program")
 }
 
 fn fan_out_program(operation_id: StableId) -> mfm_spec::structured::AuthoredStructuredProgram {
@@ -2844,32 +2556,6 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
     .expect("admission material")
 }
 
-fn admission_material_with_source(
-    discriminator: u8,
-    source_manifest: HistoryObject,
-) -> StructuredAdmissionMaterial {
-    StructuredAdmissionMaterial::new(
-        admission_object(
-            ADMISSION_CONFIGURATION_OBJECT_TYPE,
-            "mfm.runtime.fixture.configuration",
-            discriminator,
-        ),
-        admission_object(
-            ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
-            "mfm.runtime.fixture.context",
-            discriminator,
-        ),
-        source_manifest,
-        admission_object(
-            ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
-            "mfm.runtime.fixture.routing",
-            discriminator,
-        ),
-        Vec::new(),
-    )
-    .expect("admission material with source manifest")
-}
-
 fn admission_object(object_type: &str, schema: &str, discriminator: u8) -> HistoryObject {
     HistoryObject::new(
         stable(object_type).expect("object type"),
@@ -2925,13 +2611,6 @@ fn store_identity(discriminator: u8) -> StructuredStoreIdentity {
         .expect("store scope"),
         store_epoch: StoreEpoch::new(1),
     }
-}
-
-fn run_id(discriminator: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&[discriminator, 5]),
-    )
 }
 
 fn stable(value: &str) -> mfm_program::Result<StableId> {

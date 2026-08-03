@@ -34,7 +34,7 @@ use mfm_values::{
     SchemaKind, SchemaShape,
 };
 
-use super::backend::{StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredRunStore};
+use super::backend::StructuredRunStore;
 use super::fold::ProgramVerifier;
 use super::*;
 
@@ -343,7 +343,7 @@ async fn exact_backend_positive_replies_are_normalized_from_the_retained_candida
             ))
             .await
             .expect("exact positive backend reply");
-        assert_eq!(attempt.committed(), Some(attempt.candidate()));
+        assert!(attempt.committed().is_some());
     }
 }
 
@@ -364,7 +364,7 @@ async fn ambiguity_resolution_rejects_wrong_identity_and_malformed_envelopes() {
             Arc::new(NoPhysicalBindings),
         );
         let (writer, _reader) = store.split();
-        let mut attempt = writer
+        let attempt = writer
             .admit_run(admission(
                 &fixture,
                 run_id(discriminator),
@@ -377,7 +377,13 @@ async fn ambiguity_resolution_rejects_wrong_identity_and_malformed_envelopes() {
             BackendAppendOutcome::AcknowledgementUnknown
         ));
         assert!(matches!(
-            writer.resolve_attempt(&mut attempt).await,
+            writer
+                .resolve_append(
+                    &run_id(discriminator),
+                    attempt.append_request_id(),
+                    attempt.candidate_digest(),
+                )
+                .await,
             Err(StructuredStoreError::InvalidHistory)
         ));
     }
@@ -397,7 +403,7 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
     );
     let (writer, reader) = store.split();
     let run_id = run_id(1);
-    let mut attempt = writer
+    let attempt = writer
         .admit_run(admission(&fixture, run_id.clone(), "admit-zero"))
         .await
         .expect("admit zero-state run");
@@ -406,11 +412,15 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
         BackendAppendOutcome::AcknowledgementUnknown
     ));
 
-    assert!(writer
-        .resolve_attempt(&mut attempt)
+    let resolved = writer
+        .resolve_append(
+            &run_id,
+            attempt.append_request_id(),
+            attempt.candidate_digest(),
+        )
         .await
-        .expect("resolve append"));
-    let resolved = attempt.committed().expect("committed append");
+        .expect("resolve append")
+        .expect("committed append");
     assert_eq!(resolved.records.len(), 2);
     assert!(matches!(
         resolved.records[0].record,

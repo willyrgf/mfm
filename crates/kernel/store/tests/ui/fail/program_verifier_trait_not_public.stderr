@@ -3,3 +3,9 @@ error[E0432]: unresolved import `mfm_store::structured::StructuredProgramVerifie
   |
 1 | use mfm_store::structured::StructuredProgramVerifier;
   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `StructuredProgramVerifier` in `structured`
+  |
+help: a similar name exists in the module
+  |
+1 - use mfm_store::structured::StructuredProgramVerifier;
+1 + use mfm_store::structured::RegistryProgramVerifier;
+  |

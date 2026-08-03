@@ -11,7 +11,6 @@ use super::backend::{
     StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
 };
 use super::fold::StructuredStoreError;
-use super::qualification::PublicPhysicalBindingVerifier;
 
 type AppendKey = (RunId, AppendRequestId);
 

@@ -3635,6 +3635,10 @@ pub enum StructuredValueDefinition {
     /// Exact retained MFM value schema and role contract.
     Retained {
         /// Annex-validated retained-value contract and paired schema identity.
+        ///
+        /// The payload is boxed for enum layout while `flatten` preserves the
+        /// established flat persisted contract (`contract` and `schema`).
+        #[serde(flatten)]
         payload: Box<RetainedStructuredValueDefinition>,
     },
     /// Non-empty fan-out join of recursively defined lane success values.

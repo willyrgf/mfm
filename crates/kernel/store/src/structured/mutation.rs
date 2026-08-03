@@ -1,19 +1,11 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_facts::FactSet;
-use mfm_ids::{
-    AccessAttemptId, AppendRequestId, ContentDigest, ContentRef, InvocationIdentity, RunId,
-    StableId, TenantScopeId,
-};
+use mfm_ids::{AccessAttemptId, AppendRequestId, ContentDigest};
 use mfm_journal::structured::{
-    CommittedBatch, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
-    PriorRunFactSourceManifest, RecordRef, RunRecord, TenantFactCoordinate,
-    ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
-    ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
+    CommittedBatch, ExternalAccessAuthorized, RecordRef, RunRecord, TenantFactCoordinate,
 };
-use mfm_spec::structured::CertifiedProgramDocument;
-use serde::Serialize;
 
 use super::backend::{
     prior_run_fact_source, BackendAppendOutcome, StructuredHistoryBackend,
@@ -32,6 +24,18 @@ pub use mfm_runtime::history::{
     ProposedObservationOutcome, ProposedTransitionValue, StateTransitionProposal,
     StructuredAdmissionMaterial,
 };
+
+type PriorRunFactScanInvoker = Box<
+    dyn FnOnce(
+            mfm_facts::FactSelectionRequest,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = mfm_certify::structured::PriorRunFactScanCompletion>
+                    + Send
+                    + 'static,
+            >,
+        > + Send,
+>;
 
 /// Complete producer-free request to admit one certified run (store-internal).
 ///
@@ -71,10 +75,6 @@ impl StructuredAdmissionRequest {
             initial_values,
             append_request_id,
         }
-    }
-
-    pub(super) const fn run_id(&self) -> &mfm_ids::RunId {
-        &self.run_id
     }
 }
 
@@ -169,10 +169,6 @@ impl StructuredAppendAttempt {
         &self.outcome
     }
 
-    pub(super) const fn candidate(&self) -> &CommittedBatch {
-        &self.candidate
-    }
-
     /// Returns a positive committed batch proof, when acknowledgement is known.
     pub const fn committed(&self) -> Option<&CommittedBatch> {
         match &self.outcome {
@@ -221,10 +217,6 @@ impl StructuredAppendAttempt {
         Some((self.candidate, self.successor?))
     }
 
-    pub(super) fn confirm_existing_same(&mut self) {
-        self.outcome = BackendAppendOutcome::ExistingSame(self.candidate.clone());
-    }
-
     /// Converts a store attempt into the Runtime-facing sealed attempt.
     pub(super) fn into_runtime_attempt(self) -> mfm_runtime::history::StructuredAppendAttempt {
         use mfm_journal::structured::RunRecord;
@@ -253,18 +245,7 @@ impl StructuredAppendAttempt {
             if let [assigned] = batch.records.as_slice() {
                 if let RunRecord::ExternalAccessAuthorized(authorization) = &assigned.record {
                     let fact_scan = self.fact_scan_permit.map(|permit| {
-                        let port: Box<
-                            dyn FnOnce(
-                                    mfm_facts::FactSelectionRequest,
-                                ) -> std::pin::Pin<
-                                    Box<
-                                        dyn std::future::Future<
-                                                Output = mfm_certify::structured::PriorRunFactScanCompletion,
-                                            > + Send
-                                            + 'static,
-                                    >,
-                                > + Send,
-                        > = Box::new(move |request| {
+                        let port: PriorRunFactScanInvoker = Box::new(move |request| {
                             Box::pin(async move {
                                 match permit.invoke(request).await {
                                     super::fact_scan::PriorRunFactScanCompletion::Returned(v) => {

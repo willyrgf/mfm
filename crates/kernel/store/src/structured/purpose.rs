@@ -475,7 +475,8 @@ fn reject_export_source_cycles(
     }
     let mut ready = incoming
         .iter()
-        .filter_map(|(run_id, count)| (*count == 0).then(|| run_id.clone()))
+        .filter(|(_, count)| **count == 0)
+        .map(|(run_id, _)| run_id.clone())
         .collect::<BTreeSet<_>>();
     let mut seen = 0usize;
     while let Some(run_id) = ready.pop_first() {
@@ -505,7 +506,7 @@ mod export_source_closure_tests {
 
     fn run(digit: u8) -> RunId {
         let hex = format!("{digit:x}").repeat(64);
-        RunId::parse(&format!("run:sha256-jcs-v1:{hex}")).expect("run id")
+        RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("run id")
     }
 
     #[test]
@@ -560,8 +561,7 @@ mod export_source_closure_tests {
             let digit = (index % 15) as u8;
             // Distinct run ids via algorithm domain not available; use digest hex.
             let hex = format!("{index:064x}");
-            let source =
-                RunId::parse(&format!("run:sha256-jcs-v1:{hex}")).expect("distinct run id");
+            let source = RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("distinct run id");
             pending.insert(source.clone());
             graph.insert(source, BTreeSet::new());
             let _ = digit;
