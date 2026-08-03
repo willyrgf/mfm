@@ -67,11 +67,17 @@ pool. Test issuance uses deployment-private login materials only inside integrat
 
 ## Transaction semantics
 
-Each run append uses a real SQL transaction and a transaction-scoped advisory lock derived from
-the exact run id, acquired before decision-bearing head reads. Inside the lock it loads the complete
-current assigned prefix/object closure, checks the expected head and writer lineage, stores exactly
-the store-validated batch, and commits all records/objects/head together. Fact publication and
-scanner-authorization appends additionally serialize on the exact tenant frontier.
+Each run append begins `READ COMMITTED`, acquires the canonical run advisory lock before any
+decision-bearing head or append-identity read, then classifies under that lock:
+
+- same append identity and same canonical bytes -> `ExistingSame`
+- same append identity and different canonical bytes -> `AppendConflict`
+- different append identities from the same predecessor -> one `NewlyCommitted` and one `StaleHead`
+
+On unique/serialization ambiguity the store re-reads under the lock before classifying. Healthy
+contention never maps to `BackendUnavailable`. Object counts, frame sizes, and object closure bounds
+are owned by the shared store canonical-append module and enforced identically for memory and
+PostgreSQL before DML.
 
 Positive backend replies include normalized stored content; the store compares them with its
 retained candidate. Connection loss while acknowledging commit reports acknowledgement unknown and

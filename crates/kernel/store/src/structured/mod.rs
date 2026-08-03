@@ -3,6 +3,7 @@
 mod adapter;
 mod assembly;
 mod backend;
+mod canonical_append;
 mod configuration;
 mod fact_scan;
 mod fold;
@@ -20,6 +21,9 @@ pub use assembly::assemble_with_backend;
 pub use backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
     StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+};
+pub use canonical_append::{
+    validate_append_objects, validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
 };
 pub use configuration::{
     verify_configuration_history, ConfigurationAppendRequest, ConfigurationBackendAppendOutcome,

@@ -206,6 +206,7 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             {
                 return Err(StructuredStoreError::InvalidHistory);
             }
+            super::canonical_append::validate_append_objects(&committed.objects)?;
 
             let mut state = self.lock()?;
             if state.unavailable {
