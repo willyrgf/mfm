@@ -70,12 +70,10 @@ impl ProtectedKeyMaterial {
     pub(super) fn into_secure_key(mut self) -> SecureKey {
         let key_bytes = std::mem::replace(&mut self.bytes, Zeroizing::new([0_u8; 32]));
         #[cfg(test)]
-        let ownership_witness = self.ownership_witness.take();
-        SecureKey {
-            key_bytes,
-            #[cfg(test)]
-            ownership_witness,
+        if let Some(ownership_witness) = self.ownership_witness.take() {
+            return SecureKey::from_protected_with_witness(key_bytes, ownership_witness);
         }
+        SecureKey::from_protected(key_bytes)
     }
 }
 
@@ -153,7 +151,7 @@ impl SecureKey {
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, KeystoreError> {
-        let key = EthereumPrivateKey::from_secret_bytes(&*self.key_bytes)
+        let key = EthereumPrivateKey::from_secret_bytes(&self.key_bytes)
             .map_err(keystore_error_from_ethereum_key)?;
         key.sign_hash_recoverable(hash)
             .map_err(keystore_error_from_ethereum_key)
