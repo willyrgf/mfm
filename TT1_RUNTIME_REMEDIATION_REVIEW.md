@@ -986,3 +986,207 @@ proofs remain residuals and do not reopen a production bypass or unsafe entry/no
 
 _End of EVM / keystore checkpoint. Gate PASS recorded at exact HEAD
 `a83b8a780b87369dddfde1e21fd7866eeeceb875`._
+
+## Application / export / replay checkpoint (after Commit 17 + consistency fixes)
+
+### Identity
+
+| Field | Value |
+| --- | --- |
+| Reviewed revision (full hash) | `933d263a1851b57d1b2cd88951a0cbc9ab1177b7` |
+| Reviewed subject | `align cli bootstrap denial message with session bundle contract` |
+| Reviewer identity | independent application remediation reviewer subagent |
+| Review date (UTC) | 2026-08-03T20:46:55Z |
+| Branch | `refact-runtime` |
+| Scope | AUTH-05, APP-01..03, REPLAY-01..03, cross-layer QUALITY-01 / VERIFY-01, preservation list |
+| Gate decision | **PASS** |
+
+### Preceding implementation revisions reviewed
+
+| Order | Full hash | Subject |
+| --- | --- | --- |
+| 15 | `8164d070c6e04287df1ef5dc914ba33c24b691fc` | `authorize recursive export before serialization` |
+| 16 | `e2330504a576044e1bd535aceacbd7389d307f99` | `remove current candidate replay comparison` |
+| 17 | `3b750ccadf8a46aa257d8b31d0dfc5dca466c3ab` | `make portable replay independently verifiable` |
+| consistency | `3216913e30a8e4e85bbdd0874c278609406dff31` | `align portable export qualification with batch envelopes` |
+| consistency | `933d263a1851b57d1b2cd88951a0cbc9ab1177b7` | `align cli bootstrap denial message with session bundle contract` |
+
+Ancestry: EVM checkpoint `a83b8a78…`, AUTH-05 seal `e636b4d3…`, and commits 15–17 are all ancestors of the reviewed HEAD. The two consistency commits close review-found contract/test drift only (no authority redesign).
+
+### Commands and generated evidence reviewed
+
+#### Implementer verification logs
+
+| Log | Path | Disposition used |
+| --- | --- | --- |
+| Commit 15 store/app | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-15.log` | store unit + export source closure tests |
+| Commit 15 app | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-15-app.log` | app UI compile-fails |
+| Commit 16 | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-16.log` | app/replay surface after compare_current deletion |
+| Commit 17 | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-17.log` | portable ownership cutover + UI |
+| Commit 17 metadata | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-17-metadata.log` | cargo-metadata-contract |
+
+#### Independent reviewer re-checks (this review)
+
+All commands run under the Nix development shell from repository root at
+`933d263a1851b57d1b2cd88951a0cbc9ab1177b7` (or the immediately preceding clean tip before the
+consistency commits for package suites that did not change).
+
+| Command | Local evidence | Result |
+| --- | --- | --- |
+| `nix develop -c cargo test -p mfm-app --lib` | `/tmp/grok-goal-649474994ccb/implementer/verify/review-app-lib.log` | pass (40 unit, includes export denial + unpolled stream proofs) |
+| `nix develop -c cargo test -p mfm-app --test application-privacy-ui` | commit-17 / review-app-replay logs | pass (10 UI compile-fails incl. AUTH-05) |
+| `nix develop -c cargo test -p mfm-replay` | review-app-replay.log | pass (1 unit bounds test) |
+| `nix develop -c cargo test -p mfm-store --features test-support --lib` | review-store-lib.log | pass (24 unit, incl. multi-hop/cyclic/over-budget export closure) |
+| `nix develop -c cargo test -p mfm --test json_output_integration` | review-cli-json2.log | pass (8; compare_current rejected; bootstrap message aligned) |
+| `nix develop -c cargo test -p mfm-rest-api --lib` | review-rest.log | pass (25) |
+| `nix develop -c cargo test --release -p mfm-integration-tests --features parity-tests --test evm_postgres_submission --no-run` | review-integration-compile.log | pass (compiles against batch-envelope assertions) |
+
+### Full problem-to-proof audit
+
+| Proof | Disposition | Notes |
+| --- | --- | --- |
+| AUTH-05 | **PASS** | Sealed purpose readers/evidence since `e636b4d3…`; production holds and uses all five readers; grant-retaining purpose-typed `AuthorizedRunCall`; compile-fails for public≠export/trace. Reconfirmed at HEAD. |
+| APP-01 | **PASS with residual** | Two-phase export: `authorize_export_source_closure` authorizes every discovered source under `Export` before `write_structured_export`; zero public bytes on denial; pure expander covers multi-hop/shared/cyclic/over-budget; app unit tests redacted dependency denial (denied/wrong-tenant/wrong-principal). Residual: no full multi-hop denied-source E2E under live store in unit layer (R-APP-01-E2E). |
+| APP-02 | **PASS** | `compare_current` / `CompareCurrent` absent as capability. Annex `mfm.replay-mode.v1` values are only `verify`/`reproduce`. CLI/REST reject old mode as parse/schema failure, not unavailable compatibility. |
+| APP-03 | **PASS** | Unchanged since kernel: store-derived run id; no caller-supplied digest on admission command. |
+| REPLAY-01 | **PASS with residual** | `PortableRunExport` carries exact batches, fixation, source ids, top-level digest; `strict_decode` enforces bounds/canonical/digest; `verify_offline`/`fold_with_trust` call `verify_offline_recorded_history` with explicit trust snapshot only. Residual: full hostile tamper corpus is structural + partial (bounds unit + reproduce hostile paths); no complete offline unit matrix for every plan bullet (R-REPLAY-01-TAMPER). |
+| REPLAY-02 | **PASS** | App-owned `StructuredPortableExport` deleted; app calls `mfm_replay::portable::*` only. Architecture/design docs name `mfm-replay` as format owner. |
+| REPLAY-03 | **PASS with residual** | Annex owns `mfm.portable-run-export-stream.v1`, `mfm.portable-fixation.v1`, `mfm.replay-mode.v1` (generated from `contracts/recoverability/generate.py`). Residual: corpus has no portable positive/negative vectors (schema-only; other public DTOs do have vectors) (R-REPLAY-03-CORPUS). |
+| QUALITY-01 (app/export/replay) | **PASS with residual** | Portable format consolidated into `mfm-replay/portable.rs`; purpose module owns export closure; production backend no longer defines a second export DTO. Oversized modules remain elsewhere (prior residuals). |
+| VERIFY-01 (app/export/replay) | **PASS with residual** | Boundary compile-fails, denial unit tests, closure unit tests, CLI/REST rejection tests, and recompiled qualification harness present. Incomplete offline tamper matrix and portable corpus vectors residual. |
+| Preservation list | **PASS** | Graph/executor remains deleted; five record families; append atomicity; canonical float-free hashing; callback-free recorded verify; no memory fallback; affine access; prior-fact scanner; CLI/REST current set minus compare_current; redaction preserved on public error surfaces. |
+
+### Export authorization matrix
+
+| Scenario | Mechanism | Evidence | Disposition |
+| --- | --- | --- | --- |
+| Root without sources | Phase one short-circuits after root load | `authorize_export_source_closure` empty sources → `Ok(root)` | structural |
+| Direct source authorized | `authorize_required_dependency` + export load + tenant check | app unit `export_dependencies_have_their_own_redacted_denial_contract` granted path | **PASS** |
+| Source grant denied | policy `GrantDenied` → `SourceRunExportDenied` | same test | **PASS** |
+| Wrong tenant / principal on source | policy returns other tenant/principal → `SourceRunExportDenied` | same test | **PASS** |
+| Missing / store failure on source | `classify_export_dependency_store_error` collapses all store errors | production_structured.rs | structural |
+| Multi-hop shared DAG | pure `expand_export_source_closure` | store unit `multi_hop_shared_and_deterministic` | **PASS** |
+| Cyclic graph | pure expander | store unit `cyclic_source_graph_is_rejected` | **PASS** |
+| Over-budget graph | `MAX_EXPORT_SOURCE_RUNS` | store unit `over_budget_source_graph_is_rejected` | **PASS** |
+| Zero bytes on failure | serialization only after phase one; spool created in phase two | `export_run` / `write_structured_export` order | structural |
+| Unpolled stream on denial | reproduce/export denial does not read portable input | app unit `replay_and_export_denials_leave_the_input_unpolled` | **PASS** |
+| Purpose seal for export | only `ExportRunReader` / `ExportRunEvidence` | compile-fails + production load paths | **PASS** |
+| Live multi-hop denied export E2E | not unit-harnessed at this checkpoint | residual R-APP-01-E2E | residual |
+
+### Portable tamper matrix
+
+| Attack | Expected | Evidence at HEAD | Disposition |
+| --- | --- | --- | --- |
+| Oversize bytes | `TooLarge` before full decode | `oversized_and_overdeep_documents_fail_before_full_decode` | **PASS** |
+| Over-depth JSON | `TooLarge` | same | **PASS** |
+| Empty / minimal object | fail | same | **PASS** |
+| Unknown field | fail strict annex decode | qualification `assert_replay_artifact_invalid` (rehashed unknown field) | **PASS** (reproduce path) |
+| Truncated batches / stale prefix | fail equality or structure | qualification pops terminal batch then readdresses | **PASS** (reproduce path) |
+| Audit used as semantic reproduce artifact | fail | qualification rejects audit bytes for reproduce | **PASS** |
+| Top-level digest change | fail `strict_decode` recomputation | structural in `strict_decode` / `fold_with_trust` | structural |
+| Non-canonical encoding | fail byte equality to re-canonicalized form | structural | structural |
+| Batch predecessor / fixation mismatch | fail `validate_structure` | structural | structural |
+| Offline fold without live store | `verify_offline` + trust snapshot only | API present; no full golden offline unit fixture | residual R-REPLAY-01-OFFLINE-GOLDEN |
+| Record reorder / object hash swap / false fact frontier | fail fold or structure | intended via sole fold; not unit-enumerated here | residual R-REPLAY-01-TAMPER |
+
+### Repository-wide deletion searches
+
+Executed against the working tree excluding `target/` and problem/plan review logs; durable note at
+`/tmp/grok-goal-649474994ccb/implementer/deletion-audit.txt`.
+
+| Surface | Result at reviewed HEAD |
+| --- | --- |
+| Public production `StructuredRunHistoryWriter` | `pub(super)` only; compile-fail tombstones remain |
+| Production writer `split` | `pub(super)` on run store; configuration `split` remains (out of run-history AUTH-01) |
+| `StructuredProgramVerifier` | absent; compile-fail tombstone |
+| `StoreProgramVerifier` | absent |
+| Public `VerifiedProgramData::new` | `pub(super)` + compile-fail |
+| `split_qualified_registry` | absent |
+| `reviewed_safe_failures` | absent from Rust sources |
+| `compare_current` / `CompareCurrent` | rejection tests only (CLI/REST/parse); no capability |
+| App-owned `StructuredPortableExport` | deleted |
+| Plaintext `SecureKey::new([u8;32])` | compile-fail doctest only |
+| `TestAuthoritativeWriterFence` / `open_with_pool` | absent |
+| Pool openers for production assembly | opaque session bundles only (`qualification.rs` / `session.rs`) |
+
+### Generated-contract and documentation consistency
+
+| Surface | Evidence | Disposition |
+| --- | --- | --- |
+| Annex portable schemas | `mfm.portable-run-export-stream.v1`, `mfm.portable-fixation.v1` present with batch/fixation/digest shape | **PASS** |
+| Annex replay mode | values `verify`, `reproduce` only (no compare_current) | **PASS** |
+| Corpus portable vectors | none generated for portable schemas | residual R-REPLAY-03-CORPUS |
+| `docs/design.md` / `docs/architecture.md` / recoverability surface | portable ownership and two-phase export described; format lists batches/fixation | **PASS** |
+| CLI/REST README | compare_current removed in commit 16 | **PASS** |
+| Qualification harness assertions | updated to batch envelopes at `3216913e…` | **PASS** (compile); full green run remains env residual |
+| CLI bootstrap message | aligned to session-bundle wording at `933d263a…` | **PASS** |
+| REST standalone denial message | still says “authoritative-writer fence” while CLI says “session bundle”; same error code | residual R-TRANSPORT-MSG (non-blocking wording drift) |
+
+### Findings and fixing / re-review ledger
+
+#### Findings closed before gate
+
+| ID | Severity | Finding | Fix |
+| --- | --- | --- | --- |
+| B-APP-QUAL-FORMAT | Blocker for merge CI | `evm_postgres_submission` still asserted pre-commit-17 flattened `records`/`journal_head` portable shape | `3216913e…` rewrote assertions for `batches`/`fixation`/digest contract |
+| B-CLI-BOOTSTRAP-MSG | Blocker for workspace tests | CLI json test expected old fence message after AUTH-03/04 cutover to session bundles | `933d263a…` aligned expected message |
+
+#### Non-blocking residuals
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| R-APP-01-E2E | Residual | Multi-hop denied/wrong-target export under live PostgreSQL not unit-proved end-to-end | VERIFY-01; pure expander + policy unit cover mechanism |
+| R-REPLAY-01-TAMPER | Residual | Plan’s full offline tamper enumeration not one table-driven unit suite | Structural validators present; expand tests later |
+| R-REPLAY-01-OFFLINE-GOLDEN | Residual | No golden offline `verify_offline` fixture equal to online projection in unit layer | API + fold entry present |
+| R-REPLAY-03-CORPUS | Residual | Annex schema without portable corpus vectors | Generate minimum vectors later |
+| R-AUTH-05-CF-MATRIX | Residual | Cross-purpose compile-fails sample pairs, not full 5×5 | Carried from kernel re-review |
+| R-TRANSPORT-MSG | Residual | REST vs CLI standalone denial message wording differs | Same public code; optional unify |
+| R-EVM-QUAL-ENV | Residual | Prior EVM qualification role collision on shared PG | Carried from EVM checkpoint |
+| Prior domain residuals | Residual | EVM/PG QUALITY/VERIFY residuals from earlier PASS checkpoints | Not reopened |
+
+### Production-claim table
+
+| Claim | Classification | Evidence |
+| --- | --- | --- |
+| Runtime is sole production run-history writer | **real production proof** | `pub(super)` writer/split; assembly returns Runtime + purpose readers; compile-fails |
+| Certified-program verification not forgeable by app | **real production proof** | private adapter registry; opaque verified program construction |
+| Purpose-limited read projections | **real production proof** | sealed evidence types + purpose-typed calls + production five-reader wiring |
+| Recursive export authorization before bytes | **real production proof** (mechanism) + **test-only** multi-hop expansion | production path structural; multi-hop graph pure unit; live multi-hop denial residual |
+| Portable export independently verifiable offline | **real production proof** (API/path) + **test-only** partial hostile | `verify_offline` / sole fold; full golden offline residual |
+| `compare_current` deleted | **real production proof** | annex, parsers, search, rejection tests |
+| Reproduction remains deliberately unavailable | **deliberately unavailable** | `project_unavailable_reproduction` after exact artifact validation |
+| Fresh unique-intent keystore E2E | **test-only residual** | EVM checkpoint R-EVM-01-FRESH-E2E |
+| Opaque exact-target PostgreSQL sessions | **deployment TCB** | session issuance outside ordinary app; standalone CLI/REST refuse without deployment bundle |
+| Writer fence / session materials | **deployment TCB** | binaries fail closed without deployment-issued capability |
+| Host PostgreSQL role hygiene for qualification | **deployment/env residual** | R-EVM-QUAL-ENV |
+
+### Material uncertainties
+
+none
+
+(Frozen residuals above are proof-coverage gaps, not open architectural choices. No new design-contract
+ambiguity requiring architect-agent escalation was found.)
+
+### Explicit gate decision
+
+```text
+GATE: PASS
+```
+
+Rationale: Reviewed HEAD `933d263a1851b57d1b2cd88951a0cbc9ab1177b7` closes AUTH-05, APP-01..03, and
+REPLAY-01..03 for the structural production properties required by the plan. Purpose readers and
+grant-retaining authorized calls remain sealed; export authorizes the recursive source closure before
+serialization and collapses dependency failures to one redacted contract with zero emitted bytes;
+`compare_current` is deleted from annex, application, CLI, and REST surfaces; portable format and
+offline fold entry live solely in `mfm-replay` with annex-backed schemas; store-derived run identity
+is preserved. Review-found merge blockers (qualification export shape drift; CLI bootstrap message
+drift) were fixed in two consistency commits before this checkpoint. Incomplete offline tamper
+golden suites, portable corpus vectors, and live multi-hop export E2E remain non-blocking residuals.
+
+Ready for merge verification: **yes** (final executable gates still required; this checkpoint is not
+a substitute for `.#model-check` / `.#ci`).
+
+---
+
+_End of application / export / replay checkpoint. Gate PASS recorded at exact HEAD
+`933d263a1851b57d1b2cd88951a0cbc9ab1177b7`._
