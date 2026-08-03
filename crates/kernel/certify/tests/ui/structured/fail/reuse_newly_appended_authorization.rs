@@ -1,5 +1,5 @@
 use mfm_facts::FactSelectionRequest;
-use mfm_store::structured::NewlyAppendedAuthorization;
+use mfm_certify::structured::NewlyAppendedAuthorization;
 
 fn reuse(
     authorization: NewlyAppendedAuthorization,

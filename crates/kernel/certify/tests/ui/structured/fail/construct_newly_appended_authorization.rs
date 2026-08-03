@@ -1,4 +1,4 @@
-use mfm_store::structured::NewlyAppendedAuthorization;
+use mfm_certify::structured::NewlyAppendedAuthorization;
 
 fn main() {
     let _authorization = NewlyAppendedAuthorization {

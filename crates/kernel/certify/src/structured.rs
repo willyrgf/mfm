@@ -20,8 +20,8 @@ use mfm_capabilities::{
 };
 use mfm_facts::{FactSelectionReadFailure, FactSelectionReadResponse, FactSelectionRequest};
 use mfm_ids::{
-    ContentDigest, ContentRef, DigestAlgorithm, FragmentBoundaryId, OccurrenceId, RequestDigest,
-    RunId, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
+    AccessAttemptId, ContentDigest, ContentRef, DigestAlgorithm, FragmentBoundaryId, OccurrenceId,
+    RequestDigest, RunId, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
@@ -66,7 +66,6 @@ use mfm_spec::structured::{
     MAX_STRUCTURED_OCCURRENCES,
 };
 use mfm_spec::{exact_content_ref, CanonicalJsonValue};
-use mfm_store::structured::{NewlyAppendedAuthorization, PriorRunFactScanCompletion};
 use mfm_values::{
     component_object_evidence_contract_canonical, component_object_evidence_contract_ref, MfmValue,
     RetainedValueContract, SchemaIdentity,
@@ -115,6 +114,82 @@ const KERNEL_FACT_ADAPTER_IMPLEMENTATION_ID: &str =
 struct RegisteredComponentObject {
     object: CertifiedComponentObject,
     outbound_references: Vec<ComponentObjectReference>,
+}
+
+
+/// Closed completion produced only by the store-owned prior-run fact scanner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PriorRunFactScanCompletion {
+    /// Complete typed response through the authorization frontier.
+    Returned(FactSelectionReadResponse),
+    /// Reviewed definite bounded-read failure.
+    SafeFailure(FactSelectionReadFailure),
+    /// Stable redaction-safe integrity fault.
+    IntegrityFault(StableId),
+}
+
+type FactScanFuture = std::pin::Pin<
+    Box<dyn std::future::Future<Output = PriorRunFactScanCompletion> + Send + 'static>,
+>;
+
+/// Non-cloneable proof that this process directly observed one newly committed
+/// external-access authorization.
+///
+/// Production construction is limited to the store adapter via
+/// [`NewlyAppendedAuthorization::from_store_mint`].
+pub struct NewlyAppendedAuthorization {
+    authorization_ref: RecordRef,
+    authorization: ExternalAccessAuthorized,
+    fact_scan: Option<Box<dyn FnOnce(FactSelectionRequest) -> FactScanFuture + Send>>,
+}
+
+impl std::fmt::Debug for NewlyAppendedAuthorization {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NewlyAppendedAuthorization")
+            .field("authorization_ref", &self.authorization_ref)
+            .field("access_attempt_id", &self.authorization.access_attempt_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl NewlyAppendedAuthorization {
+    /// Store-adapter mint after a newly committed authorization append.
+    #[doc(hidden)]
+    pub fn from_store_mint(
+        authorization_ref: RecordRef,
+        authorization: ExternalAccessAuthorized,
+        fact_scan: Option<Box<dyn FnOnce(FactSelectionRequest) -> FactScanFuture + Send>>,
+    ) -> Self {
+        Self {
+            authorization_ref,
+            authorization,
+            fact_scan,
+        }
+    }
+
+    /// Returns the exact assigned authorization record reference.
+    pub const fn authorization_ref(&self) -> &RecordRef {
+        &self.authorization_ref
+    }
+
+    /// Returns the kernel-derived access-attempt identity.
+    pub const fn access_attempt_id(&self) -> &AccessAttemptId {
+        &self.authorization.access_attempt_id
+    }
+
+    /// Returns the complete immutable committed authorization.
+    pub const fn authorization(&self) -> &ExternalAccessAuthorized {
+        &self.authorization
+    }
+
+    /// Consumes the store-minted authority for the exact committed prior-run fact Read.
+    pub fn invoke_prior_run_fact_scan(
+        self,
+        request: FactSelectionRequest,
+    ) -> Option<FactScanFuture> {
+        self.fact_scan.map(|scan| scan(request))
+    }
 }
 
 /// Exact qualified entry-point policy selected by process assembly.
@@ -3825,6 +3900,10 @@ impl QualifiedProgramRegistry {
 
     /// Consumes qualified assembly into its callback-free admission snapshot
     /// and the sole non-cloneable live process authority for Runtime.
+    ///
+    /// Production consumers must pass the complete registry into store assembly
+    /// rather than splitting and reassembling halves independently.
+    #[doc(hidden)]
     pub fn into_runtime_parts(self) -> (AdmissionVerificationRegistry, RuntimeProcessRegistry) {
         let admission = AdmissionVerificationRegistry {
             registry: self.registry.clone(),

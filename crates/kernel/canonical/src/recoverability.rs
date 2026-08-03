@@ -2472,7 +2472,8 @@ fn validate_annex_metadata(
         "QualifiedProgramRegistry",
         "Runtime",
         "StateFrame",
-        "StructuredRunHistoryWriter",
+        "RuntimeHistoryPort",
+        "StoreHistoryAdapter",
         "WalletNonceAuthorityResource",
         "WalletNonceDomainActivationAttestation",
     ]);

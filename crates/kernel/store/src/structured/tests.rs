@@ -35,6 +35,10 @@ use mfm_values::{
 };
 
 use super::*;
+use super::backend::{
+    StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredRunStore,
+};
+use super::fold::ProgramVerifier;
 
 #[derive(Clone)]
 struct FixtureProgramVerifier {
@@ -44,7 +48,7 @@ struct FixtureProgramVerifier {
     value_schemas: BTreeMap<ContentRef, SchemaIdentity>,
 }
 
-impl StructuredProgramVerifier for FixtureProgramVerifier {
+impl ProgramVerifier for FixtureProgramVerifier {
     fn verify(
         &self,
         entry_point_id: &StableId,

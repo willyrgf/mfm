@@ -1,10 +1,6 @@
-use mfm_storage_postgres::PostgresStructuredHistoryBackend;
+// Production writers are not public. This fails at the import boundary.
 use mfm_store::structured::StructuredRunHistoryWriter;
 
-fn duplicate(
-    writer: &StructuredRunHistoryWriter<PostgresStructuredHistoryBackend>,
-) -> StructuredRunHistoryWriter<PostgresStructuredHistoryBackend> {
-    Clone::clone(writer)
+fn main() {
+    let _ = std::any::type_name::<StructuredRunHistoryWriter<()>>();
 }
-
-fn main() {}

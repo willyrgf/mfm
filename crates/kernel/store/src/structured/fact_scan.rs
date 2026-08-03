@@ -18,9 +18,7 @@ use mfm_journal::structured::{
 use serde::Serialize;
 
 use super::backend::{RawRunHistory, StructuredBackendFuture, TenantFactPublication};
-use super::fold::{
-    verify_recorded_history, StructuredProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
-};
+use super::fold::{verify_recorded_history, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun};
 use super::qualification::PublicPhysicalBindingVerifier;
 
 const SCAN_PAGE_ITEMS: u32 = 1_024;
@@ -91,7 +89,7 @@ impl FactScanPermit {
 
 pub(super) fn fact_scan_permit(
     source: Arc<dyn PriorRunFactSource>,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    program_verifier: Arc<dyn ProgramVerifier>,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
     committed: &CommittedBatch,
     successor: &VerifiedStructuredRun,
@@ -149,7 +147,7 @@ fn invalid(_message: &'static str) -> StructuredStoreError {
 
 struct BackendFactScanPort {
     source: Arc<dyn PriorRunFactSource>,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    program_verifier: Arc<dyn ProgramVerifier>,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
     consumer_run_id: RunId,
     consumer_admission: RunAdmitted,
@@ -521,7 +519,7 @@ impl BackendFactScanPort {
 pub(super) async fn verify_actionable_history(
     source: Arc<dyn PriorRunFactSource>,
     raw: RawRunHistory,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    program_verifier: Arc<dyn ProgramVerifier>,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> super::Result<VerifiedStructuredRun> {
     let fact_barriers = raw

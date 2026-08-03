@@ -2,7 +2,7 @@ error[E0061]: this method takes 2 arguments but 1 argument was supplied
  --> tests/ui/structured/fail/invoke_binding_without_new_authorization.rs:9:33
   |
 9 |     let _completion = processes.invoke_qualified_physical_binding(binding);
-  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------- argument #2 of type `mfm_store::structured::mutation::NewlyAppendedAuthorization` is missing
+  |                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------- argument #2 of type `NewlyAppendedAuthorization` is missing
   |
 note: method defined here
  --> src/structured.rs
@@ -11,5 +11,5 @@ note: method defined here
   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 help: provide the argument
   |
-9 |     let _completion = processes.invoke_qualified_physical_binding(binding, /* mfm_store::structured::mutation::NewlyAppendedAuthorization */);
-  |                                                                          +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+9 |     let _completion = processes.invoke_qualified_physical_binding(binding, /* NewlyAppendedAuthorization */);
+  |                                                                          ++++++++++++++++++++++++++++++++++

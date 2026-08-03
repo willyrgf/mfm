@@ -24,8 +24,8 @@ use mfm_evm::{
     STRUCTURED_EVM_BALANCE_COLLECTION_OPERATION_ID,
 };
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, InvocationIdentity, RunId,
-    SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, InvocationIdentity, SchemaId,
+    StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     HistoryObject, PriorRunFactSourceManifest, ADMISSION_CONFIGURATION_OBJECT_TYPE,
@@ -41,16 +41,17 @@ use mfm_portfolio::{
     STRUCTURED_PORTFOLIO_SNAPSHOT_OPERATION_ID,
 };
 use mfm_program::structured::{RuntimeReadAdapter, RuntimeReadCapability};
-use mfm_runtime::structured::{split_qualified_registry, DriveOutcome, Runtime};
+use mfm_runtime::history::StructuredAdmissionCommand;
+use mfm_runtime::structured::DriveOutcome;
 use mfm_spec::structured::{
     AuthoredBlock, AuthoredDeclaration, ExpandedBlock, ExpandedDeclaration,
     SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
     SecretFreeQualificationArtifact, StructuredComponentKind, StructuredExpansionProfile,
 };
 use mfm_store::structured::{
-    PhysicalBindingAuthorization, PhysicalBindingSupersession, ProposedCanonicalValue,
-    PublicPhysicalBindingVerifier, StructuredAdmissionMaterial, StructuredAdmissionRequest,
-    StructuredMemoryBackend, StructuredRunStore, StructuredStoreError, StructuredStoreIdentity,
+    assemble_in_memory_runtime, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    ProposedCanonicalValue, PublicPhysicalBindingVerifier, StructuredAdmissionMaterial,
+    StructuredStoreError, StructuredStoreIdentity,
 };
 use serde_json::json;
 
@@ -437,9 +438,8 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
         .certify(authored)
         .expect("execution certified program")
         .into_document();
-    let (program_verifier, processes) = split_qualified_registry(registry);
-    let store = StructuredRunStore::new(
-        StructuredMemoryBackend::new(StructuredStoreIdentity {
+    let assembled = assemble_in_memory_runtime(
+        StructuredStoreIdentity {
             store_scope_id: StoreScopeId::new(format!(
                 "{}{:032x}",
                 StoreScopeId::PREFIX,
@@ -447,19 +447,14 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
             ))
             .expect("execution store scope"),
             store_epoch: StoreEpoch::new(1),
-        }),
-        program_verifier,
+        },
+        registry,
         Arc::new(TestPublicBindingVerifier),
     );
-    let (writer, reader) = store.split();
-    let runtime = Runtime::new(writer, processes);
-    let run_id = RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(&[discriminator, 0x50]),
-    );
-    runtime
-        .admit_run(StructuredAdmissionRequest::new(
-            run_id.clone(),
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _attempt) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
             TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "4".repeat(32)))
                 .expect("execution tenant"),
             InvocationIdentity::new(format!(
@@ -488,7 +483,7 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
     }
 
     let verified = reader
-        .load_verified(&run_id)
+        .load(&run_id)
         .await
         .expect("execution verified history");
     let outcome = mfm_replay::structured::project_operation_outcome(&verified)

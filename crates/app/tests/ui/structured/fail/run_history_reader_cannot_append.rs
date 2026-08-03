@@ -1,12 +1,10 @@
+use mfm_store::structured::PublicRunReader;
 use mfm_storage_postgres::PostgresStructuredHistoryBackend;
-use mfm_store::structured::StructuredRunHistoryReader;
 
-fn unavailable<T>() -> T {
-    panic!("compile-fail placeholder")
+fn main() {
+    // Purpose readers must not expose semantic mutation entry points.
+    fn forbid(reader: &PublicRunReader<PostgresStructuredHistoryBackend>) {
+        let _ = reader.admit_run;
+    }
+    let _ = forbid;
 }
-
-async fn mutate(reader: &StructuredRunHistoryReader<PostgresStructuredHistoryBackend>) {
-    reader.admit_run(unavailable()).await;
-}
-
-fn main() {}

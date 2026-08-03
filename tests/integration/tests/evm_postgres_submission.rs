@@ -22,7 +22,7 @@ use mfm_app::{
     PublicJsonResponse, ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
 };
 use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContract};
-use mfm_certify::structured::{ProgramRegistryBuilder, RuntimeProcessRegistry};
+use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_evm::{
     canonical_wallet_reference, derive_evm_chain_lineage_id, derive_evm_semantic_signer_id,
     derive_wallet_nonce_domain, evm_deterministic_signing_profile_ref,
@@ -70,7 +70,8 @@ use mfm_portfolio::{
 use mfm_program::structured::{
     RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
 };
-use mfm_runtime::structured::{split_qualified_registry, DriveOutcome, Runtime};
+use mfm_runtime::history::StructuredAdmissionCommand;
+use mfm_runtime::structured::DriveOutcome;
 use mfm_signing::{
     GenerationGuardedDeterministicSigningProvider, PublicKeyBytes, PublicSigningIdentity,
     QualifiedReadSigningProvider, ReadAttestationQualificationFuture, SignatureBytes, SignerRef,
@@ -96,8 +97,7 @@ use mfm_storage_postgres::{
 use mfm_store::structured::{
     ConfigurationAppendRequest, ConfigurationStreamKey, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    StructuredAdmissionMaterial, StructuredAdmissionRequest, StructuredFrontier,
-    StructuredProgramVerifier, StructuredStoreError,
+    StructuredAdmissionMaterial, StructuredFrontier, StructuredStoreError,
 };
 use ring::hmac;
 use serde_json::{json, Value};
@@ -369,7 +369,14 @@ async fn qualified_evm_submission_restarts_after_one_broadcast_and_completes() {
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
     assert_eq!(rpc.operation_count("eth_getTransactionCount"), 1);
 
-    let batches = database.history_batches(run_id()).await;
+    let submission_run_id = derive_application_run_id(
+        &history_store_scope_id(&database.database_url, &database.history_schema).await,
+        &fixture.tenant,
+        &operation_id(),
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000051")
+            .expect("invocation identity"),
+    );
+    let batches = database.history_batches(submission_run_id).await;
     assert!(
         batches.iter().any(|batch| {
             canonical_json(batch)
@@ -584,27 +591,32 @@ async fn evm_postgres_submission_worker() {
     )
     .await;
     let history_control = isolated_pool(&base_url, &history_schema).await;
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         history_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&assembly.program_verifier),
+        assembly.registry,
         Arc::clone(&assembly.physical_verifier),
     )
     .await
     .expect("open authoritative structured history");
-    let (writer, reader) = store.split();
-    let runtime = Runtime::new(writer, assembly.processes);
-    let run_id = run_id();
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let invocation = InvocationIdentity::new("00000000-0000-4000-8000-000000000051")
+        .expect("invocation identity");
+    let run_id = derive_application_run_id(
+        &reader.store_identity().store_scope_id,
+        &fixture.tenant,
+        &operation_id(),
+        &invocation,
+    );
 
     match mode {
         PHASE_ADMIT_BROADCAST => {
             let phase_started = Instant::now();
-            runtime
-                .admit_run(StructuredAdmissionRequest::new(
-                    run_id.clone(),
+            let (admitted_run_id, _attempt) = runtime
+                .admit_run(StructuredAdmissionCommand::new(
                     fixture.tenant.clone(),
-                    InvocationIdentity::new("00000000-0000-4000-8000-000000000051")
-                        .expect("invocation identity"),
+                    invocation,
                     operation_id(),
                     assembly.document,
                     assembly.admission_material,
@@ -614,6 +626,7 @@ async fn evm_postgres_submission_worker() {
                 ))
                 .await
                 .expect("admit EVM submission");
+            assert_eq!(admitted_run_id, run_id);
             let mut drive_count = 0_usize;
             for _ in 0..MAX_DRIVES {
                 drive_count += 1;
@@ -646,7 +659,7 @@ async fn evm_postgres_submission_worker() {
             );
             assert!(!matches!(
                 reader
-                    .load_verified(&run_id)
+                    .load(&run_id)
                     .await
                     .expect("verify pre-restart history")
                     .frontier(),
@@ -685,7 +698,7 @@ async fn evm_postgres_submission_worker() {
             );
             assert!(matches!(
                 reader
-                    .load_verified(&run_id)
+                    .load(&run_id)
                     .await
                     .expect("verify closed history")
                     .frontier(),
@@ -1907,9 +1920,8 @@ async fn assert_replay_artifact_invalid(
 }
 
 struct RuntimeAssembly {
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    registry: mfm_certify::structured::QualifiedProgramRegistry,
     physical_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-    processes: RuntimeProcessRegistry,
     document: mfm_spec::structured::CertifiedProgramDocument,
     admission_material: StructuredAdmissionMaterial,
     request: EvmSubmissionRequest,
@@ -2154,11 +2166,9 @@ async fn assemble_runtime(
         vec![broadcast_resource_ref, wallet_resource_ref],
     )
     .expect("admission material");
-    let (program_verifier, processes) = split_qualified_registry(qualified);
     RuntimeAssembly {
-        program_verifier,
+        registry: qualified,
         physical_verifier,
-        processes,
         document,
         admission_material,
         request,
@@ -3285,13 +3295,6 @@ fn broadcast_capability_ref() -> ContentRef {
 
 fn operation_id() -> StableId {
     stable("mfm.evm.integration/structured-submit")
-}
-
-fn run_id() -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.evm.integration/structured-run"),
-    )
 }
 
 fn stable(value: &str) -> StableId {

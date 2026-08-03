@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `mfm_store::structured::StructuredRunHistoryWriter`
+ --> tests/ui/fail/writer_not_public.rs:1:5
+  |
+1 | use mfm_store::structured::StructuredRunHistoryWriter;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `StructuredRunHistoryWriter` in `structured`

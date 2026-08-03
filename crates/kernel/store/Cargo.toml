@@ -23,6 +23,8 @@ backend-conformance = ["test-support"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
+mfm-certify = { path = "../certify" }
+mfm-runtime = { path = "../runtime" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
@@ -33,8 +35,31 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-capabilities = { path = "../capabilities" }
+mfm-certify = { path = "../certify" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
+mfm-program = { path = "../program" }
+mfm-program-derive = { path = "../program-derive" }
+mfm-replay = { path = "../replay" }
+mfm-runtime = { path = "../runtime" }
+mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 trybuild = "1.0"
+
+[[test]]
+name = "api-surface"
+path = "tests/api_surface.rs"
+
+[[test]]
+name = "structured-runtime"
+path = "tests/structured_runtime.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "structured-runtime-causal"
+path = "tests/structured_runtime_causal.rs"
+required-features = ["test-support"]

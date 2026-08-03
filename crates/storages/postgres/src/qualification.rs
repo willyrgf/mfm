@@ -4,9 +4,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_ids::{StoreEpoch, StoreScopeId};
+use mfm_certify::structured::QualifiedProgramRegistry;
 use mfm_store::structured::{
-    ConfigurationHistoryStore, PublicPhysicalBindingVerifier, StructuredProgramVerifier,
-    StructuredRunStore,
+    assemble_structured_runtime, AssembledStructuredRuntime, ConfigurationHistoryStore,
+    PublicPhysicalBindingVerifier,
 };
 use sqlx::{PgPool, Row};
 
@@ -93,9 +94,9 @@ impl AuthoritativeWriterContext {
 pub async fn open_structured_authoritative<F>(
     writer_pool: PgPool,
     deployment_writer_fence: F,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-) -> Result<StructuredRunStore<PostgresStructuredHistoryBackend>>
+) -> Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>>
 where
     F: AuthoritativeWriterFence,
 {
@@ -105,9 +106,9 @@ where
         SessionAuthority::Application,
     )
     .await?;
-    Ok(StructuredRunStore::new(
+    Ok(assemble_structured_runtime(
         PostgresStructuredHistoryBackend::new(writer_pool, context),
-        program_verifier,
+        registry,
         physical_binding_verifier,
     ))
 }
@@ -123,10 +124,10 @@ where
 pub async fn open_structured_authoritative_with_configuration<F>(
     writer_pool: PgPool,
     deployment_writer_fence: F,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
-    StructuredRunStore<PostgresStructuredHistoryBackend>,
+    AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,
     ConfigurationHistoryStore<PostgresConfigurationHistoryBackend>,
 )>
 where
@@ -140,13 +141,13 @@ where
     .await?;
     let configuration_backend =
         PostgresConfigurationHistoryBackend::new_application(writer_pool.clone(), context.clone());
-    let run_history = StructuredRunStore::new(
+    let assembled = assemble_structured_runtime(
         PostgresStructuredHistoryBackend::new(writer_pool, context),
-        program_verifier,
+        registry,
         physical_binding_verifier,
     );
     Ok((
-        run_history,
+        assembled,
         ConfigurationHistoryStore::new(configuration_backend),
     ))
 }
@@ -162,10 +163,10 @@ where
 pub async fn open_structured_authoritative_application<F>(
     writer_pool: PgPool,
     deployment_writer_fence: F,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
-    StructuredRunStore<PostgresStructuredHistoryBackend>,
+    AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,
     mfm_store::structured::ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>,
 )>
 where
@@ -180,13 +181,13 @@ where
     let configuration = ConfigurationHistoryStore::new(
         PostgresConfigurationHistoryBackend::new_application(writer_pool.clone(), context.clone()),
     );
-    let run_history = StructuredRunStore::new(
+    let assembled = assemble_structured_runtime(
         PostgresStructuredHistoryBackend::new(writer_pool, context),
-        program_verifier,
+        registry,
         physical_binding_verifier,
     );
     let (_writer, reader) = configuration.split();
-    Ok((run_history, reader))
+    Ok((assembled, reader))
 }
 
 /// Opens the separately held deployment-maintenance authority for append-only configuration.

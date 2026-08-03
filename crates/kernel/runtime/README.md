@@ -1,10 +1,14 @@
 # mfm-runtime
 
-One-action interpreter and sole production holder of the structured RunHistory writer.
+One-action interpreter and sole production path that can request semantic run-history mutation.
 
-Runtime loads one verified cursor, selects the minimum declaration-ordered actionable occurrence,
-and performs at most one transition or audited external operation. It does not maintain an
-in-memory scheduler or domain-specific lifecycle.
+Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. Production adapters,
+backends, and the sole fold remain private to `mfm-store` assembly. Runtime never receives a raw
+backend, writer, pool, or proposal forge surface.
+
+Runtime loads one verified cursor through the port, selects the minimum declaration-ordered
+actionable occurrence, and performs at most one transition or audited external operation. It does
+not maintain an in-memory scheduler or domain-specific lifecycle.
 
 For Read/Effect states, Runtime privately owns:
 
@@ -21,4 +25,5 @@ The purpose-limited prior-run fact scanner follows this same ordinary Read brack
 consumes the store-minted newly committed authorization permit.
 
 Runtime commits the exact registered callback proposal. It owns no EVM/nonce knowledge, raw
-backend, replay service, or public DTO rendering.
+backend, replay service, or public DTO rendering. Callers may implement `RuntimeHistoryPort` for
+isolated tests; such ports cannot attach to MFM production backends.

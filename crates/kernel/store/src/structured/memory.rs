@@ -8,9 +8,9 @@ use mfm_journal::structured::{
 
 use super::backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunStore, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
 };
-use super::fold::{StructuredProgramVerifier, StructuredStoreError};
+use super::fold::StructuredStoreError;
 use super::qualification::PublicPhysicalBindingVerifier;
 
 type AppendKey = (RunId, AppendRequestId);
@@ -327,15 +327,13 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
     }
 }
 
-/// Opens a test-only structured memory store under one exact writer identity.
-pub fn open_structured_in_memory(
-    identity: StructuredStoreIdentity,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-) -> StructuredRunStore<StructuredMemoryBackend> {
-    StructuredRunStore::new(
-        StructuredMemoryBackend::new(identity),
-        program_verifier,
-        physical_binding_verifier,
-    )
+/// Test-support assembly of an in-memory Runtime and purpose readers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn assemble_in_memory_runtime(
+    identity: super::StructuredStoreIdentity,
+    registry: mfm_certify::structured::QualifiedProgramRegistry,
+    physical_binding_verifier: std::sync::Arc<dyn super::PublicPhysicalBindingVerifier>,
+) -> super::AssembledStructuredRuntime<StructuredMemoryBackend> {
+    let backend = StructuredMemoryBackend::new(identity);
+    super::assemble_structured_runtime(backend, registry, physical_binding_verifier)
 }
