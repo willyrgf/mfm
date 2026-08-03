@@ -2,7 +2,8 @@
 name = "mfm-evm"
 version = "0.1.0"
 edition = "2021"
-description = "Pure EVM audited-read graph, protocol, and signing contracts for MFM"
+autotests = false
+description = "Pure EVM structured balance, submission, and wallet-authority contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -23,8 +24,8 @@ thiserror = { workspace = true }
 zeroize = "1.7"
 
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-executor = { path = "../../kernel/executor" }
-mfm-facts = { path = "../../kernel/facts" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-program = { path = "../../kernel/program" }
@@ -36,3 +37,7 @@ mfm-values = { path = "../../kernel/values" }
 [dev-dependencies]
 tokio = { workspace = true }
 trybuild = "1.0"
+
+[[test]]
+name = "signing-ui"
+path = "tests/signing_ui.rs"

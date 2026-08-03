@@ -1,17 +1,25 @@
 # mfm-certify
 
-The sole deterministic composite planner and offline certifier for recoverability-v1 graphs.
+Sole structured program expansion and certification authority.
 
-The private composite planner expands child composition first, framework policy outside the
-protected state, and executor support inside it. Final canonical paths are complete before node ids
-are derived. Every dependency, effective output, public output, and terminal rule is retained in
-the expanded spec.
+The pure pipeline is child substitution, capability expansion, policy wrapping, failure
+completion, then normalization/certification. It validates lexical dominance, exact child
+bindings, exhaustive Match, nominal outcomes, failure plans, protected boundaries, FanOut bounds,
+component dependencies, policy coverage, and secret-free implementation closure.
 
-`CompositeCertificationFactory` is zero-state. Registry assembly invokes it exactly once with the
-sole shared immutable program definition; the resulting private certifier derives manifests from
-that same definition and returns complete `CertifiedAdmissionArtifacts`. Candidate certification
-uses the same callback followed by registry-owned output and proof-closure validation. Runtime
-does not repair or expand certified graphs.
+`ProgramRegistryBuilder` registers executable/qualification objects, values, states, capabilities,
+adapters, child programs, expansions, and frozen entry envelopes. `AdmissionCertificationRegistry`
+certifies a per-admission authored candidate only when its exact semantic/implementation pairs and
+bounds fit that envelope. Persisted verification repeats the same certification from the authored
+object and requires the exact certified root/document. Finalization consumes the caller's complete
+expected entry-point identity set and rejects duplicate, missing, or extra identities.
 
-`docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
-must remain domain-free.
+`ProgramRegistryBuilder` privately installs prior-run fact selection as the kernel's exact ordinary
+Read capability plus sealed stateless scanner binding source. This non-optional baseline remains in
+the Runtime process registry but is excluded from an unrelated entry point's support closure; no
+caller can register, shadow, or replace either reserved component. Every other registered process
+binding must still be required by an entry point. The scanner certificate binds store, epoch,
+tenant, admitted source, selector, capability, adapter, and both qualified implementations; the
+source retains no backend, pool, writer, or generic query handle.
+
+There is no compatibility lowering or alternate certifier.

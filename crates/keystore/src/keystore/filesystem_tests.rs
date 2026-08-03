@@ -278,7 +278,7 @@ fn test_auto_lock_timeout_expires_session() {
 
     assert!(matches!(keystore.list_keys(), Err(KeystoreError::Locked)));
     assert!(matches!(
-        keystore.get_private_key(key_id),
+        keystore.private_key_for_test(key_id),
         Err(KeystoreError::Locked)
     ));
 }
@@ -294,7 +294,7 @@ fn test_auto_lock_timeout_can_be_disabled() {
 }
 
 #[test]
-fn test_auto_lock_timeout_refreshes_on_sensitive_operations() {
+fn test_observational_test_key_access_does_not_refresh_auto_lock() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
     let key_id = keystore
@@ -306,15 +306,12 @@ fn test_auto_lock_timeout_refreshes_on_sensitive_operations() {
 
     keystore.set_auto_lock_timeout(Some(std::time::Duration::from_millis(400)));
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(keystore.get_private_key(key_id).is_ok());
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    assert!(keystore.private_key_for_test(key_id).is_ok());
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(keystore.get_private_key(key_id).is_ok());
-
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(200));
     assert!(matches!(
-        keystore.get_private_key(key_id),
+        keystore.private_key_for_test(key_id),
         Err(KeystoreError::Locked)
     ));
 }

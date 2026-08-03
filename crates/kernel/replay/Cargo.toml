@@ -2,6 +2,7 @@
 name = "mfm-replay"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 description = "Callback-free history verification, inspection, and portable export for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -20,27 +21,8 @@ path = "src/lib.rs"
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
-mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-
-[dev-dependencies]
-mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
-mfm-runtime = { path = "../runtime" }
-mfm-store = { path = "../store", features = ["backend-conformance"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-[[test]]
-name = "mfm-replay"
-path = "tests/mfm_replay.rs"
-
-[[test]]
-name = "mfm-trace-export"
-path = "tests/mfm_trace_export.rs"
-
-[[test]]
-name = "historical-executable-isolation"
-path = "tests/historical_executable_isolation.rs"
+thiserror = { workspace = true }

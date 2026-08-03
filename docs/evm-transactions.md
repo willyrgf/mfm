@@ -1,284 +1,216 @@
-# EVM Transactions
+# Structured EVM Transaction Submission
 
-Status: qualified registered product capability
+Status: current production contract for `mfm.evm/submit-transaction@1`
 
-The product publishes `mfm.evm/submit-transaction@1`. Its one-state graph uses the generic
-recoverable-effect runtime seam, one exact verified executor binding, the separately fenced
-PostgreSQL executor ledger, typed sender/nonce allocation, guarded deterministic signing, and the
-stateless exact-generation EVM transport. It adds no EVM-specific runtime phase, CLI signing
-command, REST mutation shortcut, or second run-state authority.
+## Material uncertainties
 
-The domain model, encoding, transport, and signing primitives remain reusable libraries. Only the
-qualified product registration and deployment composition grant admission or live executor access;
-the primitives alone grant neither target-entry nor journal authority.
+none
 
-## Generic Effect Seam
+## Overview
 
-The complete MFM effect protocol is domain-free:
+EVM submission is an ordinary structured operation. The authored entry state expands purely into
+visible `Pure`, `Read`, `Effect`, `Match`, child-fragment, and bounded recovery structure. Runtime
+has no EVM-specific branch, and the wallet authority has no run scheduler.
 
 ```text
-pure state request authorship
-  -> StateTransitionCommitted(EffectRequested)
-  -> ExternalAccessAuthorized(EnsureEffect)
-  -> one affine call to a qualified keyed executor
-  -> ExternalAccessObserved(executor frontier or terminal evidence)
-  -> state terminal-evidence callback
-  -> StateTransitionCommitted(EffectSettled)
+EvmSubmissionRequest
+  -> validate the authorized nonce domain and derive authenticated intent
+  -> read linearizable wallet status
+  -> observe fresh pending nonce when reservation is needed
+  -> reserve one stable intent/nonce
+  -> build and attest a deterministic candidate
+  -> activate the next candidate ordinal
+  -> sign and broadcast that exact candidate once
+  -> observe transaction, receipt, finalized head, and canonical inclusion
+  -> reconcile or complete the wallet authority
+  -> project EvmSubmissionOutput
 ```
 
-`EffectRequested` fixes the original `StateFrame`, immutable typed request, request digest,
-idempotency/effect identity, and exact executor binding. It is the MFM outbox and survives every
-process.
+Every step has a certified occurrence and exact failure handling. Polling, replacement,
+reconciliation, and exhaustion are bounded by the admitted expansion.
 
-The MFM journal owns no mutation delivery phases, nonce allocator, signer workflow, resource
-ownership, rebroadcast policy, receipt poller, or destination recovery rule. Repeated
-`drive_once` calls invoke the same keyed executor `ensure` contract. The executor either returns a
-stronger bounded frontier/terminal proof, a reviewed pending/safe-failure result, or an audit-only
-closed `NonDomainFailure`. Only the state callback can interpret certified terminal evidence and
-settle the node; non-domain evidence never reaches it.
+## Public failure contract
 
-## Qualified Executor Boundary
-
-The registered wallet executor qualifies:
-
-- immutable request/effect identity and the complete wallet policy before admission or allocation;
-- exact tenant and executor-deployment generation binding;
-- non-rollback delivery ledger;
-- permanent stale/sibling-writer exclusion;
-- destination convergence after request, response, process, host, and database ambiguity;
-- typed sender/nonce resource ownership across every writer that can use that wallet;
-- deterministic transaction construction and signing ownership;
-- safe rebroadcast or exact-hash observation semantics;
-- restart, backup, restore, failover, and reorganization behavior;
-- bounded cumulative delivery evidence and terminal tombstone;
-- exact-attempt target observation linkage; and
-- complete no-secret retained evidence.
-
-One live-owned `EvmWalletRequestQualification` is the sole cross-field predicate. It is built from
-the sealed transport catalog, verified executor binding, product object-evidence contract, derived
-guarded-signer descriptor, selected route generation, and initial-nonce descriptor. Construction
-derives and binds the complete ordered route-generation-to-chain map and verifies the executor's
-exact request/result contracts, wallet leaf expansion, target callback, resource domain/fence,
-safe-failure contract, and evidence-contract closure. The canonical proof, content reference, and
-debug form contain no endpoint, authorization, or transport internals. The live qualification
-separately retains a private clone sharing the exact transport runtime and route catalog; the
-executor obtains its transport from that qualification and has no injection argument. The
-application admission path and executor share the same `Arc`; neither accepts an independently
-supplied transport, signer reference, resource-policy pair, route descriptor, or duplicate
-validator.
-
-Valid replacement schedules and convergence plans remain request-owned semantic fields. They may
-vary between admitted requests while fitting the exact qualified evidence bounds; the deployment
-qualification deliberately does not pin either field to one deployment value.
-
-The production backend is `mfm-storage-executor-postgres`, opened only after the complete product
-support graph is admitted and only with an `ExecutorWriterGenerationFence`. That fence is
-independent of the MFM journal writer fence and must prove the exact executor binding, tenant,
-ledger generation, database/schema lineage, and stale/sibling-writer exclusion. PostgreSQL
-persistence alone still proves none of wallet ownership, nonce exclusivity, signer/envelope
-custody, destination convergence, or non-rollback generation.
-
-Memory and file executor backends are conformance surfaces only and cannot enable product
-mutation.
-
-## EVM Request Contract
-
-The registered entry point resolves one immutable EIP-1559 request whose semantic identity
-includes:
-
-- exact tenant, wallet domain, selected catalog-member route generation, and its non-zero chain
-  id;
-- expected canonical non-zero sender and the derived guarded-signer descriptor reference;
-- exact nonce-policy reference, deployment-attested initial nonce, and complete initial-nonce
-  descriptor reference;
-- exact already-known classifier, finalized-tag finality policy, and terminal assurance policy;
-- exact executor evidence bounds;
-- one closed direct `Create` or ordinary `Call` action;
-- value, calldata/init code, and access list;
-- checked fee and gas policy; and
-- any exact prerequisite value refs.
-
-The request must exclude mutable routing, endpoint, credential, pending nonce observation,
-signature, raw signed envelope, provider body, keystore path, unlock path, password, private key,
-and mnemonic.
-
-Transaction construction uses one canonical Alloy path for the type-2 signing
-digest, signed encoding, and transaction hash. Width conversions to Alloy's chain-id/nonce/gas and
-fee representations must fail closed without truncation or fallback. A deterministic recoverable
-low-s signing profile and expected sender must be verified before target entry.
-The signed EIP-2718 envelope is admitted at no more than 512 KiB immediately after Alloy encoding
-and before hashing, then checked against the same bound again when the exact RPC body is assembled.
-
-## Resource Contract
-
-The executor—not MFM runtime—must own a typed resource stream for sender/nonce allocation. Its
-allocation record binds:
-
-- exact resource ownership;
-- resource key;
-- policy reference;
-- policy-configuration reference; and
-- immutable typed allocation state.
-
-Restart refolds and revalidates the stream under the same policy/configuration pair before another
-authorization. A local process mutex, MFM worker identity, database session lock, or journal row
-cannot reserve a nonce against another wallet, relayer, operator, deployment, or process.
-
-The account-sequence key is stable and non-secret:
+The sole typed operation failure is:
 
 ```text
-account         = "eip155-" + decimal_chain_id + "-" + lower_hex_sender_without_0x
-resource_domain = "evm-wallet-domain-" + sha256(
-    wallet_domain_ref.schema_id + ":" + wallet_domain_ref.content_digest
-)
+EvmSubmissionFailure =
+    TransportUnavailable
+  | ProviderUnavailable
+  | SignerUnavailable
+  | NonceAuthorityUnavailable
+  | DestinationRejected
+  | ObservationPolicyExhausted
+  | ReplacementPolicyExhausted
+  | NonceDomainBusy
+  | NonceLineageDiverged
+  | NonceCapacityExhausted
+  | ExecutionReverted
 ```
 
-The first allocation uses the deployment-attested initial nonce. Its content-addressed descriptor
-binds the nonce, public source-attestation reference, wallet domain, chain, sender, and durable
-generation. The account-sequence policy reference is derived from the canonical EVM nonce policy;
-deployment cannot supply either half of the policy/configuration pair independently. A sender
-cannot advance to the next permanent allocation until the prior effect has immutable terminal
-evidence. Allocated nonces are never reassigned to unrelated requests.
+The expansion maps exact leaf failures into this sum. Possible entry, physical supersession,
+malformed evidence, and integrity faults retain Runtime's non-domain cursor meanings and cannot be
+converted into an EVM failure for liveness.
 
-## Target Entry And Observation
+## Domain and activation
 
-The executor's sole target-entry method is `execute_target_once`. It commits one delivery
-authorization before returning affine `TargetEntryAuthority` to the invocation closure. The
-destination adapter consumes it exactly once and returns an unbound `DeliveryAttemptOutcome`.
-`execute_target_once` retains the private affine completion seal, validates and binds that outcome
-to the current identity, attempt, operation, and generation, and persists or byte-identically
-resolves the matching executor observation before it returns. A stale CAS, lost acknowledgement,
-tombstone conflict, or restart resolves immutable ledger evidence and cannot invoke the target a
-second time.
+`WalletNonceDomain` is the pair of a qualified physical chain instance and sender. Chain identity
+includes chain id, genesis, a never-reused instance namespace, and finalized fork anchor. Redundant
+routes may name one instance; an independently operated clone cannot.
 
-An inconclusive submit exchange never authorizes a different transaction. Recovery must converge
-on the immutable request through the qualified wallet/relayer contract. Exact-hash observation,
-rebroadcast, replacement, nonce reuse, and reorganization policy must be part of that executor's
-certified equivalence and resource contract rather than runtime heuristics.
+Qualified deployment infrastructure is the sole issuer of chain-instance and route-membership
+authority. Before application assembly, an authenticated provider checks the complete public
+routing catalog against its pinned chain-registry lineage and exact current head. The
+resulting `QualifiedEvmRoutingCatalog` is opaque and non-serializable; catalog bytes alone cannot
+construct it. Admission derives its routing policy from that value and requires the live route,
+wallet activation, transaction intent, submission configuration, final admitted request, and
+portfolio binding to carry the same full chain attestation and route membership. Numeric chain-id
+equality never grants authority, and foreign binding combinations fail before admission.
 
-The only public live execution seam is `EvmWalletExecutor<Store>` with the concrete exact-generation
-`EvmJsonRpcTransport`. The five wallet operations are private typed transport methods. There is no
-generic wallet RPC client, arbitrary method/parameter call, raw JSON response, or public target
-wrapper that can bypass typed decoding or qualification.
+Before first use, deployment permanently activates the domain against one store lineage. The
+activation proof binds:
 
-Before target authorization the adapter constructs exactly one private prepared variant:
-`Broadcast`, `TransactionLookup`, `ReceiptLookup`, `FinalizedHead`, or
-`CanonicalInclusion`. Each variant owns its complete qualified request material and makes exactly
-one transport call. Post-exchange result totalization is exhaustive:
+- exact chain instance, route membership, and sender;
+- issuer namespace and current schema;
+- store lineage and writer epoch;
+- target-held public identity and current incarnation;
+- qualified finalized sender-nonce floor;
+- complete old writer/signer/relayer/operator/stale-deployment/direct-submit fencing; and
+- terminal disposition for every prior effect and allocation.
 
-- a typed-contract-valid result whose canonical encoding exceeds the retained bound is the
-  explicit `ResultUnrepresentable` attempt failure;
-- an invalid typed or contract result is
-  `adapter_contract_violation/MayHaveEntered/IntegrityBlocked`; and
-- canonical encoding or schema construction failure is
-  `result_encoding_failure/MayHaveEntered/IntegrityBlocked`.
+Activation issuance is an append-only registry CAS. Normal request execution uses the immutable
+proof and offline verification, with no registry query. Missing or incompatible proof requires a
+new sender/domain.
 
-The latter two are closed executor-target `NonDomainFailure` observations, carry no provider
-diagnostic, and cannot become terminal domain evidence.
+## Stable intent
 
-Guarded deterministic signing precedes broadcast authorization and derives one public
-candidate-specific target-entry descriptor. The descriptor commits the exact operation kind,
-unsigned candidate model, and transaction hash in the authorization append, but never the
-signature or raw signed bytes. Recovery resolves that retained descriptor and looks up its hash
-before considering rebroadcast. A policy-permitted rebroadcast re-signs behind the same generation
-guard, verifies the newly derived hash and candidate reference against the committed descriptor,
-and obtains a fresh authorization; signer unavailability is an operational retry without a
-synthetic delivery attempt.
+EVM configured-value history contains immutable transaction semantics only. It contains no tenant,
+authenticated principal, or caller token. The public selector supplies a bounded caller token, and
+the access policy supplies tenant and stable principal from the credential. Only after target-bound
+authorization does the app construct the final request and derive its authenticated issuer.
 
-Before any signer call, RPC exchange, terminal append, pending return, terminal return, or
-authorization/terminalization conflict return, the executor reloads one complete verified wallet
-history. It reconstructs the deterministic plan for every retained attempt and validates the exact
-candidate descriptor and result transition. Terminal evidence is accepted only when the complete
-request, prior-result references, candidate lineage, transaction, receipt, finalized head,
-canonical inclusion, outcome, executor generation, generation fence, and assurance tuple equal the
-history-derived terminal. A retained tombstone must then identify that exact operation, outcome,
-attempt, returned result, and returned observation. The history fold follows immutable append order
-and freezes the expected plan at each authorization from authorization-ordered results whose
-observations are already present. Later observations validate only against their frozen plan and do
-not retroactively alter a later authorization. The first observed valid terminal is selected;
-subsequent observations, including a legal post-tombstone observation, are audit-only after
-validation. Any mismatch on restart fails without signing, RPC, or append; an exact restored
-tombstone returns without any of those actions.
+`SubmissionIntentId` is derived from the wallet nonce domain, authenticated issuer identity, and
+bounded caller token. It is never accepted as a free caller-supplied identifier. The caller token
+is independent of the per-run `invocation_identity`: two invocations by the same authenticated
+principal can converge on one permanent intent, while the same token used by two principals cannot.
+Reservation, candidate, and completion keys exclude `run_id`, implementation references, and
+physical generations.
 
-The executor terminal claim must identify one exact returned observation and terminal tombstone.
-The MFM store admits its canonical objects through a later audited ensure observation and creates
-the producer-bound `ValueRef` values. The executor cannot append `EffectSettled`.
+One nonce domain permits one incomplete intent. The same intent can resolve and continue its
+permanent progress from another run. A different intent returns `NonceDomainBusy` without
+allocating a nonce. Changed canonical semantics under an existing id is an integrity conflict.
 
-## Receipt And Finality Contract
+## Fresh pending-nonce rule
 
-The typed receipt/finality contract validates:
+Every reservation attempt first commits a fresh
+`eth_getTransactionCount(sender, "pending")` Read observation.
 
-- exact transaction hash and immutable public transaction fields;
-- explicit success or revert status;
-- coherent block, transaction, and log identities;
-- no logs for a reverted top-level transaction;
-- direct-create address derivation where applicable;
-- exact canonical block placement;
-- certified confirmation depth; and
-- behavior under receipt disappearance, movement, and reorganization.
+- Virgin lineage: pending must equal the activation proof's finalized sender-nonce floor, and that
+  nonce is reserved.
+- Later lineage: allocate `local_high_water + 1` only when pending is equal or behind.
+- First-use mismatch or later provider-ahead: return `NonceLineageDiverged` without mutation.
+- Exact retry after a permanent reservation exists: resolve the original proof; the new pending
+  observation is creation-only evidence and cannot move the reserved nonce.
 
-Finality level is state/executor contract data fixed before admission. A launch-time default,
-provider claim, or runtime policy cannot change it.
+The authority transaction owns cross-run uniqueness. A producer-bound reservation value proves
+within-run causality but is not the lock.
 
-## Secret Boundary
+## Candidate family
 
-Signatures and raw signed transactions are bearer mutation material. They remain transient inside
-the qualified wallet/relayer target boundary and are never:
+The intent freezes a bounded mutation-equivalent candidate family. Each member has a stable ordinal
+and deterministic unsigned identity. The authority retains a contiguous activated prefix; it
+rejects skipped ordinals, foreign descriptors, duplicated hashes across ordinals, and replacement
+without the exact predecessor/current-status/policy eligibility permit.
 
-- typed state values;
-- executor request/result objects;
-- journal records or retained objects;
-- facts or public outputs;
-- replay inputs;
-- portable export members;
-- diagnostics; or
-- logs or durable fixtures.
+A later run reads the whole prefix, reproduces the current candidate, and observes every possible
+winning hash. An older activated replacement may win and complete the one canonical result.
 
-Loopback transport tests use only runtime-generated ephemeral sentinels, zeroizing socket/body
-owners, borrowed JSON projections, and direct decode into zeroizing signed-byte storage. Test state
-may retain public methods and transaction hashes, never authorization or raw signed bytes.
+## Signing and broadcast
 
-Only reviewed public identities, immutable unsigned intent, exact hashes, typed receipts, and
-closed safe failures may cross into retained evidence.
+`AttestCandidateIdentity` is a Read that retains only the expected transaction hash. Qualified
+signer generations implement one stable semantic signer: public key, address, algorithm, and
+deterministic signing profile are fixed. A signer whose read consumes quota, approval, billing,
+anti-replay state, rate-limit capacity, or other externally meaningful semantic state cannot
+qualify as a Read. The guard and provider declare that immutable contract explicitly;
+qualification, deployment handoff, live construction, and every signing callback recheck it before
+guard or key access. Live attestation accepts only the opaque process-local qualified bearer, and
+there is no raw-provider or Effect fallback. The local-keystore `v2` implementation opens and
+decrypts without persisted audit mutation; deployments retain any `v1` physical release and append
+a same-key-target `v2` successor.
 
-## Replay
+`BroadcastExactCandidate` is an Effect. Its invoker deterministically reproduces and verifies the
+signed envelope, submits that exact envelope once, and drops/zeroizes bearer bytes. Programs,
+history, facts, outputs, logs, traces, exports, errors, and wallet storage never retain private
+keys, signatures, or signed transactions.
 
-Recorded-history verification checks the generic effect request, authorization/observation links,
-executor frontier chain, terminal proof, and `EffectSettled` relationship without calling an
-executor or EVM provider.
+If physical authority is revoked and non-entry is proved before broadcast, Runtime records
+`SupersededBeforeEntry` and may authorize the next generation. If entry may have occurred,
+`EntryUnknown` parks the occurrence; it cannot rebroadcast automatically.
 
-Exact reproduction may recompute pure request and settlement relations from retained public
-evidence, but it never reconstructs a signature, opens a keystore, resolves a route, submits,
-polls, or appends. Candidate comparison is equally capability-free.
+## Observation and terminal convergence
 
-## Registration And Deployment
+Explicit Reads observe transaction presence, receipt, finalized head, and canonical inclusion.
+The expanded program selects bounded reconciliation or terminal branches. Completion is valid only
+for an active reservation and activated ordinal/hash. It atomically seals the activated prefix,
+persists the canonical inclusion-block outcome closure, clears the active marker, and retains high
+water.
 
-The current transaction entry point includes the state, one-state operation, entry-point/profile
-registration, value and callback contracts, executor-required leaf expansion, capability manifest
-member, qualified live executor, and production composition as one vertical path. The app admits
-an immutable configured request only when its embedded tenant equals the authorized tenant and its
-template target equals the public selector.
+`CompleteEvmNonceRequest` carries the complete bounded `TerminalWitnesses` value closure, not an
+unresolved witness digest. The closure contains the exact committed transaction lookup and receipt,
+finalized head, fresh inclusion-block lookup, selected terminal-assurance contract, and canonical
+public projection. Domain construction cross-checks transaction and receipt hashes and blocks,
+receipt status, finalized-head ordering, inclusion identity, assurance, and projection against the
+run-independent `CanonicalTerminalOutcome`. The PostgreSQL authority independently repeats those
+cross-links against the retained intent, reservation, and activated prefix before either resolving
+or creating a completion.
 
-Deployment must provide:
+Terminal idempotency compares the run-independent canonical result, not a later witness producer
+reference. Exact replay and compatible later finalized-head witnesses resolve the original
+completion; a conflicting canonical claim fails with integrity error. The original closure's
+canonical content reference remains in `CompletedWalletNonce` as audit provenance. A completion
+that becomes visible after one bounded run's last status snapshot remains available to a later run
+rather than rewriting the earlier decision.
 
-- the exact executor contract, deployment, and resource ownership;
-- a dedicated executor PostgreSQL pool and independent writer-generation fence;
-- the selected immutable EVM route-generation reference and complete initial-nonce descriptor;
-- the verified keystore signer binding, from which the public signer-descriptor reference is
-  derived;
-- a signing-generation guard covering the executor generation, destination fence, and direct-sign
-  exclusion.
+## PostgreSQL authority
 
-Bootstrap rejects any route/catalog, chain, signer, sender, generation, fence, wallet-domain,
-nonce, classifier, finality, assurance, evidence-bound, executor-semantic, or object-evidence
-mismatch before support admission. Configured request admission repeats the exact sealed
-predicate before certification and journal append. Executor entry repeats it before effect binding
-and nonce allocation; a rejected request creates no signer call, RPC call, effect record, or
-resource allocation.
+`mfm-storage-evm-postgres` owns two separately credentialed SQL surfaces:
 
-The conformance suite covers same-key/different-request rejection, concurrent ensure, stale-plan
-authorization, restart from durable bytes, response loss and signer-free hash recovery,
-already-known classification, success and revert, pre-resolution reorganization, finite
-rebroadcast/replacement equivalence, terminal retention, PostgreSQL fencing/refold, and
-no-secret/no-bearer persistence. The product deliberately exposes no compatibility submission
-path and no generic not-applied terminal outcome.
+- activation-registry administration/public proof; and
+- application wallet status/reserve/activate/complete.
+
+The crate exposes typed authorities, not a generic pool. Its authenticated provider client also
+qualifies complete routing catalogs against the pinned registry trust anchor; cloning that client
+copies only endpoint configuration and public trust, while signing authority and target inventory
+remain in the separate provider process. Each status read opens a transactionally consistent
+snapshot through a sealed current target session. Each mutation uses a fresh, non-cloneable
+transaction-bound permit. Permanent operation keys are resolved before and under the domain lock so
+lost acknowledgements converge to their original proof.
+
+The activation-registry admin, registry public, wallet application, run-history, owner, and test
+roles cannot cross-write. Target/session issuance, registry/catalog authentication, and promotion
+are supplied by qualified deployment infrastructure in a distinct process. Public request/reply
+values are evidence only; they cannot mint authority. Normal status and mutation verify the
+immutable activation proof offline and make zero chain-registry queries.
+
+## Promotion
+
+Same-domain promotion proceeds only in this order:
+
+1. irrevocably fence and drain the old target and every sender path;
+2. capture and verify the complete post-quiescence prefix;
+3. hydrate and verify the still-closed replacement;
+4. publish the next incarnation by exact-head registry CAS; and
+5. open the replacement with a new target-held session.
+
+Any missing fence, incomplete prefix, stale session, replayed permit, rollback, sibling issuer, or
+incompatible schema/issuer namespace fails closed and requires a new sender/domain.
+
+## Qualification evidence
+
+The managed PostgreSQL qualification exercises real SQL, restricted roles, authenticated
+chain-registry/catalog qualification, pinned lineage and head rejection, exact route-membership
+binding, cross-chain rejection before admission, activation, first/later reservation rules,
+idempotency, competing intents, candidate progression, completion, target copying, stale sessions,
+permits, rollback, restart, and zero normal-execution registry queries. The structured submission
+qualification additionally uses a loopback JSON-RPC server, deterministic signer, real wallet
+authority, process restart, exact single broadcast, and later completion.

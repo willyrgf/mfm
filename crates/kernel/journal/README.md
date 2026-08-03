@@ -1,45 +1,23 @@
 # mfm-journal
 
-Typed, domain-free persisted values for the recoverability-v1 run journal.
+Strict persisted data and identities for structured Runtime history.
 
-The crate loads the frozen recoverability annex through `mfm-canonical`. Every
-value is structurally validated before it can be encoded, decoded, hashed, or
-used. It does not copy schema descriptors or schema identifiers and does not
-derive persisted wire shapes from Rust serialization.
+The only record families are:
 
-`mfm-journal` owns record, transition, access-audit, object-binding, fact,
-closure, and commit-envelope values. It owns no store IO, fold, scheduler,
-callback, replay, or ambient-access authority.
+```text
+RunAdmitted
+StateTransitionCommitted
+ExternalAccessAuthorized
+ExternalAccessObserved
+RunClosed
+```
 
-Producer-independent retained metadata uses the single
-`mfm_values::RetainedValueContract`, re-exported by this crate. The journal adds producer, exact
-byte, artifact, and evidence identity only through its `ValueRef`.
-The certified spec owns the complete journal-protocol contract set; this crate
-defines the protocol values but has no spec dependency or duplicate protocol
-contract aggregate.
+The crate also owns content-addressed `HistoryObject`, typed/lexical value references, facts,
+record/head coordinates, assigned batches, semantic heads, and closed access outcomes. Prior-run
+fact data includes the strict admitted source manifest, tenant publication/barrier coordinate,
+scanner certificate, selected-source provenance with exact subject/response/claim bytes, and
+completeness attestation. Every persisted
+struct denies unknown fields and uses canonical float-free encodings.
 
-Fact emissions persist both a dense actual `emission_ordinal` and the certified
-`fact_slot_ordinal` that authorized the emission. A successful settlement keeps
-emissions grouped in nondecreasing slot order and never returns to an earlier
-slot; fact references and identities continue to use the actual emission
-ordinal.
-
-Successful settlement bodies keep output bindings and fact emissions in
-semantic ordinal order. Their redundant binding delta is an already-ordered
-wire value: repeated output-binding and fact-binding groups are independently
-canonical-byte ordered. The store owns assembly and semantic-ordinal reindexing
-during fold; this crate's `BindingDelta` constructor only validates the supplied
-wire order.
-
-Input lineage is root-only. Nested source selection lives only on
-`InputBinding::source_field_path`; a qualified-support root retains its exact
-support-graph `member_path` alongside the full producer-bound `ValueRef`.
-Admission config, seed, context, and cross-run source manifests are closed,
-path-sorted journal values. Their public constructors canonicalize at most
-4,096 entries and reject duplicate paths; only the store grants them run
-authority by committing the admission. These manifests and the per-transition
-input manifest expose zero-argument deterministic retained-contract factories
-using their annex schema and the one shared component-object-evidence identity.
-The store-authored fact-claim envelope and immutable frozen read intent expose
-the same zero-argument protocol factory, with their runtime roles fixed by the
-journal contract.
+It does not persist, fold, schedule, execute callbacks, or define a storage backend. Successor
+legality and exact object closure belong to `mfm-store`.

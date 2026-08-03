@@ -3,6 +3,7 @@ use mfm_ids::{
     ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, FactContentIdentityDigest,
     FactLogicalIdentityDigest, SchemaId, SemanticTypeId, StableId,
 };
+use mfm_values::MfmValue;
 
 use crate::*;
 
@@ -30,6 +31,24 @@ fn content_ref(seed: u64) -> ContentRef {
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, digest(seed)),
     )
     .expect("content ref")
+}
+
+fn scan_bounds() -> FactSelectionScanBounds {
+    FactSelectionScanBounds::new(
+        MAX_FACT_SCAN_PUBLICATIONS,
+        MAX_FACT_SCAN_FACTS,
+        MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+        MAX_FACT_SCAN_SELECTED_RESULTS,
+        MAX_FACT_SCAN_RESPONSE_BYTES,
+    )
+    .expect("scan bounds")
+}
+
+fn request(
+    source_manifest_ref: ContentRef,
+    queries: Vec<FactSelectionQuery>,
+) -> FactSelectionRequest {
+    FactSelectionRequest::new(source_manifest_ref, scan_bounds(), queries).expect("request")
 }
 
 fn proposed_value(seed: u64, role: &str, canonical: PlainCanonicalJsonBytes) -> ProposedFactValue {
@@ -188,7 +207,7 @@ fn frozen_fact_query_vector_round_trips_and_derives_its_domain_digest() {
 
     let schema_vector = corpus_vector("schema/mfm.fact-selection-request.v1/minimum");
     assert_eq!(
-        decoded.schema_id().as_str(),
+        decoded.schema_id().expect("request schema").as_str(),
         schema_vector["expected_schema_id"]
             .as_str()
             .expect("expected request schema")
@@ -230,14 +249,19 @@ fn frozen_fact_query_vector_round_trips_and_derives_its_domain_digest() {
             .expect("expected query content digest")
     );
 
-    let constructed = FactSelectionRequest::new(vec![query(
-        decoded.queries()[0].descriptor_ref().clone(),
-        predicate("value"),
-        FactOrdering::Ascending,
-        1,
-        FactTieBreak::FactIdentityAscending,
-    )])
-    .expect("constructed request");
+    let decoded_queries = decoded.queries().expect("decoded queries");
+    let constructed = request(
+        decoded
+            .admitted_source_manifest_ref()
+            .expect("source manifest"),
+        vec![query(
+            decoded_queries[0].descriptor_ref().clone(),
+            predicate("value"),
+            FactOrdering::Ascending,
+            1,
+            FactTieBreak::FactIdentityAscending,
+        )],
+    );
     assert_eq!(constructed.canonical_json(), request_bytes);
 }
 
@@ -270,15 +294,22 @@ fn selection_codecs_reject_unknown_fields_floats_and_noncanonical_order() {
     assert_ne!(query_with_float, query_json);
     assert!(FactSelectionQuery::from_canonical_json(query_with_float.as_bytes()).is_err());
 
-    let request = FactSelectionRequest::new(vec![query]).expect("request");
+    let request = request(content_ref(2), vec![query]);
     let request_json = std::str::from_utf8(request.canonical_json()).expect("request utf8");
     let request_with_unknown_field = request_json.replacen('{', "{\"extra\":false,", 1);
     assert!(
         FactSelectionRequest::from_canonical_json(request_with_unknown_field.as_bytes()).is_err()
     );
 
+    let canonical_request = std::str::from_utf8(request.canonical_json()).expect("request utf8");
+    let suffix = ",\"version\":\"mfm.fact-selection-request.v1\"}";
+    let body = canonical_request
+        .strip_suffix(suffix)
+        .expect("canonical request suffix");
     let request_with_noncanonical_order = format!(
-        "{{\"queries\":[{query_json}],\"producer_scope\":\"other_runs_in_tenant_scope\",\"version\":\"mfm.fact-selection-request.v1\"}}"
+        "{{\"version\":\"mfm.fact-selection-request.v1\",{}{}",
+        &body[1..],
+        "}"
     );
     assert!(
         FactSelectionRequest::from_canonical_json(request_with_noncanonical_order.as_bytes())
@@ -291,7 +322,7 @@ fn request_and_query_empty_and_maximum_bounds_are_closed() {
     assert!(FactSelectionLimit::new(0).is_err());
     assert!(FactSelectionLimit::new(129).is_err());
     assert_eq!(FactSelectionLimit::new(128).expect("max limit").get(), 128);
-    assert!(FactSelectionRequest::new(Vec::new()).is_err());
+    assert!(FactSelectionRequest::new(content_ref(2), scan_bounds(), Vec::new()).is_err());
 
     let query = query(
         content_ref(1),
@@ -315,19 +346,60 @@ fn request_and_query_empty_and_maximum_bounds_are_closed() {
     ))
     .is_err());
 
-    let maximum = FactSelectionRequest::new(vec![query.clone(); 128]).expect("maximum request");
-    assert_eq!(maximum.queries().len(), 128);
+    let maximum = request(content_ref(2), vec![query.clone(); 128]);
+    assert_eq!(maximum.queries().expect("maximum queries").len(), 128);
     assert_eq!(
         FactSelectionRequest::from_canonical_json(maximum.canonical_json())
             .expect("maximum request round trip")
             .queries()
+            .expect("round-trip queries")
             .len(),
         128
     );
-    assert!(FactSelectionRequest::new(vec![query; 129]).is_err());
+    assert!(FactSelectionRequest::new(content_ref(2), scan_bounds(), vec![query; 129]).is_err());
 
     assert!(FactSelectionRequest::from_canonical_json(
         br#"{"producer_scope":"other_runs_in_tenant_scope","queries":[],"version":"mfm.fact-selection-request.v1"}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn scan_bounds_and_read_values_reject_every_out_of_contract_shape() {
+    let maximum = scan_bounds();
+    assert_eq!(
+        serde_json::from_value::<FactSelectionScanBounds>(
+            serde_json::to_value(&maximum).expect("scan bounds JSON")
+        )
+        .expect("scan bounds round trip"),
+        maximum
+    );
+    for values in [
+        (0, 1, 1, 1, 1),
+        (1, 0, 1, 1, 1),
+        (1, 1, 0, 1, 1),
+        (1, 1, 1, 0, 1),
+        (1, 1, 1, 1, 0),
+        (MAX_FACT_SCAN_PUBLICATIONS + 1, 1, 1, 1, 1),
+        (1, MAX_FACT_SCAN_FACTS + 1, 1, 1, 1),
+        (1, 1, MAX_FACT_SCAN_RETAINED_SOURCE_BYTES + 1, 1, 1),
+        (1, 1, 1, MAX_FACT_SCAN_SELECTED_RESULTS + 1, 1),
+        (1, 1, 1, 1, MAX_FACT_SCAN_RESPONSE_BYTES + 1),
+    ] {
+        assert!(
+            FactSelectionScanBounds::new(values.0, values.1, values.2, values.3, values.4).is_err()
+        );
+    }
+    assert!(serde_json::from_str::<FactSelectionScanBounds>(
+        r#"{"maximum_publications":1,"maximum_facts":1,"maximum_retained_source_bytes":1,"maximum_selected_results":1,"maximum_response_bytes":1,"extra":false}"#
+    )
+    .is_err());
+    assert!(FactSelectionReadResponse::from_canonical_json("").is_err());
+    assert!(FactSelectionReadResponse::from_canonical_json(r#"{"value":1.5}"#).is_err());
+    assert!(FactSelectionReadResponse::from_canonical_json(r#"{"z":0,"a":1}"#).is_err());
+    assert!(serde_json::from_str::<FactSelectionReadFailure>(r#"{"code":"unknown"}"#).is_err());
+    assert!(serde_json::from_str::<FactSelectionReadFailure>(
+        r#"{"code":"store_unavailable","detail":"secret"}"#
     )
     .is_err());
 }
@@ -661,9 +733,8 @@ fn request_digest_binds_authored_query_order() {
         2,
         FactTieBreak::FactIdentityDescending,
     );
-    let left =
-        FactSelectionRequest::new(vec![first.clone(), second.clone()]).expect("left request");
-    let right = FactSelectionRequest::new(vec![second, first]).expect("right request");
+    let left = request(content_ref(3), vec![first.clone(), second.clone()]);
+    let right = request(content_ref(3), vec![second, first]);
 
     assert_ne!(left.canonical_json(), right.canonical_json());
     assert_ne!(
@@ -674,4 +745,64 @@ fn request_digest_binds_authored_query_order() {
         left.producer_scope(),
         FactProducerScope::OtherRunsInTenantScope
     );
+}
+
+#[test]
+fn fact_read_values_use_secret_marker_safe_canonical_byte_wrappers() {
+    let request = request(
+        content_ref(3),
+        vec![query(
+            content_ref(1),
+            predicate("subject"),
+            FactOrdering::Ascending,
+            1,
+            FactTieBreak::FactIdentityAscending,
+        )],
+    );
+    let request_wire = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&request).expect("request wire JSON"),
+    )
+    .expect("canonical request wire");
+    assert!(request_wire
+        .as_str()
+        .starts_with(r#"{"canonical_request_base64url":"#));
+    FactSelectionRequest::schema_descriptor()
+        .expect("request descriptor")
+        .identity
+        .validate_canonical_value(request_wire.as_bytes())
+        .expect("request wire matches its complete schema");
+    assert_eq!(
+        serde_json::from_slice::<FactSelectionRequest>(request_wire.as_bytes())
+            .expect("request wire decode"),
+        request
+    );
+    assert!(
+        serde_json::from_str::<FactSelectionRequest>(r#"{"canonical_request_json":"{}"}"#).is_err()
+    );
+
+    let response = FactSelectionReadResponse::from_canonical_json(
+        r#"{"completeness_mode":"complete_through_authorization_frontier","query_results":[]}"#,
+    )
+    .expect("response");
+    let response_wire = PlainCanonicalJsonBytes::from_json_str(
+        &serde_json::to_string(&response).expect("response wire JSON"),
+    )
+    .expect("canonical response wire");
+    assert!(response_wire
+        .as_str()
+        .starts_with(r#"{"canonical_response_base64url":"#));
+    FactSelectionReadResponse::schema_descriptor()
+        .expect("response descriptor")
+        .identity
+        .validate_canonical_value(response_wire.as_bytes())
+        .expect("response wire matches its complete schema");
+    assert_eq!(
+        serde_json::from_slice::<FactSelectionReadResponse>(response_wire.as_bytes())
+            .expect("response wire decode"),
+        response
+    );
+    assert!(serde_json::from_str::<FactSelectionReadResponse>(
+        r#"{"canonical_response_json":"{}"}"#
+    )
+    .is_err());
 }

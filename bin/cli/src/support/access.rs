@@ -72,7 +72,7 @@ mod tests {
             Ok(_) => panic!("oversized token must fail"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "AuthenticationRequired");
+        assert_eq!(error.code(), "AuthenticationRequired");
     }
 
     #[tokio::test]
@@ -81,7 +81,7 @@ mod tests {
             Ok(_) => panic!("missing token path must fail"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "AuthenticationRequired");
+        assert_eq!(error.code(), "AuthenticationRequired");
 
         let directory = TempDir::new().expect("temporary token directory");
         let empty = directory.path().join("empty.token");
@@ -92,6 +92,6 @@ mod tests {
             Ok(_) => panic!("empty token must fail"),
             Err(error) => error,
         };
-        assert_eq!(error.code, "AuthenticationRequired");
+        assert_eq!(error.code(), "AuthenticationRequired");
     }
 }

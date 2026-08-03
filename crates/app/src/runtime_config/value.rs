@@ -35,38 +35,21 @@ enum SelectedSource {
 pub(crate) struct ResolvedValue(Zeroizing<String>);
 
 impl ResolvedValue {
-    pub(crate) fn into_protected(self) -> Zeroizing<String> {
-        self.0
-    }
-
-    pub(crate) fn into_string(mut self) -> String {
+    fn into_string(mut self) -> String {
         std::mem::take(&mut *self.0)
     }
 }
 
 impl ValueSource {
-    pub(super) fn resolve_public(self) -> Result<ResolvedValue> {
-        self.select(false)?.resolve()
-    }
-
-    pub(super) fn resolve_secret(self) -> Result<ResolvedValue> {
-        self.select(true)?.resolve()
-    }
-
     pub(super) fn resolve_path(self) -> Result<PathBuf> {
-        let value = self.resolve_public()?.into_string();
+        let value = self.select()?.resolve()?.into_string();
         validate_path(&value)?;
         Ok(PathBuf::from(value))
     }
 
-    fn select(self, secret: bool) -> Result<SelectedSource> {
+    fn select(self) -> Result<SelectedSource> {
         let mut selected = Vec::with_capacity(1);
         if let Some(value) = self.direct {
-            if secret {
-                return Err(RuntimeConfigError::new(
-                    RuntimeConfigErrorKind::DirectSecretValue,
-                ));
-            }
             selected.push(SelectedSource::Direct(value));
         }
         if let Some(value) = self.env {

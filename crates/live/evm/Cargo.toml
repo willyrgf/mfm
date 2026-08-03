@@ -2,6 +2,7 @@
 name = "mfm-evm-live"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 description = "Reusable EVM transport and runtime binding for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -24,19 +25,16 @@ zeroize = "1.7"
 
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-canonical = { path = "../../kernel/canonical" }
+mfm-certify = { path = "../../kernel/certify" }
 mfm-evm = { path = "../../domains/evm" }
-mfm-executor = { path = "../../kernel/executor" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-program = { path = "../../kernel/program" }
-mfm-runtime = { path = "../../kernel/runtime" }
 mfm-signing = { path = "../../signing" }
 mfm-spec = { path = "../../kernel/spec" }
-mfm-store = { path = "../../kernel/store" }
 mfm-values = { path = "../../kernel/values" }
 
 [dev-dependencies]
 k256 = { version = "0.13.0", features = ["ecdsa"] }
-mfm-store = { path = "../../kernel/store", features = ["test-support"] }
 static_assertions = "1"
 tokio = { workspace = true, features = ["test-util"] }

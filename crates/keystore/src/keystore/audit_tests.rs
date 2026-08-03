@@ -58,32 +58,39 @@ fn test_delete_write_failure_rolls_back_memory_and_disk() {
 }
 
 #[test]
-fn test_get_private_key_write_failure_returns_error_without_audit() {
+fn read_attestation_key_access_never_attempts_an_audit_write() {
     let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("get_key_write_failure.keystore");
+    let keystore_path = temp_dir.path().join("observational_key_access.keystore");
     let mut keystore =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     keystore.unlock("strong_password_123").unwrap();
     let key_id = keystore
         .import_private_key(
-            Some("signing-key".to_string()),
+            Some("read-attestation".to_string()),
             "0000000000000000000000000000000000000000000000000000000000000001",
         )
         .unwrap();
+    let persisted_before = std::fs::read(&keystore_path).unwrap();
+    let audit_before = keystore.audit_log.len();
+    let access = crate::signer::ReadAttestationKeyAccess::for_test();
 
-    let previous_audit = keystore.audit_log.len();
     keystore.fail_next_write_for_test();
-    let err = match keystore.get_private_key(key_id) {
-        Ok(_) => panic!("get_private_key must fail closed when audit persistence fails"),
-        Err(err) => err,
-    };
+    let key = keystore
+        .private_key_for_read_attestation(key_id, &access)
+        .expect("observational key access");
+    drop(key);
 
-    assert!(matches!(err, KeystoreError::FileError(_)));
-    assert_eq!(keystore.audit_log.len(), previous_audit);
-    let persisted = persisted_audit_log(&keystore_path);
-    assert!(!persisted
-        .iter()
-        .any(|entry| matches!(entry.event, AuditEvent::GetPrivateKey { id } if id == key_id)));
+    assert_eq!(keystore.audit_log.len(), audit_before);
+    assert!(
+        std::fs::read(&keystore_path).unwrap() == persisted_before,
+        "Read attestation changed persisted keystore bytes"
+    );
+    assert!(matches!(
+        keystore.delete_key(key_id),
+        Err(KeystoreError::FileError(_))
+    ));
+    assert_eq!(keystore.audit_log.len(), audit_before);
+    assert!(keystore.entries.iter().any(|entry| entry.id == key_id));
 }
 
 #[test]
@@ -132,7 +139,7 @@ fn test_audit_append_at_boundary_compacts_oldest_entries() {
         .collect();
 
     let first_event_id = Uuid::new_v4();
-    keystore.append_audit_event(AuditEvent::GetPrivateKey { id: first_event_id }, true);
+    keystore.append_audit_event(AuditEvent::ImportPrivateKey { id: first_event_id }, true);
 
     assert_eq!(keystore.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
     assert!(matches!(
@@ -141,7 +148,7 @@ fn test_audit_append_at_boundary_compacts_oldest_entries() {
     ));
     assert!(matches!(
         keystore.audit_log().last().unwrap().event,
-        AuditEvent::GetPrivateKey { id } if id == first_event_id
+        AuditEvent::ImportPrivateKey { id } if id == first_event_id
     ));
 
     let second_event_id = Uuid::new_v4();
@@ -164,16 +171,14 @@ fn test_audit_append_at_boundary_compacts_oldest_entries() {
 }
 
 #[test]
-fn test_get_private_key_past_audit_limit_compacts_and_persists() {
+fn historical_v1_key_access_audit_record_remains_decodable_and_mac_covered() {
     let temp_dir = tempdir().unwrap();
-    let keystore_path = temp_dir.path().join("audit_compaction.keystore");
-    let (keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "audit-target");
-
+    let keystore_path = temp_dir.path().join("historical_v1_audit.keystore");
+    let (keystore, key_id) = unlocked_keystore_with_one_key(&keystore_path, "historical");
     rewrite_keystore_json_with_valid_mac(&keystore, &keystore_path, |json| {
-        json["audit_log"] = serde_json::Value::Array(
-            (0..MAX_AUDIT_LOG_ENTRIES)
-                .map(|_| serde_json::to_value(audit_test_entry(AuditEvent::Unlock)).unwrap())
-                .collect(),
+        json["audit_log"].as_array_mut().expect("audit log").push(
+            serde_json::to_value(audit_test_entry(AuditEvent::GetPrivateKey { id: key_id }))
+                .expect("historical audit record"),
         );
     });
     drop(keystore);
@@ -181,20 +186,25 @@ fn test_get_private_key_past_audit_limit_compacts_and_persists() {
     let mut reopened =
         Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     reopened.unlock("strong_password_123").unwrap();
-    for _ in 0..4 {
-        reopened.get_private_key(key_id).unwrap();
-        assert!(reopened.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES);
-    }
+    assert!(reopened
+        .audit_log()
+        .iter()
+        .any(|entry| matches!(entry.event, AuditEvent::GetPrivateKey { id } if id == key_id)));
+    drop(reopened);
 
-    let persisted = persisted_audit_log(&keystore_path);
-    assert_eq!(persisted.len(), MAX_AUDIT_LOG_ENTRIES);
+    mutate_keystore_json_retaining_mac(&keystore_path, |json| {
+        let last = json["audit_log"]
+            .as_array_mut()
+            .and_then(|entries| entries.last_mut())
+            .expect("historical audit record");
+        last["event"] = serde_json::to_value(AuditEvent::GetPrivateKey { id: Uuid::new_v4() })
+            .expect("substituted historical record");
+    });
+    let mut tampered =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     assert!(matches!(
-        persisted.first().unwrap().event,
-        AuditEvent::AuditLogCompacted { dropped_entries } if dropped_entries >= 6
-    ));
-    assert!(matches!(
-        persisted.last().unwrap().event,
-        AuditEvent::GetPrivateKey { id } if id == key_id
+        tampered.unlock("strong_password_123"),
+        Err(KeystoreError::InvalidInput(_))
     ));
 }
 
@@ -219,13 +229,6 @@ fn test_audit_log_entries_created_for_operations() {
         .audit_log()
         .iter()
         .any(|e| matches!(e.event, AuditEvent::ImportPrivateKey { .. }) && e.success));
-
-    // get_private_key logs.
-    keystore.get_private_key(pk_id).unwrap();
-    assert!(keystore
-        .audit_log()
-        .iter()
-        .any(|e| matches!(e.event, AuditEvent::GetPrivateKey { id } if id == pk_id) && e.success));
 
     // delete_key logs.
     keystore.delete_key(pk_id).unwrap();

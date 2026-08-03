@@ -51,7 +51,7 @@ impl ApiError {
 
     /// Derives the exact HTTP status from the shared classification.
     pub const fn status(&self) -> StatusCode {
-        match self.0.class {
+        match self.0.class() {
             ErrorClass::BadRequest => StatusCode::BAD_REQUEST,
             ErrorClass::Unauthorized => StatusCode::UNAUTHORIZED,
             ErrorClass::Forbidden => StatusCode::FORBIDDEN,
@@ -554,7 +554,7 @@ fn exactly_one_header(headers: &HeaderMap, name: HeaderName) -> Option<&HeaderVa
 }
 
 fn mfm_replay_media_type() -> &'static str {
-    mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
+    mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE
 }
 
 fn decode_page_query(query: Option<&str>) -> Result<PageQuery, ApiError> {

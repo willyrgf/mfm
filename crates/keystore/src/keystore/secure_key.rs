@@ -1,6 +1,7 @@
 use alloy_primitives::{Address, PrimitiveSignature};
 #[cfg(test)]
-use k256::{ecdsa::SigningKey, SecretKey};
+use k256::ecdsa::SigningKey;
+use k256::SecretKey;
 use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::crypto::{EthereumKeyError, EthereumPrivateKey};
@@ -19,7 +20,6 @@ impl SecureKey {
         }
     }
 
-    #[cfg(test)]
     fn secret_key(&self) -> Result<SecretKey, KeystoreError> {
         SecretKey::from_slice(self.key_bytes.as_ref()).map_err(|_| KeystoreError::InvalidPrivateKey)
     }
@@ -60,7 +60,6 @@ impl SecureKey {
     }
 
     /// Get public key.
-    #[cfg(test)]
     pub(crate) fn public_key(&self) -> Result<k256::PublicKey, KeystoreError> {
         let secret_key = self.secret_key()?;
         // Note: SecretKey implements ZeroizeOnDrop and will be zeroized when dropped.

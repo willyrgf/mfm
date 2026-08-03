@@ -63,6 +63,8 @@ pub enum AccessTarget {
         store_scope_id: StoreScopeId,
         /// Stable unversioned operation identity.
         entry_point_operation_id: StableId,
+        /// Exact configured target selected by the public admission input.
+        configured_target: StableId,
         /// Canonical caller-supplied UUIDv4 invocation identity.
         invocation_identity: InvocationIdentity,
     },
@@ -75,16 +77,23 @@ pub enum AccessTarget {
     },
 }
 
-/// Trusted tenant result returned by the injected policy.
+/// Trusted tenant and authenticated-principal result returned by the injected policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthorizedTenant {
     tenant_scope_id: TenantScopeId,
+    authenticated_principal_id: StableId,
 }
 
 impl AuthorizedTenant {
     /// Constructs the trusted result inside a deployment policy implementation.
-    pub fn new(tenant_scope_id: TenantScopeId) -> Self {
-        Self { tenant_scope_id }
+    ///
+    /// `authenticated_principal_id` must be derived from the authenticated credential, never
+    /// from admission input or configured semantic values.
+    pub fn new(tenant_scope_id: TenantScopeId, authenticated_principal_id: StableId) -> Self {
+        Self {
+            tenant_scope_id,
+            authenticated_principal_id,
+        }
     }
 
     /// Returns the immutable tenant selected by the trusted policy.
@@ -92,8 +101,13 @@ impl AuthorizedTenant {
         &self.tenant_scope_id
     }
 
-    pub(crate) fn into_tenant_scope_id(self) -> TenantScopeId {
-        self.tenant_scope_id
+    /// Returns the stable principal derived from the authenticated credential.
+    pub const fn authenticated_principal_id(&self) -> &StableId {
+        &self.authenticated_principal_id
+    }
+
+    pub(crate) fn into_parts(self) -> (TenantScopeId, StableId) {
+        (self.tenant_scope_id, self.authenticated_principal_id)
     }
 }
 
@@ -112,7 +126,7 @@ pub enum AccessPolicyError {
 ///
 /// The application calls this policy for every facade operation and again for every separately
 /// protected cross-run source or export dependency. Implementations must map one credential to one
-/// immutable tenant and must not retain an application session.
+/// immutable tenant and stable authenticated principal and must not retain an application session.
 #[async_trait]
 pub trait RunAccessPolicy: Send + Sync {
     /// Authenticates and authorizes one exact grant and target.

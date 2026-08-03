@@ -9,8 +9,8 @@
 mod access;
 mod application;
 mod errors;
-mod executable_identity;
 mod keystore_services;
+#[path = "production_structured.rs"]
 mod production;
 mod render;
 mod runtime_config;
@@ -25,8 +25,14 @@ pub use self::access::{
 pub use self::application::{
     application_for_test, application_with_export_for_test, TestApplicationMode,
 };
-pub use self::application::{connect_production_application, Application, EvmWalletDeployment};
-pub use self::errors::{ErrorClass, PublicError};
+pub use self::application::{
+    connect_production_application, Application, EvmWalletDeployment,
+    EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial,
+};
+pub use self::errors::{
+    ErrorClass, PublicError, PublicRuntimeFaultAttribution, PublicRuntimeFaultPhase,
+    PublicRuntimeFaultSubject, MAX_PUBLIC_ERROR_CODE_BYTES, MAX_PUBLIC_ERROR_MESSAGE_BYTES,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use self::keystore_services::initialize_insecure_keystore_for_test;
 pub use self::keystore_services::{

@@ -1,0 +1,11 @@
+error[E0599]: no method named `invoke` found for struct `QualifiedPhysicalBinding<K>` in the current scope
+ --> tests/ui/structured/fail/invoke_qualified_physical_binding_directly.rs:4:31
+  |
+4 |     let _completion = binding.invoke();
+  |                               ^^^^^^
+  |
+help: there is a method `into` with a similar name
+  |
+4 -     let _completion = binding.invoke();
+4 +     let _completion = binding.into();
+  |

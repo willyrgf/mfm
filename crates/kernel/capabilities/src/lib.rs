@@ -25,34 +25,263 @@
 //! ```
 
 use std::collections::BTreeSet;
+use std::future::Future;
+use std::marker::PhantomData;
+use std::pin::Pin;
 
 use mfm_canonical::sha256_digest_bytes;
 pub use mfm_ids::{CapabilityKind, CapabilityVersion};
 use mfm_ids::{DigestAlgorithm, EffectKind, EffectVersion, NameToken};
-pub use non_domain_failure::{
-    NonDomainDisposition, NonDomainEntryStatus, NonDomainFailure, NonDomainFailureCode,
-    NonDomainFailureError, NonDomainFailureFields, NonDomainFailureLayer,
-};
+use mfm_values::MfmValue;
 pub use provider_diagnostic::{
     ProviderDiagnosticCode, ProviderDiagnosticValue, RedactedProviderDiagnostic,
 };
-pub use safe_failure::{
-    BoundaryStage, CoarseSizeClass, FailureClass, SafeFailure, SafeFailureClassifierDescriptor,
-    SafeFailureClassifierError, SafeFailureClassifierRule, SafeFailureCode,
-    SafeFailureDiagnosticConstraint, SafeFailureDiagnosticRule, SafeFailureError,
-    SafeFailureOutcome, SafeFailureSizeRule, MAX_SAFE_FAILURE_DIAGNOSTIC_BYTES,
-    SAFE_FAILURE_CLASSIFIER_DESCRIPTOR_VERSION,
-};
 
-mod non_domain_failure;
 mod provider_diagnostic;
-mod safe_failure;
 
 #[cfg(test)]
 mod tests;
 
 /// Result type for capability descriptor helpers.
 pub type Result<T> = std::result::Result<T, CapabilityError>;
+
+/// Boxed process-local future returned by one qualified component invoker.
+pub type ComponentFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Stable redaction-safe capability contract fault.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("capability contract fault: {code}")]
+pub struct CapabilityContractFault {
+    code: mfm_ids::StableId,
+}
+
+impl CapabilityContractFault {
+    /// Constructs a reviewed stable fault code.
+    pub const fn new(code: mfm_ids::StableId) -> Self {
+        Self { code }
+    }
+
+    /// Returns the reviewed stable fault code.
+    pub const fn code(&self) -> &mfm_ids::StableId {
+        &self.code
+    }
+}
+
+/// Kernel-owned uninhabited value used where a process contract has no
+/// constructible evidence variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum NoRefreshEvidence {}
+
+impl<'de> serde::Deserialize<'de> for NoRefreshEvidence {
+    fn deserialize<D>(_deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Err(serde::de::Error::custom(
+            "the kernel Never type has no canonical value",
+        ))
+    }
+}
+
+/// Stable redaction-safe access fault code returned by a qualified adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessFaultCode {
+    code: mfm_ids::StableId,
+}
+
+impl AccessFaultCode {
+    /// Constructs one reviewed stable access-fault code.
+    pub const fn new(code: mfm_ids::StableId) -> Self {
+        Self { code }
+    }
+
+    /// Returns the reviewed stable integrity code.
+    pub const fn code(&self) -> &mfm_ids::StableId {
+        &self.code
+    }
+}
+
+/// Typed application-protocol contract for one external Read capability.
+pub trait ReadCapabilityContract: Send + Sync + 'static {
+    /// Immutable typed request authored by a state callback.
+    type Request: MfmValue;
+    /// Schema-valid typed returned value.
+    type Returned: MfmValue;
+    /// Reviewed redaction-safe definite failure visible to state settlement.
+    type SafeFailure: MfmValue;
+}
+
+/// Sealed Effect supersession-evidence mode.
+pub trait EffectRefreshMode: private::EffectRefreshModeSealed + Send + Sync + 'static {
+    /// Exact evidence carried when entry was proved not to have happened.
+    type Evidence: serde::Serialize + serde::de::DeserializeOwned + Send + Sync + 'static;
+}
+
+/// An Effect whose entry authority cannot be refreshed.
+pub enum NoRefresh {}
+
+impl private::EffectRefreshModeSealed for NoRefresh {}
+
+impl EffectRefreshMode for NoRefresh {
+    type Evidence = NoRefreshEvidence;
+}
+
+/// An Effect whose resource contract can prove supersession before entry.
+pub struct Refreshable<E>(PhantomData<fn() -> E>);
+
+impl<E> private::EffectRefreshModeSealed for Refreshable<E> where E: MfmValue {}
+
+impl<E> EffectRefreshMode for Refreshable<E>
+where
+    E: MfmValue,
+{
+    type Evidence = E;
+}
+
+/// Typed application-protocol contract for one external Effect capability.
+pub trait EffectCapabilityContract: Send + Sync + 'static {
+    /// Immutable typed request authored by a state callback.
+    type Request: MfmValue;
+    /// Schema-valid typed returned value.
+    type Returned: MfmValue;
+    /// Reviewed redaction-safe definite failure visible to state settlement.
+    type SafeFailure: MfmValue;
+    /// Exact resource-refresh contract for this effect.
+    type Refresh: EffectRefreshMode;
+}
+
+/// Closed completion produced by one qualified Read adapter invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadAdapterCompletion<Returned, SafeFailure> {
+    /// One schema-valid typed value returned.
+    Returned(Returned),
+    /// One reviewed definite state-facing failure.
+    SafeFailure(SafeFailure),
+    /// One integrity-blocking disposition.
+    IntegrityFault(AccessFaultCode),
+}
+
+/// Closed completion produced by one qualified Effect adapter invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EffectAdapterCompletion<Returned, SafeFailure, RefreshEvidence> {
+    /// One schema-valid typed value returned.
+    Returned(Returned),
+    /// One reviewed definite state-facing failure.
+    SafeFailure(SafeFailure),
+    /// Qualified evidence that the old authority was superseded before entry.
+    SupersededBeforeEntry(RefreshEvidence),
+    /// Entry may have happened and the effect must remain parked.
+    EntryUnknown(AccessFaultCode),
+    /// One integrity-blocking disposition.
+    IntegrityFault(AccessFaultCode),
+}
+
+/// Closed completion for one exact Effect capability contract.
+pub type EffectContractCompletion<C> = EffectAdapterCompletion<
+    <C as EffectCapabilityContract>::Returned,
+    <C as EffectCapabilityContract>::SafeFailure,
+    <<C as EffectCapabilityContract>::Refresh as EffectRefreshMode>::Evidence,
+>;
+
+/// Qualified callback-free validator for one Read capability.
+pub trait ReadCapabilityImplementation<C: ReadCapabilityContract>: Send + Sync + 'static {
+    /// Validates one exact typed request before authorization.
+    fn validate_request(
+        &self,
+        request: &C::Request,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates one returned value without changing its disposition.
+    fn validate_returned(
+        &self,
+        returned: &C::Returned,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates one reviewed safe failure without changing its disposition.
+    fn validate_safe_failure(
+        &self,
+        failure: &C::SafeFailure,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+}
+
+/// Qualified callback-free validator for one Effect capability.
+pub trait EffectCapabilityImplementation<C: EffectCapabilityContract>:
+    Send + Sync + 'static
+{
+    /// Validates one exact typed request before authorization.
+    fn validate_request(
+        &self,
+        request: &C::Request,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates one returned value without changing its disposition.
+    fn validate_returned(
+        &self,
+        returned: &C::Returned,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates one reviewed safe failure without changing its disposition.
+    fn validate_safe_failure(
+        &self,
+        failure: &C::SafeFailure,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates exact supersession evidence without changing its disposition.
+    fn validate_superseded_before_entry(
+        &self,
+        evidence: &<C::Refresh as EffectRefreshMode>::Evidence,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates an entry-unknown fault without changing its disposition.
+    fn validate_entry_unknown(
+        &self,
+        fault: &AccessFaultCode,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+
+    /// Validates an integrity fault without changing its disposition.
+    fn validate_integrity_fault(
+        &self,
+        fault: &AccessFaultCode,
+    ) -> std::result::Result<(), CapabilityContractFault>;
+}
+
+/// Qualified process-private live Read adapter invoker.
+pub trait ReadAdapterInvoker<C: ReadCapabilityContract>: Send + Sync + 'static {
+    /// Performs exactly one bounded invocation and returns a closed completion.
+    fn invoke<'a>(
+        &'a self,
+        request: &'a C::Request,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>>;
+}
+
+/// Qualified process-private live Effect adapter invoker.
+pub trait EffectAdapterInvoker<C: EffectCapabilityContract>: Send + Sync + 'static {
+    /// Performs exactly one bounded invocation and returns a closed completion.
+    fn invoke<'a>(
+        &'a self,
+        request: &'a C::Request,
+    ) -> ComponentFuture<'a, EffectContractCompletion<C>>;
+}
+
+/// Typed contract for one bounded signer or resource-authority operation.
+pub trait BoundedComponentContract: Send + Sync + 'static {
+    /// Exact process-local request type.
+    type Request: Send + Sync + 'static;
+    /// Closed process-local completion type.
+    type Completion: Send + Sync + 'static;
+}
+
+/// Shared qualified invoker contract for bounded signer/resource operations.
+pub trait BoundedComponentInvoker<C: BoundedComponentContract>: Send + Sync + 'static {
+    /// Performs exactly one bounded invocation.
+    fn invoke<'a>(&'a self, request: &'a C::Request) -> ComponentFuture<'a, C::Completion>;
+}
+
+/// Nominal bounded signer contract.
+pub trait SignerContract: BoundedComponentContract {}
+
+/// Nominal bounded cross-run resource-authority contract.
+pub trait ResourceAuthorityContract: BoundedComponentContract {}
 
 /// Error returned by effect descriptor construction.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -522,6 +751,8 @@ mod private {
     use super::{ExternalMutationAuthorityRole, ReadExternalRole, SupportRole};
 
     pub trait EffectSealed {}
+
+    pub trait EffectRefreshModeSealed {}
 
     pub trait RoleSealed {}
 

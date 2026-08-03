@@ -2321,7 +2321,6 @@ dependencies = [
  "mfm-certify",
  "mfm-evm",
  "mfm-evm-live",
- "mfm-executor",
  "mfm-ids",
  "mfm-journal",
  "mfm-keystore",
@@ -2331,7 +2330,7 @@ dependencies = [
  "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
- "mfm-storage-executor-postgres",
+ "mfm-storage-evm-postgres",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
@@ -2405,14 +2404,21 @@ dependencies = [
 name = "mfm-certify"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-facts",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
+ "mfm-program-derive",
  "mfm-spec",
+ "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]
@@ -2425,8 +2431,8 @@ dependencies = [
  "derive_more 1.0.0",
  "hex",
  "mfm-canonical",
- "mfm-executor",
- "mfm-facts",
+ "mfm-capabilities",
+ "mfm-certify",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
@@ -2452,15 +2458,13 @@ dependencies = [
  "k256",
  "mfm-canonical",
  "mfm-capabilities",
+ "mfm-certify",
  "mfm-evm",
- "mfm-executor",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
- "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
- "mfm-store",
  "mfm-values",
  "reqwest",
  "serde",
@@ -2473,24 +2477,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-executor"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-capabilities",
- "mfm-ids",
- "mfm-values",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "mfm-facts"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -2512,6 +2506,7 @@ dependencies = [
  "alloy-primitives",
  "async-trait",
  "axum",
+ "hex",
  "k256",
  "mfm-app",
  "mfm-canonical",
@@ -2521,6 +2516,7 @@ dependencies = [
  "mfm-facts",
  "mfm-ids",
  "mfm-journal",
+ "mfm-keystore",
  "mfm-portfolio",
  "mfm-program",
  "mfm-replay",
@@ -2528,16 +2524,23 @@ dependencies = [
  "mfm-runtime",
  "mfm-signing",
  "mfm-spec",
+ "mfm-storage-evm-postgres",
  "mfm-storage-postgres",
  "mfm-store",
  "mfm-values",
+ "mfm-wallet-authority-provider-test-support",
  "reqwest",
+ "ring",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
  "tower",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -2545,10 +2548,8 @@ name = "mfm-journal"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-capabilities",
- "mfm-facts",
  "mfm-ids",
- "mfm-values",
+ "serde",
  "serde_json",
  "thiserror",
 ]
@@ -2589,18 +2590,24 @@ dependencies = [
  "alloy-primitives",
  "mfm-bitcoin",
  "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-certify",
  "mfm-evm",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
  "mfm-program-derive",
+ "mfm-replay",
+ "mfm-runtime",
  "mfm-spec",
+ "mfm-store",
  "mfm-values",
  "num-bigint",
  "num-traits",
  "serde",
  "serde_json",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -2608,17 +2615,16 @@ name = "mfm-program"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-executor",
+ "mfm-capabilities",
  "mfm-facts",
  "mfm-ids",
- "mfm-journal",
  "mfm-program-derive",
  "mfm-spec",
- "mfm-store",
  "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]
@@ -2637,39 +2643,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-qualified-run-test-support"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-certify",
- "mfm-ids",
- "mfm-journal",
- "mfm-program",
- "mfm-program-derive",
- "mfm-spec",
- "mfm-store",
- "mfm-values",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
 name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
  "mfm-journal",
- "mfm-program",
- "mfm-qualified-run-test-support",
- "mfm-runtime",
  "mfm-spec",
  "mfm-store",
  "serde",
  "serde_json",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -2698,17 +2682,20 @@ dependencies = [
 name = "mfm-runtime"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "mfm-canonical",
  "mfm-capabilities",
- "mfm-executor",
+ "mfm-certify",
  "mfm-facts",
  "mfm-ids",
  "mfm-journal",
  "mfm-program",
  "mfm-program-derive",
- "mfm-qualified-run-test-support",
+ "mfm-replay",
  "mfm-spec",
  "mfm-store",
+ "mfm-values",
+ "serde",
  "serde_json",
  "thiserror",
  "tokio",
@@ -2732,8 +2719,8 @@ name = "mfm-spec"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-facts",
  "mfm-ids",
- "mfm-journal",
  "mfm-values",
  "serde",
  "serde_json",
@@ -2741,28 +2728,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfm-storage-executor-file"
+name = "mfm-storage-evm-postgres"
 version = "0.1.0"
 dependencies = [
- "fs2",
+ "alloy-primitives",
+ "hex",
  "mfm-canonical",
- "mfm-executor",
+ "mfm-capabilities",
+ "mfm-evm",
  "mfm-ids",
+ "mfm-journal",
+ "mfm-values",
+ "mfm-wallet-authority-provider-test-support",
+ "ring",
+ "serde",
  "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
-name = "mfm-storage-executor-postgres"
-version = "0.1.0"
-dependencies = [
- "mfm-canonical",
- "mfm-executor",
- "mfm-ids",
  "sqlx",
+ "static_assertions",
  "thiserror",
  "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -2770,12 +2755,18 @@ name = "mfm-storage-postgres"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-certify",
+ "mfm-facts",
  "mfm-ids",
  "mfm-journal",
- "mfm-qualified-run-test-support",
+ "mfm-program",
+ "mfm-program-derive",
+ "mfm-replay",
  "mfm-runtime",
  "mfm-spec",
  "mfm-store",
+ "mfm-values",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror",
@@ -2787,8 +2778,6 @@ name = "mfm-store"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
- "mfm-capabilities",
- "mfm-executor",
  "mfm-facts",
  "mfm-ids",
  "mfm-journal",
@@ -2810,6 +2799,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "mfm-wallet-authority-provider-test-support"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "mfm-canonical",
+ "mfm-evm",
+ "mfm-ids",
+ "mfm-journal",
+ "ring",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "tokio",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -5278,6 +5286,7 @@ version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 

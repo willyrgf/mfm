@@ -2,6 +2,7 @@
 name = "mfm-certify"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 description = "Certification contracts for MFM typed execution specs"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -17,11 +18,28 @@ name = "mfm_certify"
 path = "src/lib.rs"
 
 [dependencies]
+futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }
+mfm-capabilities = { path = "../capabilities" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
+mfm-store = { path = "../store" }
+mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+mfm-program-derive = { path = "../program-derive" }
+trybuild = "1.0"
+
+[[test]]
+name = "structured-certification"
+path = "tests/structured_certification.rs"
+
+[[test]]
+name = "structured-ui"
+path = "tests/structured_ui.rs"

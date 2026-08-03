@@ -29,14 +29,14 @@ error[E0277]: the trait bound `TransientSignedEip1559Envelope: MfmValue` is not 
    |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `MfmValue` is not implemented for `TransientSignedEip1559Envelope`
    |
    = help: the following other types implement trait `MfmValue`:
+             ActivateCandidateResponse
+             ActivateEvmCandidateRequest
+             ActiveWalletCandidate
              ArtifactRef<T>
-             EvmAnchorConfirmationRequest
-             EvmAnchoredSource
-             EvmBalanceAsset
-             EvmBalanceCollection
-             EvmBalanceGraphResult
-             EvmBalanceSnapshotFact
-             EvmBalanceSource
+             AttestCandidateIdentityRequest
+             AttestedWalletCandidate
+             AuthenticatedIntentIssuerId
+             BroadcastExactCandidateRequest
            and $N others
 note: required by a bound in `require_mfm_value`
   --> tests/ui/fail/transient_signed_payload_value.rs:6:25

@@ -1,5 +1,0 @@
-error[E0599]: no method named `append_admission` found for reference `&RunHistoryReader<mfm_storage_postgres::PostgresRunJournalBackend>` in the current scope
- --> tests/ui/fail/run_history_reader_cannot_append.rs:9:12
-  |
-9 |     reader.append_admission(unavailable(), unavailable());
-  |            ^^^^^^^^^^^^^^^^ method not found in `&RunHistoryReader<mfm_storage_postgres::PostgresRunJournalBackend>`

@@ -3,12 +3,13 @@ use std::sync::{Arc, Mutex};
 use super::EvmTransportOutcome;
 use alloy_primitives::{Address, B256, U256};
 use mfm_evm::{
-    EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockAnchor, EvmChainIdentityRequest,
-    EvmCheckedSource, EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmNetworkBinding,
-    EvmRoutingGenerationRef, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
+    ChainInstanceDeclaration, ChainInstanceRegistryAttestation, EvmAnchorConfirmationRequest,
+    EvmAnchoredSource, EvmBlockAnchor, EvmChainIdentityRequest, EvmCheckedSource,
+    EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmNetworkBinding, EvmRoutingGenerationRef,
+    EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest, EvmWalletReference,
     EVM_READ_MAX_RESPONSE_BYTES,
 };
-use mfm_ids::StableId;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -141,32 +142,97 @@ fn generation_id(raw: &str) -> StableId {
     StableId::new(raw).expect("generation id")
 }
 
+fn reference(byte: u8) -> EvmWalletReference {
+    let schema = SchemaId::new(
+        "mfm.test.evm-live-reference",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(b"EVM live test reference schema"),
+    )
+    .expect("reference schema");
+    let digest = ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&[byte]),
+    );
+    EvmWalletReference::from_content_ref(ContentRef::new(schema, digest).expect("reference"))
+}
+
+fn chain_attestation(
+    chain_id: u64,
+    namespace: &str,
+    registry_lineage_ref: &EvmWalletReference,
+    registry_head_ref: &EvmWalletReference,
+) -> ChainInstanceRegistryAttestation {
+    ChainInstanceRegistryAttestation::new(
+        ChainInstanceDeclaration::new(
+            registry_lineage_ref.clone(),
+            generation_id(namespace),
+            chain_id,
+            B256::repeat_byte(u8::try_from(chain_id % 250 + 1).expect("genesis byte")),
+            U256::from(1_u64),
+            B256::repeat_byte(u8::try_from(chain_id % 250 + 2).expect("anchor byte")),
+        )
+        .expect("chain declaration"),
+        reference(u8::try_from(chain_id % 250 + 3).expect("issuance byte")),
+        registry_head_ref.clone(),
+    )
+    .expect("chain attestation")
+}
+
+fn route_descriptor(
+    network_id: &str,
+    chain: &ChainInstanceRegistryAttestation,
+    generation: &str,
+) -> EvmRoutingGenerationDescriptor {
+    EvmRoutingGenerationDescriptor::new(
+        network_id,
+        "mfm.evm.json-rpc",
+        generation_id(generation),
+        reference(u8::try_from(chain.declaration().chain_id() % 250 + 4).expect("membership byte")),
+        chain.binding().expect("chain binding"),
+    )
+    .expect("route descriptor")
+}
+
 fn transport(endpoint: &str) -> (EvmJsonRpcTransport, EvmNetworkBinding) {
-    let mut routes = EvmRoutingCatalogBuilder::new();
+    let registry_lineage_ref = reference(240);
+    let registry_head_ref = reference(239);
+    let chain = chain_attestation(
+        1,
+        "mfm.test/mainnet-chain",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let binding = chain.binding().expect("chain binding");
+    let mut routes = EvmRoutingCatalogBuilder::new(registry_head_ref, vec![chain.clone()])
+        .expect("catalog builder");
     let generation = routes
         .insert(
-            "ethereum-mainnet",
-            "mfm.evm.json-rpc",
-            1,
-            generation_id("generation-a"),
+            route_descriptor("ethereum-mainnet", &chain, "generation-a"),
             EvmRpcEndpoint::new(endpoint).expect("endpoint"),
             None,
         )
         .expect("route");
     (
         EvmJsonRpcTransport::new(routes.build().expect("catalog")).expect("transport"),
-        EvmNetworkBinding::new("ethereum-mainnet", 1, generation).expect("binding"),
+        EvmNetworkBinding::new("ethereum-mainnet", binding, generation).expect("binding"),
     )
 }
 
 fn generation_ref(id: &str) -> EvmRoutingGenerationRef {
-    let mut routes = EvmRoutingCatalogBuilder::new();
+    let registry_lineage_ref = reference(241);
+    let registry_head_ref = reference(238);
+    let chain = chain_attestation(
+        1,
+        "mfm.test/generation-ref-chain",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let mut routes = EvmRoutingCatalogBuilder::new(registry_head_ref, vec![chain.clone()])
+        .expect("catalog builder");
     routes
         .insert(
-            "ethereum-mainnet",
-            "mfm.evm.json-rpc",
-            1,
-            generation_id(id),
+            route_descriptor("ethereum-mainnet", &chain, id),
             EvmRpcEndpoint::new("http://127.0.0.1:9").expect("endpoint"),
             None,
         )
@@ -305,7 +371,7 @@ async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_ex
     let (outcome, probe) = observed_chain_identity(TestResponse::status(503)).await;
     assert_eq!(
         outcome,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::HttpStatus { status: 503 })
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::HttpStatus { status: 503 })
     );
     assert_request_owner_wiped(&probe);
     assert_eq!(probe.response_created.load(Ordering::SeqCst), 0);
@@ -320,7 +386,7 @@ async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_ex
     let (outcome, probe) = observed_chain_identity(malformed).await;
     assert!(matches!(
         outcome,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseInvalid {
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::ResponseInvalid {
             response_kind: EvmResponseInvalidKind::MalformedEnvelope,
             ..
         })
@@ -354,7 +420,7 @@ async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_ex
     .await;
     assert!(matches!(
         outcome,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge { .. })
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::ResponseTooLarge { .. })
     ));
     assert_request_owner_wiped(&probe);
     assert_response_owner_wiped(&probe);
@@ -370,7 +436,7 @@ async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_ex
     .await;
     assert_eq!(
         outcome,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::TransportFailed)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::TransportFailed)
     );
     assert_request_owner_wiped(&probe);
     assert_response_owner_wiped(&probe);
@@ -384,7 +450,7 @@ async fn production_exchange_owners_are_used_and_wiped_on_success_and_failure_ex
     .await;
     assert_eq!(
         outcome,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::TransportFailed)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::TransportFailed)
     );
     assert_request_owner_wiped(&probe);
     assert_eq!(probe.response_created.load(Ordering::SeqCst), 0);
@@ -585,21 +651,24 @@ async fn six_typed_methods_issue_exactly_one_protocol_call_each() {
 
 #[tokio::test]
 async fn unavailable_or_mismatched_generation_never_enters_transport() {
-    let (unavailable_transport, _) = transport("http://127.0.0.1:9");
-    let missing =
-        EvmNetworkBinding::new("ethereum-mainnet", 1, generation_ref("missing-generation"))
-            .expect("binding");
+    let (unavailable_transport, available_binding) = transport("http://127.0.0.1:9");
+    let missing = EvmNetworkBinding::new(
+        "ethereum-mainnet",
+        available_binding.chain_instance().clone(),
+        generation_ref("missing-generation"),
+    )
+    .expect("binding");
     assert_eq!(
         unavailable_transport
             .chain_identity(&EvmChainIdentityRequest::new(missing))
             .await,
-        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::RoutingGenerationUnavailable)
     );
 
     let (transport, binding) = transport("http://127.0.0.1:9");
     let wrong_network = EvmNetworkBinding::new(
         "ethereum-sepolia",
-        1,
+        binding.chain_instance().clone(),
         binding.routing_generation_ref().clone(),
     )
     .expect("binding");
@@ -607,11 +676,21 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(wrong_network))
             .await,
-        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::RequestInvalid)
     );
+    let registry_lineage_ref = reference(240);
+    let registry_head_ref = reference(239);
+    let foreign_chain = chain_attestation(
+        2,
+        "mfm.test/foreign-chain",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    )
+    .binding()
+    .expect("foreign chain binding");
     let wrong_chain = EvmNetworkBinding::new(
         "ethereum-mainnet",
-        2,
+        foreign_chain,
         binding.routing_generation_ref().clone(),
     )
     .expect("binding");
@@ -619,7 +698,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(wrong_chain))
             .await,
-        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::RequestInvalid)
     );
     let mismatched = EvmCheckedSource::new(binding, "different-source", JSON_RPC_IMPLEMENTATION_ID)
         .expect("source");
@@ -627,7 +706,7 @@ async fn unavailable_or_mismatched_generation_never_enters_transport() {
         transport
             .latest_anchor(&EvmLatestAnchorRequest::new(mismatched))
             .await,
-        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::RequestInvalid)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::RequestInvalid)
     );
 }
 
@@ -644,7 +723,7 @@ async fn closed_semaphore_is_classified_as_pre_entry_cancellation() {
         transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        EvmTransportOutcome::DidNotEnter(EvmSafeFailure::AccessCancelled)
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::AccessCancelled)
     );
 }
 
@@ -697,7 +776,7 @@ async fn queued_exchange_does_not_encode_before_both_permits_and_wipes_sensitive
     route.limit.close();
     assert!(matches!(
         exchange.await,
-        Err(BoundaryFailure::DidNotEnter(
+        Err(BoundaryFailure::BeforeEntry(
             EvmSafeFailure::AccessCancelled
         ))
     ));
@@ -767,7 +846,7 @@ async fn queued_exchange_does_not_encode_before_both_permits_and_wipes_sensitive
     global_blocked_transport.shared.global_limit.close();
     assert!(matches!(
         exchange.await,
-        Err(BoundaryFailure::DidNotEnter(
+        Err(BoundaryFailure::BeforeEntry(
             EvmSafeFailure::AccessCancelled
         ))
     ));
@@ -828,7 +907,7 @@ async fn destination_and_invalid_response_failures_are_closed_and_single_call() 
             transport
                 .chain_identity(&EvmChainIdentityRequest::new(binding))
                 .await,
-            EvmTransportOutcome::Indeterminate(expected)
+            EvmTransportOutcome::SafeFailure(expected)
         );
         assert_eq!(server.finish().await.len(), 1);
     }
@@ -849,7 +928,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         redirect_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::HttpStatus { status: 307 })
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::HttpStatus { status: 307 })
     );
     assert_eq!(redirect.finish().await.len(), 1);
 
@@ -862,7 +941,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         oversized_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::ResponseTooLarge {
             size_class: EvmCoarseSizeClass::UpTo1Mib,
         })
     );
@@ -881,7 +960,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         declared_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::ResponseTooLarge {
             size_class: EvmCoarseSizeClass::Over1Mib,
         })
     );
@@ -921,7 +1000,7 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
         streamed_transport
             .chain_identity(&EvmChainIdentityRequest::new(binding))
             .await,
-        EvmTransportOutcome::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+        EvmTransportOutcome::SafeFailure(EvmSafeFailure::ResponseTooLarge {
             size_class: EvmCoarseSizeClass::Over1Mib,
         })
     );
@@ -930,13 +1009,20 @@ async fn redirects_and_oversized_results_are_not_retried_or_followed() {
 
 #[test]
 fn route_catalog_is_exact_generation_only_and_rejects_duplicates() {
-    let mut routes = EvmRoutingCatalogBuilder::new();
+    let registry_lineage_ref = reference(242);
+    let registry_head_ref = reference(237);
+    let chain = chain_attestation(
+        1,
+        "mfm.test/duplicate-chain",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let descriptor = route_descriptor("ethereum-mainnet", &chain, "generation");
+    let mut routes =
+        EvmRoutingCatalogBuilder::new(registry_head_ref, vec![chain]).expect("catalog builder");
     let generation = routes
         .insert(
-            "ethereum-mainnet",
-            "mfm.evm.json-rpc",
-            1,
-            generation_id("generation"),
+            descriptor.clone(),
             EvmRpcEndpoint::new("https://rpc.example.invalid").expect("endpoint"),
             None,
         )
@@ -944,10 +1030,7 @@ fn route_catalog_is_exact_generation_only_and_rejects_duplicates() {
     assert_eq!(
         routes
             .insert(
-                "ethereum-mainnet",
-                "mfm.evm.json-rpc",
-                1,
-                generation_id("generation"),
+                descriptor,
                 EvmRpcEndpoint::new("https://rpc.example.invalid").expect("endpoint"),
                 None,
             )
@@ -963,12 +1046,31 @@ fn route_catalog_is_exact_generation_only_and_rejects_duplicates() {
 
 #[test]
 fn route_descriptors_are_canonical_sorted_and_secret_free() {
+    let registry_lineage_ref = reference(243);
+    let registry_head_ref = reference(236);
+    let mainnet = chain_attestation(
+        1,
+        "mfm.test/canonical-mainnet",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
     assert_eq!(
-        EvmRoutingCatalogBuilder::new().build().err(),
+        EvmRoutingCatalogBuilder::new(registry_head_ref.clone(), vec![mainnet.clone()])
+            .expect("empty catalog builder")
+            .build()
+            .err(),
         Some(EvmTransportError::EmptyCatalog)
     );
 
-    let mut routes = EvmRoutingCatalogBuilder::new();
+    let sepolia = chain_attestation(
+        11_155_111,
+        "mfm.test/canonical-sepolia",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let mut routes =
+        EvmRoutingCatalogBuilder::new(registry_head_ref, vec![mainnet.clone(), sepolia.clone()])
+            .expect("catalog builder");
     let authorization = EvmRpcAuthorization::new(Zeroizing::new(format!(
         "Bearer route-test-{}",
         std::process::id()
@@ -976,20 +1078,14 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
     .expect("authorization");
     let second = routes
         .insert(
-            "ethereum-sepolia",
-            "mfm.evm.json-rpc",
-            11_155_111,
-            generation_id("generation-b"),
+            route_descriptor("ethereum-sepolia", &sepolia, "generation-b"),
             EvmRpcEndpoint::new("https://second.rpc.example.invalid/private").expect("endpoint"),
             Some(authorization),
         )
         .expect("route");
     let first = routes
         .insert(
-            "ethereum-mainnet",
-            "mfm.evm.json-rpc",
-            1,
-            generation_id("generation-a"),
+            route_descriptor("ethereum-mainnet", &mainnet, "generation-a"),
             EvmRpcEndpoint::new("https://first.rpc.example.invalid/private").expect("endpoint"),
             None,
         )
@@ -997,7 +1093,13 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
     let routes = routes.build().expect("catalog");
     let mut expected = vec![first, second];
     expected.sort();
-    assert_eq!(routes.descriptor().ordered_generation_refs(), expected);
+    let actual = routes
+        .descriptor()
+        .generations()
+        .iter()
+        .map(|descriptor| descriptor.generation_ref().expect("generation ref"))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
 
     let catalog_json = routes
         .descriptor()
@@ -1046,16 +1148,394 @@ fn route_descriptors_are_canonical_sorted_and_secret_free() {
     ] {
         let mut wire = serde_json::to_value(generation).expect("descriptor JSON");
         wire[field] = hostile;
-        assert!(
-            serde_json::from_value::<EvmRoutingGenerationDescriptor>(wire).is_err(),
-            "{field} must be exact"
-        );
+        let forged = serde_json::from_value::<EvmRoutingGenerationDescriptor>(wire)
+            .expect("structural descriptor");
+        assert!(forged.validate().is_err(), "{field} must be exact");
     }
 
     let mut catalog_wire = serde_json::to_value(routes.descriptor()).expect("catalog JSON");
-    catalog_wire["ordered_generation_refs"]
+    catalog_wire["generations"]
         .as_array_mut()
         .expect("generation refs")
         .reverse();
-    assert!(serde_json::from_value::<EvmRoutingCatalogDescriptor>(catalog_wire).is_err());
+    let forged = serde_json::from_value::<EvmRoutingCatalogDescriptor>(catalog_wire)
+        .expect("structural catalog");
+    assert!(forged.validate().is_err());
+}
+
+fn inventory_challenge(
+    generation_ref: ContentRef,
+    ordinal: u8,
+    finish_authorization: &[u8],
+) -> EvmRpcInventoryChallenge {
+    EvmRpcInventoryChallenge::new(
+        generation_ref,
+        EvmRpcTargetIdentity::new([ordinal.wrapping_add(10); 32]),
+        EvmRpcAssemblyLease::new([0x41; 32]),
+        EvmRpcInventoryCheckpoint::new([0x42; 32]),
+        EvmRpcRouteChallenge::new([ordinal.wrapping_add(20); 32]),
+        *mfm_canonical::sha256_digest_bytes(finish_authorization).as_bytes(),
+    )
+}
+
+fn inventory_response(
+    challenge: &EvmRpcInventoryChallenge,
+    ordinal: u16,
+    proof: &[u8],
+) -> TestResponse {
+    TestResponse::json(json!({
+        "jsonrpc": "2.0",
+        "id": ordinal,
+        "result": {
+            "protocol": "mfm.evm.rpc-inventory-qualification.v1",
+            "ordinal": ordinal,
+            "route_generation_ref": challenge.route_generation_ref(),
+            "target_identity": hex::encode(challenge.target_identity().as_bytes()),
+            "assembly_lease": hex::encode(challenge.assembly_lease().as_bytes()),
+            "checkpoint": hex::encode(challenge.checkpoint().as_bytes()),
+            "route_challenge": hex::encode(challenge.route_challenge().as_bytes()),
+            "finish_authorization_commitment":
+                hex::encode(challenge.finish_authorization_commitment()),
+            "proof": hex::encode(proof),
+        }
+    }))
+}
+
+fn inventory_catalog(
+    endpoint: &str,
+    authorization: Option<EvmRpcAuthorization>,
+) -> (EvmRoutingCatalog, ContentRef) {
+    let registry_lineage_ref = reference(231);
+    let registry_head_ref = reference(230);
+    let chain = chain_attestation(
+        1,
+        "mfm.test/inventory-chain",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let descriptor = route_descriptor("ethereum-mainnet", &chain, "inventory-generation");
+    let mut builder = EvmRoutingCatalogBuilder::new(registry_head_ref, vec![chain])
+        .expect("inventory catalog builder");
+    let generation = builder
+        .insert(
+            descriptor,
+            EvmRpcEndpoint::new(endpoint).expect("inventory endpoint"),
+            authorization,
+        )
+        .expect("inventory route");
+    (
+        builder.build().expect("inventory catalog"),
+        generation
+            .to_content_ref()
+            .expect("inventory generation ref"),
+    )
+}
+
+fn two_route_inventory_catalog() -> (EvmRoutingCatalog, Vec<ContentRef>) {
+    let registry_lineage_ref = reference(229);
+    let registry_head_ref = reference(228);
+    let first_chain = chain_attestation(
+        1,
+        "mfm.test/two-route-inventory-chain-a",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let second_chain = chain_attestation(
+        11_155_111,
+        "mfm.test/two-route-inventory-chain-b",
+        &registry_lineage_ref,
+        &registry_head_ref,
+    );
+    let mut builder = EvmRoutingCatalogBuilder::new(
+        registry_head_ref,
+        vec![first_chain.clone(), second_chain.clone()],
+    )
+    .expect("two-route inventory builder");
+    for (network, generation, chain) in [
+        ("ethereum-mainnet", "inventory-generation-a", &first_chain),
+        ("ethereum-sepolia", "inventory-generation-b", &second_chain),
+    ] {
+        builder
+            .insert(
+                route_descriptor(network, chain, generation),
+                EvmRpcEndpoint::new("http://127.0.0.1:9").expect("inventory endpoint"),
+                None,
+            )
+            .expect("inventory route");
+    }
+    let catalog = builder.build().expect("two-route inventory catalog");
+    let generations = catalog
+        .generation_descriptors()
+        .map(|(generation, _)| generation.to_content_ref().expect("generation ref"))
+        .collect();
+    (catalog, generations)
+}
+
+#[test]
+fn inventory_affine_types_are_not_cloneable_or_serializable() {
+    static_assertions::assert_not_impl_any!(PendingEvmRpcInventory: Clone, serde::Serialize);
+    static_assertions::assert_not_impl_any!(CompletedEvmRpcInventoryExchange: Clone, serde::Serialize);
+    static_assertions::assert_not_impl_any!(EvmRpcInventoryFinishAuthorization: Clone, serde::Serialize);
+    static_assertions::assert_not_impl_any!(EvmRpcInventoryProofs: Clone, serde::Serialize);
+}
+
+#[tokio::test]
+async fn inventory_exchange_uses_only_retained_endpoint_and_redacts_private_values() {
+    let finish_authorization = [0xa5; 32];
+    let (_, provisional_generation) = inventory_catalog("http://127.0.0.1:9", None);
+    let challenge = inventory_challenge(provisional_generation, 0, &finish_authorization);
+    let retained = TestServer::start(vec![inventory_response(&challenge, 0, &[0x5a; 64])]).await;
+    let substituted = TestServer::start(Vec::new()).await;
+    let credential = format!("Bearer private-inventory-{}", std::process::id());
+    let authorization = EvmRpcAuthorization::new(Zeroizing::new(credential.clone()))
+        .expect("inventory authorization");
+    let (catalog, actual_generation) = inventory_catalog(&retained.endpoint, Some(authorization));
+    assert_eq!(actual_generation, *challenge.route_generation_ref());
+
+    let pending = PendingEvmRpcInventory::new(catalog).expect("pending inventory");
+    let private_endpoint = retained.endpoint.clone();
+    for redacted in [
+        format!("{pending:?}"),
+        format!("{challenge:?}"),
+        format!("{:?}", EvmTransportError::InventoryExchangeFailed),
+    ] {
+        assert!(!redacted.contains(&private_endpoint));
+        assert!(!redacted.contains(&credential));
+    }
+
+    let (pending, proofs) = pending
+        .exchange(EvmRpcInventoryChallenges::new(vec![challenge]).expect("challenges"))
+        .await
+        .expect("inventory exchange");
+    assert_eq!(proofs.iter().count(), 1);
+    let proof_debug = format!("{proofs:?}");
+    assert!(!proof_debug.contains(&private_endpoint));
+    assert!(!proof_debug.contains(&credential));
+    assert!(!proof_debug.contains(&hex::encode([0x5a; 64])));
+    let exchange_ref = proofs.exchange_ref();
+
+    let completed = pending
+        .finish(
+            EvmRpcInventoryFinishAuthorization::new(Zeroizing::new(finish_authorization.to_vec()))
+                .expect("finish authorization"),
+        )
+        .expect("completed exchange");
+    assert_eq!(completed.exchange_ref(), exchange_ref);
+    assert_eq!(
+        completed
+            .transport()
+            .routing_generation_descriptors()
+            .count(),
+        1
+    );
+
+    let requests = retained.finish().await;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["method"], json!("mfm_qualifyRpcInventory"));
+    assert!(substituted.finish().await.is_empty());
+}
+
+#[tokio::test]
+async fn inventory_rejects_foreign_stale_and_mismatched_finish_material() {
+    let finish_authorization = [0xb6; 32];
+    let (_, generation) = inventory_catalog("http://127.0.0.1:9", None);
+    let challenge = inventory_challenge(generation, 0, &finish_authorization);
+    let mut stale = serde_json::to_value(json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+            "protocol": "mfm.evm.rpc-inventory-qualification.v1",
+            "ordinal": 0,
+            "route_generation_ref": challenge.route_generation_ref(),
+            "target_identity": hex::encode(challenge.target_identity().as_bytes()),
+            "assembly_lease": hex::encode(challenge.assembly_lease().as_bytes()),
+            "checkpoint": hex::encode([0xff; 32]),
+            "route_challenge": hex::encode(challenge.route_challenge().as_bytes()),
+            "finish_authorization_commitment":
+                hex::encode(challenge.finish_authorization_commitment()),
+            "proof": hex::encode([0x77; 64]),
+        }
+    }))
+    .expect("stale response");
+    let server = TestServer::start(vec![TestResponse::json(std::mem::take(&mut stale))]).await;
+    let (catalog, _) = inventory_catalog(&server.endpoint, None);
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(EvmRpcInventoryChallenges::new(vec![challenge]).expect("challenge closure"))
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryProof)
+    );
+    assert_eq!(server.finish().await.len(), 1);
+
+    let (_, generation) = inventory_catalog("http://127.0.0.1:9", None);
+    let challenge = inventory_challenge(generation, 0, &finish_authorization);
+    let server = TestServer::start(vec![inventory_response(&challenge, 0, &[0x66; 64])]).await;
+    let (catalog, _) = inventory_catalog(&server.endpoint, None);
+    let (pending, _) = PendingEvmRpcInventory::new(catalog)
+        .expect("pending inventory")
+        .exchange(EvmRpcInventoryChallenges::new(vec![challenge]).expect("challenge closure"))
+        .await
+        .expect("valid exchange");
+    assert_eq!(
+        pending
+            .finish(
+                EvmRpcInventoryFinishAuthorization::new(Zeroizing::new(vec![0xcc; 32]))
+                    .expect("wrong finish authorization")
+            )
+            .err(),
+        Some(EvmTransportError::InvalidInventoryFinishAuthorization)
+    );
+    assert_eq!(server.finish().await.len(), 1);
+}
+
+#[tokio::test]
+async fn inventory_rejects_missing_duplicate_reordered_and_foreign_responses() {
+    let finish_authorization = [0xc8; 32];
+    let (_, generation) = inventory_catalog("http://127.0.0.1:9", None);
+    let challenge = inventory_challenge(generation, 0, &finish_authorization);
+    let proof_hex = hex::encode([0x55; 64]);
+    let valid = inventory_response(&challenge, 0, &[0x55; 64]);
+    let mut missing: Value = serde_json::from_slice(&valid.body).expect("valid response");
+    missing["result"]
+        .as_object_mut()
+        .expect("result object")
+        .remove("proof");
+    let mut reordered: Value = serde_json::from_slice(&valid.body).expect("valid response");
+    reordered["result"]["ordinal"] = json!(1);
+    let mut foreign: Value = serde_json::from_slice(&valid.body).expect("valid response");
+    foreign["result"]["target_identity"] = hex::encode([0xfe; 32]).into();
+    let valid_text = String::from_utf8(valid.body).expect("response UTF-8");
+    let proof_member = format!(r#""proof":"{proof_hex}""#);
+    let duplicate_text =
+        valid_text.replace(&proof_member, &format!("{proof_member},{proof_member}"));
+    assert_ne!(duplicate_text, valid_text);
+
+    let invalid_responses = [
+        TestResponse::json(missing),
+        TestResponse {
+            status: 200,
+            body: duplicate_text.into_bytes(),
+            declared_length: None,
+            omit_content_length: false,
+            location: None,
+        },
+        TestResponse::json(reordered),
+        TestResponse::json(foreign),
+    ];
+    for response in invalid_responses {
+        let server = TestServer::start(vec![response]).await;
+        let (catalog, _) = inventory_catalog(&server.endpoint, None);
+        assert_eq!(
+            PendingEvmRpcInventory::new(catalog)
+                .expect("pending inventory")
+                .exchange(
+                    EvmRpcInventoryChallenges::new(vec![challenge.clone()])
+                        .expect("challenge closure")
+                )
+                .await
+                .err(),
+            Some(EvmTransportError::InvalidInventoryProof)
+        );
+        assert_eq!(server.finish().await.len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn inventory_rejects_missing_duplicate_reordered_and_foreign_challenges_before_io() {
+    let finish_authorization = [0xd7; 32];
+
+    let (catalog, generations) = two_route_inventory_catalog();
+    let missing = vec![inventory_challenge(
+        generations[0].clone(),
+        0,
+        &finish_authorization,
+    )];
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(EvmRpcInventoryChallenges::new(missing).expect("bounded challenges"))
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryChallenge)
+    );
+
+    let (catalog, generations) = two_route_inventory_catalog();
+    let duplicate = vec![
+        inventory_challenge(generations[0].clone(), 0, &finish_authorization),
+        inventory_challenge(generations[0].clone(), 1, &finish_authorization),
+    ];
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(EvmRpcInventoryChallenges::new(duplicate).expect("bounded challenges"))
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryChallenge)
+    );
+
+    let (catalog, generations) = two_route_inventory_catalog();
+    let reordered = vec![
+        inventory_challenge(generations[1].clone(), 0, &finish_authorization),
+        inventory_challenge(generations[0].clone(), 1, &finish_authorization),
+    ];
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(EvmRpcInventoryChallenges::new(reordered).expect("bounded challenges"))
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryChallenge)
+    );
+
+    let (catalog, generations) = two_route_inventory_catalog();
+    let shared_challenge = EvmRpcRouteChallenge::new([0xee; 32]);
+    let duplicate_challenges = generations
+        .into_iter()
+        .enumerate()
+        .map(|(index, generation)| {
+            let challenge = inventory_challenge(
+                generation,
+                u8::try_from(index).expect("ordinal"),
+                &finish_authorization,
+            );
+            EvmRpcInventoryChallenge::new(
+                challenge.route_generation_ref().clone(),
+                challenge.target_identity(),
+                challenge.assembly_lease(),
+                challenge.checkpoint(),
+                shared_challenge,
+                *challenge.finish_authorization_commitment(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(
+                EvmRpcInventoryChallenges::new(duplicate_challenges).expect("bounded challenges")
+            )
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryChallenge)
+    );
+
+    let (catalog, generations) = two_route_inventory_catalog();
+    let foreign = vec![
+        inventory_challenge(
+            reference(227).to_content_ref().expect("foreign ref"),
+            0,
+            &finish_authorization,
+        ),
+        inventory_challenge(generations[1].clone(), 1, &finish_authorization),
+    ];
+    assert_eq!(
+        PendingEvmRpcInventory::new(catalog)
+            .expect("pending inventory")
+            .exchange(EvmRpcInventoryChallenges::new(foreign).expect("bounded challenges"))
+            .await
+            .err(),
+        Some(EvmTransportError::InvalidInventoryChallenge)
+    );
 }

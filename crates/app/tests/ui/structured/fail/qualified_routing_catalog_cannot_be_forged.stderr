@@ -1,0 +1,11 @@
+error: cannot construct `QualifiedEvmRoutingCatalog` with struct literal syntax due to private fields
+  --> tests/ui/structured/fail/qualified_routing_catalog_cannot_be_forged.rs:13:13
+   |
+13 |     let _ = QualifiedEvmRoutingCatalog {
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         descriptor: descriptor(),
+   |         ------------------------ private field
+15 |         provider_fence_head_ref: fence_head(),
+   |         ------------------------------------- private field
+   |
+   = note: ...and other private field `client` that was not provided

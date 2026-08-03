@@ -39,29 +39,21 @@ fn authentication_grant_and_tenant_hidden_absence_have_distinct_status_classes()
         "The requested run was not found",
     );
 
-    for error in [
-        mfm_replay::ReplayError::InvalidRecordedHistory,
-        mfm_replay::ReplayError::CandidateExecutionFailed,
-        mfm_replay::ReplayError::ComparisonIntegrityFailed,
-        mfm_replay::ReplayError::InvalidExport,
-    ] {
-        let integrity: PublicError = error.into();
-        assert_public_error(
-            &integrity,
-            ErrorClass::Internal,
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "ReplayVerificationFailed",
-            "Recorded run evidence failed verification",
-        );
-    }
-
-    let unavailable: PublicError = mfm_replay::ReplayError::CandidateUnavailable.into();
+    let invalid = PublicError::replay_artifact_invalid();
     assert_public_error(
-        &unavailable,
-        ErrorClass::ServiceUnavailable,
-        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-        "RuntimeCatalogUnavailable",
-        "The exact admitted runtime catalog is unavailable",
+        &invalid,
+        ErrorClass::BadRequest,
+        axum::http::StatusCode::BAD_REQUEST,
+        "ReplayArtifactInvalid",
+        "The replay artifact is invalid.",
+    );
+    let too_large = PublicError::replay_artifact_too_large();
+    assert_public_error(
+        &too_large,
+        ErrorClass::BadRequest,
+        axum::http::StatusCode::BAD_REQUEST,
+        "ReplayArtifactTooLarge",
+        "The replay artifact exceeds the allowed size.",
     );
 }
 
@@ -72,7 +64,7 @@ fn assert_public_error(
     code: &str,
     message: &str,
 ) {
-    assert_eq!(error.class, class);
+    assert_eq!(error.class(), class);
     assert_eq!(mfm_rest_api::ApiError::from(error.clone()).status(), status);
     assert_eq!(
         serde_json::to_value(error).expect("serialize public error"),

@@ -5,7 +5,7 @@ resolver = "2"
 members = [
 	"bin/cli",
 	"bin/rest-api",
-	"tests/qualified-run-support",
+	"tests/wallet-authority-provider",
 	"tests/integration",
 	"crates/app",
 	"crates/live/bitcoin",
@@ -15,7 +15,6 @@ members = [
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",
 	"crates/kernel/journal",
-	"crates/kernel/executor",
 	"crates/kernel/facts",
 	"crates/kernel/ids",
 	"crates/kernel/program",
@@ -29,8 +28,7 @@ members = [
 	"crates/domains/evm",
 	"crates/domains/portfolio",
 	"crates/signing",
-	"crates/storages/executor-file",
-	"crates/storages/executor-postgres",
+	"crates/storages/evm-postgres",
 	"crates/storages/postgres",
 ]
 

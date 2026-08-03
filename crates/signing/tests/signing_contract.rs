@@ -1,6 +1,7 @@
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_signing::*;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 fn signer_ref() -> SignerRef {
@@ -364,11 +365,62 @@ fn guarded_binding_requires_an_account_and_matching_identity_algorithm() {
 
 struct FixedGuardedProvider {
     binding: VerifiedGenerationGuardedSignerBinding,
+    substituted_binding: VerifiedGenerationGuardedSignerBinding,
+    eligible: AtomicBool,
+    substitute_during_qualification: bool,
+    revoke_during_qualification: bool,
+    substituted: AtomicBool,
+    qualifications: AtomicUsize,
+    signs: AtomicUsize,
+}
+
+impl FixedGuardedProvider {
+    fn new(binding: VerifiedGenerationGuardedSignerBinding, eligible: bool) -> Self {
+        Self {
+            substituted_binding: binding.clone(),
+            binding,
+            eligible: AtomicBool::new(eligible),
+            substitute_during_qualification: false,
+            revoke_during_qualification: false,
+            substituted: AtomicBool::new(false),
+            qualifications: AtomicUsize::new(0),
+            signs: AtomicUsize::new(0),
+        }
+    }
 }
 
 impl GenerationGuardedDeterministicSigningProvider for FixedGuardedProvider {
+    fn is_read_attestation_eligible(&self) -> bool {
+        self.eligible.load(Ordering::SeqCst)
+    }
+
     fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
-        &self.binding
+        if self.substituted.load(Ordering::SeqCst) {
+            &self.substituted_binding
+        } else {
+            &self.binding
+        }
+    }
+
+    fn verify_read_attestation_qualification<'a>(
+        &'a self,
+        expected_binding: &'a VerifiedGenerationGuardedSignerBinding,
+    ) -> ReadAttestationQualificationFuture<'a> {
+        self.qualifications.fetch_add(1, Ordering::SeqCst);
+        if self.substitute_during_qualification {
+            self.substituted.store(true, Ordering::SeqCst);
+        }
+        if self.revoke_during_qualification {
+            self.eligible.store(false, Ordering::SeqCst);
+        }
+        let result = if expected_binding == &self.binding {
+            Ok(())
+        } else {
+            Err(SigningError::Provider {
+                reason: SigningProviderError::BindingMismatch,
+            })
+        };
+        Box::pin(async move { result })
     }
 
     fn sign_guarded<'a>(
@@ -376,6 +428,7 @@ impl GenerationGuardedDeterministicSigningProvider for FixedGuardedProvider {
         _expected_generation_ref: &'a ContentRef,
         _request: &'a SigningRequest,
     ) -> SigningFuture<'a> {
+        self.signs.fetch_add(1, Ordering::SeqCst);
         Box::pin(async {
             Err(SigningError::Provider {
                 reason: SigningProviderError::Failed,
@@ -385,33 +438,75 @@ impl GenerationGuardedDeterministicSigningProvider for FixedGuardedProvider {
 }
 
 #[tokio::test]
-async fn guarded_binder_owns_one_binding_and_rejects_provider_substitution() {
-    let expected = guarded_binding("mfm.test.guarded-signer", 0x30);
-    let returned = expected.clone();
-    let binder =
-        GenerationGuardedDeterministicSigningProviderBinder::new(expected.clone(), move || {
-            let provider: Arc<dyn GenerationGuardedDeterministicSigningProvider> =
-                Arc::new(FixedGuardedProvider {
-                    binding: returned.clone(),
-                });
-            Box::pin(async move { Ok(provider) })
-        });
-    assert_eq!(binder.binding(), &expected);
-    let provider = binder.bind().await.expect("exact provider");
-    assert_eq!(provider.binding(), &expected);
+async fn read_qualification_rejects_every_semantic_mutation_before_provider_callbacks() {
+    for mutation in [
+        "quota",
+        "approval",
+        "anti-replay",
+        "billing",
+        "rate-limit",
+        "other-semantic-state",
+    ] {
+        let provider = Arc::new(FixedGuardedProvider::new(
+            guarded_binding("mfm.test.guarded-signer", 0x30),
+            false,
+        ));
+        let raw: Arc<dyn GenerationGuardedDeterministicSigningProvider> = provider.clone();
+        assert!(
+            matches!(
+                QualifiedReadSigningProvider::try_qualify(raw).await,
+                Err(SigningError::Provider {
+                    reason: SigningProviderError::ReadAttestationIneligible
+                })
+            ),
+            "accepted {mutation} mutation"
+        );
+        assert_eq!(provider.qualifications.load(Ordering::SeqCst), 0);
+        assert_eq!(provider.signs.load(Ordering::SeqCst), 0);
+    }
+}
 
-    let substituted = guarded_binding("mfm.test.substituted-signer", 0x31);
-    let binder = GenerationGuardedDeterministicSigningProviderBinder::new(expected, move || {
-        let provider: Arc<dyn GenerationGuardedDeterministicSigningProvider> =
-            Arc::new(FixedGuardedProvider {
-                binding: substituted.clone(),
-            });
-        Box::pin(async move { Ok(provider) })
-    });
+#[tokio::test]
+async fn read_qualification_rejects_changed_eligibility_or_binding_and_rechecks_each_sign() {
+    let binding = guarded_binding("mfm.test.guarded-signer", 0x31);
+    let mut revoked = FixedGuardedProvider::new(binding.clone(), true);
+    revoked.revoke_during_qualification = true;
+    let revoked = Arc::new(revoked);
+    let raw: Arc<dyn GenerationGuardedDeterministicSigningProvider> = revoked.clone();
     assert!(matches!(
-        binder.bind().await,
+        QualifiedReadSigningProvider::try_qualify(raw).await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::ReadAttestationIneligible
+        })
+    ));
+    assert_eq!(revoked.qualifications.load(Ordering::SeqCst), 1);
+
+    let mut substituted = FixedGuardedProvider::new(binding.clone(), true);
+    substituted.substituted_binding = guarded_binding("mfm.test.substituted-signer", 0x32);
+    substituted.substitute_during_qualification = true;
+    let substituted = Arc::new(substituted);
+    let raw: Arc<dyn GenerationGuardedDeterministicSigningProvider> = substituted.clone();
+    assert!(matches!(
+        QualifiedReadSigningProvider::try_qualify(raw).await,
         Err(SigningError::Provider {
             reason: SigningProviderError::BindingMismatch
         })
     ));
+
+    let exact = Arc::new(FixedGuardedProvider::new(binding, true));
+    let raw: Arc<dyn GenerationGuardedDeterministicSigningProvider> = exact.clone();
+    let qualified = QualifiedReadSigningProvider::try_qualify(raw)
+        .await
+        .expect("eligible exact provider");
+    assert_eq!(exact.qualifications.load(Ordering::SeqCst), 1);
+    exact.eligible.store(false, Ordering::SeqCst);
+    assert!(matches!(
+        qualified
+            .sign_guarded(qualified.binding().durable_generation_ref(), &request())
+            .await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::ReadAttestationIneligible
+        })
+    ));
+    assert_eq!(exact.signs.load(Ordering::SeqCst), 0);
 }

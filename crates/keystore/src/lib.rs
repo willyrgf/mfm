@@ -55,4 +55,6 @@ mod keystore;
 mod signer;
 
 pub use self::keystore::{KeyInfo, KeyType, Keystore, KeystoreConfig, KeystoreError};
-pub use self::signer::{KeystoreSignerProvider, KEYSTORE_SIGNING_IMPLEMENTATION_ID};
+pub use self::signer::{
+    KeystoreSignerProvider, QualifiedKeystoreSigner, KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+};

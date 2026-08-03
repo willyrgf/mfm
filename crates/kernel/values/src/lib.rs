@@ -29,7 +29,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 mod generic_values;
-pub use self::generic_values::{ArtifactRef, MaybeValue, NonEmpty, SkipCode, SkipReason};
+pub use self::generic_values::{ArtifactRef, NonEmpty};
 mod retained;
 pub use self::retained::{
     component_object_evidence_contract_canonical, component_object_evidence_contract_ref,
@@ -167,15 +167,6 @@ impl ConfigError {
     }
 }
 
-/// Terminal policy for cells containing a value type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValueTerminalPolicy {
-    /// The cell must be produced with value bytes.
-    ProducedOnly,
-    /// The cell may be produced or skipped with explicit skip provenance.
-    MaybeSkipped,
-}
-
 /// Values that may cross typed state boundaries.
 pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
     /// Returns the schema descriptor for this value type.
@@ -183,11 +174,6 @@ pub trait MfmValue: Serialize + DeserializeOwned + Send + Sync + 'static {
 
     /// Returns the stable semantic identity for this value kind.
     fn semantic_id() -> Result<SemanticTypeId>;
-
-    /// Returns the terminal policy for cells containing this value type.
-    fn terminal_policy() -> ValueTerminalPolicy {
-        ValueTerminalPolicy::ProducedOnly
-    }
 
     /// Derives this value's schema id from its schema descriptor identity.
     fn schema_id() -> Result<SchemaId> {
@@ -1926,21 +1912,6 @@ pub fn framework_value_descriptor(
         )?,
         SchemaAudit::framework("mfm-values", rust_type_path),
     )
-}
-
-fn skip_reason_shape() -> Result<SchemaShape> {
-    SchemaShape::named_struct(vec![
-        FieldDescriptor::required(
-            "code",
-            SchemaShape::external_enum(vec![
-                EnumVariantDescriptor::new("dependency_skipped", SchemaShape::Unit),
-                EnumVariantDescriptor::new("filtered", SchemaShape::Unit),
-                EnumVariantDescriptor::new("not_applicable", SchemaShape::Unit),
-                EnumVariantDescriptor::new("policy", SchemaShape::Unit),
-            ])?,
-        ),
-        FieldDescriptor::required("explanation", SchemaShape::String),
-    ])
 }
 
 fn schema_version(value: &str) -> Result<SchemaVersion> {

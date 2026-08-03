@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
+use serde::Serialize;
 
 use crate::{FactError, Result, MAX_FACT_EMISSIONS};
 
@@ -20,6 +21,32 @@ pub struct ProposedFactValue {
     media_type: String,
     evidence_contract_ref: ContentRef,
     canonical: PlainCanonicalJsonBytes,
+}
+
+impl Serialize for ProposedFactValue {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            content_ref: &'a ContentRef,
+            semantic_type_id: &'a SemanticTypeId,
+            role: &'a StableId,
+            media_type: &'a str,
+            evidence_contract_ref: &'a ContentRef,
+            canonical_json: &'a str,
+        }
+        Wire {
+            content_ref: &self.content_ref,
+            semantic_type_id: &self.semantic_type_id,
+            role: &self.role,
+            media_type: &self.media_type,
+            evidence_contract_ref: &self.evidence_contract_ref,
+            canonical_json: self.canonical.as_str(),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl ProposedFactValue {
@@ -119,7 +146,7 @@ struct ProposedFactValueIdentity {
 /// alone derives their producer-bound retained authority, the fixed
 /// `mfm.fact-claim-envelope.v1`, and the journal-owned emission after
 /// store-owned preparation checks the exact certified fact slot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FactProposal {
     fact_slot_ordinal: u32,
     descriptor_ref: ContentRef,
@@ -165,7 +192,8 @@ impl FactProposal {
 }
 
 /// Slot-grouped, ordered, duplicate-free proposals from one successful settlement.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct FactSet(Vec<FactProposal>);
 
 impl FactSet {

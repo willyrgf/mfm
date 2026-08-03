@@ -1,26 +1,14 @@
 # mfm-program
 
-Typed state callbacks and deterministic operation-authoring contracts.
+Typed authoring and process callback contracts for declaration-ordered structured programs.
 
-`docs/design.md` is the normative typed-core authority contract.
-This crate is framework-owned and must remain domain-free.
+The public structured builder exposes `State`, exhaustive `Match`, bounded collect-all `FanOut`,
+typed child calls, lexical values, explicit/default failure handling, and nominal lane/operation
+outcomes. Builders preserve declaration order and perform no callback or IO. Child calls are
+authoring sugar removed by certification expansion.
 
-Every `State` selects exactly one closed `StateExecution`: pure, audited read, or recoverable
-effect. Callbacks receive borrowed verified value views; read reducers additionally receive an
-opaque value-only `ObservationView` containing a typed returned outcome or classifier-approved
-safe-failure metadata with an optional typed diagnostic, not the observation's journal
-`ValueRef`. Append and live-access authority remain private to runtime. Successful `Settlement`
-values carry an ordered `FactSet`.
+`Never` is the sealed uninhabited failure sentinel and deliberately has no value schema. State
+callbacks receive typed canonical input/committed observation views and return proposed typed
+outcomes plus fact proposals. A proposal gains authority only after store append.
 
-`AuthoredProgramBuilder` records canonical state occurrences, nested-child composition, typed
-edges, bridges, required-success nodes, and public outputs. `connect_many` authors conjunctive
-`Vec<T>` fan-in; certification derives canonical producer order from final node ids. Framework and
-executor expansion belongs exclusively to `mfm-certify`.
-
-`QualifiedProgramRegistryBuilder` is the sole program-definition assembly boundary. It creates one
-immutable shared definition, invokes the registered certification factory exactly once over that
-definition, and retains process callbacks separately from semantic values. The builder is generic:
-application qualification owns the exact production component inventory, while the kernel enforces
-common descriptor identity and exact state-to-operation-to-manifest closure. Current-candidate
-selection returns sealed, non-serializable identities and replay-safe deterministic callbacks;
-cross-version comparison must pass the pure plan-compatibility predicate before invoking them.
+This crate owns no serialized-program trust, store, Runtime, transport, or live capability.

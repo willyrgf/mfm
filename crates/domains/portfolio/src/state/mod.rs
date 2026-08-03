@@ -1,25 +1,19 @@
-//! Pure same-run portfolio snapshot and report states.
+//! Pure same-run portfolio snapshot and report semantics.
 //!
-//! The snapshot state consumes typed EVM collection outputs through graph
-//! edges. It has no store, fact-query, replay, provider, or capability access.
+//! Structured operation callbacks pass typed EVM collection values directly.
+//! This module has no store, fact-query, replay, provider, or capability access.
 
 mod decimal;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU64;
 
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_evm::{
-    EvmBalanceAsset, EvmBalanceCollection, EvmBalanceSource, EvmNetworkBinding,
-    EvmRoutingGenerationRef,
+    EvmBalanceAsset, EvmBalanceCollection, EvmBalanceSource, EvmChainInstanceBinding,
+    EvmNetworkBinding, EvmRoutingGenerationRef,
 };
-use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
-use mfm_program::{
-    boundary_content_ref, FactSet, NoBoundaryValue, NoContext, Settlement, State, StateExecution,
-    StateFrame, UnitConfig,
-};
-use mfm_program_derive::{MfmValue, PublicOutputs, StateInput};
-use mfm_values::{ConfigError, PublicOutputDescriptor};
+use mfm_program_derive::MfmValue;
+use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
 use self::decimal::{multiply_decimal_strings, DecimalValue};
@@ -47,6 +41,7 @@ pub const PORTFOLIO_ROUTING_MANIFEST_VERSION: &str = "mfm.portfolio.routing-mani
 )]
 pub struct EvmRoutingBinding {
     network_id: String,
+    chain_instance: EvmChainInstanceBinding,
     routing_generation_ref: EvmRoutingGenerationRef,
 }
 
@@ -54,6 +49,7 @@ impl EvmRoutingBinding {
     /// Creates one checked semantic-network to exact-generation binding.
     pub fn new(
         network_id: impl Into<String>,
+        chain_instance: EvmChainInstanceBinding,
         routing_generation_ref: EvmRoutingGenerationRef,
     ) -> Result<Self, ConfigError> {
         let network_id = network_id.into();
@@ -62,8 +58,12 @@ impl EvmRoutingBinding {
         routing_generation_ref
             .to_content_ref()
             .map_err(|error| ConfigError::new(error.to_string()))?;
+        chain_instance
+            .validate()
+            .map_err(|error| ConfigError::new(error.to_string()))?;
         Ok(Self {
             network_id,
+            chain_instance,
             routing_generation_ref,
         })
     }
@@ -76,6 +76,11 @@ impl EvmRoutingBinding {
     /// Returns the exact immutable generation reference.
     pub const fn routing_generation_ref(&self) -> &EvmRoutingGenerationRef {
         &self.routing_generation_ref
+    }
+
+    /// Returns the exact qualified physical-chain binding.
+    pub const fn chain_instance(&self) -> &EvmChainInstanceBinding {
+        &self.chain_instance
     }
 }
 
@@ -127,9 +132,8 @@ impl PortfolioRoutingManifest {
 }
 
 /// Complete value-only input to snapshot selection validation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, StateInput)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.portfolio.input.snapshot_selection", version = "1")]
 pub struct PortfolioSnapshotSelectionInput {
     selector: PortfolioSnapshotSelector,
     portfolio: PortfolioConfig,
@@ -148,21 +152,6 @@ impl PortfolioSnapshotSelectionInput {
             portfolio,
             routing_manifest,
         }
-    }
-
-    /// Returns the public configured-value selector.
-    pub const fn selector(&self) -> &PortfolioSnapshotSelector {
-        &self.selector
-    }
-
-    /// Returns the exact separately retained portfolio configuration.
-    pub const fn portfolio(&self) -> &PortfolioConfig {
-        &self.portfolio
-    }
-
-    /// Returns the exact qualified non-secret routing manifest.
-    pub const fn routing_manifest(&self) -> &PortfolioRoutingManifest {
-        &self.routing_manifest
     }
 }
 
@@ -257,72 +246,6 @@ impl ValidatedPortfolioSnapshotSelection {
     }
 }
 
-/// Redaction-safe typed failure of snapshot selection validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.portfolio",
-    name = "invalid-snapshot-selection",
-    version = "1",
-    schema = "mfm.portfolio.invalid_snapshot_selection"
-)]
-pub struct InvalidPortfolioSnapshotSelection {}
-
-/// Pure semantic validation before every portfolio read graph.
-pub struct ValidatePortfolioSnapshotSelectionState;
-
-/// Validated portfolio authority and exact same-run collection outputs.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, StateInput)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.portfolio.input.snapshot_assembly", version = "1")]
-pub struct PortfolioSnapshotAssemblyInput {
-    selection: ValidatedPortfolioSnapshotSelection,
-    collections: Vec<EvmBalanceCollection>,
-}
-
-impl PortfolioSnapshotAssemblyInput {
-    /// Creates final assembly input from the validator and every EVM child.
-    pub fn new(
-        selection: ValidatedPortfolioSnapshotSelection,
-        collections: Vec<EvmBalanceCollection>,
-    ) -> Self {
-        Self {
-            selection,
-            collections,
-        }
-    }
-
-    /// Returns the exact successful validator output.
-    pub const fn selection(&self) -> &ValidatedPortfolioSnapshotSelection {
-        &self.selection
-    }
-
-    /// Returns EVM child outputs in certified position order.
-    pub fn collections(&self) -> &[EvmBalanceCollection] {
-        &self.collections
-    }
-}
-
-/// Exact snapshot consumed by the pure report projection.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, StateInput)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.portfolio.input.report_projection", version = "1")]
-pub struct PortfolioReportProjectionInput {
-    snapshot: PortfolioSnapshot,
-}
-
-impl PortfolioReportProjectionInput {
-    /// Wraps one same-run portfolio snapshot for report projection.
-    pub const fn new(snapshot: PortfolioSnapshot) -> Self {
-        Self { snapshot }
-    }
-
-    /// Returns the exact same-run snapshot.
-    pub const fn snapshot(&self) -> &PortfolioSnapshot {
-        &self.snapshot
-    }
-}
-
 /// Typed semantic failure of a pure portfolio state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
@@ -340,7 +263,7 @@ pub enum PortfolioSnapshotFailure {
 }
 
 /// Value-only public output contract for the sole product entry point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, PublicOutputs)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.portfolio.public_outputs")]
 pub struct PortfolioPublicOutputs {
@@ -348,104 +271,6 @@ pub struct PortfolioPublicOutputs {
     pub snapshot: PortfolioSnapshot,
     /// Pure report projection of that exact snapshot.
     pub report: PortfolioReport,
-}
-
-impl State for ValidatePortfolioSnapshotSelectionState {
-    type Config = UnitConfig;
-    type Context = NoContext;
-    type Input = PortfolioSnapshotSelectionInput;
-    type Output = ValidatedPortfolioSnapshotSelection;
-    type Failure = InvalidPortfolioSnapshotSelection;
-    type Request = NoBoundaryValue;
-    type Observation = NoBoundaryValue;
-    type SafeDiagnostic = NoBoundaryValue;
-
-    fn state_contract_ref() -> mfm_program::Result<ContentRef> {
-        portfolio_state_contract_ref("validate_snapshot_selection")
-    }
-}
-
-fn validate_snapshot_selection_apply(
-    frame: StateFrame<'_, ValidatePortfolioSnapshotSelectionState>,
-) -> Settlement<ValidatePortfolioSnapshotSelectionState> {
-    match validate_snapshot_selection(frame.input().value()) {
-        Ok(selection) => Settlement::succeeded(selection, FactSet::empty()),
-        Err(()) => Settlement::failed(InvalidPortfolioSnapshotSelection {}),
-    }
-}
-
-/// Pure exact-coverage snapshot assembly.
-pub struct AssemblePortfolioSnapshotState;
-
-impl State for AssemblePortfolioSnapshotState {
-    type Config = UnitConfig;
-    type Context = NoContext;
-    type Input = PortfolioSnapshotAssemblyInput;
-    type Output = PortfolioSnapshot;
-    type Failure = PortfolioSnapshotFailure;
-    type Request = NoBoundaryValue;
-    type Observation = NoBoundaryValue;
-    type SafeDiagnostic = NoBoundaryValue;
-
-    fn state_contract_ref() -> mfm_program::Result<ContentRef> {
-        portfolio_state_contract_ref("assemble_snapshot")
-    }
-}
-
-fn assemble_snapshot_apply(
-    frame: StateFrame<'_, AssemblePortfolioSnapshotState>,
-) -> Settlement<AssemblePortfolioSnapshotState> {
-    let input = frame.input().value();
-    match assemble_snapshot(&input.selection, &input.collections) {
-        Ok(snapshot) => Settlement::succeeded(snapshot, FactSet::empty()),
-        Err(()) => Settlement::failed(PortfolioSnapshotFailure::InvalidCollection),
-    }
-}
-
-/// Pure report projection from the exact same-run snapshot.
-pub struct ProjectPortfolioReportState;
-
-impl State for ProjectPortfolioReportState {
-    type Config = UnitConfig;
-    type Context = NoContext;
-    type Input = PortfolioReportProjectionInput;
-    type Output = PortfolioReport;
-    type Failure = PortfolioSnapshotFailure;
-    type Request = NoBoundaryValue;
-    type Observation = NoBoundaryValue;
-    type SafeDiagnostic = NoBoundaryValue;
-
-    fn state_contract_ref() -> mfm_program::Result<ContentRef> {
-        portfolio_state_contract_ref("project_report")
-    }
-}
-
-pub(crate) const fn validation_execution() -> StateExecution<ValidatePortfolioSnapshotSelectionState>
-{
-    StateExecution::pure(validate_snapshot_selection_apply)
-}
-
-pub(crate) const fn snapshot_assembly_execution() -> StateExecution<AssemblePortfolioSnapshotState>
-{
-    StateExecution::pure(assemble_snapshot_apply)
-}
-
-pub(crate) const fn report_projection_execution() -> StateExecution<ProjectPortfolioReportState> {
-    StateExecution::pure(project_report_apply)
-}
-
-fn project_report_apply(
-    frame: StateFrame<'_, ProjectPortfolioReportState>,
-) -> Settlement<ProjectPortfolioReportState> {
-    match project_report(frame.input().value().snapshot()) {
-        Ok(report) => Settlement::succeeded(report, FactSet::empty()),
-        Err(()) => Settlement::failed(PortfolioSnapshotFailure::InvalidSnapshot),
-    }
-}
-
-/// Returns the public-output schema for the sole snapshot entry point.
-pub fn portfolio_snapshot_public_output_schema_id() -> mfm_values::Result<SchemaId> {
-    PortfolioPublicOutputs::public_schema_id()
 }
 
 fn validate_snapshot_selection(
@@ -533,6 +358,30 @@ fn validate_snapshot_selection(
     })
 }
 
+pub(crate) fn validate_structured_snapshot_selection(
+    selector: PortfolioSnapshotSelector,
+    portfolio: PortfolioConfig,
+    routing_manifest: PortfolioRoutingManifest,
+) -> Result<ValidatedPortfolioSnapshotSelection, ()> {
+    validate_snapshot_selection(&PortfolioSnapshotSelectionInput::new(
+        selector,
+        portfolio,
+        routing_manifest,
+    ))
+}
+
+pub(crate) fn assemble_structured_public_outputs(
+    selector: PortfolioSnapshotSelector,
+    portfolio: PortfolioConfig,
+    routing_manifest: PortfolioRoutingManifest,
+    collections: &[EvmBalanceCollection],
+) -> Result<PortfolioPublicOutputs, ()> {
+    let selection = validate_structured_snapshot_selection(selector, portfolio, routing_manifest)?;
+    let snapshot = assemble_snapshot(&selection, collections)?;
+    let report = project_report(&snapshot)?;
+    Ok(PortfolioPublicOutputs { snapshot, report })
+}
+
 fn demanded_networks(
     portfolio: &PortfolioConfig,
 ) -> Result<BTreeMap<&str, &NetworkConfig>, String> {
@@ -567,12 +416,7 @@ pub(crate) fn compile_evm_collections_from_parts(
     let networks = demanded_networks(portfolio).map_err(ConfigError::new)?;
     let generations = evm_routing_bindings
         .iter()
-        .map(|binding| {
-            (
-                binding.network_id.as_str(),
-                binding.routing_generation_ref.clone(),
-            )
-        })
+        .map(|binding| (binding.network_id.as_str(), binding))
         .collect::<BTreeMap<_, _>>();
     let mut sources = BTreeMap::<&str, BTreeSet<EvmBalanceSource>>::new();
 
@@ -623,11 +467,20 @@ pub(crate) fn compile_evm_collections_from_parts(
             else {
                 return Err(ConfigError::new("Bitcoin holding demand is not executable"));
             };
-            let generation = generations
+            let qualified = generations
                 .get(network_id)
                 .ok_or_else(|| ConfigError::new("demanded EVM routing generation was missing"))?;
-            let binding = EvmNetworkBinding::new(network_id, chain_id.get(), generation.clone())
-                .map_err(|error| ConfigError::new(error.to_string()))?;
+            if qualified.chain_instance.chain_id() != chain_id.get() {
+                return Err(ConfigError::new(
+                    "portfolio chain id disagreed with the qualified chain instance",
+                ));
+            }
+            let binding = EvmNetworkBinding::new(
+                network_id,
+                qualified.chain_instance.clone(),
+                qualified.routing_generation_ref.clone(),
+            )
+            .map_err(|error| ConfigError::new(error.to_string()))?;
             mfm_evm::EvmBalanceCollectionConfig::new(
                 binding,
                 *native_decimals,
@@ -921,88 +774,3 @@ fn quote_totals(totals: BTreeMap<QuoteCode, DecimalValue>) -> Vec<PortfolioQuote
         })
         .collect()
 }
-
-pub(crate) fn portfolio_state_contract_canonical(
-    name: &'static str,
-) -> mfm_program::Result<PlainCanonicalJsonBytes> {
-    PlainCanonicalJsonBytes::from_json_str(&format!(
-        r#"{{"name":"{name}","version":"mfm.portfolio.state.{name}.v1"}}"#
-    ))
-    .map_err(|error| mfm_program::ProgramError::Codec(error.to_string()))
-}
-
-fn portfolio_state_contract_ref(name: &'static str) -> mfm_program::Result<ContentRef> {
-    boundary_content_ref(
-        portfolio_state_contract_schema_id()?,
-        &portfolio_state_contract_canonical(name)?,
-    )
-}
-
-pub(crate) fn portfolio_state_contract_schema_id() -> mfm_program::Result<SchemaId> {
-    SchemaId::new(
-        "mfm.portfolio.state-contract",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.portfolio.state-contract@1"),
-    )
-    .map_err(|error| mfm_program::ProgramError::Spec(error.to_string()))
-}
-
-pub(crate) fn portfolio_state_contract_support_contract(
-    role: StableId,
-    evidence_contract_ref: ContentRef,
-) -> mfm_program::Result<mfm_values::RetainedValueContract> {
-    let semantic_type_id = SemanticTypeId::new(
-        "mfm.portfolio",
-        "state-contract",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"semantic:mfm.portfolio:state-contract:1"),
-    )
-    .map_err(|error| mfm_program::ProgramError::Spec(error.to_string()))?;
-    mfm_values::RetainedValueContract::new(
-        portfolio_state_contract_schema_id()?,
-        semantic_type_id,
-        role,
-        "application/json",
-        evidence_contract_ref,
-    )
-    .map_err(|error| mfm_program::ProgramError::Codec(error.to_string()))
-}
-
-pub(crate) fn portfolio_contract_schema_id(name: &'static str) -> mfm_program::Result<SchemaId> {
-    SchemaId::new(
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("schema:{name}:1").as_bytes()),
-    )
-    .map_err(|error| mfm_program::ProgramError::Spec(error.to_string()))
-}
-
-pub(crate) fn portfolio_support_contract(
-    schema_name: &'static str,
-    semantic_name: &'static str,
-    role: StableId,
-    evidence_contract_ref: ContentRef,
-) -> mfm_program::Result<mfm_values::RetainedValueContract> {
-    let semantic_type_id = SemanticTypeId::new(
-        "mfm.portfolio",
-        semantic_name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("semantic:mfm.portfolio:{semantic_name}:1").as_bytes()),
-    )
-    .map_err(|error| mfm_program::ProgramError::Spec(error.to_string()))?;
-    mfm_values::RetainedValueContract::new(
-        portfolio_contract_schema_id(schema_name)?,
-        semantic_type_id,
-        role,
-        "application/json",
-        evidence_contract_ref,
-    )
-    .map_err(|error| mfm_program::ProgramError::Codec(error.to_string()))
-}
-
-#[cfg(test)]
-mod tests;

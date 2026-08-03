@@ -4,22 +4,32 @@ Status: unregistered capability contract
 
 Bitcoin collection is not registered in the production state/capability catalog. No current app,
 CLI, or REST run can execute Bitcoin collection, and no aggregate-reader fallback exists. This
-document fixes the graph and qualification evidence required by a future registration change.
+document fixes the structured-program contract and qualification evidence required by a future
+registration change.
 
 Bitcoin RPC endpoints, Basic-auth values, deadlines, and local source resolution remain
 process/deployment resources. They must never appear in specs, journal records, retained objects,
 facts, public outputs, portable exports, fixtures, or diagnostics.
 
-## Required Graph
+## Required Structured Program
 
-A qualified Bitcoin operation must expand exactly this authority shape:
+A qualified Bitcoin operation must expand into one declaration-ordered program with these exact
+lexical producer bindings:
 
-```text
-BootstrapBitcoinSource
-  -> ScanBitcoinUtxos
-  -> ConfirmBitcoinScanAnchor
-  -> AggregateBitcoinBalances
-```
+Admission creates the initial `bitcoin_input` binding. Each declaration carries forward the
+immutable source, network, descriptor, scan, and anchor context needed by its successor.
+
+| Declaration | Produced binding | Exact lexical inputs |
+| --- | --- | --- |
+| `BootstrapBitcoinSource` | `bootstrapped` | `bitcoin_input` |
+| `ScanBitcoinUtxos` | `scanned` | `bootstrapped` |
+| `ConfirmBitcoinScanAnchor` | `confirmed` | `scanned` |
+| `AggregateBitcoinBalances` | `balances` | `confirmed` |
+
+Each consumer must receive the `LexicalValueRef` produced by the named declaration occurrence.
+Matching value bytes or contracts, retained-object discovery, facts, and ambient lookup cannot
+substitute for that producer reference. Certification must reject any missing, reordered, or
+substituted producer binding.
 
 ### Bootstrap
 
@@ -60,8 +70,9 @@ directly to satoshis with at most eight fractional digits and no sign, exponent,
 intermediary, overflow, or value above `MAX_MONEY`. Address balances and total use checked sums;
 zero-balance addresses remain explicit.
 
-The state may then produce ordered typed balances and transition facts. Same-run portfolio
-consumption must use graph edges.
+The state may then produce ordered typed balances and transition facts. A same-run portfolio
+declaration must consume the exact `balances` producer reference. It cannot rediscover the result
+from retained objects, facts, an aggregate reader, or a value with a matching contract.
 
 ## Why Registration Is Blocked
 
@@ -79,9 +90,9 @@ Bitcoin Core's global scan resource. Treating it as a read requires qualificatio
 - no hidden status/abort/retry or source fallback exists.
 
 Until production tests establish all of those properties against the supported Bitcoin Core
-behavior, the capability remains absent. If repeat-work safety cannot be established, a separately
-designed keyed work executor and audited status-read protocol is required; the generic runtime does
-not gain a Bitcoin-specific recovery mode.
+behavior, the capability remains absent. If repeat-work safety cannot be established, a separate
+narrow resource authority and explicit structured status/read protocol are required; generic
+Runtime does not gain a Bitcoin-specific recovery mode.
 
 ## Safe-Failure Contract
 
@@ -94,12 +105,7 @@ scan_busy
 Only the exact reviewed Bitcoin Core scan-busy condition—JSON-RPC code `-8` plus the exact-message
 classifier—maps to:
 
-```text
-Indeterminate
-destination
-boundary_observation
-ScanBusy
-```
+`SafeFailure(BitcoinScanBusy)`.
 
 A near match remains an ordinary `json_rpc_error`. `scan_busy` yields
 `InsufficientEvidence`; it does not recover or borrow the result of an earlier authorization.

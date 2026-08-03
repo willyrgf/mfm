@@ -1,29 +1,23 @@
 # mfm-evm
 
-Pure EVM protocol, audited-read state, graph, and signing contracts. The crate
-has no portfolio, app, runtime, transport, storage, keystore, or concrete
-signer-provider dependency.
+Pure EVM domain contracts and structured operations. This crate performs no network, database,
+keystore, or ambient runtime IO.
 
-Balance collection authors a certified graph with these audit units:
+It owns:
 
-1. bootstrap one exact admitted routing generation and verify its chain;
-2. read an initial latest-block anchor;
-3. fan out one token-decimals read per distinct token and one anchored balance
-   read per holding;
-4. confirm the initial anchor after every fan-out read; and
-5. aggregate the retained same-run values with pure state logic.
+- strict EVM routing, balance, transaction, receipt, finality, and public failure values;
+- the declaration-ordered EVM balance collection operation;
+- the public submission entry state and registered structured submission expansion;
+- deterministic state request/settlement callbacks;
+- wallet chain/domain, activation, intent, reservation, candidate, and completion contracts; and
+- the narrow activation/nonce resource-authority port used by concrete storage.
 
-Each read state selects exactly one protocol operation. A collection admits at
-most 1,024 holdings and 1,024 distinct tokens, producing at most 2,052 graph
-nodes. The source, chain, routing generation, fan-out coverage, and final
-anchor are checked again during pure aggregation.
+Balance collection checks chain identity, captures an anchor, reads native/token values in a
+bounded Read fan-out, confirms the anchor, and returns declaration-ordered results.
 
-The registered `mfm.evm/submit-transaction@1` mutation uses this crate's immutable EIP-1559
-request, candidate, attempt-result, receipt/finality, and terminal-evidence contracts behind the
-durable wallet executor. This crate also owns the canonical account-sequence nonce policy,
-deployment-attested initial-nonce descriptor, finalized-tag policy, and terminal assurance
-policy. Their content identities are qualified before admission and reused by allocation,
-delivery, recovery, and terminal convergence.
+Submission expands into explicit status, pending-nonce, reservation, candidate attestation,
+activation, broadcast, observation, reconciliation, completion, and projection states. The generic
+Runtime/store never imports these types.
 
-Production aggregate-reader, ingress-validation, transport, custody, storage, and replay-helper
-surfaces remain outside this crate.
+Concrete JSON-RPC and signer bindings live in `mfm-evm-live`. Real cross-run wallet authority lives
+in `mfm-storage-evm-postgres`.

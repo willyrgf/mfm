@@ -1,18 +1,12 @@
 #![warn(missing_docs)]
-//! Deterministic composite planning and offline certification.
+//! Deterministic structured-program expansion and offline certification.
 //!
-//! This crate owns the one child-composition, framework-outer,
-//! executor-inner planner. Certification validates complete implementation and
-//! capability-binding manifests, and verification deterministically reruns the
-//! planner over retained canonical inputs.
+//! This crate owns the one child-substitution and support-injection pipeline.
+//! Certification validates complete implementation and capability-binding
+//! manifests, and verification deterministically reruns expansion over retained
+//! canonical inputs.
 
-mod certification;
-mod planner;
-mod terminal;
-
-pub use certification::*;
-pub(crate) use planner::*;
-pub use terminal::*;
+pub mod structured;
 
 /// Result type for planning and certification.
 pub type Result<T> = std::result::Result<T, CertifyError>;
@@ -23,7 +17,7 @@ pub enum CertifyError {
     /// A canonical specification value failed validation.
     #[error("invalid canonical specification: {0}")]
     Specification(String),
-    /// Deterministic expansion could not resolve a complete graph.
+    /// Deterministic expansion could not resolve a complete structured program.
     #[error("planning failed: {0}")]
     Planning(String),
     /// Certification proof closure or implementation coverage was incomplete.

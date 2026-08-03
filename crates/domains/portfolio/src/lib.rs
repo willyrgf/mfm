@@ -1,11 +1,11 @@
 #![cfg_attr(test, allow(clippy::disallowed_methods, clippy::disallowed_types))]
 #![cfg_attr(not(test), deny(clippy::disallowed_methods, clippy::disallowed_types))]
 #![warn(missing_docs)]
-//! Pure portfolio model, same-run state, and EVM-only graph contracts.
+//! Pure portfolio model and structured snapshot operation.
 //!
-//! The sole production operation consumes decomposed EVM collection outputs
-//! through typed graph edges. Store-backed holding selection, aggregate live
-//! readers, Bitcoin execution, and replay helpers are intentionally absent.
+//! The sole production operation authors declaration-ordered EVM balance reads
+//! and aggregates their typed results. Store-backed holding selection,
+//! aggregate live readers, Bitcoin execution, and replay helpers are absent.
 //!
 //! ```rust
 //! use mfm_portfolio::{decode_portfolio_config, PortfolioConfig, QuoteCode};
@@ -23,12 +23,12 @@
 //! use mfm_portfolio::model::PortfolioConfig;
 //! ```
 
+mod entry;
 mod model;
-mod operation;
-mod product;
-mod qualification;
 mod state;
+mod structured;
 
+pub use entry::{PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID};
 pub use model::ids::{
     BitcoinSourceIdentityId, ExternalSignerId, KeystoreEntryId, NetworkId, NormalizedEvmAddress,
     PortfolioId, PortfolioScalarError, SymbolId, UnitPriceDecimal, WalletId,
@@ -50,28 +50,13 @@ pub use model::wallet::{
     BitcoinAddress, WalletConfig, WalletConfigError, WalletImplementationConfig, WalletSubject,
     WalletSubjectKind,
 };
-pub use operation::{
-    portfolio_snapshot_entry_point_contract, portfolio_snapshot_planning_profile,
-    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID, PORTFOLIO_SNAPSHOT_OPERATION_ID,
-};
-pub use product::{
-    portfolio_snapshot_entry_point_registration, portfolio_snapshot_routing_manifest_member_path,
-    portfolio_snapshot_unit_config_member_path, PortfolioSnapshotEntryPointArtifacts,
-    PORTFOLIO_SNAPSHOT_ROUTING_MANIFEST_MEMBER_PATH, PORTFOLIO_SNAPSHOT_UNIT_CONFIG_MEMBER_PATH,
-};
-pub use qualification::{
-    portfolio_snapshot_callback_surfaces, portfolio_snapshot_value_contracts,
-    qualify_portfolio_snapshot_states, PortfolioSnapshotCallbackSurfaces,
-    PortfolioSnapshotStateArtifacts, PortfolioSnapshotStateImplementations,
-    PortfolioSnapshotValueContracts, PortfolioStateCallbackSurface,
-    QualifiedPortfolioSnapshotStates, PORTFOLIO_STATE_CALLBACK_SURFACE_VERSION,
-};
 pub use state::{
-    portfolio_snapshot_public_output_schema_id, AssemblePortfolioSnapshotState, EvmRoutingBinding,
-    InvalidPortfolioSnapshotSelection, PortfolioPublicOutputs, PortfolioReportProjectionInput,
-    PortfolioRoutingManifest, PortfolioSnapshotAssemblyInput, PortfolioSnapshotFailure,
-    PortfolioSnapshotSelectionInput, ProjectPortfolioReportState,
-    ValidatePortfolioSnapshotSelectionState, ValidatedEvmCollectionPosition,
-    ValidatedPortfolioSnapshotSelection, PORTFOLIO_ROUTING_MANIFEST_VERSION,
-    VALIDATED_PORTFOLIO_SNAPSHOT_SELECTION_VERSION,
+    EvmRoutingBinding, PortfolioPublicOutputs, PortfolioRoutingManifest, PortfolioSnapshotFailure,
+    ValidatedEvmCollectionPosition, ValidatedPortfolioSnapshotSelection,
+    PORTFOLIO_ROUTING_MANIFEST_VERSION, VALIDATED_PORTFOLIO_SNAPSHOT_SELECTION_VERSION,
+};
+pub use structured::{
+    register_portfolio_process, structured_portfolio_lane_inputs,
+    structured_portfolio_snapshot_program, PortfolioProcessQualification, PortfolioSnapshotInput,
+    STRUCTURED_PORTFOLIO_SNAPSHOT_OPERATION_ID,
 };

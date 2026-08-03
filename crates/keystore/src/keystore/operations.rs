@@ -3,6 +3,7 @@ use zeroize::Zeroizing;
 
 use super::secure_key::ethereum_address_from_key_bytes;
 use super::*;
+use crate::signer::ReadAttestationKeyAccess;
 
 impl Keystore {
     /// Import private key (hex format).
@@ -101,10 +102,21 @@ impl Keystore {
         Ok(id)
     }
 
-    pub(crate) fn get_private_key(&mut self, id: Uuid) -> Result<SecureKey, KeystoreError> {
-        self.ensure_master_key_available()?;
+    /// Decrypts one key for Read attestation without refreshing or persisting keystore state.
+    pub(crate) fn private_key_for_read_attestation(
+        &self,
+        id: Uuid,
+        _access: &ReadAttestationKeyAccess,
+    ) -> Result<SecureKey, KeystoreError> {
+        self.ensure_unlocked_for_read()?;
         let key_bytes = self.decrypt_entry_key(id)?;
-        self.record_successful_audit(AuditEvent::GetPrivateKey { id })?;
+        Ok(SecureKey::new(*key_bytes))
+    }
+
+    #[cfg(test)]
+    pub(super) fn private_key_for_test(&self, id: Uuid) -> Result<SecureKey, KeystoreError> {
+        self.ensure_unlocked_for_read()?;
+        let key_bytes = self.decrypt_entry_key(id)?;
         Ok(SecureKey::new(*key_bytes))
     }
 

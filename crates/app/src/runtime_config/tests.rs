@@ -1,241 +1,149 @@
-use std::ffi::OsString;
 use std::io::{self, Cursor, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use mfm_signing::SignerRef;
-use static_assertions::assert_not_impl_any;
-
-use super::value::{copy_utf8, read_bounded_with_witness, ResolvedValue};
+use super::value::{copy_utf8, read_bounded_with_witness};
 use super::*;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-assert_not_impl_any!(ResolvedValue: Clone, Copy, std::fmt::Debug, std::fmt::Display, serde::Serialize);
-assert_not_impl_any!(ResolvedValue: serde::de::DeserializeOwned);
-assert_not_impl_any!(ResolvedValue: AsRef<str>, std::borrow::Borrow<str>);
-
 #[test]
-fn toml_and_json_load_the_identical_qualified_evm_route() {
+fn toml_and_json_resolve_the_same_keystore_profile() {
     let directory = tempfile::tempdir().expect("tempdir");
     let toml = directory.path().join("runtime.toml");
     let json = directory.path().join("runtime.json");
     std::fs::write(
         &toml,
         r#"
-[evm.routes.ethereum-mainnet]
-source_ref = "primary"
-chain_id = 1
-generation_id = "ethereum-mainnet-primary-v1"
-rpc_url = { direct = "https://rpc.example.invalid" }
-auth_header = { env = "MFM_TEST_AUTH" }
+[keystores.default]
+keystore_path = { direct = "/run/mfm/wallet.keystore" }
+unlock_file_path = { direct = "/run/mfm/wallet.unlock" }
 "#,
     )
-    .expect("TOML");
+    .expect("TOML config");
     std::fs::write(
         &json,
-        r#"{
-  "evm": {"routes": {"ethereum-mainnet": {
-    "source_ref": "primary",
-    "chain_id": 1,
-    "generation_id": "ethereum-mainnet-primary-v1",
-    "rpc_url": {"direct": "https://rpc.example.invalid"},
-    "auth_header": {"env": "MFM_TEST_AUTH"}
-  }}}
-}"#,
+        r#"{"keystores":{"default":{"keystore_path":{"direct":"/run/mfm/wallet.keystore"},"unlock_file_path":{"direct":"/run/mfm/wallet.unlock"}}}}"#,
     )
-    .expect("JSON");
-    let _env = locked_env("MFM_TEST_AUTH", "Bearer protected");
+    .expect("JSON config");
+
     for path in [&toml, &json] {
-        let [route]: [ResolvedEvmRoute; 1] = load_evm_routes(path)
-            .expect("qualified routes")
-            .try_into()
-            .unwrap_or_else(|_| panic!("one route"));
-        let (network, source, chain_id, generation, endpoint, authorization) = route.into_parts();
-        assert_eq!(network.as_str(), "ethereum-mainnet");
-        assert_eq!(source.as_str(), "primary");
-        assert_eq!(chain_id, 1);
-        assert_eq!(generation.as_str(), "ethereum-mainnet-primary-v1");
-        assert_eq!(endpoint.into_string(), "https://rpc.example.invalid");
-        assert_eq!(
-            authorization
-                .expect("authorization")
-                .into_protected()
-                .as_str(),
-            "Bearer protected"
-        );
+        let (keystore, unlock) = load_keystore_profile(path, "default")
+            .expect("profile")
+            .into_paths();
+        assert_eq!(keystore, std::path::Path::new("/run/mfm/wallet.keystore"));
+        assert_eq!(unlock, std::path::Path::new("/run/mfm/wallet.unlock"));
     }
-}
-
-#[test]
-fn evm_routes_have_canonical_network_order() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let path = directory.path().join("runtime.toml");
-    std::fs::write(
-        &path,
-        r#"
-[evm.routes.zeta]
-source_ref = "zeta-source"
-chain_id = 2
-generation_id = "zeta-primary-v1"
-rpc_url = { direct = "https://zeta.example.invalid" }
-
-[evm.routes.alpha]
-source_ref = "alpha-source"
-chain_id = 1
-generation_id = "alpha-primary-v1"
-rpc_url = { direct = "https://alpha.example.invalid" }
-"#,
-    )
-    .expect("config");
-
-    let networks = load_evm_routes(&path)
-        .expect("routes")
-        .into_iter()
-        .map(|route| route.into_parts().0.into_string())
-        .collect::<Vec<_>>();
-    assert_eq!(networks, ["alpha", "zeta"]);
 }
 
 #[test]
 fn json_duplicate_keys_fail_at_every_nesting_level() {
     let directory = tempfile::tempdir().expect("tempdir");
     for (name, raw) in [
-        ("root", r#"{"evm":{},"evm":{"routes":{}}}"#),
+        ("root", r#"{"keystores":{},"keystores":{"default":{}}}"#),
         (
-            "selected entry",
-            r#"{"evm":{"routes":{"dev":{"source_ref":"one","source_ref":"two","rpc_url":{"direct":"http://127.0.0.1"}}}}}"#,
+            "profile",
+            r#"{"keystores":{"default":{"keystore_path":{"direct":"/one"},"keystore_path":{"direct":"/two"},"unlock_file_path":{"direct":"/unlock"}}}}"#,
         ),
         (
-            "value source",
-            r#"{"evm":{"routes":{"dev":{"source_ref":"one","rpc_url":{"direct":"http://127.0.0.1","direct":"http://127.0.0.2"}}}}}"#,
+            "source",
+            r#"{"keystores":{"default":{"keystore_path":{"direct":"/one","direct":"/two"},"unlock_file_path":{"direct":"/unlock"}}}}"#,
         ),
         (
-            "unselected nested object",
-            r#"{"evm":{"routes":{"dev":{"source_ref":"one","rpc_url":{"direct":"http://127.0.0.1"}},"unused":{"nested":{"field":1,"field":2}}}}}"#,
+            "unselected",
+            r#"{"keystores":{"default":{"keystore_path":{"direct":"/one"},"unlock_file_path":{"direct":"/unlock"}},"unused":{"nested":{"field":1,"field":2}}}}"#,
         ),
     ] {
         let path = directory.path().join(format!("{name}.json"));
-        std::fs::write(&path, raw).expect("JSON fixture");
-        let error = load_evm_routes(&path).err().expect(name);
-        assert_eq!(error.kind(), RuntimeConfigErrorKind::DuplicateJsonKey);
+        std::fs::write(&path, raw).expect("fixture");
+        assert_eq!(
+            load_keystore_profile(&path, "default")
+                .expect_err(name)
+                .kind(),
+            RuntimeConfigErrorKind::DuplicateJsonKey,
+            "{name}",
+        );
     }
 }
 
 #[test]
-fn every_evm_route_is_strict_while_other_sections_remain_isolated() {
+fn selected_profile_and_document_shape_fail_closed() {
     let directory = tempfile::tempdir().expect("tempdir");
-    let valid = directory.path().join("selective.toml");
+    for (name, raw, profile, expected) in [
+        (
+            "unknown-field",
+            "[keystores.default]\nkeystore_path = { direct = \"/key\" }\nunlock_file_path = { direct = \"/unlock\" }\nextra = true\n",
+            "default",
+            RuntimeConfigErrorKind::UnknownSelectedField,
+        ),
+        (
+            "missing-field",
+            "[keystores.default]\nkeystore_path = { direct = \"/key\" }\n",
+            "default",
+            RuntimeConfigErrorKind::MissingRequiredField,
+        ),
+        (
+            "missing-profile",
+            "[keystores.default]\nkeystore_path = { direct = \"/key\" }\nunlock_file_path = { direct = \"/unlock\" }\n",
+            "other",
+            RuntimeConfigErrorKind::MissingKeystore,
+        ),
+        (
+            "missing-section",
+            "",
+            "default",
+            RuntimeConfigErrorKind::MissingSection,
+        ),
+        (
+            "unknown-top-level",
+            "[signers.default]\nprovider = \"retired\"\n",
+            "default",
+            RuntimeConfigErrorKind::UnknownTopLevel,
+        ),
+    ] {
+        let path = directory.path().join(format!("{name}.toml"));
+        std::fs::write(&path, raw).expect("fixture");
+        assert_eq!(
+            load_keystore_profile(&path, profile)
+                .expect_err(name)
+                .kind(),
+            expected,
+            "{name}",
+        );
+    }
+
+    let invalid_ref = directory.path().join("invalid-ref.toml");
     std::fs::write(
-        &valid,
+        &invalid_ref,
+        "[keystores.default]\nkeystore_path = { direct = \"/key\" }\nunlock_file_path = { direct = \"/unlock\" }\n",
+    )
+    .expect("fixture");
+    assert_eq!(
+        load_keystore_profile(&invalid_ref, "Not Valid")
+            .expect_err("invalid identifier")
+            .kind(),
+        RuntimeConfigErrorKind::InvalidIdentifier,
+    );
+}
+
+#[test]
+fn unselected_profiles_are_isolated_but_secret_fields_are_rejected_globally() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let isolated = directory.path().join("isolated.toml");
+    std::fs::write(
+        &isolated,
         r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[bitcoin.routes.unused]
-unknown = true
-
-[signers.unused]
-provider = 42
+[keystores.default]
+keystore_path = { direct = "/key" }
+unlock_file_path = { direct = "/unlock" }
 
 [keystores.unused]
 malformed = true
 "#,
     )
     .expect("config");
-    assert_eq!(
-        load_evm_routes(&valid)
-            .expect("other sections are isolated")
-            .len(),
-        1
-    );
+    load_keystore_profile(&isolated, "default").expect("selected profile only");
 
-    let invalid_route = directory.path().join("invalid-route.toml");
-    std::fs::write(
-        &invalid_route,
-        r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused]
-extra = true
-"#,
-    )
-    .expect("config");
-    assert_eq!(
-        load_evm_routes(&invalid_route)
-            .err()
-            .expect("every EVM route is strict")
-            .kind(),
-        RuntimeConfigErrorKind::UnknownSelectedField
-    );
-}
-
-#[test]
-fn evm_route_qualification_fields_fail_closed() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    for (name, body, expected) in [
-        (
-            "zero-chain",
-            "source_ref = \"primary\"\nchain_id = 0\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
-            RuntimeConfigErrorKind::InvalidChainId,
-        ),
-        (
-            "missing-chain",
-            "source_ref = \"primary\"\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
-            RuntimeConfigErrorKind::MissingRequiredField,
-        ),
-        (
-            "missing-generation",
-            "source_ref = \"primary\"\nchain_id = 31337\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
-            RuntimeConfigErrorKind::MissingRequiredField,
-        ),
-        (
-            "invalid-generation",
-            "source_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"INVALID\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }",
-            RuntimeConfigErrorKind::InvalidIdentifier,
-        ),
-    ] {
-        let path = directory.path().join(format!("{name}.toml"));
-        std::fs::write(&path, format!("[evm.routes.dev]\n{body}\n")).expect("config");
-        assert_eq!(
-            load_evm_routes(&path).err().expect(name).kind(),
-            expected,
-            "{name}"
-        );
-    }
-
-    let invalid_network = directory.path().join("invalid-network.toml");
-    std::fs::write(
-        &invalid_network,
-        "[evm.routes.\"Bad Network\"]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { direct = \"http://127.0.0.1:8545\" }\n",
-    )
-    .expect("config");
-    assert_eq!(
-        load_evm_routes(&invalid_network)
-            .err()
-            .expect("invalid network")
-            .kind(),
-        RuntimeConfigErrorKind::InvalidIdentifier
-    );
-
-    let empty = directory.path().join("empty.toml");
-    std::fs::write(&empty, "[evm.routes]\n").expect("config");
-    assert_eq!(
-        load_evm_routes(&empty).err().expect("empty catalog").kind(),
-        RuntimeConfigErrorKind::MissingEntry
-    );
-}
-
-#[test]
-fn global_secret_field_policy_applies_to_unselected_entries() {
-    let directory = tempfile::tempdir().expect("tempdir");
     for marker in [
         "password",
         "passphrase",
@@ -256,240 +164,17 @@ fn global_secret_field_policy_applies_to_unselected_entries() {
     ] {
         let path = directory.path().join(format!("{marker}.toml"));
         let raw = format!(
-            r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = {{ direct = "http://127.0.0.1:8545" }}
-
-[evm.routes.unused]
-unsafe_{marker}_field = "must-not-be-admitted"
-"#
+            "[keystores.default]\nkeystore_path = {{ direct = \"/key\" }}\nunlock_file_path = {{ direct = \"/unlock\" }}\n\n[keystores.unused]\nunsafe_{marker}_field = \"must-not-be-admitted\"\n"
         );
-        std::fs::write(&path, raw).expect("config");
+        std::fs::write(&path, raw).expect("fixture");
         assert_eq!(
-            load_evm_routes(&path).err().expect(marker).kind(),
+            load_keystore_profile(&path, "default")
+                .expect_err(marker)
+                .kind(),
             RuntimeConfigErrorKind::ForbiddenSecretField,
-            "{marker}"
+            "{marker}",
         );
     }
-
-    for (name, field) in [
-        (
-            "bitcoin",
-            "[bitcoin.routes.unused]\nrpc_password = { direct = \"plaintext\" }",
-        ),
-        (
-            "evm",
-            "[evm.routes.unused]\nauth_header = { direct = \"Bearer plaintext\" }",
-        ),
-    ] {
-        let path = directory.path().join(format!("direct-{name}.toml"));
-        std::fs::write(
-            &path,
-            format!(
-                "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n{field}\n"
-            ),
-        )
-        .expect("config");
-        assert_eq!(
-            load_evm_routes(&path).err().expect(name).kind(),
-            RuntimeConfigErrorKind::DirectSecretValue
-        );
-    }
-}
-
-#[test]
-fn reviewed_secret_slots_reject_bypass_shapes_globally() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let cases = [
-        (
-            "toml-scalar",
-            "toml",
-            r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused]
-auth_header = "Bearer plaintext"
-"#,
-        ),
-        (
-            "toml-array",
-            "toml",
-            r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[bitcoin.routes.unused]
-rpc_password = [{ direct = "plaintext" }]
-"#,
-        ),
-        (
-            "toml-nested",
-            "toml",
-            r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused]
-auth_header = { nested = { direct = "Bearer plaintext" } }
-"#,
-        ),
-        (
-            "json-scalar",
-            "json",
-            r#"{
-  "evm": {"routes": {
-    "dev": {
-      "source_ref": "primary",
-      "chain_id": 31337,
-      "generation_id": "dev-primary-v1",
-      "rpc_url": {"direct": "http://127.0.0.1:8545"}
-    }
-  }},
-  "bitcoin": {"routes": {"unused": {"rpc_password": "plaintext"}}}
-}"#,
-        ),
-        (
-            "json-nested-array",
-            "json",
-            r#"{
-  "evm": {"routes": {
-    "dev": {
-      "source_ref": "primary",
-      "chain_id": 31337,
-      "generation_id": "dev-primary-v1",
-      "rpc_url": {"direct": "http://127.0.0.1:8545"}
-    },
-    "unused": {"auth_header": [{"direct": "Bearer plaintext"}]}
-  }}
-}"#,
-        ),
-        (
-            "json-malformed-indirection",
-            "json",
-            r#"{
-  "evm": {"routes": {
-    "dev": {
-      "source_ref": "primary",
-      "chain_id": 31337,
-      "generation_id": "dev-primary-v1",
-      "rpc_url": {"direct": "http://127.0.0.1:8545"}
-    },
-    "unused": {"auth_header": {"env": ["MFM_AUTH"]}}
-  }}
-}"#,
-        ),
-        (
-            "json-normalized-direct",
-            "json",
-            r#"{
-  "evm": {"routes": {
-    "dev": {
-      "source_ref": "primary",
-      "chain_id": 31337,
-      "generation_id": "dev-primary-v1",
-      "rpc_url": {"direct": "http://127.0.0.1:8545"}
-    },
-    "unused": {"auth-header": {"DiReCt": "Bearer plaintext"}}
-  }}
-}"#,
-        ),
-    ];
-
-    for (name, extension, raw) in cases {
-        let path = directory.path().join(format!("{name}.{extension}"));
-        std::fs::write(&path, raw).expect("config");
-        assert_eq!(
-            load_evm_routes(&path).err().expect(name).kind(),
-            RuntimeConfigErrorKind::DirectSecretValue,
-            "{name}"
-        );
-    }
-}
-
-#[test]
-fn reviewed_secret_slots_allow_only_indirect_shapes_across_the_document() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let _env = locked_env("MFM_UNUSED_AUTH", "Bearer protected");
-    let path = directory.path().join("indirect-unselected.toml");
-    std::fs::write(
-        &path,
-        r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused]
-source_ref = "secondary"
-chain_id = 31338
-generation_id = "unused-secondary-v1"
-rpc_url = { direct = "http://127.0.0.1:8546" }
-auth_header = { env = "MFM_UNUSED_AUTH" }
-
-[bitcoin.routes.file]
-rpc_password = { file = "/not/resolved" }
-
-[bitcoin.routes.file-env]
-rpc_password = { file_env = "MFM_UNUSED_PATH" }
-"#,
-    )
-    .expect("config");
-
-    assert_eq!(
-        load_evm_routes(&path).expect("indirect secret slots").len(),
-        2
-    );
-}
-
-#[test]
-fn expected_chain_id_and_unknown_top_level_sections_fail_globally() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let expected_chain = directory.path().join("expected-chain.toml");
-    std::fs::write(
-        &expected_chain,
-        r#"
-[evm.routes.dev]
-source_ref = "primary"
-chain_id = 31337
-generation_id = "dev-primary-v1"
-rpc_url = { direct = "http://127.0.0.1:8545" }
-
-[evm.routes.unused.nested]
-expected-chain-id = 1
-"#,
-    )
-    .expect("config");
-    assert_eq!(
-        load_evm_routes(&expected_chain)
-            .err()
-            .expect("expected chain id")
-            .kind(),
-        RuntimeConfigErrorKind::ForbiddenExpectedChainId
-    );
-
-    let unknown = directory.path().join("unknown.toml");
-    std::fs::write(&unknown, "[btc.routes.legacy]\nvalue = true\n").expect("config");
-    assert_eq!(
-        load_evm_routes(&unknown)
-            .err()
-            .expect("legacy top level")
-            .kind(),
-        RuntimeConfigErrorKind::UnknownTopLevel
-    );
 }
 
 #[test]
@@ -499,12 +184,12 @@ fn value_sources_require_exactly_one_known_key() {
         ("empty", "{}", RuntimeConfigErrorKind::InvalidValueSource),
         (
             "multiple",
-            "{ direct = \"http://127.0.0.1\", env = \"MFM_RPC\" }",
+            "{ direct = \"/key\", env = \"MFM_KEY_PATH\" }",
             RuntimeConfigErrorKind::InvalidValueSource,
         ),
         (
             "unknown",
-            "{ fallback = \"http://127.0.0.1\" }",
+            "{ fallback = \"/key\" }",
             RuntimeConfigErrorKind::UnknownSelectedField,
         ),
     ] {
@@ -512,16 +197,22 @@ fn value_sources_require_exactly_one_known_key() {
         std::fs::write(
             &path,
             format!(
-                "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {source}\n"
+                "[keystores.default]\nkeystore_path = {source}\nunlock_file_path = {{ direct = \"/unlock\" }}\n"
             ),
         )
-        .expect("config");
-        assert_eq!(load_evm_routes(&path).err().expect(name).kind(), expected);
+        .expect("fixture");
+        assert_eq!(
+            load_keystore_profile(&path, "default")
+                .expect_err(name)
+                .kind(),
+            expected,
+            "{name}",
+        );
     }
 }
 
 #[test]
-fn direct_env_file_and_file_env_preserve_the_defined_bytes() {
+fn direct_env_file_and_file_env_preserve_defined_path_bytes() {
     let _lock = ENV_LOCK.lock().expect("environment lock");
     let directory = tempfile::tempdir().expect("tempdir");
     let value_file = directory.path().join("value-file");
@@ -555,6 +246,7 @@ unlock_file_path = {{ direct = "/tmp/unlock" }}
         ),
     )
     .expect("config");
+
     for (profile, expected) in [
         ("direct", " /tmp/direct-value "),
         ("env", " /tmp/env-value "),
@@ -577,33 +269,34 @@ fn environment_names_values_and_paths_fail_closed() {
     let invalid_name = directory.path().join("invalid-name.toml");
     std::fs::write(
         &invalid_name,
-        "[keystores.default]\nkeystore_path = { env = \"lowercase\" }\nunlock_file_path = { direct = \"/tmp/unlock\" }\n",
+        "[keystores.default]\nkeystore_path = { env = \"lowercase\" }\nunlock_file_path = { direct = \"/unlock\" }\n",
     )
     .expect("config");
     assert_eq!(
         load_keystore_profile(&invalid_name, "default")
-            .err()
-            .expect("invalid env name")
+            .expect_err("invalid env name")
             .kind(),
-        RuntimeConfigErrorKind::InvalidEnvironmentValue
+        RuntimeConfigErrorKind::InvalidEnvironmentValue,
     );
 
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
-        std::env::set_var("MFM_TEST_NON_UNICODE", OsString::from_vec(vec![0xff]));
+        std::env::set_var(
+            "MFM_TEST_NON_UNICODE",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        );
         let non_unicode = directory.path().join("non-unicode.toml");
         std::fs::write(
             &non_unicode,
-            "[keystores.default]\nkeystore_path = { env = \"MFM_TEST_NON_UNICODE\" }\nunlock_file_path = { direct = \"/tmp/unlock\" }\n",
+            "[keystores.default]\nkeystore_path = { env = \"MFM_TEST_NON_UNICODE\" }\nunlock_file_path = { direct = \"/unlock\" }\n",
         )
         .expect("config");
         assert_eq!(
             load_keystore_profile(&non_unicode, "default")
-                .err()
-                .expect("non-Unicode env")
+                .expect_err("non-Unicode env")
                 .kind(),
-            RuntimeConfigErrorKind::InvalidEnvironmentValue
+            RuntimeConfigErrorKind::InvalidEnvironmentValue,
         );
         std::env::remove_var("MFM_TEST_NON_UNICODE");
     }
@@ -615,45 +308,26 @@ fn document_and_resolved_value_limits_use_limit_plus_one() {
     let oversized_document = directory.path().join("oversized.toml");
     std::fs::write(&oversized_document, vec![b' '; 1024 * 1024 + 1]).expect("document");
     assert_eq!(
-        load_evm_routes(&oversized_document)
-            .err()
-            .expect("oversized document")
+        load_keystore_profile(&oversized_document, "default")
+            .expect_err("oversized document")
             .kind(),
-        RuntimeConfigErrorKind::DocumentTooLarge
+        RuntimeConfigErrorKind::DocumentTooLarge,
     );
 
     let selected = directory.path().join("selected-large.toml");
     std::fs::write(
         &selected,
         format!(
-            "[keystores.default]\nkeystore_path = {{ direct = {} }}\nunlock_file_path = {{ direct = \"/tmp/unlock\" }}\n",
+            "[keystores.default]\nkeystore_path = {{ direct = {} }}\nunlock_file_path = {{ direct = \"/unlock\" }}\n",
             toml_string(&"x".repeat(64 * 1024 + 1))
         ),
     )
     .expect("config");
     assert_eq!(
         load_keystore_profile(&selected, "default")
-            .err()
-            .expect("selected value limit")
+            .expect_err("selected value limit")
             .kind(),
-        RuntimeConfigErrorKind::ResolvedValueTooLarge
-    );
-
-    let isolated = directory.path().join("isolated-large.toml");
-    std::fs::write(
-        &isolated,
-        format!(
-            "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = {{ direct = \"http://127.0.0.1:8545\" }}\n\n[evm.routes.unused]\nsource_ref = \"secondary\"\nchain_id = 31338\ngeneration_id = \"unused-secondary-v1\"\nrpc_url = {{ direct = {} }}\n",
-            toml_string(&"x".repeat(70_000))
-        ),
-    )
-    .expect("config");
-    assert_eq!(
-        load_evm_routes(&isolated)
-            .err()
-            .expect("every EVM route is resolved")
-            .kind(),
-        RuntimeConfigErrorKind::ResolvedValueTooLarge
+        RuntimeConfigErrorKind::ResolvedValueTooLarge,
     );
 }
 
@@ -683,18 +357,17 @@ fn indirection_files_reject_empty_invalid_utf8_and_limit_plus_one() {
         std::fs::write(
             &config,
             format!(
-                "[keystores.default]\nkeystore_path = {{ file = {} }}\nunlock_file_path = {{ direct = \"/tmp/unlock\" }}\n",
+                "[keystores.default]\nkeystore_path = {{ file = {} }}\nunlock_file_path = {{ direct = \"/unlock\" }}\n",
                 toml_string(&value_file.display().to_string())
             ),
         )
         .expect("config");
         assert_eq!(
             load_keystore_profile(&config, "default")
-                .err()
-                .expect(name)
+                .expect_err(name)
                 .kind(),
             expected,
-            "{name}"
+            "{name}",
         );
     }
 }
@@ -728,57 +401,21 @@ fn protected_read_buffers_zeroize_on_success_and_every_error_path() {
 }
 
 #[test]
-fn signer_selection_decodes_only_the_signer_and_referenced_keystore() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let config = directory.path().join("signer.toml");
-    std::fs::write(
-        &config,
-        r#"
-[keystores.primary]
-keystore_path = { direct = "/run/mfm/primary.keystore" }
-unlock_file_path = { direct = "/run/mfm/primary.unlock" }
-
-[keystores.unused]
-malformed = true
-
-[signers.deployer]
-provider = "keystore"
-keystore_ref = "primary"
-entry_id = "67e55044-10b1-426f-9247-bb680e5fe0c8"
-
-[signers.unused]
-provider = 42
-"#,
-    )
-    .expect("config");
-    let (entry_id, keystore, unlock) =
-        load_signer_binding(&config, &SignerRef::new("deployer").expect("signer"))
-            .expect("selected signer")
-            .into_parts();
-    assert_eq!(entry_id.to_string(), "67e55044-10b1-426f-9247-bb680e5fe0c8");
-    assert_eq!(keystore, std::path::Path::new("/run/mfm/primary.keystore"));
-    assert_eq!(unlock, std::path::Path::new("/run/mfm/primary.unlock"));
-}
-
-#[test]
 fn paths_formats_and_errors_are_closed_and_redacted() {
     let directory = tempfile::tempdir().expect("tempdir");
     let upper = directory.path().join("private-runtime.TOML");
     std::fs::write(&upper, "").expect("config");
-    let error = load_evm_routes(&upper)
-        .err()
-        .expect("case-sensitive extension");
+    let error = load_keystore_profile(&upper, "default").expect_err("case-sensitive extension");
     assert_eq!(error.kind(), RuntimeConfigErrorKind::UnsupportedFormat);
 
     let secret_path = directory.path().join("private-runtime.toml");
     std::fs::write(
         &secret_path,
-        "[evm.routes.dev]\nsource_ref = \"primary\"\nchain_id = 31337\ngeneration_id = \"dev-primary-v1\"\nrpc_url = { env = \"MFM_PRIVATE_ENV_NAME\" }\n",
+        "[keystores.default]\nkeystore_path = { env = \"MFM_PRIVATE_ENV_NAME\" }\nunlock_file_path = { direct = \"/unlock\" }\n",
     )
     .expect("config");
-    let error = load_evm_routes(&secret_path)
-        .err()
-        .expect("missing environment value");
+    let error =
+        load_keystore_profile(&secret_path, "default").expect_err("missing environment value");
     let rendered = format!("{error:?} {error}");
     for forbidden in [
         "private-runtime.toml",
@@ -791,26 +428,6 @@ fn paths_formats_and_errors_are_closed_and_redacted() {
 
 fn toml_string(value: &str) -> String {
     serde_json::to_string(value).expect("TOML-compatible string")
-}
-
-struct EnvGuard {
-    name: &'static str,
-    _guard: std::sync::MutexGuard<'static, ()>,
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        std::env::remove_var(self.name);
-    }
-}
-
-fn locked_env(name: &'static str, value: &str) -> EnvGuard {
-    let guard = ENV_LOCK.lock().expect("environment lock");
-    std::env::set_var(name, value);
-    EnvGuard {
-        name,
-        _guard: guard,
-    }
 }
 
 struct PartialReader {

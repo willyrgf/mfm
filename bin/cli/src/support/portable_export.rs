@@ -49,7 +49,7 @@ fn invalid_input() -> PublicError {
 
 #[cfg(test)]
 mod tests {
-    use mfm_ids::{ContentDigest, ContentRef, SchemaId};
+    use mfm_ids::{ContentRef, SchemaId};
     use tempfile::TempDir;
 
     use super::{read_bounded, read_portable_export_input, MAX_PORTABLE_EXPORT_REF_BYTES};
@@ -63,17 +63,14 @@ mod tests {
         tokio::fs::write(&export_path, bytes)
             .await
             .expect("portable export");
+        let contract =
+            mfm_canonical::RecoverabilityContract::embedded().expect("recoverability contract");
         let content_ref = ContentRef::new(
-            SchemaId::parse(
-                "schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:\
-                 4fa9b2e8e090997c0ee69c70812059d2f9ea019391c02c86d7576037dc668d35",
-            )
-            .expect("portable stream schema"),
-            ContentDigest::parse(
-                "content:sha256-v1:\
-                 120b15311bb4011d6d7dd26a9311d2abfd12b8be74275d2031bf0f49c44304ad",
-            )
-            .expect("portable digest"),
+            contract
+                .schema_id("mfm.portable-run-export-stream.v1")
+                .expect("portable stream schema")
+                .clone(),
+            contract.raw_content_digest(bytes),
         )
         .expect("content ref");
         let canonical = serde_json::to_vec(&content_ref).expect("canonical content ref");
@@ -94,7 +91,7 @@ mod tests {
         let error = read_portable_export_input(&export_path, &ref_path)
             .await
             .expect_err("noncanonical ref sidecar");
-        assert_eq!(error.code, "ReplayArtifactInvalid");
+        assert_eq!(error.code(), "ReplayArtifactInvalid");
 
         for invalid in [
             serde_json::json!({
@@ -116,7 +113,7 @@ mod tests {
             let error = read_portable_export_input(&export_path, &ref_path)
                 .await
                 .expect_err("invalid ref sidecar");
-            assert_eq!(error.code, "ReplayArtifactInvalid");
+            assert_eq!(error.code(), "ReplayArtifactInvalid");
         }
 
         let legacy_ref = ContentRef::new(
@@ -137,7 +134,7 @@ mod tests {
         let error = read_portable_export_input(&export_path, &ref_path)
             .await
             .expect_err("legacy sidecar");
-        assert_eq!(error.code, "ReplayArtifactInvalid");
+        assert_eq!(error.code(), "ReplayArtifactInvalid");
 
         tokio::fs::write(&ref_path, vec![b'x'; MAX_PORTABLE_EXPORT_REF_BYTES + 1])
             .await
@@ -145,7 +142,7 @@ mod tests {
         let error = read_portable_export_input(&export_path, &ref_path)
             .await
             .expect_err("oversized ref sidecar");
-        assert_eq!(error.code, "ReplayArtifactTooLarge");
+        assert_eq!(error.code(), "ReplayArtifactTooLarge");
 
         tokio::fs::write(&ref_path, &canonical)
             .await
@@ -170,7 +167,7 @@ mod tests {
         let error = read_bounded(&path, 4)
             .await
             .expect_err("empty bounded input");
-        assert_eq!(error.code, "ReplayArtifactInvalid");
+        assert_eq!(error.code(), "ReplayArtifactInvalid");
 
         tokio::fs::write(&path, b"1234")
             .await
@@ -184,6 +181,6 @@ mod tests {
             .await
             .expect("oversized input");
         let error = read_bounded(&path, 4).await.expect_err("oversized input");
-        assert_eq!(error.code, "ReplayArtifactTooLarge");
+        assert_eq!(error.code(), "ReplayArtifactTooLarge");
     }
 }

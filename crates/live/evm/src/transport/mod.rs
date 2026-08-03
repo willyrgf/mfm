@@ -16,25 +16,37 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use alloy_primitives::{Address, B256, U256};
 use bytes::Bytes;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_evm::{
-    EvmAnchorConfirmationRequest, EvmAnchoredSource, EvmBlockAnchor, EvmBlockResponse,
-    EvmChainIdentityRequest, EvmChainIdentityResponse, EvmCheckedSource, EvmCoarseSizeClass,
-    EvmLatestAnchorRequest, EvmNativeBalanceRequest, EvmQuantityResponse, EvmResponseInvalidKind,
-    EvmRoutingGenerationRef, EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest,
-    EvmTokenDecimalsResponse, EvmWalletObservedTransaction, EvmWalletReceipt,
+    ChainInstanceRegistryAttestation, EvmAnchorConfirmationRequest, EvmAnchoredSource,
+    EvmBlockAnchor, EvmBlockResponse, EvmChainIdentityRequest, EvmChainIdentityResponse,
+    EvmChainInstanceBinding, EvmCheckedSource, EvmCoarseSizeClass, EvmLatestAnchorRequest,
+    EvmNativeBalanceRequest, EvmQuantityResponse, EvmResponseInvalidKind, EvmRoutingGenerationRef,
+    EvmSafeFailure, EvmTokenBalanceRequest, EvmTokenDecimalsRequest, EvmTokenDecimalsResponse,
+    EvmWalletObservedTransaction, EvmWalletReceipt, EvmWalletReference,
     TransientSignedEip1559Envelope,
 };
-use mfm_ids::{ContentRef, DigestAlgorithm, LocalPublicId, SchemaId, SemanticTypeId, StableId};
-use mfm_program::boundary_content_ref;
-use mfm_values::RetainedValueContract;
+pub use mfm_evm::{
+    EvmRoutingCatalogDescriptor, EvmRoutingGenerationDescriptor, EVM_JSON_RPC_PROVIDER_CLASS,
+    EVM_ROUTE_POLICY_ID, EVM_ROUTE_POLICY_VERSION, EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION,
+    EVM_ROUTING_GENERATION_DESCRIPTOR_VERSION,
+};
+use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
+use mfm_values::{MfmValue, RetainedValueContract};
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 use zeroize::{Zeroize, Zeroizing};
 
 mod exact;
+mod inventory;
+
+pub use inventory::{
+    CompletedEvmRpcInventoryExchange, EvmRpcAssemblyLease, EvmRpcInventoryChallenge,
+    EvmRpcInventoryChallenges, EvmRpcInventoryCheckpoint, EvmRpcInventoryExchangeRef,
+    EvmRpcInventoryFinishAuthorization, EvmRpcInventoryProofs, EvmRpcRouteChallenge,
+    EvmRpcRouteProof, EvmRpcTargetIdentity, PendingEvmRpcInventory,
+};
 
 pub(crate) use exact::WalletBroadcastResponse;
 use exact::{decode_response, DecodeFailure, EncodedRpcRequest, ExactRpcRequest, ExactRpcResponse};
@@ -53,6 +65,7 @@ pub(crate) const EVM_SEND_RAW_TRANSACTION_METHOD: &str = "eth_sendRawTransaction
 pub(crate) const EVM_TRANSACTION_BY_HASH_METHOD: &str = "eth_getTransactionByHash";
 pub(crate) const EVM_RECEIPT_BY_HASH_METHOD: &str = "eth_getTransactionReceipt";
 pub(crate) const EVM_BLOCK_BY_NUMBER_METHOD: &str = "eth_getBlockByNumber";
+pub(crate) const EVM_PENDING_NONCE_METHOD: &str = "eth_getTransactionCount";
 
 #[cfg(test)]
 tokio::task_local! {
@@ -88,29 +101,16 @@ struct ExchangeOwnerProbe {
     response_dropped: AtomicUsize,
     response_zeroized: AtomicUsize,
 }
-/// Fixed provider class reviewed by the EVM JSON-RPC adapter.
-pub const EVM_JSON_RPC_PROVIDER_CLASS: &str = "mfm.evm-json-rpc";
-/// Fixed route policy: one endpoint entry, no retry, redirect, or fallback.
-pub const EVM_ROUTE_POLICY_ID: &str = "mfm.evm.single-entry-no-retry";
-/// Version of the fixed route policy.
-pub const EVM_ROUTE_POLICY_VERSION: &str = "1";
-/// Exact routing-generation descriptor version.
-pub const EVM_ROUTING_GENERATION_DESCRIPTOR_VERSION: &str = "mfm.evm.routing-generation.v1";
-/// Exact aggregate routing-catalog descriptor version.
-pub const EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION: &str = "mfm.evm.routing-catalog.v1";
-
 /// Result type for local transport and routing construction.
 pub type TransportResult<T> = std::result::Result<T, EvmTransportError>;
 
-/// Transient result of one EVM read before safe-failure classification.
+/// Closed result of one bounded EVM read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvmTransportOutcome<R> {
     /// The destination returned one typed response.
     Returned(R),
-    /// Boundary entry was proven not to have occurred.
-    DidNotEnter(EvmSafeFailure),
-    /// Boundary entry or the terminal outcome remains indeterminate.
-    Indeterminate(EvmSafeFailure),
+    /// Reviewed redaction-safe failure for this read.
+    SafeFailure(EvmSafeFailure),
 }
 
 /// Redaction-safe local setup failure.
@@ -125,6 +125,18 @@ pub enum EvmTransportError {
     /// No immutable generation was supplied for a qualified catalog.
     #[error("EVM routing catalog is empty")]
     EmptyCatalog,
+    /// Provider-issued inventory challenge material was incomplete or inconsistent.
+    #[error("EVM RPC inventory challenge is invalid")]
+    InvalidInventoryChallenge,
+    /// The bounded target qualification exchange did not complete successfully.
+    #[error("EVM RPC inventory exchange failed")]
+    InventoryExchangeFailed,
+    /// A target returned missing, duplicated, reordered, foreign, or stale proof material.
+    #[error("EVM RPC inventory proof is invalid")]
+    InvalidInventoryProof,
+    /// Provider finish authorization did not match the completed inventory exchange.
+    #[error("EVM RPC inventory finish authorization is invalid")]
+    InvalidInventoryFinishAuthorization,
 }
 
 /// Checked resolved HTTP(S) endpoint.
@@ -345,217 +357,6 @@ impl fmt::Debug for EvmRpcAuthorization {
     }
 }
 
-/// Immutable secret-free identity of one resolved EVM route generation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct EvmRoutingGenerationDescriptor {
-    version: String,
-    network_id: String,
-    source_ref: String,
-    chain_id: u64,
-    generation_id: StableId,
-    provider_class: String,
-    route_policy_id: String,
-    route_policy_version: String,
-}
-
-impl EvmRoutingGenerationDescriptor {
-    fn new(
-        network_id: impl Into<String>,
-        source_ref: impl Into<String>,
-        chain_id: u64,
-        generation_id: StableId,
-    ) -> TransportResult<Self> {
-        let network_id = network_id.into();
-        let source_ref = source_ref.into();
-        LocalPublicId::new(&network_id).map_err(|_| EvmTransportError::InvalidConfiguration)?;
-        LocalPublicId::new(&source_ref).map_err(|_| EvmTransportError::InvalidConfiguration)?;
-        if chain_id == 0 {
-            return Err(EvmTransportError::InvalidConfiguration);
-        }
-        Ok(Self {
-            version: EVM_ROUTING_GENERATION_DESCRIPTOR_VERSION.to_owned(),
-            network_id,
-            source_ref,
-            chain_id,
-            generation_id,
-            provider_class: EVM_JSON_RPC_PROVIDER_CLASS.to_owned(),
-            route_policy_id: EVM_ROUTE_POLICY_ID.to_owned(),
-            route_policy_version: EVM_ROUTE_POLICY_VERSION.to_owned(),
-        })
-    }
-
-    fn validate(&self) -> TransportResult<()> {
-        LocalPublicId::new(&self.network_id)
-            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
-        LocalPublicId::new(&self.source_ref)
-            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
-        if self.version != EVM_ROUTING_GENERATION_DESCRIPTOR_VERSION
-            || self.chain_id == 0
-            || self.provider_class != EVM_JSON_RPC_PROVIDER_CLASS
-            || self.route_policy_id != EVM_ROUTE_POLICY_ID
-            || self.route_policy_version != EVM_ROUTE_POLICY_VERSION
-        {
-            return Err(EvmTransportError::InvalidConfiguration);
-        }
-        Ok(())
-    }
-
-    /// Returns the exact descriptor version.
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-
-    /// Returns the semantic network selected by this generation.
-    pub fn network_id(&self) -> &str {
-        &self.network_id
-    }
-
-    /// Returns the reviewed local source identity.
-    pub fn source_ref(&self) -> &str {
-        &self.source_ref
-    }
-
-    /// Returns the expected non-zero chain id.
-    pub const fn chain_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    /// Returns the operator-controlled immutable generation identity.
-    pub const fn generation_id(&self) -> &StableId {
-        &self.generation_id
-    }
-
-    /// Returns the fixed reviewed provider class.
-    pub fn provider_class(&self) -> &str {
-        &self.provider_class
-    }
-
-    /// Returns the fixed one-entry/no-retry route policy.
-    pub fn route_policy_id(&self) -> &str {
-        &self.route_policy_id
-    }
-
-    /// Returns the fixed route-policy version.
-    pub fn route_policy_version(&self) -> &str {
-        &self.route_policy_version
-    }
-
-    /// Returns exact canonical descriptor bytes.
-    pub fn canonical(&self) -> TransportResult<PlainCanonicalJsonBytes> {
-        self.validate()?;
-        canonical_json(self)
-    }
-
-    /// Returns the exact descriptor content identity used by typed requests.
-    pub fn content_ref(&self) -> TransportResult<ContentRef> {
-        boundary_content_ref(
-            routing_generation_descriptor_schema_id()?,
-            &self.canonical()?,
-        )
-        .map_err(|_| EvmTransportError::InvalidConfiguration)
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmRoutingGenerationDescriptor {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            version: String,
-            network_id: String,
-            source_ref: String,
-            chain_id: u64,
-            generation_id: StableId,
-            provider_class: String,
-            route_policy_id: String,
-            route_policy_version: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let descriptor = Self {
-            version: wire.version,
-            network_id: wire.network_id,
-            source_ref: wire.source_ref,
-            chain_id: wire.chain_id,
-            generation_id: wire.generation_id,
-            provider_class: wire.provider_class,
-            route_policy_id: wire.route_policy_id,
-            route_policy_version: wire.route_policy_version,
-        };
-        descriptor.validate().map_err(serde::de::Error::custom)?;
-        Ok(descriptor)
-    }
-}
-
-/// Aggregate immutable catalog identity retained by one read binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct EvmRoutingCatalogDescriptor {
-    version: String,
-    ordered_generation_refs: Vec<EvmRoutingGenerationRef>,
-}
-
-impl EvmRoutingCatalogDescriptor {
-    fn validate(&self) -> TransportResult<()> {
-        if self.version != EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION
-            || self.ordered_generation_refs.is_empty()
-            || self
-                .ordered_generation_refs
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
-        {
-            return Err(EvmTransportError::InvalidConfiguration);
-        }
-        Ok(())
-    }
-
-    /// Returns the exact descriptor version.
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-
-    /// Returns exact generation references in content-reference order.
-    pub fn ordered_generation_refs(&self) -> &[EvmRoutingGenerationRef] {
-        &self.ordered_generation_refs
-    }
-
-    /// Returns exact canonical descriptor bytes.
-    pub fn canonical(&self) -> TransportResult<PlainCanonicalJsonBytes> {
-        self.validate()?;
-        canonical_json(self)
-    }
-
-    /// Returns the aggregate catalog content identity.
-    pub fn content_ref(&self) -> TransportResult<ContentRef> {
-        boundary_content_ref(routing_catalog_descriptor_schema_id()?, &self.canonical()?)
-            .map_err(|_| EvmTransportError::InvalidConfiguration)
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmRoutingCatalogDescriptor {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            version: String,
-            ordered_generation_refs: Vec<EvmRoutingGenerationRef>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let descriptor = Self {
-            version: wire.version,
-            ordered_generation_refs: wire.ordered_generation_refs,
-        };
-        descriptor.validate().map_err(serde::de::Error::custom)?;
-        Ok(descriptor)
-    }
-}
-
 struct ResolvedGeneration {
     descriptor: EvmRoutingGenerationDescriptor,
     implementation_id: String,
@@ -564,16 +365,32 @@ struct ResolvedGeneration {
     limit: Arc<Semaphore>,
 }
 
-/// Builder for immutable, exact-reference routing generations.
-#[derive(Default)]
+/// Builder for one immutable, chain-registry-qualified routing catalog.
 pub struct EvmRoutingCatalogBuilder {
+    chain_registry_head_ref: EvmWalletReference,
+    chain_instances: Vec<ChainInstanceRegistryAttestation>,
     generations: BTreeMap<EvmRoutingGenerationRef, Arc<ResolvedGeneration>>,
 }
 
 impl EvmRoutingCatalogBuilder {
-    /// Starts an empty local generation catalog.
-    pub fn new() -> Self {
-        Self::default()
+    /// Starts one catalog from the complete provider-issued chain-registry closure.
+    pub fn new(
+        chain_registry_head_ref: EvmWalletReference,
+        chain_instances: Vec<ChainInstanceRegistryAttestation>,
+    ) -> TransportResult<Self> {
+        if chain_instances.is_empty()
+            || chain_registry_head_ref.to_content_ref().is_err()
+            || chain_instances
+                .iter()
+                .any(|attestation| attestation.validate().is_err())
+        {
+            return Err(EvmTransportError::InvalidConfiguration);
+        }
+        Ok(Self {
+            chain_registry_head_ref,
+            chain_instances,
+            generations: BTreeMap::new(),
+        })
     }
 
     /// Inserts one exact generation descriptor and its private route.
@@ -583,16 +400,15 @@ impl EvmRoutingCatalogBuilder {
     /// persisted descriptor.
     pub fn insert(
         &mut self,
-        network_id: impl Into<String>,
-        source_ref: impl Into<String>,
-        chain_id: u64,
-        generation_id: StableId,
+        descriptor: EvmRoutingGenerationDescriptor,
         endpoint: EvmRpcEndpoint,
         authorization: Option<EvmRpcAuthorization>,
     ) -> TransportResult<EvmRoutingGenerationRef> {
-        let descriptor =
-            EvmRoutingGenerationDescriptor::new(network_id, source_ref, chain_id, generation_id)?;
-        let generation = EvmRoutingGenerationRef::from_content_ref(descriptor.content_ref()?)
+        descriptor
+            .validate()
+            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        let generation = descriptor
+            .generation_ref()
             .map_err(|_| EvmTransportError::InvalidConfiguration)?;
         if self.generations.contains_key(&generation) {
             return Err(EvmTransportError::DuplicateGeneration);
@@ -615,10 +431,17 @@ impl EvmRoutingCatalogBuilder {
         if self.generations.is_empty() {
             return Err(EvmTransportError::EmptyCatalog);
         }
-        let descriptor = EvmRoutingCatalogDescriptor {
-            version: EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION.to_owned(),
-            ordered_generation_refs: self.generations.keys().cloned().collect(),
-        };
+        let descriptors = self
+            .generations
+            .values()
+            .map(|generation| generation.descriptor.clone())
+            .collect();
+        let descriptor = EvmRoutingCatalogDescriptor::new(
+            self.chain_registry_head_ref,
+            self.chain_instances,
+            descriptors,
+        )
+        .map_err(|_| EvmTransportError::InvalidConfiguration)?;
         Ok(EvmRoutingCatalog {
             generations: self.generations,
             descriptor,
@@ -691,22 +514,18 @@ struct SharedHttpRuntime {
 impl EvmJsonRpcTransport {
     /// Constructs the transport without resolving a route or performing IO.
     pub fn new(routes: EvmRoutingCatalog) -> TransportResult<Self> {
-        let client = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .no_proxy()
-            .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
-            .build()
-            .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+        let shared = shared_http_runtime()?;
         Ok(Self {
-            shared: Arc::new(SharedHttpRuntime {
-                client,
-                global_limit: Arc::new(Semaphore::new(MAX_GLOBAL_IN_FLIGHT_EXCHANGES)),
-            }),
+            shared,
             routes: Arc::new(routes),
         })
+    }
+
+    fn from_inventory(routes: EvmRoutingCatalog, shared: Arc<SharedHttpRuntime>) -> Self {
+        Self {
+            shared,
+            routes: Arc::new(routes),
+        }
     }
 
     /// Returns the exact secret-free aggregate routing descriptor.
@@ -721,8 +540,15 @@ impl EvmJsonRpcTransport {
         self.routes.generation_descriptors()
     }
 
-    pub(crate) fn is_same_instance(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.shared, &other.shared) && Arc::ptr_eq(&self.routes, &other.routes)
+    /// Returns whether one exact generation is locally bound to the exact qualified chain.
+    pub fn qualifies_route(
+        &self,
+        generation: &EvmRoutingGenerationRef,
+        chain_instance: &EvmChainInstanceBinding,
+    ) -> bool {
+        self.routes
+            .resolve(generation)
+            .is_some_and(|route| route.descriptor.chain_instance() == chain_instance)
     }
 
     /// Performs one exact `eth_chainId` operation.
@@ -740,7 +566,7 @@ impl EvmJsonRpcTransport {
         {
             Ok(ExactRpcResponse::ChainIdentity(chain_id)) => chain_id,
             Ok(_) => {
-                return indeterminate(EvmSafeFailure::ResponseInvalid {
+                return safe_failure(EvmSafeFailure::ResponseInvalid {
                     response_kind: EvmResponseInvalidKind::InvalidResult,
                     size_class: EvmCoarseSizeClass::UpTo16Kib,
                 });
@@ -749,7 +575,7 @@ impl EvmJsonRpcTransport {
         };
         EvmTransportOutcome::Returned(EvmChainIdentityResponse {
             chain_id,
-            source_scope: route.descriptor.source_ref.clone(),
+            source_scope: route.descriptor.source_ref().to_owned(),
             implementation_id: route.implementation_id.clone(),
         })
     }
@@ -767,7 +593,7 @@ impl EvmJsonRpcTransport {
             Ok(ExactRpcResponse::LatestAnchor(anchor)) => {
                 EvmTransportOutcome::Returned(EvmBlockResponse { anchor })
             }
-            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+            Ok(_) => safe_failure(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::UpTo16Kib,
             }),
@@ -786,11 +612,11 @@ impl EvmJsonRpcTransport {
         };
         let account = match parse_canonical_address(request.account()) {
             Some(account) => account,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
             Some(block_hash) => block_hash,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         match self
             .exchange(
@@ -805,7 +631,7 @@ impl EvmJsonRpcTransport {
             Ok(ExactRpcResponse::NativeBalance(quantity)) => {
                 EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity))
             }
-            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+            Ok(_) => safe_failure(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::UpTo16Kib,
             }),
@@ -826,11 +652,11 @@ impl EvmJsonRpcTransport {
             .filter(|address| !address.is_zero())
         {
             Some(contract) => contract,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
             Some(block_hash) => block_hash,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         match self
             .exchange(
@@ -845,7 +671,7 @@ impl EvmJsonRpcTransport {
             Ok(ExactRpcResponse::TokenDecimals(decimals)) => {
                 EvmTransportOutcome::Returned(EvmTokenDecimalsResponse { decimals })
             }
-            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+            Ok(_) => safe_failure(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::UpTo16Kib,
             }),
@@ -864,17 +690,17 @@ impl EvmJsonRpcTransport {
         };
         let account = match parse_canonical_address(request.account()) {
             Some(account) => account,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         let contract = match parse_canonical_address(request.contract_address())
             .filter(|address| !address.is_zero())
         {
             Some(contract) => contract,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         let block_hash = match parse_canonical_hash(request.source().anchor().hash()) {
             Some(block_hash) => block_hash,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         match self
             .exchange(
@@ -890,7 +716,7 @@ impl EvmJsonRpcTransport {
             Ok(ExactRpcResponse::TokenBalance(quantity)) => {
                 EvmTransportOutcome::Returned(EvmQuantityResponse::new(quantity))
             }
-            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+            Ok(_) => safe_failure(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::UpTo16Kib,
             }),
@@ -905,7 +731,7 @@ impl EvmJsonRpcTransport {
     ) -> EvmTransportOutcome<EvmBlockResponse> {
         let source = match request.source() {
             Some(source) => source,
-            None => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            None => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         let route = match self.resolve_anchored_source(source) {
             Ok(route) => route,
@@ -913,7 +739,7 @@ impl EvmJsonRpcTransport {
         };
         let number = match source.anchor().number_quantity() {
             Ok(number) => number,
-            Err(_) => return did_not_enter(EvmSafeFailure::RequestInvalid),
+            Err(_) => return safe_failure(EvmSafeFailure::RequestInvalid),
         };
         match self
             .exchange(route, ExactRpcRequest::ConfirmAnchor { number })
@@ -922,7 +748,7 @@ impl EvmJsonRpcTransport {
             Ok(ExactRpcResponse::ConfirmAnchor(anchor)) => {
                 EvmTransportOutcome::Returned(EvmBlockResponse { anchor })
             }
-            Ok(_) => indeterminate(EvmSafeFailure::ResponseInvalid {
+            Ok(_) => safe_failure(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::UpTo16Kib,
             }),
@@ -937,13 +763,13 @@ impl EvmJsonRpcTransport {
         let route = self
             .routes
             .resolve(binding.routing_generation_ref())
-            .ok_or(BoundaryFailure::DidNotEnter(
+            .ok_or(BoundaryFailure::BeforeEntry(
                 EvmSafeFailure::RoutingGenerationUnavailable,
             ))?;
-        if route.descriptor.network_id != binding.network_id()
-            || route.descriptor.chain_id != binding.chain_id()
+        if route.descriptor.network_id() != binding.network_id()
+            || route.descriptor.chain_instance() != binding.chain_instance()
         {
-            return Err(BoundaryFailure::DidNotEnter(EvmSafeFailure::RequestInvalid));
+            return Err(BoundaryFailure::BeforeEntry(EvmSafeFailure::RequestInvalid));
         }
         Ok(route)
     }
@@ -953,10 +779,10 @@ impl EvmJsonRpcTransport {
         source: &EvmCheckedSource,
     ) -> std::result::Result<Arc<ResolvedGeneration>, BoundaryFailure> {
         let route = self.resolve_binding(source.binding())?;
-        if route.descriptor.source_ref != source.source_scope()
+        if route.descriptor.source_ref() != source.source_scope()
             || route.implementation_id != source.implementation_id()
         {
-            return Err(BoundaryFailure::DidNotEnter(EvmSafeFailure::RequestInvalid));
+            return Err(BoundaryFailure::BeforeEntry(EvmSafeFailure::RequestInvalid));
         }
         Ok(route)
     }
@@ -968,7 +794,7 @@ impl EvmJsonRpcTransport {
         source
             .anchor()
             .validate()
-            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::RequestInvalid))?;
+            .map_err(|_| BoundaryFailure::BeforeEntry(EvmSafeFailure::RequestInvalid))?;
         self.resolve_source(source.source())
     }
 
@@ -980,7 +806,7 @@ impl EvmJsonRpcTransport {
         let (_route_permit, _global_permit) = self.acquire_exchange_permits(&route).await?;
         let EncodedRpcRequest { operation, body } = request
             .encode()
-            .map_err(|()| BoundaryFailure::DidNotEnter(EvmSafeFailure::RequestInvalid))?;
+            .map_err(|()| BoundaryFailure::BeforeEntry(EvmSafeFailure::RequestInvalid))?;
         let mut request = self
             .shared
             .client
@@ -994,10 +820,10 @@ impl EvmJsonRpcTransport {
         let mut response = request
             .send()
             .await
-            .map_err(|_| BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed))?;
+            .map_err(|_| BoundaryFailure::AfterEntry(EvmSafeFailure::TransportFailed))?;
         let status = response.status().as_u16();
         if response.status() != reqwest::StatusCode::OK {
-            return Err(BoundaryFailure::Indeterminate(EvmSafeFailure::HttpStatus {
+            return Err(BoundaryFailure::AfterEntry(EvmSafeFailure::HttpStatus {
                 status,
             }));
         }
@@ -1014,7 +840,7 @@ impl EvmJsonRpcTransport {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed))?
+            .map_err(|_| BoundaryFailure::AfterEntry(EvmSafeFailure::TransportFailed))?
         {
             bytes.extend(&chunk).map_err(response_too_large)?;
         }
@@ -1029,18 +855,18 @@ impl EvmJsonRpcTransport {
         let route_permit = Arc::clone(&route.limit)
             .acquire_owned()
             .await
-            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
+            .map_err(|_| BoundaryFailure::BeforeEntry(EvmSafeFailure::AccessCancelled))?;
         let global_permit = Arc::clone(&self.shared.global_limit)
             .acquire_owned()
             .await
-            .map_err(|_| BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled))?;
+            .map_err(|_| BoundaryFailure::BeforeEntry(EvmSafeFailure::AccessCancelled))?;
         Ok((route_permit, global_permit))
     }
 
     fn resolve_wallet_route(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
     ) -> Result<Arc<ResolvedGeneration>, WalletRpcFailure> {
         let generation = EvmRoutingGenerationRef::from_content_ref(route_generation_ref.clone())
             .map_err(|_| WalletRpcFailure::GenerationFenced)?;
@@ -1048,7 +874,7 @@ impl EvmJsonRpcTransport {
             .routes
             .resolve(&generation)
             .ok_or(WalletRpcFailure::GenerationFenced)?;
-        if route.descriptor.chain_id != chain_id {
+        if route.descriptor.chain_instance() != chain_instance {
             return Err(WalletRpcFailure::GenerationFenced);
         }
         Ok(route)
@@ -1057,10 +883,10 @@ impl EvmJsonRpcTransport {
     async fn wallet_exchange(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
         request: ExactRpcRequest,
     ) -> Result<ExactRpcResponse, WalletRpcFailure> {
-        let route = self.resolve_wallet_route(route_generation_ref, chain_id)?;
+        let route = self.resolve_wallet_route(route_generation_ref, chain_instance)?;
         self.exchange(route, request)
             .await
             .map_err(wallet_boundary_failure)
@@ -1069,13 +895,13 @@ impl EvmJsonRpcTransport {
     pub(crate) async fn send_raw_transaction(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
         signed: TransientSignedEip1559Envelope,
     ) -> Result<WalletBroadcastResponse, WalletRpcFailure> {
         match self
             .wallet_exchange(
                 route_generation_ref,
-                chain_id,
+                chain_instance,
                 ExactRpcRequest::SendRawTransaction { signed },
             )
             .await?
@@ -1085,16 +911,35 @@ impl EvmJsonRpcTransport {
         }
     }
 
+    pub(crate) async fn pending_nonce(
+        &self,
+        route_generation_ref: &ContentRef,
+        chain_instance: &EvmChainInstanceBinding,
+        sender: Address,
+    ) -> Result<U256, WalletRpcFailure> {
+        match self
+            .wallet_exchange(
+                route_generation_ref,
+                chain_instance,
+                ExactRpcRequest::PendingNonce { sender },
+            )
+            .await?
+        {
+            ExactRpcResponse::PendingNonce(nonce) => Ok(nonce),
+            _ => Err(WalletRpcFailure::InvalidResponse),
+        }
+    }
+
     pub(crate) async fn transaction_by_hash(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
         transaction_hash: B256,
     ) -> Result<Option<EvmWalletObservedTransaction>, WalletRpcFailure> {
         match self
             .wallet_exchange(
                 route_generation_ref,
-                chain_id,
+                chain_instance,
                 ExactRpcRequest::TransactionByHash { transaction_hash },
             )
             .await?
@@ -1107,13 +952,13 @@ impl EvmJsonRpcTransport {
     pub(crate) async fn receipt_by_hash(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
         transaction_hash: B256,
     ) -> Result<Option<EvmWalletReceipt>, WalletRpcFailure> {
         match self
             .wallet_exchange(
                 route_generation_ref,
-                chain_id,
+                chain_instance,
                 ExactRpcRequest::ReceiptByHash { transaction_hash },
             )
             .await?
@@ -1126,12 +971,12 @@ impl EvmJsonRpcTransport {
     pub(crate) async fn finalized_head(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
     ) -> Result<EvmBlockAnchor, WalletRpcFailure> {
         match self
             .wallet_exchange(
                 route_generation_ref,
-                chain_id,
+                chain_instance,
                 ExactRpcRequest::FinalizedHead,
             )
             .await?
@@ -1144,13 +989,13 @@ impl EvmJsonRpcTransport {
     pub(crate) async fn inclusion_block(
         &self,
         route_generation_ref: &ContentRef,
-        chain_id: u64,
+        chain_instance: &EvmChainInstanceBinding,
         number: U256,
     ) -> Result<Option<EvmBlockAnchor>, WalletRpcFailure> {
         match self
             .wallet_exchange(
                 route_generation_ref,
-                chain_id,
+                chain_instance,
                 ExactRpcRequest::InclusionBlock { number },
             )
             .await?
@@ -1159,6 +1004,22 @@ impl EvmJsonRpcTransport {
             _ => Err(WalletRpcFailure::InvalidResponse),
         }
     }
+}
+
+fn shared_http_runtime() -> TransportResult<Arc<SharedHttpRuntime>> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .no_proxy()
+        .pool_max_idle_per_host(MAX_IDLE_CONNECTIONS_PER_HOST)
+        .build()
+        .map_err(|_| EvmTransportError::InvalidConfiguration)?;
+    Ok(Arc::new(SharedHttpRuntime {
+        client,
+        global_limit: Arc::new(Semaphore::new(MAX_GLOBAL_IN_FLIGHT_EXCHANGES)),
+    }))
 }
 
 impl fmt::Debug for EvmJsonRpcTransport {
@@ -1183,73 +1044,70 @@ pub(crate) enum WalletRpcFailure {
 
 fn wallet_boundary_failure(failure: BoundaryFailure) -> WalletRpcFailure {
     match failure {
-        BoundaryFailure::DidNotEnter(EvmSafeFailure::RoutingGenerationUnavailable) => {
+        BoundaryFailure::BeforeEntry(EvmSafeFailure::RoutingGenerationUnavailable) => {
             WalletRpcFailure::GenerationFenced
         }
-        BoundaryFailure::DidNotEnter(EvmSafeFailure::AccessCancelled) => {
+        BoundaryFailure::BeforeEntry(EvmSafeFailure::AccessCancelled) => {
             WalletRpcFailure::AccessCancelled
         }
-        BoundaryFailure::DidNotEnter(_) => WalletRpcFailure::UnavailableBeforeEntry,
-        BoundaryFailure::Indeterminate(EvmSafeFailure::TransportFailed) => {
+        BoundaryFailure::BeforeEntry(_) => WalletRpcFailure::UnavailableBeforeEntry,
+        BoundaryFailure::AfterEntry(EvmSafeFailure::TransportFailed) => {
             WalletRpcFailure::ResponseLost
         }
-        BoundaryFailure::Indeterminate(
+        BoundaryFailure::AfterEntry(
             EvmSafeFailure::HttpStatus { .. } | EvmSafeFailure::JsonRpcError { .. },
         ) => WalletRpcFailure::DestinationRejected,
-        BoundaryFailure::Indeterminate(_) => WalletRpcFailure::InvalidResponse,
+        BoundaryFailure::AfterEntry(_) => WalletRpcFailure::InvalidResponse,
     }
 }
 
 fn decode_boundary_failure(failure: DecodeFailure, response_len: usize) -> BoundaryFailure {
     match failure {
         DecodeFailure::MalformedEnvelope => {
-            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
+            BoundaryFailure::AfterEntry(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::MalformedEnvelope,
                 size_class: EvmCoarseSizeClass::from_byte_length(response_len),
             })
         }
         DecodeFailure::MissingResult => {
-            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseMissingResult {
+            BoundaryFailure::AfterEntry(EvmSafeFailure::ResponseMissingResult {
                 size_class: EvmCoarseSizeClass::from_byte_length(response_len),
             })
         }
         DecodeFailure::InvalidResult => {
-            BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseInvalid {
+            BoundaryFailure::AfterEntry(EvmSafeFailure::ResponseInvalid {
                 response_kind: EvmResponseInvalidKind::InvalidResult,
                 size_class: EvmCoarseSizeClass::from_byte_length(response_len),
             })
         }
         DecodeFailure::ResultTooLarge(result_len) => response_too_large(result_len),
         DecodeFailure::JsonRpcError(json_rpc_code) => {
-            BoundaryFailure::Indeterminate(EvmSafeFailure::JsonRpcError { json_rpc_code })
+            BoundaryFailure::AfterEntry(EvmSafeFailure::JsonRpcError { json_rpc_code })
         }
     }
 }
 
 enum BoundaryFailure {
-    DidNotEnter(EvmSafeFailure),
-    Indeterminate(EvmSafeFailure),
+    BeforeEntry(EvmSafeFailure),
+    AfterEntry(EvmSafeFailure),
 }
 
 impl BoundaryFailure {
     fn into_outcome<T>(self) -> EvmTransportOutcome<T> {
         match self {
-            Self::DidNotEnter(failure) => EvmTransportOutcome::DidNotEnter(failure),
-            Self::Indeterminate(failure) => EvmTransportOutcome::Indeterminate(failure),
+            Self::BeforeEntry(failure) | Self::AfterEntry(failure) => {
+                EvmTransportOutcome::SafeFailure(failure)
+            }
         }
     }
 }
 
-fn did_not_enter<T>(failure: EvmSafeFailure) -> EvmTransportOutcome<T> {
-    EvmTransportOutcome::DidNotEnter(failure)
-}
-
-fn indeterminate<T>(failure: EvmSafeFailure) -> EvmTransportOutcome<T> {
-    EvmTransportOutcome::Indeterminate(failure)
+fn safe_failure<T>(failure: EvmSafeFailure) -> EvmTransportOutcome<T> {
+    EvmTransportOutcome::SafeFailure(failure)
 }
 
 fn response_too_large(bytes: usize) -> BoundaryFailure {
-    BoundaryFailure::Indeterminate(EvmSafeFailure::ResponseTooLarge {
+    BoundaryFailure::AfterEntry(EvmSafeFailure::ResponseTooLarge {
         size_class: EvmCoarseSizeClass::from_byte_length(bytes),
     })
 }
@@ -1278,15 +1136,9 @@ fn parse_canonical_hash(raw: &str) -> Option<B256> {
     raw.parse().ok()
 }
 
-fn canonical_json<T: Serialize>(value: &T) -> TransportResult<PlainCanonicalJsonBytes> {
-    let json = serde_json::to_string(value).map_err(|_| EvmTransportError::InvalidConfiguration)?;
-    PlainCanonicalJsonBytes::from_json_str(&json)
-        .map_err(|_| EvmTransportError::InvalidConfiguration)
-}
-
 /// Returns the schema identity for one exact routing-generation descriptor.
 pub fn routing_generation_descriptor_schema_id() -> TransportResult<SchemaId> {
-    descriptor_schema_id("mfm.evm.routing-generation-descriptor")
+    EvmRoutingGenerationDescriptor::schema_id().map_err(|_| EvmTransportError::InvalidConfiguration)
 }
 
 /// Builds retained metadata for one routing-generation support object.
@@ -1304,7 +1156,7 @@ pub fn routing_generation_descriptor_support_contract(
 
 /// Returns the schema identity for the aggregate routing-catalog descriptor.
 pub fn routing_catalog_descriptor_schema_id() -> TransportResult<SchemaId> {
-    descriptor_schema_id("mfm.evm.routing-catalog-descriptor")
+    EvmRoutingCatalogDescriptor::schema_id().map_err(|_| EvmTransportError::InvalidConfiguration)
 }
 
 /// Builds retained metadata for the aggregate routing-catalog support object.
@@ -1318,16 +1170,6 @@ pub fn routing_catalog_descriptor_support_contract(
         role,
         evidence_contract_ref,
     )
-}
-
-fn descriptor_schema_id(name: &'static str) -> TransportResult<SchemaId> {
-    SchemaId::new(
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("schema:{name}:1").as_bytes()),
-    )
-    .map_err(|_| EvmTransportError::InvalidConfiguration)
 }
 
 fn descriptor_support_contract(

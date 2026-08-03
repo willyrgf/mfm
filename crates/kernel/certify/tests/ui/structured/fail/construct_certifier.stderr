@@ -1,0 +1,43 @@
+error[E0451]: fields `entry` and `registry` of struct `EntryPointCertifier` are private
+  --> tests/ui/structured/fail/construct_certifier.rs:9:9
+   |
+ 8 |     EntryPointCertifier {
+   |     ------------------- in this type
+ 9 |         entry: value(),
+   |         ^^^^^ private field
+10 |         registry: value(),
+   |         ^^^^^^^^ private field
+
+error[E0451]: fields `entry` and `registry` of struct `AdmissionVerifier` are private
+  --> tests/ui/structured/fail/construct_certifier.rs:16:9
+   |
+15 |     AdmissionVerifier {
+   |     ----------------- in this type
+16 |         entry: value(),
+   |         ^^^^^ private field
+17 |         registry: value(),
+   |         ^^^^^^^^ private field
+
+error: type `structured::EntryPointDefinition` is private
+ --> tests/ui/structured/fail/construct_certifier.rs:9:16
+  |
+9 |         entry: value(),
+  |                ^^^^^^^ private type
+
+error: type `structured::StructuredCertificationRegistry` is private
+  --> tests/ui/structured/fail/construct_certifier.rs:10:19
+   |
+10 |         registry: value(),
+   |                   ^^^^^^^ private type
+
+error: type `structured::EntryPointDefinition` is private
+  --> tests/ui/structured/fail/construct_certifier.rs:16:16
+   |
+16 |         entry: value(),
+   |                ^^^^^^^ private type
+
+error: type `structured::StructuredCertificationRegistry` is private
+  --> tests/ui/structured/fail/construct_certifier.rs:17:19
+   |
+17 |         registry: value(),
+   |                   ^^^^^^^ private type

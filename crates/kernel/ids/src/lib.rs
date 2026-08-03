@@ -7,15 +7,15 @@
 //! kernel crates.
 //!
 //! ```
-//! use mfm_ids::{NodeId, SchemaVersion};
+//! use mfm_ids::{OccurrenceId, SchemaVersion};
 //!
-//! let node_id = NodeId::parse(
-//!     "node:sha256-jcs-v1:\
+//! let occurrence_id = OccurrenceId::parse(
+//!     "occurrence:sha256-jcs-v1:\
 //!      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 //! )?;
 //! let schema_version = SchemaVersion::new("1")?;
 //!
-//! assert_eq!(node_id.category(), "node");
+//! assert!(occurrence_id.as_str().starts_with("occurrence:"));
 //! assert_eq!(schema_version.as_str(), "1");
 //! # Ok::<(), mfm_ids::IdentityError>(())
 //! ```
@@ -166,12 +166,6 @@ pub enum EffectKindKind {}
 /// Marker for capability kind ids.
 pub enum CapabilityKindKind {}
 
-/// Marker for typed execution spec hashes.
-pub enum SpecHashKind {}
-
-/// Marker for node ids.
-pub enum NodeIdKind {}
-
 /// Marker for run ids.
 pub enum RunIdKind {}
 
@@ -201,12 +195,6 @@ pub type EffectKind = Identity<EffectKindKind>;
 
 /// Typed capability kind identity.
 pub type CapabilityKind = Identity<CapabilityKindKind>;
-
-/// Digest of a certified typed execution spec.
-pub type SpecHash = Identity<SpecHashKind>;
-
-/// Planned or certified node identity.
-pub type NodeId = Identity<NodeIdKind>;
 
 /// Typed run identity.
 pub type RunId = Identity<RunIdKind>;
@@ -359,7 +347,7 @@ impl<'de> Deserialize<'de> for StoreEpoch {
 
 /// App-owned non-secret tenant ownership scope.
 ///
-/// This scalar is copied into admitted roots and executor deployments. It is not a content
+/// This scalar is copied into admitted roots and qualified resource deployments. It is not a content
 /// reference, credential, principal, or mutable membership identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TenantScopeId(String);
@@ -1057,8 +1045,6 @@ impl private::IdentityCategory for SchemaKind {
 impl_identity_category!(EffectKindKind, "effect", NamespaceNameDigest);
 impl_identity_category!(CapabilityKindKind, "capability", NamespaceNameDigest);
 
-impl_digest_only_category!(SpecHashKind, "spec");
-impl_digest_only_category!(NodeIdKind, "node");
 impl_digest_only_category!(RunIdKind, "run");
 impl_digest_only_category!(ArtifactIdKind, "artifact");
 impl_unrestricted_digest_only_category!(ContentDigestKind, "content");

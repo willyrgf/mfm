@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Typed authored-program and closed state-execution contracts.
+//! Typed declaration-ordered program authoring and state-execution contracts.
 //!
 //! Values in this crate carry no store, append, runtime, or external-access
 //! authority. Runtime privately validates committed proofs before borrowing the
@@ -7,16 +7,10 @@
 
 extern crate self as mfm_program;
 
-mod authoring;
-mod callbacks;
-mod execution;
-mod registry;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
-pub use authoring::*;
-pub use callbacks::*;
-pub use execution::*;
-pub use mfm_ids::EntryPointId;
-pub use registry::*;
+pub mod structured;
 
 /// Result type for typed program construction.
 pub type Result<T> = std::result::Result<T, ProgramError>;
@@ -42,4 +36,34 @@ impl From<mfm_spec::SpecError> for ProgramError {
     fn from(error: mfm_spec::SpecError) -> Self {
         Self::Spec(error.to_string())
     }
+}
+
+/// Canonicalizes one typed structured-runtime boundary value.
+pub fn encode_boundary<T: Serialize>(value: &T) -> Result<mfm_canonical::PlainCanonicalJsonBytes> {
+    let json =
+        serde_json::to_string(value).map_err(|error| ProgramError::Codec(error.to_string()))?;
+    mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|error| ProgramError::Codec(error.to_string()))
+}
+
+/// Decodes canonical structured-runtime boundary bytes and requires an exact round trip.
+pub fn decode_boundary<T: DeserializeOwned + Serialize>(
+    canonical: &mfm_canonical::PlainCanonicalJsonBytes,
+) -> Result<T> {
+    let value = serde_json::from_slice::<T>(canonical.as_bytes())
+        .map_err(|error| ProgramError::Codec(error.to_string()))?;
+    if encode_boundary(&value)? != *canonical {
+        return Err(ProgramError::Codec(
+            "typed decode did not round-trip exact canonical bytes".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+/// Derives the exact content reference for canonical structured-runtime boundary bytes.
+pub fn boundary_content_ref(
+    schema_id: mfm_ids::SchemaId,
+    canonical: &mfm_canonical::PlainCanonicalJsonBytes,
+) -> Result<mfm_ids::ContentRef> {
+    mfm_spec::exact_content_ref(schema_id, canonical).map_err(Into::into)
 }

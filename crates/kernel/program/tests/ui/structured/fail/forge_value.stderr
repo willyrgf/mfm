@@ -1,0 +1,9 @@
+error[E0451]: fields `slot` and `_value` of struct `Value` are private
+ --> tests/ui/structured/fail/forge_value.rs:8:9
+  |
+7 |     Value {
+  |     ----- in this type
+8 |         slot,
+  |         ^^^^ private field
+9 |         _value: PhantomData,
+  |         ^^^^^^ private field
