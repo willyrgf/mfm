@@ -5220,6 +5220,7 @@ impl Fixture {
                     reservation,
                     activated_candidates,
                     candidate_ordinal,
+                    candidate_ordinal,
                 )
                 .expect("candidate activation permit"),
             },

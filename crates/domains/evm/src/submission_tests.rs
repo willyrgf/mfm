@@ -1023,6 +1023,214 @@ fn candidate_skip_provenance_is_normalized_and_preserves_exact_progress() {
 }
 
 #[test]
+fn recovery_visits_every_activated_candidate_before_replacement() {
+    use crate::{derive_exact_candidate_activation_permit, CandidateActivationPermit};
+
+    let fixture = QualificationFixture::new().expect("qualification fixture");
+    // Crash mid-history with ≥2 activated candidates retained.
+    let c0 = fixture.active.active_candidate.clone();
+    let mut c1 = c0.clone();
+    c1.attested_candidate.candidate_ordinal = 1;
+    c1.attested_candidate.transaction_hash = format!("{:#x}", B256::repeat_byte(0x42));
+    c1.attested_candidate.unsigned_candidate_digest = format!("{:#x}", B256::repeat_byte(0x62));
+    // Distinct descriptor identity so prefix validation elsewhere stays strict.
+    c1.attested_candidate.candidate_descriptor_ref = fixture
+        .prepared
+        .intent
+        .derived
+        .request
+        .route_generation_ref()
+        .clone();
+    c1.activation_evidence_ref = fixture
+        .post_reserve
+        .reservation
+        .reservation_evidence_ref
+        .clone();
+
+    let mut work = fixture.candidate.work.clone();
+    work.activated_candidates = vec![c0.clone(), c1.clone()];
+    work.current_candidate = Some(c1.clone());
+    // Simulate status recovery: walk starts at ordinal 0, not activated_len.
+    work.next_candidate_ordinal = 0;
+    work.observed_prefix_len = 0;
+
+    let progress = SubmissionProgress {
+        work: Some(work.clone()),
+        completion: None,
+        failure: None,
+    };
+    // Fixture family has one member; with next=0 still Execute for reobservation.
+    let CandidateSlotDecision::Execute { work: slot0 } =
+        successful(submission_process::select_candidate_slot(&progress))
+    else {
+        panic!("slot 0 must execute recovery of first activated candidate");
+    };
+    assert_eq!(slot0.next_candidate_ordinal, 0);
+
+    let permit0 = derive_exact_candidate_activation_permit(
+        &slot0.reservation,
+        &slot0.activated_candidates,
+        0,
+        0,
+    )
+    .expect("reobservation of ordinal 0");
+    assert!(matches!(
+        permit0,
+        CandidateActivationPermit::Reobservation {
+            exact_ordinal: 0,
+            ..
+        }
+    ));
+
+    // EVM-04: replacement without observing the full activated prefix is rejected.
+    assert!(
+        derive_exact_candidate_activation_permit(
+            &slot0.reservation,
+            &slot0.activated_candidates,
+            2,
+            0,
+        )
+        .is_err(),
+        "replacement without observing activated prefix must fail"
+    );
+    assert!(
+        derive_exact_candidate_activation_permit(
+            &slot0.reservation,
+            &slot0.activated_candidates,
+            2,
+            1,
+        )
+        .is_err(),
+        "replacement after partial observation must fail"
+    );
+    let permit_replace = derive_exact_candidate_activation_permit(
+        &slot0.reservation,
+        &slot0.activated_candidates,
+        2,
+        2,
+    )
+    .expect("replacement after independent observation of every earlier candidate");
+    assert!(matches!(
+        permit_replace,
+        CandidateActivationPermit::Replacement {
+            exact_next_ordinal: 2,
+            predecessor_ordinal: 1,
+            ..
+        }
+    ));
+
+    // Observation reconcile advances past ordinal 0 without jumping to activated_len.
+    let active0 = ActiveCandidateWork {
+        candidate: CandidateWork {
+            work: work.clone(),
+            unsigned_candidate: fixture.candidate.unsigned_candidate.clone(),
+            attested_candidate: Some(c0.attested_candidate.clone()),
+        },
+        active_candidate: c0.clone(),
+    };
+    let mut observation = fixture.observation.clone();
+    observation.active = active0;
+    observation.observation.transaction = Some(crate::EvmTransactionLookupObservation::Missing);
+    observation.observation.receipt = Some(crate::EvmReceiptLookupObservation::Missing);
+    let CandidateResolution::Resume { work: advanced } =
+        successful(submission_process::mark_observation_reconcile(&observation))
+    else {
+        panic!("non-terminal observation must resume next ordinal");
+    };
+    assert_eq!(advanced.next_candidate_ordinal, 1);
+    assert_eq!(advanced.observed_prefix_len, 1);
+    assert_eq!(advanced.activated_candidates.len(), 2);
+
+    // After observing c0, reobservation of c1 is the next certified step.
+    let permit1 = derive_exact_candidate_activation_permit(
+        &advanced.reservation,
+        &advanced.activated_candidates,
+        1,
+        1,
+    )
+    .expect("reobservation of ordinal 1 after observing ordinal 0");
+    assert!(matches!(
+        permit1,
+        CandidateActivationPermit::Reobservation {
+            exact_ordinal: 1,
+            ..
+        }
+    ));
+
+    // Status resume still starts at 0 even when the retained prefix is non-empty.
+    let multi_status = reserved_status(&fixture, true);
+    // reserved_status(advanced=true) has one candidate; assert next resets to 0.
+    let StateSettlement::Proposed(outcome) = submission_process::settle_wallet_status(
+        &fixture.prepared,
+        &CommittedObservation::Returned(multi_status),
+    ) else {
+        panic!("reserved status must settle");
+    };
+    let ProposedStateValue::Success(WalletStatusDecision::Reserved { work: resumed }) =
+        outcome.value()
+    else {
+        panic!("must resume reserved work");
+    };
+    assert_eq!(resumed.next_candidate_ordinal, 0);
+    assert_eq!(resumed.observed_prefix_len, 0);
+    assert!(!resumed.activated_candidates.is_empty());
+}
+
+#[test]
+fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
+    let fixture = QualificationFixture::new().expect("qualification fixture");
+    let completed = match completed_status(&fixture) {
+        WalletNonceStatus::Completed { completion, .. } => completion,
+        _ => panic!("completed fixture"),
+    };
+    completed
+        .validate()
+        .expect("complete public recovery closure must validate");
+    // Output embeds the full witness preimage, not a dangling digest.
+    assert_eq!(
+        completed.terminal_witnesses,
+        fixture.completion.request.terminal_witnesses
+    );
+    let witnesses_ref = canonical_wallet_reference(&completed.terminal_witnesses)
+        .expect("witnesses reference");
+    assert_eq!(
+        completed.original_terminal_witnesses_ref,
+        witnesses_ref.content_digest()
+    );
+    assert!(
+        !completed.sealed_activated_candidates.is_empty(),
+        "sealed activated prefix must be retained"
+    );
+    assert!(completed.sealed_activated_candidates.iter().any(|c| {
+        c.attested_candidate.candidate_ordinal
+            == completed
+                .canonical_terminal_outcome
+                .winning_candidate_ordinal
+            && c.attested_candidate.transaction_hash
+                == completed.canonical_terminal_outcome.transaction_hash
+    }));
+
+    let mut forged = completed.clone();
+    forged.sealed_activated_candidates.clear();
+    assert!(forged.validate().is_err(), "empty sealed prefix rejected");
+
+    let mut forged = completed.clone();
+    forged.original_terminal_witnesses_ref =
+        format!("{:#x}", B256::repeat_byte(0xee));
+    assert!(
+        forged.validate().is_err(),
+        "witness digest mismatch rejected"
+    );
+
+    let mut forged = completed;
+    forged.terminal_witnesses.canonical_public_result = "{\"conflict\":true}".to_owned();
+    assert!(
+        forged.validate().is_err(),
+        "witness/outcome conflict rejected"
+    );
+}
+
+#[test]
 fn failure_reconciliation_uses_one_exact_authoritative_snapshot() {
     let fixture = QualificationFixture::new().expect("qualification fixture");
     let unchanged = reserved_status(&fixture, false);
@@ -1175,6 +1383,8 @@ fn completed_status(fixture: &QualificationFixture) -> WalletNonceStatus {
             .clone(),
         semantic_completion_key: completion_request.completion_key.clone(),
         canonical_terminal_outcome: completion_request.canonical_terminal_outcome.clone(),
+        terminal_witnesses: completion_request.terminal_witnesses.clone(),
+        sealed_activated_candidates: vec![fixture.active.active_candidate.clone()],
         original_terminal_witnesses_ref: canonical_wallet_reference(
             &completion_request.terminal_witnesses,
         )

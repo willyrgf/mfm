@@ -335,7 +335,10 @@ fn validated_wallet_status(
                     reservation: reservation.clone(),
                     activated_candidates: activated_candidates.clone(),
                     current_candidate: current_candidate.clone(),
-                    next_candidate_ordinal: activated_candidates.len() as u16,
+                    // EVM-03: every recovery walk starts at ordinal 0 so the full
+                    // retained activated prefix is observed before replacement.
+                    next_candidate_ordinal: 0,
+                    observed_prefix_len: 0,
                     status_baseline: WalletStatusBaseline::Reserved {
                         resource_head_ref: resource_head_ref.clone(),
                         canonical_status_digest,
@@ -421,7 +424,8 @@ fn valid_completion(
     reservation: &ReservedWalletNonce,
     completion: &CompletedWalletNonce,
 ) -> bool {
-    completion.nonce_domain == reservation.nonce_domain
+    completion.validate().is_ok()
+        && completion.nonce_domain == reservation.nonce_domain
         && completion.nonce == reservation.nonce
         && completion.semantic_reservation_key == prepared.reservation_key
         && completion.canonical_terminal_outcome.nonce_domain == reservation.nonce_domain
@@ -431,7 +435,6 @@ fn valid_completion(
             == prepared.reservation_key
         && completion.canonical_terminal_outcome.submission_intent_id
             == prepared.intent.submission_intent_id
-        && completion.completion_evidence_ref.to_content_ref().is_ok()
 }
 
 pub(crate) fn pending_nonce_request(prepared: &PreparedWalletSubmission) -> EvmPendingNonceRequest {
@@ -615,33 +618,24 @@ pub(crate) fn select_candidate_slot(
     progress: &SubmissionProgress,
 ) -> ProposedStateOutcome<CandidateSlotDecision, mfm_program::structured::Never> {
     let decision = match (&progress.work, &progress.completion, &progress.failure) {
-        (Some(work), None, None) => {
-            let family_len = work
-                .prepared
-                .intent
-                .derived
-                .request
-                .candidate_family()
-                .candidates()
-                .len();
-            let activated_len = work.activated_candidates.len();
-            let next = usize::from(work.next_candidate_ordinal);
-            if next < family_len {
-                CandidateSlotDecision::Execute { work: work.clone() }
-            } else if activated_len > 0 {
-                // EVM-03: family slots are exhausted, but retained activated
-                // candidates must still be observed on recovery so already-
-                // finalized work can complete. Re-enter the last activated
-                // ordinal; activation/broadcast resolve idempotently.
-                let mut recover = work.clone();
-                let last = u16::try_from(activated_len.saturating_sub(1)).unwrap_or(0);
-                recover.next_candidate_ordinal = last;
-                recover.current_candidate = work.activated_candidates.last().cloned();
-                CandidateSlotDecision::Execute { work: recover }
-            } else {
-                CandidateSlotDecision::Exhausted
-            }
+        (Some(work), None, None)
+            if usize::from(work.next_candidate_ordinal)
+                < work
+                    .prepared
+                    .intent
+                    .derived
+                    .request
+                    .candidate_family()
+                    .candidates()
+                    .len() =>
+        {
+            // Recovery and first-use share one walk: ordinals are visited in
+            // certified order. Already-activated ordinals reobserve; the first
+            // unactivated ordinal may replace only after the full prefix was
+            // observed (see derive_candidate_activation_permit).
+            CandidateSlotDecision::Execute { work: work.clone() }
         }
+        (Some(_), None, None) => CandidateSlotDecision::Exhausted,
         _ => CandidateSlotDecision::Skip,
     };
     ProposedStateOutcome::Success(decision)
@@ -748,6 +742,7 @@ pub(crate) fn derive_candidate_activation_permit(
             EvmSubmissionFailure::SignerUnavailable,
         ));
     }
+    // Torn prefix: current must equal last when present.
     if candidate.work.current_candidate.as_ref() != candidate.work.activated_candidates.last() {
         return ProposedStateOutcome::Failure(reconcile_reserved(
             &candidate.work,
@@ -758,6 +753,7 @@ pub(crate) fn derive_candidate_activation_permit(
         &candidate.work.reservation,
         &candidate.work.activated_candidates,
         candidate.work.next_candidate_ordinal,
+        candidate.work.observed_prefix_len,
     ) {
         Ok(permit) => permit,
         Err(_) => {
@@ -1092,10 +1088,36 @@ pub(crate) fn select_terminal_evidence(
     ProposedStateOutcome::Success(terminal)
 }
 
+/// After non-terminal observation of ordinal *k*, advance the certified recovery
+/// walk to *k + 1* without resetting to the end of the activated prefix.
+///
+/// This is the sole path that records observation evidence for replacement
+/// admission: `observed_prefix_len` becomes exclusive upper bound *k + 1*.
 pub(crate) fn mark_observation_reconcile(
     work: &CandidateObservationWork,
-) -> ProposedStateOutcome<PreparedWalletSubmission, mfm_program::structured::Never> {
-    ProposedStateOutcome::Success(work.active.candidate.work.prepared.clone())
+) -> ProposedStateOutcome<CandidateResolution, mfm_program::structured::Never> {
+    let active = &work.active.active_candidate;
+    let ordinal = active.attested_candidate.candidate_ordinal;
+    let mut submission = work.active.candidate.work.clone();
+    // Retain a contiguous activated prefix including the candidate just observed.
+    if submission
+        .activated_candidates
+        .get(usize::from(ordinal))
+        .is_none()
+        && submission.activated_candidates.len() == usize::from(ordinal)
+    {
+        submission.activated_candidates.push(active.clone());
+    }
+    if let Some(retained) = submission.activated_candidates.get(usize::from(ordinal)) {
+        // Prefer the authority-retained activation evidence when present.
+        submission.current_candidate = Some(retained.clone());
+    } else {
+        submission.current_candidate = Some(active.clone());
+    }
+    let next = ordinal.saturating_add(1);
+    submission.next_candidate_ordinal = next;
+    submission.observed_prefix_len = next;
+    ProposedStateOutcome::Success(CandidateResolution::Resume { work: submission })
 }
 
 pub(crate) fn finalized_head_request(
@@ -1329,6 +1351,8 @@ pub(crate) fn settle_completion(
                     == work.request.current_reservation.semantic_reservation_key
                 && completion.canonical_terminal_outcome
                     == work.request.canonical_terminal_outcome
+                && completion.terminal_witnesses == work.request.terminal_witnesses
+                && completion.validate().is_ok()
                 && completion.completion_evidence_ref.to_content_ref().is_ok() =>
         {
             StateSettlement::Proposed(ProposedStateOutcome::Success(completion.clone()))

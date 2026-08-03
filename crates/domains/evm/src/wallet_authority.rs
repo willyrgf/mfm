@@ -1220,10 +1220,18 @@ pub enum CandidateActivationPermit {
 
 /// Derives the one exact activation permit for the next member of a retained
 /// candidate prefix, or reobservation of an already activated ordinal.
+///
+/// `observed_prefix_len` is the exclusive upper bound of activated ordinals that
+/// have independent producer observation evidence in the current recovery walk.
+/// Certified order requires `observed_prefix_len == next_candidate_ordinal`
+/// before any activation (reobservation, initial, or replacement). Replacement
+/// therefore cannot admit until every retained activated candidate has been
+/// observed (EVM-03/EVM-04).
 pub fn derive_exact_candidate_activation_permit(
     reservation: &ReservedWalletNonce,
     activated_candidates: &[ActiveWalletCandidate],
     next_candidate_ordinal: u16,
+    observed_prefix_len: u16,
 ) -> Result<CandidateActivationPermit, WalletAuthorityContractError> {
     if activated_candidates
         .iter()
@@ -1236,6 +1244,14 @@ pub fn derive_exact_candidate_activation_permit(
     {
         return Err(WalletAuthorityContractError::Invalid(
             "candidate_progression",
+        ));
+    }
+
+    // Affine certified-order walk: no ordinal may activate until every earlier
+    // activated ordinal has producer observation evidence in this recovery.
+    if observed_prefix_len != next_candidate_ordinal {
+        return Err(WalletAuthorityContractError::Invalid(
+            "candidate_observation_order",
         ));
     }
 
@@ -1282,17 +1298,19 @@ pub fn derive_exact_candidate_activation_permit(
 
     let replacement_policy_ref = crate::evm_wallet_nonce_policy_ref()
         .map_err(|_| WalletAuthorityContractError::Canonical)?;
-    // EVM-04: eligibility binds producer-facing activation evidence for every
-    // earlier candidate, not a state-authored claim alone.
+    // EVM-04: eligibility is consumptive and binds the full activated prefix,
+    // predecessor activation evidence, observed-prefix frontier, and frozen
+    // policy. Replacement cannot self-certify without matching this preimage.
     let eligibility_ref = domain_content_digest(
-        "mfm.evm.candidate-replacement-eligibility.v2",
+        "mfm.evm.candidate-replacement-eligibility.v3",
         &(
             reservation,
             activated_candidates,
             &predecessor.activation_evidence_ref,
             next_candidate_ordinal,
+            observed_prefix_len,
             &replacement_policy_ref,
-            "requires_producer_terminal_or_rejection_evidence",
+            "requires_independent_observation_of_every_earlier_activated_candidate",
         ),
     )
     .map_err(|_| WalletAuthorityContractError::Canonical)?
@@ -1545,13 +1563,18 @@ impl TerminalWitnesses {
     }
 }
 
-/// Permanent completion proof and canonical outcome.
+/// Permanent completion proof and the complete public recovery preimage.
+///
+/// The sealed activated prefix and terminal witnesses are retained as full
+/// content-addressed objects (not digests with missing preimages) so a later
+/// process can rehash offline and project the public result without ambient
+/// reconstruction (EVM-09).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
     name = "completed-wallet-nonce",
-    version = "1",
+    version = "2",
     schema = "mfm.evm.completed_wallet_nonce"
 )]
 pub struct CompletedWalletNonce {
@@ -1565,10 +1588,64 @@ pub struct CompletedWalletNonce {
     pub semantic_completion_key: EvmNonceCompletionKey,
     /// Canonical run-independent outcome.
     pub canonical_terminal_outcome: CanonicalTerminalOutcome,
-    /// Original terminal-witness producer reference.
+    /// Complete terminal-witness preimage proving the outcome.
+    pub terminal_witnesses: TerminalWitnesses,
+    /// Sealed activated prefix at the completion linearization point.
+    pub sealed_activated_candidates: Vec<ActiveWalletCandidate>,
+    /// Content digest of [`Self::terminal_witnesses`] (audit provenance).
     pub original_terminal_witnesses_ref: String,
     /// Permanent completion evidence.
     pub completion_evidence_ref: EvmWalletReference,
+}
+
+impl CompletedWalletNonce {
+    /// Revalidates the complete public recovery closure against itself.
+    pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
+        self.nonce_domain.validate()?;
+        self.semantic_reservation_key.validate()?;
+        self.semantic_completion_key.validate()?;
+        self.canonical_terminal_outcome.validate()?;
+        self.terminal_witnesses
+            .validate_against(&self.canonical_terminal_outcome)?;
+        let witnesses_ref = canonical_wallet_reference(&self.terminal_witnesses)?;
+        if self.nonce_domain != self.canonical_terminal_outcome.nonce_domain
+            || self.nonce != self.canonical_terminal_outcome.nonce
+            || self.semantic_reservation_key
+                != self.canonical_terminal_outcome.semantic_reservation_key
+            || derive_evm_nonce_completion_key(&self.semantic_reservation_key)?
+                != self.semantic_completion_key
+            || self.original_terminal_witnesses_ref != witnesses_ref.content_digest()
+            || validate_reference(&self.completion_evidence_ref).is_err()
+            || self.sealed_activated_candidates.is_empty()
+            || self.sealed_activated_candidates.len() > EVM_WALLET_REPLACEMENT_LIMIT
+            || !self.sealed_activated_candidates.iter().any(|candidate| {
+                candidate.attested_candidate.candidate_ordinal
+                    == self.canonical_terminal_outcome.winning_candidate_ordinal
+                    && candidate.attested_candidate.transaction_hash
+                        == self.canonical_terminal_outcome.transaction_hash
+                    && candidate.activation_evidence_ref
+                        == self
+                            .canonical_terminal_outcome
+                            .winning_activation_evidence_ref
+            })
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_closure",
+            ));
+        }
+        for (ordinal, candidate) in self.sealed_activated_candidates.iter().enumerate() {
+            if usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
+                || candidate.attested_candidate.semantic_reservation_key
+                    != self.semantic_reservation_key
+                || validate_reference(&candidate.activation_evidence_ref).is_err()
+            {
+                return Err(WalletAuthorityContractError::Invalid(
+                    "completed_wallet_nonce_prefix",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// One transactionally consistent wallet-nonce status snapshot.

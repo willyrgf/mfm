@@ -627,13 +627,14 @@ fn author_terminal_decision(
             arm.normal(&resolution)
         })?;
         arms.arm("reconcile", stable("terminal-reconcile")?, |arm, _| {
-            let prepared = arm
+            // Advance the certified recovery walk past the just-observed
+            // ordinal; do not re-read status and jump to activated_len.
+            let resolution = arm
                 .state::<MarkObservationReconcileState>(
                     stable("mark-observation-reconcile")?,
                     observed,
                 )?
                 .infallible()?;
-            let resolution = read_candidate_status(arm, "observation", &prepared)?;
             arm.normal(&resolution)
         })
     })
