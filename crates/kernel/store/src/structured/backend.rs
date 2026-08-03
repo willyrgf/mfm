@@ -9,7 +9,6 @@ use super::fact_scan::{verify_actionable_history, PriorRunFactSource};
 use super::fold::{
     validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
 };
-use super::mutation::StructuredAppendAttempt;
 use super::qualification::PublicPhysicalBindingVerifier;
 
 pub use mfm_runtime::history::StructuredStoreIdentity;
@@ -291,35 +290,6 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
             &batch,
         )?;
         Ok(Some(batch))
-    }
-
-    /// Resolves one unchanged attempt and accepts only its exact retained
-    /// store-validated candidate.
-    pub async fn resolve_attempt(
-        &self,
-        attempt: &mut StructuredAppendAttempt,
-    ) -> super::Result<bool> {
-        let candidate = attempt.candidate();
-        let run_id = candidate
-            .records
-            .first()
-            .ok_or(StructuredStoreError::InvalidHistory)?
-            .record_ref
-            .run_id
-            .clone();
-        let append_request_id = attempt.append_request_id().clone();
-        let candidate_digest = attempt.candidate_digest().clone();
-        let resolved = self
-            .resolve_append(&run_id, &append_request_id, &candidate_digest)
-            .await?;
-        match resolved {
-            Some(batch) if batch == *attempt.candidate() => {
-                attempt.confirm_existing_same();
-                Ok(true)
-            }
-            Some(_) => Err(StructuredStoreError::InvalidHistory),
-            None => Ok(false),
-        }
     }
 }
 

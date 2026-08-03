@@ -88,6 +88,26 @@ fn decode_error(value: serde_json::Value) -> String {
 }
 
 #[test]
+fn boxed_retained_definition_preserves_flat_persisted_shape() {
+    let contract = structured_value_contract::<mfm_facts::FactSelectionRequest>()
+        .expect("fact selection contract");
+    let schema = <mfm_facts::FactSelectionRequest as mfm_values::MfmValue>::schema_descriptor()
+        .expect("fact selection schema")
+        .identity;
+    let definition = StructuredValueDefinition::retained(contract, schema).expect("definition");
+    let encoded = serde_json::to_value(&definition).expect("definition JSON");
+
+    assert_eq!(encoded["kind"], "retained");
+    assert!(encoded.get("payload").is_none());
+    assert!(encoded.get("contract").is_some());
+    assert!(encoded.get("schema").is_some());
+    assert_eq!(
+        serde_json::from_value::<StructuredValueDefinition>(encoded).expect("definition decode"),
+        definition
+    );
+}
+
+#[test]
 fn normalized_program_is_strict_and_rejects_hostile_tables() {
     let program = fixture_program();
     let encoded = normalized_json();

@@ -4,9 +4,7 @@
 //! validation, digest rules, and offline validator. Application code requests
 //! projection through this module and does not define a second format.
 
-use std::collections::BTreeSet;
-
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract};
+use mfm_canonical::{sha256_digest_bytes, RecoverabilityContract};
 use mfm_ids::{
     ContentDigest, ContentRef, DigestAlgorithm, RunId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
@@ -227,7 +225,7 @@ impl PortableRunExport {
         )
         .map_err(classify_fold_error)?;
         if verified.run_id() != &self.run_id
-            || &verified.admission().tenant_scope_id != &self.tenant_scope_id
+            || verified.admission().tenant_scope_id != self.tenant_scope_id
             || verified.journal_head() != &self.fixation.journal_head
             || verified.semantic_head() != &self.fixation.semantic_head
         {

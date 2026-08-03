@@ -1527,8 +1527,6 @@ struct ProcessReadImplementation {
     counts: Arc<ReadValidationCounts>,
 }
 
-struct RejectingSafeFailureReadImplementation;
-
 impl ReadCapabilityImplementation<ProcessReadCapability> for ProcessReadImplementation {
     fn validate_request(
         &self,
@@ -1577,33 +1575,6 @@ impl ReadCapabilityImplementation<AlternateProcessReadCapability>
         _failure: &ProcessFailure,
     ) -> std::result::Result<(), CapabilityContractFault> {
         Ok(())
-    }
-}
-
-impl ReadCapabilityImplementation<ProcessReadCapability>
-    for RejectingSafeFailureReadImplementation
-{
-    fn validate_request(
-        &self,
-        _request: &ProcessValue,
-    ) -> std::result::Result<(), CapabilityContractFault> {
-        Ok(())
-    }
-
-    fn validate_returned(
-        &self,
-        _returned: &ProcessValue,
-    ) -> std::result::Result<(), CapabilityContractFault> {
-        Ok(())
-    }
-
-    fn validate_safe_failure(
-        &self,
-        _failure: &ProcessFailure,
-    ) -> std::result::Result<(), CapabilityContractFault> {
-        Err(CapabilityContractFault::new(sid(
-            "mfm.test/rejected-safe-failure",
-        )))
     }
 }
 
@@ -2272,16 +2243,7 @@ fn simple_read_callbacks() -> StructuredStateCallbacks<ReadProcessState> {
     }
 }
 
-#[derive(Clone, Copy)]
-enum MayFailSafeFailureSettlement {
-    FailureEcho,
-    SuccessFromFailure,
-    FixedFailure(u64),
-    SuccessOnOddFailureOtherwiseFailure,
-}
-
 fn may_fail_read_callbacks<S>(
-    behavior: MayFailSafeFailureSettlement,
     settlement_calls: Option<Arc<AtomicUsize>>,
 ) -> StructuredStateCallbacks<S>
 where
@@ -2311,27 +2273,12 @@ where
             if let Some(calls) = &settlement_calls {
                 calls.fetch_add(1, Ordering::SeqCst);
             }
-            match behavior {
-                MayFailSafeFailureSettlement::FailureEcho => {
-                    ProposedStateOutcome::Failure(failure.clone())
-                }
-                MayFailSafeFailureSettlement::SuccessFromFailure => {
-                    ProposedStateOutcome::Success(ProcessValue {
-                        value: failure.code,
-                    })
-                }
-                MayFailSafeFailureSettlement::FixedFailure(code) => {
-                    ProposedStateOutcome::Failure(ProcessFailure { code })
-                }
-                MayFailSafeFailureSettlement::SuccessOnOddFailureOtherwiseFailure => {
-                    if failure.code % 2 == 1 {
-                        ProposedStateOutcome::Success(ProcessValue {
-                            value: failure.code,
-                        })
-                    } else {
-                        ProposedStateOutcome::Failure(failure.clone())
-                    }
-                }
+            if failure.code % 2 == 1 {
+                ProposedStateOutcome::Success(ProcessValue {
+                    value: failure.code,
+                })
+            } else {
+                ProposedStateOutcome::Failure(failure.clone())
             }
         }),
     }
@@ -3069,10 +3016,7 @@ fn may_fail_safe_failure_settlement_is_total_over_arbitrary_valid_values() {
     let settlement_calls = Arc::new(AtomicUsize::new(0));
     let registry = read_process_assembly::<ReadProcessState, _>(
         operation_id,
-        may_fail_read_callbacks(
-            MayFailSafeFailureSettlement::SuccessOnOddFailureOtherwiseFailure,
-            Some(settlement_calls.clone()),
-        ),
+        may_fail_read_callbacks(Some(settlement_calls.clone())),
         Arc::new(ProcessReadImplementation {
             counts: Arc::new(ReadValidationCounts::default()),
         }),

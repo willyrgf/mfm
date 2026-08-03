@@ -6,23 +6,21 @@ use std::sync::{Arc, Mutex};
 use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_certify::structured::AdmissionVerificationRegistry;
 use mfm_ids::{ContentRef, InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
-use mfm_journal::structured::{RecordRef, RunRecord};
+use mfm_journal::structured::RecordRef;
 use mfm_runtime::history::{
-    AccessAuthorizationProposal, AccessObservationProposal, HistoryAppendOutcome, HistoryError,
-    HistoryFuture, ObservationCommit, ObservationQualification, ProposedObservationOutcome,
-    RuntimeHistoryPort, StateTransitionProposal, StructuredAdmissionCommand,
-    StructuredAppendAttempt, StructuredStoreIdentity, VerifiedRunView,
+    AccessAuthorizationProposal, AccessObservationProposal, HistoryError, HistoryFuture,
+    ObservationCommit, ObservationQualification, ProposedObservationOutcome, RuntimeHistoryPort,
+    StateTransitionProposal, StructuredAdmissionCommand, StructuredAppendAttempt,
+    StructuredStoreIdentity, VerifiedRunView,
 };
 use mfm_spec::structured::CertifiedProgramRoot;
 use mfm_spec::CanonicalJsonValue;
 
-use super::backend::{StructuredHistoryBackend, StructuredRunHistoryWriter, StructuredRunStore};
+use super::backend::{StructuredHistoryBackend, StructuredRunHistoryWriter};
 use super::fold::{
     ProgramVerifier, StructuredStoreError, VerifiedProgramData, VerifiedStructuredRun,
 };
 use super::mutation::StructuredAdmissionRequest as StoreAdmissionRequest;
-use super::qualification::PublicPhysicalBindingVerifier;
-use mfm_runtime::history::StructuredAdmissionMaterial as StoreAdmissionMaterial;
 
 /// Concrete registry-backed program verifier for live assembly and offline trust snapshots.
 pub struct RegistryProgramVerifier {
@@ -161,27 +159,8 @@ pub struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
 }
 
 impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
-    pub(super) fn from_parts(
-        backend: B,
-        admission: AdmissionVerificationRegistry,
-        physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-    ) -> Self {
-        let program_verifier = build_program_verifier(admission);
-        let store = StructuredRunStore::new(backend, program_verifier, physical_binding_verifier);
-        let (writer, _reader) = store.split();
-        Self { writer }
-    }
-
     pub(super) fn from_writer(writer: StructuredRunHistoryWriter<B>) -> Self {
         Self { writer }
-    }
-
-    pub(super) fn store_identity(&self) -> &StructuredStoreIdentity {
-        // Map backend identity into runtime identity (same fields).
-        let identity = self.writer.store_identity();
-        // SAFETY of transmute avoided: types are identical layout via re-export.
-        // backend now re-exports runtime StructuredStoreIdentity.
-        identity
     }
 }
 
