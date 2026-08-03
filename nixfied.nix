@@ -449,6 +449,22 @@ in
       env = postgresEnv;
       requires = [ "postgres" ];
     };
+    postgres-sql-inventory-check = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-storage-postgres"
+        "--lib"
+        "sql_inventory"
+        "--"
+        "--nocapture"
+      ];
+      env = {
+        # Inventory is source-local; no live database is required.
+        SQLX_OFFLINE = "true";
+      };
+    };
     wallet-nonce-postgres-storage-qualification = cargoLeaf {
       run = [
         "cargo"

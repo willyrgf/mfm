@@ -76,15 +76,16 @@ directly instead of its enclosing gate:
 ```bash
 nix run .#run -- --task cargo-metadata-contract
 nix run .#run -- --task recoverability-postgres-v1
+nix run .#run -- --task postgres-sql-inventory-check
 nix run .#run -- --task parity-bitcoin-core
 ```
 
 The task invocation starts only its declared service requirements. Task ids
 come from `nixfied.nix`; the examples above run the metadata contract without a
 service, the complete recoverability-v1 PostgreSQL corpus/conformance target
-with managed PostgreSQL, and the Bitcoin parity target with managed Bitcoin
-Core. Direct task runs use the broad verification target and retain Nixfied
-evidence.
+with managed PostgreSQL, the dynamic SQL inventory leaf without a database, and
+the Bitcoin parity target with managed Bitcoin Core. Direct task runs use the
+broad verification target and retain Nixfied evidence.
 
 Leaf task ids are focused internal entry points, not stable public verbs.
 Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its

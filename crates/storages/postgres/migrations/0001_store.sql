@@ -87,7 +87,7 @@ CREATE TABLE store_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT store_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.structured-run-history-postgres.v4'
+        schema_contract_version = 'mfm.structured-run-history-postgres.v5'
     )
 );
 
@@ -147,7 +147,7 @@ SELECT
 FROM identity_parts;
 
 INSERT INTO store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.structured-run-history-postgres.v4');
+VALUES (TRUE, 'mfm.structured-run-history-postgres.v5');
 
 INSERT INTO target_authority (
     singleton,
@@ -280,26 +280,41 @@ CREATE TABLE tenant_fact_heads (
     store_epoch NUMERIC(20, 0) NOT NULL,
     tenant_scope_id TEXT NOT NULL,
     fact_order NUMERIC(20, 0) NOT NULL,
-    CONSTRAINT tenant_fact_heads_primary_v2 PRIMARY KEY (
+    publication_count NUMERIC(20, 0) NOT NULL,
+    minimum_order NUMERIC(20, 0),
+    maximum_order NUMERIC(20, 0),
+    CONSTRAINT tenant_fact_heads_primary_v3 PRIMARY KEY (
         store_scope_id,
         store_epoch,
         tenant_scope_id
     ),
-    CONSTRAINT tenant_fact_heads_scope_v2 CHECK (
+    CONSTRAINT tenant_fact_heads_scope_v3 CHECK (
         store_scope_id ~ '^mfm[.]store_scope[.]v1:[0-9a-f]{32}$'
     ),
-    CONSTRAINT tenant_fact_heads_epoch_v2 CHECK (
+    CONSTRAINT tenant_fact_heads_epoch_v3 CHECK (
         store_epoch >= 1
         AND store_epoch <= 18446744073709551615::numeric
         AND trunc(store_epoch) = store_epoch
     ),
-    CONSTRAINT tenant_fact_heads_tenant_v2 CHECK (
+    CONSTRAINT tenant_fact_heads_tenant_v3 CHECK (
         tenant_scope_id ~ '^mfm[.]tenant_scope[.]v1:[0-9a-f]{32}$'
     ),
-    CONSTRAINT tenant_fact_heads_order_v2 CHECK (
+    CONSTRAINT tenant_fact_heads_order_v3 CHECK (
         fact_order >= 0
         AND fact_order <= 18446744073709551615::numeric
         AND trunc(fact_order) = fact_order
+        AND publication_count >= 0
+        AND publication_count <= 18446744073709551615::numeric
+        AND trunc(publication_count) = publication_count
+        AND publication_count = fact_order
+        AND (
+            (fact_order = 0 AND minimum_order IS NULL AND maximum_order IS NULL)
+            OR (
+                fact_order >= 1
+                AND minimum_order = 1
+                AND maximum_order = fact_order
+            )
+        )
     )
 );
 

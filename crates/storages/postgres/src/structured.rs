@@ -342,15 +342,16 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             let mut transaction = self.begin_read().await?;
             let rows = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, \
-                        tenant_scope_id, fact_order::text AS fact_order \
+                        tenant_scope_id, fact_order::text AS fact_order, \
+                        publication_count::text AS publication_count, \
+                        minimum_order::text AS minimum_order, \
+                        maximum_order::text AS maximum_order \
                    FROM tenant_fact_heads WHERE tenant_scope_id = $1",
             )
             .bind(tenant_scope_id.as_str())
             .fetch_all(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let route_summary =
-                load_tenant_fact_route_summary(transaction.conn(), tenant_scope_id).await?;
             let fact_order = match rows.as_slice() {
                 [] => 0,
                 [row]
@@ -360,7 +361,25 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                             == self.identity.store_epoch.get().to_string()
                         && required_text(row, "tenant_scope_id")? == tenant_scope_id.as_str() =>
                 {
-                    parse_fact_order(&required_text(row, "fact_order")?, true)?
+                    let order = parse_fact_order(&required_text(row, "fact_order")?, true)?;
+                    let summary = TenantFactRouteSummary {
+                        publication_count: parse_fact_order(
+                            &required_text(row, "publication_count")?,
+                            true,
+                        )?,
+                        minimum_order: optional_text(row, "minimum_order")?
+                            .map(|value| parse_fact_order(&value, false))
+                            .transpose()?,
+                        maximum_order: optional_text(row, "maximum_order")?
+                            .map(|value| parse_fact_order(&value, false))
+                            .transpose()?,
+                    };
+                    if !summary.is_dense_through(order) {
+                        return Err(invalid(
+                            "structured PostgreSQL tenant fact head differs from dense routes",
+                        ));
+                    }
+                    order
                 }
                 _ => {
                     return Err(invalid(
@@ -368,11 +387,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     ));
                 }
             };
-            if !route_summary.is_dense_through(fact_order) {
-                return Err(invalid(
-                    "structured PostgreSQL tenant fact head differs from dense routes",
-                ));
-            }
             transaction.commit().await?;
             Ok(TenantFactFrontier::new(
                 self.identity.store_scope_id.clone(),
@@ -575,8 +589,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     lock_tenant_fact(&mut transaction, &tenant_lock_key).await?;
                     sqlx::query(
                         "INSERT INTO tenant_fact_heads ( \
-                            store_scope_id, store_epoch, tenant_scope_id, fact_order \
-                         ) VALUES ($1, $2::numeric, $3, 0) ON CONFLICT DO NOTHING",
+                            store_scope_id, store_epoch, tenant_scope_id, fact_order, \
+                            publication_count, minimum_order, maximum_order \
+                         ) VALUES ($1, $2::numeric, $3, 0, 0, NULL, NULL) \
+                         ON CONFLICT DO NOTHING",
                     )
                     .bind(self.identity.store_scope_id.as_str())
                     .bind(self.identity.store_epoch.get().to_string())
@@ -586,7 +602,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     .map_err(|_| StructuredStoreError::BackendUnavailable)?;
                     let rows = sqlx::query(
                         "SELECT store_scope_id, store_epoch::text AS store_epoch, \
-                                tenant_scope_id, fact_order::text AS fact_order \
+                                tenant_scope_id, fact_order::text AS fact_order, \
+                                publication_count::text AS publication_count, \
+                                minimum_order::text AS minimum_order, \
+                                maximum_order::text AS maximum_order \
                            FROM tenant_fact_heads WHERE tenant_scope_id = $1 FOR UPDATE",
                     )
                     .bind(frontier.tenant_scope_id.as_str())
@@ -611,12 +630,42 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     }
                     let current_order =
                         parse_fact_order(&required_text(head, "fact_order")?, true)?;
-                    if !load_tenant_fact_route_summary(transaction.conn(), &frontier.tenant_scope_id)
-                        .await?
-                        .is_dense_through(current_order)
-                    {
+                    let route_summary = TenantFactRouteSummary {
+                        publication_count: parse_fact_order(
+                            &required_text(head, "publication_count")?,
+                            true,
+                        )?,
+                        minimum_order: optional_text(head, "minimum_order")?
+                            .map(|value| parse_fact_order(&value, false))
+                            .transpose()?,
+                        maximum_order: optional_text(head, "maximum_order")?
+                            .map(|value| parse_fact_order(&value, false))
+                            .transpose()?,
+                    };
+                    if !route_summary.is_dense_through(current_order) {
                         return Err(invalid(
                             "structured PostgreSQL tenant fact head differs from dense routes",
+                        ));
+                    }
+                    // Indexed probe: reject retained publications beyond the locked head without
+                    // scanning lifetime aggregates.
+                    let ahead = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS ( \
+                             SELECT 1 FROM tenant_fact_publications \
+                              WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
+                                AND tenant_scope_id = $3 AND fact_order > $4::numeric \
+                         )",
+                    )
+                    .bind(self.identity.store_scope_id.as_str())
+                    .bind(self.identity.store_epoch.get().to_string())
+                    .bind(frontier.tenant_scope_id.as_str())
+                    .bind(current_order.to_string())
+                    .fetch_one(&mut **transaction.conn())
+                    .await
+                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                    if ahead {
+                        return Err(invalid(
+                            "structured PostgreSQL tenant fact head lags retained publications",
                         ));
                     }
                     match &committed.tenant_fact_coordinate {
@@ -748,7 +797,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 return Ok(BackendAppendOutcome::StaleHead);
             }
             if let Some(publication) = pending_tenant_publication {
-                let inserted = sqlx::query(
+                let inserted = match sqlx::query(
                     "INSERT INTO tenant_fact_publications ( \
                         store_scope_id, store_epoch, tenant_scope_id, fact_order, \
                         run_id, run_sequence, transition_ordinal, transition_record_hash \
@@ -768,12 +817,23 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(publication.transition_ref.record_hash.as_str())
                 .execute(&mut **transaction.conn())
                 .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?
-                .rows_affected();
+                {
+                    Ok(result) => result.rows_affected(),
+                    Err(error) if is_contention_sqlstate(&error) => {
+                        transaction.rollback().await?;
+                        return Ok(BackendAppendOutcome::StaleHead);
+                    }
+                    Err(_) => return Err(StructuredStoreError::BackendUnavailable),
+                };
                 let advanced = sqlx::query(
-                    "UPDATE tenant_fact_heads SET fact_order = $4::numeric \
+                    "UPDATE tenant_fact_heads \
+                        SET fact_order = $4::numeric, \
+                            publication_count = $4::numeric, \
+                            minimum_order = 1, \
+                            maximum_order = $4::numeric \
                       WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
-                        AND tenant_scope_id = $3 AND fact_order = $5::numeric",
+                        AND tenant_scope_id = $3 AND fact_order = $5::numeric \
+                        AND publication_count = $5::numeric",
                 )
                 .bind(self.identity.store_scope_id.as_str())
                 .bind(self.identity.store_epoch.get().to_string())
@@ -845,38 +905,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             Ok(Some(batch))
         })
     }
-}
-
-async fn load_tenant_fact_route_summary(
-    transaction: &mut Transaction<'_, Postgres>,
-    tenant_scope_id: &TenantScopeId,
-) -> Result<TenantFactRouteSummary, StructuredStoreError> {
-    let row = sqlx::query(
-        "SELECT count(*)::text AS publication_count, \
-                min(fact_order)::text AS minimum_order, \
-                max(fact_order)::text AS maximum_order \
-           FROM tenant_fact_publications WHERE tenant_scope_id = $1",
-    )
-    .bind(tenant_scope_id.as_str())
-    .fetch_one(&mut **transaction)
-    .await
-    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    let publication_count = parse_fact_order(&required_text(&row, "publication_count")?, true)?;
-    let minimum_order = row
-        .try_get::<Option<String>, _>("minimum_order")
-        .map_err(|_| invalid("structured PostgreSQL minimum fact order is invalid"))?
-        .map(|value| parse_fact_order(&value, false))
-        .transpose()?;
-    let maximum_order = row
-        .try_get::<Option<String>, _>("maximum_order")
-        .map_err(|_| invalid("structured PostgreSQL maximum fact order is invalid"))?
-        .map(|value| parse_fact_order(&value, false))
-        .transpose()?;
-    Ok(TenantFactRouteSummary {
-        publication_count,
-        minimum_order,
-        maximum_order,
-    })
 }
 
 async fn select_batch_rows(
@@ -1090,6 +1118,11 @@ fn decode_objects(rows: Vec<StoredObjectRow>) -> Result<Vec<HistoryObject>, Stru
 fn required_text(row: &PgRow, column: &str) -> Result<String, StructuredStoreError> {
     row.try_get(column)
         .map_err(|_| invalid("structured PostgreSQL retained text is absent"))
+}
+
+fn optional_text(row: &PgRow, column: &str) -> Result<Option<String>, StructuredStoreError> {
+    row.try_get(column)
+        .map_err(|_| invalid("structured PostgreSQL optional text is invalid"))
 }
 
 fn required_sequence(row: &PgRow, column: &str) -> Result<u64, StructuredStoreError> {
