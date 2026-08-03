@@ -106,9 +106,12 @@ impl VerifiedProgramData {
     }
 }
 
-/// Private callback-free persisted-program verification seam used only inside
-/// the store fold and adapter. Production uses [`AdmissionVerificationRegistry`].
-pub(super) trait ProgramVerifier: Send + Sync {
+/// Callback-free persisted-program verification seam for the sole fold.
+///
+/// Production uses [`mfm_certify::structured::AdmissionVerificationRegistry`]. Offline portable
+/// verification supplies the same concrete registry through a store-owned adapter.
+pub trait ProgramVerifier: Send + Sync {
+    /// Verifies one certified root against its exact authored program bytes.
     fn verify(
         &self,
         entry_point_id: &StableId,
@@ -269,10 +272,27 @@ impl VerifiedStructuredRun {
         &self.state.continuation.journal_heads
     }
 
+    /// Returns every exact committed-batch envelope in append order.
+    pub fn batches(&self) -> &[CommittedBatch] {
+        &self.state.continuation.batches
+    }
+
     /// Returns the terminal nominal operation-outcome reference, when closed.
     pub const fn closed_outcome_ref(&self) -> Option<&ContentRef> {
         self.state.continuation.closed_outcome_ref.as_ref()
     }
+}
+
+/// Read-only offline entry to the sole structured-history fold.
+///
+/// Accepts already-parsed exact batch envelopes and concrete callback-free trust
+/// material. It cannot append, expose a writer, or perform ambient IO.
+pub fn verify_offline_recorded_history(
+    raw: RawRunHistory,
+    program_verifier: &dyn ProgramVerifier,
+    physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
+) -> super::Result<VerifiedStructuredRun> {
+    verify_recorded_history(raw, program_verifier, physical_binding_verifier)
 }
 
 #[cfg(test)]
@@ -1676,6 +1696,8 @@ struct FoldMachine {
     closed_outcome_ref: Option<ContentRef>,
     records: Vec<AssignedRecord>,
     journal_heads: Vec<JournalHead>,
+    /// Exact committed-batch envelopes retained for portable export and offline fold entry.
+    batches: Vec<CommittedBatch>,
 }
 
 struct PhysicalBindingVerification<'a> {
@@ -1702,6 +1724,7 @@ impl FoldMachine {
             closed_outcome_ref: None,
             records: Vec::new(),
             journal_heads: Vec::new(),
+            batches: Vec::new(),
         }
     }
 
@@ -1713,6 +1736,7 @@ impl FoldMachine {
         }
         self.records.extend(batch.records.iter().cloned());
         self.journal_heads.push(batch.head.clone());
+        self.batches.push(batch.clone());
     }
 
     fn admit_objects(&mut self, objects: Vec<HistoryObject>) -> super::Result<()> {

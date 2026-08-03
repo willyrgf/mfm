@@ -618,30 +618,49 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                 "content_ref hashes the exact canonical_json UTF-8 bytes",
             ),
         ),
-        "mfm.portable-run-export-stream.v1": (
+        "mfm.portable-fixation.v1": (
             ["P-AP-01", "P-RH-01"],
             object_shape(
                 [
                     field("journal_head", journal_head),
-                    field("kind", enum("semantic", "audit")),
-                    field(
-                        "objects",
-                        array(reference("mfm.structured-history-object.v1")),
-                    ),
-                    field(
-                        "records",
-                        array(reference("mfm.structured-assigned-record.v1"), 1),
-                    ),
-                    field("run_id", reference("mfm.primitive-run_id.v1")),
                     field(
                         "semantic_head",
                         reference("mfm.structured-semantic-head.v1"),
+                    ),
+                    field("store_epoch", reference("mfm.primitive-store_epoch.v1")),
+                    field("store_scope_id", reference("mfm.primitive-store_scope_id.v1")),
+                ],
+                "semantic and physical fixation bind one exact export prefix",
+            ),
+        ),
+        "mfm.portable-run-export-stream.v1": (
+            ["P-AP-01", "P-RH-01"],
+            object_shape(
+                [
+                    field(
+                        "batches",
+                        array(canonical_value, 1),
+                    ),
+                    field(
+                        "digest",
+                        reference("mfm.primitive-content_digest.v1"),
+                    ),
+                    field(
+                        "fixation",
+                        reference("mfm.portable-fixation.v1"),
+                    ),
+                    field("kind", enum("semantic", "audit")),
+                    field("run_id", reference("mfm.primitive-run_id.v1")),
+                    field(
+                        "source_run_ids",
+                        array(reference("mfm.primitive-run_id.v1")),
                     ),
                     field("store_scope_id", reference("mfm.primitive-store_scope_id.v1")),
                     field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
                     field("version", literal("mfm.structured-portable-run-export.v1")),
                 ],
-                "the export is one exact canonical JSON object",
+                "the export is one exact canonical JSON object with committed-batch envelopes",
+                "digest covers every required member except itself",
             ),
         ),
     }

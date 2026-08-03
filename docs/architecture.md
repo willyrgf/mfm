@@ -54,7 +54,7 @@ Every workspace package declares one `package.metadata.mfm.layer`.
 | Journal | Exactly five strict record families and assigned append identities | Persistence, callbacks, or cursor derivation |
 | Store | Atomic CAS, exact object closure, sole callback-free fold, verified cursor, purpose readers, writer fencing | Domain interpretation or destination IO |
 | Runtime | Sole history writer, admission, one cursor action, affine access bracket, callback invocation | Business policy, EVM lifecycle, or cross-run resource state |
-| Replay | Callback-free projections over the store fold | Writer, callback, provider, or signer authority |
+| Replay | Portable export format, offline verification, and callback-free projections over the store fold | Writer, callback, provider, or signer authority |
 | State | Deterministic request authoring and returned/safe-failure interpretation | Network, filesystem, clock, store, or hidden retries |
 | Adapter | Total binding from one Runtime authorization to one explicit capability | Scheduler, persisted lifecycle, or unrecorded completion |
 | Transport | One bounded protocol exchange and checked public response | Run history, state settlement, or resource policy |

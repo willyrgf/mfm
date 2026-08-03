@@ -15,6 +15,7 @@ mod qualification;
 
 #[doc(hidden)]
 pub use adapter::StoreHistoryAdapter;
+pub use adapter::RegistryProgramVerifier;
 pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 #[cfg(any(test, feature = "test-support"))]
 pub use assembly::assemble_with_backend;
@@ -35,8 +36,9 @@ pub use configuration::{
 #[doc(hidden)]
 pub use fact_scan::PriorRunFactScanCompletion;
 pub use fold::{
-    ActionableState, LaneCursor, ObservationQualification, ProgramCursor, StateLeaf,
-    StructuredFrontier, StructuredStoreError, VerifiedProgramData, VerifiedStructuredRun,
+    verify_offline_recorded_history, ActionableState, LaneCursor, ObservationQualification,
+    ProgramCursor, ProgramVerifier, StateLeaf, StructuredFrontier, StructuredStoreError,
+    VerifiedProgramData, VerifiedStructuredRun,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::{assemble_in_memory_runtime, StructuredMemoryBackend};
@@ -57,6 +59,11 @@ pub use purpose::{
     ExportRunReader, ExportSourceClosureError, PublicRunEvidence, PublicRunReader,
     RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader, MAX_EXPORT_SOURCE_RUNS,
 };
+
+/// Converts an offline-verified fold result into sealed recorded-replay evidence.
+pub fn recorded_evidence_from_verified(verified: VerifiedStructuredRun) -> RecordedRunEvidence {
+    RecordedRunEvidence::from_offline_verified(verified)
+}
 pub use qualification::{
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,
     PublicPhysicalBindingVerifier,

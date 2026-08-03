@@ -61,8 +61,7 @@ const PORTFOLIO_SCOPE_ID: &str = "mfm.portfolio/structured-snapshot-scope";
 const BALANCE_SCOPE_ID: &str = "mfm.evm/structured-balance-scope";
 const SUBMISSION_SCOPE_ID: &str = "mfm.evm/structured-submission-scope";
 const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revision";
-const STRUCTURED_EXPORT_VERSION: &str = "mfm.structured-portable-run-export.v1";
-const MAX_REPLAY_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_REPLAY_EXPORT_BYTES: u64 = mfm_replay::portable::MAX_PORTABLE_EXPORT_BYTES;
 
 type HistoryBackend = PostgresStructuredHistoryBackend;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
@@ -1071,51 +1070,19 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum StructuredExportKind {
-    Semantic,
-    Audit,
-}
-
-impl From<mfm_replay::portable::ExportKind> for StructuredExportKind {
-    fn from(value: mfm_replay::portable::ExportKind) -> Self {
-        match value {
-            mfm_replay::portable::ExportKind::Semantic => Self::Semantic,
-            mfm_replay::portable::ExportKind::Audit => Self::Audit,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StructuredPortableExport {
-    version: String,
-    kind: StructuredExportKind,
-    store_scope_id: mfm_ids::StoreScopeId,
-    tenant_scope_id: TenantScopeId,
-    run_id: RunId,
-    journal_head: mfm_journal::structured::JournalHead,
-    semantic_head: mfm_journal::structured::SemanticHead,
-    records: Vec<mfm_journal::structured::AssignedRecord>,
-    objects: Vec<HistoryObject>,
-}
-
 async fn write_structured_export(
     evidence: &ExportRunEvidence,
     request: ExportRequest,
 ) -> Result<ExportedRun, PublicError> {
-    let export = structured_export(evidence, request.kind())?;
-    let bytes = structured_export_bytes(&export)?;
-    let contract = RecoverabilityContract::embedded().map_err(|_| export_stream_io_error())?;
-    let content_ref = ContentRef::new(
-        contract
-            .schema_id("mfm.portable-run-export-stream.v1")
-            .map_err(|_| export_stream_io_error())?
-            .clone(),
-        contract.raw_content_digest(&bytes),
+    let export = mfm_replay::portable::PortableRunExport::from_export_evidence(
+        evidence,
+        request.kind(),
     )
     .map_err(|_| export_stream_io_error())?;
+    let bytes = export
+        .to_canonical_bytes()
+        .map_err(|_| export_stream_io_error())?;
+    let content_ref = export.content_ref().map_err(|_| export_stream_io_error())?;
     let mut spool = WritableSpool::create()
         .await
         .map_err(|_| export_stream_io_error())?;
@@ -1125,55 +1092,6 @@ async fn write_structured_export(
         .map_err(|_| export_stream_io_error())?;
     let spool = spool.finish().await.map_err(|_| export_stream_io_error())?;
     Ok(ExportedRun::from_content_ref(content_ref, Box::pin(spool)))
-}
-
-fn structured_export(
-    evidence: &ExportRunEvidence,
-    kind: mfm_replay::portable::ExportKind,
-) -> Result<StructuredPortableExport, PublicError> {
-    let semantic_cutoff = match evidence.semantic_head() {
-        mfm_journal::structured::SemanticHead::Genesis { admission_ref, .. } => admission_ref,
-        mfm_journal::structured::SemanticHead::Transition { transition_ref, .. } => transition_ref,
-    };
-    let run_sequence = match kind {
-        mfm_replay::portable::ExportKind::Semantic => semantic_cutoff.run_sequence,
-        mfm_replay::portable::ExportKind::Audit => evidence.journal_head().run_sequence,
-    };
-    let index = usize::try_from(run_sequence)
-        .ok()
-        .and_then(|sequence| sequence.checked_sub(1))
-        .ok_or_else(export_stream_io_error)?;
-    let journal_head = evidence
-        .journal_heads()
-        .get(index)
-        .cloned()
-        .ok_or_else(export_stream_io_error)?;
-    let records = match kind {
-        mfm_replay::portable::ExportKind::Semantic => {
-            evidence.semantic_records().cloned().collect::<Vec<_>>()
-        }
-        mfm_replay::portable::ExportKind::Audit => evidence.records().to_vec(),
-    };
-    if records.is_empty() {
-        return Err(export_stream_io_error());
-    }
-    Ok(StructuredPortableExport {
-        version: STRUCTURED_EXPORT_VERSION.to_owned(),
-        kind: kind.into(),
-        store_scope_id: evidence.admission().store_scope_id.clone(),
-        tenant_scope_id: evidence.admission().tenant_scope_id.clone(),
-        run_id: evidence.run_id().clone(),
-        journal_head,
-        semantic_head: evidence.semantic_head().clone(),
-        records,
-        objects: evidence.objects_through(run_sequence).cloned().collect(),
-    })
-}
-
-fn structured_export_bytes(export: &StructuredPortableExport) -> Result<Vec<u8>, PublicError> {
-    canonical_json(export)
-        .map(|canonical| canonical.as_bytes().to_vec())
-        .map_err(|_| export_stream_io_error())
 }
 
 async fn validate_replay_export(
@@ -1197,20 +1115,19 @@ async fn validate_replay_export(
     if contract.raw_content_digest(&bytes) != *content_ref.content_digest() {
         return Err(PublicError::replay_artifact_invalid());
     }
-    let validated = contract
-        .strict_decode("mfm.portable-run-export-stream.v1", &bytes)
+    let supplied = mfm_replay::portable::PortableRunExport::strict_decode(&bytes)
         .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let supplied: StructuredPortableExport = serde_json::from_slice(validated.as_bytes())
-        .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected = structured_export(evidence, mfm_replay::portable::ExportKind::Semantic)
-        .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected_bytes =
-        structured_export_bytes(&expected).map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected_ref = ContentRef::new(
-        content_ref.schema_id().clone(),
-        contract.raw_content_digest(&expected_bytes),
+    let expected = mfm_replay::portable::PortableRunExport::from_export_evidence(
+        evidence,
+        mfm_replay::portable::ExportKind::Semantic,
     )
     .map_err(|_| PublicError::replay_artifact_invalid())?;
+    let expected_bytes = expected
+        .to_canonical_bytes()
+        .map_err(|_| PublicError::replay_artifact_invalid())?;
+    let expected_ref = expected
+        .content_ref()
+        .map_err(|_| PublicError::replay_artifact_invalid())?;
     if supplied != expected || bytes != expected_bytes || content_ref != expected_ref {
         return Err(PublicError::replay_artifact_invalid());
     }
