@@ -282,6 +282,70 @@ fn test_test_only_private_key_decryption_covers_imported_key_types() {
 }
 
 #[test]
+fn decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
+    let key_id = keystore
+        .import_private_key(Some("ownership".to_string()), test_key)
+        .unwrap();
+
+    let witness = KeyMaterialWitness::new();
+    let secure = keystore
+        .private_key_for_test_with_ownership_witness(key_id, witness.clone())
+        .expect("decrypt");
+    assert!(witness.observed_transfer());
+    assert!(!witness.observed_cleanup());
+    let address = secure.ethereum_address().expect("address");
+    assert_eq!(
+        format!("{address:?}"),
+        "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
+    );
+    drop(secure);
+    assert!(witness.observed_cleanup());
+}
+
+#[test]
+fn decrypt_missing_entry_fails_closed_without_secret_output() {
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let missing = Uuid::new_v4();
+    match keystore.private_key_for_test(missing) {
+        Err(err @ KeystoreError::KeyNotFound(_)) => {
+            let rendered = format!("{err:?}{err}");
+            assert!(
+                !rendered
+                    .contains("0000000000000000000000000000000000000000000000000000000000000001")
+            );
+        }
+        Ok(_) => panic!("missing key must fail closed"),
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn decrypt_locked_keystore_fails_closed() {
+    let temp_dir = tempdir().unwrap();
+    let keystore_path = temp_dir.path().join("locked_decrypt.keystore");
+    let key_id = {
+        let mut keystore =
+            Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+        keystore.unlock("test_password").unwrap();
+        let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
+        keystore.import_private_key(None, test_key).unwrap()
+    };
+    let locked =
+        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    match locked.private_key_for_test(key_id) {
+        Err(KeystoreError::Locked) => {}
+        Ok(_) => panic!("locked keystore must fail closed"),
+        Err(other) => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
 fn test_list_keys_comprehensive() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();

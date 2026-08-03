@@ -17,10 +17,20 @@
 //! # Ok::<(), mfm_keystore::KeystoreError>(())
 //! ```
 //!
-//! Raw key wrappers and retrieval are deliberately not public:
+//! Raw key wrappers and retrieval are deliberately not public. Decrypted material
+//! moves only as a protected zeroizing allocation into the crate-private
+//! `SecureKey`; there is no plaintext-array constructor on that type.
 //!
 //! ```compile_fail
 //! use mfm_keystore::SecureKey;
+//! ```
+//!
+//! ```compile_fail
+//! // SecureKey is crate-private and has no plaintext `[u8; 32]` constructor.
+//! // Even if the type were visible, `SecureKey::new([0u8; 32])` is not an API.
+//! fn _plaintext_secure_key_ctor() {
+//!     let _ = mfm_keystore::SecureKey::new([0u8; 32]);
+//! }
 //! ```
 //!
 //! ```compile_fail

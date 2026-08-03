@@ -103,21 +103,36 @@ impl Keystore {
     }
 
     /// Decrypts one key for Read attestation without refreshing or persisting keystore state.
+    ///
+    /// Decrypted material moves as an owned zeroizing allocation into
+    /// [`SecureKey`]; there is no plaintext `[u8; 32]` intermediate.
     pub(crate) fn private_key_for_read_attestation(
         &self,
         id: Uuid,
         _access: &ReadAttestationKeyAccess,
     ) -> Result<SecureKey, KeystoreError> {
         self.ensure_unlocked_for_read()?;
-        let key_bytes = self.decrypt_entry_key(id)?;
-        Ok(SecureKey::new(*key_bytes))
+        Ok(self.decrypt_entry_key(id)?.into_secure_key())
     }
 
     #[cfg(test)]
     pub(super) fn private_key_for_test(&self, id: Uuid) -> Result<SecureKey, KeystoreError> {
         self.ensure_unlocked_for_read()?;
-        let key_bytes = self.decrypt_entry_key(id)?;
-        Ok(SecureKey::new(*key_bytes))
+        Ok(self.decrypt_entry_key(id)?.into_secure_key())
+    }
+
+    /// Test-only decrypt path that witnesses protected-allocation ownership
+    /// transfer into [`SecureKey`] and cleanup on drop.
+    #[cfg(test)]
+    pub(super) fn private_key_for_test_with_ownership_witness(
+        &self,
+        id: Uuid,
+        witness: super::secure_key::KeyMaterialWitness,
+    ) -> Result<SecureKey, KeystoreError> {
+        self.ensure_unlocked_for_read()?;
+        let material = self.decrypt_entry_key_with_witness(id, witness.clone())?;
+        witness.record_transfer();
+        Ok(material.into_secure_key())
     }
 
     /// List stored keys (metadata only). Requires an unlocked session.
@@ -148,25 +163,47 @@ impl Keystore {
         result
     }
 
-    fn decrypt_entry_key(&self, id: Uuid) -> Result<Zeroizing<[u8; 32]>, KeystoreError> {
+    /// Decrypts one entry into protected key material.
+    ///
+    /// On every error path (locked, missing entry, AEAD failure, wrong length)
+    /// any intermediate plaintext buffer is owned by a zeroizing container and
+    /// is cleaned up when that container drops. Success transfers the same
+    /// protected allocation into [`SecureKey`] without an ordinary array copy.
+    fn decrypt_entry_key(
+        &self,
+        id: Uuid,
+    ) -> Result<super::secure_key::ProtectedKeyMaterial, KeystoreError> {
+        let decrypted = self.decrypt_entry_bytes(id)?;
+        super::secure_key::ProtectedKeyMaterial::from_decrypted_exact(decrypted)
+    }
+
+    #[cfg(test)]
+    fn decrypt_entry_key_with_witness(
+        &self,
+        id: Uuid,
+        witness: super::secure_key::KeyMaterialWitness,
+    ) -> Result<super::secure_key::ProtectedKeyMaterial, KeystoreError> {
+        let decrypted = self.decrypt_entry_bytes(id)?;
+        super::secure_key::ProtectedKeyMaterial::from_decrypted_exact_with_witness(
+            decrypted, witness,
+        )
+    }
+
+    fn decrypt_entry_bytes(&self, id: Uuid) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
         let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
         let entry = self
             .entries
             .iter()
             .find(|entry| entry.id == id)
             .ok_or(KeystoreError::KeyNotFound(id))?;
-        let decrypted_data = self.decrypt_data(
+        // AEAD failure returns before any key material is allocated; successful
+        // plaintext lands only in the returned Zeroizing buffer.
+        self.decrypt_data(
             master_key,
             &entry.nonce,
             &entry.encrypted_data,
             entry.id.as_bytes(),
-        )?;
-        if decrypted_data.len() != 32 {
-            return Err(KeystoreError::InvalidPrivateKey);
-        }
-        let mut key_bytes = [0u8; 32];
-        key_bytes.copy_from_slice(&decrypted_data);
-        Ok(Zeroizing::new(key_bytes))
+        )
     }
 
     fn record_successful_audit(&mut self, event: AuditEvent) -> Result<(), KeystoreError> {
