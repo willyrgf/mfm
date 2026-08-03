@@ -174,11 +174,12 @@ CREATE TABLE wallet_nonce_domains (
         length(activation_record_json) BETWEEN 2 AND 4194304
         AND length(activation_attestation_json) BETWEEN 2 AND 4194304
     ),
+    -- EIP-2681: nonce 2^64-1 is invalid; high water is at most 2^64-2.
     CONSTRAINT wallet_nonce_domains_high_water_v1 CHECK (
         local_high_water_nonce IS NULL
         OR (
             local_high_water_nonce >= 0
-            AND local_high_water_nonce <= 18446744073709551615::numeric
+            AND local_high_water_nonce <= 18446744073709551614::numeric
             AND trunc(local_high_water_nonce) = local_high_water_nonce
         )
     )
@@ -207,9 +208,10 @@ CREATE TABLE wallet_nonce_reservations (
     CONSTRAINT wallet_nonce_reservations_domain_fk_v1 FOREIGN KEY (
         wallet_nonce_domain_id
     ) REFERENCES wallet_nonce_domains (wallet_nonce_domain_id),
+    -- EIP-2681: transaction nonce 2^64-1 is permanently invalid.
     CONSTRAINT wallet_nonce_reservations_quantity_v1 CHECK (
         nonce >= 0
-        AND nonce <= 18446744073709551615::numeric
+        AND nonce <= 18446744073709551614::numeric
         AND trunc(nonce) = nonce
     ),
     CONSTRAINT wallet_nonce_reservations_identity_v1 CHECK (

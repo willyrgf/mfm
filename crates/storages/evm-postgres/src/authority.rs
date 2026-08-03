@@ -177,6 +177,9 @@ impl PostgresWalletNonceAuthority {
         domain_id: &str,
         retained_activation: Option<&WalletNonceDomainActivationAttestation>,
     ) -> Result<ValidatedDomainAggregate> {
+        // Bounded current projection: high water, reservation count, maximum
+        // nonce, and at most one incomplete reservation. Cost is independent of
+        // lifetime lineage length (no per-candidate historical walk).
         let retained_high_water = sqlx::query_scalar::<_, Option<String>>(
             "SELECT local_high_water_nonce::text FROM wallet_nonce_domains \
              WHERE wallet_nonce_domain_id = $1",
@@ -185,18 +188,24 @@ impl PostgresWalletNonceAuthority {
         .fetch_optional(&mut *connection)
         .await
         .map_err(|_| PostgresEvmWalletError::Unavailable)?;
-        let reservation_rows = sqlx::query(
-            "SELECT semantic_reservation_key, nonce::text AS nonce \
-             FROM wallet_nonce_reservations WHERE wallet_nonce_domain_id = $1 \
-             ORDER BY wallet_nonce_reservations.nonce",
+        let stats = sqlx::query(
+            "SELECT COUNT(*)::bigint AS reservation_count, \
+                    MAX(nonce)::text AS maximum_nonce \
+             FROM wallet_nonce_reservations WHERE wallet_nonce_domain_id = $1",
         )
         .bind(domain_id)
-        .fetch_all(&mut *connection)
+        .fetch_one(&mut *connection)
         .await
         .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+        let reservation_count = stats
+            .try_get::<i64, _>("reservation_count")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)? as u64;
+        let maximum_nonce = stats
+            .try_get::<Option<String>, _>("maximum_nonce")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?;
 
         let Some(activation) = retained_activation else {
-            if retained_high_water.is_some() || !reservation_rows.is_empty() {
+            if retained_high_water.is_some() || reservation_count > 0 {
                 return Err(PostgresEvmWalletError::InvalidAuthority);
             }
             return Ok(ValidatedDomainAggregate {
@@ -219,10 +228,12 @@ impl PostgresWalletNonceAuthority {
         };
         let high_water = retained_high_water
             .map(|value| {
-                u64::from_str(&value).map_err(|_| PostgresEvmWalletError::InvalidAuthority)
+                mfm_evm::TransactionNonce::from_str(&value)
+                    .map(mfm_evm::TransactionNonce::get)
+                    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)
             })
             .transpose()?;
-        if reservation_rows.is_empty() {
+        if reservation_count == 0 {
             if high_water.is_some() {
                 return Err(PostgresEvmWalletError::InvalidAuthority);
             }
@@ -232,49 +243,60 @@ impl PostgresWalletNonceAuthority {
             });
         }
         let high_water = high_water.ok_or(PostgresEvmWalletError::InvalidAuthority)?;
-        let mut expected_nonce = activation
+        let floor = activation
             .current_schema_record
             .finalized_sender_nonce_floor;
-        let mut incomplete_reservation_key = None;
-        let row_count = reservation_rows.len();
-        for (index, row) in reservation_rows.into_iter().enumerate() {
-            let reservation_key = required_row_text(&row, "semantic_reservation_key")?;
-            let retained_nonce = required_row_text(&row, "nonce")?
-                .parse::<u64>()
-                .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-            if retained_nonce != expected_nonce {
-                return Err(PostgresEvmWalletError::InvalidAuthority);
-            }
-            let reservation = self
-                .load_validated_reservation(connection, reservation_key)
-                .await?
-                .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
-            if reservation.reservation.nonce_domain.as_str() != domain_id
-                || reservation.reservation.nonce != retained_nonce
-            {
-                return Err(PostgresEvmWalletError::InvalidAuthority);
-            }
-            let candidates = self
-                .load_validated_candidates(connection, &reservation)
-                .await?;
-            let completion = self
-                .load_validated_completion(connection, &reservation, &candidates)
-                .await?;
-            if completion.is_none() {
-                if index + 1 != row_count || incomplete_reservation_key.is_some() {
-                    return Err(PostgresEvmWalletError::InvalidAuthority);
-                }
-                incomplete_reservation_key = Some(reservation_key.to_owned());
-            }
-            if index + 1 < row_count {
-                expected_nonce = expected_nonce
-                    .checked_add(1)
-                    .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
-            }
-        }
-        if expected_nonce != high_water {
+        let floor_nonce = mfm_evm::TransactionNonce::new(floor)
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let maximum = maximum_nonce
+            .ok_or(PostgresEvmWalletError::InvalidAuthority)
+            .and_then(|value| {
+                mfm_evm::TransactionNonce::from_str(&value)
+                    .map(mfm_evm::TransactionNonce::get)
+                    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)
+            })?;
+        if maximum != high_water {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
+        // Contiguous prefix: floor .. high_water inclusive has exactly
+        // (high_water - floor + 1) reservations.
+        let expected_count = high_water
+            .checked_sub(floor_nonce.get())
+            .and_then(|delta| delta.checked_add(1))
+            .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+        if reservation_count != expected_count {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
+
+        // At most one incomplete reservation, and it must be the highest nonce.
+        let incomplete_rows = sqlx::query(
+            "SELECT r.semantic_reservation_key, r.nonce::text AS nonce \
+             FROM wallet_nonce_reservations r \
+             LEFT JOIN wallet_nonce_completions c \
+               ON c.semantic_reservation_key = r.semantic_reservation_key \
+             WHERE r.wallet_nonce_domain_id = $1 \
+               AND c.semantic_reservation_key IS NULL \
+             ORDER BY r.nonce",
+        )
+        .bind(domain_id)
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+        if incomplete_rows.len() > 1 {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
+        let incomplete_reservation_key = if let Some(row) = incomplete_rows.first() {
+            let reservation_key = required_row_text(row, "semantic_reservation_key")?;
+            let incomplete_nonce = required_row_text(row, "nonce")?
+                .parse::<u64>()
+                .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+            if incomplete_nonce != high_water {
+                return Err(PostgresEvmWalletError::InvalidAuthority);
+            }
+            Some(reservation_key.to_owned())
+        } else {
+            None
+        };
         Ok(ValidatedDomainAggregate {
             high_water: Some(high_water),
             incomplete_reservation_key,
@@ -1417,6 +1439,20 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 }
 
                 let pending = request.qualified_floor.observed.pending_nonce;
+                // EIP-2681: u64::MAX is never a valid transaction nonce. Reject
+                // before any reservation mutation.
+                let Ok(pending_nonce) = mfm_evm::TransactionNonce::new(pending) else {
+                    let completion = self
+                        .returned_reservation(ReserveWalletNonceResponse::NonceCapacityExhausted);
+                    match self.bound_database_attempt(
+                        self.commit_reservation_attempt(write, request, completion)
+                            .await,
+                        database_attempt,
+                    ) {
+                        Ok(completion) => return completion,
+                        Err(RetryDatabaseAttempt) => continue 'database_attempt,
+                    }
+                };
                 let nonce = match aggregate.high_water {
                     None if pending
                         == request
@@ -1424,7 +1460,7 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                             .current_schema_record
                             .finalized_sender_nonce_floor =>
                     {
-                        pending
+                        pending_nonce.get()
                     }
                     None => {
                         let completion = self
@@ -1438,22 +1474,8 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                             Err(RetryDatabaseAttempt) => continue 'database_attempt,
                         }
                     }
-                    Some(high_water) => match high_water.checked_add(1) {
-                        Some(next) if pending <= next => next,
-                        Some(_) => {
-                            let completion = self.returned_reservation(
-                                ReserveWalletNonceResponse::NonceLineageDiverged,
-                            );
-                            match self.bound_database_attempt(
-                                self.commit_reservation_attempt(write, request, completion)
-                                    .await,
-                                database_attempt,
-                            ) {
-                                Ok(completion) => return completion,
-                                Err(RetryDatabaseAttempt) => continue 'database_attempt,
-                            }
-                        }
-                        None => {
+                    Some(high_water) => {
+                        let Ok(high_water_nonce) = mfm_evm::TransactionNonce::new(high_water) else {
                             let completion = self.returned_reservation(
                                 ReserveWalletNonceResponse::NonceCapacityExhausted,
                             );
@@ -1465,9 +1487,51 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                                 Ok(completion) => return completion,
                                 Err(RetryDatabaseAttempt) => continue 'database_attempt,
                             }
+                        };
+                        match high_water_nonce.checked_successor() {
+                            Some(next) if pending <= next.get() => next.get(),
+                            Some(_) => {
+                                let completion = self.returned_reservation(
+                                    ReserveWalletNonceResponse::NonceLineageDiverged,
+                                );
+                                match self.bound_database_attempt(
+                                    self.commit_reservation_attempt(write, request, completion)
+                                        .await,
+                                    database_attempt,
+                                ) {
+                                    Ok(completion) => return completion,
+                                    Err(RetryDatabaseAttempt) => continue 'database_attempt,
+                                }
+                            }
+                            None => {
+                                let completion = self.returned_reservation(
+                                    ReserveWalletNonceResponse::NonceCapacityExhausted,
+                                );
+                                match self.bound_database_attempt(
+                                    self.commit_reservation_attempt(write, request, completion)
+                                        .await,
+                                    database_attempt,
+                                ) {
+                                    Ok(completion) => return completion,
+                                    Err(RetryDatabaseAttempt) => continue 'database_attempt,
+                                }
+                            }
                         }
-                    },
+                    }
                 };
+                // Final admission gate: never persist an invalid nonce.
+                if mfm_evm::TransactionNonce::new(nonce).is_err() {
+                    let completion = self
+                        .returned_reservation(ReserveWalletNonceResponse::NonceCapacityExhausted);
+                    match self.bound_database_attempt(
+                        self.commit_reservation_attempt(write, request, completion)
+                            .await,
+                        database_attempt,
+                    ) {
+                        Ok(completion) => return completion,
+                        Err(RetryDatabaseAttempt) => continue 'database_attempt,
+                    }
+                }
 
                 let observed_floor_ref = match mfm_journal::structured::domain_content_digest(
                     "mfm.evm.wallet-observed-floor-provenance.v1",

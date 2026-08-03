@@ -1,9 +1,44 @@
+use std::str::FromStr;
+
 use alloy_primitives::{address, b256, TxKind, B256, U256};
 
 use super::*;
 
 const SENDER: Address = address!("1111111111111111111111111111111111111111");
 const RECIPIENT: Address = address!("2222222222222222222222222222222222222222");
+
+#[test]
+fn transaction_nonce_rejects_u64_max_and_has_checked_successor() {
+    use crate::{TransactionNonce, EVM_TRANSACTION_NONCE_MAX};
+
+    assert_eq!(TransactionNonce::new(0).expect("zero").get(), 0);
+    assert_eq!(
+        TransactionNonce::new(EVM_TRANSACTION_NONCE_MAX)
+            .expect("max valid")
+            .get(),
+        EVM_TRANSACTION_NONCE_MAX
+    );
+    assert!(TransactionNonce::new(u64::MAX).is_err());
+    assert_eq!(
+        TransactionNonce::new(EVM_TRANSACTION_NONCE_MAX - 1)
+            .expect("near max")
+            .checked_successor()
+            .expect("successor")
+            .get(),
+        EVM_TRANSACTION_NONCE_MAX
+    );
+    assert!(TransactionNonce::new(EVM_TRANSACTION_NONCE_MAX)
+        .expect("max valid")
+        .checked_successor()
+        .is_none());
+    assert!(TransactionNonce::from_str("18446744073709551615").is_err());
+    assert_eq!(
+        TransactionNonce::from_str("18446744073709551614")
+            .expect("max text")
+            .get(),
+        EVM_TRANSACTION_NONCE_MAX
+    );
+}
 
 #[test]
 fn wallet_policy_descriptors_are_distinct_and_current() {

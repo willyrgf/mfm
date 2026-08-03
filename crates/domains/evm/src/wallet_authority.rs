@@ -44,6 +44,66 @@ const CANDIDATE_FAMILY_DOMAIN: &str = "mfm.evm.candidate-family.v1";
 /// Maximum number of statically authored observation rounds per candidate.
 pub const EVM_WALLET_OBSERVATION_ROUND_LIMIT: u8 = 2;
 
+/// Maximum protocol-valid transaction nonce ([EIP-2681](https://eips.ethereum.org/EIPS/eip-2681)).
+///
+/// `u64::MAX` (`2^64 - 1`) is permanently invalid as a transaction nonce. Every
+/// admitted value therefore has a checked successor only while strictly below
+/// this maximum; reserving the maximum exhausts capacity.
+pub const EVM_TRANSACTION_NONCE_MAX: u64 = u64::MAX - 1;
+
+/// Protocol-valid EVM transaction nonce with a representable checked successor
+/// until capacity is exhausted.
+///
+/// Values equal to `u64::MAX` are rejected at every construction and decode
+/// boundary. Zero through [`EVM_TRANSACTION_NONCE_MAX`] are admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TransactionNonce(u64);
+
+impl TransactionNonce {
+    /// Admits one protocol-valid nonce.
+    pub fn new(value: u64) -> Result<Self, WalletAuthorityContractError> {
+        if value > EVM_TRANSACTION_NONCE_MAX {
+            return Err(WalletAuthorityContractError::Invalid("transaction_nonce"));
+        }
+        Ok(Self(value))
+    }
+
+    /// Returns the raw nonce value.
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the checked successor when it remains protocol-valid.
+    pub fn checked_successor(self) -> Option<Self> {
+        self.0
+            .checked_add(1)
+            .and_then(|next| Self::new(next).ok())
+    }
+}
+
+impl From<TransactionNonce> for u64 {
+    fn from(value: TransactionNonce) -> Self {
+        value.0
+    }
+}
+
+impl FromStr for TransactionNonce {
+    type Err = WalletAuthorityContractError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let parsed = u64::from_str(value)
+            .map_err(|_| WalletAuthorityContractError::Invalid("transaction_nonce"))?;
+        Self::new(parsed)
+    }
+}
+
+impl std::fmt::Display for TransactionNonce {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// Error returned while constructing canonical wallet-authority material.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WalletAuthorityContractError {

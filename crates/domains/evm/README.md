@@ -25,5 +25,10 @@ production signing requests bind the complete public identity from the qualified
 account identifier is never interpreted as public-key material. Signer integrity and binding
 mismatches are classified separately from ordinary signer unavailability.
 
+`TransactionNonce` admits only protocol-valid values with a representable checked successor
+(EIP-2681 rejects `u64::MAX`). Wallet status and mutation load a bounded current high-water /
+incomplete-reservation projection rather than replaying the full lifetime candidate lineage on
+every access.
+
 Concrete JSON-RPC and signer bindings live in `mfm-evm-live`. Real cross-run wallet authority lives
 in `mfm-storage-evm-postgres`.
