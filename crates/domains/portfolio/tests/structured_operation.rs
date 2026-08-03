@@ -483,7 +483,7 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
     }
 
     let verified = reader
-        .load(&run_id)
+        .load_public(&run_id)
         .await
         .expect("execution verified history");
     let outcome = mfm_replay::structured::project_operation_outcome(&verified)

@@ -41,7 +41,7 @@ use mfm_storage_postgres::{
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
-    ConfigurationRevision, ConfigurationStreamKey, PhysicalBindingAuthorization,
+    ConfigurationRevision, ConfigurationStreamKey, ExportRunReader, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
     PublicRunReader, StructuredAdmissionMaterial, StructuredFrontier, StructuredHistoryBackend,
     StructuredStoreError, StructuredStoreIdentity,
@@ -568,7 +568,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     );
 
     let admitted = history_reader
-        .load(&admitted_run_id)
+        .load_public(&admitted_run_id)
         .await
         .expect("reload admitted race winner");
     assert_eq!(
@@ -1294,7 +1294,7 @@ async fn structured_history_fresh_process_worker() {
             ));
             assert!(matches!(
                 reader
-                    .load(&run_id)
+                    .load_public(&run_id)
                     .await
                     .expect("first-process refold")
                     .frontier(),
@@ -1302,7 +1302,7 @@ async fn structured_history_fresh_process_worker() {
             ));
         }
         "continue" => {
-            let verified = reader.load(&run_id).await.expect("second-process refold");
+            let verified = reader.load_public(&run_id).await.expect("second-process refold");
             assert!(matches!(
                 verified.frontier(),
                 StructuredFrontier::Actions(_)
@@ -1313,7 +1313,7 @@ async fn structured_history_fresh_process_worker() {
             );
             assert!(matches!(
                 reader
-                    .load(&run_id)
+                    .load_public(&run_id)
                     .await
                     .expect("second-process closed refold")
                     .frontier(),
@@ -1413,7 +1413,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     let verification_replay = verification.replay_reader;
     assert!(matches!(
         verification_reader
-            .load(&run_id)
+        .load_public(&run_id)
             .await
             .expect("verification-process closed refold")
             .frontier(),
@@ -1428,7 +1428,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     ));
     assert!(matches!(
         memory_reader
-            .load(&run_id)
+        .load_public(&run_id)
             .await
             .expect("memory parity closed refold")
             .frontier(),
@@ -1454,7 +1454,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     unavailable_control.close().await;
     assert_eq!(
         unavailable_reader
-            .load(&run_id)
+        .load_public(&run_id)
             .await
             .expect_err("closed PostgreSQL pool must fail without fallback"),
         StructuredStoreError::BackendUnavailable
@@ -1542,7 +1542,7 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
     }
 
     if matches!(
-        reader.load(&first_run).await.expect("reload first").frontier(),
+        reader.load_public(&first_run).await.expect("reload first").frontier(),
         StructuredFrontier::Actions(_)
     ) {
         assert_eq!(
@@ -1555,7 +1555,7 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
     }
     if matches!(
         reader
-            .load(&second_run)
+            .load_public(&second_run)
             .await
             .expect("reload second")
             .frontier(),
@@ -1717,10 +1717,11 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     .expect("qualify fact scanner store");
     let AssembledStructuredRuntime {
         runtime: postgres_runtime,
-        public_reader: postgres_reader,
+        public_reader: postgres_public_reader,
+        export_reader: postgres_reader,
         ..
     } = postgres_assembled;
-    let postgres_identity = postgres_reader.store_identity().clone();
+    let postgres_identity = postgres_public_reader.store_identity().clone();
     let postgres_response = drive_qualified_fact_scan(
         postgres_runtime,
         &postgres_reader,
@@ -1752,7 +1753,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     .await
     .expect("reopen fact scanner store through an independent pool");
     let reopened_response =
-        retained_fact_response(&reopened_assembled.public_reader, &consumer_run).await;
+        retained_fact_response(&reopened_assembled.export_reader, &consumer_run).await;
     assert_eq!(reopened_response, postgres_response);
 
     let memory_fixture = qualified_fact_scan_fixture();
@@ -1763,7 +1764,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     );
     let AssembledStructuredRuntime {
         runtime: memory_runtime,
-        public_reader: memory_reader,
+        export_reader: memory_reader,
         ..
     } = memory_assembled;
     let memory_response = drive_qualified_fact_scan(
@@ -1802,7 +1803,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     .await
     .expect("qualify empty-frontier scanner store");
     let allowed_runtime = allowed_assembled.runtime;
-    let allowed_reader = allowed_assembled.public_reader;
+    let allowed_reader = allowed_assembled.export_reader;
     let store_scope = allowed_reader.store_identity().store_scope_id.clone();
     let empty_tenant =
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "3".repeat(32))).expect("tenant");
@@ -1891,7 +1892,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     .await
     .expect("reopen scanner with an excluding manifest");
     let excluded_runtime = excluded_assembled.runtime;
-    let excluded_reader = excluded_assembled.public_reader;
+    let excluded_reader = excluded_assembled.export_reader;
     let excluded_invocation =
         InvocationIdentity::new("00000000-0000-4000-8000-000000000086").expect("excluded inv");
     let excluded_run = derive_run_id(
@@ -2006,7 +2007,7 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
 
     if matches!(
         reader
-            .load(&producer_run)
+            .load_public(&producer_run)
             .await
             .expect("reload racing producer")
             .frontier(),
@@ -2023,7 +2024,7 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
     }
     if matches!(
         reader
-            .load(&consumer_run)
+            .load_public(&consumer_run)
             .await
             .expect("reload racing consumer")
             .frontier(),
@@ -2044,7 +2045,7 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
     // Finish the consumer if authorization landed but observation/settlement remains open.
     for _ in 0..4 {
         let frontier = reader
-            .load(&consumer_run)
+            .load_public(&consumer_run)
             .await
             .expect("poll consumer frontier")
             .frontier()
@@ -2253,7 +2254,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("remove one object row");
     assert!(matches!(
-        reader.load(&run_id).await,
+        reader.load_public(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     insert_object_snapshot(&mutation_pool, &run_id, first).await;
@@ -2273,7 +2274,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("append one extra object row");
     assert!(matches!(
-        reader.load(&run_id).await,
+        reader.load_public(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     sqlx::query(
@@ -2289,7 +2290,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, second).await;
     update_object_snapshot(&mutation_pool, &run_id, second.ordinal, first).await;
     assert!(matches!(
-        reader.load(&run_id).await,
+        reader.load_public(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2306,7 +2307,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("mismatch object content reference");
     assert!(matches!(
-        reader.load(&run_id).await,
+        reader.load_public(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2329,7 +2330,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("persist oversized hostile object row");
     assert!(matches!(
-        reader.load(&run_id).await,
+        reader.load_public(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2343,7 +2344,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("restore object frame bound");
     reader
-        .load(&run_id)
+        .load_public(&run_id)
         .await
         .expect("restored object rows must refold");
 
@@ -2389,7 +2390,7 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     }
     assert!(matches!(
         reader
-            .load(&run_id)
+            .load_public(&run_id)
             .await
             .expect("refold eleven numeric batches")
             .frontier(),
@@ -2742,7 +2743,7 @@ fn fact_scan_profile() -> StructuredExpansionProfile {
 
 async fn drive_qualified_fact_scan<B, P>(
     runtime: Runtime<P>,
-    reader: &PublicRunReader<B>,
+    reader: &ExportRunReader<B>,
     producer_operation: StableId,
     consumer_operation: StableId,
     producer_document: mfm_spec::structured::CertifiedProgramDocument,
@@ -2845,9 +2846,9 @@ where
     assert_eq!(selected.response_canonical_json, r#"{"value":8}"#);
 
     let producer = reader
-        .load(&producer_run)
+        .load_for_export(&producer_run)
         .await
-        .expect("publicly recompute producer prefix");
+        .expect("export-recompute producer prefix");
     assert_eq!(
         selected.subject_canonical_json,
         producer
@@ -2871,9 +2872,9 @@ where
     );
 
     let consumer = reader
-        .load(&consumer_run)
+        .load_for_export(&consumer_run)
         .await
-        .expect("publicly recompute consumer history");
+        .expect("export-recompute consumer history");
     let output = consumer
         .records()
         .iter()
@@ -2893,19 +2894,19 @@ where
 }
 
 async fn retained_fact_response<B: StructuredHistoryBackend>(
-    reader: &PublicRunReader<B>,
+    reader: &ExportRunReader<B>,
     run_id: &RunId,
 ) -> String {
-    let verified = reader
-        .load(run_id)
+    let evidence = reader
+        .load_for_export(run_id)
         .await
-        .expect("publicly recompute retained fact response");
-    let returned = verified
+        .expect("export-recompute retained fact response");
+    let returned = evidence
         .records()
         .iter()
         .find_map(|assigned| match &assigned.record {
             RunRecord::ExternalAccessObserved(observation) => match &observation.outcome {
-                ObservationOutcome::Returned { value } => verified.object(&value.value_ref),
+                ObservationOutcome::Returned { value } => evidence.object(&value.value_ref),
                 _ => None,
             },
             _ => None,

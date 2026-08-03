@@ -718,7 +718,7 @@ impl Application {
         run_id: RunId,
     ) -> Result<DriveResponse, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::Drive, run_id)
+            .authorize_run::<run_grant::Drive>(credential, RunAccessGrant::Drive, run_id)
             .await?;
         self.backend.drive_once(&call).await
     }
@@ -730,7 +730,7 @@ impl Application {
         run_id: RunId,
     ) -> Result<PublicRunView, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::ReadPublic, run_id)
+            .authorize_run::<run_grant::ReadPublic>(credential, RunAccessGrant::ReadPublic, run_id)
             .await?;
         self.backend.read_public_run(&call).await
     }
@@ -743,7 +743,7 @@ impl Application {
         request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::Replay, run_id)
+            .authorize_run::<run_grant::Replay>(credential, RunAccessGrant::Replay, run_id)
             .await?;
         if request.requires_export_authorization() {
             call.authorize_same_run_grant(RunAccessGrant::Export)
@@ -760,7 +760,11 @@ impl Application {
         page: PageRequest,
     ) -> Result<TransitionTracePage, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::InspectTrace, run_id)
+            .authorize_run::<run_grant::InspectTrace>(
+                credential,
+                RunAccessGrant::InspectTrace,
+                run_id,
+            )
             .await?;
         self.backend.read_transition_trace(&call, page).await
     }
@@ -773,7 +777,11 @@ impl Application {
         page: PageRequest,
     ) -> Result<AccessAuditPage, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::InspectAudit, run_id)
+            .authorize_run::<run_grant::InspectAudit>(
+                credential,
+                RunAccessGrant::InspectAudit,
+                run_id,
+            )
             .await?;
         self.backend.read_access_audit(&call, page).await
     }
@@ -786,17 +794,18 @@ impl Application {
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
         let call = self
-            .authorize_run(credential, RunAccessGrant::Export, run_id)
+            .authorize_run::<run_grant::Export>(credential, RunAccessGrant::Export, run_id)
             .await?;
         self.backend.export_run(&call, request).await
     }
 
-    async fn authorize_run(
+    async fn authorize_run<G: run_grant::RunGrantMarker>(
         &self,
         credential: SecretCredential,
         grant: RunAccessGrant,
         run_id: RunId,
-    ) -> Result<AuthorizedRunCall<'_>, PublicError> {
+    ) -> Result<AuthorizedRunCall<'_, G>, PublicError> {
+        debug_assert_eq!(grant, G::GRANT);
         let target = AccessTarget::RunTarget {
             store_scope_id: self.store_scope_id.clone(),
             run_id: run_id.clone(),
@@ -810,6 +819,8 @@ impl Application {
             tenant_scope_id,
             authenticated_principal_id,
             run_id,
+            grant,
+            _marker: std::marker::PhantomData,
         })
     }
 }
@@ -849,22 +860,73 @@ fn entry_point_not_found() -> PublicError {
     )
 }
 
-pub(crate) struct AuthorizedRunCall<'policy> {
+/// Typestate markers for purpose-bound authorized run calls.
+pub(crate) mod run_grant {
+    use crate::RunAccessGrant;
+
+    /// Closed marker for one approved run-access grant.
+    pub(crate) trait RunGrantMarker: Send + Sync + 'static {
+        /// Exact grant this marker retains.
+        const GRANT: RunAccessGrant;
+    }
+
+    /// Drive one legal run action.
+    pub(crate) struct Drive;
+    /// Read the ordinary public run view.
+    pub(crate) struct ReadPublic;
+    /// Inspect transition-trace material.
+    pub(crate) struct InspectTrace;
+    /// Inspect access-audit material.
+    pub(crate) struct InspectAudit;
+    /// Replay recorded history.
+    pub(crate) struct Replay;
+    /// Export one portable run stream.
+    pub(crate) struct Export;
+
+    impl RunGrantMarker for Drive {
+        const GRANT: RunAccessGrant = RunAccessGrant::Drive;
+    }
+    impl RunGrantMarker for ReadPublic {
+        const GRANT: RunAccessGrant = RunAccessGrant::ReadPublic;
+    }
+    impl RunGrantMarker for InspectTrace {
+        const GRANT: RunAccessGrant = RunAccessGrant::InspectTrace;
+    }
+    impl RunGrantMarker for InspectAudit {
+        const GRANT: RunAccessGrant = RunAccessGrant::InspectAudit;
+    }
+    impl RunGrantMarker for Replay {
+        const GRANT: RunAccessGrant = RunAccessGrant::Replay;
+    }
+    impl RunGrantMarker for Export {
+        const GRANT: RunAccessGrant = RunAccessGrant::Export;
+    }
+}
+
+/// Purpose-bound authorized run call that retains the exact approved grant.
+pub(crate) struct AuthorizedRunCall<'policy, G: run_grant::RunGrantMarker> {
     credential: SecretCredential,
     policy: &'policy dyn RunAccessPolicy,
     store_scope_id: &'policy StoreScopeId,
     tenant_scope_id: TenantScopeId,
     authenticated_principal_id: StableId,
     run_id: RunId,
+    grant: RunAccessGrant,
+    _marker: std::marker::PhantomData<G>,
 }
 
-impl AuthorizedRunCall<'_> {
+impl<G: run_grant::RunGrantMarker> AuthorizedRunCall<'_, G> {
     pub(crate) const fn tenant_scope_id(&self) -> &TenantScopeId {
         &self.tenant_scope_id
     }
 
     pub(crate) const fn run_id(&self) -> &RunId {
         &self.run_id
+    }
+
+    /// Returns the exact approved grant retained by this call.
+    pub(crate) const fn grant(&self) -> RunAccessGrant {
+        self.grant
     }
 
     /// Reauthorizes one additional grant for the same exact root, tenant, and principal.
@@ -930,34 +992,37 @@ pub(crate) trait ApplicationBackend: Send + Sync {
         request: AdmitRunRequest,
     ) -> Result<AdmitRunResponse, PublicError>;
 
-    async fn drive_once(&self, call: &AuthorizedRunCall<'_>) -> Result<DriveResponse, PublicError>;
+    async fn drive_once(
+        &self,
+        call: &AuthorizedRunCall<'_, run_grant::Drive>,
+    ) -> Result<DriveResponse, PublicError>;
 
     async fn read_public_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::ReadPublic>,
     ) -> Result<PublicRunView, PublicError>;
 
     async fn replay_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::Replay>,
         request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError>;
 
     async fn read_transition_trace(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::InspectTrace>,
         page: PageRequest,
     ) -> Result<TransitionTracePage, PublicError>;
 
     async fn read_access_audit(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::InspectAudit>,
         page: PageRequest,
     ) -> Result<AccessAuditPage, PublicError>;
 
     async fn export_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::Export>,
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError>;
 }
@@ -1062,21 +1127,21 @@ impl ApplicationBackend for TestApplicationBackend {
 
     async fn drive_once(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::Drive>,
     ) -> Result<DriveResponse, PublicError> {
         Err(self.failure())
     }
 
     async fn read_public_run(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::ReadPublic>,
     ) -> Result<PublicRunView, PublicError> {
         Err(self.failure())
     }
 
     async fn replay_run(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::Replay>,
         _request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError> {
         match &self.mode {
@@ -1087,7 +1152,7 @@ impl ApplicationBackend for TestApplicationBackend {
 
     async fn read_transition_trace(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::InspectTrace>,
         _page: PageRequest,
     ) -> Result<TransitionTracePage, PublicError> {
         Err(self.failure())
@@ -1095,7 +1160,7 @@ impl ApplicationBackend for TestApplicationBackend {
 
     async fn read_access_audit(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::InspectAudit>,
         _page: PageRequest,
     ) -> Result<AccessAuditPage, PublicError> {
         Err(self.failure())
@@ -1103,7 +1168,7 @@ impl ApplicationBackend for TestApplicationBackend {
 
     async fn export_run(
         &self,
-        _call: &AuthorizedRunCall<'_>,
+        _call: &AuthorizedRunCall<'_, run_grant::Export>,
         _request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
         let Some(export) = &self.export else {
@@ -1152,7 +1217,7 @@ mod tests {
     use std::task::{Context, Poll};
 
     use super::{
-        application_for_test, AuthorizedRunCall, EvmWalletDeployment,
+        application_for_test, run_grant, AuthorizedRunCall, EvmWalletDeployment,
         EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial, TestApplicationMode,
     };
     use crate::{
@@ -1466,8 +1531,8 @@ mod tests {
         store_scope_id: &'policy StoreScopeId,
         tenant_scope_id: TenantScopeId,
         run_id: RunId,
-        _grant: RunAccessGrant,
-    ) -> AuthorizedRunCall<'policy> {
+        grant: RunAccessGrant,
+    ) -> AuthorizedRunCall<'policy, run_grant::Replay> {
         AuthorizedRunCall {
             credential: SecretCredential::new(b"opaque".to_vec()).expect("credential"),
             policy,
@@ -1475,6 +1540,8 @@ mod tests {
             tenant_scope_id,
             authenticated_principal_id: principal('1'),
             run_id,
+            grant,
+            _marker: std::marker::PhantomData,
         }
     }
 

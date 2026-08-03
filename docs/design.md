@@ -391,8 +391,9 @@ inject a fully qualified application.
 | Authored or serialized program | Data only until exact certification. |
 | Certified program document | Sole semantic program authority for admission and fold verification. |
 | Structured history writer | Non-cloneable run-mutation authority held only by Runtime. |
-| Structured history reader | Cloneable callback-free purpose-read authority. |
-| Verified structured run | Fold-derived semantic and chronology authority for one exact prefix. |
+| Structured history reader | Cloneable callback-free purpose-read authority; each purpose returns only sealed purpose evidence. |
+| Verified structured run | Fold-derived internal semantic and chronology authority for one exact prefix; not a public purpose-read surface. |
+| Purpose-sealed evidence | Public/trace/audit/replay/export newtypes that expose only that purpose's projection accessors. |
 | Prepared/authorized/pending/committed access values | Private affine Runtime protocol stages. |
 | Public physical certificate | Evidence only; cannot construct a live target session or mutation permit. |
 | Qualified EVM routing catalog | Opaque deployment admission authority; serializable catalog data alone cannot construct it. |

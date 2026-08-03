@@ -1,0 +1,5 @@
+error[E0609]: no field `load_for_export` on type `&PublicRunReader<PostgresStructuredHistoryBackend>`
+ --> tests/ui/structured/fail/public_reader_cannot_load_export_evidence.rs:7:24
+  |
+7 |         let _ = reader.load_for_export;
+  |                        ^^^^^^^^^^^^^^^ unknown field

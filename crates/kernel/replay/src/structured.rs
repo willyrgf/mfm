@@ -8,7 +8,8 @@ use mfm_journal::structured::{
 };
 use mfm_spec::structured::OperationOutcome;
 use mfm_store::structured::{
-    ReplayRunReader, StructuredHistoryBackend, StructuredStoreError, VerifiedStructuredRun,
+    AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
+    StructuredHistoryBackend, StructuredStoreError, TraceRunEvidence,
 };
 use serde::{Deserialize, Serialize};
 
@@ -247,17 +248,20 @@ impl StructuredOperationOutcomeView {
 /// Replays one complete structured run through the same callback-free store fold.
 ///
 /// The reader exposes no writer, process callback, adapter, signer, or provider
-/// authority. The returned view is derived only from committed records and
-/// content-addressed objects.
+/// authority. The returned sealed evidence is derived only from committed records
+/// and content-addressed objects and cannot be used as export or public evidence.
 pub async fn verify_recorded_history<B: StructuredHistoryBackend>(
     reader: &ReplayRunReader<B>,
     run_id: &RunId,
-) -> Result<VerifiedStructuredRun> {
-    reader.load(run_id).await.map_err(classify_store_error)
+) -> Result<RecordedRunEvidence> {
+    reader
+        .load_for_recorded_verify(run_id)
+        .await
+        .map_err(classify_store_error)
 }
 
 /// Projects the canonical callback-free replay summary of one verified prefix.
-pub fn project_replay_result(run: &VerifiedStructuredRun) -> Result<StructuredReplayResult> {
+pub fn project_replay_result(run: &RecordedRunEvidence) -> Result<StructuredReplayResult> {
     StructuredCanonicalProjection::encode(
         "mfm.structured-replay-result",
         &serde_json::json!({
@@ -266,7 +270,7 @@ pub fn project_replay_result(run: &VerifiedStructuredRun) -> Result<StructuredRe
             "journal_head": run.journal_head(),
             "semantic_head": run.semantic_head(),
             "record_count": run.records().len(),
-            "status": frontier_status(run),
+            "status": frontier_status(run.frontier()),
         }),
     )
     .map(StructuredReplayResult)
@@ -296,13 +300,13 @@ fn project_unavailable(kind: &'static str, run_id: &RunId) -> Result<StructuredR
 
 /// Projects one bounded, head-fixed transition trace page.
 pub fn project_transition_trace(
-    run: &VerifiedStructuredRun,
+    run: &TraceRunEvidence,
     at_head: Option<&JournalHead>,
     start: u32,
     limit: u16,
 ) -> Result<StructuredProjectionPage<StructuredTransitionTrace>> {
-    let at_journal_head = fixed_head(run, at_head)?;
-    let transitions = records_at(run, &at_journal_head)
+    let at_journal_head = fixed_head(run.journal_head(), run.journal_heads(), at_head)?;
+    let transitions = records_at(run.records(), &at_journal_head)
         .filter_map(|assigned| match &assigned.record {
             RunRecord::StateTransitionCommitted(transition) => Some((assigned, transition)),
             _ => None,
@@ -340,13 +344,13 @@ pub fn project_transition_trace(
 
 /// Projects one bounded, head-fixed external-access audit page.
 pub fn project_access_audit(
-    run: &VerifiedStructuredRun,
+    run: &AuditRunEvidence,
     at_head: Option<&JournalHead>,
     start: u32,
     limit: u16,
 ) -> Result<StructuredProjectionPage<StructuredAccessAuditEntry>> {
-    let at_journal_head = fixed_head(run, at_head)?;
-    let records = records_at(run, &at_journal_head).collect::<Vec<_>>();
+    let at_journal_head = fixed_head(run.journal_head(), run.journal_heads(), at_head)?;
+    let records = records_at(run.records(), &at_journal_head).collect::<Vec<_>>();
     let authorizations = records
         .iter()
         .filter_map(|assigned| match &assigned.record {
@@ -381,7 +385,7 @@ pub fn project_access_audit(
 
 /// Resolves and validates the terminal selected typed value of a closed run.
 pub fn project_operation_outcome(
-    run: &VerifiedStructuredRun,
+    run: &PublicRunEvidence,
 ) -> Result<Option<StructuredOperationOutcomeView>> {
     let Some(outcome_ref) = run.closed_outcome_ref() else {
         return Ok(None);
@@ -412,9 +416,9 @@ pub fn project_operation_outcome(
     }))
 }
 
-fn frontier_status(run: &VerifiedStructuredRun) -> &'static str {
+fn frontier_status(frontier: &mfm_store::structured::StructuredFrontier) -> &'static str {
     use mfm_store::structured::StructuredFrontier;
-    match run.frontier() {
+    match frontier {
         StructuredFrontier::Actions(_) => "actionable",
         StructuredFrontier::WaitingReads => "waiting_reads",
         StructuredFrontier::PossibleEntry => "possible_entry",
@@ -423,23 +427,27 @@ fn frontier_status(run: &VerifiedStructuredRun) -> &'static str {
     }
 }
 
-fn fixed_head(run: &VerifiedStructuredRun, requested: Option<&JournalHead>) -> Result<JournalHead> {
-    let selected = requested.unwrap_or_else(|| run.journal_head());
+fn fixed_head(
+    journal_head: &JournalHead,
+    journal_heads: &[JournalHead],
+    requested: Option<&JournalHead>,
+) -> Result<JournalHead> {
+    let selected = requested.unwrap_or(journal_head);
     let index = usize::try_from(selected.run_sequence)
         .ok()
         .and_then(|sequence| sequence.checked_sub(1))
         .ok_or(StructuredReplayError::InvalidRecordedHistory)?;
-    if run.journal_heads().get(index) != Some(selected) {
+    if journal_heads.get(index) != Some(selected) {
         return Err(StructuredReplayError::InvalidRecordedHistory);
     }
     Ok(selected.clone())
 }
 
 fn records_at<'a>(
-    run: &'a VerifiedStructuredRun,
+    records: &'a [AssignedRecord],
     head: &'a JournalHead,
 ) -> impl Iterator<Item = &'a AssignedRecord> {
-    run.records()
+    records
         .iter()
         .filter(move |record| record.record_ref.run_sequence <= head.run_sequence)
 }

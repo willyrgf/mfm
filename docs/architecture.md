@@ -21,7 +21,7 @@ operation DSL
        +-> authorized Read  -> registered invoker -> transport/scanner/status port
        +-> authorized Effect -> registered invoker -> transport/signer/resource authority
 
-store purpose readers -> same fold -> public-read/trace/audit/replay/export
+store purpose readers -> same fold -> purpose-sealed evidence (public/trace/audit/replay/export)
 ```
 
 Only `State` is executable. `Match` and `FanOut` are structural. Runtime performs one verified
