@@ -1190,3 +1190,20 @@ a substitute for `.#model-check` / `.#ci`).
 
 _End of application / export / replay checkpoint. Gate PASS recorded at exact HEAD
 `933d263a1851b57d1b2cd88951a0cbc9ab1177b7`._
+
+## Final merge-gate revision note
+
+After application checkpoint PASS at `933d263a…` / review commit `f00631c1…`, final `.#ci`
+failed solely on `fmt` (pre-existing rustfmt drift across remediation modules, not a new
+authority regression). Fixing revision:
+
+| Field | Value |
+| --- | --- |
+| Format revision (full hash) | `686796f8fb99d89ff43b4996f8b3cf5b974df985` |
+| Subject | `apply rustfmt for final merge gate` |
+| Content change | `cargo fmt` only (43 files); no semantic/authority/contract change |
+
+Final executable gates are re-run at `686796f8…`. Application checkpoint structural decisions are
+unchanged; this note re-pins the merge-verification tip after the format-only cutover required by
+`fmt`.
+
