@@ -2655,12 +2655,8 @@ fn assert_process_graph_valid(assembly: &ProgramRegistryBuilder) {
         .keys()
         .cloned()
         .collect::<BTreeSet<_>>();
-    validate_process_component_graph(
-        &assembly.registry,
-        &assembly.process_components,
-        &required,
-    )
-    .expect("valid process graph");
+    validate_process_component_graph(&assembly.registry, &assembly.process_components, &required)
+        .expect("valid process graph");
 }
 
 fn assert_process_graph_rejected(
@@ -3835,22 +3831,21 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     let request_owner = callback_owner.clone();
     let settle_returned_calls = callback_calls.clone();
     let settle_safe_calls = callback_calls.clone();
-    let callbacks =
-        StructuredStateCallbacks::<ReadProcessState>::Read {
-            request: Arc::new(move |frame: StateFrame<'_, ProcessValue>| {
-                let _retained = &request_owner;
-                request_calls.fetch_add(1, Ordering::SeqCst);
-                frame.input().clone()
-            }),
-            settle_returned: Arc::new(move |_frame, returned| {
-                settle_returned_calls.fetch_add(1, Ordering::SeqCst);
-                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
-            }),
-            settle_safe_failure: Arc::new(move |_frame, failure| {
-                settle_safe_calls.fetch_add(1, Ordering::SeqCst);
-                ProposedStateOutcome::Failure(failure.clone())
-            }),
-        };
+    let callbacks = StructuredStateCallbacks::<ReadProcessState>::Read {
+        request: Arc::new(move |frame: StateFrame<'_, ProcessValue>| {
+            let _retained = &request_owner;
+            request_calls.fetch_add(1, Ordering::SeqCst);
+            frame.input().clone()
+        }),
+        settle_returned: Arc::new(move |_frame, returned| {
+            settle_returned_calls.fetch_add(1, Ordering::SeqCst);
+            StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+        }),
+        settle_safe_failure: Arc::new(move |_frame, failure| {
+            settle_safe_calls.fetch_add(1, Ordering::SeqCst);
+            ProposedStateOutcome::Failure(failure.clone())
+        }),
+    };
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
         .state_contract_ref;

@@ -22,8 +22,8 @@ use mfm_journal::structured::{
 };
 use mfm_program::structured::{
     state_contract, CommittedObservation, Direct, Never, OperationBuilder,
-    PriorRunFactSelectionCapability, Pure, Read, SafeFailureNotApplicable,
-    SafeFailureSuccessOnly, State, StateFrame, StateSettlement, StructuredStateCallbacks,
+    PriorRunFactSelectionCapability, Pure, Read, SafeFailureNotApplicable, SafeFailureSuccessOnly,
+    State, StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
@@ -34,12 +34,11 @@ use mfm_spec::structured::{
     StructuredFactDescriptor,
 };
 use mfm_storage_postgres::{
-    issue_application_sessions, issue_combined_sessions,
-    issue_configuration_maintenance_sessions, open_configuration_maintenance,
-    open_structured_authoritative, open_structured_authoritative_with_configuration,
-    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
-    PostgresStoreError, PostgresStructuredHistoryBackend, SessionLoginMaterial,
-    TargetSessionMaterials,
+    issue_application_sessions, issue_combined_sessions, issue_configuration_maintenance_sessions,
+    open_configuration_maintenance, open_structured_authoritative,
+    open_structured_authoritative_with_configuration, ApplicationTargetSessions,
+    CombinedTargetSessions, ConfigurationMaintenanceSessions, PostgresStoreError,
+    PostgresStructuredHistoryBackend, SessionLoginMaterial, TargetSessionMaterials,
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
@@ -471,7 +470,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     assert_eq!(reopened_document, document);
     let (reopened_history, reopened_configuration) =
         open_structured_authoritative_with_configuration(
-        database.combined_sessions().await,
+            database.combined_sessions().await,
             reopened_registry,
             physical_verifier,
         )
@@ -854,7 +853,6 @@ async fn insert_configuration_head(
     .expect("insert configuration head as owner");
 }
 
-
 #[tokio::test]
 async fn coordinated_configuration_rollback_is_visible_to_fresh_sessions() {
     let database = TestDatabase::create().await;
@@ -938,12 +936,7 @@ async fn qualification_attempt(
     let (registry, _) =
         qualified_program(stable("mfm.postgres.fixture/qualification").expect("operation id"));
     let sessions = database.try_application_sessions().await?;
-    open_structured_authoritative(
-        sessions,
-        registry,
-        Arc::new(NoPhysicalBindings),
-    )
-    .await
+    open_structured_authoritative(sessions, registry, Arc::new(NoPhysicalBindings)).await
 }
 
 async fn assert_schema_reopen_rejected(database: &TestDatabase) {
@@ -958,8 +951,7 @@ async fn assert_schema_reopen_rejected(database: &TestDatabase) {
 async fn assert_session_reopen_rejected(database: &TestDatabase) {
     assert!(matches!(
         qualification_attempt(&database).await,
-        Err(PostgresStoreError::WriterRequired)
-            | Err(PostgresStoreError::TargetSessionRejected)
+        Err(PostgresStoreError::WriterRequired) | Err(PostgresStoreError::TargetSessionRejected)
     ));
 }
 
@@ -1128,13 +1120,9 @@ async fn structured_history_fresh_process_worker() {
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let assembled = open_structured_authoritative(
-        sessions,
-        registry,
-        physical_verifier,
-    )
-    .await
-    .expect("qualify fresh-process structured store");
+    let assembled = open_structured_authoritative(sessions, registry, physical_verifier)
+        .await
+        .expect("qualify fresh-process structured store");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let store_scope = reader.store_identity().store_scope_id.clone();
@@ -1178,13 +1166,19 @@ async fn structured_history_fresh_process_worker() {
             ));
         }
         "continue" => {
-            let verified = reader.load_public(&run_id).await.expect("second-process refold");
+            let verified = reader
+                .load_public(&run_id)
+                .await
+                .expect("second-process refold");
             assert!(matches!(
                 verified.frontier(),
                 StructuredFrontier::Actions(_)
             ));
             assert_eq!(
-                runtime.drive_once(&run_id).await.expect("continue in second process"),
+                runtime
+                    .drive_once(&run_id)
+                    .await
+                    .expect("continue in second process"),
                 DriveOutcome::TransitionCommitted { closed: true }
             );
             assert!(matches!(
@@ -1286,7 +1280,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     let verification_replay = verification.replay_reader;
     assert!(matches!(
         verification_reader
-        .load_public(&run_id)
+            .load_public(&run_id)
             .await
             .expect("verification-process closed refold")
             .frontier(),
@@ -1301,7 +1295,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     ));
     assert!(matches!(
         memory_reader
-        .load_public(&run_id)
+            .load_public(&run_id)
             .await
             .expect("memory parity closed refold")
             .frontier(),
@@ -1413,7 +1407,11 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
     }
 
     if matches!(
-        reader.load_public(&first_run).await.expect("reload first").frontier(),
+        reader
+            .load_public(&first_run)
+            .await
+            .expect("reload first")
+            .frontier(),
         StructuredFrontier::Actions(_)
     ) {
         assert_eq!(
@@ -1611,8 +1609,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         &postgres_identity.store_scope_id,
         &default_tenant(),
         &reopened_fixture.consumer_operation,
-        &InvocationIdentity::new("00000000-0000-4000-8000-000000000081")
-            .expect("consumer inv"),
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000081").expect("consumer inv"),
     );
     let reopened_pool = database.run_writer_pool().await;
     let reopened_assembled = open_structured_authoritative(
@@ -2018,11 +2015,7 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     .expect("create object-row failure trigger");
 
     let admit = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            "object-row-rollback",
-        ))
+        .admit_run(admission(operation_id, document, "object-row-rollback"))
         .await;
     assert!(
         matches!(
@@ -2066,11 +2059,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            "malformed-object-rows",
-        ))
+        .admit_run(admission(operation_id, document, "malformed-object-rows"))
         .await
         .expect("admit corruption fixture");
     let mutation_pool = database.independent_pool().await;
@@ -2225,15 +2214,15 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            "numeric-order-admit",
-        ))
+        .admit_run(admission(operation_id, document, "numeric-order-admit"))
         .await
         .expect("admit numeric-order fixture");
     for _transition in 0..10 {
-        match runtime.drive_once(&run_id).await.expect("commit sequential transition") {
+        match runtime
+            .drive_once(&run_id)
+            .await
+            .expect("commit sequential transition")
+        {
             DriveOutcome::TransitionCommitted { closed: false }
             | DriveOutcome::TransitionCommitted { closed: true } => {}
             other => panic!("unexpected numeric-order drive: {other:?}"),
@@ -2271,11 +2260,23 @@ async fn run_fresh_process_worker(database: &TestDatabase, mode: &str) {
         .env("DATABASE_URL", database.application_database_url())
         .env(FRESH_PROCESS_SCHEMA_ENV, &database.schema)
         .env(FRESH_PROCESS_MODE_ENV, mode)
-        .env("MFM_TEST_RUN_READER_URL", database.run_reader_login.database_url(&database.database_url))
-        .env("MFM_TEST_RUN_WRITER_URL", database.run_writer_login.database_url(&database.database_url))
+        .env(
+            "MFM_TEST_RUN_READER_URL",
+            database
+                .run_reader_login
+                .database_url(&database.database_url),
+        )
+        .env(
+            "MFM_TEST_RUN_WRITER_URL",
+            database
+                .run_writer_login
+                .database_url(&database.database_url),
+        )
         .env(
             "MFM_TEST_CONFIG_READER_URL",
-            database.configuration_reader_login.database_url(&database.database_url),
+            database
+                .configuration_reader_login
+                .database_url(&database.database_url),
         )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -3272,7 +3273,8 @@ impl TestDatabase {
         (
             self.run_reader_login.database_url(&self.database_url),
             self.run_writer_login.database_url(&self.database_url),
-            self.configuration_reader_login.database_url(&self.database_url),
+            self.configuration_reader_login
+                .database_url(&self.database_url),
             self.schema.clone(),
         )
     }

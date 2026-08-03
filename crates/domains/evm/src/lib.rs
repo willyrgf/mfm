@@ -43,9 +43,10 @@ pub use chain_registry::{
 };
 pub use model::{EvmBlockAnchor, EvmBlockAnchorError};
 pub use signing::{
-    derive_evm_semantic_signer_id, sign_eip1559, sign_eip1559_guarded, signing_failure_is_integrity,
-    AccountAddress, Eip1559QuantityField, EvmSignatureError, EvmSigningError,
-    TransientSignedEip1559Envelope, UnsignedEip1559Envelope, EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
+    derive_evm_semantic_signer_id, sign_eip1559, sign_eip1559_guarded,
+    signing_failure_is_integrity, AccountAddress, Eip1559QuantityField, EvmSignatureError,
+    EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope,
+    EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
 };
 pub use structured_balance::{
     author_evm_balance_fan_out, author_evm_balance_lane_selection, balance_adapter_contract,
@@ -119,10 +120,10 @@ pub use wallet_authority::{
     ReserveEvmNonceRequest, ReserveWalletNonceCapability, ReserveWalletNonceResponse,
     ReservedWalletNonce, SubmissionIntentId, TerminalWitnesses, TransactionNonce,
     WalletAuthorityContractError, WalletNonceAuthority, WalletNonceAuthorityResource,
-    WalletNonceDomain, EVM_TRANSACTION_NONCE_MAX,
-    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
-    WalletNonceStoreIncarnation, WalletNonceStoreLineageHead, WalletNonceStorePromotionAttestation,
-    WalletNonceStoreSuccessor, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    WalletNonceDomain, WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord,
+    WalletNonceStatus, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
+    WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX,
+    EVM_WALLET_OBSERVATION_ROUND_LIMIT,
 };
 
 #[cfg(test)]

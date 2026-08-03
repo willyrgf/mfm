@@ -1144,12 +1144,7 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            4,
-            "pure-admit",
-        ))
+        .admit_run(admission(operation_id, document, 4, "pure-admit"))
         .await
         .expect("admission");
     history_loads.store(0, Ordering::SeqCst);
@@ -1229,12 +1224,7 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            4,
-            "callback-fault-admit",
-        ))
+        .admit_run(admission(operation_id, document, 4, "callback-fault-admit"))
         .await
         .expect("admission");
     let pre_fault_head = reader
@@ -1334,12 +1324,7 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            4,
-            "codec-fault-admit",
-        ))
+        .admit_run(admission(operation_id, document, 4, "codec-fault-admit"))
         .await
         .expect("admission");
     let pre_fault_head = reader
@@ -1424,12 +1409,7 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
     let runtime = &assembled.runtime;
     let reader = &assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            4,
-            "fan-out-admit",
-        ))
+        .admit_run(admission(operation_id, document, 4, "fan-out-admit"))
         .await
         .expect("admission");
 
@@ -1517,12 +1497,7 @@ async fn exact_root_program_cache_rejects_authored_object_substitution() {
     );
     let (run_id, _) = assembled
         .runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            4,
-            "cache-admit",
-        ))
+        .admit_run(admission(operation_id, document, 4, "cache-admit"))
         .await
         .expect("admission");
     assert_eq!(
@@ -1596,12 +1571,7 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(admission(
-            operation_id,
-            document,
-            7,
-            "fact-admit",
-        ))
+        .admit_run(admission(operation_id, document, 7, "fact-admit"))
         .await
         .expect("admission");
     assert_eq!(
@@ -1768,7 +1738,9 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         .load_public(&failed_run_id)
         .await
         .expect("failed run");
-    let outcome_ref = failed.closed_outcome_ref().expect("ordinary failure must close the run");
+    let outcome_ref = failed
+        .closed_outcome_ref()
+        .expect("ordinary failure must close the run");
     let failed_outcome: serde_json::Value = failed
         .object(outcome_ref)
         .expect("failed outcome object")
@@ -1787,7 +1759,9 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         .load_public(&successful_run_id)
         .await
         .expect("successful run");
-    let outcome_ref = succeeded.closed_outcome_ref().expect("successful run must close");
+    let outcome_ref = succeeded
+        .closed_outcome_ref()
+        .expect("successful run must close");
     let successful_outcome: serde_json::Value = succeeded
         .object(outcome_ref)
         .expect("successful outcome object")
@@ -1986,7 +1960,9 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         .load_public(&failed_run_id)
         .await
         .expect("failed run");
-    let outcome_ref = failed.closed_outcome_ref().expect("safe failure must close the run");
+    let outcome_ref = failed
+        .closed_outcome_ref()
+        .expect("safe failure must close the run");
     let failed_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = failed
         .object(outcome_ref)
         .expect("failed outcome object")
@@ -2007,7 +1983,9 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         .load_public(&successful_run_id)
         .await
         .expect("successful run");
-    let outcome_ref = succeeded.closed_outcome_ref().expect("successful run must close");
+    let outcome_ref = succeeded
+        .closed_outcome_ref()
+        .expect("successful run must close");
     let successful_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = succeeded
         .object(outcome_ref)
         .expect("successful outcome object")
@@ -2085,11 +2063,7 @@ async fn frozen_effect_supersession_is_not_rewritten_after_persistence_integrity
         let runtime = assembled.runtime;
         let reader = assembled.public_reader;
         let (run_id, _attempt) = runtime
-            .admit_run(effect_admission(
-                operation_id,
-                document,
-                resource_ref,
-            ))
+            .admit_run(effect_admission(operation_id, document, resource_ref))
             .await
             .expect("effect admission");
 
@@ -2162,11 +2136,7 @@ async fn invalid_supersession_evidence_is_rejected_without_a_diagnostic_observat
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(effect_admission(
-            operation_id,
-            document,
-            resource_ref,
-        ))
+        .admit_run(effect_admission(operation_id, document, resource_ref))
         .await
         .expect("effect admission");
 
@@ -2317,9 +2287,7 @@ async fn admission_requires_the_exact_certified_resource_lineage_set() {
     .expect("unused resource ref");
     let unrelated_ref = binding_object(45).content_ref;
 
-    assert!(
-        effect_admission_material(vec![resource_ref.clone(), resource_ref.clone()]).is_err()
-    );
+    assert!(effect_admission_material(vec![resource_ref.clone(), resource_ref.clone()]).is_err());
 
     let assembled = assemble_structured_runtime(
         StructuredMemoryBackend::new(store_identity(40)),
@@ -2400,11 +2368,7 @@ async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation(
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
-        .admit_run(effect_admission(
-            operation_id,
-            document,
-            resource_ref,
-        ))
+        .admit_run(effect_admission(operation_id, document, resource_ref))
         .await
         .expect("effect admission");
 
@@ -2809,12 +2773,7 @@ fn effect_admission(
     document: mfm_spec::structured::CertifiedProgramDocument,
     lineage_ref: mfm_ids::ContentRef,
 ) -> StructuredAdmissionCommand {
-    effect_admission_with_lineages(
-        operation_id,
-        document,
-        vec![lineage_ref],
-        "effect-admit",
-    )
+    effect_admission_with_lineages(operation_id, document, vec![lineage_ref], "effect-admit")
 }
 
 fn effect_admission_with_lineages(

@@ -14,16 +14,15 @@ use mfm_evm::{
     derive_evm_nonce_completion_key, derive_exact_candidate_activation_permit,
     ActivateCandidateResponse, ActivateEvmCandidateRequest, ActivateWalletCandidateCapability,
     ActiveWalletCandidate, CandidateActivationPermit, CanonicalTerminalOutcome,
-    CompleteEvmNonceRequest,
-    CompleteWalletNonceCapability, CompleteWalletNonceResponse, CompletedWalletNonce,
-    EvmCandidateFamily, EvmReceiptLookupObservation, EvmSubmissionCapabilityImplementation,
-    EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionLookupObservation,
-    EvmWalletReference, ExecutionDisposition, ReadEvmWalletNonceStatusRequest,
-    ReadWalletNonceStatusCapability, ReserveEvmNonceRequest, ReserveWalletNonceCapability,
-    ReserveWalletNonceResponse, ReservedWalletNonce, TerminalWitnesses, UnsignedWalletCandidate,
-    WalletNonceAuthority, WalletNonceDomainActivationAttestation,
-    WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreIncarnation,
-    WalletNonceStoreLineageHead,
+    CompleteEvmNonceRequest, CompleteWalletNonceCapability, CompleteWalletNonceResponse,
+    CompletedWalletNonce, EvmCandidateFamily, EvmReceiptLookupObservation,
+    EvmSubmissionCapabilityImplementation, EvmSubmissionFailure, EvmTransactionIntent,
+    EvmTransactionLookupObservation, EvmWalletReference, ExecutionDisposition,
+    ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability, ReserveEvmNonceRequest,
+    ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
+    TerminalWitnesses, UnsignedWalletCandidate, WalletNonceAuthority,
+    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
+    WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
 };
 use mfm_ids::{ContentDigest, StableId};
 use mfm_journal::structured::{HistoryObject, LexicalValueRef};
@@ -200,7 +199,8 @@ impl PostgresWalletNonceAuthority {
         .map_err(|_| PostgresEvmWalletError::Unavailable)?;
         let reservation_count = stats
             .try_get::<i64, _>("reservation_count")
-            .map_err(|_| PostgresEvmWalletError::Unavailable)? as u64;
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?
+            as u64;
         let maximum_nonce = stats
             .try_get::<Option<String>, _>("maximum_nonce")
             .map_err(|_| PostgresEvmWalletError::Unavailable)?;
@@ -926,17 +926,15 @@ impl PostgresWalletNonceAuthority {
             CandidateActivationPermit::Reobservation {
                 exact_ordinal,
                 retained_activation_ref,
-            } => Ok(
-                *exact_ordinal == request.next_candidate.candidate_ordinal
-                    && retained_activation_ref == &existing.activation_evidence_ref
-                    && derive_exact_candidate_activation_permit(
-                        &reservation.reservation,
-                        &candidates,
-                        request.next_candidate.candidate_ordinal,
-                        request.next_candidate.candidate_ordinal,
-                    )
-                    .is_ok_and(|expected| expected == request.activation_permit),
-            ),
+            } => Ok(*exact_ordinal == request.next_candidate.candidate_ordinal
+                && retained_activation_ref == &existing.activation_evidence_ref
+                && derive_exact_candidate_activation_permit(
+                    &reservation.reservation,
+                    &candidates,
+                    request.next_candidate.candidate_ordinal,
+                    request.next_candidate.candidate_ordinal,
+                )
+                .is_ok_and(|expected| expected == request.activation_permit)),
             _ => Ok(candidate_progression_matches(
                 request,
                 &reservation,
@@ -1508,7 +1506,8 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                         }
                     }
                     Some(high_water) => {
-                        let Ok(high_water_nonce) = mfm_evm::TransactionNonce::new(high_water) else {
+                        let Ok(high_water_nonce) = mfm_evm::TransactionNonce::new(high_water)
+                        else {
                             let completion = self.returned_reservation(
                                 ReserveWalletNonceResponse::NonceCapacityExhausted,
                             );
@@ -2210,14 +2209,9 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 {
                     return self.abort_write(write, failure).await;
                 }
-                if insert_completion(
-                    &mut write.transaction,
-                    request,
-                    &completed,
-                    state_input_ref,
-                )
-                .await
-                .is_err()
+                if insert_completion(&mut write.transaction, request, &completed, state_input_ref)
+                    .await
+                    .is_err()
                 {
                     let failure = EffectAdapterCompletion::SafeFailure(
                         EvmSubmissionFailure::NonceAuthorityUnavailable,

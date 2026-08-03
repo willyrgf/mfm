@@ -54,7 +54,6 @@ pub fn assemble_structured_runtime<B: StructuredHistoryBackend>(
     }
 }
 
-
 /// Test-support assembly over an arbitrary backend.
 #[cfg(any(test, feature = "test-support"))]
 pub fn assemble_with_backend<B: StructuredHistoryBackend>(

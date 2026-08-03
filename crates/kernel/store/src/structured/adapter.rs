@@ -21,8 +21,8 @@ use super::fold::{
     ProgramVerifier, StructuredStoreError, VerifiedProgramData, VerifiedStructuredRun,
 };
 use super::mutation::StructuredAdmissionRequest as StoreAdmissionRequest;
-use mfm_runtime::history::StructuredAdmissionMaterial as StoreAdmissionMaterial;
 use super::qualification::PublicPhysicalBindingVerifier;
+use mfm_runtime::history::StructuredAdmissionMaterial as StoreAdmissionMaterial;
 
 /// Concrete registry-backed program verifier for live assembly and offline trust snapshots.
 pub struct RegistryProgramVerifier {
@@ -128,10 +128,7 @@ impl VerifiedRunView for VerifiedStructuredRun {
         VerifiedStructuredRun::frontier(self)
     }
 
-    fn object(
-        &self,
-        content_ref: &ContentRef,
-    ) -> Option<&mfm_journal::structured::HistoryObject> {
+    fn object(&self, content_ref: &ContentRef) -> Option<&mfm_journal::structured::HistoryObject> {
         VerifiedStructuredRun::object(self, content_ref)
     }
 
@@ -148,10 +145,7 @@ impl VerifiedRunView for VerifiedStructuredRun {
     fn observation(
         &self,
         access_attempt_id: &mfm_ids::AccessAttemptId,
-    ) -> Option<(
-        &RecordRef,
-        &mfm_journal::structured::ExternalAccessObserved,
-    )> {
+    ) -> Option<(&RecordRef, &mfm_journal::structured::ExternalAccessObserved)> {
         VerifiedStructuredRun::observation(self, access_attempt_id)
     }
 }
@@ -216,8 +210,7 @@ fn derive_run_id(
         ),
     ])
     .map_err(|_| HistoryError::InvalidHistory)?;
-    let contract =
-        RecoverabilityContract::embedded().map_err(|_| HistoryError::InvalidHistory)?;
+    let contract = RecoverabilityContract::embedded().map_err(|_| HistoryError::InvalidHistory)?;
     let validated = contract
         .encode("mfm.run-id-preimage.v1", &preimage)
         .map_err(|_| HistoryError::InvalidHistory)?;
@@ -230,9 +223,7 @@ fn to_store_transition(proposal: &StateTransitionProposal) -> StateTransitionPro
     proposal.clone()
 }
 
-fn to_store_authorization(
-    proposal: &AccessAuthorizationProposal,
-) -> AccessAuthorizationProposal {
+fn to_store_authorization(proposal: &AccessAuthorizationProposal) -> AccessAuthorizationProposal {
     proposal.clone()
 }
 
@@ -245,7 +236,6 @@ fn to_store_observation_outcome(
 fn to_store_observation(proposal: &AccessObservationProposal) -> AccessObservationProposal {
     proposal.clone()
 }
-
 
 impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> {
     type VerifiedRun = VerifiedStructuredRun;

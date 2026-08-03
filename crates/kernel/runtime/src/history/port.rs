@@ -20,8 +20,7 @@ use super::proofs::{ObservationCommit, StructuredAppendAttempt};
 use super::Result;
 
 /// Boxed asynchronous history-port operation.
-pub type HistoryFuture<'a, T> =
-    Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
+pub type HistoryFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
 /// Read view required by Runtime over one verified structured run.
 pub trait VerifiedRunView: Send {
@@ -65,9 +64,7 @@ pub trait AppendAttemptApi: Send {
     fn closed(&self) -> bool;
 
     /// Consumes a newly committed authorization into its one-use proof.
-    fn into_newly_appended_authorization(
-        self,
-    ) -> Option<super::NewlyAppendedAuthorization>
+    fn into_newly_appended_authorization(self) -> Option<super::NewlyAppendedAuthorization>
     where
         Self: Sized;
 
@@ -118,10 +115,7 @@ pub trait RuntimeHistoryPort: Send + Sync {
     ) -> HistoryFuture<'a, (RunId, StructuredAppendAttempt)>;
 
     /// Loads and callback-free verifies one exact run for a Runtime action.
-    fn load_verified<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> HistoryFuture<'a, Self::VerifiedRun>;
+    fn load_verified<'a>(&'a self, run_id: &'a RunId) -> HistoryFuture<'a, Self::VerifiedRun>;
 
     /// Verifies and atomically commits one exact current callback result.
     fn commit_state_transition<'a>(

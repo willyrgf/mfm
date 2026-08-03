@@ -486,7 +486,12 @@ impl Ord for StructuralPathSegment {
         }
         match kind_rank(self).cmp(&kind_rank(other)) {
             Ordering::Equal => match (self, other) {
-                (Root { operation_id: left }, Root { operation_id: right }) => left.cmp(right),
+                (
+                    Root { operation_id: left },
+                    Root {
+                        operation_id: right,
+                    },
+                ) => left.cmp(right),
                 (
                     Declaration {
                         ordinal: left_ord,
@@ -520,7 +525,9 @@ impl Ord for StructuralPathSegment {
                         ordinal: right_ord,
                         key: right_key,
                     },
-                ) => left_ord.cmp(right_ord).then_with(|| left_key.cmp(right_key)),
+                ) => left_ord
+                    .cmp(right_ord)
+                    .then_with(|| left_key.cmp(right_key)),
                 (
                     Fragment {
                         expansion_ref: left_ref,
@@ -2353,10 +2360,7 @@ impl StructuredProgramNormalizer {
                         );
                         continue;
                     }
-                    if field_name
-                        .as_deref()
-                        .is_some_and(is_structural_path_field)
-                    {
+                    if field_name.as_deref().is_some_and(is_structural_path_field) {
                         let path = serde_json::from_value(value)
                             .map_err(|error| SpecError::Invariant(error.to_string()))?;
                         completed.push(
@@ -2421,7 +2425,9 @@ impl StructuredProgramNormalizer {
             }
         }
         completed.pop().ok_or_else(|| {
-            SpecError::Invariant("structured program JSON normalization produced no root".to_owned())
+            SpecError::Invariant(
+                "structured program JSON normalization produced no root".to_owned(),
+            )
         })
     }
 

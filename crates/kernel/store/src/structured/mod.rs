@@ -13,12 +13,12 @@ mod mutation;
 mod purpose;
 mod qualification;
 
+pub use adapter::RegistryProgramVerifier;
 #[doc(hidden)]
 pub use adapter::StoreHistoryAdapter;
-pub use adapter::RegistryProgramVerifier;
-pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 #[cfg(any(test, feature = "test-support"))]
 pub use assembly::assemble_with_backend;
+pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 pub use backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
     StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
@@ -49,9 +49,7 @@ pub use mfm_runtime::history::{
     StructuredAdmissionMaterial,
 };
 // Store-local append attempt and observation commit used by internal writer tests.
-pub use mutation::{
-    ObservationCommit, StructuredAdmissionRequest, StructuredAppendAttempt,
-};
+pub use mutation::{ObservationCommit, StructuredAdmissionRequest, StructuredAppendAttempt};
 // Runtime-facing authorization proof type.
 pub use mfm_certify::structured::NewlyAppendedAuthorization;
 pub use purpose::{

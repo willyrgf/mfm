@@ -1532,7 +1532,9 @@ async fn verify_production_projections(
     let semantic_batches = semantic["batches"]
         .as_array()
         .expect("semantic committed batches");
-    let audit_batches = audit["batches"].as_array().expect("audit committed batches");
+    let audit_batches = audit["batches"]
+        .as_array()
+        .expect("audit committed batches");
     assert!(!semantic_batches.is_empty());
     assert!(!audit_batches.is_empty());
     assert!(
@@ -1555,9 +1557,7 @@ async fn verify_production_projections(
     // Atomic batch selection retains an adjacent RunClosed when it shares the
     // semantic cutoff batch; audit always ends at the physical close.
     assert_eq!(
-        audit_records
-            .last()
-            .expect("audit terminal record")["record"]["kind"],
+        audit_records.last().expect("audit terminal record")["record"]["kind"],
         "run_closed"
     );
     assert_eq!(
@@ -1566,9 +1566,7 @@ async fn verify_production_projections(
     );
     assert_eq!(
         semantic["fixation"]["journal_head"],
-        semantic_batches
-            .last()
-            .expect("semantic terminal batch")["head"]
+        semantic_batches.last().expect("semantic terminal batch")["head"]
     );
     assert_eq!(
         audit["fixation"]["journal_head"],
@@ -3302,19 +3300,27 @@ async fn run_worker(
         .env(PROVIDER_PUBLIC_KEY_ENV, provider.public_key_hex())
         .env(
             "MFM_TEST_RUN_READER_URL",
-            database.history_run_reader_login.database_url(&database.database_url),
+            database
+                .history_run_reader_login
+                .database_url(&database.database_url),
         )
         .env(
             "MFM_TEST_RUN_WRITER_URL",
-            database.history_run_writer_login.database_url(&database.database_url),
+            database
+                .history_run_writer_login
+                .database_url(&database.database_url),
         )
         .env(
             "MFM_TEST_CONFIG_READER_URL",
-            database.history_config_reader_login.database_url(&database.database_url),
+            database
+                .history_config_reader_login
+                .database_url(&database.database_url),
         )
         .env(
             "MFM_TEST_CONFIG_WRITER_URL",
-            database.history_config_writer_login.database_url(&database.database_url),
+            database
+                .history_config_writer_login
+                .database_url(&database.database_url),
         )
         .env(WORKER_MODE_ENV, mode)
         .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string())
@@ -3576,8 +3582,12 @@ impl TestDatabase {
         }
         self.history_run_reader_login.drop(&self.admin_pool).await;
         self.history_run_writer_login.drop(&self.admin_pool).await;
-        self.history_config_reader_login.drop(&self.admin_pool).await;
-        self.history_config_writer_login.drop(&self.admin_pool).await;
+        self.history_config_reader_login
+            .drop(&self.admin_pool)
+            .await;
+        self.history_config_writer_login
+            .drop(&self.admin_pool)
+            .await;
         self.admin_pool.close().await;
     }
 }
@@ -3873,4 +3883,3 @@ async fn load_history_target_roles(database_url: &str, schema: &str) -> HistoryT
             .expect("configuration writer"),
     }
 }
-

@@ -530,10 +530,7 @@ mod export_source_closure_tests {
         })
         .expect("shared dag again");
         assert_eq!(first, second);
-        assert_eq!(
-            first,
-            BTreeSet::from([mid, other, shared])
-        );
+        assert_eq!(first, BTreeSet::from([mid, other, shared]));
     }
 
     #[test]

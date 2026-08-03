@@ -332,10 +332,7 @@ fn provenance_resolution_accepts_maximum_depth_and_rejects_over_depth_without_st
         },
     );
     let mut over = StructuredProgramDenormalizer {
-        structural_paths: BTreeMap::from([(
-            path.content_ref().expect("path ref"),
-            path,
-        )]),
+        structural_paths: BTreeMap::from([(path.content_ref().expect("path ref"), path)]),
         lexical_slots: over_slots,
         resolved_slots: BTreeMap::new(),
         active_slots: BTreeSet::new(),

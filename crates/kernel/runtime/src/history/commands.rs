@@ -22,8 +22,7 @@ pub struct ProposedCanonicalValue {
 impl ProposedCanonicalValue {
     /// Canonicalizes one float-free serializable value.
     pub fn from_value<T: Serialize>(value: &T) -> Result<Self, HistoryError> {
-        let json =
-            serde_json::to_string(value).map_err(|_| HistoryError::InvalidHistory)?;
+        let json = serde_json::to_string(value).map_err(|_| HistoryError::InvalidHistory)?;
         Self::from_json(&json)
     }
 

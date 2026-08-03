@@ -115,7 +115,12 @@ fn structured_history_ownership_edges_are_one_way() {
         &packages,
         "mfm-certify",
         &["mfm-program", "mfm-journal"],
-        &["mfm-store", "mfm-runtime", "mfm-app", "mfm-storage-postgres"],
+        &[
+            "mfm-store",
+            "mfm-runtime",
+            "mfm-app",
+            "mfm-storage-postgres",
+        ],
     );
     assert_dependencies(
         &packages,

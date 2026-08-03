@@ -83,9 +83,7 @@ impl<'a> LockedWriteTx<'a> {
             .map_err(|_| StructuredStoreError::BackendUnavailable)
     }
 
-    pub(crate) async fn commit_outcome(
-        self,
-    ) -> Result<CommitOutcome, StructuredStoreError> {
+    pub(crate) async fn commit_outcome(self) -> Result<CommitOutcome, StructuredStoreError> {
         match self.transaction.commit().await {
             Ok(()) => Ok(CommitOutcome::Committed),
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
@@ -110,9 +108,7 @@ impl<'a> LockedConfigurationWriteTx<'a> {
         &mut self.transaction
     }
 
-    pub(crate) async fn commit_outcome(
-        self,
-    ) -> Result<CommitOutcome, StructuredStoreError> {
+    pub(crate) async fn commit_outcome(self) -> Result<CommitOutcome, StructuredStoreError> {
         match self.transaction.commit().await {
             Ok(()) => Ok(CommitOutcome::Committed),
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
@@ -191,13 +187,11 @@ pub(crate) async fn lock_tenant_fact(
     tx: &mut LockedWriteTx<'_>,
     lock_key: &str,
 ) -> Result<(), StructuredStoreError> {
-    sqlx::query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 1))",
-    )
-    .bind(lock_key)
-    .execute(&mut **tx.conn())
-    .await
-    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 1))")
+        .bind(lock_key)
+        .execute(&mut **tx.conn())
+        .await
+        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
     Ok(())
 }
 
@@ -213,13 +207,11 @@ pub(crate) async fn begin_configuration_write_locked<'a>(
     let permit = TargetPermit::from_binding(binding);
     let mut transaction = begin_base(session, binding, false).await?;
     validate_target_permit(&mut transaction, &permit, false).await?;
-    sqlx::query(
-        "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))",
-    )
-    .bind(stream_lock_key)
-    .execute(&mut *transaction)
-    .await
-    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))")
+        .bind(stream_lock_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
     Ok(LockedConfigurationWriteTx { transaction })
 }
 
@@ -289,16 +281,14 @@ async fn validate_target_permit(
     if !read_only {
         // Serialize fence-generation observation for writers without requiring UPDATE
         // privilege on the authority row itself.
-        sqlx::query(
-            "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 2))",
-        )
-        .bind(format!(
-            "mfm.target-fence:{}:{}",
-            permit.schema_name, permit.fence_generation
-        ))
-        .execute(&mut **transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 2))")
+            .bind(format!(
+                "mfm.target-fence:{}:{}",
+                permit.schema_name, permit.fence_generation
+            ))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
     }
 
     let row = sqlx::query(

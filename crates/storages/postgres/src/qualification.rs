@@ -55,8 +55,7 @@ pub async fn open_structured_authoritative_with_configuration(
     );
     let run_backend =
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target);
-    let assembled =
-        assemble_structured_runtime(run_backend, registry, physical_binding_verifier);
+    let assembled = assemble_structured_runtime(run_backend, registry, physical_binding_verifier);
     Ok((
         assembled,
         ConfigurationHistoryStore::new(configuration_backend),
@@ -73,13 +72,12 @@ pub async fn open_structured_authoritative_application(
     mfm_store::structured::ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>,
 )> {
     let (run_reader, run_writer, configuration_reader, target) = sessions.into_application_parts();
-    let configuration = ConfigurationHistoryStore::new(
-        PostgresConfigurationHistoryBackend::from_sessions(
+    let configuration =
+        ConfigurationHistoryStore::new(PostgresConfigurationHistoryBackend::from_sessions(
             configuration_reader,
             None,
             target.clone(),
-        ),
-    );
+        ));
     let assembled = assemble_structured_runtime(
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target),
         registry,
@@ -95,13 +93,12 @@ pub async fn open_configuration_maintenance(
 ) -> Result<mfm_store::structured::ConfigurationHistoryWriter<PostgresConfigurationHistoryBackend>>
 {
     let (configuration_reader, configuration_writer, target) = sessions.into_parts();
-    let configuration = ConfigurationHistoryStore::new(
-        PostgresConfigurationHistoryBackend::from_sessions(
+    let configuration =
+        ConfigurationHistoryStore::new(PostgresConfigurationHistoryBackend::from_sessions(
             configuration_reader,
             Some(configuration_writer),
             target,
-        ),
-    );
+        ));
     let (writer, _reader) = configuration.split();
     Ok(writer)
 }

@@ -819,7 +819,8 @@ fn keystore_provider_rejects_wrong_implementation_algorithm_and_profile_bindings
     let dir = tempfile::tempdir().expect("tempdir");
     let address = Address::from([0x11; 20]);
     let identity = |algorithm: SigningAlgorithmId| {
-        PublicSigningIdentity::new(algorithm, None, Some(format!("{address:#x}"))).expect("identity")
+        PublicSigningIdentity::new(algorithm, None, Some(format!("{address:#x}")))
+            .expect("identity")
     };
     let cases = [
         qualified_binding_for_implementation(address, 0x49, "mfm.signing.keystore.rfc6979.v1"),

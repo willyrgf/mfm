@@ -24,9 +24,9 @@ pub use qualification::{
 };
 pub use schema::PostgresSchema;
 pub use session::{
-    issue_application_sessions, issue_combined_sessions,
-    issue_configuration_maintenance_sessions, ApplicationTargetSessions, CombinedTargetSessions,
-    ConfigurationMaintenanceSessions, SessionLoginMaterial, TargetBinding, TargetSessionMaterials,
+    issue_application_sessions, issue_combined_sessions, issue_configuration_maintenance_sessions,
+    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
+    SessionLoginMaterial, TargetBinding, TargetSessionMaterials,
 };
 pub use structured::PostgresStructuredHistoryBackend;
 

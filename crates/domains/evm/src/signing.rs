@@ -338,8 +338,7 @@ impl UnsignedEip1559Envelope {
             return Err(EvmSigningError::RecoveredAddressMismatch);
         }
         Ok(ExpectedSignerIdentity::public_key_and_account_id(
-            public_key,
-            account_id,
+            public_key, account_id,
         )?)
     }
 

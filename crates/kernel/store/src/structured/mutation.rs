@@ -230,14 +230,12 @@ impl StructuredAppendAttempt {
         use mfm_journal::structured::RunRecord;
         use mfm_runtime::history::{HistoryAppendOutcome, NewlyAppendedAuthorization};
 
-        let closed = self
-            .committed()
-            .is_some_and(|batch| {
-                batch
-                    .records
-                    .iter()
-                    .any(|record| matches!(&record.record, RunRecord::RunClosed(_)))
-            });
+        let closed = self.committed().is_some_and(|batch| {
+            batch
+                .records
+                .iter()
+                .any(|record| matches!(&record.record, RunRecord::RunClosed(_)))
+        });
         let outcome = match &self.outcome {
             BackendAppendOutcome::NewlyCommitted(batch) => {
                 HistoryAppendOutcome::NewlyCommitted(batch.clone())
