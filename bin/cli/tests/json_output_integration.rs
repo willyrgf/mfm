@@ -14,7 +14,7 @@ fn standalone_ops_json_fails_the_same_production_bootstrap() {
     assert_eq!(error.error.code(), "AuthoritativeWriterFenceUnavailable");
     assert_eq!(
         error.error.message(),
-        "A deployment-owned authoritative-writer fence is required"
+        "A deployment-issued exact-target session bundle is required"
     );
 }
 
