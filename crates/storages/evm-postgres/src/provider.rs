@@ -33,7 +33,11 @@ const PROVIDER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTHENTICATION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.authentication.v1\0";
 const ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
 const MAX_DEPLOYMENT_ROUTES: usize = 64;
-const MAX_DEPLOYMENT_PROOF_BYTES: usize = 16 * 1024;
+/// Raw proof budget chosen so the complete FinishDeploymentAssembly JSON
+/// envelope (hex-encoded proofs plus metadata for every admitted route) stays
+/// within [`MAX_MESSAGE_BYTES`]. Hex encoding doubles each proof; the remaining
+/// budget reserves framing for route refs, ordinals, and message keys.
+const MAX_DEPLOYMENT_PROOF_BYTES: usize = 4 * 1024;
 const MAX_FINISH_AUTHORIZATION_BYTES: usize = 1024;
 
 /// Qualified public trust anchor for one external wallet authority provider.
@@ -704,18 +708,26 @@ impl PendingDeploymentAssembly {
         let exchange_ref_hex = hex::encode(exchange_ref);
         let assembly_lease_hex = hex::encode(self.assembly_lease);
         let checkpoint_hex = hex::encode(self.checkpoint);
+        // Account for the complete canonical record envelope so an accepted
+        // proof collection can never exceed the store frame after encoding.
+        let finish_request = ProviderRequest::FinishDeploymentAssembly {
+            descriptor: self.descriptor.clone(),
+            provider_fence_head_ref: self.provider_fence_head_ref.clone(),
+            binding: self.binding.clone(),
+            assembly_lease: assembly_lease_hex.clone(),
+            checkpoint: checkpoint_hex.clone(),
+            exchange_ref: exchange_ref_hex.clone(),
+            proofs: wire_proofs.clone(),
+        };
+        let encoded_finish = Zeroizing::new(
+            serde_json::to_vec(&finish_request)
+                .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?,
+        );
+        if encoded_finish.len() > MAX_MESSAGE_BYTES || encoded_finish.contains(&b'\n') {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
         let mut channel = self.client.channel().await?;
-        channel
-            .send(&ProviderRequest::FinishDeploymentAssembly {
-                descriptor: self.descriptor.clone(),
-                provider_fence_head_ref: self.provider_fence_head_ref.clone(),
-                binding: self.binding.clone(),
-                assembly_lease: assembly_lease_hex.clone(),
-                checkpoint: checkpoint_hex.clone(),
-                exchange_ref: exchange_ref_hex.clone(),
-                proofs: wire_proofs.clone(),
-            })
-            .await?;
+        channel.send(&finish_request).await?;
         let reply = channel.receive::<ProviderReply>().await?;
         let ProviderReply::DeploymentAssemblyFinished {
             mut finish_authorization,

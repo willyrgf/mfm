@@ -350,22 +350,20 @@ fn release_material_matches(
         .initial_store_incarnation_ref
         .to_content_ref()
         .map_err(|_| wallet_deployment_invalid())?;
+    // Every retained wallet release (including successors) must name the
+    // authority's actual current physical incarnation, not only the root.
+    let wallet_releases_current = releases
+        .wallet_read
+        .releases()
+        .chain(releases.wallet_effect.releases())
+        .all(|release| release.physical_target_ref() == &wallet_target_ref);
     if histories
         .iter()
         .any(|history| history.current().admitted_routing_policy_ref() != routing_policy_ref)
         || releases.rpc.current().physical_target_ref() != &route_target_ref
         || releases.signer.current().physical_target_ref() != signer_generation_ref
         || releases.balance.current().physical_target_ref() != &catalog_target_ref
-        || releases
-            .wallet_read
-            .releases()
-            .next()
-            .is_none_or(|release| release.physical_target_ref() != &wallet_target_ref)
-        || releases
-            .wallet_effect
-            .releases()
-            .next()
-            .is_none_or(|release| release.physical_target_ref() != &wallet_target_ref)
+        || !wallet_releases_current
         || releases.broadcast.current().physical_target_ref()
             != &releases.broadcast_lineage_head_object.content_ref
         || releases

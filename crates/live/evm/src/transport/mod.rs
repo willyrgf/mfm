@@ -1038,10 +1038,33 @@ pub(crate) enum WalletRpcFailure {
     AccessCancelled,
     UnavailableBeforeEntry,
     ResponseLost,
+    /// Reserved for a future reviewed, producer-proved non-entry rejection.
+    /// Transport no longer maps post-entry HTTP/JSON-RPC faults here; those
+    /// remain [`Self::InvalidResponse`] so broadcast preserves entry ambiguity.
+    #[allow(dead_code)]
     DestinationRejected,
     InvalidResponse,
 }
 
+/// Classifies transport boundary outcomes for wallet operations.
+///
+/// Reviewed table (broadcast and wallet reads share this mapping; broadcast
+/// later maps `InvalidResponse`/`ResponseLost` to entry-unknown ambiguity):
+///
+/// | Boundary outcome | Classification |
+/// | --- | --- |
+/// | Pre-entry routing generation unavailable | GenerationFenced |
+/// | Pre-entry access cancelled | AccessCancelled |
+/// | Pre-entry validation/other | UnavailableBeforeEntry |
+/// | Post-entry transport disconnect/timeout | ResponseLost (ambiguous) |
+/// | Post-entry HTTP non-200 after send | InvalidResponse (ambiguous) |
+/// | Post-entry generic JSON-RPC error | InvalidResponse (ambiguous) |
+/// | Post-entry decode/envelope/result faults | InvalidResponse (ambiguous) |
+///
+/// Exact `already known` is decoded as a successful `AlreadyKnown` response
+/// before this mapping. There is no reviewed definite-rejection code path that
+/// proves non-entry after the request may have reached the provider; such
+/// outcomes must not become `DestinationRejected`.
 fn wallet_boundary_failure(failure: BoundaryFailure) -> WalletRpcFailure {
     match failure {
         BoundaryFailure::BeforeEntry(EvmSafeFailure::RoutingGenerationUnavailable) => {
@@ -1054,9 +1077,12 @@ fn wallet_boundary_failure(failure: BoundaryFailure) -> WalletRpcFailure {
         BoundaryFailure::AfterEntry(EvmSafeFailure::TransportFailed) => {
             WalletRpcFailure::ResponseLost
         }
+        // Post-entry HTTP status and generic JSON-RPC errors are not proof of
+        // non-entry. A proxy may have forwarded the raw transaction before
+        // returning a non-200 or unrecognized error.
         BoundaryFailure::AfterEntry(
             EvmSafeFailure::HttpStatus { .. } | EvmSafeFailure::JsonRpcError { .. },
-        ) => WalletRpcFailure::DestinationRejected,
+        ) => WalletRpcFailure::InvalidResponse,
         BoundaryFailure::AfterEntry(_) => WalletRpcFailure::InvalidResponse,
     }
 }

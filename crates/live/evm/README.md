@@ -39,6 +39,12 @@ signature recovery against that identity, and maps integrity/contract violations
 `IntegrityFault` rather than `SignerUnavailable`. Raw signature bytes and private-key material are
 never retained in adapter evidence.
 
+Once a broadcast request may have reached the provider, timeout, disconnect, non-200 HTTP, generic
+JSON-RPC error, and decode failure remain entry-unknown without producer rejection proof. Exact
+`already known` is the only reviewed non-entry success classification. Physical release currentness
+is revalidated on every provider/signer/wallet access against the authority's actual incarnation;
+process-start-only checks are not sufficient.
+
 Signer implementation cutovers remain append-only physical releases. An observational keystore
 `v2` release follows the retained audited `v1` certificate as a same-key-target successor, and the
 complete release-history digest changes with that append.
