@@ -63,6 +63,14 @@ impl EvmStructuredWalletBindings {
         let resource_contract_ref = WalletNonceAuthorityResource::contract()
             .and_then(|contract| contract.content_ref().map_err(Into::into))
             .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)?;
+        // Every retained release (root and successors) must name the authority's
+        // actual current physical incarnation. A successor that claims a rotated
+        // target while the concrete authority still represents another
+        // incarnation is rejected at construction and rechecked per access.
+        let releases_match_authority = read_release_history
+            .releases()
+            .chain(effect_release_history.releases())
+            .all(|release| release.physical_target_ref() == &initial_target_ref);
         if domain_activation_attestation.validate().is_err()
             || read_release_history.current().admitted_routing_policy_ref()
                 != &admitted_routing_policy_ref
@@ -70,14 +78,15 @@ impl EvmStructuredWalletBindings {
                 .current()
                 .admitted_routing_policy_ref()
                 != &admitted_routing_policy_ref
-            || read_release_history
-                .releases()
-                .next()
-                .is_none_or(|release| release.physical_target_ref() != &initial_target_ref)
-            || effect_release_history
-                .releases()
-                .next()
-                .is_none_or(|release| release.physical_target_ref() != &initial_target_ref)
+            || !releases_match_authority
+            || !authority_release_is_current(
+                authority.as_ref(),
+                read_release_history.current().physical_target_ref(),
+            )
+            || !authority_release_is_current(
+                authority.as_ref(),
+                effect_release_history.current().physical_target_ref(),
+            )
         {
             return Err(EvmStructuredLiveBindingError::InvalidContract);
         }
@@ -91,13 +100,34 @@ impl EvmStructuredWalletBindings {
         })
     }
 
+    /// Consumes one physical-release currentness permit for this access.
+    ///
+    /// Returns false when the current release no longer matches the authority's
+    /// exact physical incarnation or the admitted routing policy. Callers must
+    /// revalidate immediately before every protected side effect.
+    fn consume_physical_release_permit(&self, effect: bool) -> bool {
+        let history = if effect {
+            &self.effect_release_history
+        } else {
+            &self.read_release_history
+        };
+        let current = history.current();
+        current.admitted_routing_policy_ref() == &self.admitted_routing_policy_ref
+            && authority_release_is_current(self.authority.as_ref(), current.physical_target_ref())
+            && history
+                .releases()
+                .all(|release| release.physical_target_ref() == current.physical_target_ref())
+    }
+
     fn read_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
         selection.admitted_routing_policy_ref == &self.admitted_routing_policy_ref
+            && self.consume_physical_release_permit(false)
     }
 
     fn effect_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
         self.read_selection(selection)
             && selection.stable_resource_lineage_contract_ref == Some(&self.resource_contract_ref)
+            && self.consume_physical_release_permit(true)
     }
 
     /// Returns the immutable admitted routing policy selected by this authority.
@@ -134,6 +164,19 @@ impl EvmStructuredWalletBindings {
     pub const fn effect_release_history(&self) -> &EvmPhysicalBindingReleaseHistory {
         &self.effect_release_history
     }
+}
+
+/// Proves the selected release target is the authority's current physical incarnation.
+fn authority_release_is_current(
+    authority: &dyn WalletNonceAuthority,
+    release_target: &ContentRef,
+) -> bool {
+    authority
+        .domain_activation_attestation()
+        .initial_store_incarnation_ref
+        .to_content_ref()
+        .ok()
+        .is_some_and(|current| &current == release_target)
 }
 
 trait WalletReadSpec: RuntimeReadCapability {
