@@ -3595,8 +3595,8 @@ impl HistoryTestLogin {
     ) -> Self {
         let digest = sha256_digest_bytes(schema.as_bytes()).to_string();
         let discriminator = &digest[..16];
-        let role_name = format!("mfm_evm_history_{}_{}", &purpose[..1], discriminator);
-        let password = format!("MfmEvmHistory{}{}", discriminator, purpose.len());
+        let role_name = history_login_role_name(schema, purpose);
+        let password = format!("MfmEvmHistory{discriminator}{purpose}");
         sqlx::query(AssertSqlSafe(format!(
             "CREATE ROLE {role_name} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE \
              NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 PASSWORD '{password}'"
@@ -3637,6 +3637,28 @@ impl HistoryTestLogin {
             .await
             .expect("drop restricted history login");
     }
+}
+
+fn history_login_role_name(schema: &str, purpose: &str) -> String {
+    let digest = sha256_digest_bytes(schema.as_bytes()).to_string();
+    let discriminator = &digest[..16];
+    format!("mfm_evm_history_{purpose}_{discriminator}")
+}
+
+#[test]
+fn history_login_purposes_produce_distinct_role_names() {
+    let schema = "mfm_evm_submission_history_fixture";
+    let run_reader = history_login_role_name(schema, "rrd");
+    let run_writer = history_login_role_name(schema, "rwr");
+    let configuration_reader = history_login_role_name(schema, "crd");
+    let configuration_writer = history_login_role_name(schema, "cwr");
+
+    assert_ne!(run_reader, run_writer);
+    assert_ne!(configuration_reader, configuration_writer);
+    assert!(run_reader.contains("_rrd_"));
+    assert!(run_writer.contains("_rwr_"));
+    assert!(configuration_reader.contains("_crd_"));
+    assert!(configuration_writer.contains("_cwr_"));
 }
 
 fn quoted_test_identifier(value: &str) -> String {

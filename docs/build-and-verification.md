@@ -96,7 +96,9 @@ The `evm-postgres-submission-qualification` leaf is the sole production-scale
 exception to the normal test profile: it runs its unchanged two-process integration
 target with `cargo test --release`. The optimized build keeps the full certified EVM
 expansion, greater-than-16-MiB normalized history admission, and restart proof within
-the managed task bound; it is not a separate implementation or reduced fixture.
+the managed task bound; it is not a separate implementation or reduced fixture. Its isolated
+history fixture provisions purpose-scoped reader and writer logins so each restricted principal
+remains distinct while the qualification exercises the complete access boundary.
 
 For repeated parity debugging, the incremental lane can be faster: start the
 required service once, set explicit variables such as `DATABASE_URL` or
