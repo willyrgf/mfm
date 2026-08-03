@@ -22,6 +22,8 @@ pub enum CommitFault {
     RollBackBeforeCommit,
     /// Commit upstream, consume its acknowledgement, and close before the client observes it.
     CommitAndLoseAcknowledgement,
+    /// Commit upstream, retain the consumed acknowledgement until released, then close the client.
+    CommitAndHoldLostAcknowledgement,
     /// Fail the client acknowledgement while retaining the live upstream transaction until released.
     HoldTransactionBeforeCommit,
 }
@@ -138,7 +140,35 @@ impl PostgresCommitFaultProxy {
         }
     }
 
-    /// Releases all upstream transactions retained by `HoldTransactionBeforeCommit`.
+    /// Arms one committed acknowledgement loss that remains held until explicitly released.
+    pub fn arm_held_lost_acknowledgement(&self) -> Result<u64, ProviderTestError> {
+        let target = self
+            .state
+            .held_lost_acknowledgements
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .ok_or(ProviderTestError::Invalid)?;
+        self.arm(CommitFault::CommitAndHoldLostAcknowledgement, 1)?;
+        Ok(target)
+    }
+
+    /// Waits until the upstream commit is durable and its client acknowledgement is held.
+    pub async fn wait_for_held_lost_acknowledgements(&self, target: u64) {
+        loop {
+            let notified = self.state.held_lost_acknowledgements_changed.notified();
+            if self
+                .state
+                .held_lost_acknowledgements
+                .load(Ordering::Acquire)
+                >= target
+            {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Releases retained transactions and committed acknowledgements held by this proxy.
     pub fn release_held_transactions(&self) {
         self.state.release_generation.fetch_add(1, Ordering::AcqRel);
         self.state.release_changed.notify_waiters();
@@ -159,6 +189,8 @@ struct ProxyState {
     plan: Mutex<Option<FaultPlan>>,
     intercepted: AtomicU64,
     intercepted_changed: Notify,
+    held_lost_acknowledgements: AtomicU64,
+    held_lost_acknowledgements_changed: Notify,
     release_generation: AtomicU64,
     release_changed: Notify,
 }
@@ -199,6 +231,12 @@ impl ProxyState {
             notified.await;
         }
     }
+
+    fn record_held_lost_acknowledgement(&self) {
+        self.held_lost_acknowledgements
+            .fetch_add(1, Ordering::AcqRel);
+        self.held_lost_acknowledgements_changed.notify_waiters();
+    }
 }
 
 async fn proxy_connection(
@@ -209,6 +247,8 @@ async fn proxy_connection(
     let mut server = TcpStream::connect(upstream).await?;
     let mut startup_forwarded = false;
     let mut suppress_commit_acknowledgement = false;
+    let mut held_acknowledgement_generation = None;
+    let mut commit_completed = false;
     loop {
         tokio::select! {
             frontend = read_frontend_frame(&mut client, startup_forwarded) => {
@@ -224,6 +264,13 @@ async fn proxy_connection(
                         Some(CommitFault::CommitAndLoseAcknowledgement) => {
                             server.write_all(&frontend.bytes).await?;
                             suppress_commit_acknowledgement = true;
+                        }
+                        Some(CommitFault::CommitAndHoldLostAcknowledgement) => {
+                            let retained_generation =
+                                state.release_generation.load(Ordering::Acquire);
+                            server.write_all(&frontend.bytes).await?;
+                            suppress_commit_acknowledgement = true;
+                            held_acknowledgement_generation = Some(retained_generation);
                         }
                         Some(CommitFault::HoldTransactionBeforeCommit) => {
                             let retained_generation =
@@ -241,7 +288,16 @@ async fn proxy_connection(
             backend = read_backend_frame(&mut server) => {
                 let backend = backend?;
                 if suppress_commit_acknowledgement {
+                    if backend.is_successful_commit_completion() {
+                        commit_completed = true;
+                    }
                     if backend.kind() == b'Z' {
+                        if let Some(retained_generation) = held_acknowledgement_generation {
+                            if commit_completed {
+                                state.record_held_lost_acknowledgement();
+                                state.wait_for_release(retained_generation).await;
+                            }
+                        }
                         client.shutdown().await?;
                         return Ok(());
                     }
@@ -275,6 +331,10 @@ impl PostgresFrame {
             .ok()
             .map(|query| query.trim_end_matches('\0').trim())
             .is_some_and(|query| query.eq_ignore_ascii_case("commit"))
+    }
+
+    fn is_successful_commit_completion(&self) -> bool {
+        self.typed && self.kind() == b'C' && self.bytes.get(5..) == Some(b"COMMIT\0")
     }
 }
 
@@ -324,4 +384,28 @@ fn bounded_frame_length(bytes: [u8; 4]) -> io::Result<usize> {
         return Err(io::Error::other("invalid PostgreSQL frame length"));
     }
     Ok(length)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn backend_frame(kind: u8, body: &[u8]) -> PostgresFrame {
+        let length = u32::try_from(body.len() + 4)
+            .expect("bounded test frame")
+            .to_be_bytes();
+        let mut bytes = Vec::with_capacity(body.len() + 5);
+        bytes.push(kind);
+        bytes.extend_from_slice(&length);
+        bytes.extend_from_slice(body);
+        PostgresFrame { bytes, typed: true }
+    }
+
+    #[test]
+    fn held_acknowledgement_requires_successful_commit_completion() {
+        assert!(backend_frame(b'C', b"COMMIT\0").is_successful_commit_completion());
+        assert!(!backend_frame(b'C', b"ROLLBACK\0").is_successful_commit_completion());
+        assert!(!backend_frame(b'E', b"COMMIT\0").is_successful_commit_completion());
+        assert!(!backend_frame(b'Z', b"I").is_successful_commit_completion());
+    }
 }
