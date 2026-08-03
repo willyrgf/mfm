@@ -360,7 +360,8 @@ async fn structured_runtime_executes_the_complete_portfolio_topology_matrix() {
     const NATIVE_ONLY: &[FixtureAssets] = &[FixtureAssets::Native];
     const TOKEN_ONLY: &[FixtureAssets] = &[FixtureAssets::Token];
     const MIXED: &[FixtureAssets] = &[FixtureAssets::Mixed];
-    const MULTI_NETWORK: &[FixtureAssets] = &[FixtureAssets::Mixed, FixtureAssets::Mixed];
+    // Two networks cover both asset kinds without multiplying every balance lane.
+    const MULTI_NETWORK: &[FixtureAssets] = &[FixtureAssets::Native, FixtureAssets::Token];
 
     for (case_index, (label, assets)) in [
         ("native-only", NATIVE_ONLY),
