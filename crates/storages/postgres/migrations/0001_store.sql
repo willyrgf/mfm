@@ -1,82 +1,71 @@
 -- Sole current PostgreSQL authority for structured RunHistory.
 --
--- This destructive pre-release baseline has no compatibility relation to the
--- retired graph journal. A database with any earlier 0001 checksum is rejected
+-- This destructive pre-release baseline has no compatibility relation to earlier
+-- structured-history baselines. A database with any earlier 0001 checksum is rejected
 -- and must be reset rather than migrated or reinterpreted.
+--
+-- Roles are exact-target: each store schema owns a distinct non-login owner plus
+-- qualification, run-reader, run-writer, configuration-reader, and configuration-writer
+-- roles. Sibling schemas never share grants. Role names are derived from a private
+-- 16-hex target key of md5(current_schema()).
 
-DO $mfm_roles$
+DO $mfm_target_roles$
+DECLARE
+    schema_name text := current_schema();
+    target_key text := substr(md5(schema_name), 1, 16);
+    owner_role text := format('mfm_t_%s_own', target_key);
+    qualification_role text := format('mfm_t_%s_qlf', target_key);
+    run_reader_role text := format('mfm_t_%s_rrd', target_key);
+    run_writer_role text := format('mfm_t_%s_rwr', target_key);
+    configuration_reader_role text := format('mfm_t_%s_crd', target_key);
+    configuration_writer_role text := format('mfm_t_%s_cwr', target_key);
+    role_name text;
 BEGIN
     IF current_user IN (
-        'mfm_store_owner',
-        'mfm_store_qualification',
-        'mfm_store_application',
-        'mfm_store_configuration_maintenance'
+        owner_role,
+        qualification_role,
+        run_reader_role,
+        run_writer_role,
+        configuration_reader_role,
+        configuration_writer_role
     ) THEN
         RAISE EXCEPTION 'the migration must not run as a runtime role';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_store_owner') THEN
-        CREATE ROLE mfm_store_owner
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1;
-    ELSE
-        ALTER ROLE mfm_store_owner
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1 PASSWORD NULL;
+    IF schema_name IS NULL OR schema_name = '' OR schema_name = 'pg_catalog' THEN
+        RAISE EXCEPTION 'migration requires an explicit non-catalog search_path schema';
     END IF;
 
-    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_store_application') THEN
-        CREATE ROLE mfm_store_application
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1;
-    ELSE
-        ALTER ROLE mfm_store_application
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1 PASSWORD NULL;
-    END IF;
+    FOREACH role_name IN ARRAY ARRAY[
+        owner_role,
+        qualification_role,
+        run_reader_role,
+        run_writer_role,
+        configuration_reader_role,
+        configuration_writer_role
+    ]
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = role_name) THEN
+            EXECUTE format(
+                'CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT
+                 NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1',
+                role_name
+            );
+        ELSE
+            EXECUTE format(
+                'ALTER ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT
+                 NOREPLICATION NOBYPASSRLS CONNECTION LIMIT -1 PASSWORD NULL',
+                role_name
+            );
+        END IF;
+        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
+    END LOOP;
 
-    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'mfm_store_qualification') THEN
-        CREATE ROLE mfm_store_qualification
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1;
-    ELSE
-        ALTER ROLE mfm_store_qualification
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1 PASSWORD NULL;
-    END IF;
-
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_catalog.pg_roles
-        WHERE rolname = 'mfm_store_configuration_maintenance'
-    ) THEN
-        CREATE ROLE mfm_store_configuration_maintenance
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1;
-    ELSE
-        ALTER ROLE mfm_store_configuration_maintenance
-            NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS
-            CONNECTION LIMIT -1 PASSWORD NULL;
-    END IF;
-
-    EXECUTE format('GRANT mfm_store_owner TO %I', current_user);
-    EXECUTE format('GRANT mfm_store_qualification TO %I', current_user);
-    EXECUTE format('GRANT mfm_store_application TO %I', current_user);
-    EXECUTE format('GRANT mfm_store_configuration_maintenance TO %I', current_user);
+    EXECUTE format('GRANT %I TO %I', owner_role, current_user);
+    EXECUTE format('GRANT %I TO %I', qualification_role, current_user);
+    EXECUTE format('ALTER SCHEMA %I OWNER TO %I', schema_name, owner_role);
 END
-$mfm_roles$;
-
-ALTER ROLE mfm_store_owner RESET ALL;
-ALTER ROLE mfm_store_qualification RESET ALL;
-ALTER ROLE mfm_store_application RESET ALL;
-ALTER ROLE mfm_store_configuration_maintenance RESET ALL;
-
-DO $mfm_schema_owner$
-DECLARE
-    schema_name text := current_schema();
-BEGIN
-    EXECUTE format('ALTER SCHEMA %I OWNER TO mfm_store_owner', schema_name);
-END
-$mfm_schema_owner$;
+$mfm_target_roles$;
 
 CREATE TABLE store_identity (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
@@ -98,7 +87,40 @@ CREATE TABLE store_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT store_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.structured-run-history-postgres.v3'
+        schema_contract_version = 'mfm.structured-run-history-postgres.v4'
+    )
+);
+
+CREATE TABLE target_authority (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    target_key TEXT NOT NULL,
+    fence_generation NUMERIC(20, 0) NOT NULL,
+    release_epoch NUMERIC(20, 0) NOT NULL,
+    owner_role TEXT NOT NULL,
+    qualification_role TEXT NOT NULL,
+    run_reader_role TEXT NOT NULL,
+    run_writer_role TEXT NOT NULL,
+    configuration_reader_role TEXT NOT NULL,
+    configuration_writer_role TEXT NOT NULL,
+    CONSTRAINT target_authority_singleton_v1 CHECK (singleton),
+    CONSTRAINT target_authority_key_v1 CHECK (target_key ~ '^[0-9a-f]{16}$'),
+    CONSTRAINT target_authority_generation_v1 CHECK (
+        fence_generation >= 1
+        AND fence_generation <= 18446744073709551615::numeric
+        AND trunc(fence_generation) = fence_generation
+    ),
+    CONSTRAINT target_authority_release_v1 CHECK (
+        release_epoch >= 1
+        AND release_epoch <= 18446744073709551615::numeric
+        AND trunc(release_epoch) = release_epoch
+    ),
+    CONSTRAINT target_authority_roles_v1 CHECK (
+        owner_role = format('mfm_t_%s_own', target_key)
+        AND qualification_role = format('mfm_t_%s_qlf', target_key)
+        AND run_reader_role = format('mfm_t_%s_rrd', target_key)
+        AND run_writer_role = format('mfm_t_%s_rwr', target_key)
+        AND configuration_reader_role = format('mfm_t_%s_crd', target_key)
+        AND configuration_writer_role = format('mfm_t_%s_cwr', target_key)
     )
 );
 
@@ -125,7 +147,32 @@ SELECT
 FROM identity_parts;
 
 INSERT INTO store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.structured-run-history-postgres.v3');
+VALUES (TRUE, 'mfm.structured-run-history-postgres.v4');
+
+INSERT INTO target_authority (
+    singleton,
+    target_key,
+    fence_generation,
+    release_epoch,
+    owner_role,
+    qualification_role,
+    run_reader_role,
+    run_writer_role,
+    configuration_reader_role,
+    configuration_writer_role
+)
+SELECT
+    TRUE,
+    target_key,
+    1,
+    1,
+    format('mfm_t_%s_own', target_key),
+    format('mfm_t_%s_qlf', target_key),
+    format('mfm_t_%s_rrd', target_key),
+    format('mfm_t_%s_rwr', target_key),
+    format('mfm_t_%s_crd', target_key),
+    format('mfm_t_%s_cwr', target_key)
+FROM (SELECT substr(md5(current_schema()), 1, 16) AS target_key) AS keys;
 
 CREATE TABLE run_history_heads (
     run_id TEXT PRIMARY KEY,
@@ -457,67 +504,142 @@ CREATE TABLE configuration_heads (
     )
 );
 
-ALTER TABLE store_identity OWNER TO mfm_store_owner;
-ALTER TABLE store_schema_metadata OWNER TO mfm_store_owner;
-ALTER TABLE run_history_heads OWNER TO mfm_store_owner;
-ALTER TABLE run_history_batches OWNER TO mfm_store_owner;
-ALTER TABLE run_history_batch_objects OWNER TO mfm_store_owner;
-ALTER TABLE tenant_fact_heads OWNER TO mfm_store_owner;
-ALTER TABLE tenant_fact_publications OWNER TO mfm_store_owner;
-ALTER TABLE configuration_revisions OWNER TO mfm_store_owner;
-ALTER TABLE configuration_heads OWNER TO mfm_store_owner;
-ALTER TABLE _sqlx_migrations OWNER TO mfm_store_owner;
-
-SET LOCAL ROLE mfm_store_owner;
+DO $mfm_table_owners$
+DECLARE
+    owner_role text;
+BEGIN
+    SELECT authority.owner_role INTO owner_role FROM target_authority AS authority WHERE singleton;
+    EXECUTE format('ALTER TABLE store_identity OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE store_schema_metadata OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE target_authority OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE run_history_heads OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE run_history_batches OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE run_history_batch_objects OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE tenant_fact_heads OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE tenant_fact_publications OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE configuration_revisions OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE configuration_heads OWNER TO %I', owner_role);
+    EXECUTE format('ALTER TABLE _sqlx_migrations OWNER TO %I', owner_role);
+END
+$mfm_table_owners$;
 
 DO $mfm_schema_acl$
 DECLARE
     schema_name text := current_schema();
+    owner_role text;
+    qualification_role text;
+    run_reader_role text;
+    run_writer_role text;
+    configuration_reader_role text;
+    configuration_writer_role text;
 BEGIN
+    SELECT
+        authority.owner_role,
+        authority.qualification_role,
+        authority.run_reader_role,
+        authority.run_writer_role,
+        authority.configuration_reader_role,
+        authority.configuration_writer_role
+    INTO
+        owner_role,
+        qualification_role,
+        run_reader_role,
+        run_writer_role,
+        configuration_reader_role,
+        configuration_writer_role
+    FROM target_authority AS authority
+    WHERE singleton;
+
+    EXECUTE format('SET LOCAL ROLE %I', owner_role);
+
     EXECUTE format('REVOKE ALL ON SCHEMA %I FROM PUBLIC', schema_name);
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO mfm_store_qualification', schema_name);
-    EXECUTE format('GRANT USAGE ON SCHEMA %I TO mfm_store_application', schema_name);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, qualification_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, run_reader_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, run_writer_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, configuration_reader_role);
+    EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', schema_name, configuration_writer_role);
+
+    EXECUTE 'REVOKE ALL ON TABLE store_identity FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE store_schema_metadata FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE target_authority FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE run_history_heads FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE run_history_batches FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE run_history_batch_objects FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE tenant_fact_heads FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE tenant_fact_publications FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE configuration_revisions FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE configuration_heads FROM PUBLIC';
+    EXECUTE 'REVOKE ALL ON TABLE _sqlx_migrations FROM PUBLIC';
+
+    EXECUTE format('GRANT SELECT ON TABLE store_identity TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE store_schema_metadata TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE target_authority TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_heads TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_batches TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_batch_objects TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE tenant_fact_heads TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE tenant_fact_publications TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE configuration_revisions TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE configuration_heads TO %I', qualification_role);
+    EXECUTE format('GRANT SELECT ON TABLE _sqlx_migrations TO %I', qualification_role);
+
+    EXECUTE format('GRANT SELECT ON TABLE store_identity TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE store_schema_metadata TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE target_authority TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_heads TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_batches TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE run_history_batch_objects TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE tenant_fact_heads TO %I', run_reader_role);
+    EXECUTE format('GRANT SELECT ON TABLE tenant_fact_publications TO %I', run_reader_role);
+
+    EXECUTE format('GRANT SELECT ON TABLE store_identity TO %I', run_writer_role);
+    EXECUTE format('GRANT SELECT ON TABLE store_schema_metadata TO %I', run_writer_role);
+    EXECUTE format('GRANT SELECT ON TABLE target_authority TO %I', run_writer_role);
     EXECUTE format(
-        'GRANT USAGE ON SCHEMA %I TO mfm_store_configuration_maintenance',
-        schema_name
+        'GRANT SELECT, INSERT, UPDATE ON TABLE run_history_heads TO %I',
+        run_writer_role
     );
+    EXECUTE format('GRANT SELECT, INSERT ON TABLE run_history_batches TO %I', run_writer_role);
+    EXECUTE format(
+        'GRANT SELECT, INSERT ON TABLE run_history_batch_objects TO %I',
+        run_writer_role
+    );
+    EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE ON TABLE tenant_fact_heads TO %I',
+        run_writer_role
+    );
+    EXECUTE format(
+        'GRANT SELECT, INSERT ON TABLE tenant_fact_publications TO %I',
+        run_writer_role
+    );
+
+    EXECUTE format('GRANT SELECT ON TABLE store_identity TO %I', configuration_reader_role);
+    EXECUTE format(
+        'GRANT SELECT ON TABLE store_schema_metadata TO %I',
+        configuration_reader_role
+    );
+    EXECUTE format('GRANT SELECT ON TABLE target_authority TO %I', configuration_reader_role);
+    EXECUTE format(
+        'GRANT SELECT ON TABLE configuration_revisions TO %I',
+        configuration_reader_role
+    );
+    EXECUTE format('GRANT SELECT ON TABLE configuration_heads TO %I', configuration_reader_role);
+
+    EXECUTE format('GRANT SELECT ON TABLE store_identity TO %I', configuration_writer_role);
+    EXECUTE format(
+        'GRANT SELECT ON TABLE store_schema_metadata TO %I',
+        configuration_writer_role
+    );
+    EXECUTE format('GRANT SELECT ON TABLE target_authority TO %I', configuration_writer_role);
+    EXECUTE format(
+        'GRANT SELECT, INSERT ON TABLE configuration_revisions TO %I',
+        configuration_writer_role
+    );
+    EXECUTE format(
+        'GRANT SELECT, INSERT, UPDATE ON TABLE configuration_heads TO %I',
+        configuration_writer_role
+    );
+
+    RESET ROLE;
 END
 $mfm_schema_acl$;
-
-REVOKE ALL ON TABLE store_identity FROM PUBLIC;
-REVOKE ALL ON TABLE store_schema_metadata FROM PUBLIC;
-REVOKE ALL ON TABLE run_history_heads FROM PUBLIC;
-REVOKE ALL ON TABLE run_history_batches FROM PUBLIC;
-REVOKE ALL ON TABLE run_history_batch_objects FROM PUBLIC;
-REVOKE ALL ON TABLE tenant_fact_heads FROM PUBLIC;
-REVOKE ALL ON TABLE tenant_fact_publications FROM PUBLIC;
-REVOKE ALL ON TABLE configuration_revisions FROM PUBLIC;
-REVOKE ALL ON TABLE configuration_heads FROM PUBLIC;
-REVOKE ALL ON TABLE _sqlx_migrations FROM PUBLIC;
-
-GRANT SELECT ON TABLE store_identity TO mfm_store_qualification;
-GRANT SELECT ON TABLE store_schema_metadata TO mfm_store_qualification;
-GRANT SELECT ON TABLE run_history_heads TO mfm_store_qualification;
-GRANT SELECT ON TABLE run_history_batches TO mfm_store_qualification;
-GRANT SELECT ON TABLE run_history_batch_objects TO mfm_store_qualification;
-GRANT SELECT ON TABLE tenant_fact_heads TO mfm_store_qualification;
-GRANT SELECT ON TABLE tenant_fact_publications TO mfm_store_qualification;
-GRANT SELECT ON TABLE configuration_revisions TO mfm_store_qualification;
-GRANT SELECT ON TABLE configuration_heads TO mfm_store_qualification;
-GRANT SELECT ON TABLE _sqlx_migrations TO mfm_store_qualification;
-
-GRANT SELECT ON TABLE store_identity TO mfm_store_application;
-GRANT SELECT ON TABLE store_schema_metadata TO mfm_store_application;
-GRANT SELECT, INSERT, UPDATE ON TABLE run_history_heads TO mfm_store_application;
-GRANT SELECT, INSERT ON TABLE run_history_batches TO mfm_store_application;
-GRANT SELECT, INSERT ON TABLE run_history_batch_objects TO mfm_store_application;
-GRANT SELECT, INSERT, UPDATE ON TABLE tenant_fact_heads TO mfm_store_application;
-GRANT SELECT, INSERT ON TABLE tenant_fact_publications TO mfm_store_application;
-GRANT SELECT ON TABLE store_identity TO mfm_store_configuration_maintenance;
-GRANT SELECT ON TABLE store_schema_metadata TO mfm_store_configuration_maintenance;
-GRANT SELECT, INSERT ON TABLE configuration_revisions TO mfm_store_configuration_maintenance;
-GRANT SELECT, INSERT, UPDATE ON TABLE configuration_heads TO mfm_store_configuration_maintenance;
-GRANT SELECT ON TABLE configuration_revisions TO mfm_store_application;
-GRANT SELECT ON TABLE configuration_heads TO mfm_store_application;
-
-RESET ROLE;

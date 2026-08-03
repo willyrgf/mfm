@@ -32,7 +32,7 @@ pub(crate) async fn connect_application(
     Err(PublicError::new(
         mfm_app::ErrorClass::ServiceUnavailable,
         "AuthoritativeWriterFenceUnavailable",
-        "A deployment-owned authoritative-writer fence is required",
+        "A deployment-issued exact-target session bundle is required",
     ))
 }
 

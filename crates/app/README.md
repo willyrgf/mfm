@@ -41,7 +41,7 @@ unavailable result when no qualified candidate is supplied; there is no live fal
 `connect_production_application` requires:
 
 - a deployment-supplied `RunAccessPolicy`;
-- a deployment-supplied run-history `AuthoritativeWriterFence`;
+- a deployment-issued opaque exact-target session bundle;
 - authoritative PostgreSQL;
 - one affine `EvmWalletDeployment` produced only from
   `EvmWalletDeploymentAssemblyInput`: the provider-qualified routing catalog, pending exact private
@@ -68,9 +68,10 @@ issuer, signer secret, target session, mutation permit, or generic invoker.
 The application receives resolve-only configured-value history. Deployment/maintenance owns its
 append writer. The selected revision becomes immutable run admission material.
 
-Standalone CLI/REST bootstraps cannot self-attest deployment authority and fail closed with
+Standalone CLI/REST bootstraps cannot self-issue target sessions and fail closed with
 `AuthoritativeWriterFenceUnavailable`. An embedding deployment injects a fully composed
-`Application` or REST `AppState`.
+`Application` or REST `AppState` after issuing the opaque session bundle from deployment-private
+login materials.
 
 ## Privacy
 

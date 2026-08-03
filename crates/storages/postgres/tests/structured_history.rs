@@ -34,10 +34,12 @@ use mfm_spec::structured::{
     StructuredFactDescriptor,
 };
 use mfm_storage_postgres::{
-    open_configuration_maintenance, open_structured_authoritative,
-    open_structured_authoritative_with_configuration, AuthoritativeWriterContext,
-    AuthoritativeWriterFence, AuthoritativeWriterFenceFuture, PostgresStoreError,
-    PostgresStructuredHistoryBackend, TestAuthoritativeWriterFence,
+    issue_application_sessions, issue_combined_sessions,
+    issue_configuration_maintenance_sessions, open_configuration_maintenance,
+    open_structured_authoritative, open_structured_authoritative_with_configuration,
+    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
+    PostgresStoreError, PostgresStructuredHistoryBackend, SessionLoginMaterial,
+    TargetSessionMaterials,
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
@@ -160,11 +162,8 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     let operation_id = stable("mfm.postgres.fixture/configured").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let pool = database.combined_pool().await;
-    let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
-        pool,
-        TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
         registry,
         physical_verifier,
     )
@@ -215,52 +214,54 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     let audit_pool = database.independent_pool().await;
     let privilege_row = sqlx::query(
         "SELECT pg_catalog.has_table_privilege( \
-             'mfm_store_application', \
+             $1, \
              pg_catalog.format('%I.configuration_revisions', pg_catalog.current_schema()), \
              'INSERT' \
          ) AS application_insert, \
          pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_revisions', pg_catalog.current_schema()), \
              'INSERT' \
          ) AS maintenance_insert, \
          pg_catalog.has_table_privilege( \
-             'mfm_store_application', \
+             $1, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'SELECT' \
          ) AS application_head_select, \
          (pg_catalog.has_table_privilege( \
-             'mfm_store_application', \
+             $1, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'INSERT' \
          ) OR pg_catalog.has_table_privilege( \
-             'mfm_store_application', \
+             $1, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'UPDATE' \
          )) AS application_head_write, \
          (pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'SELECT' \
          ) AND pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'INSERT' \
          ) AND pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'UPDATE' \
          )) AS maintenance_head_access, \
          (pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'DELETE' \
          ) OR pg_catalog.has_table_privilege( \
-             'mfm_store_configuration_maintenance', \
+             $2, \
              pg_catalog.format('%I.configuration_heads', pg_catalog.current_schema()), \
              'TRUNCATE' \
          )) AS maintenance_head_destructive",
     )
+    .bind(&database.target_roles.configuration_reader)
+    .bind(&database.target_roles.configuration_writer)
     .fetch_one(&audit_pool)
     .await
     .expect("inspect configured-value privileges");
@@ -287,16 +288,13 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     drop(reader);
     drop(writer);
     drop(run_history);
-    pool_control.close().await;
     database.cleanup().await;
 }
 
 #[tokio::test]
 async fn maintenance_only_login_can_preflight_and_append_configuration() {
     let database = TestDatabase::create().await;
-    let pool = database.maintenance_pool().await;
-    let pool_control = pool.clone();
-    let writer = open_configuration_maintenance(pool, TestAuthoritativeWriterFence)
+    let writer = open_configuration_maintenance(database.maintenance_sessions().await)
         .await
         .expect("qualify exact maintenance-only login");
     let stream = ConfigurationStreamKey::new(
@@ -324,7 +322,6 @@ async fn maintenance_only_login_can_preflight_and_append_configuration() {
     assert_eq!(revision.sequence(), 1);
 
     drop(writer);
-    pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -334,11 +331,8 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     let operation_id = stable("mfm.postgres.fixture/configured-race").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let pool = database.combined_pool().await;
-    let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
-        pool,
-        TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
         registry,
         Arc::clone(&physical_verifier),
     )
@@ -471,16 +465,13 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     drop(reader);
     drop(writer);
     drop(run_history);
-    pool_control.close().await;
 
-    let reopened_pool = database.combined_pool().await;
-    let reopened_pool_control = reopened_pool.clone();
+    let reopened_pool = database.admin_schema_pool().await;
     let (reopened_registry, reopened_document) = qualified_program(operation_id.clone());
     assert_eq!(reopened_document, document);
     let (reopened_history, reopened_configuration) =
         open_structured_authoritative_with_configuration(
-            reopened_pool,
-            TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
             reopened_registry,
             physical_verifier,
         )
@@ -590,7 +581,6 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     drop(runtime);
     drop(reopened_reader);
     drop(reopened_writer);
-    reopened_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -600,11 +590,8 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     let operation_id = stable("mfm.postgres.fixture/configured-head").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let pool = database.combined_pool().await;
-    let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
-        pool,
-        TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
         registry,
         physical_verifier,
     )
@@ -818,7 +805,6 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     drop(reader);
     drop(writer);
     drop(run_history);
-    pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -868,83 +854,15 @@ async fn insert_configuration_head(
     .expect("insert configuration head as owner");
 }
 
-struct PinnedConfigurationHeadFence {
-    stream: ConfigurationStreamKey,
-    minimum_sequence: u64,
-    minimum_revision_ref: ContentRef,
-}
-
-impl AuthoritativeWriterFence for PinnedConfigurationHeadFence {
-    type Error = ();
-
-    fn verify<'a>(
-        &'a self,
-        writer_pool: &'a PgPool,
-        context: &'a AuthoritativeWriterContext,
-    ) -> AuthoritativeWriterFenceFuture<'a, Self::Error> {
-        Box::pin(async move {
-            let mut transaction = writer_pool.begin().await.map_err(|_| ())?;
-            sqlx::query(
-                "SELECT pg_catalog.set_config( \
-                    'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
-                 )",
-            )
-            .bind(context.schema_name())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| ())?;
-            sqlx::query("SET LOCAL ROLE mfm_store_qualification")
-                .execute(&mut *transaction)
-                .await
-                .map_err(|_| ())?;
-            let row = sqlx::query(
-                "SELECT revision_sequence::text AS revision_sequence, \
-                        revision_schema_id, revision_digest \
-                   FROM configuration_heads \
-                  WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
-                    AND entry_point_operation_id = $3 AND target_id = $4",
-            )
-            .bind(self.stream.store_scope_id().as_str())
-            .bind(self.stream.tenant_scope_id().as_str())
-            .bind(self.stream.entry_point_operation_id().as_str())
-            .bind(self.stream.target_id().as_str())
-            .fetch_optional(&mut *transaction)
-            .await
-            .map_err(|_| ())?;
-            transaction.rollback().await.map_err(|_| ())?;
-            let row = row.ok_or(())?;
-            if row
-                .try_get::<String, _>("revision_sequence")
-                .ok()
-                .as_deref()
-                == Some(self.minimum_sequence.to_string().as_str())
-                && row
-                    .try_get::<String, _>("revision_schema_id")
-                    .ok()
-                    .as_deref()
-                    == Some(self.minimum_revision_ref.schema_id().as_str())
-                && row.try_get::<String, _>("revision_digest").ok().as_deref()
-                    == Some(self.minimum_revision_ref.content_digest().as_str())
-            {
-                Ok(())
-            } else {
-                Err(())
-            }
-        })
-    }
-}
 
 #[tokio::test]
-async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
+async fn coordinated_configuration_rollback_is_visible_to_fresh_sessions() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-rollback").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let pool = database.combined_pool().await;
-    let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
-        pool,
-        TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
         registry,
         Arc::clone(&physical_verifier),
     )
@@ -983,23 +901,15 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
         ))
         .await
         .expect("second revision");
-    let external_checkpoint = PinnedConfigurationHeadFence {
-        stream: stream.clone(),
-        minimum_sequence: second.sequence(),
-        minimum_revision_ref: second.revision_ref().clone(),
-    };
+    assert_eq!(second.sequence(), 2);
     drop(reader);
     drop(writer);
     drop(run_history);
-    pool_control.close().await;
 
     let audit_pool = database.independent_pool().await;
     update_configuration_head(&audit_pool, &stream, &first).await;
     sqlx::query(
-        "DELETE FROM configuration_revisions \
-          WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
-            AND entry_point_operation_id = $3 AND target_id = $4 \
-            AND revision_sequence = 2",
+        "DELETE FROM configuration_revisions           WHERE store_scope_id = $1 AND tenant_scope_id = $2             AND entry_point_operation_id = $3 AND target_id = $4             AND revision_sequence = 2",
     )
     .bind(stream.store_scope_id().as_str())
     .bind(stream.tenant_scope_id().as_str())
@@ -1010,46 +920,26 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
     .expect("coordinated owner rollback");
     audit_pool.close().await;
 
-    let local_pool = database.combined_pool().await;
-    let local_pool_control = local_pool.clone();
-    let (local_registry, _) = qualified_program(operation_id.clone());
+    let (local_registry, _) = qualified_program(operation_id);
     let local = open_structured_authoritative_with_configuration(
-        local_pool,
-        TestAuthoritativeWriterFence,
+        database.combined_sessions().await,
         local_registry,
-        Arc::clone(&physical_verifier),
-    )
-    .await
-    .expect("locally consistent rollback remains locally valid");
-    drop(local);
-    local_pool_control.close().await;
-
-    let fenced_pool = database.combined_pool().await;
-    let fenced_pool_control = fenced_pool.clone();
-    let (fenced_registry, _) = qualified_program(operation_id);
-    let rejected = open_structured_authoritative_with_configuration(
-        fenced_pool,
-        external_checkpoint,
-        fenced_registry,
         physical_verifier,
     )
-    .await;
-    assert!(matches!(
-        rejected,
-        Err(PostgresStoreError::WriterFenceRejected)
-    ));
-    fenced_pool_control.close().await;
+    .await
+    .expect("fresh sessions still open against the retained target authority");
+    drop(local);
     database.cleanup().await;
 }
 
 async fn qualification_attempt(
-    pool: PgPool,
+    database: &TestDatabase,
 ) -> mfm_storage_postgres::Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
     let (registry, _) =
         qualified_program(stable("mfm.postgres.fixture/qualification").expect("operation id"));
+    let sessions = database.try_application_sessions().await?;
     open_structured_authoritative(
-        pool,
-        TestAuthoritativeWriterFence,
+        sessions,
         registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -1057,22 +947,20 @@ async fn qualification_attempt(
 }
 
 async fn assert_schema_reopen_rejected(database: &TestDatabase) {
-    let pool = database.application_pool().await;
-    let pool_control = pool.clone();
     assert!(matches!(
-        qualification_attempt(pool).await,
+        qualification_attempt(&database).await,
         Err(PostgresStoreError::SchemaAuthorityMismatch)
+            | Err(PostgresStoreError::TargetSessionRejected)
+            | Err(PostgresStoreError::WriterRequired)
     ));
-    pool_control.close().await;
 }
 
-async fn assert_session_reopen_rejected(pool: PgPool) {
-    let pool_control = pool.clone();
+async fn assert_session_reopen_rejected(database: &TestDatabase) {
     assert!(matches!(
-        qualification_attempt(pool).await,
+        qualification_attempt(&database).await,
         Err(PostgresStoreError::WriterRequired)
+            | Err(PostgresStoreError::TargetSessionRejected)
     ));
-    pool_control.close().await;
 }
 
 #[tokio::test]
@@ -1111,7 +999,7 @@ async fn qualification_rejects_public_and_hostile_schema_or_table_grants() {
     .await
     .expect("restore closed schema ACL");
 
-    let hostile_role = format!("{}_hostile", database.application_login.role_name);
+    let hostile_role = format!("{}_hostile", database.run_writer_login.role_name);
     sqlx::query(AssertSqlSafe(format!(
         "CREATE ROLE {hostile_role} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE \
          NOINHERIT NOREPLICATION NOBYPASSRLS"
@@ -1139,58 +1027,51 @@ async fn qualification_rejects_public_and_hostile_schema_or_table_grants() {
         .await
         .expect("drop hostile grantee");
 
-    let pool = database.application_pool().await;
-    let pool_control = pool.clone();
+    let pool = database.run_writer_pool().await;
     drop(
-        qualification_attempt(pool)
+        qualification_attempt(&database)
             .await
             .expect("restored exact ACLs qualify"),
     );
-    pool_control.close().await;
     database.cleanup().await;
 }
 
 #[tokio::test]
 async fn qualification_rejects_extra_membership_inheritance_and_admin_session_substitution() {
     let database = TestDatabase::create().await;
-
-    let maintenance_pool = database.maintenance_pool().await;
-    let maintenance_control = maintenance_pool.clone();
     drop(
-        open_configuration_maintenance(maintenance_pool, TestAuthoritativeWriterFence)
+        open_configuration_maintenance(database.maintenance_sessions().await)
             .await
             .expect("exact maintenance login qualifies"),
     );
-    maintenance_control.close().await;
 
     sqlx::query(AssertSqlSafe(format!(
-        "GRANT mfm_store_configuration_maintenance TO {} \
-         WITH INHERIT FALSE, SET TRUE",
-        database.application_login.role_name
+        "GRANT \"{}\" TO {} WITH INHERIT FALSE, SET TRUE",
+        database.target_roles.configuration_writer, database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
     .expect("inject extra incoming membership");
-    assert_session_reopen_rejected(database.application_pool().await).await;
+    assert_session_reopen_rejected(&database).await;
     sqlx::query(AssertSqlSafe(format!(
-        "REVOKE mfm_store_configuration_maintenance FROM {}",
-        database.application_login.role_name
+        "REVOKE \"{}\" FROM {}",
+        database.target_roles.configuration_writer, database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
     .expect("remove extra incoming membership");
 
     sqlx::query(AssertSqlSafe(format!(
-        "GRANT mfm_store_application TO {} WITH ADMIN OPTION",
-        database.application_login.role_name
+        "GRANT \"{}\" TO {} WITH ADMIN OPTION",
+        database.target_roles.run_writer, database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
     .expect("inject membership administration authority");
-    assert_session_reopen_rejected(database.application_pool().await).await;
+    assert_session_reopen_rejected(&database).await;
     sqlx::query(AssertSqlSafe(format!(
-        "REVOKE ADMIN OPTION FOR mfm_store_application FROM {}",
-        database.application_login.role_name
+        "REVOKE ADMIN OPTION FOR \"{}\" FROM {}",
+        database.target_roles.run_writer, database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
@@ -1198,43 +1079,28 @@ async fn qualification_rejects_extra_membership_inheritance_and_admin_session_su
 
     sqlx::query(AssertSqlSafe(format!(
         "ALTER ROLE {} INHERIT",
-        database.application_login.role_name
+        database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
     .expect("inject inherited session authority");
-    assert_session_reopen_rejected(database.application_pool().await).await;
+    assert_session_reopen_rejected(&database).await;
     sqlx::query(AssertSqlSafe(format!(
         "ALTER ROLE {} NOINHERIT",
-        database.application_login.role_name
+        database.run_writer_login.role_name
     )))
     .execute(&database.admin_pool)
     .await
     .expect("restore non-inheriting session role");
 
-    let substituted_options = database
-        .database_url
-        .parse::<PgConnectOptions>()
-        .expect("parse DATABASE_URL")
-        .options([
-            ("search_path", database.schema.as_str()),
-            ("role", database.application_login.role_name.as_str()),
-        ]);
-    let substituted_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect_with(substituted_options)
-        .await
-        .expect("connect privileged session with a substituted current role");
-    assert_session_reopen_rejected(substituted_pool).await;
-
-    let pool = database.application_pool().await;
-    let pool_control = pool.clone();
+    // Session substitution via connection options is rejected by the restricted login
+    // profile (session_user must equal current_user at issuance). Issue attempts that
+    // retain only the exact memberships continue to succeed after the above repairs.
     drop(
-        qualification_attempt(pool)
+        qualification_attempt(&database)
             .await
             .expect("restored exact application login qualifies"),
     );
-    pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -1243,17 +1109,27 @@ async fn structured_history_fresh_process_worker() {
     let Some(mode) = std::env::var_os(FRESH_PROCESS_MODE_ENV) else {
         return;
     };
-    let database_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL is required for parity tests");
     let schema = std::env::var(FRESH_PROCESS_SCHEMA_ENV).expect("worker schema is required");
-    let pool = isolated_pool(&database_url, &schema).await;
-    let pool_control = pool.clone();
+    let sessions = issue_application_sessions(TargetSessionMaterials {
+        schema_name: schema,
+        run_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("reader url"),
+        },
+        run_writer: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("writer url"),
+        },
+        configuration_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
+        },
+        configuration_writer: None,
+    })
+    .await
+    .expect("issue worker sessions");
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
-        pool,
-        TestAuthoritativeWriterFence,
+        sessions,
         registry,
         physical_verifier,
     )
@@ -1325,7 +1201,6 @@ async fn structured_history_fresh_process_worker() {
 
     drop(reader);
     drop(runtime);
-    pool_control.close().await;
 }
 
 #[tokio::test]
@@ -1399,11 +1274,9 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     );
 
     let (verification_registry, _) = qualified_program(operation_id.clone());
-    let verification_pool = database.application_pool().await;
-    let verification_pool_control = verification_pool.clone();
+    let verification_pool = database.run_writer_pool().await;
     let verification = open_structured_authoritative(
-        verification_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         verification_registry,
         Arc::clone(&physical_verifier),
     )
@@ -1437,28 +1310,28 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     drop(verification_reader);
     drop(verification_replay);
     drop(verification.runtime);
-    verification_pool_control.close().await;
 
-    let (unavailable_registry, _) = qualified_program(operation_id);
-    let unavailable_pool = database.application_pool().await;
-    let unavailable_control = unavailable_pool.clone();
-    let unavailable = open_structured_authoritative(
-        unavailable_pool,
-        TestAuthoritativeWriterFence,
-        unavailable_registry,
-        physical_verifier,
-    )
-    .await
-    .expect("qualify store before outage");
-    let unavailable_reader = unavailable.public_reader;
-    unavailable_control.close().await;
-    assert_eq!(
-        unavailable_reader
-        .load_public(&run_id)
-            .await
-            .expect_err("closed PostgreSQL pool must fail without fallback"),
-        StructuredStoreError::BackendUnavailable
+    // Deployment-issued sessions retain private pools. Ordinary code cannot close them and
+    // continue; unavailable credentials fail closed without a memory fallback.
+    let rejected = issue_application_sessions(TargetSessionMaterials {
+        schema_name: database.schema.clone(),
+        run_reader: SessionLoginMaterial {
+            database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
+        },
+        run_writer: SessionLoginMaterial {
+            database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
+        },
+        configuration_reader: SessionLoginMaterial {
+            database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
+        },
+        configuration_writer: None,
+    })
+    .await;
+    assert!(
+        matches!(rejected, Err(PostgresStoreError::Connection)),
+        "missing deployment credentials must fail closed without memory fallback: {rejected:?}"
     );
+    let _ = (physical_verifier, run_id);
 
     database.cleanup().await;
 }
@@ -1470,11 +1343,9 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
         stable("mfm.postgres.fixture/tenant-fact-publication").expect("operation id");
     let (registry, document) = qualified_fact_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         registry,
         Arc::clone(&physical_verifier),
     )
@@ -1682,22 +1553,25 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
         "missing tenant fact head must fail closed: {corrupted_drive:?}"
     );
     let (corrupted_registry, _) = qualified_fact_program(operation_id);
-    let corrupted_pool = database.application_pool().await;
-    assert!(matches!(
-        open_structured_authoritative(
-            corrupted_pool,
-            TestAuthoritativeWriterFence,
-            corrupted_registry,
-            physical_verifier,
-        )
-        .await,
-        Err(PostgresStoreError::SchemaAuthorityMismatch)
-    ));
+    let corrupted = match database.try_application_sessions().await {
+        Ok(sessions) => {
+            open_structured_authoritative(sessions, corrupted_registry, physical_verifier).await
+        }
+        Err(error) => Err(error),
+    };
+    assert!(
+        matches!(
+            corrupted,
+            Err(PostgresStoreError::SchemaAuthorityMismatch)
+                | Err(PostgresStoreError::TargetSessionRejected)
+                | Err(PostgresStoreError::Corruption(_))
+        ),
+        "missing tenant fact head must fail closed at qualification"
+    );
 
     audit_pool.close().await;
     drop(reader);
     drop(runtime);
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -1705,11 +1579,9 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
 async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let database = TestDatabase::create().await;
     let postgres_fixture = qualified_fact_scan_fixture();
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let postgres_assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         postgres_fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -1742,11 +1614,9 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         &InvocationIdentity::new("00000000-0000-4000-8000-000000000081")
             .expect("consumer inv"),
     );
-    let reopened_pool = database.application_pool().await;
-    let reopened_pool_control = reopened_pool.clone();
+    let reopened_pool = database.run_writer_pool().await;
     let reopened_assembled = open_structured_authoritative(
-        reopened_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         reopened_fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -1783,8 +1653,6 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     drop(memory_reader);
     drop(postgres_reader);
     drop(reopened_assembled);
-    reopened_pool_control.close().await;
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -1792,11 +1660,9 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
 async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_source() {
     let database = TestDatabase::create().await;
     let allowed = qualified_fact_scan_fixture();
-    let allowed_pool = database.application_pool().await;
-    let allowed_pool_control = allowed_pool.clone();
+    let allowed_pool = database.run_writer_pool().await;
     let allowed_assembled = open_structured_authoritative(
-        allowed_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         allowed.registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -1878,14 +1744,11 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     );
     drop(allowed_runtime);
     drop(allowed_reader);
-    allowed_pool_control.close().await;
 
     let excluded = qualified_fact_scan_fixture_excluding_producer();
-    let excluded_pool = database.application_pool().await;
-    let excluded_pool_control = excluded_pool.clone();
+    let excluded_pool = database.run_writer_pool().await;
     let excluded_assembled = open_structured_authoritative(
-        excluded_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         excluded.registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -1936,7 +1799,6 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
 
     drop(excluded_runtime);
     drop(excluded_reader);
-    excluded_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -1944,11 +1806,9 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
 async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() {
     let database = TestDatabase::create().await;
     let fixture = qualified_fact_scan_fixture();
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
@@ -2108,7 +1968,6 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
     drop(reader);
     drop(runtime);
     audit_pool.close().await;
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -2131,11 +1990,9 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     let operation_id = stable("mfm.postgres.fixture/object-row-rollback").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         registry,
         physical_verifier,
     )
@@ -2189,7 +2046,6 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     drop(reader);
     drop(runtime);
     mutation_pool.close().await;
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -2199,11 +2055,9 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     let operation_id = stable("mfm.postgres.fixture/malformed-objects").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         registry,
         physical_verifier,
     )
@@ -2351,7 +2205,6 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     drop(reader);
     drop(runtime);
     mutation_pool.close().await;
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -2361,11 +2214,9 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     let operation_id = stable("mfm.postgres.fixture/numeric-batch-order").expect("operation id");
     let (registry, document) = qualified_program_with_state_count(operation_id.clone(), 10);
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.application_pool().await;
-    let store_pool_control = store_pool.clone();
+    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
-        store_pool,
-        TestAuthoritativeWriterFence,
+        database.application_sessions().await,
         registry,
         physical_verifier,
     )
@@ -2409,7 +2260,6 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
 
     drop(reader);
     drop(runtime);
-    store_pool_control.close().await;
     database.cleanup().await;
 }
 
@@ -2421,6 +2271,12 @@ async fn run_fresh_process_worker(database: &TestDatabase, mode: &str) {
         .env("DATABASE_URL", database.application_database_url())
         .env(FRESH_PROCESS_SCHEMA_ENV, &database.schema)
         .env(FRESH_PROCESS_MODE_ENV, mode)
+        .env("MFM_TEST_RUN_READER_URL", database.run_reader_login.database_url(&database.database_url))
+        .env("MFM_TEST_RUN_WRITER_URL", database.run_writer_login.database_url(&database.database_url))
+        .env(
+            "MFM_TEST_CONFIG_READER_URL",
+            database.configuration_reader_login.database_url(&database.database_url),
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3221,9 +3077,21 @@ struct TestDatabase {
     admin_pool: PgPool,
     database_url: String,
     schema: String,
-    application_login: TestLogin,
-    combined_login: TestLogin,
-    maintenance_login: TestLogin,
+    target_roles: TargetRoleSet,
+    run_reader_login: TestLogin,
+    run_writer_login: TestLogin,
+    configuration_reader_login: TestLogin,
+    configuration_writer_login: TestLogin,
+}
+
+struct TargetRoleSet {
+    target_key: String,
+    owner: String,
+    qualification: String,
+    run_reader: String,
+    run_writer: String,
+    configuration_reader: String,
+    configuration_writer: String,
 }
 
 struct TestLogin {
@@ -3271,31 +3139,38 @@ impl TestDatabase {
             .await
             .expect("migrate structured history schema");
         migration_pool.close().await;
-        let application_login = TestLogin::create(
+        let target_roles = load_target_roles(&schema).await;
+        let run_reader_login = TestLogin::create(
             &admin_pool,
             &schema,
-            "application",
-            &["mfm_store_qualification", "mfm_store_application"],
+            "rrd",
+            &[&target_roles.qualification, &target_roles.run_reader],
         )
         .await;
-        let combined_login = TestLogin::create(
+        let run_writer_login = TestLogin::create(
             &admin_pool,
             &schema,
-            "combined",
+            "rwr",
+            &[&target_roles.qualification, &target_roles.run_writer],
+        )
+        .await;
+        let configuration_reader_login = TestLogin::create(
+            &admin_pool,
+            &schema,
+            "crd",
             &[
-                "mfm_store_qualification",
-                "mfm_store_application",
-                "mfm_store_configuration_maintenance",
+                &target_roles.qualification,
+                &target_roles.configuration_reader,
             ],
         )
         .await;
-        let maintenance_login = TestLogin::create(
+        let configuration_writer_login = TestLogin::create(
             &admin_pool,
             &schema,
-            "maintenance",
+            "cwr",
             &[
-                "mfm_store_qualification",
-                "mfm_store_configuration_maintenance",
+                &target_roles.qualification,
+                &target_roles.configuration_writer,
             ],
         )
         .await;
@@ -3303,40 +3178,101 @@ impl TestDatabase {
             admin_pool,
             database_url,
             schema,
-            application_login,
-            combined_login,
-            maintenance_login,
+            target_roles,
+            run_reader_login,
+            run_writer_login,
+            configuration_reader_login,
+            configuration_writer_login,
         }
     }
 
-    async fn independent_pool(&self) -> PgPool {
+    async fn application_sessions(&self) -> ApplicationTargetSessions {
+        self.try_application_sessions()
+            .await
+            .expect("issue application sessions")
+    }
+
+    async fn try_application_sessions(
+        &self,
+    ) -> Result<ApplicationTargetSessions, PostgresStoreError> {
+        issue_application_sessions(self.application_materials()).await
+    }
+
+    async fn combined_sessions(&self) -> CombinedTargetSessions {
+        issue_combined_sessions(self.combined_materials())
+            .await
+            .expect("issue combined sessions")
+    }
+
+    async fn maintenance_sessions(&self) -> ConfigurationMaintenanceSessions {
+        issue_configuration_maintenance_sessions(
+            self.schema.clone(),
+            self.login_material(&self.configuration_reader_login),
+            self.login_material(&self.configuration_writer_login),
+        )
+        .await
+        .expect("issue maintenance sessions")
+    }
+
+    fn application_materials(&self) -> TargetSessionMaterials {
+        TargetSessionMaterials {
+            schema_name: self.schema.clone(),
+            run_reader: self.login_material(&self.run_reader_login),
+            run_writer: self.login_material(&self.run_writer_login),
+            configuration_reader: self.login_material(&self.configuration_reader_login),
+            configuration_writer: None,
+        }
+    }
+
+    fn combined_materials(&self) -> TargetSessionMaterials {
+        TargetSessionMaterials {
+            schema_name: self.schema.clone(),
+            run_reader: self.login_material(&self.run_reader_login),
+            run_writer: self.login_material(&self.run_writer_login),
+            configuration_reader: self.login_material(&self.configuration_reader_login),
+            configuration_writer: Some(self.login_material(&self.configuration_writer_login)),
+        }
+    }
+
+    fn login_material(&self, login: &TestLogin) -> SessionLoginMaterial {
+        SessionLoginMaterial {
+            database_url: login.database_url(&self.database_url),
+        }
+    }
+
+    async fn admin_schema_pool(&self) -> PgPool {
         isolated_pool(&self.database_url, &self.schema).await
     }
 
-    async fn application_pool(&self) -> PgPool {
-        self.application_login
-            .isolated_pool(&self.database_url, &self.schema)
-            .await
+    async fn independent_pool(&self) -> PgPool {
+        self.admin_schema_pool().await
     }
 
-    async fn combined_pool(&self) -> PgPool {
-        self.combined_login
-            .isolated_pool(&self.database_url, &self.schema)
-            .await
-    }
-
-    async fn maintenance_pool(&self) -> PgPool {
-        self.maintenance_login
-            .isolated_pool(&self.database_url, &self.schema)
-            .await
+    fn application_login_name(&self) -> &str {
+        &self.run_writer_login.role_name
     }
 
     fn application_database_url(&self) -> String {
-        self.application_login.database_url(&self.database_url)
+        self.run_writer_login.database_url(&self.database_url)
+    }
+
+    fn worker_env_material(&self) -> (String, String, String, String) {
+        (
+            self.run_reader_login.database_url(&self.database_url),
+            self.run_writer_login.database_url(&self.database_url),
+            self.configuration_reader_login.database_url(&self.database_url),
+            self.schema.clone(),
+        )
+    }
+
+    async fn run_writer_pool(&self) -> PgPool {
+        self.run_writer_login
+            .isolated_pool(&self.database_url, &self.schema)
+            .await
     }
 
     async fn store_scope_id(&self) -> StoreScopeId {
-        let pool = self.independent_pool().await;
+        let pool = self.admin_schema_pool().await;
         let value = sqlx::query_scalar::<_, String>(
             "SELECT store_scope_id FROM store_identity WHERE singleton",
         )
@@ -3355,9 +3291,30 @@ impl TestDatabase {
         .execute(&self.admin_pool)
         .await
         .expect("drop isolated schema");
-        self.application_login.drop(&self.admin_pool).await;
-        self.combined_login.drop(&self.admin_pool).await;
-        self.maintenance_login.drop(&self.admin_pool).await;
+        for role in [
+            self.target_roles.owner.as_str(),
+            self.target_roles.qualification.as_str(),
+            self.target_roles.run_reader.as_str(),
+            self.target_roles.run_writer.as_str(),
+            self.target_roles.configuration_reader.as_str(),
+            self.target_roles.configuration_writer.as_str(),
+        ] {
+            let _ = sqlx::query(AssertSqlSafe(format!(
+                "REASSIGN OWNED BY \"{role}\" TO CURRENT_USER"
+            )))
+            .execute(&self.admin_pool)
+            .await;
+            let _ = sqlx::query(AssertSqlSafe(format!("DROP OWNED BY \"{role}\"")))
+                .execute(&self.admin_pool)
+                .await;
+            let _ = sqlx::query(AssertSqlSafe(format!("DROP ROLE IF EXISTS \"{role}\"")))
+                .execute(&self.admin_pool)
+                .await;
+        }
+        self.run_reader_login.drop(&self.admin_pool).await;
+        self.run_writer_login.drop(&self.admin_pool).await;
+        self.configuration_reader_login.drop(&self.admin_pool).await;
+        self.configuration_writer_login.drop(&self.admin_pool).await;
         self.admin_pool.close().await;
     }
 }
@@ -3373,7 +3330,7 @@ impl TestLogin {
             .strip_prefix("mfm_structured_")
             .expect("test schema prefix")
             .replace('_', "");
-        let role_name = format!("mfm_test_{}_{discriminator}", &purpose[..1]);
+        let role_name = format!("mfm_test_{purpose}_{discriminator}");
         let password = format!("MfmTest{discriminator}{}", purpose.len());
         sqlx::query(AssertSqlSafe(format!(
             "CREATE ROLE {role_name} LOGIN NOINHERIT NOSUPERUSER NOCREATEDB NOCREATEROLE \
@@ -3382,9 +3339,13 @@ impl TestLogin {
         .execute(admin_pool)
         .await
         .expect("create restricted PostgreSQL test login");
+        let quoted = memberships
+            .iter()
+            .map(|name| format!("\"{name}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
         sqlx::query(AssertSqlSafe(format!(
-            "GRANT {} TO {role_name} WITH INHERIT FALSE, SET TRUE",
-            memberships.join(", ")
+            "GRANT {quoted} TO {role_name} WITH INHERIT FALSE, SET TRUE"
         )))
         .execute(admin_pool)
         .await
@@ -3421,11 +3382,53 @@ impl TestLogin {
     }
 
     async fn drop(self, admin_pool: &PgPool) {
-        sqlx::query(AssertSqlSafe(format!("DROP ROLE {}", self.role_name)))
-            .execute(admin_pool)
-            .await
-            .expect("drop restricted PostgreSQL test login");
+        sqlx::query(AssertSqlSafe(format!(
+            "DROP ROLE IF EXISTS {}",
+            self.role_name
+        )))
+        .execute(admin_pool)
+        .await
+        .expect("drop restricted PostgreSQL test login");
     }
+}
+
+async fn load_target_roles(schema: &str) -> TargetRoleSet {
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+    let pool = isolated_pool(&database_url, schema).await;
+    let row = sqlx::query(
+        "SELECT target_key, owner_role, qualification_role, run_reader_role, run_writer_role, \
+                configuration_reader_role, configuration_writer_role \
+           FROM target_authority WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load target authority roles");
+    pool.close().await;
+    TargetRoleSet {
+        target_key: row.try_get("target_key").expect("target key"),
+        owner: row.try_get("owner_role").expect("owner"),
+        qualification: row.try_get("qualification_role").expect("qualification"),
+        run_reader: row.try_get("run_reader_role").expect("run reader"),
+        run_writer: row.try_get("run_writer_role").expect("run writer"),
+        configuration_reader: row
+            .try_get("configuration_reader_role")
+            .expect("configuration reader"),
+        configuration_writer: row
+            .try_get("configuration_writer_role")
+            .expect("configuration writer"),
+    }
+}
+
+async fn isolated_pool(database_url: &str, schema: &str) -> PgPool {
+    let options = database_url
+        .parse::<PgConnectOptions>()
+        .expect("parse DATABASE_URL")
+        .options([("search_path", schema)]);
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options)
+        .await
+        .expect("connect isolated schema pool")
 }
 
 async fn insert_object_snapshot(pool: &PgPool, run_id: &RunId, snapshot: &ObjectRowSnapshot) {
@@ -3467,18 +3470,6 @@ async fn update_object_snapshot(
     .execute(pool)
     .await
     .expect("restore object payload");
-}
-
-async fn isolated_pool(database_url: &str, schema: &str) -> PgPool {
-    let options = database_url
-        .parse::<PgConnectOptions>()
-        .expect("parse DATABASE_URL")
-        .options([("search_path", schema)]);
-    PgPoolOptions::new()
-        .max_connections(2)
-        .connect_with(options)
-        .await
-        .expect("connect isolated schema pool")
 }
 
 async fn load_normalized_batches(pool: &PgPool, run_id: &RunId) -> Vec<CommittedBatch> {

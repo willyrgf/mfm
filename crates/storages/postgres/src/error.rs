@@ -1,7 +1,7 @@
 /// Error returned while qualifying a PostgreSQL structured-history store.
 #[derive(Debug, thiserror::Error)]
 pub enum PostgresStoreError {
-    /// PostgreSQL could not be reached through the supplied writer pool.
+    /// PostgreSQL could not be reached through the supplied session materials.
     #[error("postgres writer connection failed")]
     Connection,
     /// The compiled destructive baseline and the connected schema differ.
@@ -10,12 +10,15 @@ pub enum PostgresStoreError {
     /// The applied migration checksum differs from the compiled baseline.
     #[error("postgres store migration checksum mismatch")]
     MigrationChecksumMismatch,
-    /// The connection is read-only, in recovery, or lacks the exact restricted session profile.
+    /// The connection is not the exact restricted session profile for this target.
     #[error("postgres connection is not the authoritative writer")]
     WriterRequired,
-    /// The deployment-owned non-rollback writer fence rejected qualification.
-    #[error("postgres authoritative-writer fence rejected qualification")]
-    WriterFenceRejected,
+    /// The opaque deployment-issued target session bundle was rejected.
+    #[error("postgres target session bundle rejected qualification")]
+    TargetSessionRejected,
+    /// A copied, expired, wrong-release, or stale-generation target permit was rejected.
+    #[error("postgres target permit is not current")]
+    TargetPermitRejected,
     /// The PostgreSQL commit outcome could not be classified after connection loss.
     #[error("postgres commit outcome is unknown")]
     OutcomeUnknown,

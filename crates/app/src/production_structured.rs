@@ -25,7 +25,7 @@ use mfm_spec::structured::{
 };
 use mfm_spec::{EntryPointContract, PlanningProfile};
 use mfm_storage_postgres::{
-    open_structured_authoritative_application, AuthoritativeWriterFence,
+    open_structured_authoritative_application, ApplicationTargetSessions,
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
 };
 use mfm_store::structured::{
@@ -37,7 +37,6 @@ use mfm_store::structured::{
 };
 use mfm_values::{MfmConfig, MfmValue};
 use serde::Serialize;
-use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::application::{
@@ -47,7 +46,7 @@ use crate::application::{
 use crate::stream_spool::{snapshot_input, WritableSpool};
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
-    decode_transition_trace_page_request, production_database_url, AccessAuditPage,
+    decode_transition_trace_page_request, AccessAuditPage,
     AdmissionStatus, AdmitRunRequest, AdmitRunResponse, Application, DriveResponse,
     EntryPointContract as PublicEntryPointContract, ErrorClass, ExportRequest, ExportedRun,
     PageRequest, PublicError, PublicRunView, PublicRuntimeFaultAttribution,
@@ -88,20 +87,11 @@ struct ProductionBackend {
     wallet_domain_activation_attestation: mfm_evm::WalletNonceDomainActivationAttestation,
 }
 
-pub(super) async fn connect<RunFence>(
-    database_url: Option<&str>,
+pub(super) async fn connect(
+    sessions: ApplicationTargetSessions,
     policy: Arc<dyn RunAccessPolicy>,
-    deployment_writer_fence: RunFence,
     wallet: EvmWalletDeployment,
-) -> Result<Application, PublicError>
-where
-    RunFence: AuthoritativeWriterFence + 'static,
-{
-    let database_url = production_database_url(database_url)?;
-    let pool = PgPoolOptions::new()
-        .connect(&database_url)
-        .await
-        .map_err(|_| run_store_unavailable())?;
+) -> Result<Application, PublicError> {
     let EvmWalletDeploymentParts {
         routing_manifest,
         routing_catalog,
@@ -127,8 +117,7 @@ where
             wallet_bindings.resource_contract_ref().clone(),
         )?);
     let (assembled, configuration) = open_structured_authoritative_application(
-        pool,
-        deployment_writer_fence,
+        sessions,
         assembly.registry,
         physical_verifier,
     )

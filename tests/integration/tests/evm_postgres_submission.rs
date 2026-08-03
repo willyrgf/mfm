@@ -91,8 +91,9 @@ use mfm_storage_evm_postgres::{
     QualifiedEvmRoutingCatalog, WalletAuthorityProviderClient, WalletAuthorityProviderTrust,
 };
 use mfm_storage_postgres::{
+    issue_application_sessions, issue_configuration_maintenance_sessions,
     open_configuration_maintenance, open_structured_authoritative, PostgresSchema,
-    TestAuthoritativeWriterFence,
+    SessionLoginMaterial, TargetSessionMaterials,
 };
 use mfm_store::structured::{
     ConfigurationAppendRequest, ConfigurationStreamKey, PhysicalBindingAuthorization,
@@ -585,15 +586,24 @@ async fn evm_postgres_submission_worker() {
         mode == PHASE_ADMIT_BROADCAST,
     )
     .await;
-    let history_pool = isolated_pool(
-        &required_database_url(HISTORY_APPLICATION_DATABASE_URL_ENV),
-        &history_schema,
-    )
-    .await;
+    let sessions = issue_application_sessions(TargetSessionMaterials {
+        schema_name: history_schema.clone(),
+        run_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("run reader url"),
+        },
+        run_writer: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("run writer url"),
+        },
+        configuration_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
+        },
+        configuration_writer: None,
+    })
+    .await
+    .expect("issue history application sessions");
     let history_control = isolated_pool(&base_url, &history_schema).await;
     let assembled = open_structured_authoritative(
-        history_pool,
-        TestAuthoritativeWriterFence,
+        sessions,
         assembly.registry,
         Arc::clone(&assembly.physical_verifier),
     )
@@ -779,12 +789,26 @@ async fn run_production_application_worker(
         .await;
     }
 
+    let application_sessions = issue_application_sessions(TargetSessionMaterials {
+        schema_name: history_schema.to_owned(),
+        run_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("run reader url"),
+        },
+        run_writer: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("run writer url"),
+        },
+        configuration_reader: SessionLoginMaterial {
+            database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
+        },
+        configuration_writer: None,
+    })
+    .await
+    .expect("issue production history sessions");
     let application = connect_production_application(
-        Some(&history_url),
+        application_sessions,
         Arc::new(AllowTenantPolicy {
             tenant: fixture.tenant.clone(),
         }),
-        TestAuthoritativeWriterFence,
         material.wallet,
     )
     .await
@@ -1147,14 +1171,21 @@ async fn seed_production_configuration(
     fixture: &Fixture,
     material: &ProductionDeploymentMaterial,
 ) {
-    let pool = isolated_pool(
-        &required_database_url(HISTORY_MAINTENANCE_DATABASE_URL_ENV),
-        history_schema,
-    )
-    .await;
-    let writer = open_configuration_maintenance(pool, TestAuthoritativeWriterFence)
+    let writer = open_configuration_maintenance(
+        issue_configuration_maintenance_sessions(
+            history_schema.to_owned(),
+            SessionLoginMaterial {
+                database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader"),
+            },
+            SessionLoginMaterial {
+                database_url: std::env::var("MFM_TEST_CONFIG_WRITER_URL").expect("config writer"),
+            },
+        )
         .await
-        .expect("open deployment configuration maintenance");
+        .expect("issue configuration maintenance sessions"),
+    )
+    .await
+    .expect("open deployment configuration maintenance");
     writer
         .append(ConfigurationAppendRequest::new(
             ConfigurationStreamKey::new(
@@ -3230,16 +3261,20 @@ async fn run_worker(
         .env(PROVIDER_ENDPOINT_ENV, provider.endpoint())
         .env(PROVIDER_PUBLIC_KEY_ENV, provider.public_key_hex())
         .env(
-            HISTORY_APPLICATION_DATABASE_URL_ENV,
-            database
-                .history_application_login
-                .database_url(&database.database_url),
+            "MFM_TEST_RUN_READER_URL",
+            database.history_run_reader_login.database_url(&database.database_url),
         )
         .env(
-            HISTORY_MAINTENANCE_DATABASE_URL_ENV,
-            database
-                .history_maintenance_login
-                .database_url(&database.database_url),
+            "MFM_TEST_RUN_WRITER_URL",
+            database.history_run_writer_login.database_url(&database.database_url),
+        )
+        .env(
+            "MFM_TEST_CONFIG_READER_URL",
+            database.history_config_reader_login.database_url(&database.database_url),
+        )
+        .env(
+            "MFM_TEST_CONFIG_WRITER_URL",
+            database.history_config_writer_login.database_url(&database.database_url),
         )
         .env(WORKER_MODE_ENV, mode)
         .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string())
@@ -3353,8 +3388,10 @@ struct TestDatabase {
     database_url: String,
     history_schema: String,
     wallet_schema: String,
-    history_application_login: HistoryTestLogin,
-    history_maintenance_login: HistoryTestLogin,
+    history_run_reader_login: HistoryTestLogin,
+    history_run_writer_login: HistoryTestLogin,
+    history_config_reader_login: HistoryTestLogin,
+    history_config_writer_login: HistoryTestLogin,
 }
 
 struct HistoryTestLogin {
@@ -3391,21 +3428,33 @@ impl TestDatabase {
             .expect("acquire wallet login administrator");
         configure_wallet_login_principals(&mut wallet_login_admin).await;
         drop(wallet_login_admin);
-        let history_application_login = HistoryTestLogin::create(
+        let roles = load_history_target_roles(&database_url, &history_schema).await;
+        let history_run_reader_login = HistoryTestLogin::create(
             &admin_pool,
             &history_schema,
-            "application",
-            &["mfm_store_qualification", "mfm_store_application"],
+            "rrd",
+            &[&roles.qualification, &roles.run_reader],
         )
         .await;
-        let history_maintenance_login = HistoryTestLogin::create(
+        let history_run_writer_login = HistoryTestLogin::create(
             &admin_pool,
             &history_schema,
-            "maintenance",
-            &[
-                "mfm_store_qualification",
-                "mfm_store_configuration_maintenance",
-            ],
+            "rwr",
+            &[&roles.qualification, &roles.run_writer],
+        )
+        .await;
+        let history_config_reader_login = HistoryTestLogin::create(
+            &admin_pool,
+            &history_schema,
+            "crd",
+            &[&roles.qualification, &roles.configuration_reader],
+        )
+        .await;
+        let history_config_writer_login = HistoryTestLogin::create(
+            &admin_pool,
+            &history_schema,
+            "cwr",
+            &[&roles.qualification, &roles.configuration_writer],
         )
         .await;
         Self {
@@ -3413,8 +3462,10 @@ impl TestDatabase {
             database_url,
             history_schema,
             wallet_schema,
-            history_application_login,
-            history_maintenance_login,
+            history_run_reader_login,
+            history_run_writer_login,
+            history_config_reader_login,
+            history_config_writer_login,
         }
     }
 
@@ -3483,8 +3534,10 @@ impl TestDatabase {
             .await
             .expect("drop isolated schema");
         }
-        self.history_application_login.drop(&self.admin_pool).await;
-        self.history_maintenance_login.drop(&self.admin_pool).await;
+        self.history_run_reader_login.drop(&self.admin_pool).await;
+        self.history_run_writer_login.drop(&self.admin_pool).await;
+        self.history_config_reader_login.drop(&self.admin_pool).await;
+        self.history_config_writer_login.drop(&self.admin_pool).await;
         self.admin_pool.close().await;
     }
 }
@@ -3507,9 +3560,13 @@ impl HistoryTestLogin {
         .execute(admin_pool)
         .await
         .expect("create restricted history login");
+        let quoted = memberships
+            .iter()
+            .map(|name| format!("\"{}\"", name))
+            .collect::<Vec<_>>()
+            .join(", ");
         sqlx::query(AssertSqlSafe(format!(
-            "GRANT {} TO {role_name} WITH INHERIT FALSE, SET TRUE",
-            memberships.join(", ")
+            "GRANT {quoted} TO {role_name} WITH INHERIT FALSE, SET TRUE"
         )))
         .execute(admin_pool)
         .await
@@ -3746,3 +3803,34 @@ fn unique_schema(kind: &str) -> String {
         counter
     )
 }
+
+struct HistoryTargetRoles {
+    qualification: String,
+    run_reader: String,
+    run_writer: String,
+    configuration_reader: String,
+    configuration_writer: String,
+}
+
+async fn load_history_target_roles(database_url: &str, schema: &str) -> HistoryTargetRoles {
+    let pool = isolated_pool(database_url, schema).await;
+    let row = sqlx::query(
+        "SELECT qualification_role, run_reader_role, run_writer_role,                 configuration_reader_role, configuration_writer_role            FROM target_authority WHERE singleton",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("load history target roles");
+    pool.close().await;
+    HistoryTargetRoles {
+        qualification: row.try_get("qualification_role").expect("qualification"),
+        run_reader: row.try_get("run_reader_role").expect("run reader"),
+        run_writer: row.try_get("run_writer_role").expect("run writer"),
+        configuration_reader: row
+            .try_get("configuration_reader_role")
+            .expect("configuration reader"),
+        configuration_writer: row
+            .try_get("configuration_writer_role")
+            .expect("configuration writer"),
+    }
+}
+

@@ -2,31 +2,29 @@ use std::collections::BTreeSet;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{StoreEpoch, StoreScopeId};
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{AssertSqlSafe, PgConnection, PgPool, Row};
 
 use crate::error::{PostgresStoreError, Result};
+use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v3";
-pub(crate) const APPLICATION_ROLE: &str = "mfm_store_application";
-pub(crate) const CONFIGURATION_MAINTENANCE_ROLE: &str = "mfm_store_configuration_maintenance";
-pub(crate) const OWNER_ROLE: &str = "mfm_store_owner";
-pub(crate) const QUALIFICATION_ROLE: &str = "mfm_store_qualification";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v4";
 
 // These SHA-256 values bind canonical, schema-name-independent catalog rows. They are
 // regenerated only with the destructive baseline and deliberately fail closed across
-// PostgreSQL catalog-rendering changes.
+// PostgreSQL catalog-rendering changes. Placeholders are filled after the first online
+// catalog probe against the v4 baseline.
 const RELATION_MANIFEST_SHA256: &str =
-    "4bf1296af4b5228b7ef12c2b4e7758b464af5713f3db7fafc97c8440bd1a7468";
+    "f47471638d25408bc1b5e61840c59eaccf6db12f2bcc470c445d556752e6ba58";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "fe899a9929f55f33a63bab6c68485be8b856d13458385f922f12597b7e351f6c";
+    "29edbcb642b4915c04c35ed424b7d19ff109a43cd5b1eaac9bda89752bc2f262";
 const INDEX_MANIFEST_SHA256: &str =
-    "3d79eabe64b319bb114dce665c2c33b1264f45a6baf0c1bda3a043906609f8bb";
+    "f191bf7df8eed0a3fa596165414925f20365f7b89110b9bf2ca3c1222596aee1";
 const EXECUTABLE_MANIFEST_SHA256: &str =
     "665fd6cb23c59ee9116c63c9b80f42cd85fc32d6fd994a30a3c11a538f58b920";
 const ACL_MANIFEST_SHA256: &str =
-    "8e47929e20411ba2a2951b901eddc4b99cca5d8f910366869d552a9f9736ec74";
+    "69446804600c06508b741bdce8f681b1182c8174088b7072352ab90e90be2de6";
 
 /// Administrative schema management for the sole destructive structured-history baseline.
 pub struct PostgresSchema;
@@ -86,7 +84,7 @@ async fn validate_authoritative_schema_inner(
     if let Some(expected_schema) = expected_schema {
         pin_schema(connection, expected_schema).await?;
     }
-    assume_qualification_role(connection).await?;
+    assume_qualification_role(connection, expected_schema).await?;
     if let Some(expected_schema) = expected_schema {
         let actual = sqlx::query_scalar::<_, String>("SELECT current_schema()::text")
             .fetch_one(&mut *connection)
@@ -98,8 +96,9 @@ async fn validate_authoritative_schema_inner(
     }
     validate_migration_ledger(connection).await?;
     validate_catalog_shape(connection).await?;
-    validate_managed_roles(connection).await?;
+    let roles = validate_managed_roles(connection).await?;
     let identity = validate_identity(connection).await?;
+    validate_target_authority(connection, &roles).await?;
     validate_prefix_integrity(connection, &identity).await?;
     transaction
         .commit()
@@ -108,12 +107,33 @@ async fn validate_authoritative_schema_inner(
     Ok(identity)
 }
 
-async fn assume_qualification_role(connection: &mut PgConnection) -> Result<()> {
-    sqlx::query("SET LOCAL ROLE mfm_store_qualification")
+async fn assume_qualification_role(
+    connection: &mut PgConnection,
+    expected_schema: Option<&str>,
+) -> Result<()> {
+    let schema = if let Some(schema) = expected_schema {
+        schema.to_owned()
+    } else {
+        sqlx::query_scalar::<_, String>("SELECT current_schema()::text")
+            .fetch_one(&mut *connection)
+            .await
+            .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?
+    };
+    if schema == "pg_catalog" || schema.is_empty() {
+        return Err(PostgresStoreError::SchemaAuthorityMismatch);
+    }
+    let qualification = TargetKey::from_schema(&schema).role_name(TargetRoleKind::Qualification);
+    // Role names are derived from the schema's closed target key and quoted.
+    let set_role = format!("SET LOCAL ROLE {}", quote_ident(&qualification));
+    sqlx::query(AssertSqlSafe(set_role))
         .execute(&mut *connection)
         .await
         .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
     Ok(())
+}
+
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 async fn pin_schema(connection: &mut PgConnection, expected_schema: &str) -> Result<()> {
@@ -238,7 +258,15 @@ WITH target_namespace AS (
             relation.relname,
             relation.relkind::text,
             relation.relpersistence::text,
-            owner_role.rolname,
+            CASE
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_qlf$' THEN '<target-qualification>'
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rrd$' THEN '<target-run-reader>'
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rwr$' THEN '<target-run-writer>'
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_crd$' THEN '<target-configuration-reader>'
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_cwr$' THEN '<target-configuration-writer>'
+                ELSE owner_role.rolname
+            END,
             COALESCE(access_method.amname, ''),
             relation.relchecks,
             relation.relhasindex,
@@ -382,7 +410,10 @@ WITH target_namespace AS (
             pg_catalog.pg_get_function_identity_arguments(procedure_row.oid),
             pg_catalog.pg_get_function_result(procedure_row.oid),
             language.lanname,
-            owner_role.rolname,
+            CASE
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE owner_role.rolname
+            END,
             procedure_row.prokind::text,
             procedure_row.provolatile::text,
             procedure_row.proparallel::text,
@@ -511,7 +542,10 @@ WITH target_namespace AS (
         pg_catalog.jsonb_build_array(
             'schema-owner',
             '<schema>',
-            owner_role.rolname
+            CASE
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE owner_role.rolname
+            END
         ) AS manifest_row
     FROM target_namespace
     JOIN pg_catalog.pg_roles AS owner_role ON owner_role.oid = target_namespace.nspowner
@@ -525,8 +559,20 @@ WITH target_namespace AS (
         pg_catalog.jsonb_build_array(
             'schema-acl',
             '<schema>',
-            CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee_role.rolname END,
-            grantor_role.rolname,
+            CASE
+                WHEN acl.grantee = 0 THEN 'PUBLIC'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_qlf$' THEN '<target-qualification>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rrd$' THEN '<target-run-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rwr$' THEN '<target-run-writer>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_crd$' THEN '<target-configuration-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_cwr$' THEN '<target-configuration-writer>'
+                ELSE grantee_role.rolname
+            END,
+            CASE
+                WHEN grantor_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE grantor_role.rolname
+            END,
             acl.privilege_type,
             acl.is_grantable
         )
@@ -549,8 +595,20 @@ WITH target_namespace AS (
         pg_catalog.jsonb_build_array(
             'relation-acl',
             relation.relname,
-            CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee_role.rolname END,
-            grantor_role.rolname,
+            CASE
+                WHEN acl.grantee = 0 THEN 'PUBLIC'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_qlf$' THEN '<target-qualification>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rrd$' THEN '<target-run-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rwr$' THEN '<target-run-writer>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_crd$' THEN '<target-configuration-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_cwr$' THEN '<target-configuration-writer>'
+                ELSE grantee_role.rolname
+            END,
+            CASE
+                WHEN grantor_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE grantor_role.rolname
+            END,
             acl.privilege_type,
             acl.is_grantable
         )
@@ -573,8 +631,20 @@ WITH target_namespace AS (
             'column-acl',
             relation.relname,
             attribute.attname,
-            CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee_role.rolname END,
-            grantor_role.rolname,
+            CASE
+                WHEN acl.grantee = 0 THEN 'PUBLIC'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_qlf$' THEN '<target-qualification>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rrd$' THEN '<target-run-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rwr$' THEN '<target-run-writer>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_crd$' THEN '<target-configuration-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_cwr$' THEN '<target-configuration-writer>'
+                ELSE grantee_role.rolname
+            END,
+            CASE
+                WHEN grantor_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE grantor_role.rolname
+            END,
             acl.privilege_type,
             acl.is_grantable
         )
@@ -593,14 +663,32 @@ WITH target_namespace AS (
 
     SELECT
         'default-acl',
-        owner_role.rolname,
+        CASE
+            WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+            ELSE owner_role.rolname
+        END,
         default_acl.defaclobjtype::text,
         pg_catalog.jsonb_build_array(
             'default-acl',
-            owner_role.rolname,
+            CASE
+                WHEN owner_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE owner_role.rolname
+            END,
             default_acl.defaclobjtype::text,
-            CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE grantee_role.rolname END,
-            grantor_role.rolname,
+            CASE
+                WHEN acl.grantee = 0 THEN 'PUBLIC'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_qlf$' THEN '<target-qualification>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rrd$' THEN '<target-run-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_rwr$' THEN '<target-run-writer>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_crd$' THEN '<target-configuration-reader>'
+                WHEN grantee_role.rolname ~ '^mfm_t_[0-9a-f]{16}_cwr$' THEN '<target-configuration-writer>'
+                ELSE grantee_role.rolname
+            END,
+            CASE
+                WHEN grantor_role.rolname ~ '^mfm_t_[0-9a-f]{16}_own$' THEN '<target-owner>'
+                ELSE grantor_role.rolname
+            END,
             acl.privilege_type,
             acl.is_grantable
         )
@@ -617,32 +705,32 @@ FROM manifest
 ORDER BY object_kind, object_name, subobject_name, manifest_row::text
 "#;
 
-async fn validate_managed_roles(connection: &mut PgConnection) -> Result<()> {
-    let expected_names = [
-        APPLICATION_ROLE,
-        CONFIGURATION_MAINTENANCE_ROLE,
-        OWNER_ROLE,
-        QUALIFICATION_ROLE,
-    ];
+async fn validate_managed_roles(connection: &mut PgConnection) -> Result<TargetRoleNames> {
+    let schema = sqlx::query_scalar::<_, String>("SELECT current_schema()::text")
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
+    let roles = TargetRoleNames::from_target_key(TargetKey::from_schema(&schema));
+    let expected_names = roles.managed_names();
     let expected = expected_names
         .iter()
         .copied()
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
-    let roles = sqlx::query(
+    let rows = sqlx::query(
         "SELECT rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb, rolcanlogin, \
                 rolreplication, rolbypassrls, rolconnlimit, rolvaliduntil IS NULL AS no_expiry, \
                 rolconfig IS NULL AS no_config \
            FROM pg_catalog.pg_roles WHERE rolname = ANY($1) ORDER BY rolname",
     )
-    .bind(expected_names)
+    .bind(&expected_names[..])
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
-    if roles.len() != expected.len() {
+    if rows.len() != expected.len() {
         return Err(PostgresStoreError::SchemaAuthorityMismatch);
     }
-    for role in &roles {
+    for role in &rows {
         if role.try_get::<bool, _>("rolsuper").unwrap_or(true)
             || !role.try_get::<bool, _>("rolinherit").unwrap_or(false)
             || role.try_get::<bool, _>("rolcreaterole").unwrap_or(true)
@@ -657,7 +745,7 @@ async fn validate_managed_roles(connection: &mut PgConnection) -> Result<()> {
             return Err(PostgresStoreError::SchemaAuthorityMismatch);
         }
     }
-    let actual = roles
+    let actual = rows
         .iter()
         .map(|role| string(role, "rolname"))
         .collect::<Result<BTreeSet<_>>>()?;
@@ -672,11 +760,69 @@ async fn validate_managed_roles(connection: &mut PgConnection) -> Result<()> {
           WHERE member_role.rolname = ANY($1) \
           ORDER BY member_role.rolname, parent_role.rolname",
     )
-    .bind(expected_names)
+    .bind(&expected_names[..])
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
     if !inherited_roles.is_empty() {
+        return Err(PostgresStoreError::SchemaAuthorityMismatch);
+    }
+    Ok(roles)
+}
+
+async fn validate_target_authority(
+    connection: &mut PgConnection,
+    roles: &TargetRoleNames,
+) -> Result<()> {
+    let row = sqlx::query(
+        "SELECT target_key, fence_generation::text AS fence_generation, \
+                release_epoch::text AS release_epoch, \
+                owner_role, qualification_role, run_reader_role, run_writer_role, \
+                configuration_reader_role, configuration_writer_role, \
+                (SELECT count(*)::bigint FROM target_authority) AS authority_count \
+           FROM target_authority WHERE singleton",
+    )
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?
+    .ok_or(PostgresStoreError::SchemaAuthorityMismatch)?;
+    if row.try_get::<i64, _>("authority_count").ok() != Some(1)
+        || row.try_get::<String, _>("target_key").ok().as_deref() != Some(roles.target_key.as_str())
+        || row.try_get::<String, _>("owner_role").ok().as_deref() != Some(roles.owner.as_str())
+        || row
+            .try_get::<String, _>("qualification_role")
+            .ok()
+            .as_deref()
+            != Some(roles.qualification.as_str())
+        || row.try_get::<String, _>("run_reader_role").ok().as_deref()
+            != Some(roles.run_reader.as_str())
+        || row.try_get::<String, _>("run_writer_role").ok().as_deref()
+            != Some(roles.run_writer.as_str())
+        || row
+            .try_get::<String, _>("configuration_reader_role")
+            .ok()
+            .as_deref()
+            != Some(roles.configuration_reader.as_str())
+        || row
+            .try_get::<String, _>("configuration_writer_role")
+            .ok()
+            .as_deref()
+            != Some(roles.configuration_writer.as_str())
+    {
+        return Err(PostgresStoreError::SchemaAuthorityMismatch);
+    }
+    let fence_generation = row
+        .try_get::<String, _>("fence_generation")
+        .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
+    let release_epoch = row
+        .try_get::<String, _>("release_epoch")
+        .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
+    if fence_generation.parse::<u64>().ok().filter(|v| *v >= 1).is_none()
+        || release_epoch.parse::<u64>().ok().filter(|v| *v >= 1).is_none()
+        || fence_generation.parse::<u64>().ok().map(|v| v.to_string())
+            != Some(fence_generation.clone())
+        || release_epoch.parse::<u64>().ok().map(|v| v.to_string()) != Some(release_epoch)
+    {
         return Err(PostgresStoreError::SchemaAuthorityMismatch);
     }
     Ok(())
