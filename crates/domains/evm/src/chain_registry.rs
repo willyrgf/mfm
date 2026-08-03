@@ -809,10 +809,25 @@ mod tests {
             &reference(23),
         )
         .expect("authenticated issuer");
-        let base_intent =
-            derive_submission_intent_id(&base_domain, &issuer, "same-token").expect("base intent");
-        let fork_intent =
-            derive_submission_intent_id(&fork_domain, &issuer, "same-token").expect("fork intent");
+        let expansion = crate::evm_submission_expansion_policy_ref().expect("expansion");
+        let base_intent = derive_submission_intent_id(
+            &base_domain,
+            &issuer,
+            "same-token",
+            1,
+            "mfm.test/family",
+            &expansion,
+        )
+        .expect("base intent");
+        let fork_intent = derive_submission_intent_id(
+            &fork_domain,
+            &issuer,
+            "same-token",
+            1,
+            "mfm.test/family",
+            &expansion,
+        )
+        .expect("fork intent");
         assert_ne!(base_intent, fork_intent);
         assert_ne!(
             derive_evm_nonce_reservation_key(&base_domain, &base_intent)

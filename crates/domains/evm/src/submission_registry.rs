@@ -1260,6 +1260,10 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
         CandidateActivationPermit::Initial { exact_next_ordinal } => {
             ordinal == 0 && *exact_next_ordinal == 0
         }
+        CandidateActivationPermit::Reobservation {
+            exact_ordinal,
+            retained_activation_ref,
+        } => *exact_ordinal == ordinal && valid_reference(retained_activation_ref),
         CandidateActivationPermit::Replacement {
             predecessor_activation_ref,
             predecessor_ordinal,

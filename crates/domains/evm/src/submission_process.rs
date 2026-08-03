@@ -97,10 +97,17 @@ pub(crate) fn derive_submission_intent(
         Ok(value) => value,
         Err(_) => return ProposedStateOutcome::Failure(EvmSubmissionFailure::DestinationRejected),
     };
+    let expansion_contract_ref = match crate::evm_submission_expansion_policy_ref() {
+        Ok(value) => value,
+        Err(_) => return ProposedStateOutcome::Failure(EvmSubmissionFailure::DestinationRejected),
+    };
     let submission_intent_id = match derive_submission_intent_id(
         &derived.nonce_domain,
         &issuer_id,
         request.caller_submission_token(),
+        request.observation_rounds(),
+        request.candidate_family().digest(),
+        &expansion_contract_ref,
     ) {
         Ok(value) => value,
         Err(_) => return ProposedStateOutcome::Failure(EvmSubmissionFailure::DestinationRejected),
@@ -608,20 +615,33 @@ pub(crate) fn select_candidate_slot(
     progress: &SubmissionProgress,
 ) -> ProposedStateOutcome<CandidateSlotDecision, mfm_program::structured::Never> {
     let decision = match (&progress.work, &progress.completion, &progress.failure) {
-        (Some(work), None, None)
-            if usize::from(work.next_candidate_ordinal)
-                < work
-                    .prepared
-                    .intent
-                    .derived
-                    .request
-                    .candidate_family()
-                    .candidates()
-                    .len() =>
-        {
-            CandidateSlotDecision::Execute { work: work.clone() }
+        (Some(work), None, None) => {
+            let family_len = work
+                .prepared
+                .intent
+                .derived
+                .request
+                .candidate_family()
+                .candidates()
+                .len();
+            let activated_len = work.activated_candidates.len();
+            let next = usize::from(work.next_candidate_ordinal);
+            if next < family_len {
+                CandidateSlotDecision::Execute { work: work.clone() }
+            } else if activated_len > 0 {
+                // EVM-03: family slots are exhausted, but retained activated
+                // candidates must still be observed on recovery so already-
+                // finalized work can complete. Re-enter the last activated
+                // ordinal; activation/broadcast resolve idempotently.
+                let mut recover = work.clone();
+                let last = u16::try_from(activated_len.saturating_sub(1)).unwrap_or(0);
+                recover.next_candidate_ordinal = last;
+                recover.current_candidate = work.activated_candidates.last().cloned();
+                CandidateSlotDecision::Execute { work: recover }
+            } else {
+                CandidateSlotDecision::Exhausted
+            }
         }
-        (Some(_), None, None) => CandidateSlotDecision::Exhausted,
         _ => CandidateSlotDecision::Skip,
     };
     ProposedStateOutcome::Success(decision)

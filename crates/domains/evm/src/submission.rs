@@ -385,7 +385,16 @@ impl EvmSubmissionRequest {
             &principal,
             &self.issuer_namespace_contract_ref,
         )?;
-        derive_submission_intent_id(&domain, &issuer, &self.caller_submission_token)?;
+        let expansion = crate::evm_submission_expansion_policy_ref()
+            .map_err(|_| crate::WalletAuthorityContractError::Invalid("expansion_contract"))?;
+        derive_submission_intent_id(
+            &domain,
+            &issuer,
+            &self.caller_submission_token,
+            self.observation_rounds,
+            self.candidate_family.digest(),
+            &expansion,
+        )?;
         Ok(())
     }
 }
