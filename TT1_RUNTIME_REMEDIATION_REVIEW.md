@@ -508,3 +508,219 @@ PASS dispositions remain valid. Non-blocking QUALITY/E2E residuals do not reopen
 
 _End of kernel checkpoint re-review. Gate PASS recorded at exact HEAD
 `e636b4d326e98b1647d512e28bf93d18fa6bbcc1`._
+
+---
+
+## PostgreSQL store checkpoint (after Commit 7)
+
+### Identity
+
+| Field | Value |
+| --- | --- |
+| Reviewed revision (full hash) | `67e9a549c3aa908e4c957289bcb482ab57961d34` |
+| Reviewed subject | `bound postgres fact publication and query assurance` |
+| Reviewer identity | independent postgres remediation reviewer subagent |
+| Review date (UTC) | 2026-08-03T19:15:00Z |
+| Branch | `refact-runtime` |
+| Scope | AUTH-03, AUTH-04, STORE-01..07, related QUALITY-01 / VERIFY-01 |
+| Gate decision | **PASS** |
+
+### Preceding implementation revisions reviewed
+
+| Order | Full hash | Subject |
+| --- | --- | --- |
+| 5 | `1d015b05c29ff8c3963d0c3e14574f35ad5b303b` | `seal postgres store target authority` |
+| 6 | `54de9296b45387004768de5ff2c38236f44e7e15` | `classify postgres exact head races precisely` |
+| 7 | `67e9a549c3aa908e4c957289bcb482ab57961d34` | `bound postgres fact publication and query assurance` |
+
+HEAD after Commit 7 matches the required subject chain. Kernel checkpoint at
+`e636b4d326e98b1647d512e28bf93d18fa6bbcc1` remains recorded above and is not reopened.
+
+### Commands and generated evidence reviewed
+
+#### Implementer verification logs
+
+| Log | Path | Disposition used |
+| --- | --- | --- |
+| Commit 5 recoverability | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-05.log` | `recoverability-postgres-v1` ok |
+| Commit 5 sqlx online | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-05-sqlx.log` | `postgres-sqlx-check` ok |
+| Commit 5 integration compile trail | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-05-integration*.log` | intermediate dirty-tree noise; HEAD re-checked independently |
+| Commit 6 recoverability | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-06.log` | `recoverability-postgres-v1` ok |
+| Commit 7 recoverability + offline/inventory | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-07.log` | recoverability + offline ok |
+| Commit 7 inventory | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-07-inventory.log` | `postgres-sql-inventory-check` ok |
+| Commit 7 offline | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-07-offline.log` | `postgres-sqlx-offline-check` ok |
+| Commit 7 sqlx online | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-07-sqlx.log` | `postgres-sqlx-check` ok |
+
+#### Independent reviewer re-checks (this review)
+
+All commands run under the Nix development shell / Nixfied tasks from repository root at
+`67e9a549c3aa908e4c957289bcb482ab57961d34`.
+
+| Command | Local evidence | Result |
+| --- | --- | --- |
+| `nix run .#run -- --task postgres-sql-inventory-check` | `/tmp/review-pg-inventory.log` | pass |
+| `nix run .#run -- --task recoverability-postgres-v1` | `/tmp/review-pg-recoverability.log` | pass |
+| `nix run .#run -- --task postgres-sqlx-check` | `/tmp/review-pg-sqlx.log` | pass |
+| `nix develop -c cargo test -p mfm-store --features test-support --lib` | `/tmp/review-store-lib.log` | pass (21 tests, includes shared canonical-append bounds) |
+| `nix develop -c cargo test -p mfm-storage-postgres --lib sql_inventory` | shell | pass (`every_runtime_query_is_owned_by_the_allowlist`) |
+
+### Repository-wide searches for deleted / sealed authority surfaces
+
+Searches executed against the working tree excluding `target/`:
+
+| Surface | Search | Result at HEAD |
+| --- | --- | --- |
+| Production openers accepting `PgPool` / URL / fence | `open_structured_*`, `PgPool` in `qualification.rs` | Openers accept only opaque `ApplicationTargetSessions` / `CombinedTargetSessions` / `ConfigurationMaintenanceSessions`. No pool/URL/fence parameters. |
+| Public pool getter / retained backend pool | `fn pool(`, `pub.*PgPool` in production sources | `RoleSession::pool` is `pub(crate)` only. Session bundle fields are private. Backend constructors are `pub(crate)`. |
+| Global cluster roles (`mfm_store_application`, …) | `mfm_store_application`, `mfm_store_` | Absent. Roles are exact-target `mfm_t_{16hex}_{own\|qlf\|rrd\|rwr\|crd\|cwr}` from schema key. |
+| Always-successful test fence | `TestAuthoritativeWriterFence`, `AlwaysSuccessful` | Absent from production Rust sources. |
+| Public DML / locked write transaction | `LockedWriteTx`, `WriteTx` | `pub(crate)` in private `transaction` module only. |
+| Shared writer pool backing readers | session construction | Distinct login/session pools per `SessionKind` (run-reader, run-writer, configuration-reader, configuration-writer). |
+| Application connection construction | `crates/app` production path | `production_structured::connect` takes `ApplicationTargetSessions` only and calls `open_structured_authoritative_application`. |
+
+Deployment-facing residual surfaces (explicit TCB, not ordinary application authority):
+
+- Public `SessionLoginMaterial { database_url }` and `issue_*_sessions` are the deployment issuance boundary. Holders of those credentials are documented as inside the TCB (`crates/storages/postgres/README.md`, schema header comments).
+- `PostgresSchema::migrate(database_url)` remains the owner migration path.
+
+### Role / ACL matrix evidence
+
+| Capability | Role set | Grant surface (schema-local) | Evidence |
+| --- | --- | --- | --- |
+| Owner / DDL | `mfm_t_*_own` | schema + table owner | `migrations/0001_store.sql` role create + `ALTER … OWNER` |
+| Qualification | `mfm_t_*_qlf` | SELECT on catalog/history/config tables | ACL block + issuance `SET LOCAL ROLE` to qlf for target load |
+| Run reader | `mfm_t_*_rrd` | SELECT run heads/batches/objects + fact heads/publications | ACL; `SessionKind::RunReader` → read-only tx |
+| Run writer | `mfm_t_*_rwr` | SELECT/INSERT(/UPDATE heads) on run + fact tables only | ACL; no configuration DML grants |
+| Configuration reader | `mfm_t_*_crd` | SELECT configuration revisions/heads | ACL; read-only tx |
+| Configuration writer | `mfm_t_*_cwr` | SELECT/INSERT revisions + UPDATE heads | ACL; maintenance issuance only |
+
+Sibling-target isolation (structural):
+
+- Target key = `substr(md5(schema_name), 1, 16)`; sibling schemas get distinct role names and grants only on their schema (`0001_store.sql` comments + ACL `GRANT USAGE ON SCHEMA %I` for that schema only).
+- Issuance probes exact membership set `{qualification, managed}` with `SET` allowed only for those two, rejects superuser/`BYPASSRLS`/inherit/admin-option/extra membership (`session.rs` `probe_login_shape`; tests `qualification_rejects_extra_membership_inheritance_and_admin_session_substitution`, `qualification_rejects_public_and_hostile_schema_or_table_grants`).
+
+Per-transaction permit:
+
+- Every read/write begins in `transaction.rs`, selects managed role, pins `search_path`, and compares database OID, schema, store scope/epoch, schema contract version, fence generation, and release epoch against the binding (`validate_target_permit`). Writers take an advisory fence lock before observing authority.
+
+Role-matrix residual: no single exhaustive table-driven test enumerates every role × every operation × every sibling schema cell. Isolation is enforced by grant construction + issuance probes + purpose-separated session kinds; matrix completeness remains a residual (R-AUTH-04-MATRIX).
+
+### Cross-process traces
+
+| Trace | Observation | Disposition |
+| --- | --- | --- |
+| Fresh-process admit → continue | `structured_history_fresh_process_worker` + `fresh_process_refolds_and_continues_the_same_structured_run` spawns a second process with only opaque session env materials; second process refolds and continues without memory fallback | **present** |
+| Fresh-process vs memory parity | Same fixture continues through memory and reopens PostgreSQL; closed frontiers match | **present** |
+| Missing deployment credentials | Invalid URLs fail issuance with `PostgresStoreError::Connection`; no memory fallback | **present** |
+| Same-run multi-process exact-head barriers (deterministic join of two OS processes racing one append identity) | Not present as a dedicated barrier harness; configuration and fact races are primarily same-process `tokio::join!` against one store | **partial residual** (R-STORE-03-XPROC) |
+| Sequential reopen after durable append | Multiple tests reopen via `application_sessions()` / `issue_application_sessions` and continue | **present** |
+
+### Fault-stage matrix
+
+Plan Commit 7 stages: before lock, after lock, after decision read, after each DML class, before commit, after server commit / before acknowledgement, retry.
+
+| Stage | Evidence at HEAD | Disposition |
+| --- | --- | --- |
+| Child object-row INSERT failure mid-append | `object_row_failure_rolls_back_batch_objects_and_head` (trigger inject); zero retained batch/object/head rows | **present** |
+| Configuration head CAS / constraint failure | `configured_value_head_update_is_atomic_and_target_isolated` injects CHECK; revision count stays 1, head stays 1 | **present** |
+| Coordinated configuration rollback visibility | `coordinated_configuration_rollback_is_visible_to_fresh_sessions` | **present** |
+| Malformed retained objects post-qualification | `malformed_object_rows_fail_closed_after_qualification` | **present** |
+| Connection loss / invalid credentials | Missing-deployment issuance fail-closed | **present (issuance)** |
+| Full stage-by-stage inject for run append (before lock … post-commit ack loss + retry classification) | No complete harness covering every listed stage for run history | **partial residual** (R-STORE-03-FAULT) |
+| Acknowledgement-unknown classification path | `CommitOutcome::AcknowledgementUnknown` in `transaction.rs`; mapped from both run and configuration append | **code present**; dedicated ack-loss retry suite thin |
+
+Atomicity property for exercised stages: injected DML failure leaves no partial append (rollback under one locked write transaction). Residual is matrix breadth, not production dual-write ownership.
+
+### SQL inventory
+
+| Item | Evidence |
+| --- | --- |
+| Inventory module | `crates/storages/postgres/src/sql_inventory.rs` |
+| Allowlist owners | Role/tx setup (`SET LOCAL ROLE`, isolation, `search_path`, advisory locks), permit/catalog reads, run/config/fact DML families, migration/role probes, `AssertSqlSafe` |
+| Executable leaf | `postgres-sql-inventory-check` → `sql_inventory::tests::every_runtime_query_is_owned_by_the_allowlist` |
+| Dynamic `sqlx::query(` count (src) | configuration 6, session 12, transaction 10, schema 8, structured 15, inventory self 2 |
+| Checked `sqlx::query!` macros | **none** at HEAD (known residual R-STORE-05-MACROS) |
+| Documentation honesty | README + `docs/build-and-verification.md` state inventory + offline/online prepare check; do not claim compile-time coverage of dynamic families |
+
+Online `postgres-sqlx-check` still owns migration metadata prepare-check, authoritative schema probe, and hostile schema-mutation rejection (`SchemaAuthorityMismatch` path).
+
+### Query-plan / fact-frontier evidence
+
+| Property | Code / schema | Test evidence |
+| --- | --- | --- |
+| Atomic fact frontier on head row | `tenant_fact_heads` stores `fact_order`, `publication_count`, `minimum_order`, `maximum_order`; publication CAS updates head with publication insert in one locked write | `tenant_fact_publications_are_dense_atomic_and_exactly_routed`; concurrent publication/barrier linearization |
+| No lifetime aggregate on publish | Publish path reads locked head + `EXISTS` ahead probe on indexed publications; no `COUNT`/`MIN`/`MAX` over lifetime history in `structured.rs` append | Code inspection |
+| Bounded scan | `scan_fact_publications` filters PK prefix + `fact_order` range + fixed `LIMIT` (`maximum_items` ≤ 1024) | Prior-run fact scan reopen/empty-frontier tests |
+| Index ownership | PK `(store_scope_id, store_epoch, tenant_scope_id, fact_order)` on `tenant_fact_publications` | Migration |
+| Long-history `EXPLAIN` stability proof | Not present | **residual** R-STORE-06-PLAN |
+
+### Proof dispositions
+
+| Proof | Disposition | Notes |
+| --- | --- | --- |
+| AUTH-03 | **PASS** | Ordinary production cannot obtain/retain a cloneable pool through openers or session bundles. Deployment login materials remain TCB. Invalid credentials fail closed without memory fallback. |
+| AUTH-04 | **PASS** (matrix residual) | Exact-target roles and schema-local grants; sibling isolation structural; hostile membership/inheritance/public-grant rejection tests green. Full role×op×sibling table residual. |
+| STORE-01 | **PASS** (xproc residual) | Lock-before-decision + `classify_existing_under_lock`; healthy contention maps to `ExistingSame` / `AppendConflict` / `StaleHead`. Configuration concurrent matrix exact; multi-process run barriers partial. |
+| STORE-02 | **PASS** | Always-successful production fence removed; no production-compilable always-approve fence type. |
+| STORE-03 | **PASS** (matrix residual) | Shared Runtime-observable outcomes against PostgreSQL + memory parity/fresh process; fault/xproc matrices partial but atomic ownership is single private transaction module. |
+| STORE-04 | **PASS** | Shared `canonical_append` bounds/closure validation before either backend DML; memory + postgres consume it; bounds unit test matches 16 MiB / 65_536. |
+| STORE-05 | **PASS** (macro residual) | Executable dynamic allowlist + truthful docs; fixed SQL not yet fully `query!` migrated. |
+| STORE-06 | **PASS** (plan residual) | Head-maintained frontier/count; bounded indexed scans; no lifetime aggregates on hot path. No long-history EXPLAIN harness. |
+| STORE-07 | **PASS** | One private `transaction` module owns begin/role/`search_path`/permit/locks/commit classification for run and configuration. |
+| QUALITY-01 (postgres portion) | **PASS with residual** | Split into `roles` / `session` / `transaction` / `sql_inventory`; `structured.rs` remains large. |
+| VERIFY-01 (postgres portion) | **PASS with residual** | Inventory, sqlx, recoverability leaves green; incomplete multi-process barrier and full fault-stage harnesses remain. |
+
+### Adversarial checks against FAIL criteria
+
+| FAIL criterion | Observed | Gate impact |
+| --- | --- | --- |
+| Production can still bypass with retained pool | No public pool openers; session pools not extractable outside crate; app connect takes opaque sessions only | does not fail |
+| Production can still use global roles | Global application/maintenance roles deleted; per-target role names only | does not fail |
+| Healthy exact-head contention returns only availability | Contention SQLSTATEs re-read under lock; configuration race asserts exact domain outcomes without `BackendUnavailable` | does not fail |
+| Dual transaction authority | Single `transaction.rs` owner | does not fail |
+| Documentation claims broader SQL assurance than executable | Inventory + prepare-check boundary documented accurately | does not fail |
+
+Known implementer residuals accepted as non-blocking when structure enforces the property and some proofs exist:
+
+1. multi-process exact-head barriers partial
+2. fault-injection stage matrix partial
+3. not all SQL is `query!` macros
+
+### Findings and fixing revisions
+
+No open blockers found at this checkpoint. Non-blocking residuals:
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| R-AUTH-04-MATRIX | Residual | Role/ACL matrix and sibling-target denial are structural + partial hostile tests; not a full combinatorial suite | Strengthen later under VERIFY-01 |
+| R-STORE-03-XPROC | Residual | Cross-process same-run exact-head barriers incomplete; sequential fresh-process and same-process races present | Continue STORE-03 proofs |
+| R-STORE-03-FAULT | Residual | Stage-by-stage fault inject covers object-row and configuration-head paths, not every planned run-append stage / ack-loss retry | Continue STORE-03 proofs |
+| R-STORE-05-MACROS | Residual | Dynamic `sqlx::query` remains; owned by allowlist rather than `query!` | Optional migrate fixed shapes |
+| R-STORE-06-PLAN | Residual | No long-history EXPLAIN/query-plan assertion | Optional performance harness |
+| R-QUALITY-01-PG | Residual | `structured.rs` / large integration test file remain concentrated | Later QUALITY-01 |
+| R-README-CLAIM | Residual | README claims “sibling-target denial” suite more broadly than dedicated multi-schema tests currently prove | Prefer wording aligned with structural+partial proofs or add the tests |
+| R-DEPLOY-TCB | Residual | Public `SessionLoginMaterial` URLs can still open raw SQL if held; declared deployment TCB | Accept by contract; keep materials out of ordinary app paths |
+
+### Fixing revisions and re-review ledger
+
+| Event | Revision | Outcome |
+| --- | --- | --- |
+| Commit 5 authority seal | `1d015b05c29ff8c3963d0c3e14574f35ad5b303b` | Target roles, opaque sessions, private transaction module, fence removal |
+| Commit 6 exact-head classification | `54de9296b45387004768de5ff2c38236f44e7e15` | Shared canonical append + lock-order classification |
+| Commit 7 facts + SQL assurance | `67e9a549c3aa908e4c957289bcb482ab57961d34` | Atomic fact heads, inventory leaf, bounded scans |
+| Independent review | `67e9a549c3aa908e4c957289bcb482ab57961d34` | **PASS** — no production retained-pool / global-role bypass; residuals non-blocking |
+
+### Explicit gate decision
+
+```text
+GATE: PASS
+```
+
+Rationale: HEAD `67e9a549c3aa908e4c957289bcb482ab57961d34` closes AUTH-03/04 and STORE-01..07 for production authority, atomicity, and contention properties. Ordinary code cannot open history through a retained pool or global role; write authority is exact-target, permit-checked, and funneled through one private transaction typestate; healthy races classify domain outcomes; both backends share canonical ingress bounds; fact frontiers are head-maintained and scans are page-bounded; SQL assurance is executable and truthfully scoped. Partial multi-process barrier, fault-stage, EXPLAIN, and `query!` migration matrices remain residuals and do not reopen a production bypass.
+
+Independent re-checks of `postgres-sql-inventory-check`, `recoverability-postgres-v1`, `postgres-sqlx-check`, and store lib tests are green at the reviewed revision.
+
+---
+
+_End of PostgreSQL store checkpoint. Gate PASS recorded at exact HEAD
+`67e9a549c3aa908e4c957289bcb482ab57961d34`._
