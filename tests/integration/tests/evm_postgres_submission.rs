@@ -124,8 +124,6 @@ const RPC_ENDPOINT_ENV: &str = "MFM_EVM_POSTGRES_RPC_ENDPOINT";
 const ACTIVATION_ENV: &str = "MFM_EVM_POSTGRES_ACTIVATION_ATTESTATION";
 const PROVIDER_ENDPOINT_ENV: &str = "MFM_EVM_POSTGRES_PROVIDER_ENDPOINT";
 const PROVIDER_PUBLIC_KEY_ENV: &str = "MFM_EVM_POSTGRES_PROVIDER_PUBLIC_KEY";
-const HISTORY_APPLICATION_DATABASE_URL_ENV: &str = "MFM_EVM_HISTORY_APPLICATION_DATABASE_URL";
-const HISTORY_MAINTENANCE_DATABASE_URL_ENV: &str = "MFM_EVM_HISTORY_MAINTENANCE_DATABASE_URL";
 const ACTIVATION_ADMIN_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_ACTIVATION_ADMIN_DATABASE_URL";
 const ACTIVATION_PUBLIC_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_ACTIVATION_PUBLIC_DATABASE_URL";
 const NONCE_APPLICATION_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_NONCE_APPLICATION_DATABASE_URL";
@@ -765,10 +763,6 @@ async fn run_production_application_worker(
     qualified_routing_catalog: QualifiedEvmRoutingCatalog,
     mode: &str,
 ) {
-    let history_url = scoped_database_url(
-        &required_database_url(HISTORY_APPLICATION_DATABASE_URL_ENV),
-        history_schema,
-    );
     let material = production_deployment_material(
         fixture,
         activation,
