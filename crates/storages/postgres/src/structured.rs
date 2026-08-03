@@ -18,12 +18,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 
-use crate::session::{
-    ApplicationTargetSessions, CombinedTargetSessions, RoleSession, TargetBinding,
-};
+use crate::session::{ApplicationTargetSessions, RoleSession, TargetBinding};
 use crate::transaction::{
     begin_read, begin_run_write, lock_run, lock_tenant_fact, store_identity_from_binding,
-    CommitOutcome, LockedWriteTx, ReadTx,
+    LockedWriteTx, ReadTx,
 };
 
 const OBJECT_INSERT_CHUNK_SIZE: usize = 8_192;

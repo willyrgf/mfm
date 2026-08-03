@@ -25,28 +25,6 @@ impl TargetRoleKind {
             Self::ConfigurationWriter => "cwr",
         }
     }
-
-    pub(crate) const fn catalog_token(self) -> &'static str {
-        match self {
-            Self::Owner => "<target-owner>",
-            Self::Qualification => "<target-qualification>",
-            Self::RunReader => "<target-run-reader>",
-            Self::RunWriter => "<target-run-writer>",
-            Self::ConfigurationReader => "<target-configuration-reader>",
-            Self::ConfigurationWriter => "<target-configuration-writer>",
-        }
-    }
-
-    pub(crate) const fn all() -> [Self; 6] {
-        [
-            Self::Owner,
-            Self::Qualification,
-            Self::RunReader,
-            Self::RunWriter,
-            Self::ConfigurationReader,
-            Self::ConfigurationWriter,
-        ]
-    }
 }
 
 /// Validated 16-hex target key used to name schema-local roles.
@@ -96,6 +74,10 @@ fn md5_hex(input: &[u8]) -> String {
     fn i(x: u32, y: u32, z: u32) -> u32 {
         y ^ (x | !z)
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the argument order mirrors one RFC 1321 compression round"
+    )]
     fn op(
         a: u32,
         b: u32,
@@ -266,26 +248,9 @@ impl TargetRoleNames {
     }
 }
 
-/// Maps a managed role name to its catalog token for schema-independent hashing.
-pub(crate) fn normalize_role_name(role_name: &str) -> String {
-    if let Some((key_part, suffix)) = role_name
-        .strip_prefix("mfm_t_")
-        .and_then(|rest| rest.split_once('_'))
-    {
-        if let Some(key) = TargetKey::parse(key_part) {
-            for kind in TargetRoleKind::all() {
-                if suffix == kind.suffix() && role_name == key.role_name(kind) {
-                    return kind.catalog_token().to_owned();
-                }
-            }
-        }
-    }
-    role_name.to_owned()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{md5_hex, normalize_role_name, TargetKey, TargetRoleKind, TargetRoleNames};
+    use super::{md5_hex, TargetKey, TargetRoleKind, TargetRoleNames};
 
     #[test]
     fn target_key_roles_are_stable() {
@@ -293,10 +258,9 @@ mod tests {
         let names = TargetRoleNames::from_target_key(key.clone());
         assert_eq!(names.run_writer, "mfm_t_0123456789abcdef_rwr");
         assert_eq!(
-            normalize_role_name(&key.role_name(TargetRoleKind::Owner)),
-            "<target-owner>"
+            names.name(TargetRoleKind::Owner),
+            "mfm_t_0123456789abcdef_own"
         );
-        assert_eq!(normalize_role_name("postgres"), "postgres");
     }
 
     #[test]

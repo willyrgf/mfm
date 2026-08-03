@@ -50,13 +50,6 @@ impl<'a> ReadTx<'a> {
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)
     }
-
-    pub(crate) async fn rollback(self) -> Result<(), StructuredStoreError> {
-        self.transaction
-            .rollback()
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)
-    }
 }
 
 /// Write transaction that has not yet acquired its canonical advisory lock.

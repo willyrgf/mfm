@@ -109,9 +109,7 @@ impl std::fmt::Debug for TargetBinding {
 pub(crate) struct RoleSession {
     pool: PgPool,
     kind: SessionKind,
-    login_role: String,
     managed_role: String,
-    managed_role_oid: u32,
 }
 
 impl RoleSession {
@@ -125,14 +123,6 @@ impl RoleSession {
 
     pub(crate) fn managed_role(&self) -> &str {
         &self.managed_role
-    }
-
-    pub(crate) const fn managed_role_oid(&self) -> u32 {
-        self.managed_role_oid
-    }
-
-    pub(crate) fn login_role(&self) -> &str {
-        &self.login_role
     }
 }
 
@@ -148,28 +138,8 @@ pub struct ApplicationTargetSessions {
 }
 
 impl ApplicationTargetSessions {
-    pub(crate) fn target(&self) -> &TargetBinding {
-        &self.target
-    }
-
-    pub(crate) fn run_reader(&self) -> &RoleSession {
-        &self.run_reader
-    }
-
-    pub(crate) fn run_writer(&self) -> &RoleSession {
-        &self.run_writer
-    }
-
-    pub(crate) fn configuration_reader(&self) -> &RoleSession {
-        &self.configuration_reader
-    }
-
     pub(crate) fn into_run_parts(self) -> (RoleSession, RoleSession, TargetBinding) {
         (self.run_reader, self.run_writer, self.target)
-    }
-
-    pub(crate) fn into_configuration_reader(self) -> (RoleSession, TargetBinding) {
-        (self.configuration_reader, self.target)
     }
 
     pub(crate) fn into_application_parts(
@@ -201,18 +171,6 @@ pub struct ConfigurationMaintenanceSessions {
 }
 
 impl ConfigurationMaintenanceSessions {
-    pub(crate) fn target(&self) -> &TargetBinding {
-        &self.target
-    }
-
-    pub(crate) fn configuration_reader(&self) -> &RoleSession {
-        &self.configuration_reader
-    }
-
-    pub(crate) fn configuration_writer(&self) -> &RoleSession {
-        &self.configuration_writer
-    }
-
     pub(crate) fn into_parts(self) -> (RoleSession, RoleSession, TargetBinding) {
         (
             self.configuration_reader,
@@ -241,26 +199,6 @@ pub struct CombinedTargetSessions {
 }
 
 impl CombinedTargetSessions {
-    pub(crate) fn target(&self) -> &TargetBinding {
-        &self.target
-    }
-
-    pub(crate) fn run_reader(&self) -> &RoleSession {
-        &self.run_reader
-    }
-
-    pub(crate) fn run_writer(&self) -> &RoleSession {
-        &self.run_writer
-    }
-
-    pub(crate) fn configuration_reader(&self) -> &RoleSession {
-        &self.configuration_reader
-    }
-
-    pub(crate) fn configuration_writer(&self) -> &RoleSession {
-        &self.configuration_writer
-    }
-
     /// Drops the configuration writer, leaving application sessions only.
     pub fn into_application(self) -> ApplicationTargetSessions {
         ApplicationTargetSessions {
@@ -269,10 +207,6 @@ impl CombinedTargetSessions {
             run_writer: self.run_writer,
             configuration_reader: self.configuration_reader,
         }
-    }
-
-    pub(crate) fn into_run_parts(self) -> (RoleSession, RoleSession, TargetBinding) {
-        (self.run_reader, self.run_writer, self.target)
     }
 
     pub(crate) fn into_parts(
@@ -487,14 +421,11 @@ async fn open_role_session(
     kind: SessionKind,
 ) -> Result<RoleSession> {
     let pool = connect_login(login, expected_schema).await?;
-    let (login_role, managed_role, managed_role_oid) =
-        probe_login_shape(&pool, target, kind).await?;
+    let managed_role = probe_login_shape(&pool, target, kind).await?;
     Ok(RoleSession {
         pool,
         kind,
-        login_role,
         managed_role,
-        managed_role_oid,
     })
 }
 
@@ -659,7 +590,7 @@ async fn probe_login_shape(
     pool: &PgPool,
     target: &TargetBinding,
     kind: SessionKind,
-) -> Result<(String, String, u32)> {
+) -> Result<String> {
     let mut transaction = pool
         .begin()
         .await
@@ -794,8 +725,7 @@ async fn probe_login_shape(
     .fetch_one(&mut *transaction)
     .await
     .map_err(|_| PostgresStoreError::WriterRequired)?;
-    let managed_role_oid =
-        u32::try_from(role_oid).map_err(|_| PostgresStoreError::WriterRequired)?;
+    u32::try_from(role_oid).map_err(|_| PostgresStoreError::WriterRequired)?;
 
     sqlx::query(
         "SELECT pg_catalog.set_config( \
@@ -818,7 +748,7 @@ async fn probe_login_shape(
         .rollback()
         .await
         .map_err(|_| PostgresStoreError::WriterRequired)?;
-    Ok((session_role_name, managed, managed_role_oid))
+    Ok(managed)
 }
 
 fn parse_u64(value: &str) -> Result<u64> {
