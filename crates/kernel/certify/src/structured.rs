@@ -2704,62 +2704,128 @@ impl ProgramRegistryBuilder {
     /// Registers the exact type-derived structured retained-value contract and
     /// its frozen component-evidence dependency.
     pub fn register_value<T: MfmValue>(&mut self) -> Result<ContentRef> {
-        let schema = T::schema_descriptor()
-            .map_err(|error| CertifyError::Certification(error.to_string()))?
-            .identity;
-        let evidence_ref = component_object_evidence_contract_ref()
+        self.register_structured_value::<T>()
+    }
+
+    /// Registers one recursive structured-value definition (retained leaf or
+    /// non-empty fan-out join) through the single qualification encoder.
+    pub fn register_structured_value<T: mfm_program::structured::StructuredValue>(
+        &mut self,
+    ) -> Result<ContentRef> {
+        let definition = T::structured_value_definition()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        let evidence_value = CanonicalJsonValue::from_canonical_json(
-            component_object_evidence_contract_canonical()
-                .map_err(|error| CertifyError::Certification(error.to_string()))?
-                .as_bytes(),
-        )?;
-        self.registry
-            .register_component_object(RegisteredComponentObject {
-                object: CertifiedComponentObject {
-                    object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                    content_ref: evidence_ref.clone(),
-                    value: evidence_value,
-                },
-                outbound_references: Vec::new(),
-            })?;
-        let contract = structured_value_contract::<T>()?;
-        let contract_ref = retained_value_contract_ref(&contract)?;
-        if schema
-            .schema_id()
-            .map_err(|error| CertifyError::Certification(error.to_string()))?
-            != *contract.schema_id()
-            || schema.semantic_type_id.as_ref() != Some(contract.semantic_type_id())
-        {
-            return Err(CertifyError::Certification(
-                "registered value schema differs from its retained contract".to_owned(),
-            ));
+        self.register_structured_value_definition(&definition)
+    }
+
+    /// Registers one recursive structured-value definition through the single
+    /// qualification encoder used by retained values and fan-out joins.
+    pub fn register_structured_value_definition(
+        &mut self,
+        definition: &mfm_spec::structured::StructuredValueDefinition,
+    ) -> Result<ContentRef> {
+        match definition {
+            mfm_spec::structured::StructuredValueDefinition::Retained { contract, schema } => {
+                let evidence_ref = component_object_evidence_contract_ref()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?;
+                let evidence_value = CanonicalJsonValue::from_canonical_json(
+                    component_object_evidence_contract_canonical()
+                        .map_err(|error| CertifyError::Certification(error.to_string()))?
+                        .as_bytes(),
+                )?;
+                self.registry
+                    .register_component_object(RegisteredComponentObject {
+                        object: CertifiedComponentObject {
+                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: evidence_ref.clone(),
+                            value: evidence_value,
+                        },
+                        outbound_references: Vec::new(),
+                    })?;
+                let contract_ref = retained_value_contract_ref(contract)?;
+                if schema
+                    .schema_id()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?
+                    != *contract.schema_id()
+                    || schema.semantic_type_id.as_ref() != Some(contract.semantic_type_id())
+                {
+                    return Err(CertifyError::Certification(
+                        "registered value schema differs from its retained contract".to_owned(),
+                    ));
+                }
+                let value = CanonicalJsonValue::from_canonical_json(
+                    contract
+                        .canonical_json()
+                        .map_err(|error| CertifyError::Certification(error.to_string()))?
+                        .as_bytes(),
+                )?;
+                self.registry
+                    .register_component_object(RegisteredComponentObject {
+                        object: CertifiedComponentObject {
+                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: contract_ref.clone(),
+                            value,
+                        },
+                        outbound_references: vec![ComponentObjectReference {
+                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: evidence_ref,
+                        }],
+                    })?;
+                insert_exact(
+                    &mut self.registry.value_schemas,
+                    contract_ref.clone(),
+                    schema.clone(),
+                    "retained value schema identity",
+                )?;
+                Ok(contract_ref)
+            }
+            mfm_spec::structured::StructuredValueDefinition::NonEmptyFanOutJoin {
+                lane_success,
+                lane_failure,
+            } => {
+                let success_ref = self.register_structured_value_definition(lane_success)?;
+                if let StructuredFailureContract::Typed { contract_ref, .. } = lane_failure {
+                    if !self.registry.component_objects.contains_key(contract_ref)
+                        && !self.registry.value_schemas.contains_key(contract_ref)
+                    {
+                        return Err(CertifyError::Certification(
+                            "fan-out join failure contract is not qualified".to_owned(),
+                        ));
+                    }
+                }
+                let lane_content_ref = lane_outcome_contract_ref(&success_ref, lane_failure)?;
+                let mut lane_references = vec![contract_reference(&success_ref)?];
+                collect_failure_contract_reference(lane_failure, &mut lane_references)?;
+                self.registry
+                    .register_component_object(RegisteredComponentObject {
+                        object: CertifiedComponentObject {
+                            object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: lane_content_ref.clone(),
+                            value: CanonicalJsonValue::from_canonical_json(
+                                lane_outcome_contract_canonical_json(&success_ref, lane_failure)?
+                                    .as_bytes(),
+                            )?,
+                        },
+                        outbound_references: lane_references,
+                    })?;
+                let join_content_ref = fan_out_join_contract_ref(&success_ref, lane_failure)?;
+                self.registry
+                    .register_component_object(RegisteredComponentObject {
+                        object: CertifiedComponentObject {
+                            object_type: stable_id(FAN_OUT_JOIN_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: join_content_ref.clone(),
+                            value: CanonicalJsonValue::from_canonical_json(
+                                fan_out_join_contract_canonical_json(&success_ref, lane_failure)?
+                                    .as_bytes(),
+                            )?,
+                        },
+                        outbound_references: vec![ComponentObjectReference {
+                            object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
+                            content_ref: lane_content_ref,
+                        }],
+                    })?;
+                Ok(join_content_ref)
+            }
         }
-        let value = CanonicalJsonValue::from_canonical_json(
-            contract
-                .canonical_json()
-                .map_err(|error| CertifyError::Certification(error.to_string()))?
-                .as_bytes(),
-        )?;
-        self.registry
-            .register_component_object(RegisteredComponentObject {
-                object: CertifiedComponentObject {
-                    object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                    content_ref: contract_ref.clone(),
-                    value,
-                },
-                outbound_references: vec![ComponentObjectReference {
-                    object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                    content_ref: evidence_ref,
-                }],
-            })?;
-        insert_exact(
-            &mut self.registry.value_schemas,
-            contract_ref.clone(),
-            schema,
-            "retained value schema identity",
-        )?;
-        Ok(contract_ref)
     }
 
     /// Registers one exact domain fact descriptor and its typed contract edges.
@@ -7916,6 +7982,14 @@ fn validate_authored_block(
                     .iter()
                     .map(|arm| arm.canonical_tag.as_str())
                     .collect();
+                let mut arm_labels = BTreeSet::new();
+                for arm in &binding.arms {
+                    if !arm_labels.insert(arm.label.clone()) {
+                        return Err(CertifyError::Certification(
+                            "authored Match has duplicate stable arm label".to_owned(),
+                        ));
+                    }
+                }
                 let normal_slots: Vec<LexicalSlot> = binding
                     .arms
                     .iter()
@@ -8106,6 +8180,14 @@ fn validate_authored_failure_directive(
                     "custom failure route is not exact and exhaustive".to_owned(),
                 ));
             }
+            let mut arm_labels = BTreeSet::new();
+            for arm in arms {
+                if !arm_labels.insert(arm.label.clone()) {
+                    return Err(CertifyError::Certification(
+                        "custom recovery has duplicate stable arm label".to_owned(),
+                    ));
+                }
+            }
             let plan_path = occurrence_path.child(StructuralPathSegment::FailurePlan {
                 label: stable_id("handler")?,
             })?;
@@ -8259,8 +8341,14 @@ fn validate_block_lexical(block: &ExpandedBlock, visible: &mut VisibleSlots) -> 
                         "expanded Match selector or structural path is not dominating".to_owned(),
                     ));
                 }
+                let mut arm_labels = BTreeSet::new();
                 let mut arm_slots = Vec::new();
                 for (arm, variant) in binding.arms.iter().zip(&binding.selector_contract.variants) {
+                    if !arm_labels.insert(arm.label.clone()) {
+                        return Err(CertifyError::Certification(
+                            "expanded Match has duplicate stable arm label".to_owned(),
+                        ));
+                    }
                     let arm_path = binding.path.child(StructuralPathSegment::MatchArm {
                         label: arm.label.clone(),
                         tag: arm.canonical_tag.clone(),

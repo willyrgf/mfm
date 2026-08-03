@@ -29,6 +29,12 @@ pub const MAX_FAN_OUT_DEPTH: u8 = 2;
 pub const MAX_STRUCTURAL_PATH_DEPTH: usize = 64;
 /// Maximum component objects in one certified-program closure.
 pub const MAX_CERTIFIED_COMPONENT_OBJECTS: usize = 65_536;
+/// Maximum producer-slot resolution depth during denormalization of expanded
+/// provenance tables. Bound is independent of process stack size.
+pub const MAX_PROVENANCE_RESOLUTION_DEPTH: usize = MAX_STRUCTURAL_PATH_DEPTH.saturating_mul(4);
+/// Maximum JSON nodes visited while normalizing or denormalizing one structured
+/// program payload. Bound is independent of process stack size.
+pub const MAX_STRUCTURED_JSON_NODES: usize = MAX_CERTIFIED_COMPONENT_OBJECTS;
 
 const NEVER_CONTRACT_SCHEMA_NAME: &str = "mfm.kernel.never-failure-contract";
 const NEVER_CONTRACT_BYTES: &[u8] =
@@ -412,7 +418,10 @@ impl SemanticCallPath {
 }
 
 /// One normalized structural path segment.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+///
+/// Ordering is ordinal-first for declarations and lanes so diagnostic labels
+/// never reorder certified structural identity. Labels remain diagnostics only.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StructuralPathSegment {
     /// Root lexical region of one operation.
@@ -453,6 +462,83 @@ pub enum StructuralPathSegment {
         /// Stable local route label.
         label: StableId,
     },
+}
+
+impl PartialOrd for StructuralPathSegment {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for StructuralPathSegment {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        use StructuralPathSegment::*;
+        fn kind_rank(segment: &StructuralPathSegment) -> u8 {
+            match segment {
+                Root { .. } => 0,
+                Declaration { .. } => 1,
+                MatchArm { .. } => 2,
+                FanOutLane { .. } => 3,
+                Fragment { .. } => 4,
+                FailurePlan { .. } => 5,
+            }
+        }
+        match kind_rank(self).cmp(&kind_rank(other)) {
+            Ordering::Equal => match (self, other) {
+                (Root { operation_id: left }, Root { operation_id: right }) => left.cmp(right),
+                (
+                    Declaration {
+                        ordinal: left_ord,
+                        label: left_label,
+                    },
+                    Declaration {
+                        ordinal: right_ord,
+                        label: right_label,
+                    },
+                ) => left_ord
+                    .cmp(right_ord)
+                    .then_with(|| left_label.cmp(right_label)),
+                (
+                    MatchArm {
+                        tag: left_tag,
+                        label: left_label,
+                    },
+                    MatchArm {
+                        tag: right_tag,
+                        label: right_label,
+                    },
+                ) => left_tag
+                    .cmp(right_tag)
+                    .then_with(|| left_label.cmp(right_label)),
+                (
+                    FanOutLane {
+                        ordinal: left_ord,
+                        key: left_key,
+                    },
+                    FanOutLane {
+                        ordinal: right_ord,
+                        key: right_key,
+                    },
+                ) => left_ord.cmp(right_ord).then_with(|| left_key.cmp(right_key)),
+                (
+                    Fragment {
+                        expansion_ref: left_ref,
+                        label: left_label,
+                    },
+                    Fragment {
+                        expansion_ref: right_ref,
+                        label: right_label,
+                    },
+                ) => left_ref
+                    .cmp(right_ref)
+                    .then_with(|| left_label.cmp(right_label)),
+                (FailurePlan { label: left }, FailurePlan { label: right }) => left.cmp(right),
+                _ => Ordering::Equal,
+            },
+            order => order,
+        }
+    }
 }
 
 /// Complete normalized structural path for a declaration or lexical region.
@@ -2226,39 +2312,117 @@ impl StructuredProgramNormalizer {
 
     fn normalize_value(
         &mut self,
-        value: serde_json::Value,
-        field_name: Option<&str>,
+        root: serde_json::Value,
+        root_field_name: Option<&str>,
     ) -> Result<serde_json::Value> {
-        if is_inline_lexical_slot(&value) {
-            let slot = serde_json::from_value(value)
-                .map_err(|error| SpecError::Invariant(error.to_string()))?;
-            return serde_json::to_value(self.normalize_slot(slot)?)
-                .map_err(|error| SpecError::Invariant(error.to_string()));
+        // Explicit work stack: hostile deep JSON fails with a typed bound error
+        // rather than exhausting the process stack.
+        enum Frame {
+            Start {
+                value: serde_json::Value,
+                field_name: Option<String>,
+            },
+            ArrayCollect {
+                total: usize,
+            },
+            ObjectCollect {
+                keys: Vec<String>,
+            },
         }
-        if field_name.is_some_and(is_structural_path_field) {
-            let path = serde_json::from_value(value)
-                .map_err(|error| SpecError::Invariant(error.to_string()))?;
-            return serde_json::to_value(self.normalize_path(path)?)
-                .map_err(|error| SpecError::Invariant(error.to_string()));
+        let mut stack = vec![Frame::Start {
+            value: root,
+            field_name: root_field_name.map(str::to_owned),
+        }];
+        let mut completed = Vec::new();
+        let mut nodes = 0usize;
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Start { value, field_name } => {
+                    nodes = nodes.saturating_add(1);
+                    if nodes > MAX_STRUCTURED_JSON_NODES {
+                        return Err(SpecError::Invariant(
+                            "structured program JSON node budget exceeded".to_owned(),
+                        ));
+                    }
+                    if is_inline_lexical_slot(&value) {
+                        let slot = serde_json::from_value(value)
+                            .map_err(|error| SpecError::Invariant(error.to_string()))?;
+                        completed.push(
+                            serde_json::to_value(self.normalize_slot(slot)?)
+                                .map_err(|error| SpecError::Invariant(error.to_string()))?,
+                        );
+                        continue;
+                    }
+                    if field_name
+                        .as_deref()
+                        .is_some_and(is_structural_path_field)
+                    {
+                        let path = serde_json::from_value(value)
+                            .map_err(|error| SpecError::Invariant(error.to_string()))?;
+                        completed.push(
+                            serde_json::to_value(self.normalize_path(path)?)
+                                .map_err(|error| SpecError::Invariant(error.to_string()))?,
+                        );
+                        continue;
+                    }
+                    match value {
+                        serde_json::Value::Array(values) => {
+                            let total = values.len();
+                            stack.push(Frame::ArrayCollect { total });
+                            for value in values.into_iter().rev() {
+                                stack.push(Frame::Start {
+                                    value,
+                                    field_name: None,
+                                });
+                            }
+                        }
+                        serde_json::Value::Object(values) => {
+                            let mut keys = Vec::with_capacity(values.len());
+                            let mut items = Vec::with_capacity(values.len());
+                            for (key, value) in values {
+                                keys.push(key.clone());
+                                items.push((key, value));
+                            }
+                            stack.push(Frame::ObjectCollect { keys });
+                            for (key, value) in items.into_iter().rev() {
+                                stack.push(Frame::Start {
+                                    value,
+                                    field_name: Some(key),
+                                });
+                            }
+                        }
+                        scalar => completed.push(scalar),
+                    }
+                }
+                Frame::ArrayCollect { total } => {
+                    let mut items = Vec::with_capacity(total);
+                    for _ in 0..total {
+                        items.push(completed.pop().ok_or_else(|| {
+                            SpecError::Invariant(
+                                "structured program JSON array frame underfilled".to_owned(),
+                            )
+                        })?);
+                    }
+                    items.reverse();
+                    completed.push(serde_json::Value::Array(items));
+                }
+                Frame::ObjectCollect { keys } => {
+                    let mut object = serde_json::Map::with_capacity(keys.len());
+                    for key in keys.into_iter().rev() {
+                        let value = completed.pop().ok_or_else(|| {
+                            SpecError::Invariant(
+                                "structured program JSON object frame underfilled".to_owned(),
+                            )
+                        })?;
+                        object.insert(key, value);
+                    }
+                    completed.push(serde_json::Value::Object(object));
+                }
+            }
         }
-        match value {
-            serde_json::Value::Array(values) => Ok(serde_json::Value::Array(
-                values
-                    .into_iter()
-                    .map(|value| self.normalize_value(value, None))
-                    .collect::<Result<Vec<_>>>()?,
-            )),
-            serde_json::Value::Object(values) => Ok(serde_json::Value::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| {
-                        self.normalize_value(value, Some(&key))
-                            .map(|value| (key, value))
-                    })
-                    .collect::<Result<serde_json::Map<_, _>>>()?,
-            )),
-            scalar => Ok(scalar),
-        }
+        completed.pop().ok_or_else(|| {
+            SpecError::Invariant("structured program JSON normalization produced no root".to_owned())
+        })
     }
 
     fn finish(
@@ -2277,6 +2441,44 @@ impl StructuredProgramNormalizer {
                 .map(|(slot_ref, slot)| ExpandedLexicalSlotDefinition { slot_ref, slot })
                 .collect(),
         )
+    }
+}
+
+fn expanded_producer_child_slots(producer: &ExpandedLexicalProducer) -> Vec<ExpandedSlotRef> {
+    match producer {
+        ExpandedLexicalProducer::AdmissionRoot { .. }
+        | ExpandedLexicalProducer::AuthoredCallOutput { .. }
+        | ExpandedLexicalProducer::StateOutput { .. } => Vec::new(),
+        ExpandedLexicalProducer::ArmValue { source, .. } => vec![source.clone()],
+        ExpandedLexicalProducer::MatchMerge {
+            declaration_ordered_arm_slots,
+            ..
+        } => declaration_ordered_arm_slots.clone(),
+        ExpandedLexicalProducer::ScopeFailureMerge {
+            declaration_ordered_failure_slots,
+            ..
+        } => declaration_ordered_failure_slots.clone(),
+        ExpandedLexicalProducer::VariantPayload { selector, .. } => vec![selector.clone()],
+        ExpandedLexicalProducer::FragmentInput { source, .. }
+        | ExpandedLexicalProducer::FragmentBoundary { source, .. } => vec![source.clone()],
+        ExpandedLexicalProducer::LaneOutcome {
+            success_slot,
+            failure_slot,
+            ..
+        } => {
+            let mut children = Vec::with_capacity(2);
+            if let Some(slot) = success_slot {
+                children.push(slot.clone());
+            }
+            if let Some(slot) = failure_slot {
+                children.push(slot.clone());
+            }
+            children
+        }
+        ExpandedLexicalProducer::FanOutJoin {
+            declaration_ordered_lane_slots,
+            ..
+        } => declaration_ordered_lane_slots.clone(),
     }
 }
 
@@ -2370,39 +2572,105 @@ impl StructuredProgramDenormalizer {
         Ok(path)
     }
 
-    fn resolve_slot(&mut self, reference: ExpandedSlotRef) -> Result<LexicalSlot> {
-        if let Some(slot) = self.resolved_slots.get(&reference.slot_ref) {
-            self.used_slots.insert(reference.slot_ref);
-            return Ok(slot.clone());
+    fn resolve_slot(&mut self, start: ExpandedSlotRef) -> Result<LexicalSlot> {
+        // Explicit work stack with a depth budget independent of process stack
+        // size: a shallow table can encode a long acyclic reference chain.
+        enum Phase {
+            Enter,
+            Finish(ExpandedLexicalSlot),
         }
-        if !self.active_slots.insert(reference.slot_ref.clone()) {
-            return Err(SpecError::Invariant(
-                "expanded lexical slot graph contains a cycle".to_owned(),
-            ));
+        struct Frame {
+            reference: ExpandedSlotRef,
+            depth: usize,
+            phase: Phase,
         }
-        let definition = self
-            .lexical_slots
+        let mut stack = vec![Frame {
+            reference: start,
+            depth: 0,
+            phase: Phase::Enter,
+        }];
+        let mut last = None;
+        while let Some(frame) = stack.pop() {
+            match frame.phase {
+                Phase::Enter => {
+                    if frame.depth > MAX_PROVENANCE_RESOLUTION_DEPTH {
+                        return Err(SpecError::Invariant(
+                            "expanded provenance resolution depth exceeded".to_owned(),
+                        ));
+                    }
+                    if let Some(slot) = self.resolved_slots.get(&frame.reference.slot_ref) {
+                        self.used_slots.insert(frame.reference.slot_ref.clone());
+                        last = Some(slot.clone());
+                        continue;
+                    }
+                    if !self.active_slots.insert(frame.reference.slot_ref.clone()) {
+                        return Err(SpecError::Invariant(
+                            "expanded lexical slot graph contains a cycle".to_owned(),
+                        ));
+                    }
+                    let definition = self
+                        .lexical_slots
+                        .get(&frame.reference.slot_ref)
+                        .cloned()
+                        .ok_or_else(|| {
+                            SpecError::Invariant(
+                                "expanded lexical slot reference is not defined locally".to_owned(),
+                            )
+                        })?;
+                    let children = expanded_producer_child_slots(&definition.producer);
+                    stack.push(Frame {
+                        reference: frame.reference,
+                        depth: frame.depth,
+                        phase: Phase::Finish(definition),
+                    });
+                    for child in children.into_iter().rev() {
+                        stack.push(Frame {
+                            reference: child,
+                            depth: frame.depth.saturating_add(1),
+                            phase: Phase::Enter,
+                        });
+                    }
+                }
+                Phase::Finish(definition) => {
+                    let producer = self.assemble_resolved_producer(definition.producer)?;
+                    let slot = LexicalSlot {
+                        lexical_path: self.resolve_path(ExpandedPathRef {
+                            path_ref: definition.lexical_path_ref,
+                        })?,
+                        contract_ref: definition.contract_ref,
+                        producer,
+                    };
+                    self.active_slots.remove(&frame.reference.slot_ref);
+                    self.used_slots.insert(frame.reference.slot_ref.clone());
+                    self.resolved_slots
+                        .insert(frame.reference.slot_ref.clone(), slot.clone());
+                    last = Some(slot);
+                }
+            }
+        }
+        last.ok_or_else(|| {
+            SpecError::Invariant("expanded provenance resolution produced no slot".to_owned())
+        })
+    }
+
+    fn take_resolved_slot(&mut self, reference: ExpandedSlotRef) -> Result<LexicalSlot> {
+        let slot = self
+            .resolved_slots
             .get(&reference.slot_ref)
             .cloned()
             .ok_or_else(|| {
                 SpecError::Invariant(
-                    "expanded lexical slot reference is not defined locally".to_owned(),
+                    "expanded lexical slot dependency was not resolved before assembly".to_owned(),
                 )
             })?;
-        let slot = LexicalSlot {
-            lexical_path: self.resolve_path(ExpandedPathRef {
-                path_ref: definition.lexical_path_ref,
-            })?,
-            contract_ref: definition.contract_ref,
-            producer: self.resolve_producer(definition.producer)?,
-        };
-        self.active_slots.remove(&reference.slot_ref);
-        self.used_slots.insert(reference.slot_ref.clone());
-        self.resolved_slots.insert(reference.slot_ref, slot.clone());
+        self.used_slots.insert(reference.slot_ref);
         Ok(slot)
     }
 
-    fn resolve_producer(&mut self, producer: ExpandedLexicalProducer) -> Result<LexicalProducer> {
+    fn assemble_resolved_producer(
+        &mut self,
+        producer: ExpandedLexicalProducer,
+    ) -> Result<LexicalProducer> {
         Ok(match producer {
             ExpandedLexicalProducer::AdmissionRoot { root_id } => {
                 LexicalProducer::AdmissionRoot { root_id }
@@ -2426,7 +2694,7 @@ impl StructuredProgramDenormalizer {
                 source,
             } => LexicalProducer::ArmValue {
                 selected_arm_path: self.resolve_path(selected_arm_path)?,
-                source: Box::new(self.resolve_slot(source)?),
+                source: Box::new(self.take_resolved_slot(source)?),
             },
             ExpandedLexicalProducer::MatchMerge {
                 match_path,
@@ -2435,7 +2703,7 @@ impl StructuredProgramDenormalizer {
                 match_path: self.resolve_path(match_path)?,
                 declaration_ordered_arm_slots: declaration_ordered_arm_slots
                     .into_iter()
-                    .map(|slot| self.resolve_slot(slot))
+                    .map(|slot| self.take_resolved_slot(slot))
                     .collect::<Result<Vec<_>>>()?,
             },
             ExpandedLexicalProducer::ScopeFailureMerge {
@@ -2445,7 +2713,7 @@ impl StructuredProgramDenormalizer {
                 scope_id,
                 declaration_ordered_failure_slots: declaration_ordered_failure_slots
                     .into_iter()
-                    .map(|slot| self.resolve_slot(slot))
+                    .map(|slot| self.take_resolved_slot(slot))
                     .collect::<Result<Vec<_>>>()?,
             },
             ExpandedLexicalProducer::VariantPayload {
@@ -2453,7 +2721,7 @@ impl StructuredProgramDenormalizer {
                 canonical_tag,
                 payload_path,
             } => LexicalProducer::VariantPayload {
-                selector: Box::new(self.resolve_slot(selector)?),
+                selector: Box::new(self.take_resolved_slot(selector)?),
                 canonical_tag,
                 payload_path,
             },
@@ -2464,7 +2732,7 @@ impl StructuredProgramDenormalizer {
             } => LexicalProducer::FragmentInput {
                 boundary_id,
                 child_root_id,
-                source: Box::new(self.resolve_slot(source)?),
+                source: Box::new(self.take_resolved_slot(source)?),
             },
             ExpandedLexicalProducer::FragmentBoundary {
                 boundary_id,
@@ -2473,7 +2741,7 @@ impl StructuredProgramDenormalizer {
             } => LexicalProducer::FragmentBoundary {
                 boundary_id,
                 role,
-                source: Box::new(self.resolve_slot(source)?),
+                source: Box::new(self.take_resolved_slot(source)?),
             },
             ExpandedLexicalProducer::LaneOutcome {
                 lane_path,
@@ -2482,10 +2750,10 @@ impl StructuredProgramDenormalizer {
             } => LexicalProducer::LaneOutcome {
                 lane_path: self.resolve_path(lane_path)?,
                 success_slot: success_slot
-                    .map(|slot| self.resolve_slot(slot).map(Box::new))
+                    .map(|slot| self.take_resolved_slot(slot).map(Box::new))
                     .transpose()?,
                 failure_slot: failure_slot
-                    .map(|slot| self.resolve_slot(slot).map(Box::new))
+                    .map(|slot| self.take_resolved_slot(slot).map(Box::new))
                     .transpose()?,
             },
             ExpandedLexicalProducer::FanOutJoin {
@@ -2495,40 +2763,103 @@ impl StructuredProgramDenormalizer {
                 group_path: self.resolve_path(group_path)?,
                 declaration_ordered_lane_slots: declaration_ordered_lane_slots
                     .into_iter()
-                    .map(|slot| self.resolve_slot(slot))
+                    .map(|slot| self.take_resolved_slot(slot))
                     .collect::<Result<Vec<_>>>()?,
             },
         })
     }
 
-    fn denormalize_value(&mut self, value: serde_json::Value) -> Result<serde_json::Value> {
-        if is_expanded_slot_reference(&value) {
-            let reference = serde_json::from_value(value)
-                .map_err(|error| SpecError::Invariant(error.to_string()))?;
-            return serde_json::to_value(self.resolve_slot(reference)?)
-                .map_err(|error| SpecError::Invariant(error.to_string()));
+    fn denormalize_value(&mut self, root: serde_json::Value) -> Result<serde_json::Value> {
+        // Explicit work stack with a node budget independent of process stack size.
+        enum Frame {
+            Start(serde_json::Value),
+            ArrayCollect { total: usize },
+            ObjectCollect { keys: Vec<String> },
         }
-        if is_expanded_path_reference(&value) {
-            let reference = serde_json::from_value(value)
-                .map_err(|error| SpecError::Invariant(error.to_string()))?;
-            return serde_json::to_value(self.resolve_path(reference)?)
-                .map_err(|error| SpecError::Invariant(error.to_string()));
+        let mut stack = vec![Frame::Start(root)];
+        let mut completed = Vec::new();
+        let mut nodes = 0usize;
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Start(value) => {
+                    nodes = nodes.saturating_add(1);
+                    if nodes > MAX_STRUCTURED_JSON_NODES {
+                        return Err(SpecError::Invariant(
+                            "structured program JSON node budget exceeded".to_owned(),
+                        ));
+                    }
+                    if is_expanded_slot_reference(&value) {
+                        let reference = serde_json::from_value(value)
+                            .map_err(|error| SpecError::Invariant(error.to_string()))?;
+                        completed.push(
+                            serde_json::to_value(self.resolve_slot(reference)?)
+                                .map_err(|error| SpecError::Invariant(error.to_string()))?,
+                        );
+                        continue;
+                    }
+                    if is_expanded_path_reference(&value) {
+                        let reference = serde_json::from_value(value)
+                            .map_err(|error| SpecError::Invariant(error.to_string()))?;
+                        completed.push(
+                            serde_json::to_value(self.resolve_path(reference)?)
+                                .map_err(|error| SpecError::Invariant(error.to_string()))?,
+                        );
+                        continue;
+                    }
+                    match value {
+                        serde_json::Value::Array(values) => {
+                            let total = values.len();
+                            stack.push(Frame::ArrayCollect { total });
+                            for value in values.into_iter().rev() {
+                                stack.push(Frame::Start(value));
+                            }
+                        }
+                        serde_json::Value::Object(values) => {
+                            let mut keys = Vec::with_capacity(values.len());
+                            let mut items = Vec::with_capacity(values.len());
+                            for (key, value) in values {
+                                keys.push(key.clone());
+                                items.push((key, value));
+                            }
+                            stack.push(Frame::ObjectCollect { keys });
+                            for (_, value) in items.into_iter().rev() {
+                                stack.push(Frame::Start(value));
+                            }
+                        }
+                        scalar => completed.push(scalar),
+                    }
+                }
+                Frame::ArrayCollect { total } => {
+                    let mut items = Vec::with_capacity(total);
+                    for _ in 0..total {
+                        items.push(completed.pop().ok_or_else(|| {
+                            SpecError::Invariant(
+                                "structured program JSON array frame underfilled".to_owned(),
+                            )
+                        })?);
+                    }
+                    items.reverse();
+                    completed.push(serde_json::Value::Array(items));
+                }
+                Frame::ObjectCollect { keys } => {
+                    let mut object = serde_json::Map::with_capacity(keys.len());
+                    for key in keys.into_iter().rev() {
+                        let value = completed.pop().ok_or_else(|| {
+                            SpecError::Invariant(
+                                "structured program JSON object frame underfilled".to_owned(),
+                            )
+                        })?;
+                        object.insert(key, value);
+                    }
+                    completed.push(serde_json::Value::Object(object));
+                }
+            }
         }
-        match value {
-            serde_json::Value::Array(values) => Ok(serde_json::Value::Array(
-                values
-                    .into_iter()
-                    .map(|value| self.denormalize_value(value))
-                    .collect::<Result<Vec<_>>>()?,
-            )),
-            serde_json::Value::Object(values) => Ok(serde_json::Value::Object(
-                values
-                    .into_iter()
-                    .map(|(key, value)| self.denormalize_value(value).map(|value| (key, value)))
-                    .collect::<Result<serde_json::Map<_, _>>>()?,
-            )),
-            scalar => Ok(scalar),
-        }
+        completed.pop().ok_or_else(|| {
+            SpecError::Invariant(
+                "structured program JSON denormalization produced no root".to_owned(),
+            )
+        })
     }
 
     fn ensure_complete_use(&self) -> Result<()> {
@@ -3266,7 +3597,7 @@ pub fn lane_outcome_contract_canonical_json(
     canonical(&(success_contract_ref, failure_contract))
 }
 
-/// Derives the nominal declaration-ordered vector contract for one fan-out
+/// Derives the nominal non-empty head-plus-tail join contract for one fan-out
 /// group from its exact lane outcome contract.
 pub fn fan_out_join_contract_ref(
     success_contract_ref: &ContentRef,
@@ -3276,14 +3607,114 @@ pub fn fan_out_join_contract_ref(
     structured_content_ref("mfm.fan-out-join-contract", &canonical)
 }
 
-/// Returns the canonical preimage of one nominal declaration-ordered fan-out
-/// join contract.
+/// Returns the canonical preimage of one nominal non-empty fan-out join contract.
 pub fn fan_out_join_contract_canonical_json(
     success_contract_ref: &ContentRef,
     failure_contract: &StructuredFailureContract,
 ) -> Result<PlainCanonicalJsonBytes> {
     let lane_contract_ref = lane_outcome_contract_ref(success_contract_ref, failure_contract)?;
     canonical(&lane_contract_ref)
+}
+
+/// One recursive structured-value algebra node for qualification closure.
+///
+/// Every admission, state, child-success, Match-result, policy, fan-out lane,
+/// and operation-root success boundary is closed by this algebra. Store
+/// validation dispatches through the derived contract identity; there is no
+/// parallel aggregate append path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StructuredValueDefinition {
+    /// Exact retained MFM value schema and role contract.
+    Retained {
+        /// Annex-validated retained-value contract.
+        contract: RetainedValueContract,
+        /// Qualified schema identity paired with the retained contract.
+        schema: mfm_values::SchemaIdentity,
+    },
+    /// Non-empty fan-out join of recursively defined lane success values.
+    NonEmptyFanOutJoin {
+        /// Recursive definition of each lane success body.
+        lane_success: Box<StructuredValueDefinition>,
+        /// Exact lane failure contract (`Never` or typed retained failure).
+        lane_failure: StructuredFailureContract,
+    },
+}
+
+impl StructuredValueDefinition {
+    /// Constructs a retained leaf after proving contract/schema agreement.
+    pub fn retained(
+        contract: RetainedValueContract,
+        schema: mfm_values::SchemaIdentity,
+    ) -> Result<Self> {
+        let schema_id = schema
+            .schema_id()
+            .map_err(|error| SpecError::Contract(error.to_string()))?;
+        if schema_id != *contract.schema_id()
+            || schema.semantic_type_id.as_ref() != Some(contract.semantic_type_id())
+        {
+            return Err(SpecError::Invariant(
+                "structured value definition schema differs from its retained contract".to_owned(),
+            ));
+        }
+        Ok(Self::Retained { contract, schema })
+    }
+
+    /// Constructs a non-empty recursive fan-out join definition.
+    pub fn non_empty_fan_out_join(
+        lane_success: StructuredValueDefinition,
+        lane_failure: StructuredFailureContract,
+    ) -> Result<Self> {
+        lane_failure.validate()?;
+        Ok(Self::NonEmptyFanOutJoin {
+            lane_success: Box::new(lane_success),
+            lane_failure,
+        })
+    }
+
+    /// Derives the exact nominal contract identity for this definition.
+    pub fn contract_ref(&self) -> Result<ContentRef> {
+        match self {
+            Self::Retained { contract, .. } => retained_value_contract_ref(contract),
+            Self::NonEmptyFanOutJoin {
+                lane_success,
+                lane_failure,
+            } => fan_out_join_contract_ref(&lane_success.contract_ref()?, lane_failure),
+        }
+    }
+
+    /// Returns the exact lane-outcome contract for a fan-out join definition.
+    pub fn lane_outcome_contract_ref(&self) -> Result<Option<ContentRef>> {
+        match self {
+            Self::Retained { .. } => Ok(None),
+            Self::NonEmptyFanOutJoin {
+                lane_success,
+                lane_failure,
+            } => Ok(Some(lane_outcome_contract_ref(
+                &lane_success.contract_ref()?,
+                lane_failure,
+            )?)),
+        }
+    }
+
+    /// Walks retained leaves in definition order (left-to-right, depth-first).
+    pub fn retained_leaves(&self) -> Vec<(&RetainedValueContract, &mfm_values::SchemaIdentity)> {
+        let mut leaves = Vec::new();
+        self.collect_retained_leaves(&mut leaves);
+        leaves
+    }
+
+    fn collect_retained_leaves<'a>(
+        &'a self,
+        leaves: &mut Vec<(&'a RetainedValueContract, &'a mfm_values::SchemaIdentity)>,
+    ) {
+        match self {
+            Self::Retained { contract, schema } => leaves.push((contract, schema)),
+            Self::NonEmptyFanOutJoin { lane_success, .. } => {
+                lane_success.collect_retained_leaves(leaves);
+            }
+        }
+    }
 }
 
 fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {

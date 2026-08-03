@@ -1475,12 +1475,17 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
     assert_eq!(outcome.kind(), "success");
     let join: serde_json::Value = serde_json::from_slice(outcome.canonical_value().as_bytes())
         .expect("decode projected fan-out join");
+    assert!(
+        join.get("head").is_some(),
+        "non-empty fan-out join head: {join}"
+    );
     assert_eq!(
-        join["declaration_ordered"]
+        join["tail"]
             .as_array()
-            .unwrap_or_else(|| panic!("declaration-ordered lane outcomes: {join}"))
+            .unwrap_or_else(|| panic!("fan-out join tail: {join}"))
             .len(),
-        2
+        1,
+        "two-lane join is head plus one tail entry: {join}"
     );
 }
 

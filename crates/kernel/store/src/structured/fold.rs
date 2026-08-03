@@ -18,7 +18,7 @@ use mfm_journal::structured::{
     ExternalAccessAuthorized, ExternalAccessObserved, HistoryObject, JournalHead, LexicalValueRef,
     ObservationOutcome, PriorRunFactScannerBindingCertificate, PriorRunFactSourceManifest,
     RecordLogicalKey, RecordRef, RunAdmitted, RunClosed, RunRecord, SemanticHead, StateOutcomeRef,
-    StateTransitionCommitted, TenantFactCoordinate, TypedValueRef,
+    StateTransitionCommitted, StructuralValueOrigin, TenantFactCoordinate, TypedValueRef,
     ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
     ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
@@ -698,6 +698,7 @@ pub(super) fn prepare_admission(
                 .content_ref()
                 .map_err(|_| invalid("admission root slot reference cannot be derived"))?,
             value: typed,
+            structural_origin: None,
         });
     }
 
@@ -809,6 +810,7 @@ pub(super) fn prepare_state_transition(
                     .content_ref()
                     .map_err(|_| invalid("state output slot reference cannot be derived"))?,
                 value: typed,
+                structural_origin: None,
             };
             let facts = prepare_fact_proposals(facts, &state, machine.program()?, &mut objects)?;
             (StateOutcomeRef::Success(binding), facts)
@@ -827,6 +829,7 @@ pub(super) fn prepare_state_transition(
                         .content_ref()
                         .map_err(|_| invalid("state failure slot reference cannot be derived"))?,
                     value: typed,
+                    structural_origin: None,
                 }),
                 Vec::new(),
             )
@@ -2215,6 +2218,15 @@ impl DerivationEngine<'_> {
     }
 
     fn bind_alias(&mut self, slot: &LexicalSlot, source: &BoundValue) -> super::Result<BoundValue> {
+        self.bind_alias_with_origin(slot, source, None)
+    }
+
+    fn bind_alias_with_origin(
+        &mut self,
+        slot: &LexicalSlot,
+        source: &BoundValue,
+        structural_origin: Option<StructuralValueOrigin>,
+    ) -> super::Result<BoundValue> {
         let binding = LexicalValueRef {
             slot_ref: slot
                 .content_ref()
@@ -2223,6 +2235,7 @@ impl DerivationEngine<'_> {
                 contract_ref: slot.contract_ref.clone(),
                 value_ref: source.reference.value.value_ref.clone(),
             },
+            structural_origin,
         };
         self.bind_exact(slot, binding.clone())?;
         Ok(BoundValue {
@@ -2232,6 +2245,15 @@ impl DerivationEngine<'_> {
     }
 
     fn bind_derived(&mut self, slot: &LexicalSlot, value: Value) -> super::Result<BoundValue> {
+        self.bind_derived_with_origin(slot, value, None)
+    }
+
+    fn bind_derived_with_origin(
+        &mut self,
+        slot: &LexicalSlot,
+        value: Value,
+        structural_origin: Option<StructuralValueOrigin>,
+    ) -> super::Result<BoundValue> {
         let schema_id = typed_value_schema_id(self.machine.program()?, &slot.contract_ref)?;
         let canonical =
             canonical_json(&value).map_err(|_| invalid("derived typed value is not canonical"))?;
@@ -2256,6 +2278,7 @@ impl DerivationEngine<'_> {
             slot_ref: slot
                 .content_ref()
                 .map_err(|_| invalid("derived slot reference cannot be derived"))?,
+            structural_origin,
             value: TypedValueRef {
                 contract_ref: slot.contract_ref.clone(),
                 value_ref,
@@ -2500,15 +2523,29 @@ fn walk_match(
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| invalid("Match selector has no canonical kind tag"))?;
-    let arm = binding
+    let (arm_ordinal, arm) = binding
         .arms
         .iter()
-        .find(|arm| arm.canonical_tag == tag)
+        .enumerate()
+        .find(|(_, arm)| arm.canonical_tag == tag)
         .ok_or_else(|| invalid("Match selector tag is not certified"))?;
     match walk_block(engine, &arm.body)? {
         WalkResult::Pending(cursor) => Ok(DeclarationResult::Pending(cursor)),
         WalkResult::Complete(FlowValue::Normal(value)) => {
-            engine.bind_alias(&binding.output_slot, &value)?;
+            let match_path_ref = binding
+                .path
+                .content_ref()
+                .map_err(|_| invalid("Match path reference cannot be derived"))?;
+            let origin = StructuralValueOrigin::MatchArm {
+                match_path_ref,
+                arm_ordinal: u32::try_from(arm_ordinal)
+                    .map_err(|_| invalid("Match arm ordinal overflowed"))?,
+                arm_key: arm.label.clone(),
+                value_contract_ref: binding.output_slot.contract_ref.clone(),
+                source_slot_ref: value.reference.slot_ref.clone(),
+                source_value_ref: value.reference.value.value_ref.clone(),
+            };
+            engine.bind_alias_with_origin(&binding.output_slot, &value, Some(origin))?;
             Ok(DeclarationResult::Continue)
         }
         WalkResult::Complete(FlowValue::ScopeFailure(value)) => {
@@ -2564,7 +2601,11 @@ fn walk_fan_out(
     let mut lane_cursors = Vec::with_capacity(group.lanes.len());
     let mut lane_values = Vec::with_capacity(group.lanes.len());
     let mut any_pending = false;
-    for lane in &group.lanes {
+    let group_path_ref = group
+        .path
+        .content_ref()
+        .map_err(|_| invalid("fan-out group path reference cannot be derived"))?;
+    for (lane_ordinal, lane) in group.lanes.iter().enumerate() {
         engine.bindings = parent_bindings.clone();
         match walk_block(engine, &lane.body)? {
             WalkResult::Pending(cursor) => {
@@ -2577,8 +2618,21 @@ fn walk_fan_out(
                     FlowValue::Normal(value) => ("Success", value),
                     FlowValue::ScopeFailure(value) => ("Failure", value),
                 };
+                let origin = StructuralValueOrigin::FanOutLane {
+                    group_path_ref: group_path_ref.clone(),
+                    lane_ordinal: u32::try_from(lane_ordinal)
+                        .map_err(|_| invalid("fan-out lane ordinal overflowed"))?,
+                    lane_key: lane.key.clone(),
+                    outcome_contract_ref: lane.outcome_slot.contract_ref.clone(),
+                    source_slot_ref: value.reference.slot_ref.clone(),
+                    source_value_ref: value.reference.value.value_ref.clone(),
+                };
                 let lane_json = tagged_wrapper(variant, value.value);
-                let lane_value = engine.bind_derived(&lane.outcome_slot, lane_json)?;
+                let lane_value = engine.bind_derived_with_origin(
+                    &lane.outcome_slot,
+                    lane_json,
+                    Some(origin),
+                )?;
                 lane_cursors.push(LaneCursor::Completed {
                     outcome_ref: lane_value.reference.value.value_ref.clone(),
                 });
@@ -2602,9 +2656,13 @@ fn walk_fan_out(
                 .ok_or_else(|| invalid("completed fan-out lane has no outcome"))
         })
         .collect::<super::Result<Vec<_>>>()?;
+    let (head, tail) = ordered
+        .split_first()
+        .map(|(head, tail)| (head.clone(), tail.to_vec()))
+        .ok_or_else(|| invalid("fan-out join requires a non-empty lane set"))?;
     engine.bind_derived(
         &group.output_slot,
-        serde_json::json!({ "declaration_ordered": ordered }),
+        serde_json::json!({ "head": head, "tail": tail }),
     )?;
     Ok(DeclarationResult::Continue)
 }
@@ -2649,7 +2707,11 @@ fn resolve_failure(
     else {
         return Err(invalid("Never boundary received a committed failure"));
     };
-    engine.bind_exact(source_slot, failure.reference)?;
+    // Rebind the body/child failure value into the certified boundary source
+    // slot. The body exit and the FragmentBoundary::TypedFailure (or state
+    // failure) source slot are distinct lexical identities; bind_exact would
+    // reject a legitimate child failure that must cross the boundary.
+    engine.bind_alias(source_slot, &failure)?;
     match plan.as_ref() {
         FailurePlan::Propagate {
             before_boundary,
@@ -3302,14 +3364,20 @@ fn validate_value_against_contract(
             let lane_contract_ref = decode_fan_out_join_contract(program, contract_ref)?;
             let object = value
                 .as_object()
-                .filter(|object| object.len() == 1)
                 .ok_or_else(|| invalid("fan-out join is not one exact object"))?;
-            let outcomes = object
-                .get("declaration_ordered")
+            // Non-empty head-plus-tail representation; emptiness is unrepresentable.
+            let head = object
+                .get("head")
+                .ok_or_else(|| invalid("fan-out join head is absent"))?;
+            let tail = object
+                .get("tail")
                 .and_then(Value::as_array)
-                .filter(|outcomes| !outcomes.is_empty())
-                .ok_or_else(|| invalid("fan-out join outcomes are absent"))?;
-            for outcome in outcomes {
+                .ok_or_else(|| invalid("fan-out join tail is absent"))?;
+            if object.len() != 2 {
+                return Err(invalid("fan-out join object has unexpected fields"));
+            }
+            validate_value_against_contract(program, &lane_contract_ref, head, depth + 1)?;
+            for outcome in tail {
                 validate_value_against_contract(program, &lane_contract_ref, outcome, depth + 1)?;
             }
             Ok(())

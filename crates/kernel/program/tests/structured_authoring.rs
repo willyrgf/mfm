@@ -222,6 +222,91 @@ fn match_is_type_derived_exhaustive_and_lexically_sealed() {
 }
 
 #[test]
+fn match_merges_aggregate_results_and_state_returns_aggregate() {
+    struct ReturnJoinState;
+    impl State for ReturnJoinState {
+        type Input = Input;
+        type Output = InnerJoin;
+        type Failure = Never;
+        type Request = ();
+        type Returned = ();
+        type SafeFailure = ();
+        type Execution = Pure;
+        type SafeFailureDisposition = SafeFailureNotApplicable;
+        type Capability = Direct;
+
+        fn semantic_state_id() -> mfm_program::Result<StableId> {
+            Ok(stable("return-join"))
+        }
+    }
+
+    struct ConsumeJoinState;
+    impl State for ConsumeJoinState {
+        type Input = InnerJoin;
+        type Output = Output;
+        type Failure = Never;
+        type Request = ();
+        type Returned = ();
+        type SafeFailure = ();
+        type Execution = Pure;
+        type SafeFailureDisposition = SafeFailureNotApplicable;
+        type Capability = Direct;
+
+        fn semantic_state_id() -> mfm_program::Result<StableId> {
+            Ok(stable("consume-join"))
+        }
+    }
+
+    let mut builder = OperationBuilder::<Output, Never>::new(
+        stable("mfm.fixture/aggregate-match"),
+        stable("root"),
+    )
+    .expect("builder");
+    let input = builder.input::<Input>(stable("input")).expect("input");
+    let selector = builder
+        .input::<Selector>(stable("selector"))
+        .expect("selector");
+    let mut fan_out = builder
+        .root()
+        .fan_out::<Input, Never>(stable("parallel"))
+        .expect("fan-out");
+    fan_out
+        .lane(stable("lane-a"), |lane| lane.normal(&input))
+        .expect("lane a");
+    fan_out
+        .lane(stable("lane-b"), |lane| lane.normal(&input))
+        .expect("lane b");
+    let join = fan_out.finish().expect("join");
+    let returned = builder
+        .root()
+        .state::<ReturnJoinState>(stable("return-join"), &input)
+        .expect("return join state accepts scalar input")
+        .infallible()
+        .expect("return join output is aggregate");
+    let merged = builder
+        .root()
+        .match_value(stable("choice"), &selector, |arms| {
+            arms.arm("left", stable("left-arm"), |block, _| {
+                block.normal(&join)
+            })?;
+            arms.arm("right", stable("right-arm"), |block, _| {
+                block.normal(&returned)
+            })
+        })
+        .expect("Match merges aggregate arm products");
+    let consumed = builder
+        .root()
+        .state::<ConsumeJoinState>(stable("consume-join"), &merged)
+        .expect("later state consumes merged aggregate")
+        .infallible()
+        .expect("consume completion");
+    let completion = builder.succeed(&consumed).expect("root success");
+    builder
+        .finish(completion)
+        .expect("aggregate composition through Match and state is admitted");
+}
+
+#[test]
 fn fan_out_is_non_empty_and_depth_two_join_is_consumable() {
     let mut empty =
         OperationBuilder::<Output, Never>::new(stable("mfm.fixture/empty-fan-out"), stable("root"))
