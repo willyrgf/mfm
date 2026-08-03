@@ -9,8 +9,10 @@ use mfm_journal::structured::{
     RunRecord, TenantFactCoordinate, TenantFactFrontier,
 };
 use mfm_store::structured::{
-    BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredStoreError, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    validate_append_objects, validate_envelope_frame, BackendAppendOutcome, RawRunHistory,
+    StructuredBackendFuture, StructuredHistoryBackend, StructuredStoreError,
+    StructuredStoreIdentity, TenantFactPublication, ValidatedBatch, MAX_BATCH_OBJECTS,
+    MAX_STORED_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -24,8 +26,6 @@ use crate::transaction::{
     CommitOutcome, LockedWriteTx, ReadTx,
 };
 
-const MAX_STORED_FRAME_BYTES: usize = 16_777_216;
-const MAX_BATCH_OBJECTS: usize = 65_536;
 const OBJECT_INSERT_CHUNK_SIZE: usize = 8_192;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -492,15 +492,11 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             {
                 return Err(invalid("validated PostgreSQL batch spans runs"));
             }
-            validate_objects_for_storage(&committed.objects)?;
+            validate_append_objects(&committed.objects)?;
             let envelope = StoredBatchEnvelope::from_batch(&committed)?;
             let canonical_envelope = canonical_json(&envelope)
                 .map_err(|_| invalid("validated PostgreSQL batch envelope is not canonical"))?;
-            if canonical_envelope.as_bytes().len() > MAX_STORED_FRAME_BYTES {
-                return Err(invalid(
-                    "validated PostgreSQL batch envelope exceeds its byte bound",
-                ));
-            }
+            validate_envelope_frame(canonical_envelope.as_str())?;
 
             let mut transaction = self.begin_locked_write(run_id.as_str()).await?;
 
@@ -673,7 +669,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .predecessor
                 .as_ref()
                 .map(|head| head.commit_digest.as_str());
-            sqlx::query(
+            let batch_insert = sqlx::query(
                 "INSERT INTO run_history_batches ( \
                     run_id, run_sequence, append_request_id, candidate_digest, \
                     predecessor_sequence, predecessor_commit_digest, head_commit_digest, \
@@ -689,8 +685,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .bind(committed.head.commit_digest.as_str())
             .bind(canonical_envelope.as_str())
             .execute(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            .await;
+            if let Err(error) = batch_insert {
+                if is_contention_sqlstate(&error) {
+                    // Re-read under the still-held lock and classify the exact outcome.
+                    return classify_existing_under_lock(transaction, &run_id, &committed).await;
+                }
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
             insert_object_rows(
                 transaction.conn(),
                 &run_id,
@@ -719,7 +721,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .rows_affected()
             } else {
-                sqlx::query(
+                match sqlx::query(
                     "INSERT INTO run_history_heads ( \
                         run_id, store_scope_id, store_epoch, head_sequence, head_commit_digest \
                      ) VALUES ($1, $2, $3::numeric, $4::numeric, $5)",
@@ -731,11 +733,19 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(committed.head.commit_digest.as_str())
                 .execute(&mut **transaction.conn())
                 .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?
-                .rows_affected()
+                {
+                    Ok(result) => result.rows_affected(),
+                    Err(error) if is_contention_sqlstate(&error) => {
+                        transaction.rollback().await?;
+                        return Ok(BackendAppendOutcome::StaleHead);
+                    }
+                    Err(_) => return Err(StructuredStoreError::BackendUnavailable),
+                }
             };
             if affected != 1 {
-                return Err(StructuredStoreError::StaleHead);
+                // Under the run advisory lock this is a lost CAS race, not unavailability.
+                transaction.rollback().await?;
+                return Ok(BackendAppendOutcome::StaleHead);
             }
             if let Some(publication) = pending_tenant_publication {
                 let inserted = sqlx::query(
@@ -1009,39 +1019,8 @@ async fn insert_object_rows(
     Ok(())
 }
 
-fn validate_objects_for_storage(objects: &[HistoryObject]) -> Result<(), StructuredStoreError> {
-    if objects.len() > MAX_BATCH_OBJECTS {
-        return Err(invalid(
-            "validated PostgreSQL batch object count exceeds its bound",
-        ));
-    }
-    if objects
-        .windows(2)
-        .any(|pair| pair[0].content_ref >= pair[1].content_ref)
-    {
-        return Err(invalid(
-            "validated PostgreSQL batch objects are not in canonical reference order",
-        ));
-    }
-    for object in objects {
-        if object.canonical_json.is_empty()
-            || object.canonical_json.len() > MAX_STORED_FRAME_BYTES
-            || object.validate().is_err()
-        {
-            return Err(invalid(
-                "validated PostgreSQL object bytes are not bounded canonical content",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn decode_canonical_envelope(json: &str) -> Result<StoredBatchEnvelope, StructuredStoreError> {
-    if json.len() < 2 || json.len() > MAX_STORED_FRAME_BYTES {
-        return Err(invalid(
-            "structured PostgreSQL batch envelope exceeds its byte bound",
-        ));
-    }
+    validate_envelope_frame(json)?;
     let envelope: StoredBatchEnvelope = serde_json::from_str(json)
         .map_err(|_| invalid("structured PostgreSQL batch envelope cannot be strictly decoded"))?;
     if usize::try_from(envelope.object_count)
@@ -1147,4 +1126,53 @@ fn parse_fact_order(value: &str, allow_zero: bool) -> Result<u64, StructuredStor
 
 const fn invalid(_message: &'static str) -> StructuredStoreError {
     StructuredStoreError::InvalidHistory
+}
+
+fn is_contention_sqlstate(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(database)
+            if matches!(
+                database.code().as_deref(),
+                Some("23505" | "40001" | "40P01")
+            )
+    )
+}
+
+async fn classify_existing_under_lock(
+    mut transaction: crate::transaction::LockedWriteTx<'_>,
+    run_id: &RunId,
+    committed: &CommittedBatch,
+) -> Result<BackendAppendOutcome, StructuredStoreError> {
+    let existing_rows = select_batch_rows(
+        transaction.conn(),
+        "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
+                candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
+                predecessor_commit_digest, head_commit_digest, batch_envelope_json \
+           FROM run_history_batches \
+          WHERE run_id = $1 AND append_request_id = $2",
+        run_id,
+        Some(committed.append_request_id.as_str()),
+    )
+    .await?;
+    if let Some(existing_row) = exactly_one_or_none(existing_rows)? {
+        let existing_sequence = existing_row.run_sequence;
+        let mut object_rows =
+            load_object_rows(transaction.conn(), run_id, Some(existing_sequence)).await?;
+        let existing =
+            existing_row.reconstruct(object_rows.remove(&existing_sequence).unwrap_or_default())?;
+        if !object_rows.is_empty() {
+            return Err(invalid(
+                "structured PostgreSQL idempotent objects differ from their batch",
+            ));
+        }
+        transaction.commit().await?;
+        return if existing == *committed {
+            Ok(BackendAppendOutcome::ExistingSame(existing))
+        } else {
+            Err(StructuredStoreError::AppendConflict)
+        };
+    }
+    transaction.rollback().await?;
+    Ok(BackendAppendOutcome::StaleHead)
 }
