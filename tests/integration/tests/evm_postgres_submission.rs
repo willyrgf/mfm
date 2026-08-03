@@ -1520,31 +1520,59 @@ async fn verify_production_projections(
     let semantic: Value =
         serde_json::from_slice(&semantic_bytes).expect("decode semantic portable export");
     let audit: Value = serde_json::from_slice(&audit_bytes).expect("decode audit portable export");
+    assert_eq!(semantic["version"], "mfm.structured-portable-run-export.v1");
+    assert_eq!(audit["version"], "mfm.structured-portable-run-export.v1");
     assert_eq!(semantic["kind"], "semantic");
     assert_eq!(audit["kind"], "audit");
-    assert_eq!(semantic["journal_head"], audit["journal_head"]);
+    assert!(semantic.get("fixation").is_some());
+    assert!(audit.get("fixation").is_some());
+    assert!(semantic.get("batches").is_some());
+    assert!(audit.get("batches").is_some());
+    assert!(semantic.get("digest").is_some());
+    let semantic_batches = semantic["batches"]
+        .as_array()
+        .expect("semantic committed batches");
+    let audit_batches = audit["batches"].as_array().expect("audit committed batches");
+    assert!(!semantic_batches.is_empty());
+    assert!(!audit_batches.is_empty());
     assert!(
-        semantic["records"]
-            .as_array()
-            .expect("semantic records")
-            .len()
-            < audit["records"].as_array().expect("audit records").len()
+        semantic_batches.len() <= audit_batches.len(),
+        "semantic export must not retain more physical batches than audit"
     );
-    assert_eq!(
-        semantic["records"]
-            .as_array()
-            .expect("semantic records")
-            .last()
-            .expect("semantic terminal record")["record"]["kind"],
-        "state_transition_committed"
+    let semantic_records = flatten_portable_batch_records(semantic_batches);
+    let audit_records = flatten_portable_batch_records(audit_batches);
+    assert!(
+        semantic_records.len() <= audit_records.len(),
+        "semantic export must not retain more records than audit"
     );
+    assert!(
+        semantic_records.iter().any(|record| {
+            record["record"]["kind"] == "state_transition_committed"
+                || record["record"]["kind"] == "run_admitted"
+        }),
+        "semantic export must retain a semantic settlement record"
+    );
+    // Atomic batch selection retains an adjacent RunClosed when it shares the
+    // semantic cutoff batch; audit always ends at the physical close.
     assert_eq!(
-        audit["records"]
-            .as_array()
-            .expect("audit records")
+        audit_records
             .last()
             .expect("audit terminal record")["record"]["kind"],
         "run_closed"
+    );
+    assert_eq!(
+        semantic["fixation"]["semantic_head"],
+        audit["fixation"]["semantic_head"]
+    );
+    assert_eq!(
+        semantic["fixation"]["journal_head"],
+        semantic_batches
+            .last()
+            .expect("semantic terminal batch")["head"]
+    );
+    assert_eq!(
+        audit["fixation"]["journal_head"],
+        audit_batches.last().expect("audit terminal batch")["head"]
     );
     let replay_input = ExportStreamInput::from_reader(
         semantic_ref.clone(),
@@ -1575,11 +1603,11 @@ async fn verify_production_projections(
     .await;
 
     let mut stale_semantic = semantic.clone();
-    stale_semantic["records"]
+    stale_semantic["batches"]
         .as_array_mut()
-        .expect("stale semantic records")
+        .expect("stale semantic batches")
         .pop()
-        .expect("remove semantic terminal record");
+        .expect("remove semantic terminal batch");
     let (stale_ref, stale_bytes) = readdress_portable_value(&semantic_ref, &stale_semantic);
     assert_replay_artifact_invalid(
         &application,
@@ -1920,6 +1948,18 @@ fn readdress_portable_value(original_ref: &ContentRef, value: &Value) -> (Conten
     )
     .expect("readdress hostile portable export");
     (content_ref, bytes)
+}
+
+fn flatten_portable_batch_records(batches: &[Value]) -> Vec<&Value> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            batch["records"]
+                .as_array()
+                .expect("committed batch records")
+                .iter()
+        })
+        .collect()
 }
 
 async fn assert_replay_artifact_invalid(
