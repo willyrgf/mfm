@@ -113,7 +113,9 @@ call-site handler.
 `Match` selects one exact canonical tag from an already-defined registered closed sum. Branch
 choice is derived from the committed selector value; it is never authored into history.
 
-`FanOut` is non-empty, collect-all, declaration ordered, and limited to `Pure` and `Read` states.
+`FanOut` is non-empty (head-plus-tail), collect-all, declaration ordered, and limited to `Pure` and
+`Read` states. Match-arm and fan-out-lane products retain structural origin in `LexicalValueRef`
+independently of payload bytes. Structural path ordering is ordinal-first; labels are diagnostic.
 The certified profile bounds lanes, occurrences, declarations, branch depth, and fan-out depth.
 The production portfolio uses depth two: portfolio network lanes contain EVM-owned read lanes.
 A waiting Read may expose a later lane; an unresolved barrier stops further scanning. Joins retain

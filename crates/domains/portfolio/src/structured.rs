@@ -338,8 +338,8 @@ fn aggregate_portfolio_collections(
     joined: &PortfolioCollectionJoin,
 ) -> ProposedStateOutcome<PortfolioPublicOutputs, PortfolioSnapshotFailure> {
     let mut context = None;
-    let mut collections = Vec::<EvmBalanceCollection>::with_capacity(joined.as_slice().len());
-    for (ordinal, outcome) in joined.as_slice().iter().enumerate() {
+    let mut collections = Vec::<EvmBalanceCollection>::with_capacity(joined.len());
+    for (ordinal, outcome) in joined.iter().enumerate() {
         let result = match outcome {
             LaneOutcome::Failure(_) => {
                 return ProposedStateOutcome::Failure(PortfolioSnapshotFailure::InvalidCollection)

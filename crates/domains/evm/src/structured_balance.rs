@@ -991,8 +991,8 @@ fn settle_confirmation(
 fn aggregate_lanes(
     joined: &BalanceLaneJoin,
 ) -> ProposedStateOutcome<EvmBalanceCollectionResult, EvmReadFailure> {
-    let mut successful = Vec::with_capacity(joined.as_slice().len());
-    for outcome in joined.as_slice() {
+    let mut successful = Vec::with_capacity(joined.len());
+    for outcome in joined.iter() {
         match outcome {
             LaneOutcome::Failure(failure) => return ProposedStateOutcome::Failure(*failure),
             LaneOutcome::Success(result) => successful.push(result),

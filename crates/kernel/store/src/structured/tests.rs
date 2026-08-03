@@ -806,17 +806,58 @@ async fn persisted_root_outcomes_bind_every_applicable_provenance_exactly() {
                     .iter()
                     .filter(|object| object.canonical_json.as_str() == r#"{"Success":7}"#)
                     .collect::<Vec<_>>();
+                // Payload objects remain content-addressed; lane provenance is
+                // carried by distinct LexicalValueRef.structural_origin values.
                 assert_eq!(
                     lane_objects.len(),
                     1,
-                    "two identical lanes must share one exact wrapper object"
+                    "two identical lane payloads share one content-addressed wrapper object"
                 );
+                let lane_origins = verified
+                    .live_bindings()
+                    .filter_map(|binding| binding.structural_origin.as_ref())
+                    .filter(|origin| {
+                        matches!(
+                            origin,
+                            mfm_journal::structured::StructuralValueOrigin::FanOutLane { .. }
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    lane_origins.len(),
+                    2,
+                    "each completed lane retains a structural origin"
+                );
+                match (lane_origins[0], lane_origins[1]) {
+                    (
+                        mfm_journal::structured::StructuralValueOrigin::FanOutLane {
+                            lane_ordinal: first_ordinal,
+                            source_value_ref: first_value,
+                            ..
+                        },
+                        mfm_journal::structured::StructuralValueOrigin::FanOutLane {
+                            lane_ordinal: second_ordinal,
+                            source_value_ref: second_value,
+                            ..
+                        },
+                    ) => {
+                        assert_ne!(
+                            first_ordinal, second_ordinal,
+                            "identical payloads from distinct lanes keep distinct ordinals"
+                        );
+                        assert_eq!(
+                            first_value, second_value,
+                            "byte-identical lane payloads share content identity"
+                        );
+                    }
+                    _ => panic!("expected FanOutLane structural origins"),
+                }
                 let join_objects = admission_batch
                     .objects
                     .iter()
                     .filter(|object| {
                         object.canonical_json.as_str()
-                            == r#"{"declaration_ordered":[{"Success":7},{"Success":7}]}"#
+                            == r#"{"head":{"Success":7},"tail":[{"Success":7}]}"#
                     })
                     .collect::<Vec<_>>();
                 assert_eq!(join_objects.len(), 1, "one exact fan-out join object");

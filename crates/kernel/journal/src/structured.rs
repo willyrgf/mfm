@@ -622,6 +622,11 @@ pub struct TypedValueRef {
 }
 
 /// Exact typed value bytes bound to one certified lexical slot.
+///
+/// Aggregate payload bytes do not carry structural authority. When a value is
+/// produced by Match-arm merge or fan-out-lane completion, [`structural_origin`]
+/// binds the selected arm/lane independently of payload equality so two
+/// byte-identical products remain distinguishable.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalValueRef {
@@ -630,6 +635,73 @@ pub struct LexicalValueRef {
     /// Exact typed retained value.
     #[serde(flatten)]
     pub value: TypedValueRef,
+    /// Selected Match-arm or fan-out-lane producer identity, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structural_origin: Option<StructuralValueOrigin>,
+}
+
+impl LexicalValueRef {
+    /// Constructs a binding without structural Match/FanOut origin.
+    pub fn new(slot_ref: ContentRef, value: TypedValueRef) -> Self {
+        Self {
+            slot_ref,
+            value,
+            structural_origin: None,
+        }
+    }
+
+    /// Constructs a binding with an explicit structural origin.
+    pub fn with_origin(
+        slot_ref: ContentRef,
+        value: TypedValueRef,
+        structural_origin: StructuralValueOrigin,
+    ) -> Self {
+        Self {
+            slot_ref,
+            value,
+            structural_origin: Some(structural_origin),
+        }
+    }
+}
+
+/// Nominal origin of a Match-arm or fan-out-lane product.
+///
+/// Fields are independent of payload bytes so identical values from distinct
+/// arms or lanes remain distinguishable by group path, key, ordinal, contract,
+/// and source reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum StructuralValueOrigin {
+    /// Selected arm of an exhaustive Match merge.
+    MatchArm {
+        /// Structural path of the owning Match.
+        match_path_ref: ContentRef,
+        /// Declaration ordinal of the selected arm.
+        arm_ordinal: u32,
+        /// Diagnostic arm key (not used for identity ordering).
+        arm_key: StableId,
+        /// Value contract of the selected arm product.
+        value_contract_ref: ContentRef,
+        /// Exact source LexicalValueRef slot that produced the arm value.
+        source_slot_ref: ContentRef,
+        /// Exact source value content identity.
+        source_value_ref: ContentRef,
+    },
+    /// Completed fan-out lane outcome wrapper.
+    FanOutLane {
+        /// Structural path of the owning fan-out group.
+        group_path_ref: ContentRef,
+        /// Declaration ordinal of the lane.
+        lane_ordinal: u32,
+        /// Diagnostic lane key (not used for identity ordering).
+        lane_key: StableId,
+        /// Success or failure contract of the lane outcome.
+        outcome_contract_ref: ContentRef,
+        /// Exact source LexicalValueRef slot that produced the lane body value.
+        source_slot_ref: ContentRef,
+        /// Exact source value content identity.
+        source_value_ref: ContentRef,
+    },
 }
 
 /// One state-produced durable fact with its complete certified claim closure.

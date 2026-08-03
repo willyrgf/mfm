@@ -199,6 +199,7 @@ fn test_lexical_value_ref(discriminator: u8) -> LexicalValueRef {
             contract_ref: test_history_object("mfm.test/input-contract", discriminator).content_ref,
             value_ref: test_history_object("mfm.test/input-value", discriminator).content_ref,
         },
+        structural_origin: None,
     }
 }
 

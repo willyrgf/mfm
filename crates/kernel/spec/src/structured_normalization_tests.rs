@@ -270,6 +270,114 @@ fn cyclic_slot_graph_is_rejected_by_resolution() {
 }
 
 #[test]
+fn provenance_resolution_accepts_maximum_depth_and_rejects_over_depth_without_stack_overflow() {
+    let path = fixture_program().root.path;
+    let path_ref = path.content_ref().expect("path ref");
+    let contract_ref = fixture_ref("depth-value");
+    let max_depth = MAX_PROVENANCE_RESOLUTION_DEPTH;
+    let mut slots = BTreeMap::new();
+    let mut previous = ExpandedSlotRef {
+        slot_ref: fixture_ref("depth-leaf"),
+    };
+    slots.insert(
+        previous.slot_ref.clone(),
+        ExpandedLexicalSlot {
+            lexical_path_ref: path_ref.clone(),
+            contract_ref: contract_ref.clone(),
+            producer: ExpandedLexicalProducer::AdmissionRoot {
+                root_id: stable("depth-leaf"),
+            },
+        },
+    );
+    for ordinal in 1..=max_depth {
+        let slot_ref = fixture_ref(&format!("depth-{ordinal}"));
+        slots.insert(
+            slot_ref.clone(),
+            ExpandedLexicalSlot {
+                lexical_path_ref: path_ref.clone(),
+                contract_ref: contract_ref.clone(),
+                producer: ExpandedLexicalProducer::ArmValue {
+                    selected_arm_path: ExpandedPathRef {
+                        path_ref: path_ref.clone(),
+                    },
+                    source: previous.clone(),
+                },
+            },
+        );
+        previous = ExpandedSlotRef { slot_ref };
+    }
+    let mut denormalizer = StructuredProgramDenormalizer {
+        structural_paths: BTreeMap::from([(path_ref.clone(), path.clone())]),
+        lexical_slots: slots.clone(),
+        resolved_slots: BTreeMap::new(),
+        active_slots: BTreeSet::new(),
+        used_paths: BTreeSet::new(),
+        used_slots: BTreeSet::new(),
+    };
+    denormalizer
+        .resolve_slot(previous.clone())
+        .expect("maximum provenance depth must resolve without stack overflow");
+
+    let over_ref = fixture_ref("depth-over");
+    let mut over_slots = slots;
+    over_slots.insert(
+        over_ref.clone(),
+        ExpandedLexicalSlot {
+            lexical_path_ref: path_ref.clone(),
+            contract_ref,
+            producer: ExpandedLexicalProducer::ArmValue {
+                selected_arm_path: ExpandedPathRef { path_ref },
+                source: previous,
+            },
+        },
+    );
+    let mut over = StructuredProgramDenormalizer {
+        structural_paths: BTreeMap::from([(
+            path.content_ref().expect("path ref"),
+            path,
+        )]),
+        lexical_slots: over_slots,
+        resolved_slots: BTreeMap::new(),
+        active_slots: BTreeSet::new(),
+        used_paths: BTreeSet::new(),
+        used_slots: BTreeSet::new(),
+    };
+    assert!(
+        over.resolve_slot(ExpandedSlotRef { slot_ref: over_ref })
+            .expect_err("one-past-max depth must fail closed")
+            .to_string()
+            .contains("depth exceeded"),
+        "hostile over-depth must be a typed depth rejection"
+    );
+}
+
+#[test]
+fn denormalize_value_rejects_hostile_json_node_budget_without_stack_overflow() {
+    let path = fixture_program().root.path;
+    let path_ref = path.content_ref().expect("path ref");
+    let mut denormalizer = StructuredProgramDenormalizer {
+        structural_paths: BTreeMap::from([(path_ref, path)]),
+        lexical_slots: BTreeMap::new(),
+        resolved_slots: BTreeMap::new(),
+        active_slots: BTreeSet::new(),
+        used_paths: BTreeSet::new(),
+        used_slots: BTreeSet::new(),
+    };
+    let mut hostile = serde_json::Value::Array(Vec::new());
+    for _ in 0..=MAX_STRUCTURED_JSON_NODES {
+        hostile = serde_json::Value::Array(vec![hostile]);
+    }
+    assert!(
+        denormalizer
+            .denormalize_value(hostile)
+            .expect_err("hostile deep JSON must fail closed")
+            .to_string()
+            .contains("node budget"),
+        "hostile JSON depth must not stack-overflow"
+    );
+}
+
+#[test]
 fn expanded_program_rejects_authored_call_outputs() {
     let authored = fixture_program();
     let hostile_slot = LexicalSlot {

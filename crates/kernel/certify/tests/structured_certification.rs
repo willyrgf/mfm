@@ -3399,14 +3399,97 @@ fn certified_fan_out_join_is_declaration_ordered_under_completion_permutations()
     assert_eq!(
         forward_result,
         serde_json::json!({
-            "declaration_ordered": [
-                {"Success": {"value": 15}},
+            "head": {"Success": {"value": 15}},
+            "tail": [
                 {"Success": {"value": 25}},
             ]
         })
     );
     assert_eq!(forward.calls, ["mfm.fixture/lane-a", "mfm.fixture/lane-b"]);
     assert_eq!(reverse.calls, ["mfm.fixture/lane-b", "mfm.fixture/lane-a"]);
+}
+
+#[test]
+fn qualification_rejects_duplicate_same_scope_labels() {
+    // Duplicate declaration labels in one block.
+    let operation_id = stable("mfm.fixture/duplicate-declaration-labels");
+    let mut duplicate_decl = copy_program(operation_id.clone());
+    let AuthoredDeclaration::State(first) = &duplicate_decl.root.declarations[0] else {
+        panic!("copy fixture");
+    };
+    let mut second = (**first).clone();
+    second.label = first.label.clone();
+    second.semantic_path = first.semantic_path.clone();
+    second.semantic_call_id = first.semantic_call_id.clone();
+    duplicate_decl
+        .root
+        .declarations
+        .push(AuthoredDeclaration::State(Box::new(second)));
+    let mut assembly = ProgramRegistryBuilder::new();
+    assembly
+        .register_value::<Request>()
+        .expect("request contract");
+    assembly
+        .register_value::<Response>()
+        .expect("response contract");
+    assembly
+        .register_fixture_state::<CopyState>(stable("mfm.fixture/copy-state-implementation"))
+        .expect("copy state");
+    assembly
+        .register_entry_point(operation_id.clone(), duplicate_decl, profile())
+        .expect("hostile duplicate declaration remains inert until build");
+    let error = assembly
+        .build(std::slice::from_ref(&operation_id))
+        .expect_err("duplicate declaration labels must fail qualification");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate authored declaration label"),
+        "got {error}"
+    );
+
+    // Duplicate Match arm labels with distinct tags.
+    let match_id = stable("mfm.fixture/duplicate-match-labels");
+    let mut match_program = guard_match_program(match_id.clone());
+    let binding = match_program
+        .root
+        .declarations
+        .iter_mut()
+        .find_map(|declaration| match declaration {
+            AuthoredDeclaration::Match(binding) => Some(binding),
+            _ => None,
+        })
+        .expect("guard Match fixture");
+    binding.arms[1].label = binding.arms[0].label.clone();
+    let mut assembly = ProgramRegistryBuilder::new();
+    assembly
+        .register_value::<Request>()
+        .expect("request contract");
+    assembly
+        .register_value::<Response>()
+        .expect("response contract");
+    assembly
+        .register_value::<StateFailure>()
+        .expect("failure contract");
+    assembly
+        .register_closed_sum::<GuardDecision>()
+        .expect("selector");
+    assembly
+        .register_fixture_state::<CopyState>(stable("mfm.fixture/copy-state-implementation"))
+        .expect("copy state");
+    assembly
+        .register_fixture_state::<GuardState>(stable("mfm.fixture/guard-state-implementation"))
+        .expect("guard state");
+    assembly
+        .register_entry_point(match_id.clone(), match_program, profile())
+        .expect("hostile match remains inert");
+    let error = assembly
+        .build(std::slice::from_ref(&match_id))
+        .expect_err("duplicate Match arm labels must fail qualification");
+    assert!(
+        error.to_string().contains("duplicate stable arm label"),
+        "got {error}"
+    );
 }
 
 #[test]
@@ -3496,8 +3579,8 @@ fn typed_fan_out_wraps_success_and_failure_and_joins_in_declaration_order() {
     assert_eq!(
         forward_result,
         serde_json::json!({
-            "declaration_ordered": [
-                {"Failure": {"code": 7}},
+            "head": {"Failure": {"code": 7}},
+            "tail": [
                 {"Success": {"value": 15}},
             ]
         })
@@ -3557,17 +3640,16 @@ fn certified_depth_two_fan_out_executes_without_structural_transitions() {
     assert_eq!(
         outcome,
         serde_json::json!({
-            "declaration_ordered": [
+            "head": {"Success": {
+                "head": {"Success": {"value": 11}},
+                "tail": [
+                    {"Success": {"value": 21}},
+                ]
+            }},
+            "tail": [
                 {"Success": {
-                    "declaration_ordered": [
-                        {"Success": {"value": 11}},
-                        {"Success": {"value": 21}},
-                    ]
-                }},
-                {"Success": {
-                    "declaration_ordered": [
-                        {"Success": {"value": 21}},
-                    ]
+                    "head": {"Success": {"value": 21}},
+                    "tail": []
                 }},
             ]
         })
@@ -5406,7 +5488,10 @@ impl ExecutionOracle {
             .ok_or_else(|| "fan-out oracle did not complete every lane".to_owned())?;
         self.insert(
             &group.output_slot,
-            serde_json::json!({ "declaration_ordered": joined }),
+            serde_json::json!({
+                "head": joined[0],
+                "tail": joined[1..].to_vec(),
+            }),
         )
     }
 
@@ -5656,7 +5741,7 @@ impl ExecutionOracle {
                     serde_json::from_value(input).map_err(|error| error.to_string())?;
                 Ok(OracleStateOutcome::Success(
                     serde_json::to_value(Response {
-                        value: joined.as_slice().len() as u64,
+                        value: joined.len() as u64,
                     })
                     .map_err(|error| error.to_string())?,
                 ))

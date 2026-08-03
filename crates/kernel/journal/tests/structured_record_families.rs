@@ -42,6 +42,7 @@ fn lexical(byte: u8) -> LexicalValueRef {
     LexicalValueRef {
         slot_ref: content_ref(byte.wrapping_add(32)),
         value: typed(byte),
+        structural_origin: None,
     }
 }
 

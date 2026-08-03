@@ -5295,6 +5295,7 @@ impl Fixture {
                 contract_ref: reference.clone(),
                 value_ref: reference,
             },
+            structural_origin: None,
         }
     }
 
@@ -5309,6 +5310,7 @@ impl Fixture {
                 contract_ref: reference.clone(),
                 value_ref: reference,
             },
+            structural_origin: None,
         }
     }
 }

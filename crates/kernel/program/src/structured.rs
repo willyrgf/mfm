@@ -362,11 +362,18 @@ where
 
 /// Sealed typed lexical-value contract used by operation roots and structural
 /// joins.
+///
+/// The algebra is closed by [`StructuredValueDefinition`]: retained MFM values
+/// and non-empty fan-out joins. Qualification registers definitions recursively
+/// through one encoder; there is no parallel aggregate append path.
 pub trait StructuredValue:
     private::StructuredValueSealed + Serialize + DeserializeOwned + Send + Sync + 'static
 {
     /// Derives the exact nominal contract for this lexical value role.
     fn structured_contract_ref() -> Result<ContentRef>;
+
+    /// Returns the one recursive qualification definition for this value role.
+    fn structured_value_definition() -> Result<mfm_spec::structured::StructuredValueDefinition>;
 }
 
 impl<T> StructuredValue for T
@@ -375,6 +382,17 @@ where
 {
     fn structured_contract_ref() -> Result<ContentRef> {
         structured_value_contract_ref::<T>().map_err(Into::into)
+    }
+
+    fn structured_value_definition() -> Result<mfm_spec::structured::StructuredValueDefinition> {
+        let schema = T::schema_descriptor()
+            .map_err(|error| ProgramError::Authoring(error.to_string()))?
+            .identity;
+        mfm_spec::structured::StructuredValueDefinition::retained(
+            structured_value_contract::<T>()?,
+            schema,
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -638,8 +656,8 @@ where
 pub trait State: Send + Sync + 'static {
     /// Typed input consumed by the state.
     type Input: StructuredValue;
-    /// Typed successful output.
-    type Output: MfmValue;
+    /// Typed successful output (retained value or non-empty fan-out join).
+    type Output: StructuredValue;
     /// Explicit `Never` or inhabited typed failure.
     type Failure: FailureValue;
     /// Typed request authored by a Read/Effect callback; unused by Pure.
@@ -943,8 +961,8 @@ where
 
 /// Registered child operation definition used by pure substitution.
 pub trait ChildOperation: Send + Sync + 'static {
-    /// Typed child success value.
-    type Output: MfmValue;
+    /// Typed child success value (retained value or non-empty fan-out join).
+    type Output: StructuredValue;
     /// Exact child failure value.
     type Failure: FailureValue;
 
@@ -959,7 +977,7 @@ pub fn state_contract<S: State>() -> Result<StructuredStateContract> {
         S::semantic_state_id()?,
         S::Execution::execution_contract()?,
         S::Input::structured_contract_ref()?,
-        structured_value_contract_ref::<S::Output>()?,
+        S::Output::structured_contract_ref()?,
         S::Failure::failure_contract()?,
         S::SafeFailureDisposition::contract(),
         S::Capability::requirement_ref()?,
@@ -1111,30 +1129,151 @@ pub struct ChildInputBinding {
 }
 
 /// Nominal value produced by a declaration-ordered collect-all fan-out join.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Representation is head-plus-tail so an empty aggregate is unrepresentable
+/// at construction and rejected by strict decoding.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FanOutResults<Output, Failure> {
-    declaration_ordered: Vec<LaneOutcome<Output, Failure>>,
+    head: LaneOutcome<Output, Failure>,
+    tail: Vec<LaneOutcome<Output, Failure>>,
+}
+
+impl<'de, Output, Failure> Deserialize<'de> for FanOutResults<Output, Failure>
+where
+    Output: Deserialize<'de>,
+    Failure: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, MapAccess, Visitor};
+        use std::fmt;
+
+        struct FanOutVisitor<Output, Failure> {
+            _types: PhantomData<(Output, Failure)>,
+        }
+
+        impl<'de, Output, Failure> Visitor<'de> for FanOutVisitor<Output, Failure>
+        where
+            Output: Deserialize<'de>,
+            Failure: Deserialize<'de>,
+        {
+            type Value = FanOutResults<Output, Failure>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("non-empty FanOutResults { head, tail }")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut head = None;
+                let mut tail = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "head" => {
+                            if head.is_some() {
+                                return Err(Error::duplicate_field("head"));
+                            }
+                            head = Some(map.next_value()?);
+                        }
+                        "tail" => {
+                            if tail.is_some() {
+                                return Err(Error::duplicate_field("tail"));
+                            }
+                            tail = Some(map.next_value()?);
+                        }
+                        other => {
+                            return Err(Error::unknown_field(other, &["head", "tail"]));
+                        }
+                    }
+                }
+                let head = head.ok_or_else(|| Error::missing_field("head"))?;
+                Ok(FanOutResults {
+                    head,
+                    tail: tail.unwrap_or_default(),
+                })
+            }
+        }
+
+        deserializer.deserialize_struct(
+            "FanOutResults",
+            &["head", "tail"],
+            FanOutVisitor {
+                _types: PhantomData,
+            },
+        )
+    }
 }
 
 impl<Output, Failure> FanOutResults<Output, Failure> {
-    /// Constructs the nominal join data in certified declaration order.
+    /// Constructs the non-empty join data from a head and optional tail.
     ///
     /// This is value data only; certified slot provenance remains the authority
     /// that permits a state input to consume it.
-    pub fn from_declaration_ordered(outcomes: Vec<LaneOutcome<Output, Failure>>) -> Self {
-        Self {
-            declaration_ordered: outcomes,
-        }
+    pub fn from_head_and_tail(
+        head: LaneOutcome<Output, Failure>,
+        tail: Vec<LaneOutcome<Output, Failure>>,
+    ) -> Self {
+        Self { head, tail }
     }
 
-    /// Returns lane outcomes in certified declaration order.
-    pub fn as_slice(&self) -> &[LaneOutcome<Output, Failure>] {
-        &self.declaration_ordered
+    /// Constructs the non-empty join data in certified declaration order.
+    ///
+    /// Returns `None` when `outcomes` is empty. Empty aggregates are
+    /// unrepresentable; callers must not invent a fallback empty value.
+    pub fn try_from_declaration_ordered(
+        mut outcomes: Vec<LaneOutcome<Output, Failure>>,
+    ) -> Option<Self> {
+        if outcomes.is_empty() {
+            return None;
+        }
+        let head = outcomes.remove(0);
+        Some(Self {
+            head,
+            tail: outcomes,
+        })
+    }
+
+    /// Returns the mandatory first lane outcome.
+    pub const fn head(&self) -> &LaneOutcome<Output, Failure> {
+        &self.head
+    }
+
+    /// Returns the remaining lane outcomes in certified declaration order.
+    pub fn tail(&self) -> &[LaneOutcome<Output, Failure>] {
+        &self.tail
+    }
+
+    /// Iterates lane outcomes in certified declaration order (head first).
+    pub fn iter(&self) -> impl Iterator<Item = &LaneOutcome<Output, Failure>> {
+        std::iter::once(&self.head).chain(self.tail.iter())
+    }
+
+    /// Returns lane outcomes in certified declaration order (head first).
+    pub fn as_slice(&self) -> Vec<&LaneOutcome<Output, Failure>> {
+        self.iter().collect()
+    }
+
+    /// Returns the number of lane outcomes (always at least one).
+    pub fn len(&self) -> usize {
+        1 + self.tail.len()
+    }
+
+    /// Always `false`; emptiness is unrepresentable.
+    pub const fn is_empty(&self) -> bool {
+        false
     }
 
     /// Consumes the nominal join data into its declaration-ordered outcomes.
     pub fn into_inner(self) -> Vec<LaneOutcome<Output, Failure>> {
-        self.declaration_ordered
+        let mut outcomes = Vec::with_capacity(self.len());
+        outcomes.push(self.head);
+        outcomes.extend(self.tail);
+        outcomes
     }
 }
 
@@ -1147,6 +1286,14 @@ where
         fan_out_join_contract_ref(
             &Output::structured_contract_ref()?,
             &Failure::failure_contract()?,
+        )
+        .map_err(Into::into)
+    }
+
+    fn structured_value_definition() -> Result<mfm_spec::structured::StructuredValueDefinition> {
+        mfm_spec::structured::StructuredValueDefinition::non_empty_fan_out_join(
+            Output::structured_value_definition()?,
+            Failure::failure_contract()?,
         )
         .map_err(Into::into)
     }
@@ -1389,7 +1536,7 @@ where
         }
         let (path, semantic_path) = self.next_paths(&label, None)?;
         let semantic_call_id = semantic_path.identity()?;
-        let output_contract_ref = structured_value_contract_ref::<C::Output>()?;
+        let output_contract_ref = C::Output::structured_contract_ref()?;
         let output = Value::from_slot(LexicalSlot {
             lexical_path: path,
             contract_ref: output_contract_ref.clone(),
@@ -1425,19 +1572,19 @@ where
         input: &Value<Input>,
     ) -> Result<Value<Output>>
     where
-        Input: MfmValue,
-        Output: MfmValue,
+        Input: StructuredValue,
+        Output: StructuredValue,
         Policy: AllowsPolicyProceed,
     {
         self.require_visible(&input.slot)?;
-        if input.slot.contract_ref != structured_value_contract_ref::<Input>()? {
+        if input.slot.contract_ref != Input::structured_contract_ref()? {
             return Err(ProgramError::Authoring(
                 "policy proceed input contract is not type-derived".to_owned(),
             ));
         }
         let (path, semantic_path) = self.next_paths(&label, None)?;
         let semantic_call_id = semantic_path.identity()?;
-        let output_contract_ref = structured_value_contract_ref::<Output>()?;
+        let output_contract_ref = Output::structured_contract_ref()?;
         let output = Value::from_slot(LexicalSlot {
             lexical_path: path,
             contract_ref: output_contract_ref.clone(),
@@ -1481,10 +1628,10 @@ where
     ) -> Result<Value<Output>>
     where
         Selector: ClosedSum,
-        Output: MfmValue,
+        Output: StructuredValue,
     {
         let selector_contract = closed_sum_contract::<Selector>()?;
-        let output_contract_ref = structured_value_contract_ref::<Output>()?;
+        let output_contract_ref = Output::structured_contract_ref()?;
         selector_contract.validate()?;
         self.require_visible(&selector.slot)?;
         if selector.slot.contract_ref != selector_contract.selector_contract_ref {
@@ -2300,8 +2447,8 @@ pub struct PolicyProceed<Input, Output, Failure> {
 
 impl<Input, Output, Failure> PolicyProceed<Input, Output, Failure>
 where
-    Input: MfmValue,
-    Output: MfmValue,
+    Input: StructuredValue,
+    Output: StructuredValue,
     Failure: FailureValue,
 {
     /// Inserts the protected boundary at this exact declaration position and
@@ -2422,8 +2569,8 @@ where
 /// Typed authoring builder for one boundary-specific policy recipe.
 pub struct PolicyRecipeBuilder<Input, Output, Failure>
 where
-    Input: MfmValue,
-    Output: MfmValue,
+    Input: StructuredValue,
+    Output: StructuredValue,
     Failure: FailureValue,
 {
     operation: OperationBuilder<Output, Failure>,
@@ -2432,8 +2579,8 @@ where
 
 impl<Input, Output, Failure> PolicyRecipeBuilder<Input, Output, Failure>
 where
-    Input: MfmValue,
-    Output: MfmValue,
+    Input: StructuredValue,
+    Output: StructuredValue,
     Failure: FailureValue,
 {
     /// Starts one recipe and mints its sole non-cloneable `proceed` authority.
@@ -2551,7 +2698,7 @@ where
     }
 
     /// Declares one immutable admission input root.
-    pub fn input<T: MfmValue>(&mut self, root_id: StableId) -> Result<Value<T>> {
+    pub fn input<T: StructuredValue>(&mut self, root_id: StableId) -> Result<Value<T>> {
         if self.input_roots.iter().any(
             |slot| matches!(&slot.producer, LexicalProducer::AdmissionRoot { root_id: existing } if existing == &root_id),
         ) {
@@ -2561,7 +2708,7 @@ where
         }
         let slot = LexicalSlot {
             lexical_path: self.root.path.clone(),
-            contract_ref: structured_value_contract_ref::<T>()?,
+            contract_ref: T::structured_contract_ref()?,
             producer: LexicalProducer::AdmissionRoot { root_id },
         };
         self.input_roots.push(slot.clone());
