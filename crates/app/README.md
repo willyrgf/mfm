@@ -52,10 +52,12 @@ unavailable result when no qualified candidate is supplied; there is no live fal
 
 Deployment assembly derives the known EVM signer-interface, key-specific semantic signer,
 RFC6979-low-s signing profile, exact broadcast, structured submission, bounded expansion, and
-terminal-assurance contracts in code. Syntax-valid substitute references fail before the provider
-lease begins. The async provider bracket consumes the catalog and authorities, proves the retained
-private RPC inventory, rechecks unchanged provider/signer/store state, and privately constructs all
-three live binding sets.
+terminal-assurance contracts in code from the qualified live signer's full public identity.
+Syntax-valid substitute references fail before the provider lease begins. The sealed deployment
+semantics and public signing identity are retained; every later configuration revision is
+recomputed against that sealed tuple before history or wallet mutation. The async provider bracket
+consumes the catalog and authorities, proves the retained private RPC inventory, rechecks unchanged
+provider/signer/store state, and privately constructs all three live binding sets.
 
 Assembly declares and builds exactly the three current structured production program identities in
 one qualified registry; registry finalization rejects a missing, extra, or duplicate identity. The

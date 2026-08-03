@@ -250,7 +250,9 @@ impl BlockingKeystoreSigner {
             .into_iter()
             .find(|key| key.id == self.entry_id)
             .ok_or(KeystoreSignerError::KeyUnavailable)?;
-        if format!("{:?}", key_info.address) != expected_account {
+        // Account identifiers are lowercase 0x-prefixed hex only; never treat
+        // the account string as public-key material.
+        if format!("{:#x}", key_info.address) != expected_account {
             return Err(KeystoreSignerError::BindingMismatch);
         }
         let secure_key = keystore
@@ -259,7 +261,7 @@ impl BlockingKeystoreSigner {
         let address = secure_key
             .ethereum_address()
             .map_err(|_| KeystoreSignerError::SigningFailed)?;
-        if format!("{address:?}") != expected_account {
+        if format!("{address:#x}") != expected_account {
             return Err(KeystoreSignerError::BindingMismatch);
         }
         Ok((secure_key, address))
@@ -286,7 +288,7 @@ fn public_identity(
     Ok(PublicSigningIdentity::new(
         binding.algorithm().clone(),
         public_key,
-        Some(format!("{address:?}")),
+        Some(format!("{address:#x}")),
     )?)
 }
 

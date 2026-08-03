@@ -5,14 +5,22 @@ use alloy_eips::eip2930::AccessListItem;
 use alloy_primitives::{address, b256, hex, PrimitiveSignature};
 use mfm_ids::DigestBytes;
 use mfm_signing::{
-    DeterministicSigningProvider, PublicSigningIdentity, SignatureBytes, SigningFuture,
-    SigningProfileId, SigningProvider,
+    DeterministicSigningProvider, ExpectedSignerIdentity, PublicSigningIdentity, SignatureBytes,
+    SigningError, SigningFuture, SigningProfileId, SigningProvider,
 };
 
 const EXPECTED_SENDER: Address = address!("dd6b8b3dc6b7ad97db52f08a275ff4483e024cea");
 
+fn expected_sender() -> AccountAddress {
+    AccountAddress::new(EXPECTED_SENDER).expect("sender")
+}
+
 fn signer_ref() -> SignerRef {
     SignerRef::new("deployer").expect("signer ref")
+}
+
+fn account_only_identity(sender: AccountAddress) -> ExpectedSignerIdentity {
+    ExpectedSignerIdentity::account_id(sender.account_id()).expect("identity")
 }
 
 fn alloy_vector_envelope() -> UnsignedEip1559Envelope {
@@ -40,7 +48,10 @@ fn alloy_vector_signature() -> SignatureBytes {
 }
 
 fn identity(account: Address, algorithm: SigningAlgorithmId) -> PublicSigningIdentity {
-    PublicSigningIdentity::new(algorithm, None, Some(format!("{account:?}"))).expect("identity")
+    let account_id = AccountAddress::new(account)
+        .map(|address| address.account_id())
+        .unwrap_or_else(|_| format!("{:#x}", account));
+    PublicSigningIdentity::new(algorithm, None, Some(account_id)).expect("identity")
 }
 
 struct FixedProvider {
@@ -220,7 +231,7 @@ fn alloy_known_vector_uses_one_hash_and_encoding_path() {
         b256!("0d5688ac3897124635b6cf1bc0e29d6dfebceebdc10a54d74f2ef8b56535b682")
     );
     let request = envelope
-        .signing_request(signer_ref(), EXPECTED_SENDER)
+        .signing_request(signer_ref(), account_only_identity(expected_sender()))
         .expect("request");
     assert_eq!(
         request.algorithm().as_str(),
@@ -267,7 +278,7 @@ async fn canonical_service_calls_provider_exactly_once() {
     let signed = sign_eip1559(
         &alloy_vector_envelope(),
         signer_ref(),
-        EXPECTED_SENDER,
+        expected_sender(),
         &provider,
     )
     .await
@@ -283,7 +294,7 @@ async fn canonical_service_rejects_the_wrong_deterministic_provider_before_signi
     let error = sign_eip1559(
         &alloy_vector_envelope(),
         signer_ref(),
-        EXPECTED_SENDER,
+        expected_sender(),
         &provider,
     )
     .await
@@ -297,7 +308,7 @@ async fn canonical_service_rejects_the_wrong_deterministic_provider_before_signi
 fn finalization_rejects_profile_mismatch_before_signature_use() {
     let envelope = alloy_vector_envelope();
     let request = envelope
-        .signing_request(signer_ref(), EXPECTED_SENDER)
+        .signing_request(signer_ref(), account_only_identity(expected_sender()))
         .expect("request");
     let other_request = SigningRequest::from_digest(
         signer_ref(),
@@ -307,9 +318,7 @@ fn finalization_rejects_profile_mismatch_before_signature_use() {
         request.purpose().clone(),
         DigestBytes::from_array(*request.digest()),
     )
-    .require_public_identity(
-        ExpectedSignerIdentity::account_id(format!("{EXPECTED_SENDER:?}")).expect("identity"),
-    );
+    .require_public_identity(account_only_identity(expected_sender()));
     let result = SigningResult::for_request(
         &other_request,
         identity(EXPECTED_SENDER, other_request.algorithm().clone()),
@@ -327,7 +336,7 @@ fn finalization_rejects_profile_mismatch_before_signature_use() {
 fn finalization_rejects_noncanonical_parity_high_s_and_wrong_sender() {
     let envelope = alloy_vector_envelope();
     let request = envelope
-        .signing_request(signer_ref(), EXPECTED_SENDER)
+        .signing_request(signer_ref(), account_only_identity(expected_sender()))
         .expect("request");
 
     let mut bad_parity = alloy_vector_signature().as_bytes().to_vec();
@@ -366,8 +375,9 @@ fn finalization_rejects_noncanonical_parity_high_s_and_wrong_sender() {
     );
 
     let wrong_sender = address!("1111111111111111111111111111111111111111");
+    let wrong_account = AccountAddress::new(wrong_sender).expect("wrong sender");
     let wrong_request = envelope
-        .signing_request(signer_ref(), wrong_sender)
+        .signing_request(signer_ref(), account_only_identity(wrong_account))
         .expect("request");
     let result = SigningResult::for_request(
         &wrong_request,
@@ -398,6 +408,46 @@ fn signed_envelope_admission_accepts_the_exact_bound_and_rejects_one_more_byte()
         ])),
         Err(EvmSigningError::SignedTransactionTooLarge)
     );
+}
+
+#[test]
+fn account_address_is_not_public_key_material() {
+    let account = expected_sender();
+    assert_eq!(account.account_id(), format!("{EXPECTED_SENDER:#x}"));
+    assert_ne!(account.account_id().len(), 66); // 32-byte key hex would be 66 with 0x
+    assert!(AccountAddress::new(Address::ZERO).is_err());
+    assert!(matches!(
+        AccountAddress::from_account_id("not-an-address"),
+        Err(EvmSigningError::InvalidSemanticSignerIdentity)
+    ));
+}
+
+#[test]
+fn signing_failure_classifier_separates_integrity_from_unavailability() {
+    assert!(signing_failure_is_integrity(
+        &EvmSigningError::RecoveredAddressMismatch
+    ));
+    assert!(signing_failure_is_integrity(
+        &EvmSigningError::DeterministicProfileMismatch
+    ));
+    assert!(signing_failure_is_integrity(
+        &EvmSigningError::IncompletePublicSigningIdentity
+    ));
+    assert!(signing_failure_is_integrity(&EvmSigningError::Signing(
+        SigningError::Provider {
+            reason: mfm_signing::SigningProviderError::BindingMismatch,
+        }
+    )));
+    assert!(!signing_failure_is_integrity(&EvmSigningError::Signing(
+        SigningError::Provider {
+            reason: mfm_signing::SigningProviderError::Failed,
+        }
+    )));
+    assert!(!signing_failure_is_integrity(&EvmSigningError::Signing(
+        SigningError::Provider {
+            reason: mfm_signing::SigningProviderError::GenerationGuardUnavailable,
+        }
+    )));
 }
 
 #[test]

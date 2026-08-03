@@ -43,9 +43,9 @@ pub use chain_registry::{
 };
 pub use model::{EvmBlockAnchor, EvmBlockAnchorError};
 pub use signing::{
-    derive_evm_semantic_signer_id, sign_eip1559, sign_eip1559_guarded, Eip1559QuantityField,
-    EvmSignatureError, EvmSigningError, TransientSignedEip1559Envelope, UnsignedEip1559Envelope,
-    EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
+    derive_evm_semantic_signer_id, sign_eip1559, sign_eip1559_guarded, signing_failure_is_integrity,
+    AccountAddress, Eip1559QuantityField, EvmSignatureError, EvmSigningError,
+    TransientSignedEip1559Envelope, UnsignedEip1559Envelope, EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES,
 };
 pub use structured_balance::{
     author_evm_balance_fan_out, author_evm_balance_lane_selection, balance_adapter_contract,

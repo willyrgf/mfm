@@ -82,6 +82,12 @@ struct ProductionBackend {
     prior_run_source_manifest: HistoryObject,
     broadcast_resource_ref: ContentRef,
     wallet_resource_ref: ContentRef,
+    /// Sealed deployment submission semantics derived from the qualified live
+    /// signer at assembly time. Every configuration revision is recomputed
+    /// against this tuple; untrusted configuration cannot echo or substitute
+    /// qualified contract references.
+    sealed_submission_semantics: mfm_evm::EvmDeploymentSubmissionSemantics,
+    sealed_public_signing_identity: mfm_signing::PublicSigningIdentity,
     submission_route_generation_ref: mfm_evm::EvmWalletReference,
     submission_chain_instance: mfm_evm::EvmChainInstanceBinding,
     wallet_domain_activation_attestation: mfm_evm::WalletNonceDomainActivationAttestation,
@@ -99,6 +105,8 @@ pub(super) async fn connect(
         context_manifest,
         prior_run_source_manifest,
         portfolio_coverage_inputs,
+        sealed_submission_semantics,
+        sealed_public_signing_identity,
         submission_bindings,
         balance_bindings,
         wallet_bindings,
@@ -145,6 +153,8 @@ pub(super) async fn connect(
         prior_run_source_manifest,
         broadcast_resource_ref: assembly.broadcast_resource_ref,
         wallet_resource_ref: wallet_bindings.resource_contract_ref().clone(),
+        sealed_submission_semantics,
+        sealed_public_signing_identity,
         submission_route_generation_ref: submission_bindings.route_generation_ref().clone(),
         submission_chain_instance: submission_bindings.chain_instance().clone(),
         wallet_domain_activation_attestation: wallet_bindings
@@ -634,7 +644,19 @@ impl ProductionBackend {
         submission_configuration
             .validate()
             .map_err(|_| configured_value_invalid())?;
-        let route = submission_configuration
+        // Recompute sealed deployment semantics against the qualified live
+        // signer for every configuration revision. Untrusted configuration
+        // cannot choose or echo a qualified contract reference.
+        let revision_semantics = submission_configuration
+            .deployment_semantics(
+                self.sealed_submission_semantics.semantic_signer_id(),
+                &self.sealed_public_signing_identity,
+            )
+            .map_err(|_| configured_value_invalid())?;
+        if revision_semantics != self.sealed_submission_semantics {
+            return Err(configured_value_invalid());
+        }
+        let route = revision_semantics
             .route_generation_ref()
             .to_content_ref()
             .ok()
@@ -642,22 +664,16 @@ impl ProductionBackend {
                 mfm_evm::EvmRoutingGenerationRef::from_content_ref(reference).ok()
             })
             .and_then(|reference| self.routing_catalog.resolve_generation(&reference));
-        let activation_chain = submission_configuration
-            .domain_activation_attestation()
-            .current_schema_record
-            .chain_instance_attestation
-            .binding()
-            .ok();
         if submission_configuration
             .transaction_intent()
             .template()
             .target()
             != selector.target()
-            || submission_configuration.domain_activation_attestation()
+            || revision_semantics.domain_activation_attestation()
                 != &self.wallet_domain_activation_attestation
-            || submission_configuration.route_generation_ref()
-                != &self.submission_route_generation_ref
-            || activation_chain.as_ref() != Some(&self.submission_chain_instance)
+            || revision_semantics.route_generation_ref() != &self.submission_route_generation_ref
+            || revision_semantics.expected_sender()
+                != self.sealed_submission_semantics.expected_sender()
             || route.is_none_or(|generation| {
                 generation.chain_instance() != &self.submission_chain_instance
             })

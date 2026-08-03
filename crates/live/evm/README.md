@@ -34,6 +34,11 @@ semantics: quota, approval, anti-replay, billing, rate-limit, or other externall
 consumption is ineligible for the attestation Read, with no Effect fallback. Exact broadcast
 reproduces and submits one candidate once, then zeroizes bearer bytes.
 
+Guarded signing builds the request from the qualified binding's full public key and account, verifies
+signature recovery against that identity, and maps integrity/contract violations to
+`IntegrityFault` rather than `SignerUnavailable`. Raw signature bytes and private-key material are
+never retained in adapter evidence.
+
 Signer implementation cutovers remain append-only physical releases. An observational keystore
 `v2` release follows the retained audited `v1` certificate as a same-key-target successor, and the
 complete release-history digest changes with that append.

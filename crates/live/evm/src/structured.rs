@@ -19,14 +19,15 @@ use mfm_evm::{
     evm_finalized_head_adapter_contract, evm_inclusion_block_adapter_contract,
     evm_pending_nonce_adapter_contract, evm_receipt_lookup_adapter_contract,
     evm_signer_attestation_adapter_contract, evm_transaction_lookup_adapter_contract,
-    sign_eip1559_guarded, AttestCandidateIdentityCapability, AttestCandidateIdentityRequest,
-    AttestedWalletCandidate, BroadcastExactCandidateCapability, BroadcastExactCandidateRequest,
-    BroadcastLineageHead, EvmBroadcastResource, EvmCandidateSigner, EvmChainInstanceBinding,
-    EvmFinalizedHeadCapability, EvmFinalizedHeadObservation, EvmFinalizedHeadRequest,
-    EvmInclusionBlockCapability, EvmInclusionBlockObservation, EvmInclusionBlockRequest,
-    EvmPendingNonceCapability, EvmPendingNonceRequest, EvmReceiptLookupCapability,
-    EvmReceiptLookupObservation, EvmReceiptLookupRequest, EvmRoutingGenerationRef,
-    EvmSubmissionFailure, EvmSubmissionProcessQualification, EvmTransactionLookupCapability,
+    sign_eip1559_guarded, signing_failure_is_integrity, AccountAddress,
+    AttestCandidateIdentityCapability, AttestCandidateIdentityRequest, AttestedWalletCandidate,
+    BroadcastExactCandidateCapability, BroadcastExactCandidateRequest, BroadcastLineageHead,
+    EvmBroadcastResource, EvmCandidateSigner, EvmChainInstanceBinding, EvmFinalizedHeadCapability,
+    EvmFinalizedHeadObservation, EvmFinalizedHeadRequest, EvmInclusionBlockCapability,
+    EvmInclusionBlockObservation, EvmInclusionBlockRequest, EvmPendingNonceCapability,
+    EvmPendingNonceRequest, EvmReceiptLookupCapability, EvmReceiptLookupObservation,
+    EvmReceiptLookupRequest, EvmRoutingGenerationRef, EvmSubmissionFailure,
+    EvmSubmissionProcessQualification, EvmTransactionLookupCapability,
     EvmTransactionLookupObservation, EvmTransactionLookupRequest, EvmWalletReceiptStatus,
     EvmWalletReference, ObservedPendingNonceFloor, SubmittedCandidateProof,
     UnsignedWalletCandidate,
@@ -270,15 +271,29 @@ impl EvmStructuredLiveBindings {
             .binding()
             .public_descriptor()
             .map_err(|_| LiveInvocationFailure::Integrity)?;
-        let signed = sign_eip1559_guarded(
+        let expected_sender = AccountAddress::new(self.expected_sender)
+            .map_err(|_| LiveInvocationFailure::Integrity)?;
+        let signed = match sign_eip1559_guarded(
             &envelope,
             self.signer.binding().signer_ref().clone(),
-            self.expected_sender,
+            expected_sender,
             &generation_ref,
             &self.signer,
         )
         .await
-        .map_err(|_| LiveInvocationFailure::Safe(EvmSubmissionFailure::SignerUnavailable))?;
+        {
+            Ok(signed) => signed,
+            Err(error) if signing_failure_is_integrity(&error) => {
+                // Integrity/contract violations are invalid evidence, never
+                // ordinary signer unavailability.
+                return Err(LiveInvocationFailure::Integrity);
+            }
+            Err(_) => {
+                return Err(LiveInvocationFailure::Safe(
+                    EvmSubmissionFailure::SignerUnavailable,
+                ));
+            }
+        };
         Ok((
             signed,
             EvmWalletReference::from_content_ref(generation_ref),
@@ -896,13 +911,17 @@ impl BoundedComponentInvoker<EvmCandidateSigner> for EvmStructuredLiveBindings {
         &'a self,
         request: &'a AttestCandidateIdentityRequest,
     ) -> ComponentFuture<'a, Result<AttestedWalletCandidate, EvmSubmissionFailure>> {
+        // Bounded resource invocation cannot express integrity faults; only
+        // genuine operational unavailability is reported here. The structured
+        // Read attestation path maps integrity to IntegrityFault instead.
         Box::pin(async move {
-            self.attest_candidate(request)
-                .await
-                .map_err(|failure| match failure {
-                    LiveInvocationFailure::Safe(failure) => failure,
-                    LiveInvocationFailure::Integrity => EvmSubmissionFailure::SignerUnavailable,
-                })
+            match self.attest_candidate(request).await {
+                Ok(attested) => Ok(attested),
+                Err(LiveInvocationFailure::Safe(failure)) => Err(failure),
+                Err(LiveInvocationFailure::Integrity) => {
+                    Err(EvmSubmissionFailure::SignerUnavailable)
+                }
+            }
         })
     }
 }

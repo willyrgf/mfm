@@ -407,6 +407,10 @@ pub struct EvmWalletDeployment {
     context_manifest: HistoryObject,
     prior_run_source_manifest: HistoryObject,
     portfolio_coverage_inputs: Vec<mfm_evm::EvmBalanceLaneInput>,
+    /// Exact deployment semantics derived from the qualified live signer.
+    sealed_submission_semantics: mfm_evm::EvmDeploymentSubmissionSemantics,
+    /// Full public signing identity bound at qualification (key + account).
+    sealed_public_signing_identity: mfm_signing::PublicSigningIdentity,
     submission_bindings: Arc<mfm_evm_live::EvmStructuredLiveBindings>,
     balance_bindings: Arc<mfm_evm_live::EvmStructuredBalanceBindings>,
     wallet_bindings: Arc<mfm_evm_live::EvmStructuredWalletBindings>,
@@ -558,6 +562,10 @@ impl EvmWalletDeployment {
         {
             return Err(wallet_deployment_invalid());
         }
+        let sealed_public_signing_identity = signer_provider
+            .binding()
+            .expected_public_identity()
+            .clone();
         let chain_instance = submission.transaction_intent().chain_instance().clone();
         let submission_bindings = Arc::new(
             mfm_evm_live::EvmStructuredLiveBindings::new(
@@ -600,6 +608,8 @@ impl EvmWalletDeployment {
             context_manifest,
             prior_run_source_manifest,
             portfolio_coverage_inputs,
+            sealed_submission_semantics: semantics,
+            sealed_public_signing_identity,
             submission_bindings,
             balance_bindings,
             wallet_bindings,
@@ -614,6 +624,8 @@ impl EvmWalletDeployment {
             context_manifest: self.context_manifest,
             prior_run_source_manifest: self.prior_run_source_manifest,
             portfolio_coverage_inputs: self.portfolio_coverage_inputs,
+            sealed_submission_semantics: self.sealed_submission_semantics,
+            sealed_public_signing_identity: self.sealed_public_signing_identity,
             submission_bindings: self.submission_bindings,
             balance_bindings: self.balance_bindings,
             wallet_bindings: self.wallet_bindings,
@@ -627,6 +639,8 @@ pub(crate) struct EvmWalletDeploymentParts {
     pub(crate) routing_policy: HistoryObject,
     pub(crate) context_manifest: HistoryObject,
     pub(crate) prior_run_source_manifest: HistoryObject,
+    pub(crate) sealed_submission_semantics: mfm_evm::EvmDeploymentSubmissionSemantics,
+    pub(crate) sealed_public_signing_identity: mfm_signing::PublicSigningIdentity,
     pub(crate) portfolio_coverage_inputs: Vec<mfm_evm::EvmBalanceLaneInput>,
     pub(crate) submission_bindings: Arc<mfm_evm_live::EvmStructuredLiveBindings>,
     pub(crate) balance_bindings: Arc<mfm_evm_live::EvmStructuredBalanceBindings>,
