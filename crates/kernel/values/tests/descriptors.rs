@@ -169,12 +169,6 @@ fn schema_id_uses_identity_not_audit() {
 #[test]
 fn framework_generic_descriptors_have_golden_schema_ids() {
     assert_eq!(
-        MaybeValue::<ExampleValue>::schema_id()
-            .expect("maybe schema id")
-            .as_str(),
-        "schema:mfm.kernel.maybe_value:1:sha256-jcs-v1:38eab156404c9bf41fb9c57498468fd0139ffa1a2b8f9bc3cc2a50cf6cb345f0"
-    );
-    assert_eq!(
         ArtifactRef::<ExampleValue>::schema_id()
             .expect("artifact ref schema id")
             .as_str(),

@@ -135,7 +135,10 @@ pub enum AuditEvent {
         /// Identifier assigned to the imported entry.
         id: Uuid,
     },
-    /// A private key retrieval was attempted for signing.
+    // Retained only so authenticated v1 audit histories remain decodable and MAC-covered. The
+    // current implementation has no producer for this historical record.
+    #[allow(dead_code)]
+    /// A historical v1 private-key retrieval was attempted for signing.
     GetPrivateKey {
         /// Identifier of the requested entry.
         id: Uuid,

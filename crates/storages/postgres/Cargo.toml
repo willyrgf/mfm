@@ -3,6 +3,7 @@ name = "mfm-storage-postgres"
 version = "0.1.0"
 edition = "2021"
 build = "build.rs"
+autotests = false
 
 [package.metadata.mfm]
 layer = "storage"
@@ -12,21 +13,27 @@ mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate"] }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
+mfm-certify = { path = "../../kernel/certify" }
+mfm-facts = { path = "../../kernel/facts" }
+mfm-program = { path = "../../kernel/program" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-replay = { path = "../../kernel/replay" }
 mfm-runtime = { path = "../../kernel/runtime" }
 mfm-spec = { path = "../../kernel/spec" }
 mfm-store = { path = "../../kernel/store", features = ["backend-conformance"] }
-serde_json = { workspace = true }
+mfm-values = { path = "../../kernel/values" }
 
 [features]
-parity-tests = []
+parity-tests = ["mfm-store/backend-conformance"]
 
 [[test]]
-name = "recoverability-v1"
-path = "tests/recoverability_v1.rs"
+name = "structured-history"
+path = "tests/structured_history.rs"
 required-features = ["parity-tests"]

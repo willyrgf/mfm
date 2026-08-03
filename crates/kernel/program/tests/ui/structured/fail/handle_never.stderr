@@ -1,0 +1,13 @@
+error[E0599]: the method `or_default` exists for struct `PendingState<'_, Infallible, Never>`, but its trait bounds were not satisfied
+  --> tests/ui/structured/fail/handle_never.rs:50:21
+   |
+50 |     let _ = pending.or_default();
+   |                     ^^^^^^^^^^ method cannot be called on `PendingState<'_, Infallible, Never>` due to unsatisfied trait bounds
+   |
+  ::: src/structured.rs
+   |
+   | pub enum Never {}
+   | -------------- doesn't satisfy `Never: MfmValue`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Never: MfmValue`

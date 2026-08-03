@@ -61,15 +61,6 @@ fn accepts_category_identity_golden_strings() {
 #[test]
 fn accepts_digest_only_identity_golden_strings() {
     let cases = [
-        SpecHash::parse(format!("spec:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("spec hash")
-            .to_string(),
-        NodeId::parse(format!("node:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("node id")
-            .to_string(),
-        AttemptId::parse(format!("attempt:sha256-jcs-v1:{DIGEST_HEX}"))
-            .expect("attempt id")
-            .to_string(),
         RunId::parse(format!("run:sha256-jcs-v1:{DIGEST_HEX}"))
             .expect("run id")
             .to_string(),
@@ -84,9 +75,6 @@ fn accepts_digest_only_identity_golden_strings() {
     assert_eq!(
         cases,
         [
-            format!("spec:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("node:sha256-jcs-v1:{DIGEST_HEX}"),
-            format!("attempt:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("run:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("artifact:sha256-jcs-v1:{DIGEST_HEX}"),
             format!("content:sha256-jcs-v1:{DIGEST_HEX}"),
@@ -193,10 +181,6 @@ fn rejects_invalid_identity_strings() {
         (
             "schema:mfm.name:1:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             |value| EffectKind::parse(value).is_err(),
-        ),
-        (
-            "spec:mfm.name:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            |value| SpecHash::parse(value).is_err(),
         ),
     ];
 

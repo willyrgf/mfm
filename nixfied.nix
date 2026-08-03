@@ -54,14 +54,22 @@ let
     CPATH = "${pkgs.libiconv}/include";
   };
 
+  walletPostgresRoleEnv = {
+    MFM_EVM_WALLET_ACTIVATION_ADMIN_DATABASE_URL =
+      "postgresql://mfm_wallet_activation_admin_login@\${host:postgres}:\${port:postgres}/postgres";
+    MFM_EVM_WALLET_ACTIVATION_PUBLIC_DATABASE_URL =
+      "postgresql://mfm_wallet_activation_public_login@\${host:postgres}:\${port:postgres}/postgres";
+    MFM_EVM_WALLET_NONCE_APPLICATION_DATABASE_URL =
+      "postgresql://mfm_wallet_nonce_application_login@\${host:postgres}:\${port:postgres}/postgres";
+  };
   postgresEnv = {
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "true";
-  };
+  } // walletPostgresRoleEnv;
   postgresSqlxEnv = {
     DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
     SQLX_OFFLINE = "false";
-  };
+  } // walletPostgresRoleEnv;
   bitcoinCore =
     assert lib.versionAtLeast pkgs.bitcoind.version "28";
     assert pkgs.bitcoind.version == "31.0";
@@ -318,6 +326,8 @@ in
         "check"
         "-p"
         "mfm-storage-postgres"
+        "-p"
+        "mfm-storage-evm-postgres"
         "--features"
         "parity-tests"
         "--all-targets"
@@ -352,11 +362,15 @@ in
         "-lc"
         ''
           set -euo pipefail
+          repo_root="$(pwd -P)"
           admin_database_url="$DATABASE_URL"
           schema="sqlx_prepare_$$"
+          wallet_schema="evm_wallet_sqlx_prepare_$$"
           psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA $schema"
+          psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "CREATE SCHEMA $wallet_schema"
           cleanup() {
             psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS $schema CASCADE"
+            psql "$admin_database_url" -v ON_ERROR_STOP=1 -c "DROP SCHEMA IF EXISTS $wallet_schema CASCADE"
           }
           trap cleanup EXIT
 
@@ -401,6 +415,19 @@ in
           prepare_check
           authoritative_schema_check
           echo "restored schema accepted by SQLx and authoritative validation"
+
+          export DATABASE_URL="$admin_database_url''${separator}options=-csearch_path%3D$wallet_schema"
+          cd "$repo_root/crates/storages/evm-postgres"
+          cargo sqlx migrate run --source migrations
+          cargo test --lib \
+            schema::tests::verification_probe_accepts_the_current_authoritative_schema \
+            -- --ignored --exact --nocapture
+          cargo sqlx prepare --check -- --all-targets --features parity-tests
+          cargo test --features parity-tests --test wallet-authority --no-run
+          cd "$repo_root"
+          cargo test --release -p mfm-integration-tests --features parity-tests \
+            --test evm_postgres_submission --no-run
+          echo "wallet activation and nonce schema accepted by authoritative validation and SQLx"
         ''
       ];
       env = postgresSqlxEnv;
@@ -414,27 +441,53 @@ in
         "mfm-storage-postgres"
         "--features"
         "parity-tests"
+        "--test"
+        "structured-history"
         "--"
         "--nocapture"
       ];
       env = postgresEnv;
       requires = [ "postgres" ];
     };
-    executor-postgres-qualification = cargoLeaf {
+    wallet-nonce-postgres-storage-qualification = cargoLeaf {
       run = [
         "cargo"
         "test"
         "-p"
-        "mfm-storage-executor-postgres"
+        "mfm-storage-evm-postgres"
         "--features"
-        "qualification-tests"
+        "parity-tests"
         "--test"
-        "qualification"
+        "wallet-authority"
         "--"
         "--nocapture"
       ];
       env = postgresEnv;
       requires = [ "postgres" ];
+    };
+    evm-postgres-submission-qualification = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "--release"
+        "-p"
+        "mfm-integration-tests"
+        "--features"
+        "parity-tests"
+        "--test"
+        "evm_postgres_submission"
+        "--"
+        "--nocapture"
+      ];
+      env = postgresEnv;
+      requires = [ "postgres" ];
+    };
+    wallet-nonce-postgres-qualification = {
+      kind = "composite";
+      steps = {
+        storage.task = "wallet-nonce-postgres-storage-qualification";
+        structured-submission.task = "evm-postgres-submission-qualification";
+      };
     };
     parity-bitcoin-core = cargoLeaf {
       tools = cargoTools ++ [ "bitcoin-core-cli" ];
@@ -489,10 +542,13 @@ in
     test-db = {
       kind = "composite";
       steps = {
-        executor-postgres-qualification.task = "executor-postgres-qualification";
         postgres-sqlx-check.task = "postgres-sqlx-check";
         recoverability-postgres-v1 = {
           task = "recoverability-postgres-v1";
+          dependsOn = [ "postgres-sqlx-check" ];
+        };
+        wallet-nonce-postgres-qualification = {
+          task = "wallet-nonce-postgres-qualification";
           dependsOn = [ "postgres-sqlx-check" ];
         };
       };

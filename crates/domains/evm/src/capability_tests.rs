@@ -1,6 +1,6 @@
 use alloy_eips::eip2930::AccessList;
-use alloy_primitives::{Address, Bytes, TxKind, U256};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId};
+use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
 use mfm_values::MfmValue;
 
 use super::*;
@@ -21,6 +21,23 @@ fn generation(byte: u8) -> EvmRoutingGenerationRef {
         .expect("generation")
 }
 
+fn chain_binding(chain_id: u64) -> Result<EvmChainInstanceBinding, WalletAuthorityContractError> {
+    let registry = EvmWalletReference::from_content_ref(
+        generation(250)
+            .to_content_ref()
+            .expect("registry reference"),
+    );
+    let declaration = ChainInstanceDeclaration::new(
+        registry.clone(),
+        StableId::new("mfm.test/chain-instance").expect("chain namespace"),
+        chain_id,
+        B256::repeat_byte(0x11),
+        U256::from(1_u64),
+        B256::repeat_byte(0x12),
+    )?;
+    ChainInstanceRegistryAttestation::new(declaration, registry.clone(), registry)?.binding()
+}
+
 #[test]
 fn routing_generation_round_trips_as_one_exact_content_reference() {
     let generation = generation(7);
@@ -37,9 +54,10 @@ fn routing_generation_round_trips_as_one_exact_content_reference() {
 
 #[test]
 fn network_binding_rejects_zero_chain_and_invalid_network() {
-    assert!(EvmNetworkBinding::new("ethereum-mainnet", 1, generation(1)).is_ok());
-    assert!(EvmNetworkBinding::new("ethereum-mainnet", 0, generation(1)).is_err());
-    assert!(EvmNetworkBinding::new("contains secret", 1, generation(1)).is_err());
+    let binding = chain_binding(1).expect("qualified chain");
+    assert!(EvmNetworkBinding::new("ethereum-mainnet", binding.clone(), generation(1)).is_ok());
+    assert!(chain_binding(0).is_err());
+    assert!(EvmNetworkBinding::new("contains secret", binding, generation(1)).is_err());
 }
 
 #[test]

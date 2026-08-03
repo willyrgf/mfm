@@ -105,6 +105,10 @@ fn run_admit_help_describes_generic_entry_point_target() {
         "generic target help is missing: {rendered}"
     );
     assert!(
+        rendered.contains("--caller-submission-token"),
+        "EVM caller-token help is missing: {rendered}"
+    );
+    assert!(
         !rendered.to_ascii_lowercase().contains("portfolio target"),
         "portfolio-only target help survived: {rendered}"
     );

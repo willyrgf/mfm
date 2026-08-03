@@ -113,10 +113,14 @@ pub(crate) fn print_error(error: PublicError, format: &OutputFormat) {
 }
 
 fn error_text(error: &PublicError) -> String {
-    if error.code == "RuntimeConfigRequired" {
-        format!("{}: {}; pass --runtime-config", error.code, error.message)
+    if error.code() == "RuntimeConfigRequired" {
+        format!(
+            "{}: {}; pass --runtime-config",
+            error.code(),
+            error.message()
+        )
     } else {
-        format!("{}: {}", error.code, error.message)
+        format!("{}: {}", error.code(), error.message())
     }
 }
 
@@ -282,33 +286,16 @@ where
     T: mfm_app::PublicJsonResponse,
 {
     match result {
-        Ok(output) => {
-            if format.is_json() {
-                match output.public_json().and_then(|value| {
-                    serde_json::to_string_pretty(&value).map_err(|_| {
-                        PublicError::internal(
-                            "SerializationError",
-                            "Failed to serialize response payload",
-                        )
-                    })
-                }) {
-                    Ok(json) => println!("{json}"),
-                    Err(error) => {
-                        print_error(error, format);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                match text(&output) {
-                    Ok(text) => print!("{text}"),
-                    Err(error) => {
-                        print_error(error, format);
-                        std::process::exit(1);
-                    }
-                }
+        Ok(output) => match render_public_result(&output, format, text) {
+            Ok(rendered) => {
+                print!("{rendered}");
+                std::process::exit(0);
             }
-            std::process::exit(0);
-        }
+            Err(error) => {
+                print_error(error, format);
+                std::process::exit(1);
+            }
+        },
         Err(error) => {
             print_error(error, format);
             std::process::exit(1);
@@ -316,9 +303,50 @@ where
     }
 }
 
+/// Renders one reviewed ops/run success without performing process IO.
+pub(crate) fn render_public_result<T>(
+    output: &T,
+    format: &OutputFormat,
+    text: impl FnOnce(&T) -> Result<String, PublicError>,
+) -> Result<String, PublicError>
+where
+    T: mfm_app::PublicJsonResponse,
+{
+    if !format.is_json() {
+        return text(output);
+    }
+
+    output
+        .public_json()
+        .and_then(|value| {
+            serde_json::to_string_pretty(&value).map_err(|_| {
+                PublicError::internal("SerializationError", "Failed to serialize response payload")
+            })
+        })
+        .map(|mut rendered| {
+            rendered.push('\n');
+            rendered
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ReviewedResponse;
+
+    impl mfm_app::PublicJsonResponse for ReviewedResponse {
+        fn public_json(&self) -> Result<serde_json::Value, PublicError> {
+            Ok(serde_json::json!({
+                "at_journal_head": {
+                    "commit_digest": "sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000",
+                    "run_sequence": 1,
+                },
+                "next_cursor": null,
+                "transitions": [],
+            }))
+        }
+    }
 
     #[test]
     fn runtime_config_text_adds_cli_remediation() {
@@ -338,5 +366,89 @@ mod tests {
     fn other_error_text_has_no_runtime_config_remediation() {
         let error = PublicError::bad_request("InvalidInput", "input is invalid");
         assert_eq!(error_text(&error), "InvalidInput: input is invalid");
+    }
+
+    #[test]
+    fn public_result_renderer_preserves_reviewed_json_and_text() {
+        let output = ReviewedResponse;
+        assert_eq!(
+            render_public_result(&output, &OutputFormat::Json, |_| unreachable!())
+                .expect("render reviewed JSON"),
+            concat!(
+                "{\n",
+                "  \"at_journal_head\": {\n",
+                "    \"commit_digest\": \"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000\",\n",
+                "    \"run_sequence\": 1\n",
+                "  },\n",
+                "  \"next_cursor\": null,\n",
+                "  \"transitions\": []\n",
+                "}\n",
+            )
+        );
+        assert_eq!(
+            render_public_result(&output, &OutputFormat::Text, |_| {
+                Ok("reviewed text\n".to_owned())
+            })
+            .expect("render reviewed text"),
+            "reviewed text\n"
+        );
+    }
+
+    #[test]
+    fn runtime_error_json_uses_the_frozen_transport_envelope() {
+        let bytes = corpus_vector_bytes("schema/mfm.error-response.v1/runtime-store-fault");
+        mfm_canonical::RecoverabilityContract::embedded()
+            .expect("recoverability annex")
+            .strict_decode("mfm.error-response.v1", &bytes)
+            .expect("frozen error envelope");
+        let expected: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("frozen error response JSON");
+        let error: PublicError =
+            serde_json::from_value(expected["error"].clone()).expect("frozen public Runtime error");
+        let response = ErrorResponse::new(error.clone());
+        assert_eq!(
+            serde_json::to_value(&response).expect("CLI error envelope"),
+            expected
+        );
+        assert_eq!(
+            error_text(&error),
+            "ReplayVerificationFailed: Recorded run evidence failed verification"
+        );
+        let encoded = serde_json::to_string(&response).expect("CLI Runtime error JSON");
+        assert!(!encoded.contains("implementation"));
+        assert!(!encoded.contains("diagnostic"));
+    }
+
+    fn corpus_vector_bytes(id: &str) -> Vec<u8> {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/recoverability/v1/corpus.json"
+        )))
+        .expect("recoverability corpus");
+        let encoded = corpus["positive_vectors"]
+            .as_array()
+            .expect("positive vectors")
+            .iter()
+            .find(|vector| vector["id"] == id)
+            .and_then(|vector| vector["input_hex"].as_str())
+            .expect("error response corpus vector");
+        decode_hex(encoded)
+    }
+
+    fn decode_hex(encoded: &str) -> Vec<u8> {
+        assert_eq!(encoded.len() % 2, 0, "hex length");
+        encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+            .collect()
+    }
+
+    fn hex_nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("corpus contains non-lowercase-hex input"),
+        }
     }
 }

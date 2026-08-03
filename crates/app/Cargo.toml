@@ -2,6 +2,7 @@
 name = "mfm-app"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 
 [package.metadata.mfm]
 layer = "assembly"
@@ -28,7 +29,6 @@ mfm-canonical = { path = "../kernel/canonical" }
 mfm-certify = { path = "../kernel/certify" }
 mfm-evm = { path = "../domains/evm" }
 mfm-evm-live = { path = "../live/evm" }
-mfm-executor = { path = "../kernel/executor" }
 mfm-ids = { path = "../kernel/ids" }
 mfm-journal = { path = "../kernel/journal" }
 mfm-portfolio = { path = "../domains/portfolio" }
@@ -39,8 +39,8 @@ mfm-signing = { path = "../signing" }
 mfm-keystore = { path = "../keystore" }
 mfm-spec = { path = "../kernel/spec" }
 mfm-store = { path = "../kernel/store" }
+mfm-storage-evm-postgres = { path = "../storages/evm-postgres" }
 mfm-storage-postgres = { path = "../storages/postgres" }
-mfm-storage-executor-postgres = { path = "../storages/executor-postgres" }
 mfm-values = { path = "../kernel/values" }
 toml = "0.8"
 url = { workspace = true }
@@ -52,3 +52,7 @@ k256 = { version = "0.13.0", features = ["ecdsa"] }
 mfm-store = { path = "../kernel/store", features = ["backend-conformance"] }
 trybuild = "1.0"
 static_assertions = "1"
+
+[[test]]
+name = "application-privacy-ui"
+path = "tests/application_privacy_ui.rs"

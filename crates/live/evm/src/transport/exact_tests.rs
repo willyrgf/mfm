@@ -66,6 +66,10 @@ fn wallet_operations_use_the_shared_descriptor_method_contract() {
         ExactRpcOperation::InclusionBlock.method(),
         EVM_BLOCK_BY_NUMBER_METHOD
     );
+    assert_eq!(
+        ExactRpcOperation::PendingNonce.method(),
+        EVM_PENDING_NONCE_METHOD
+    );
 }
 
 #[test]
@@ -116,6 +120,12 @@ fn fixed_allowlist_request_encoding_is_exact() {
                 ExactRpcRequest::ConfirmAnchor { number: U256::ZERO },
                 r#"{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x0",false]}"#
                     .to_owned(),
+            ),
+            (
+                ExactRpcRequest::PendingNonce { sender: account },
+                format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionCount","params":["{ADDRESS}","pending"]}}"#
+                ),
             ),
             (
                 ExactRpcRequest::TransactionByHash {
@@ -169,6 +179,43 @@ fn fixed_allowlist_request_encoding_is_exact() {
         nonzero.body.as_slice(),
         br#"{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x2a",false]}"#
     );
+}
+
+#[test]
+fn pending_nonce_response_requires_one_canonical_quantity() {
+    for (result, expected) in [
+        (r#""0x0""#, U256::ZERO),
+        (r#""0x1""#, U256::from(1_u8)),
+        (
+            r#""0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff""#,
+            U256::MAX,
+        ),
+    ] {
+        assert_eq!(
+            decode_response(ExactRpcOperation::PendingNonce, &result_envelope(result),),
+            Ok(ExactRpcResponse::PendingNonce(expected))
+        );
+    }
+
+    for result in [
+        "null",
+        "0",
+        r#""""#,
+        r#""0x""#,
+        r#""0x00""#,
+        r#""0X1""#,
+        r#""0xA""#,
+        r#""0x+1""#,
+        r#"" 0x1""#,
+        r#""0x00000000000000000000000000000000000000000000000000000000000000001""#,
+        r#""0\u00781""#,
+        r#"{"nonce":"0x1"}"#,
+    ] {
+        assert_eq!(
+            decode_response(ExactRpcOperation::PendingNonce, &result_envelope(result),),
+            Err(DecodeFailure::InvalidResult)
+        );
+    }
 }
 
 #[test]

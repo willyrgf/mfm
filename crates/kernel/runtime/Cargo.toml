@@ -2,6 +2,7 @@
 name = "mfm-runtime"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 description = "Stateless audited interpreter for MFM certified execution specs"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -17,20 +18,28 @@ name = "mfm_runtime"
 path = "src/lib.rs"
 
 [dependencies]
+futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-executor = { path = "../executor" }
-mfm-facts = { path = "../facts" }
+mfm-certify = { path = "../certify" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time"] }
+
+[[test]]
+name = "structured-runtime"
+path = "tests/structured_runtime.rs"
 
 [dev-dependencies]
+mfm-capabilities = { path = "../capabilities" }
+mfm-facts = { path = "../facts" }
 mfm-program-derive = { path = "../program-derive" }
-mfm-qualified-run-test-support = { path = "../../../tests/qualified-run-support" }
+mfm-replay = { path = "../replay" }
 mfm-store = { path = "../store", features = ["backend-conformance"] }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
 serde_json = { workspace = true }

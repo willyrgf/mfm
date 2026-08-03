@@ -1,678 +1,283 @@
 # Architecture
 
-Status: contributor architecture guide
+Status: contributor responsibility and placement guide
 
-`docs/design.md` is the normative runtime, journal, store, replay, and authority contract. This
-document owns responsibility taxonomy, placement, dependency direction, and contributor checks.
+`docs/design.md` is the normative contract. This document owns taxonomy, package placement, and
+dependency direction.
 
-## One Sentence
+## Material uncertainties
 
-MFM operations deterministically plan certified typed graphs; states own closed pure/read/effect
-semantics; adapters bind state requests to explicit capabilities; transports and signers remain
-reusable platform primitives; the executor owns durable mutation convergence; runtime performs one
-authorized admission or one stateless drive action; the journal records five complete record
-families; store verifies and appends
-them atomically; replay uses the same verified view without live semantic IO; and app, CLI, and
-REST are authorization and presentation boundaries only.
+none
 
-## Core Runtime Shape
+## Runtime shape
 
 ```text
-deployment-provisioned current configuration
-  -> app validates and canonicalizes one entry-point input
-  -> exact entry-point registration selects one PlanningProfile
-  -> operation authoring plus deterministic framework/executor expansion
-  -> certification of graph, manifests, dependencies, terminal contract, and public output
-  -> app authorizes one opaque admission plan
-  -> Runtime::admit validates the exact registry and appends RunAdmitted without semantic live IO
+operation DSL
+  -> pure expansion and certification
+  -> CertifiedProgramDocument
+  -> Runtime -- sole writer --> RunHistory store
+       |                         |
+       |                         +-> sole callback-free fold
+       +-> authorized Read  -> registered invoker -> transport/scanner/status port
+       +-> authorized Effect -> registered invoker -> transport/signer/resource authority
 
-later drive_once call
-  -> app authorizes Drive for one tenant/run
-  -> store loads one native committed journal and its exact objects
-  -> callback-free verification mints one borrowed VerifiedRunView
-  -> runtime derives one closed action
-  -> runtime either commits one local transition, performs one audited call, or reports waiting
-  -> store appends one legal whole batch through exact-head compare-and-swap
+store reader -> same fold -> app/replay/trace/audit/export
 ```
 
-The only run-journal records are:
+Only `State` is executable. `Match` and `FanOut` are structural. Runtime performs one verified
+cursor action; it is neither a mutable scheduler nor a workflow-specific lifecycle.
 
-```text
-RunAdmitted
-StateTransitionCommitted
-ExternalAccessAuthorized
-ExternalAccessObserved
-RunClosed
-```
+## Package layers
 
-The executor is a separate authority flow:
-
-```text
-EffectRequested
-  -> immutable executor binding and request identity
-  -> append-only keyed delivery/resource ledger
-  -> committed affine target-entry authority
-  -> one unbound target outcome bound by the private completion seal
-  -> exact observation, bounded frontier, and terminal tombstone
-  -> terminal evidence returned through one audited ensure call
-  -> EffectSettled
-```
-
-The executor cannot mutate the MFM journal or settle a state. The runtime cannot choose executor
-delivery or resource policy.
-
-## Semantic Package Metadata
-
-Each workspace package declares one closed `package.metadata.mfm.layer`:
+Every workspace package declares one `package.metadata.mfm.layer`.
 
 | Layer | Responsibility |
 | --- | --- |
-| `kernel` | Domain-free contracts and runtime infrastructure. |
-| `domain` | Pure domain model, capability, state, and operation semantics. |
-| `live` | Domain adapter and reusable transport implementations. |
+| `kernel` | Domain-free canonical, value, program, certification, history, store, Runtime, and replay contracts. |
+| `domain` | Pure domain types, states, structured operations, expansion, and narrow resource ports. |
+| `live` | Qualified adapters and reusable protocol transports. |
 | `signing` | Generic signing contracts. |
 | `secret-provider` | Secret-bearing keystore and signer implementations. |
-| `storage` | Concrete journal or executor-ledger persistence. |
-| `assembly` | Process configuration, implementation construction, authorization, and application services. |
-| `binary` | CLI or HTTP transport surfaces. |
-| `test` | Cross-boundary fixtures and qualification harnesses. |
+| `storage` | Concrete RunHistory, configuration-history, activation-registry, or resource-authority persistence. |
+| `assembly` | Authentication, qualification, dependency construction, configuration resolution, and application services. |
+| `binary` | CLI or HTTP decoding, dispatch, and rendering. |
+| `test` | Cross-boundary qualification harnesses and external provider fixtures. |
 
-Domain packages declare a validated domain and `source` or `aggregate` role. Every live package has
-a matching pure-domain owner. Kernel packages declare whether domain and binary packages may
-consume them. Cargo target kind, metadata, and dependency direction are checked together; package
-names and directory counts are not architecture.
+## Responsibility taxonomy
 
-## Responsibility Taxonomy
-
-| Category | Owns | Does not own |
+| Owner | Owns | Must not own |
 | --- | --- | --- |
-| Canonical/identity primitive | Frozen encodings, domain-separated identities, raw-byte content references | Workflow or domain behavior |
-| Value contract | Complete `SchemaIdentity`/`SchemaShape` descriptors, strict canonical structural value validation, and the one producer-independent retained-value contract | Producer authority, retained-byte identity, or workflow behavior |
-| Journal contract | Five record schemas, producer-bound `ValueRef`, heads, references, batch algebra, persisted fact-slot and actual-emission coordinates | Persistence, scheduling, state callbacks |
-| Program | Typed graphs, `StateExecution`, `StateFrame`, value views, settlement values, process-only fact proposals | Store or live-access authority |
-| Certifier | Planning-profile verification, deterministic expansion verification, manifests, certified dependency, terminal, and bounded homogeneous fact-slot contracts | Runtime scheduling or live IO |
-| State | Pure request authorship, observation interpretation, output/fact/failure construction | Ambient IO, persistence, scheduler policy |
-| Capability contract | One typed application-protocol request and one closed returned/safe/non-domain completion, plus the callback-free classifier that embeds and enforces an optional exact diagnostic schema identity | State reduction, hidden retry, workflow topology, or an outer post-invocation error channel |
-| Adapter | Private total binding from runtime-authorized state request to reusable transport/executor surface; every surviving return becomes exact pending-observation material | A second lifecycle, replay reducer, or unjournaled completion path |
-| Transport | Reusable protocol encoding, IO, checked decoding, and safe error classification | Journal access, state settlement, workflow topology |
-| Executor | Keyed delivery convergence, `execute_target_once`, affine target-entry authority, unbound target outcomes, private completion seals, sealed exact observations, terminal evidence, typed resource policy | Run scheduling, state settlement, journal mutation |
-| Store | One-shot qualified assembly, sole affine writer, cloneable purpose readers, atomic append, object binding, hashes, CAS, callback-free structural fold, exact producer/object/observation closure verification, fact-group validation and actual-ordinal assignment, verified views | State execution, domain outcomes, destination IO |
-| Runtime | Sole run-history writer ownership, exact admission, deterministic readiness/materialization, the private `Prepared -> Authorized -> PendingObservation -> CommittedObservation` bracket, and one-action drive | Business policy, target protocol phases, resource policy, persisted status |
-| Replay | Callback-free recorded verification including non-domain non-consumability, exact reproduction, candidate comparison | Live scheduler, live capability, append |
-| App assembly | Authentication, grants, entry-point catalog, pre-split support bootstrap, runtime/reader wiring, DTO services | Run-history mutation, planning logic, or state behavior |
-| Binary/API | Input decoding, route/command dispatch, response rendering | Store/runtime/live implementation construction |
+| Canonical/ids | Float-free canonical bytes, domain-separated hashes, typed identifiers, content references | Workflow or domain meaning |
+| Values | Strict schemas and producer-independent retained-value contracts | Producer authority or scheduling |
+| Program | Typed declaration-ordered authoring, state callback contracts, nominal values and outcomes | Persistence or ambient IO |
+| Spec/certify | Serialized structured algebra, pure expansion, bounds, failure plans, policy and implementation closure | Runtime scheduling or live IO |
+| Journal | Exactly five strict record families and assigned append identities | Persistence, callbacks, or cursor derivation |
+| Store | Atomic CAS, exact object closure, sole callback-free fold, verified cursor, purpose readers, writer fencing | Domain interpretation or destination IO |
+| Runtime | Sole history writer, admission, one cursor action, affine access bracket, callback invocation | Business policy, EVM lifecycle, or cross-run resource state |
+| Replay | Callback-free projections over the store fold | Writer, callback, provider, or signer authority |
+| State | Deterministic request authoring and returned/safe-failure interpretation | Network, filesystem, clock, store, or hidden retries |
+| Adapter | Total binding from one Runtime authorization to one explicit capability | Scheduler, persisted lifecycle, or unrecorded completion |
+| Transport | One bounded protocol exchange and checked public response | Run history, state settlement, or resource policy |
+| Resource authority | One narrow durable cross-run invariant and its permanent operation keys | Run folding, scheduling, provider calls, or terminal run meaning |
+| App | Qualified assembly, access policy, tenant isolation, config resolution, DTO orchestration | History mutation outside Runtime or domain logic |
+| Binary | Input parsing, command/route dispatch, rendering | Lower implementation construction or secret retention |
 
-Before adding a module, crate, schema, capability, public type, route, or command, identify one row
-that owns it. If it spans rows, split the responsibility or make the lower authority explicit.
-
-The program registry builder is the sole semantic program-definition assembly boundary. It creates
-one immutable shared definition for entry points, states, capabilities, planner identity, policies,
-executors, and current manifests; live entries retain only their process callbacks/invokers plus
-shared definition references. The registered zero-state certification factory receives that same
-definition exactly once and returns the sole private certifier callback. Certifier-local catalogs
-are thin borrowed projections, not a second construction or ownership surface. This kernel boundary
-is inventory-generic: it enforces common qualification, unambiguous descriptors, and exact
-state-operation-manifest closure, while app qualification and deployment assembly own the current
-production component inventory.
-
-## Dependency Direction
-
-Kernel dependencies point toward lower contracts:
+## Kernel dependency direction
 
 ```text
-ids + canonical
+canonical + ids
   -> values
   -> capabilities
-  -> journal
   -> program + spec
   -> certify
+  -> journal
   -> store
   -> runtime + replay
-
-ids + canonical + values + capabilities
-  -> executor
 ```
 
-Concrete storage depends on kernel store or executor traits; kernel never depends on a concrete
-backend. Pure domains consume only domain-facing kernel and generic signing contracts. Source
-domains never depend on aggregate domains. Live packages consume their pure domains and
-runtime-facing kernel contracts, but not app, binaries, concrete stores, or secret providers.
-Aggregate live packages do not import source-live implementations. Assembly wires lower layers.
-Binaries consume only binary-facing assembly or kernel contracts.
-
-The removal of a package must also remove its workspace member, normal/build/dev dependency edges,
-feature references, test fixtures, metadata expectations, and lockfile package entry in the same
-atomic change.
-
-## Operation Boundary
-
-Operations are deterministic planning only.
-
-Operations may:
-
-- validate canonical typed planning input;
-- call child operation builders;
-- author typed seeds, nodes, bindings, dependencies, and public-output roots;
-- attach stable keys and source roles;
-- select exact framework/executor policies through the registered planning profile; and
-- return an authored graph for certification.
-
-Operations must not:
-
-- execute state callbacks;
-- access network, filesystem, clock, process, signer, or provider for semantic work;
-- append records or read current run state;
-- select observations or settle effects;
-- construct runtime capabilities; or
-- hide topology in app or binary glue.
-
-Framework pre/post behavior is an ordinary planner-injected typed node with visible bindings and
-rewiring. Runtime has no framework-origin branch.
-
-## State Boundary
-
-States own reusable outcome-affecting semantics.
-
-Every state selects exactly one closed execution case:
-
-- pure: one `StateFrame -> Settlement` callback;
-- read: total request authorship and one observation callback; or
-- effect: total request authorship and terminal-evidence settlement.
-
-States may define typed config, context, input, output, facts, failure, request, response, and
-evidence contracts. They may validate domain rules and construct deterministic results.
-
-States must not:
-
-- instantiate transports or clients;
-- inspect a journal, store, scheduler, app, or binary;
-- resolve routing or signer material;
-- retry a capability invisibly;
-- persist values or facts directly;
-- add another phase or runner kind; or
-- use replay-specific reducers.
-
-`StateFrame`, `RequestView`, `ObservationView`, and `Settlement` are value-only program contracts.
-Committed proof and live-access authority stay private to runtime.
-
-## Capability And Adapter Boundary
-
-A capability represents exactly one application-protocol operation for one immutable typed request.
-It owns bounded encoding/decoding, source validation, cancellation behavior, and a closed
-`SafeFailure` classifier. One runtime authorization permits at most one such operation. Its
-runtime-facing return is exhaustive: a reviewed typed value, an admitted `DidNotEnter` or
-`Indeterminate` safe failure, or an audit-only `NonDomainFailure`. There is no outer error after
-affine authority is consumed.
-
-A capability cannot:
-
-- choose graph behavior;
-- reduce a state;
-- construct state output, facts, or domain failure;
-- retry or fail over invisibly;
-- append journal records; or
-- define replay behavior.
-
-The adapter is private live-crate glue. It consumes runtime's affine `AuthorizedAccess`, invokes a
-lower runtime-agnostic transport or executor, and totalizes every surviving return into one exact
-pending observation. Returned-value encoding and contract faults become closed integrity-blocked
-non-domain outcomes; they cannot escape as an unjournaled `Result`. The adapter owns no persisted
-lifecycle. Reusable transports do not expose or depend on MFM runtime authority.
-
-`NonDomainFailure` is never sent to state code. Its closed entry-status, disposition, and code
-relation is verified by store and replay, which derive its access layer from committed history.
-Together with the linked authorization's exact operation, request, and binding, that relation
-provides the sole audit classification for a normally returned provider or transport fault that is
-not admitted by the certified `SafeFailure` contract. No outer error can bypass both routes.
-`RetryableOperational` permits only a later separately authorized attempt after the audit record
-commits; it defines no code-specific scheduling, backoff, circuit breaking, failover, or hidden
-adapter retry. `IntegrityBlocked` blocks semantic progress.
-
-Every required live bootstrap, including source and chain validation, is its own audited state
-after `RunAdmitted`. App admission may bind one immutable non-secret routing generation but cannot
-probe or silently replace it.
-
-## Transport Boundary
-
-Transports may:
-
-- resolve the exact admitted routing generation;
-- construct checked source-bound sessions;
-- execute one bounded protocol request;
-- validate protocol identity and response shape;
-- return a typed result or reviewed safe failure; and
-- redact endpoint, credential, provider text, body, and path details.
-
-Transports must not:
-
-- use workflow recipe names;
-- know graph topology or state phase;
-- open keystores unless they are a dedicated secret-provider implementation;
-- persist journal/executor authority;
-- perform hidden retries, source rotation, or fallback; or
-- expose unchecked clients through an authority-bearing production path.
-
-Generic protocol code belongs in a reusable public transport module. The sibling MFM adapter stays
-private.
-
-## Executor And Mutation Boundary
-
-`mfm-executor` owns domain-free keyed convergence. It retains immutable request identity, bounded
-delivery history, affine target-entry and private completion-seal authority, terminal proof, and
-typed resource-policy state. A concrete executor backend is a `storage` package.
-
-`KeyedExecutorLedger<Store>` is the sole high-level executor implementation. It owns strict folding,
-typed resource-policy validation, deterministic attempt derivation, bounded CAS retry, observation,
-and terminal semantics. Its asynchronous `ExecutorLedgerStore` boundary owns only one exact fenced
-store identity, complete immutable effect/resource and exact-content reads, and atomic
-compare-and-append. Memory, file, and PostgreSQL stores implement that same raw contract; no backend
-duplicates the engine.
-
-`execute_target_once` is the sole high-level target-entry method. It commits the target
-authorization, invokes the caller's closure exactly once with affine authority, validates and
-binds its unbound outcome through the retained private completion seal, and persists or exactly
-resolves the matching observation before returning. Reload, stale CAS, acknowledgement ambiguity,
-terminal conflict, and restart use immutable ledger evidence and cannot invoke the target again. A
-schema-valid returned result that exceeds the retained bound is the explicit
-`ResultUnrepresentable` attempt outcome.
-
-One compare-and-append may atomically bind an effect and allocate a resource, or upgrade a
-previously bound effect that has no target attempt. `Applied` is the only store result that can mint
-affine target-entry authority. An already-applied proposal or head conflict is reloaded; an
-acknowledgement-ambiguous append returns no authority. Sequence policies cannot advance a shared
-sender until the prior allocated effect has immutable terminal evidence.
-
-Each authorization atomically retains the complete schema-qualified target-entry descriptor whose
-reference derives the attempt identity. The shared engine can resolve that descriptor by effect and
-attempt during recovery. This keeps candidate-specific public target input durable without
-retaining signatures, raw signed envelopes, credentials, or other bearer material.
-
-The EVM adapter preflights one closed prepared sum—`Broadcast`, `TransactionLookup`,
-`ReceiptLookup`, `FinalizedHead`, or `CanonicalInclusion`—before executor authorization. Each
-variant makes one transport call. Post-exchange conversion distinguishes an oversized otherwise
-valid result (`ResultUnrepresentable`), an invalid typed/contract result
-(`adapter_contract_violation`), and encoding/schema construction failure
-(`result_encoding_failure`); the latter two are `MayHaveEntered/IntegrityBlocked` non-domain
-target observations.
-
-`mfm-evm-live` owns one wallet-specific history fold above that domain-free ledger. After request
-qualification and permanent allocation, every initial, restored, post-target,
-authorization/terminalization-conflict, pending, and terminal decision uses it before target
-authorization/observation, signing or target IO, terminal append, or return. The fold reconstructs
-each deterministic wallet plan, validates its exact descriptor/result transition, derives the
-complete terminal relation from the validated prefix, and accepts a tombstone only when its
-operation, outcome, attempt, returned result, and observation name that derived terminal attempt.
-The fold reads records in immutable append order and freezes each plan at authorization using
-authorization-ordered evidence whose observations are already present. A later observation is
-validated against that frozen plan without rewriting later authorizations. The first observed valid
-terminal is selected; subsequent observations, including legal post-tombstone observations, are
-validation-only audit evidence. No backend, RPC target, or return adapter duplicates or partially
-revalidates those rules.
-
-Every reopen strictly refolds the complete immutable effect/resource graph and exact executor-owned
-content inventory under the selected binding. Missing, extra, duplicate, mismatched, forked, or
-partially linked content fails closed. Backend transactions end before target IO.
-
-Production registration additionally requires deployment-specific proof of:
-
-- non-rollback ledger generation;
-- stale and sibling writer exclusion;
-- destination convergence and resource ownership;
-- exact tenant/deployment binding;
-- restart, backup, restore, and promotion behavior; and
-- no-secret retained evidence.
-
-The journal's qualified PostgreSQL writer does not satisfy executor or destination fencing.
-Production mutation requires its separately qualified executor store and authoritative destination
-fence even when both use PostgreSQL.
-
-`mfm-storage-executor-postgres` implements only the raw asynchronous executor-store boundary. It
-uses a dedicated schema and executor-only owner/application roles; immutable binding, frontier,
-resource, allocation-link, and content rows are authority, while heads are derived views. Opening
-requires a deployment-supplied executor writer-generation fence independent of the journal fence,
-then performs a strict shared-engine refold before returning the store. Database transactions take
-generation, effect, and optional resource locks in that order and end before any destination,
-signer, wallet, or RPC IO.
-
-## Journal And Store Boundary
-
-`mfm-values` owns complete `SchemaIdentity` and `SchemaShape` descriptors, their strict canonical
-structural value validator, and the one producer-independent `RetainedValueContract`.
-`mfm-capabilities` owns classifier embedding and callback-free enforcement of an optional exact
-diagnostic `SchemaIdentity`. `mfm-journal` owns the frozen five-record schemas, producer-bound
-`ValueRef`, and journal references. `mfm-store` owns legal append and verified read authority.
-
-Concrete qualification creates one non-cloneable `QualifiedRunStore<B>` containing the sole
-backend handle and mutation seal. Application assembly may provision current configuration and
-admit the exact qualified support graph before `split` consumes that assembly once. The result is
-one non-cloneable `RunHistoryWriter<B>` and a cloneable `RunHistoryReader<B>`. Runtime consumes the
-writer. Replay and application read services receive only readers; neither can admit support,
-prepare appends, append history, or recover a backend or pool handle.
-
-Successful transition bodies preserve output and fact bindings in semantic ordinal order.
-`mfm-store` privately assembles the redundant binding delta by canonical-byte sorting repeated
-output and fact groups independently after variant-group precedence is fixed. Its fold alone
-reindexes both groups by semantic ordinal, rejects duplicate ordinals, and compares/applies the
-semantic vectors. `mfm-journal` remains the strict already-ordered wire-value validator; it does
-not choose semantic order.
-
-Stores own:
-
-- native per-run commits and records;
-- per-run predecessor sequence/digest;
-- canonical record, candidate, and commit hashes;
-- exact logical-key and batch rules;
-- object admission and `commit_artifact_bindings`;
-- tenant fact publication and selection-barrier coordinates;
-- append idempotency and exact-head CAS;
-- closure and post-closure audit-tail validation;
-- one private structural/semantic fold;
-- `CommittedRunJournal` and `VerifiedRunView`; and
-- purpose-specific readers and direct-new-authorization permits.
-
-A store does not own state callbacks, domain interpretation, executor delivery, routing, or
-process scheduling.
-
-The first production backend is PostgreSQL. Every authority-bearing read and write uses one fenced
-authoritative writer. The application role cannot update/delete/truncate immutable authority or
-manipulate store identity and tenant fact heads directly. HA/WAL promotion must fence old writers
-and prove a complete non-rollback lineage. Replica reads cannot mint current store authority.
-
-Physical tables and indexes may normalize the journal, objects, bindings, and fact routing fields.
-They must not create a separately writable semantic model. Current configuration is a distinct
-pre-admission concern and becomes immutable root material when selected for a run.
-
-## Runtime Boundary
-
-Runtime is the process-local owner of the sole run-history writer and an interpreter over one
-certified graph and one borrowed `VerifiedRunView`.
-Its private action algebra is:
-
-```text
-CommitPure
-ExecuteAccess(PreparedAccess)
-SettleRead
-CommitEffectRequest
-SettleEffect
-CommitDependencySkip
-Closed
-Blocked
-```
-
-Runtime owns:
-
-- validation and append of one opaque, owned `AuthorizedAdmissionPlan`;
-- exact registry admission-artifact matching and injection of that registry's admitted support;
-- the sole non-cloneable `RunHistoryWriter`;
-- deterministic readiness and dependency-skip derivation;
-- exact typed input/context materialization;
-- sole qualified-program-registry selection and callback/live-invoker dispatch;
-- committed request/observation proof selection;
-- complete physical observation-suffix validation before action ranking;
-- one closed `PreparedAccess` sum over read, ensure, and reserved fact selection;
-- private kind-typed `Prepared -> Authorized -> PendingObservation -> CommittedObservation`
-  sequencing;
-- authorization append followed by one affine call and mandatory exact observation persistence;
-- canonical settlement validation;
-- transition candidate construction; and
-- exact-head retry after reload.
-
-The pending observation owns stable logical identity independently of predecessor-bound physical
-append candidates. Runtime resolves the authorization key before each attempt, accepts only
-byte-identical committed content, rebases only after a definite stale predecessor, and resolves an
-acknowledgement-ambiguous attempt unchanged before rebase. It never reinvokes while resolving that
-obligation. Operational persistence failure uses 10-to-1,000-millisecond capped exponential
-backoff and resets on verified head progress. Task cancellation starts no detached work and leaves
-an unmatched authorization if no observation committed.
-
-Runtime owns no process-persistent semantic state. Another process may independently qualify the
-same fenced backend, construct the same exact registry and runtime, and continue under store CAS;
-it does not clone or recover another process's writer.
-
-## Replay Boundary
-
-Recorded-history verification is callback-free and produces `VerifiedRunView`. Exact reproduction
-reruns the admitted pure planner/state computations. Candidate comparison runs only the explicitly
-identified current candidate code.
-
-Replay may read the exact journal, immutable object closure, certification proof closure, and
-authorized cross-run source stream. It may self-attest its executable where the mode requires it.
-It does not invoke the live scheduler, authorize access, append, resolve routing, call a provider or
-executor, read domain files, or construct a signer.
-
-Recorded verification accepts the complete four-outcome access algebra callback-free. It preserves
-`NonDomainFailure` as audit-only evidence, derives only its fixed retryable-operational or
-integrity-blocked projection, and rejects any transition that tries to consume it as safe or domain
-evidence.
-
-Purpose-specific trace, audit, fact-completeness, reproduction, and export readers borrow the same
-verified authority. A cursor or reference cannot mint reader authority.
-
-## Facts And Cross-Run Data
-
-Facts are transition emissions, not an independent write protocol. A same-run consumer uses an
-explicit graph edge. A prior-run consumer authors `FactSelectionRequest` and invokes the reserved
-`mfm.journal.fact-selection.v1` read at a tenant fact barrier.
-
-The reserved store capability has no process invoker or independently selected route. Its admitted
-read binding's capability contract is strictly validated as the reserved scan contract, while its
-retained `routing_catalog_ref` is the singleton internal routing generation passed exactly to
-authorization.
-
-The spec and certifier own dense homogeneous fact-slot declarations, their descriptor and
-subject/response contracts, their minimum/maximum multiplicity, the per-slot and per-settlement
-bounds, and proof that every same-run actual-ordinal dependency lies in exactly one producer
-slot's invariant ordinal core with matching source and destination contracts. `mfm-facts` and
-`mfm-program` own process-only slot-indexed proposals, preserve order within nondecreasing slot
-groups, and reject exact duplicates. They do not mint journal coordinates.
-
-The store validates every callback group against its certified slot, assigns dense actual
-`emission_ordinal` values across the accepted sequence, constructs producer-bound fact authority,
-and publishes it atomically with the transition. The journal persists both the actual ordinal and
-the authorizing `fact_slot_ordinal`; it does not own proposal, certification, or publication
-policy. Replay rechecks the persisted grouping and certified multiplicity contract.
-
-The store privately scans the authoritative writer's dense publication prefix through that
-barrier. Only complete coverage mints `FactSelectionResponse`; private scan continuation cannot be
-persisted or resumed as public authority. `FactScanPageVerifier` solely owns the private
-`(fact_order, fact_ordinal)` cursor or explicit terminal state, the 4,096-publication and
-8,192-emission step budgets, and each logical emission range. Memory and PostgreSQL adapters only
-load ordered complete publications and submit them; a publication continued within its emissions
-is reloaded and fully verified before the next range is consumed.
-
-Completion consumes the affine scan exactly once into immutable sealed pending-observation
-material before any predecessor-bound append candidate exists. Exact-content resolution,
-stale-head retry, and acknowledgement recovery retain those bytes and never repeat the scan.
-Normally returned store-unavailable or invalid-history failures totalize into fact-layer
-`NonDomainFailure`; task/process loss simply abandons the private scan and leaves an unmatched
-authorization.
-
-The fresh authorization result owns the sole affine live-scan permit. Scan pages include every
-dense publication through the barrier, including unselectable publications from the consuming run.
-For each final selected source, the scan builder reduces the full verified producer run to the
-exact publication-prefix typed closure before minting `CompletedFactScan`; no broader producer
-lookup authority crosses that boundary.
-
-Store-owned closure traversal distinguishes semantic references from transport authority.
-`ContentRef` contributes a dependency and resolves exact-prefix bytes through the canonical-lowest
-matching `ValueRef`, whose metadata is not recursively interpreted. `ValueRef` contributes a
-semantic object plus its evidence-contract dependency. Strict annex projection drives recursive
-payload traversal, except that a `ContentRef` target with schema exactly `mfm.value-ref.v1` remains
-a transport-only wrapper and stops traversal because the incoming content reference is already the
-semantic edge. Bounded insertion and cycle rejection apply to the traversed semantic closure.
-Transport-only objects accompany the generic observation append but never enter ordered semantic
-object references.
-
-Selected producer and transport authorities enter the consuming observation as unbound
-`RequireExisting` imports; only its response and attestation are bound `AdmitOrVerifyExact`
-products. The physical journal verifier may provisionally admit first-use authority only for
-unbound imports in an attested fact observation. The semantic observation fold must consume that
-entire import set and exact-close it against the selected facts and attested digest before
-`VerifiedRunView` exists. Durable backends independently retain the live global
-`RequireExisting` check at append time.
-
-The completed affine scan derives its sealed authorization while consuming itself into generic
-observation material. The reserved observation and its private attestation-routing row are assigned
-and persisted in the same backend transaction. Live reducer entry, after runtime chooses compatible
-returned observations, and replay completeness both load that row against a caller-supplied exact
-`VerifiedRunView` and invoke the same completeness verifier; neither runtime nor replay can mint
-completeness structurally.
-
-Cross-run correction input uses a separate effective/evidence-only source role and a semantically
-closed source. It cannot substitute for ordinary graph data. Corrections are separately planned,
-certified, admitted, driven, and closed runs under the normal journal/store contract.
-
-## Domain Placement
-
-Within a pure domain crate, private roles point downward:
-
-```text
-model <- capability <- signing <- state <- operation
-```
-
-An aggregate domain may consume narrow pure source-domain contracts. A source domain never depends
-on an aggregate or its operation topology.
-
-Current domain product placement:
-
-- `mfm-evm` owns typed EVM model, capability, state, and operation contracts.
-- `mfm-evm` also owns the canonical nonce, initial-nonce, finality, and assurance policy
-  artifacts used by the wallet executor.
-- `mfm-signing` derives the generic secret-free guarded-signer descriptor from one verified
-  signer binding.
-- `mfm-evm-live` owns reusable JSON-RPC transport, private audited adapters, and the sealed
-  wallet-request qualification that closes the transport catalog, executor semantics, signer,
-  resource policy, and EVM policy artifacts before live use and privately retains a clone of the
-  exact qualified transport instance.
-- `mfm-evm-live` exposes wallet execution only as `EvmWalletExecutor<Store>` obtaining its concrete
-  exact-operation transport from that qualification; raw wallet RPC, transport injection, and
-  target-entry types remain private.
-- EVM portfolio reads use decomposed bootstrap, anchor, per-call fan-out, confirmation, and pure
-  aggregation nodes.
-- EVM transaction submission uses the same stateless transport behind a durable wallet executor;
-  the domain owns immutable request/evidence semantics, while guarded signing, sender/nonce
-  allocation, target attempts, and terminal convergence remain executor responsibilities.
-- `mfm-bitcoin` and `mfm-bitcoin-live` may retain reusable pure/transport foundations, but Bitcoin
-  collection is not in the production catalog.
-- `mfm-portfolio` owns aggregate configuration, graph planning, same-run typed dataflow, snapshot,
-  and report projection.
-- The product catalog exposes `mfm.portfolio/snapshot@1` and
-  `mfm.evm/submit-transaction@1`.
-
-## App And Binary Boundary
-
-`crates/app` owns:
-
-- the opaque process-facing application facade;
-- authentication and exact purpose grants;
-- tenant derivation and sealed `RunAccessAuthority<G>`;
-- the entry-point/planning-profile catalog;
-- sole `QualifiedProgramRegistry` assembly, including admitted support, deterministic callbacks,
-  semantic read/effect entries, and process-private live invokers;
-- the one content-scoped `68 + N` portfolio/EVM support graph, its single store admission, and
-  transfer of that non-cloneable admitted graph into the sole registry;
-- one-shot qualified PostgreSQL run-store bootstrap, the shared `Arc<Runtime<_>>`, a cloneable
-  run-history reader, and the separately fenced PostgreSQL executor store;
-- exact wallet executor, resource-owner, signer-generation, request-qualification, and target
-  binding composition;
-- current-configuration resolution for admission;
-- exact run services and reviewed DTOs; and
-- public-output, trace, audit, replay, and export reader composition.
-
-For the current product, `N` is the exact configured EVM routing-generation count in
-`1..=4096`. The support scope hashes the complete field-path-ordered member identities and retained
-contracts. Its live EVM portion is `15 + N`: the prior route/read/executor closure plus the derived
-guarded-signer descriptor, nonce policy, initial nonce, already-known classifier, finality policy,
-assurance policy, and wallet-request qualification. Private endpoints, credentials, transports,
-caller configuration, and per-run artifacts never enter that graph. Runtime and the private
-application backend borrow one shared registry `Arc`; Runtime owns the sole writer, while the
-application backend retains only its reader and executor-readiness capability. Admission and the
-executor borrow the same live-owned wallet-qualification `Arc`. The qualification's canonical
-proof, reference, and debug
-form exclude its privately retained exact transport clone, including endpoints and authorization;
-the clone shares the original runtime and route catalog. Admission and execution do not assemble
-parallel transports, catalogs, policy predicates, or admitted support authority.
-
-The complete facade is:
-
-```text
-entry_points
-admit_run
-drive_once
-read_public_run
-replay_run
-read_transition_trace
-read_access_audit
-export_run
-```
-
-Entry-point discovery is non-disclosing. Every run operation authorizes one of:
-`Admit`, `Drive`, `Replay`, `ReadPublic`, `InspectTrace`, `InspectAudit`, or `Export`.
-
-CLI and REST decode connection/authentication and command/request input, invoke one facade method,
-and render the corresponding DTO. They cannot construct stores, catalogs, transports, executors,
-keystores, or runtime services.
-
-The exact public surface is:
-
-```text
-GET  /v1/entry-points                 mfm ops list
-POST /v1/runs                         mfm run admit
-POST /v1/runs/{run_id}/drive          mfm run drive
-GET  /v1/runs/{run_id}                mfm run show
-POST /v1/runs/{run_id}/replay         mfm run replay
-GET  /v1/runs/{run_id}/trace          mfm run trace
-GET  /v1/runs/{run_id}/audit          mfm run audit
-POST /v1/runs/{run_id}/exports        mfm run export
-```
-
-There is no arbitrary object read or tenant-wide run/fact discovery contract.
-The separately authorized audit projection exposes `NonDomainFailure` only in its closed
-`non_domain_failure` field; app and binaries do not reinterpret it as a safe failure, returned
-value, or domain result.
-
-## Public Naming Rules
-
-Public command, route, schema, capability, executable, and output identities use durable domain
-language. They must not expose crate names, adapter names, test fixtures, temporary acronyms, or
-implementation topology.
-
-Changing a frozen schema or semantic identity requires a reviewed current-design cutover and
-regenerated complete golden corpus. Compatibility aliases and dual current paths are forbidden.
-
-## Review Checklist
-
-Before merging, verify:
-
-- one responsibility owns every new type, module, table, command, or route;
-- the five-record algebra and exhaustive batch contract remain closed;
-- state request authorship is pure and total;
-- every semantic external operation receives exactly one preceding authorization;
-- only a directly observed new authorization mints live authority;
-- every surviving live return becomes exact pending-observation material and no normal success
-  escapes before committed or byte-identically resolved observation proof;
-- no `NonDomainFailure` reaches state logic or satisfies settlement;
-- runtime performs one action and retains no process semantic state;
-- effects use the executor boundary and do not add journal phases;
-- same-run data uses graph edges and prior-run selection is audited;
-- the store owns one fold/view and no consumer rebuilds another authority;
-- PostgreSQL authority uses the fenced writer and immutable-root locking;
-- replay constructs no live semantic capability;
-- typed/persisted/public data contains no secrets or floats;
-- Bitcoin remains absent unless its qualification passes;
-- every registered product mutation has its exact qualified executor, resource owner, and
-  independent deployment fence;
-- app and binaries expose only the exact granted surface; and
-- tests enforce negative boundaries as well as successful behavior.
-
-## Companion Documents
-
-- `docs/design.md`: normative semantic and authority contract
-- `docs/persisted-public-surfaces.md`: persisted/public no-secret inventory
-- `docs/recoverability-app-surface-v1.md`: exact app, CLI, REST, DTO, and disclosure contract
-- `docs/portfolio-snapshot.md`: published product objective
-- `docs/evm-rpc-routing.md`: EVM routing generation and audited read graph
-- `docs/btc-rpc-routing.md`: unregistered Bitcoin qualification target
-- `docs/evm-transactions.md`: qualified EVM wallet effect and deployment contract
-- `docs/code-quality.md`: mandatory contribution policy
-- `docs/build-and-verification.md`: scope-driven verification workflow
+Some lower primitives are siblings rather than a strict linear chain, but dependencies always
+point toward contracts with less authority. The kernel never imports a concrete store, domain,
+live adapter, app, or binary. Generic Runtime, journal, store, and replay must remain EVM-neutral.
+
+Concrete stores depend on their domain-free store port or domain-owned resource port. Pure domains
+may depend on kernel contracts and generic signing descriptions, not live implementations or app.
+Live crates consume their domain and reusable transports. Assembly wires everything. Binaries
+consume only assembly/public contracts.
+
+## Structured operation placement
+
+`mfm-program` provides typed builders. An operation deterministically:
+
+- declares input roots in order;
+- appends states, exhaustive matches, and bounded fan-outs;
+- binds child inputs and exact child success/failure boundaries;
+- selects explicit recovery or exact default failure mapping; and
+- constructs one nominal root outcome.
+
+Operations perform no network, filesystem, signer, store, configuration, or current-run IO.
+Domain-specific expansion belongs with the domain and is registered with `mfm-certify`. Expansion
+injects ordinary visible states and structure; no Runtime branch depends on expansion origin.
+
+## State and capability placement
+
+A state selects `Pure`, `Read<C>`, or `Effect<C>` and declares exact input, output, failure,
+request, returned, safe-failure, fact, and capability contracts. Its callback receives typed
+canonical values and committed observation evidence only. A callback returns a proposed success or
+typed failure plus exact fact proposals; the store append creates durable authority.
+
+A capability represents one application-protocol request. A registered process implementation
+validates request, returned value, and safe failure. A live adapter additionally owns the private
+physical binding and total invoker. Transport errors are mapped to reviewed safe failures or
+generic non-state-consumable access outcomes before persistence; provider text is discarded.
+Live registration also emits the exact public physical purpose tuple used by production assembly:
+capability, adapter implementation, physical target, and its immutable ordered certificate-release
+history. This catalog contains evidence only and confers no invocation or mutation authority.
+
+## Store and Runtime placement
+
+`mfm-store` is the choke point for persisted legality. Its backend accepts a store-validated
+candidate, not arbitrary records. The in-memory backend is a conformance implementation. The
+PostgreSQL backend owns SQL transactions and writer-fence enforcement but reuses the same fold.
+The fold marks physical checks as retained-history replay or current-candidate qualification and
+supplies the exact prior binding plus folded minimum lineage head for refresh. A deployment
+verifier can consequently retain historical releases for callback-free restart while requiring
+new Effect attempts and supersession proofs to follow one strict old-to-new release relation.
+
+Prior-run fact selection keeps its pure and persisted responsibilities separate:
+
+- `mfm-facts` owns the journal-independent request, bounds, queries, typed Read values, and fixed
+  deterministic selector.
+- `mfm-journal` owns the admitted source-manifest contract, tenant publication/barrier coordinates,
+  scanner binding certificate, selected-source provenance, and completeness attestation.
+- `mfm-store` recognizes the exact reserved Read, assigns publication and barrier coordinates,
+  mints its affine purpose-limited permit, scans and verifies producer histories, and recomputes
+  retained positive responses during public verified loads.
+- storage backends atomically compare both the run predecessor and tenant fact head. The memory
+  backend mirrors the production contract; PostgreSQL retains dense heads and append-only
+  publication routes in `tenant_fact_heads` and `tenant_fact_publications`.
+- `mfm-certify` privately installs the exact capability and sealed stateless scanner binding source
+  as a non-optional kernel process baseline. The pair remains available to Runtime but is excluded
+  from unrelated entry support closures; arbitrary unused bindings still fail registry
+  qualification. Registry finalization requires the complete expected entry-point identity set and
+  rejects missing, extra, or duplicate identities. The source retains no backend, pool, writer, or
+  generic query handle.
+
+Runtime holds the non-cloneable writer and process registry. It never receives a raw backend. It
+loads one verified prefix, selects the minimum actionable occurrence path, and performs exactly one
+action. The scanner travels through the same ordinary Read
+authorization/invocation/observation/settlement protocol. Runtime passes the newly committed
+authorization proof into the sealed invoker, while ordinary adapters discard that proof. No normal
+live return can escape recording.
+
+`mfm-certify` issues opaque process identities containing semantic kind, semantic contract, and
+qualified implementation contract. Runtime retains that identity on callback proposals and emits
+one contextual fault carrying the exact phase, run, prior verified head, occurrence, and process or
+store identity. The app converts it to a reviewed public attribution that omits implementation
+contracts and lower-boundary diagnostics. A callback or rejected candidate never becomes a
+history record; durable integrity blocking requires an invoker-returned committed integrity
+observation.
+
+Replay receives only a reader. It cannot invoke state callbacks, append, refresh physical
+bindings, scan arbitrary data, contact providers, or construct signers.
+
+## Configuration placement
+
+Configured values are not run events. The store layer owns an append-only configuration-history
+port and PostgreSQL implementation. Deployment/maintenance receives the writer; application
+assembly receives a reader. Admission resolves one exact `(store, tenant, entry, target)` revision
+and includes that immutable revision in the run material.
+
+The PostgreSQL adapter also owns a per-stream `configuration_heads` exact-head CAS. It detects
+local removal, rollback, and divergence, but it cannot independently detect a coordinated rollback
+of the database rows and local head. Deployment qualification therefore combines it with the same
+external non-rollback writer-fence authority admitted for production storage; neither the local
+head nor a reconstructed database may mint that authority.
+
+## EVM placement
+
+`mfm-evm` owns:
+
+- EVM request/result/failure types;
+- chain-registry declarations and attestations, full chain-instance bindings, and route-membership
+  catalog descriptors;
+- structured balance and submission programs;
+- registered submission expansion;
+- wallet-domain, intent, reservation, candidate, activation, and completion contracts; and
+- the narrow wallet activation/nonce authority port.
+
+`mfm-evm-live` owns direct Runtime-authorized JSON-RPC, balance, signer-attestation, exact
+broadcast, and wallet-authority bindings. Its signer-attestation constructor accepts only
+`mfm-signing`'s opaque process-local `QualifiedReadSigningProvider`, and it rechecks the bearer's
+immutable observational eligibility before every signer callback. It owns no scheduler or durable
+transaction lifecycle.
+
+`mfm-storage-evm-postgres` owns real SQL activation-registry and nonce-authority implementations,
+private role-specific pools, target-session checks, transaction-bound mutation permits, permanent
+operation-key idempotency, and linearizable status. It performs no JSON-RPC and cannot append run
+history.
+
+Qualified deployment infrastructure owns the non-exportable target key, fence issuer, session
+qualification, chain-registry and route-membership issuance, non-rollback registry head,
+revocation, promotion, and complete sender-path fencing. Its provider protocol is the sole path
+that turns a complete public routing catalog into the opaque non-serializable qualification value
+accepted by application assembly. Live bindings, portfolio compilation, wallet activation,
+transaction intent, and submission transport all compare the full qualified chain binding;
+chain-id equality is never sufficient. Repository assembly consumes the sealed client/enforcement
+port and fails closed when it is absent.
+
+Application assembly owns the `BeginDeploymentAssembly`/`FinishDeploymentAssembly` cutover. Begin
+consumes the opaque qualified catalog and binds the exact current wallet provenance, key-specific
+signer evidence, code-derived semantic tuple, six complete release histories, catalog, and private
+route inventory to a bounded provider lease and fresh target challenges. Finish validates the
+ordered endpoint proofs, rechecks catalog/fence/wallet currentness, and removes the lease in the
+same critical section that authorizes completion. Only then does the app consume the
+provider-neutral completed exchange and qualified signer and privately construct all live
+bindings. Storage does not depend on the live transport crate, and neither public DTOs nor a
+directly constructed transport are deployment authority.
+
+`mfm-signing` owns the reusable raw guarded-provider contract and the sole checked conversion into
+`QualifiedReadSigningProvider`. Raw providers and their transitive guards must explicitly reject
+Read eligibility when they consume quota, approval, anti-replay, billing, rate-limit, or other
+semantic state. `mfm-keystore` proves the actual key identity and guard/fence contract during both
+initial qualification and affine handoff through a signer-owned, token-gated open/decrypt path that
+cannot initialize or persist keystore state. The old audited getter is deleted; its authenticated
+`v1` audit variant remains schema history with no executable producer. The observational provider is implementation `v2`; an existing signer release
+history retains `v1` and appends a same-target `v2` successor rather than rewriting the old release.
+The application carries the pending keystore authority
+through provider assembly, consumes it into the opaque Read-qualified bearer, and maps any handoff
+failure to its reviewed redacted deployment error. Neither structural signer descriptors nor
+release-history objects can mint or substitute for that live qualification, and there is no Effect
+fallback.
+
+The provider's registry issuance reference commits its logical provider identity together with the
+activation record. Startup hydration recomputes that commitment, permitting same-identity process
+restart but rejecting cross-provider activation reuse. Revocation closes new assembly admission
+and clears pending assembly leases atomically; a concurrent Finish succeeds only if it linearizes
+before that cutover. Lease observation, revocation drain, and promotion drain account for both
+ordinary authority leases and nonexpired assembly leases.
+
+The external checkpoint owner is a separate control-plane authority outside every restartable
+provider child. It retains one acknowledged prefix and at most one exact prepared transition.
+Children prepare before SQL, acknowledge only the observed exact successor prefix, and reconcile
+before readiness: predecessor retains `Prepared` for identical-only retry, successor finalizes it,
+and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. No child-local
+file, copied database, or public attestation can reset that checkpoint.
+
+## Portfolio placement
+
+`mfm-portfolio` owns configuration validation, route-to-lane compilation, the depth-two structured
+snapshot operation, and aggregation semantics. It imports EVM domain operations, not EVM live
+adapters. App assembly resolves the configured portfolio and routing manifest before authoring the
+candidate; certification admits only a program within the frozen entry-point envelope.
+
+## Application and binary placement
+
+`mfm-app` builds one qualified registry, splits it into the store verifier and Runtime process
+registry, opens the fenced store, gives Runtime the writer, and retains only readers plus the
+application facade. Access grants are re-evaluated for each admit, drive, read, replay, trace,
+audit, and export call. The policy derives tenant and stable principal from the credential;
+admission authorization names the exact operation, configured target, and invocation before
+configuration resolution. EVM configured values own semantic transaction material only, and the
+app constructs the identity-bound request after authorization from that configuration plus the
+selector's bounded caller token. Tenant equality is checked after callback-free load.
+
+CLI and REST preserve their transport contracts. Standalone binaries do not mint deployment
+authority. They fail closed until an embedding deployment supplies the fenced store and sealed EVM
+bindings.
+
+## Contributor checks
+
+Before adding a public type, module, schema, crate, route, or task:
+
+1. Name exactly one owner row above.
+2. Confirm the dependency points toward a lower-authority contract.
+3. Confirm no second fold, scheduler, mutation writer, configuration authority, or resource
+   lifecycle is introduced.
+4. Route ambient IO through a registered adapter/transport or narrow authority.
+5. Keep persisted structures canonical, float-free, strict, bounded, content-addressed, and
+   secret-free.
+6. Add boundary tests and update this document when responsibility changes.
+
+The removed arbitrary execution graph and generic executor are not compatibility surfaces. A
+static reference-closure graph used by certification, Cargo, or documentation is ordinary
+dependency data and never execution authority.

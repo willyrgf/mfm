@@ -79,7 +79,7 @@ impl Keystore {
 
     pub(super) fn load_from_disk(&mut self) -> Result<(), KeystoreError> {
         self.ensure_target_path_is_safe()?;
-        self.ensure_parent_directory_safe()?;
+        self.ensure_existing_parent_directory_safe()?;
         self.early_file_validation()?;
 
         let value = self.read_keystore_file_value()?;
@@ -104,7 +104,7 @@ impl Keystore {
         }
 
         self.ensure_target_path_is_safe()?;
-        self.ensure_parent_directory_safe()?;
+        self.ensure_existing_parent_directory_safe()?;
 
         let value = self.read_keystore_file_value()?;
         self.parse_bounded_header(&value)?;
@@ -117,7 +117,7 @@ impl Keystore {
         master_key: &[u8; 32],
     ) -> Result<KeystoreFile, KeystoreError> {
         self.ensure_target_path_is_safe()?;
-        self.ensure_parent_directory_safe()?;
+        self.ensure_existing_parent_directory_safe()?;
 
         let value = self.read_keystore_file_value()?;
         let header = self.parse_bounded_header(&value)?;
@@ -299,6 +299,17 @@ impl Keystore {
     }
 
     fn ensure_parent_directory_safe(&self) -> Result<PathBuf, KeystoreError> {
+        self.ensure_parent_directory_safe_with_creation(true)
+    }
+
+    fn ensure_existing_parent_directory_safe(&self) -> Result<PathBuf, KeystoreError> {
+        self.ensure_parent_directory_safe_with_creation(false)
+    }
+
+    fn ensure_parent_directory_safe_with_creation(
+        &self,
+        create_missing: bool,
+    ) -> Result<PathBuf, KeystoreError> {
         let parent = self
             .path
             .parent()
@@ -329,9 +340,13 @@ impl Keystore {
                     ));
                 }
             }
-        } else {
+        } else if create_missing {
             fs::create_dir_all(&parent)?;
             Self::set_restrictive_permissions_for_directory(&parent)?;
+        } else {
+            return Err(KeystoreError::InvalidInput(
+                "Keystore parent directory is unavailable".to_string(),
+            ));
         }
 
         Ok(parent)

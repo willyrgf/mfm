@@ -7,6 +7,7 @@ fn application_facade_keeps_only_the_exact_run_surface() {
 
     for method in [
         "pub fn entry_points(",
+        "pub async fn check_ready(",
         "pub async fn admit_run(",
         "pub async fn drive_once(",
         "pub async fn read_public_run(",
@@ -144,27 +145,19 @@ fn cli_run_tree_has_only_exact_run_commands() {
 }
 
 #[test]
-fn audit_renderer_uses_only_the_frozen_verified_projection_fields() {
+fn projection_renderers_use_only_the_current_structured_wrappers() {
     let renderer = read("crates/app/src/render.rs");
     for field in [
-        "authorization_ref",
-        "observation_ref",
-        "authorization_journal_head",
-        "observation_journal_head",
-        "capability_binding_ref",
-        "capability_operation_id",
-        "request_ref",
-        "status",
-        "result_ref",
-        "failure",
-        "non_domain_failure",
-        "effect_key",
-        "delivery_audit_ref",
-        "delivery_audit_terminal",
+        "run_id",
+        "at_journal_head",
+        "transitions",
+        "complete_as_of_journal_head",
+        "entries",
+        "next_cursor",
     ] {
         assert!(
             renderer.contains(&format!("\"{field}\"")),
-            "audit renderer must retain {field}"
+            "projection renderer must retain {field}"
         );
     }
     for removed in [
@@ -174,6 +167,10 @@ fn audit_renderer_uses_only_the_frozen_verified_projection_fields() {
         "operation_id",
         "request_identity",
         "result_identity",
+        "non_domain_failure",
+        "effect_key",
+        "delivery_audit_ref",
+        "delivery_audit_terminal",
         "executor_frontier_ref",
         "executor_frontier_sealed_terminal",
     ] {
@@ -192,7 +189,7 @@ async fn standalone_rest_bootstrap_fails_closed_without_a_writer_fence() {
     };
     assert_eq!(error.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        error.public_error().code,
+        error.public_error().code(),
         "AuthoritativeWriterFenceUnavailable"
     );
 }

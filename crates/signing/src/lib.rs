@@ -5,9 +5,11 @@
 //! the separate generation-guarded deterministic wallet boundary. Qualified
 //! wallet providers fix one complete public binding and cannot be used through
 //! the general direct-sign trait. Their deployment guard is inseparable from
-//! each signing call. Private keys, passwords, endpoint paths, signatures,
-//! signed payloads, and provider runtime resolution remain outside persisted
-//! workflow config and values.
+//! each signing call. Read attestation additionally requires an opaque,
+//! process-local qualification proving that the provider and every transitive
+//! guard are observational. Private keys, passwords, endpoint paths,
+//! signatures, signed payloads, and provider runtime resolution remain outside
+//! persisted workflow config and values.
 //!
 //! ```rust
 //! use mfm_ids::DigestBytes;
@@ -50,14 +52,9 @@ pub type Result<T> = std::result::Result<T, SigningError>;
 /// Boxed future returned by signer providers.
 pub type SigningFuture<'a> = Pin<Box<dyn Future<Output = Result<SigningResult>> + Send + 'a>>;
 
-/// Future returned by a guarded deterministic signing-provider binder.
-pub type GenerationGuardedDeterministicSigningProviderBindFuture = Pin<
-    Box<
-        dyn Future<Output = Result<Arc<dyn GenerationGuardedDeterministicSigningProvider>>>
-            + Send
-            + 'static,
-    >,
->;
+/// Future returned while proving that a guarded signer is eligible for Read attestation.
+pub type ReadAttestationQualificationFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 /// Future returned by a deployment-supplied signer-generation guard.
 pub type SigningGenerationGuardFuture<'a> =
@@ -127,8 +124,25 @@ pub trait DeterministicSigningProvider: SigningProvider {
 /// This is a separate contract from [`SigningProvider`]. A qualified wallet
 /// implementation must not expose its key through that unguarded trait.
 pub trait GenerationGuardedDeterministicSigningProvider: Send + Sync {
+    /// Declares whether every transitive attestation operation is eligible for Read execution.
+    ///
+    /// `true` is an immutable implementation contract: qualification, generation guards, and
+    /// signing must not consume quota, approval tokens, anti-replay state, billing credit,
+    /// rate-limit capacity, or any other externally meaningful semantic state. Operational audit
+    /// counters are permitted only when they cannot affect the returned identity or later access.
+    fn is_read_attestation_eligible(&self) -> bool;
+
     /// Returns the one exact public wallet/provider binding.
     fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding;
+
+    /// Reproves the complete provider, identity, generation, fence, and direct-path contract.
+    ///
+    /// Implementations must reject Read-ineligible providers before invoking any guard or
+    /// accessing a key, and must exact-match `expected_binding` before performing provider IO.
+    fn verify_read_attestation_qualification<'a>(
+        &'a self,
+        expected_binding: &'a VerifiedGenerationGuardedSignerBinding,
+    ) -> ReadAttestationQualificationFuture<'a>;
 
     /// Checks the mandatory deployment guard and signs the transient request.
     ///
@@ -148,58 +162,18 @@ pub trait GenerationGuardedDeterministicSigningProvider: Send + Sync {
 /// into a concrete guarded provider, which invokes it inside
 /// [`GenerationGuardedDeterministicSigningProvider::sign_guarded`].
 pub trait SigningGenerationGuard: Send + Sync {
+    /// Declares whether this guard is observational for Read attestation.
+    ///
+    /// `false` is required for guards that consume quota, approval tokens, anti-replay state,
+    /// billing credit, rate-limit capacity, or any other externally meaningful semantic state.
+    fn is_read_attestation_eligible(&self) -> bool;
+
     /// Proves that the bound generation is current, stale/sibling writers are
     /// fenced, and the wallet key is excluded from general direct signing.
     fn verify_current_and_exclusive<'a>(
         &'a self,
         binding: &'a VerifiedGenerationGuardedSignerBinding,
     ) -> SigningGenerationGuardFuture<'a>;
-}
-
-type BindGenerationGuardedDeterministicSigningProvider =
-    dyn Fn() -> GenerationGuardedDeterministicSigningProviderBindFuture + Send + Sync;
-
-/// Process-local binder for one exact qualified wallet signer.
-///
-/// The binder owns the binding rather than accepting caller-selected signer
-/// material. It rejects a provider that returns any different public binding.
-#[derive(Clone)]
-pub struct GenerationGuardedDeterministicSigningProviderBinder {
-    binding: VerifiedGenerationGuardedSignerBinding,
-    bind: Arc<BindGenerationGuardedDeterministicSigningProvider>,
-}
-
-impl GenerationGuardedDeterministicSigningProviderBinder {
-    /// Creates a binder for one exact verified wallet binding.
-    pub fn new<B>(binding: VerifiedGenerationGuardedSignerBinding, bind: B) -> Self
-    where
-        B: Fn() -> GenerationGuardedDeterministicSigningProviderBindFuture + Send + Sync + 'static,
-    {
-        Self {
-            binding,
-            bind: Arc::new(bind),
-        }
-    }
-
-    /// Returns the exact wallet/provider binding fixed by this binder.
-    pub const fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
-        &self.binding
-    }
-
-    /// Resolves the exact guarded provider and rechecks its complete binding.
-    pub fn bind(&self) -> GenerationGuardedDeterministicSigningProviderBindFuture {
-        let expected = self.binding.clone();
-        let provider = (self.bind)();
-        Box::pin(async move {
-            let provider = provider.await?;
-            if provider.binding() != &expected {
-                return Err(SigningError::Provider {
-                    reason: SigningProviderError::BindingMismatch,
-                });
-            }
-            Ok(provider)
-        })
-    }
 }
 
 /// Process-local signer reference used by workflow config and runtime binding.
@@ -657,12 +631,15 @@ impl ExpectedSignerIdentity {
     }
 }
 
-/// Fully validated public identity and generation binding for one guarded signer.
+/// Structurally validated public evidence for one guarded signer.
 ///
 /// The binding contains no private key, unlock source, endpoint, credential,
 /// signature, or signed payload. Its three content references fix the wallet's
 /// durable generation, deployment fence evidence, and provider/ACL proof that
-/// excludes the key from general direct-sign access.
+/// claims to exclude the key from general direct-sign access. Constructing this
+/// value does not prove that the key exists or that any referenced fence or
+/// exclusion authority is current. Concrete secret-provider qualification must
+/// establish those facts before this evidence becomes production authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedGenerationGuardedSignerBinding {
     signer_ref: SignerRef,
@@ -739,7 +716,7 @@ impl VerifiedGenerationGuardedSignerBinding {
         &self.expected_public_identity
     }
 
-    /// Returns the independently durable wallet/executor generation.
+    /// Returns the independently durable wallet-authority generation.
     pub const fn durable_generation_ref(&self) -> &ContentRef {
         &self.durable_generation_ref
     }
@@ -785,6 +762,100 @@ impl VerifiedGenerationGuardedSignerBinding {
             });
         }
         Ok(())
+    }
+
+    /// Requires the complete key and account identity needed by production
+    /// secret-provider qualification.
+    pub fn require_complete_public_identity(&self) -> Result<()> {
+        if self.expected_public_identity.public_key().is_none()
+            || self.expected_public_identity.account_id().is_none()
+        {
+            return Err(SigningError::InvalidRequest {
+                reason: SigningRequestError::MissingPublicIdentity,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Process-local signer qualified for deterministic, observational Read attestation.
+///
+/// This bearer is the only input accepted by live Read attestation. It snapshots one exact public
+/// binding and is minted only after the raw provider has declared Read eligibility and reverified
+/// its complete provider, key-identity, generation, fence, and direct-path contract. Eligibility
+/// is rechecked before every signing call. The bearer exposes neither its raw provider nor an
+/// unchecked constructor and is not serializable.
+///
+/// ```compile_fail
+/// use std::sync::Arc;
+/// use mfm_signing::{
+///     GenerationGuardedDeterministicSigningProvider, QualifiedReadSigningProvider,
+/// };
+///
+/// fn bypass(
+///     raw: Arc<dyn GenerationGuardedDeterministicSigningProvider>,
+/// ) -> QualifiedReadSigningProvider {
+///     raw.into()
+/// }
+/// ```
+#[derive(Clone)]
+pub struct QualifiedReadSigningProvider {
+    provider: Arc<dyn GenerationGuardedDeterministicSigningProvider>,
+    binding: VerifiedGenerationGuardedSignerBinding,
+}
+
+impl QualifiedReadSigningProvider {
+    /// Qualifies one raw guarded provider for observational Read attestation.
+    pub async fn try_qualify(
+        provider: Arc<dyn GenerationGuardedDeterministicSigningProvider>,
+    ) -> Result<Self> {
+        if !provider.is_read_attestation_eligible() {
+            return Err(read_attestation_ineligible());
+        }
+        let binding = provider.binding().clone();
+        provider
+            .verify_read_attestation_qualification(&binding)
+            .await?;
+        if !provider.is_read_attestation_eligible() {
+            return Err(read_attestation_ineligible());
+        }
+        if provider.binding() != &binding {
+            return Err(SigningError::Provider {
+                reason: SigningProviderError::BindingMismatch,
+            });
+        }
+        Ok(Self { provider, binding })
+    }
+
+    /// Returns the exact public binding proven during Read qualification.
+    pub const fn binding(&self) -> &VerifiedGenerationGuardedSignerBinding {
+        &self.binding
+    }
+
+    /// Returns whether the raw provider still satisfies its immutable Read contract and binding.
+    pub fn is_read_attestation_eligible(&self) -> bool {
+        self.provider.is_read_attestation_eligible() && self.provider.binding() == &self.binding
+    }
+
+    /// Signs through the qualified guarded provider after rechecking Read eligibility and binding.
+    pub fn sign_guarded<'a>(
+        &'a self,
+        expected_generation_ref: &'a ContentRef,
+        request: &'a SigningRequest,
+    ) -> SigningFuture<'a> {
+        if !self.is_read_attestation_eligible() {
+            return Box::pin(async { Err(read_attestation_ineligible()) });
+        }
+        self.provider.sign_guarded(expected_generation_ref, request)
+    }
+}
+
+impl fmt::Debug for QualifiedReadSigningProvider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("QualifiedReadSigningProvider")
+            .field("binding", &self.binding)
+            .finish_non_exhaustive()
     }
 }
 
@@ -915,7 +986,7 @@ impl GenerationGuardedSignerDescriptor {
         &self.expected_public_identity
     }
 
-    /// Returns the independently durable wallet/executor generation.
+    /// Returns the independently durable wallet-authority generation.
     pub const fn durable_generation_ref(&self) -> &ContentRef {
         &self.durable_generation_ref
     }
@@ -1175,6 +1246,8 @@ pub enum SigningProviderError {
     GenerationFenced,
     /// The deployment guard found another direct-sign path to the wallet key.
     DirectSigningOverlap,
+    /// The signer or a transitive guard performs externally meaningful semantic mutation.
+    ReadAttestationIneligible,
 }
 
 /// Closed deployment-generation guard failures.
@@ -1257,6 +1330,12 @@ fn content_ref_value(reference: &ContentRef) -> Result<CanonicalValue> {
 fn invalid_public_descriptor() -> SigningError {
     SigningError::InvalidRequest {
         reason: SigningRequestError::InvalidPublicDescriptor,
+    }
+}
+
+fn read_attestation_ineligible() -> SigningError {
+    SigningError::Provider {
+        reason: SigningProviderError::ReadAttestationIneligible,
     }
 }
 

@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 //! Pure fact authoring and selection semantics for the MFM typed kernel.
 //!
-//! Facts are transition outputs. Same-run consumers use certified graph edges;
+//! Facts are transition outputs. Same-run consumers use lexical structured-program values;
 //! deliberate cross-run selection uses one annex-backed
 //! [`FactSelectionRequest`]. This crate owns only journal-independent value
 //! semantics. Journal references, tenant coordinates, scan authority,
@@ -25,14 +25,21 @@
 mod codec;
 mod descriptor;
 mod emission;
+mod read;
 mod selection;
 mod value;
 
 pub use descriptor::{FactDescriptor, FactKind};
 pub use emission::{FactProposal, FactSet, ProposedFactValue};
+pub use read::{
+    FactSelectionCompletenessMode, FactSelectionReadFailure, FactSelectionReadFailureCode,
+    FactSelectionReadResponse, FactSelectionScanBounds, MAX_FACT_SCAN_FACTS,
+    MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES, MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+    MAX_FACT_SCAN_SELECTED_RESULTS,
+};
 pub use selection::{
-    FactCandidate, FactOrdering, FactProducerScope, FactSelectionLimit, FactSelectionQuery,
-    FactSelectionRequest, FactTieBreak, FactTopK,
+    prior_run_fact_selector_contract_ref, FactCandidate, FactOrdering, FactProducerScope,
+    FactSelectionLimit, FactSelectionQuery, FactSelectionRequest, FactTieBreak, FactTopK,
 };
 pub use value::{CanonicalFactPredicate, FactScalar, FactSubject};
 

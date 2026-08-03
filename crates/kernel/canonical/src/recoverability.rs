@@ -3,13 +3,8 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use mfm_ids::{
-    AdmissionLogicalKey, ArtifactId, AttemptId, ContentDigest, ContentRef,
-    CorrectionInvocationDigest, DigestAlgorithm, EffectKey, ExecutorFrontierDigest,
-    ExecutorRecordDigest, FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest,
-    GenesisDigest, JournalCandidateDigest, JournalCommitDigest, JournalRecordHash, NodeId,
-    ObjectEvidenceDigest, OutputLogicalIdentityDigest, RecordId, RequestDigest, RunId,
-    RunSemanticStateDigest, SchemaId, SemanticDigest, SourceClosureDigest, SpecHash,
-    TerminalEffectEvidenceDigest,
+    ContentDigest, ContentRef, DigestAlgorithm, FactContentIdentityDigest,
+    FactLogicalIdentityDigest, FactQueryDigest, RunId, SchemaId, SemanticDigest,
 };
 use serde_json::{Map, Value};
 
@@ -496,75 +491,19 @@ impl RecoverabilityContract {
     }
 
     branded_domain_derivation!(
-        derive_admission_logical_key,
-        "mfm.admission-logical-key.v1",
-        "semantic_digest",
-        AdmissionLogicalKey,
-        "Derives the frozen logical identity for one run-admission request."
-    );
-
-    digest_only_domain_derivation!(
-        derive_artifact_id,
-        "mfm.artifact-id.v1",
-        "artifact_id",
-        ArtifactId,
-        "Derives the frozen identity of one retained artifact."
-    );
-
-    branded_domain_derivation!(
-        derive_correction_invocation_digest,
-        "mfm.correction-invocation.v1",
-        "semantic_digest",
-        CorrectionInvocationDigest,
-        "Derives the frozen digest of one correction invocation."
-    );
-
-    branded_domain_derivation!(
-        derive_effect_key,
-        "mfm.effect-key.v1",
-        "effect_key",
-        EffectKey,
-        "Derives the frozen keyed-effect identity."
-    );
-
-    branded_domain_derivation!(
-        derive_attempt_id,
-        "mfm.executor-delivery-attempt.v1",
-        "attempt_id",
-        AttemptId,
-        "Derives the frozen identity of one executor delivery attempt."
-    );
-
-    branded_domain_derivation!(
-        derive_executor_frontier_digest,
-        "mfm.executor-frontier.v1",
-        "semantic_digest",
-        ExecutorFrontierDigest,
-        "Derives the frozen digest of one executor frontier."
-    );
-
-    branded_domain_derivation!(
-        derive_executor_record_digest,
-        "mfm.executor-record.v1",
-        "semantic_digest",
-        ExecutorRecordDigest,
-        "Derives the frozen digest of one executor-owned record."
-    );
-
-    branded_domain_derivation!(
-        derive_fact_content_identity_digest,
+        derive_fact_content_identity,
         "mfm.fact-content-identity.v1",
         "semantic_digest",
         FactContentIdentityDigest,
-        "Derives the frozen content identity digest of one fact."
+        "Derives the frozen producer-independent identity of retained fact content."
     );
 
     branded_domain_derivation!(
-        derive_fact_logical_identity_digest,
+        derive_fact_logical_identity,
         "mfm.fact-logical-identity.v1",
         "semantic_digest",
         FactLogicalIdentityDigest,
-        "Derives the frozen logical identity digest of one fact."
+        "Derives the frozen producer-transition-bound identity of one emitted fact."
     );
 
     branded_domain_derivation!(
@@ -575,78 +514,6 @@ impl RecoverabilityContract {
         "Derives the frozen digest of one fact-selection request."
     );
 
-    branded_domain_derivation!(
-        derive_genesis_digest,
-        "mfm.genesis.v1",
-        "semantic_digest",
-        GenesisDigest,
-        "Derives the frozen digest of one run genesis preimage."
-    );
-
-    branded_domain_derivation!(
-        derive_journal_candidate_digest,
-        "mfm.journal-candidate.v1",
-        "semantic_digest",
-        JournalCandidateDigest,
-        "Derives the frozen digest of one unassigned journal candidate."
-    );
-
-    branded_domain_derivation!(
-        derive_journal_commit_digest,
-        "mfm.journal-commit.v1",
-        "semantic_digest",
-        JournalCommitDigest,
-        "Derives the frozen digest of one assigned journal commit."
-    );
-
-    branded_domain_derivation!(
-        derive_record_id,
-        "mfm.journal-record-id.v1",
-        "record_id",
-        RecordId,
-        "Derives the frozen immutable journal record identity."
-    );
-
-    branded_domain_derivation!(
-        derive_journal_record_hash,
-        "mfm.journal-record.v1",
-        "semantic_digest",
-        JournalRecordHash,
-        "Derives the frozen semantic hash of one journal record."
-    );
-
-    digest_only_domain_derivation!(
-        derive_node_id,
-        "mfm.node-occurrence.v1",
-        "node_id",
-        NodeId,
-        "Derives the frozen identity of one node occurrence."
-    );
-
-    branded_domain_derivation!(
-        derive_object_evidence_digest,
-        "mfm.object-evidence.v1",
-        "semantic_digest",
-        ObjectEvidenceDigest,
-        "Derives the frozen digest of retained-object evidence."
-    );
-
-    branded_domain_derivation!(
-        derive_output_logical_identity_digest,
-        "mfm.output-logical-identity.v1",
-        "semantic_digest",
-        OutputLogicalIdentityDigest,
-        "Derives the frozen logical identity digest of one output occurrence."
-    );
-
-    branded_domain_derivation!(
-        derive_request_digest,
-        "mfm.request.v1",
-        "semantic_digest",
-        RequestDigest,
-        "Derives the frozen semantic digest of one external request."
-    );
-
     digest_only_domain_derivation!(
         derive_run_id,
         "mfm.run-id.v1",
@@ -654,82 +521,6 @@ impl RecoverabilityContract {
         RunId,
         "Derives the frozen identity of one run."
     );
-
-    branded_domain_derivation!(
-        derive_run_semantic_state_digest,
-        "mfm.run-semantic-state.v1",
-        "semantic_digest",
-        RunSemanticStateDigest,
-        "Derives the frozen digest of one reconstructed run state."
-    );
-
-    /// Derives the frozen redaction digest of one exact cross-run source reference.
-    pub fn derive_cross_run_source_redaction_digest(
-        &self,
-        value: &ValidatedCanonicalValue,
-    ) -> std::result::Result<SemanticDigest, RecoverabilityError> {
-        self.semantic_digest_for(
-            "mfm.cross-run-source-redaction.v1",
-            "semantic_digest",
-            value,
-        )
-    }
-
-    branded_domain_derivation!(
-        derive_source_closure_digest,
-        "mfm.source-closure.v1",
-        "semantic_digest",
-        SourceClosureDigest,
-        "Derives the frozen digest of one cross-run source closure."
-    );
-
-    digest_only_domain_derivation!(
-        derive_spec_hash,
-        "mfm.spec-hash.v1",
-        "spec_hash",
-        SpecHash,
-        "Derives the frozen hash identity of one certified spec."
-    );
-
-    branded_domain_derivation!(
-        derive_terminal_effect_evidence_digest,
-        "mfm.terminal-effect-evidence.v1",
-        "semantic_digest",
-        TerminalEffectEvidenceDigest,
-        "Derives the frozen digest of terminal effect evidence."
-    );
-
-    /// Derives the frozen schema identity from its exact descriptor preimage.
-    pub fn derive_schema_id(
-        &self,
-        value: &ValidatedCanonicalValue,
-    ) -> std::result::Result<SchemaId, RecoverabilityError> {
-        let digest = self.semantic_digest_for("mfm.schema.v1", "schema_id", value)?;
-        let (contract, version) = value
-            .value
-            .as_object()
-            .and_then(|object| object.get("contract"))
-            .and_then(Value::as_str)
-            .and_then(contract_name_version)
-            .ok_or_else(|| {
-                RecoverabilityError::new(
-                    RecoverabilityErrorCode::IdentityConstruction,
-                    "schema descriptor cannot form a schema identity",
-                )
-            })?;
-        SchemaId::new(
-            contract,
-            version,
-            DigestAlgorithm::Sha256JcsV1,
-            *digest.digest(),
-        )
-        .map_err(|_| {
-            RecoverabilityError::new(
-                RecoverabilityErrorCode::IdentityConstruction,
-                "schema descriptor cannot form a schema identity",
-            )
-        })
-    }
 
     /// Computes the raw SHA-256 digest of exact retained bytes.
     pub fn raw_content_digest(&self, bytes: &[u8]) -> ContentDigest {
@@ -793,18 +584,6 @@ impl RecoverabilityContract {
                 "schema contract is not registered",
             )
         })?;
-        if schema
-            .shape
-            .as_object()
-            .and_then(|shape| shape.get("kind"))
-            .and_then(Value::as_str)
-            == Some("framed_sequence")
-        {
-            return Err(RecoverabilityError::new(
-                RecoverabilityErrorCode::WrongType,
-                "framed-sequence schemas require the streaming codec",
-            ));
-        }
         Ok(schema)
     }
 
@@ -1332,11 +1111,6 @@ impl RecoverabilityContract {
             "array" => self.validate_array(definition, value, path, depth),
             "object" => self.validate_object(definition, value, path, depth),
             "tagged_union" => self.validate_tagged_union(definition, value, path, depth),
-            "framed_sequence" => Err(value_error(
-                RecoverabilityErrorCode::WrongType,
-                path,
-                "framed-sequence schemas require the streaming codec",
-            )),
             _ => Err(value_error(
                 RecoverabilityErrorCode::InvalidAnnex,
                 path,
@@ -1840,16 +1614,6 @@ fn collect_schema_references(
             output.insert(
                 required_string(object, "contract", RecoverabilityErrorCode::InvalidAnnex)?
                     .to_owned(),
-            );
-        }
-        Some("framed_sequence") => {
-            output.insert(
-                required_string(
-                    object,
-                    "frame_contract",
-                    RecoverabilityErrorCode::InvalidAnnex,
-                )?
-                .to_owned(),
             );
         }
         Some("nullable" | "optional_absent") => collect_schema_references(
@@ -2632,16 +2396,16 @@ fn validate_annex_metadata(
     require_exact_keys(
         identities,
         &[
+            "access_attempt_id",
             "artifact_id",
-            "attempt_id",
             "content_digest",
-            "effect_key",
-            "node_id",
-            "record_id",
+            "failure_plan_id",
+            "fragment_boundary_id",
+            "occurrence_id",
             "run_id",
             "schema_id",
+            "semantic_call_id",
             "semantic_digest",
-            "spec_hash",
             "store_scope_id",
             "tenant_scope_id",
         ],
@@ -2694,35 +2458,23 @@ fn validate_annex_metadata(
             .filter_map(Value::as_str)
             .collect::<BTreeSet<_>>();
     let expected_transient = BTreeSet::from([
-        "AdmitAuthority",
-        "AdmittedSupportGraph",
+        "AdmissionCertificationRegistry",
         "AuthorizedAccess",
-        "AuthorizedEnsureAccess",
-        "AuthorizedReadAccess",
-        "CapabilityCatalog",
-        "ClosureVerificationSession",
+        "CandidateActivationPermit",
         "CommittedObservation",
-        "CommittedRequest",
-        "FactScanSession",
-        "More",
+        "ConfigurationHistoryWriter",
         "NewlyAppendedAuthorization",
-        "OfflineVerifiedRun",
-        "PreparedObjectGraph",
-        "QualifiedDeploymentAuthority",
-        "QualifiedSupportGraph",
-        "RequestView",
-        "RunAccessAuthority",
-        "StateCatalog",
-        "StateFrame",
-        "TargetEntryAuthority",
-        "VerifiedConfiguredValue",
-        "VerifiedExportStream",
-        "VerifiedRunView",
-        "VerifiedTerminalEffectView",
-        "AuthorizedEvmWalletTarget",
+        "OperationBuilder",
         "PendingObservation",
-        "PreparedAccess",
-        "PreparedEvmWalletTarget",
+        "PhysicalBindingAuthorization",
+        "ProgramRegistryBuilder",
+        "QualifiedPhysicalBinding",
+        "QualifiedProgramRegistry",
+        "Runtime",
+        "StateFrame",
+        "StructuredRunHistoryWriter",
+        "WalletNonceAuthorityResource",
+        "WalletNonceDomainActivationAttestation",
     ]);
     if actual_transient != expected_transient {
         return Err(RecoverabilityError::new(
@@ -2905,7 +2657,6 @@ fn validate_schema_algebra_registry(
         "boolean",
         "bounded_unsigned_integer",
         "canonical_decimal_u64",
-        "framed_sequence",
         "literal",
         "nullable",
         "object",
@@ -3207,74 +2958,6 @@ fn validate_shape_definition(
             require_exact_key_set(object, &allowed, "tagged union schema node")?;
             validate_closed_object_metadata(object)?;
             validate_union_definition(object, schemas, depth)?;
-        }
-        "framed_sequence" => {
-            require_exact_keys(
-                object,
-                &[
-                    "frame_contract",
-                    "invariants",
-                    "kind",
-                    "max_frame_canonical_json_bytes",
-                    "media_type",
-                    "record_prefix_hex",
-                    "record_suffix_hex",
-                ],
-                "framed sequence schema node",
-            )?;
-            if required_string(
-                object,
-                "frame_contract",
-                RecoverabilityErrorCode::InvalidAnnex,
-            )? != "mfm.portable-run-export-frame.v1"
-                || required_string(
-                    object,
-                    "max_frame_canonical_json_bytes",
-                    RecoverabilityErrorCode::InvalidAnnex,
-                )? != "16777216"
-                || required_string(object, "media_type", RecoverabilityErrorCode::InvalidAnnex)?
-                    != "application/vnd.mfm.run-export-stream.v1+json-seq"
-                || required_string(
-                    object,
-                    "record_prefix_hex",
-                    RecoverabilityErrorCode::InvalidAnnex,
-                )? != "1e"
-                || required_string(
-                    object,
-                    "record_suffix_hex",
-                    RecoverabilityErrorCode::InvalidAnnex,
-                )? != "0a"
-            {
-                return Err(RecoverabilityError::new(
-                    RecoverabilityErrorCode::InvalidAnnex,
-                    "framed sequence does not match the portable export wire contract",
-                ));
-            }
-            let frame = schemas
-                .get("mfm.portable-run-export-frame.v1")
-                .ok_or_else(|| {
-                    RecoverabilityError::new(
-                        RecoverabilityErrorCode::InvalidAnnex,
-                        "portable export frame schema is not registered",
-                    )
-                })?;
-            if frame
-                .shape
-                .as_object()
-                .and_then(|shape| shape.get("kind"))
-                .and_then(Value::as_str)
-                != Some("tagged_union")
-            {
-                return Err(RecoverabilityError::new(
-                    RecoverabilityErrorCode::InvalidAnnex,
-                    "portable export frame contract is not a tagged union",
-                ));
-            }
-            validate_unique_strings(required_array(
-                object,
-                "invariants",
-                RecoverabilityErrorCode::InvalidAnnex,
-            )?)?;
         }
         _ => {
             return Err(RecoverabilityError::new(

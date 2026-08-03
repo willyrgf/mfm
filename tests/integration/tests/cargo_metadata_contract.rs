@@ -1,67 +1,28 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
 
-const REQUIRED_JOURNAL_CONSUMERS: [&str; 3] = ["mfm-replay", "mfm-runtime", "mfm-store"];
-const REMOVED_PACKAGES: [&str; 3] = ["mfm-events", "mfm-manual-auth", "mfm-portfolio-live"];
+const REMOVED_PACKAGES: [&str; 3] = [
+    "mfm-executor",
+    "mfm-storage-executor-file",
+    "mfm-storage-executor-postgres",
+];
+
+const GENERIC_HISTORY_PACKAGES: [&str; 7] = [
+    "mfm-journal",
+    "mfm-program",
+    "mfm-certify",
+    "mfm-store",
+    "mfm-runtime",
+    "mfm-replay",
+    "mfm-spec",
+];
 
 #[test]
-fn recoverability_workspace_uses_one_journal_crate() {
-    let root = repository_root();
-    let metadata = cargo_metadata(&root);
-    let packages = workspace_packages(&metadata);
-
-    let journal = packages
-        .get("mfm-journal")
-        .expect("mfm-journal must be a workspace member");
-    assert_eq!(
-        relative_manifest_path(&root, journal),
-        "crates/kernel/journal/Cargo.toml"
-    );
-    assert_eq!(
-        journal
-            .pointer("/metadata/mfm/layer")
-            .and_then(Value::as_str),
-        Some("kernel")
-    );
-    assert_eq!(
-        journal
-            .pointer("/metadata/mfm/domain-facing")
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-    assert_eq!(
-        journal
-            .pointer("/metadata/mfm/binary-facing")
-            .and_then(Value::as_bool),
-        Some(false)
-    );
-
-    for consumer_name in REQUIRED_JOURNAL_CONSUMERS {
-        let consumer = packages
-            .get(consumer_name)
-            .unwrap_or_else(|| panic!("{consumer_name} must be a workspace member"));
-        assert!(
-            dependency_names(consumer).contains("mfm-journal"),
-            "{consumer_name} must consume the one journal contract"
-        );
-    }
-
-    let executor = packages
-        .get("mfm-executor")
-        .expect("mfm-executor must be a workspace member");
-    assert!(
-        !dependency_names(executor).contains("mfm-journal"),
-        "mfm-executor must embed capability-owned values without depending on mfm-journal"
-    );
-}
-
-#[test]
-fn superseded_event_manual_auth_and_portfolio_live_crates_are_absent() {
+fn retired_executor_packages_and_paths_are_absent() {
     let root = repository_root();
     let metadata = cargo_metadata(&root);
     let packages = workspace_packages(&metadata);
@@ -69,102 +30,128 @@ fn superseded_event_manual_auth_and_portfolio_live_crates_are_absent() {
     for removed in REMOVED_PACKAGES {
         assert!(
             !packages.contains_key(removed),
-            "{removed} must not remain a workspace member"
+            "{removed} must not remain a workspace member",
         );
-
         for (consumer_name, consumer) in &packages {
             assert!(
                 !dependency_names(consumer).contains(removed),
-                "{consumer_name} must not depend on removed package {removed}"
+                "{consumer_name} must not depend on retired package {removed}",
             );
         }
     }
 
     for removed_path in [
-        "crates/kernel/events/Cargo.toml",
-        "crates/kernel/manual-auth/Cargo.toml",
-        "crates/live/portfolio/Cargo.toml",
+        "crates/kernel/executor",
+        "crates/storages/executor-file",
+        "crates/storages/executor-postgres",
     ] {
         assert!(
             !root.join(removed_path).exists(),
-            "{removed_path} must be deleted rather than retained as a compatibility crate"
+            "{removed_path} must be deleted rather than retained as a compatibility path",
         );
     }
 }
 
 #[test]
-fn run_history_ownership_dependencies_and_sources_are_one_way() {
+fn wallet_authority_storage_is_an_explicit_storage_layer_member() {
+    let root = repository_root();
+    let metadata = cargo_metadata(&root);
+    let packages = workspace_packages(&metadata);
+    let wallet = packages
+        .get("mfm-storage-evm-postgres")
+        .expect("wallet authority storage must be a workspace member");
+
+    assert_eq!(
+        relative_manifest_path(&root, wallet),
+        "crates/storages/evm-postgres/Cargo.toml",
+    );
+    assert_eq!(
+        metadata_string(wallet, "/metadata/mfm/layer"),
+        Some("storage")
+    );
+    assert_eq!(metadata_string(wallet, "/metadata/mfm/domain"), Some("evm"));
+    let dependencies = normal_dependency_names(wallet);
+    assert!(dependencies.contains("mfm-evm"));
+    for forbidden in ["mfm-app", "mfm-runtime", "mfm-replay", "mfm-store"] {
+        assert!(
+            !dependencies.contains(forbidden),
+            "wallet authority storage must not depend on {forbidden}",
+        );
+    }
+}
+
+#[test]
+fn generic_structured_history_packages_remain_evm_neutral() {
     let root = repository_root();
     let metadata = cargo_metadata(&root);
     let packages = workspace_packages(&metadata);
 
-    assert_normal_dependencies(
-        &packages,
-        "mfm-store",
-        &[],
-        &["mfm-app", "mfm-runtime", "mfm-storage-postgres"],
-    );
-    assert_normal_dependencies(
+    for package_name in GENERIC_HISTORY_PACKAGES {
+        let package = packages
+            .get(package_name)
+            .unwrap_or_else(|| panic!("{package_name} must be a workspace member"));
+        assert_eq!(
+            metadata_string(package, "/metadata/mfm/layer"),
+            Some("kernel")
+        );
+        for dependency in normal_dependency_names(package) {
+            assert!(
+                dependency != "mfm-evm"
+                    && dependency != "mfm-evm-live"
+                    && dependency != "mfm-storage-evm-postgres",
+                "{package_name} must remain EVM-neutral but depends on {dependency}",
+            );
+        }
+    }
+}
+
+#[test]
+fn structured_history_ownership_edges_are_one_way() {
+    let root = repository_root();
+    let metadata = cargo_metadata(&root);
+    let packages = workspace_packages(&metadata);
+
+    assert_dependencies(
         &packages,
         "mfm-runtime",
-        &["mfm-program", "mfm-store"],
-        &["mfm-app", "mfm-storage-postgres"],
+        &["mfm-certify", "mfm-program", "mfm-store"],
+        &["mfm-app", "mfm-replay", "mfm-storage-postgres"],
     );
-    assert_normal_dependencies(
+    assert_dependencies(
         &packages,
         "mfm-replay",
-        &["mfm-store"],
+        &["mfm-journal", "mfm-store"],
         &["mfm-app", "mfm-runtime", "mfm-storage-postgres"],
     );
-    assert_normal_dependencies(
+    assert_dependencies(
         &packages,
         "mfm-storage-postgres",
-        &["mfm-store"],
-        &["mfm-app", "mfm-runtime"],
+        &["mfm-journal", "mfm-store"],
+        &["mfm-app", "mfm-replay", "mfm-runtime"],
     );
-    assert_normal_dependencies(
+    assert_dependencies(
         &packages,
         "mfm-app",
-        &["mfm-replay", "mfm-runtime", "mfm-storage-postgres"],
+        &[
+            "mfm-certify",
+            "mfm-program",
+            "mfm-replay",
+            "mfm-runtime",
+            "mfm-storage-evm-postgres",
+            "mfm-storage-postgres",
+        ],
         &[],
     );
 
-    let production = read_source(&root, "crates/app/src/production.rs");
-    for forbidden in [
-        ".append_admission(",
-        ".prepare_admission(",
-        "QualifiedPostgresStore",
-        "PreparedJournalAppend",
-        "writer_pool(",
-    ] {
-        assert!(
-            !production.contains(forbidden),
-            "application production assembly must not retain `{forbidden}`"
-        );
-    }
     assert!(
-        production.contains(".admit("),
-        "application admission must enter through Runtime"
+        root.join("crates/app/src/production_structured.rs")
+            .is_file(),
+        "application assembly must use the structured production backend",
     );
-
-    let postgres_exports = read_source(&root, "crates/storages/postgres/src/lib.rs");
     assert!(
-        !postgres_exports.contains("QualifiedPostgresStore"),
-        "the retired combined PostgreSQL facade must not remain exported"
+        !root.join("crates/app/src/production.rs").exists(),
+        "the graph-era production backend must be deleted",
     );
-    let store_exports = read_source(&root, "crates/kernel/store/src/lib.rs");
-    for retired in [
-        "RunJournalStore",
-        "SupportStore",
-        "ConfiguredValueStore",
-        "AdmissionSourceStore",
-        "FactSelectionStore",
-    ] {
-        assert!(
-            !store_exports.contains(retired),
-            "the retired combined store facade `{retired}` must not remain exported"
-        );
-    }
 }
 
 fn repository_root() -> PathBuf {
@@ -191,7 +178,7 @@ fn cargo_metadata(root: &Path) -> Value {
     assert!(
         output.status.success(),
         "cargo metadata failed:\n{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stderr),
     );
     serde_json::from_slice(&output.stdout).expect("decode cargo metadata")
 }
@@ -260,7 +247,7 @@ fn normal_dependency_names(package: &Value) -> BTreeSet<&str> {
         .collect()
 }
 
-fn assert_normal_dependencies(
+fn assert_dependencies(
     packages: &BTreeMap<String, &Value>,
     package_name: &str,
     required: &[&str],
@@ -273,30 +260,29 @@ fn assert_normal_dependencies(
     for required_name in required {
         assert!(
             dependencies.contains(required_name),
-            "{package_name} must normally depend on {required_name}"
+            "{package_name} must normally depend on {required_name}",
         );
     }
     for forbidden_name in forbidden {
         assert!(
             !dependencies.contains(forbidden_name),
-            "{package_name} must not normally depend on {forbidden_name}"
+            "{package_name} must not normally depend on {forbidden_name}",
         );
     }
 }
 
-fn read_source(root: &Path, relative: &str) -> String {
-    fs::read_to_string(root.join(relative))
-        .unwrap_or_else(|error| panic!("read {relative}: {error}"))
+fn metadata_string<'a>(package: &'a Value, pointer: &str) -> Option<&'a str> {
+    package.pointer(pointer).and_then(Value::as_str)
 }
 
 fn relative_manifest_path(root: &Path, package: &Value) -> String {
-    let manifest_path = package
+    let manifest = package
         .get("manifest_path")
         .and_then(Value::as_str)
-        .expect("manifest path");
-    Path::new(manifest_path)
+        .expect("manifest_path");
+    Path::new(manifest)
         .strip_prefix(root)
-        .expect("workspace manifest must be under repository root")
+        .expect("workspace-relative manifest")
         .to_string_lossy()
         .replace('\\', "/")
 }

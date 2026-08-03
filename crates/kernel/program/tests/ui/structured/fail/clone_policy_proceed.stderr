@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `PolicyProceed<Input, Output, Failure>` in the current scope
+ --> tests/ui/structured/fail/clone_policy_proceed.rs:4:30
+  |
+4 |     let _duplicate = proceed.clone();
+  |                              ^^^^^ method not found in `PolicyProceed<Input, Output, Failure>`

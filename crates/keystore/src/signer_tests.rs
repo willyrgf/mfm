@@ -5,13 +5,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use alloy_primitives::{Address, PrimitiveSignature, B256};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
+use k256::elliptic_curve::sec1::ToEncodedPoint;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
 use mfm_signing::{
     DeterministicSigningProvider, ExpectedSignerIdentity,
-    GenerationGuardedDeterministicSigningProvider, PublicSigningIdentity, SignatureBytes,
-    SignerRef, SigningAlgorithmId, SigningDomainId, SigningGenerationGuard,
-    SigningGenerationGuardError, SigningGenerationGuardFuture, SigningProfileId, SigningProvider,
-    SigningProviderError, SigningPurposeId, SigningResult, VerifiedGenerationGuardedSignerBinding,
+    GenerationGuardedDeterministicSigningProvider, PublicKeyBytes, PublicSigningIdentity,
+    QualifiedReadSigningProvider, SignatureBytes, SignerRef, SigningAlgorithmId, SigningDomainId,
+    SigningGenerationGuard, SigningGenerationGuardError, SigningGenerationGuardFuture,
+    SigningProfileId, SigningProvider, SigningProviderError, SigningPurposeId, SigningResult,
+    VerifiedGenerationGuardedSignerBinding,
 };
 use static_assertions::assert_not_impl_any;
 use tempfile::TempDir;
@@ -29,6 +31,36 @@ struct TestKeystore {
     address: Address,
 }
 
+#[cfg(unix)]
+struct ReadOnlyDirectory {
+    path: PathBuf,
+    original: fs::Permissions,
+}
+
+#[cfg(unix)]
+impl ReadOnlyDirectory {
+    fn new(path: &Path) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let original = fs::metadata(path)
+            .expect("directory metadata")
+            .permissions();
+        let read_only = fs::Permissions::from_mode(original.mode() & !0o222);
+        fs::set_permissions(path, read_only).expect("disable directory writes");
+        Self {
+            path: path.to_path_buf(),
+            original,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ReadOnlyDirectory {
+    fn drop(&mut self) {
+        let _ = fs::set_permissions(&self.path, self.original.clone());
+    }
+}
+
 fn signer_ref() -> SignerRef {
     SignerRef::new("deployer").expect("signer ref")
 }
@@ -39,6 +71,10 @@ fn algorithm() -> SigningAlgorithmId {
 
 fn profile() -> SigningProfileId {
     SigningProfileId::new(SECP256K1_RFC6979_LOW_S_PROFILE_ID).expect("profile")
+}
+
+fn semantic_signer_id() -> StableId {
+    StableId::new("mfm.test.signer/key-identity").expect("semantic signer id")
 }
 
 fn content_ref(seed: u8) -> ContentRef {
@@ -71,6 +107,68 @@ fn binding(address: Address, generation_seed: u8) -> VerifiedGenerationGuardedSi
     .expect("verified guarded binding")
 }
 
+fn qualified_binding(
+    address: Address,
+    generation_seed: u8,
+) -> VerifiedGenerationGuardedSignerBinding {
+    qualified_binding_for_implementation(
+        address,
+        generation_seed,
+        KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+    )
+}
+
+fn qualified_binding_for_implementation(
+    address: Address,
+    generation_seed: u8,
+    implementation_id: &str,
+) -> VerifiedGenerationGuardedSignerBinding {
+    VerifiedGenerationGuardedSignerBinding::verify(
+        signer_ref(),
+        implementation_id,
+        algorithm(),
+        profile(),
+        PublicSigningIdentity::new(
+            algorithm(),
+            Some(test_public_key()),
+            Some(format!("{address:?}")),
+        )
+        .expect("complete public identity"),
+        content_ref(generation_seed),
+        content_ref(generation_seed.wrapping_add(1)),
+        content_ref(generation_seed.wrapping_add(2)),
+    )
+    .expect("qualified guarded binding evidence")
+}
+
+fn persisted_audit_count(bytes: &[u8]) -> usize {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .expect("persisted keystore JSON")
+        .get("audit_log")
+        .and_then(serde_json::Value::as_array)
+        .expect("persisted audit log")
+        .len()
+}
+
+fn test_public_key() -> PublicKeyBytes {
+    let mut key_bytes = [0_u8; 32];
+    key_bytes[31] = 1;
+    let public_key = k256::SecretKey::from_slice(&key_bytes)
+        .expect("test key")
+        .public_key()
+        .to_encoded_point(true);
+    PublicKeyBytes::new(public_key.as_bytes().to_vec()).expect("compressed public key")
+}
+
+fn test_address() -> Address {
+    let mut key_bytes = [0_u8; 32];
+    key_bytes[31] = 1;
+    crate::crypto::EthereumPrivateKey::from_secret_bytes(&key_bytes)
+        .expect("test private key")
+        .address()
+        .expect("test address")
+}
+
 #[derive(Clone, Copy)]
 enum GuardVerdict {
     Current,
@@ -81,6 +179,7 @@ enum GuardVerdict {
 
 struct TestGenerationGuard {
     verdict: GuardVerdict,
+    eligible: AtomicUsize,
     checks: AtomicUsize,
 }
 
@@ -88,8 +187,21 @@ impl TestGenerationGuard {
     fn new(verdict: GuardVerdict) -> Arc<Self> {
         Arc::new(Self {
             verdict,
+            eligible: AtomicUsize::new(1),
             checks: AtomicUsize::new(0),
         })
+    }
+
+    fn ineligible(verdict: GuardVerdict) -> Arc<Self> {
+        Arc::new(Self {
+            verdict,
+            eligible: AtomicUsize::new(0),
+            checks: AtomicUsize::new(0),
+        })
+    }
+
+    fn set_eligible(&self, eligible: bool) {
+        self.eligible.store(usize::from(eligible), Ordering::SeqCst);
     }
 
     fn checks(&self) -> usize {
@@ -98,6 +210,10 @@ impl TestGenerationGuard {
 }
 
 impl SigningGenerationGuard for TestGenerationGuard {
+    fn is_read_attestation_eligible(&self) -> bool {
+        self.eligible.load(Ordering::SeqCst) == 1
+    }
+
     fn verify_current_and_exclusive<'a>(
         &'a self,
         _binding: &'a VerifiedGenerationGuardedSignerBinding,
@@ -131,11 +247,7 @@ fn test_keystore() -> TestKeystore {
     let other_entry_id = keystore
         .import_private_key(Some("other".to_owned()), OTHER_KEY)
         .expect("import key");
-    let address = keystore
-        .get_private_key(entry_id)
-        .expect("secure key")
-        .ethereum_address()
-        .expect("address");
+    let address = test_address();
 
     TestKeystore {
         _dir: dir,
@@ -177,6 +289,254 @@ async fn sign(
 ) -> mfm_signing::Result<SigningResult> {
     let generation = provider.binding().durable_generation_ref().clone();
     provider.sign_guarded(&generation, request).await
+}
+
+#[tokio::test]
+async fn qualification_checks_key_identity_and_guard_before_consuming_handoff() {
+    let keystore = test_keystore();
+    let persisted_before = fs::read(&keystore.keystore_path).expect("persisted keystore");
+    let audit_count_before = persisted_audit_count(&persisted_before);
+    #[cfg(unix)]
+    let _read_only_directory = ReadOnlyDirectory::new(
+        keystore
+            .keystore_path
+            .parent()
+            .expect("keystore parent directory"),
+    );
+    let guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let candidate = KeystoreSignerProvider::new_with_config(
+        qualified_binding(keystore.address, 0x08),
+        keystore.entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+    let semantic_contract_ref = content_ref(0x0b);
+
+    let qualified = candidate
+        .qualify(semantic_signer_id(), semantic_contract_ref.clone())
+        .await
+        .expect("qualified signer");
+    assert_eq!(guard.checks(), 1);
+    assert_eq!(
+        qualified.semantic_signer_contract_ref(),
+        &semantic_contract_ref
+    );
+    assert_eq!(qualified.semantic_signer_id(), &semantic_signer_id());
+    assert_eq!(
+        qualified.binding().expected_public_identity().public_key(),
+        Some(&test_public_key())
+    );
+
+    let (handed_off_signer_id, handed_off_contract, provider) = qualified
+        .into_read_signing_provider()
+        .await
+        .expect("current affine handoff");
+    assert_eq!(handed_off_contract, semantic_contract_ref);
+    assert_eq!(handed_off_signer_id, semantic_signer_id());
+    assert_eq!(guard.checks(), 2);
+
+    let request = SigningRequest::from_digest(
+        signer_ref(),
+        algorithm(),
+        profile(),
+        SigningDomainId::new("evm.transaction").expect("domain"),
+        SigningPurposeId::new("evm.transaction.eip1559").expect("purpose"),
+        mfm_ids::DigestBytes::from_array([0x42; 32]),
+    )
+    .require_public_identity(
+        ExpectedSignerIdentity::public_key_and_account_id(
+            test_public_key(),
+            format!("{:?}", keystore.address),
+        )
+        .expect("identity"),
+    );
+    let generation = provider.binding().durable_generation_ref().clone();
+    let result = provider
+        .sign_guarded(&generation, &request)
+        .await
+        .expect("guarded sign");
+    let repeated = provider
+        .sign_guarded(&generation, &request)
+        .await
+        .expect("repeated guarded sign");
+    assert_eq!(
+        result.public_identity(),
+        provider.binding().expected_public_identity()
+    );
+    assert_eq!(result.signature(), repeated.signature());
+    assert_eq!(guard.checks(), 4);
+    let persisted_after = fs::read(&keystore.keystore_path).expect("persisted keystore");
+    assert_eq!(persisted_audit_count(&persisted_after), audit_count_before);
+    assert!(
+        persisted_after == persisted_before,
+        "Read qualification or signing changed persisted keystore bytes"
+    );
+}
+
+#[tokio::test]
+async fn read_qualification_rejects_every_semantic_guard_before_guard_or_key_access() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    for (index, mutation) in [
+        "quota",
+        "approval",
+        "anti-replay",
+        "billing",
+        "rate-limit",
+        "other-semantic-state",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let guard = TestGenerationGuard::ineligible(GuardVerdict::Current);
+        let candidate = KeystoreSignerProvider::new(
+            qualified_binding(Address::from([0x11; 20]), 0x40 + index as u8),
+            Uuid::new_v4(),
+            directory.path().join("missing.keystore"),
+            directory.path().join("missing.unlock"),
+            guard.clone(),
+        )
+        .expect("candidate");
+        assert!(
+            matches!(
+                candidate
+                    .qualify(semantic_signer_id(), content_ref(0x70 + index as u8))
+                    .await,
+                Err(SigningError::Provider {
+                    reason: SigningProviderError::ReadAttestationIneligible
+                })
+            ),
+            "accepted {mutation} mutation"
+        );
+        assert_eq!(guard.checks(), 0);
+    }
+}
+
+#[tokio::test]
+async fn handoff_and_signing_recheck_revoked_read_eligibility() {
+    let keystore = test_keystore();
+    let guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let candidate = KeystoreSignerProvider::new_with_config(
+        qualified_binding(keystore.address, 0x48),
+        keystore.entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+    let qualified = candidate
+        .qualify(semantic_signer_id(), content_ref(0x4b))
+        .await
+        .expect("initial qualification");
+    assert_eq!(guard.checks(), 1);
+    guard.set_eligible(false);
+    assert!(matches!(
+        qualified.into_read_signing_provider().await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::ReadAttestationIneligible
+        })
+    ));
+    assert_eq!(guard.checks(), 1);
+
+    guard.set_eligible(true);
+    let candidate = KeystoreSignerProvider::new_with_config(
+        qualified_binding(keystore.address, 0x4c),
+        keystore.entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+    let (_, _, provider) = candidate
+        .qualify(semantic_signer_id(), content_ref(0x4f))
+        .await
+        .expect("initial qualification")
+        .into_read_signing_provider()
+        .await
+        .expect("handoff qualification");
+    let checks_before_revocation = guard.checks();
+    guard.set_eligible(false);
+    assert!(matches!(
+        provider
+            .sign_guarded(
+                provider.binding().durable_generation_ref(),
+                &evm_request(keystore.address),
+            )
+            .await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::ReadAttestationIneligible
+        })
+    ));
+    assert_eq!(guard.checks(), checks_before_revocation);
+}
+
+#[tokio::test]
+async fn qualification_rejects_wrong_key_and_incomplete_public_evidence() {
+    let keystore = test_keystore();
+    let wrong_key_guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let wrong_key = KeystoreSignerProvider::new_with_config(
+        qualified_binding(keystore.address, 0x0c),
+        keystore.other_entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        wrong_key_guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+    assert!(matches!(
+        wrong_key
+            .qualify(semantic_signer_id(), content_ref(0x0f))
+            .await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::BindingMismatch
+        })
+    ));
+    assert_eq!(wrong_key_guard.checks(), 1);
+
+    let incomplete_guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let incomplete = KeystoreSignerProvider::new_with_config(
+        binding(keystore.address, 0x10),
+        keystore.entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        incomplete_guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+    assert!(matches!(
+        incomplete
+            .qualify(semantic_signer_id(), content_ref(0x13))
+            .await,
+        Err(SigningError::InvalidRequest { .. })
+    ));
+    assert_eq!(incomplete_guard.checks(), 0);
+}
+
+#[tokio::test]
+async fn qualification_guard_failure_precedes_every_runtime_source_access() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let guard = TestGenerationGuard::new(GuardVerdict::DirectSigningOverlap);
+    let candidate = KeystoreSignerProvider::new(
+        qualified_binding(Address::from([0x11; 20]), 0x14),
+        Uuid::new_v4(),
+        dir.path().join("missing.keystore"),
+        dir.path().join("missing.unlock"),
+        guard.clone(),
+    )
+    .expect("candidate");
+    assert!(matches!(
+        candidate
+            .qualify(semantic_signer_id(), content_ref(0x17))
+            .await,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::DirectSigningOverlap
+        })
+    ));
+    assert_eq!(guard.checks(), 1);
 }
 
 fn request(
@@ -406,6 +766,31 @@ async fn every_failure_and_debug_surface_redacts_runtime_secrets() {
 }
 
 #[tokio::test]
+async fn missing_read_keystore_does_not_create_a_parent_or_replacement() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing_parent = dir.path().join("missing-parent");
+    let missing_keystore = missing_parent.join("wallet.keystore");
+    let unlock_file = dir.path().join("unlock.txt");
+    fs::write(&unlock_file, PASSWORD).expect("unlock file");
+    let address = Address::from([0x11; 20]);
+    let provider = KeystoreSignerProvider::new(
+        binding(address, 0x35),
+        Uuid::new_v4(),
+        &missing_keystore,
+        &unlock_file,
+        TestGenerationGuard::new(GuardVerdict::Current),
+    )
+    .expect("checked provider paths");
+
+    let error = sign(&provider, &evm_request(address))
+        .await
+        .expect_err("missing keystore");
+    assert!(matches!(error, SigningError::Provider { .. }));
+    assert!(!missing_parent.exists());
+    assert!(!missing_keystore.exists());
+}
+
+#[tokio::test]
 async fn tampered_keystore_failure_stays_redacted() {
     let keystore = test_keystore();
     fs::write(&keystore.keystore_path, b"{\"tampered\":true}").expect("tamper");
@@ -422,6 +807,8 @@ async fn tampered_keystore_failure_stays_redacted() {
 #[test]
 fn qualified_provider_and_bearer_values_have_no_direct_or_persistable_surface() {
     assert_not_impl_any!(KeystoreSignerProvider: SigningProvider, DeterministicSigningProvider, Clone);
+    assert_not_impl_any!(QualifiedKeystoreSigner: Clone, serde::Serialize);
+    assert_not_impl_any!(QualifiedReadSigningProvider: serde::Serialize);
     assert_not_impl_any!(SigningRequest: Clone, serde::Serialize);
     assert_not_impl_any!(SignatureBytes: Clone, serde::Serialize);
     assert_not_impl_any!(SigningResult: Clone, serde::Serialize);
@@ -435,6 +822,7 @@ fn keystore_provider_rejects_wrong_implementation_algorithm_and_profile_bindings
         PublicSigningIdentity::new(algorithm, None, Some(format!("{address:?}"))).expect("identity")
     };
     let cases = [
+        qualified_binding_for_implementation(address, 0x49, "mfm.signing.keystore.rfc6979.v1"),
         VerifiedGenerationGuardedSignerBinding::verify(
             signer_ref(),
             "mfm.signing.other-provider.v1",
@@ -488,6 +876,22 @@ fn keystore_provider_rejects_wrong_implementation_algorithm_and_profile_bindings
         );
         assert_eq!(guard.checks(), 0);
     }
+}
+
+#[test]
+fn observational_v2_provider_has_a_distinct_public_descriptor() {
+    let address = Address::from([0x11; 20]);
+    let v1 = qualified_binding_for_implementation(address, 0x5a, "mfm.signing.keystore.rfc6979.v1");
+    let v2 = qualified_binding(address, 0x5a);
+
+    assert_eq!(
+        v2.provider_implementation_id().as_str(),
+        "mfm.signing.keystore.rfc6979.v2"
+    );
+    assert_ne!(
+        v1.public_descriptor().expect("v1 descriptor").reference(),
+        v2.public_descriptor().expect("v2 descriptor").reference()
+    );
 }
 
 #[tokio::test]

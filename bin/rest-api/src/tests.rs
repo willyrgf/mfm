@@ -10,7 +10,7 @@ use mfm_app::{
     application_for_test, application_with_export_for_test, AccessPolicyError, AccessTarget,
     AuthorizedTenant, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
 };
-use mfm_ids::TenantScopeId;
+use mfm_ids::{StableId, TenantScopeId};
 use tokio::io::{AsyncRead, ReadBuf};
 use tower::ServiceExt as _;
 
@@ -31,6 +31,7 @@ impl RecordingPolicy {
                     tenant_hex.to_string().repeat(32)
                 ))
                 .expect("tenant scope"),
+                StableId::new(format!("mfm.rest.test/principal-{tenant_hex}")).expect("principal"),
             )),
             calls: Mutex::new(Vec::new()),
         })
@@ -176,7 +177,7 @@ async fn replay_stream_request_requires_exact_headers_and_preserves_raw_bytes() 
         replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty())
             .expect_err("missing content type")
             .public_error()
-            .code,
+            .code(),
         "ReplayArtifactInvalid"
     );
 
@@ -196,7 +197,7 @@ async fn replay_stream_request_requires_exact_headers_and_preserves_raw_bytes() 
     let mut headers = replay_stream_headers(bytes);
     headers.append(
         CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
     );
     assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
 
@@ -239,7 +240,7 @@ async fn request_body_limit_returns_a_reviewed_public_error() {
     .await
     .expect_err("oversized body");
     assert_eq!(error.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(error.public_error().code, "RequestBodyTooLarge");
+    assert_eq!(error.public_error().code(), "RequestBodyTooLarge");
 }
 
 #[tokio::test]
@@ -250,7 +251,7 @@ async fn standalone_composition_fails_closed_without_a_writer_fence() {
     };
     assert_eq!(error.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
-        error.public_error().code,
+        error.public_error().code(),
         "AuthoritativeWriterFenceUnavailable"
     );
 }
@@ -285,6 +286,53 @@ async fn readiness_is_unauthenticated_and_performs_no_policy_work() {
         })
     );
     assert!(policy.calls().is_empty());
+}
+
+#[tokio::test]
+async fn health_is_unauthenticated_and_has_the_exact_success_body() {
+    let policy = RecordingPolicy::allowing('1');
+    let response = test_router(policy.clone(), TestApplicationMode::Sentinel)
+        .oneshot(request(Method::GET, "/v1/health", Body::empty(), None))
+        .await
+        .expect("health response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get(CONTENT_TYPE),
+        Some(&HeaderValue::from_static("application/json"))
+    );
+    let body = to_bytes(response.into_body(), 1_024)
+        .await
+        .expect("health body");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body).expect("health JSON"),
+        json!({
+            "status": "success",
+            "data": { "ok": true },
+        })
+    );
+    assert!(policy.calls().is_empty());
+}
+
+#[tokio::test]
+async fn runtime_error_response_uses_the_frozen_transport_envelope() {
+    let bytes = corpus_vector_bytes("schema/mfm.error-response.v1/runtime-store-fault");
+    mfm_canonical::RecoverabilityContract::embedded()
+        .expect("recoverability annex")
+        .strict_decode("mfm.error-response.v1", &bytes)
+        .expect("frozen error envelope");
+    let expected: Value = serde_json::from_slice(&bytes).expect("frozen error response JSON");
+    let error: PublicError =
+        serde_json::from_value(expected["error"].clone()).expect("frozen public Runtime error");
+    let response = ApiError::from(error).into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = to_bytes(response.into_body(), 4_096)
+        .await
+        .expect("Runtime error response body");
+    let actual: Value = serde_json::from_slice(&body).expect("Runtime error response JSON");
+    assert_eq!(actual, expected);
+    let encoded = String::from_utf8(body.to_vec()).expect("Runtime error response UTF-8");
+    assert!(!encoded.contains("implementation"));
+    assert!(!encoded.contains("diagnostic"));
 }
 
 #[tokio::test]
@@ -635,7 +683,7 @@ async fn export_response_is_lazy_raw_stream_with_exact_headers() {
     assert_eq!(
         response.headers().get(CONTENT_TYPE),
         Some(&HeaderValue::from_static(
-            mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
+            mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE
         ))
     );
     assert_eq!(
@@ -723,7 +771,7 @@ async fn invalid_replay_artifacts_fail_before_policy_or_backend_replay() {
     );
     invalid_digest.headers_mut().insert(
         CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
     );
     invalid_digest.headers_mut().insert(
         MFM_CONTENT_DIGEST,
@@ -816,7 +864,7 @@ fn replay_stream_headers(bytes: &[u8]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE),
+        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
     );
     headers.insert(
         MFM_CONTENT_DIGEST,
@@ -851,10 +899,45 @@ async fn assert_public_error(response: Response, status: StatusCode, code: &str,
     );
 }
 
+fn corpus_vector_bytes(id: &str) -> Vec<u8> {
+    let corpus: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../contracts/recoverability/v1/corpus.json"
+    )))
+    .expect("recoverability corpus");
+    let encoded = corpus["positive_vectors"]
+        .as_array()
+        .expect("positive vectors")
+        .iter()
+        .find(|vector| vector["id"] == id)
+        .and_then(|vector| vector["input_hex"].as_str())
+        .expect("error response corpus vector");
+    decode_hex(encoded)
+}
+
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    assert_eq!(encoded.len() % 2, 0, "hex length");
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        _ => panic!("corpus contains non-lowercase-hex input"),
+    }
+}
+
 fn replay_response() -> mfm_app::ReplayResponse {
     mfm_app::ReplayResponse::strict_decode(
-        format!("{{\"kind\":\"reproduced\",\"result\":\"unavailable\",\"run_id\":\"{RUN_ID}\"}}")
-            .as_bytes(),
+        format!(
+            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{RUN_ID}\"}}"
+        )
+        .as_bytes(),
     )
     .expect("replay response")
 }

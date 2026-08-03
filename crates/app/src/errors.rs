@@ -1,4 +1,8 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use mfm_ids::{ContentRef, OccurrenceId, RunId, StoreEpoch, StoreScopeId};
+use mfm_journal::structured::JournalHead;
+use mfm_spec::structured::StructuredComponentKind;
 
 /// High-level error classes used by application-facing APIs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -20,27 +24,134 @@ pub enum ErrorClass {
     ServiceUnavailable,
 }
 
+/// Reviewed public Runtime boundary attached to an attributed fault.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicRuntimeFaultPhase {
+    /// Invoke a qualified Pure state callback.
+    InvokePure,
+    /// Author a typed Read or Effect request.
+    AuthorRequest,
+    /// Select, preflight, or enter a qualified physical binding.
+    QualifyAccess,
+    /// Settle one already committed normal observation.
+    SettleObservation,
+    /// Build or callback-free qualify one proposed history candidate.
+    QualifyCandidate,
+    /// Atomically append one qualified candidate.
+    AppendCandidate,
+    /// Load and callback-free verify existing history.
+    LoadHistory,
+    /// Resolve one unchanged ambiguous append identity.
+    ResolveAppend,
+}
+
+/// Secret-free qualified authority named by a public Runtime fault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PublicRuntimeFaultSubject {
+    /// Qualified process component without its private implementation identity.
+    Process {
+        /// Semantic component kind.
+        component_kind: StructuredComponentKind,
+        /// Exact public semantic contract.
+        semantic_contract_ref: ContentRef,
+    },
+    /// Immutable structured-history writer identity.
+    Store {
+        /// Qualified store lineage.
+        store_scope_id: StoreScopeId,
+        /// Authoritative writer epoch.
+        store_epoch: StoreEpoch,
+    },
+}
+
+/// Reviewed, secret-free context for one public Runtime fault.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PublicRuntimeFaultAttribution {
+    /// Exact Runtime boundary that detected the fault.
+    pub phase: PublicRuntimeFaultPhase,
+    /// Affected run.
+    pub run_id: RunId,
+    /// Last verified journal head, absent before a head could be verified.
+    pub pre_fault_head: Option<JournalHead>,
+    /// Current executable occurrence, when applicable.
+    pub occurrence_id: Option<OccurrenceId>,
+    /// Qualified semantic component or store authority.
+    pub subject: PublicRuntimeFaultSubject,
+}
+
 /// Stable redaction-safe public error payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, thiserror::Error)]
 #[error("{code}: {message}")]
+#[serde(deny_unknown_fields)]
 pub struct PublicError {
     /// Transport-only classification, omitted from the public JSON object.
     #[serde(skip, default)]
-    pub class: ErrorClass,
+    class: ErrorClass,
     /// Stable machine-readable code.
-    pub code: String,
+    code: String,
     /// Reviewed public message.
-    pub message: String,
+    message: String,
+    /// Reviewed secret-free Runtime attribution, when this error came from Runtime.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    runtime_fault: Option<Box<PublicRuntimeFaultAttribution>>,
 }
+
+/// Maximum UTF-8 bytes in one public error code.
+pub const MAX_PUBLIC_ERROR_CODE_BYTES: usize = 128;
+/// Maximum UTF-8 bytes in one reviewed public error message.
+pub const MAX_PUBLIC_ERROR_MESSAGE_BYTES: usize = 4_096;
+
+const INVALID_PUBLIC_ERROR_CODE: &str = "PublicErrorContractViolation";
+const INVALID_PUBLIC_ERROR_MESSAGE: &str = "A public error could not be rendered";
 
 impl PublicError {
     /// Constructs one reviewed public error.
     pub fn new(class: ErrorClass, code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        let message = message.into();
+        if !public_error_fields_are_valid(&code, &message) {
+            return Self {
+                class: ErrorClass::Internal,
+                code: INVALID_PUBLIC_ERROR_CODE.to_owned(),
+                message: INVALID_PUBLIC_ERROR_MESSAGE.to_owned(),
+                runtime_fault: None,
+            };
+        }
         Self {
             class,
-            code: code.into(),
-            message: message.into(),
+            code,
+            message,
+            runtime_fault: None,
         }
+    }
+
+    /// Attaches reviewed secret-free Runtime attribution.
+    pub fn with_runtime_fault(mut self, attribution: PublicRuntimeFaultAttribution) -> Self {
+        self.runtime_fault = Some(Box::new(attribution));
+        self
+    }
+
+    /// Returns the transport-only classification.
+    pub const fn class(&self) -> ErrorClass {
+        self.class
+    }
+
+    /// Returns the stable machine-readable code.
+    pub fn code(&self) -> &str {
+        &self.code
+    }
+
+    /// Returns the reviewed public message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Returns reviewed Runtime attribution when this error came from Runtime.
+    pub fn runtime_fault(&self) -> Option<&PublicRuntimeFaultAttribution> {
+        self.runtime_fault.as_deref()
     }
 
     /// Constructs a caller-input error.
@@ -120,18 +231,46 @@ impl PublicError {
         )
     }
 
-    fn runtime_catalog_unavailable() -> Self {
-        Self::backend(
-            ErrorClass::ServiceUnavailable,
-            "RuntimeCatalogUnavailable",
-            "The exact admitted runtime catalog is unavailable",
-        )
-    }
-
     /// Constructs a generic not-found error for unrelated keystore surfaces.
     pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(ErrorClass::NotFound, code, message)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicErrorWire {
+    code: String,
+    message: String,
+    #[serde(default)]
+    runtime_fault: Option<PublicRuntimeFaultAttribution>,
+}
+
+impl<'de> Deserialize<'de> for PublicError {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PublicErrorWire::deserialize(deserializer)?;
+        if !public_error_fields_are_valid(&wire.code, &wire.message) {
+            return Err(serde::de::Error::custom(
+                "public error code or message exceeds the reviewed wire bounds",
+            ));
+        }
+        Ok(Self {
+            class: ErrorClass::Internal,
+            code: wire.code,
+            message: wire.message,
+            runtime_fault: wire.runtime_fault.map(Box::new),
+        })
+    }
+}
+
+fn public_error_fields_are_valid(code: &str, message: &str) -> bool {
+    !code.is_empty()
+        && code.len() <= MAX_PUBLIC_ERROR_CODE_BYTES
+        && !message.is_empty()
+        && message.len() <= MAX_PUBLIC_ERROR_MESSAGE_BYTES
 }
 
 impl From<crate::AccessPolicyError> for PublicError {
@@ -143,174 +282,11 @@ impl From<crate::AccessPolicyError> for PublicError {
     }
 }
 
-impl From<mfm_storage_postgres::PostgresStoreError> for PublicError {
-    fn from(error: mfm_storage_postgres::PostgresStoreError) -> Self {
-        use mfm_storage_postgres::PostgresStoreError;
-
-        match error {
-            PostgresStoreError::SchemaAuthorityMismatch
-            | PostgresStoreError::MigrationChecksumMismatch => Self::backend(
-                ErrorClass::Internal,
-                "IncompatibleStoreSchema",
-                "Run store schema is incompatible with this MFM build",
-            ),
-            PostgresStoreError::Connection
-            | PostgresStoreError::WriterRequired
-            | PostgresStoreError::WriterFenceRejected
-            | PostgresStoreError::Database(_) => Self::backend(
-                ErrorClass::ServiceUnavailable,
-                "RunStoreUnavailable",
-                "The authoritative run store is unavailable",
-            ),
-            PostgresStoreError::OutcomeUnknown => Self::backend(
-                ErrorClass::ServiceUnavailable,
-                "RunStoreOutcomeUnknown",
-                "The run store commit outcome is unknown",
-            ),
-            PostgresStoreError::Store(error) => (*error).into(),
-            PostgresStoreError::Corruption(_) => Self::backend(
-                ErrorClass::Internal,
-                "RunStoreCorruption",
-                "Run store returned invalid data",
-            ),
-        }
-    }
-}
-
-impl From<mfm_store::StoreError> for PublicError {
-    fn from(error: mfm_store::StoreError) -> Self {
-        use mfm_store::StoreError;
-
-        match error {
-            StoreError::RunNotFound | StoreError::AppendRunNotFound { .. } => Self::run_not_found(),
-            StoreError::AdmissionConflict => Self::backend(
-                ErrorClass::Conflict,
-                "AdmissionConflict",
-                "The invocation identity is already bound to different root material",
-            ),
-            StoreError::HeadMismatch { .. } => Self::backend(
-                ErrorClass::Conflict,
-                "RunAdvanced",
-                "The run advanced before this action could commit",
-            ),
-            StoreError::AppendRequestConflict => Self::backend(
-                ErrorClass::Conflict,
-                "AppendRequestConflict",
-                "The append request identity conflicts with committed material",
-            ),
-            StoreError::RunClosed => Self::backend(
-                ErrorClass::Conflict,
-                "RunClosed",
-                "The run is already closed",
-            ),
-            StoreError::AccessDenied { .. }
-            | StoreError::InvalidAuthorityBinding { .. }
-            | StoreError::AdmissionAuthorityMismatch
-            | StoreError::JournalContract
-            | StoreError::InvalidPreparedAppend { .. }
-            | StoreError::EmptyJournal
-            | StoreError::PersistedMismatch { .. }
-            | StoreError::SequenceOverflow
-            | StoreError::FactOrderOverflow { .. }
-            | StoreError::InvalidClosure
-            | StoreError::DuplicateLogicalRecord
-            | StoreError::AuthorizationNotEligible
-            | StoreError::UnknownAuthorization
-            | StoreError::ObservationAlreadyCommitted
-            | StoreError::InvalidAuditTail
-            | StoreError::InvalidAuditPage { .. }
-            | StoreError::InvalidTracePage { .. }
-            | StoreError::FrozenReadIntentConflict
-            | StoreError::ObservationNotConsumable
-            | StoreError::TransitionFoldMismatch { .. }
-            | StoreError::InvalidObjectAuthority { .. }
-            | StoreError::MissingObjectAuthority { .. }
-            | StoreError::ObjectContentMismatch { .. }
-            | StoreError::ObjectAuthorityConflict { .. }
-            | StoreError::ObjectNotReachable
-            | StoreError::InvalidFactCoordinate
-            | StoreError::CorruptFactHistory
-            | StoreError::FactSelectionLimitExceeded
-            | StoreError::FactScanBindingMismatch
-            | StoreError::SourceScopeMismatch
-            | StoreError::InvalidSourceClosure
-            | StoreError::DigestMismatch { .. }
-            | StoreError::MemoryLockPoisoned
-            | StoreError::MemoryFailureSelectorAlreadyArmed
-            | StoreError::InjectedFailure { .. } => Self::backend(
-                ErrorClass::Internal,
-                "RunAuthorityInvalid",
-                "Run authority verification failed",
-            ),
-        }
-    }
-}
-
-impl From<mfm_runtime::RuntimeError> for PublicError {
-    fn from(error: mfm_runtime::RuntimeError) -> Self {
-        use mfm_runtime::RuntimeError;
-
-        match error {
-            RuntimeError::Store(error) => error.into(),
-            RuntimeError::StoreBackendUnavailable => Self::backend(
-                ErrorClass::ServiceUnavailable,
-                "RunStoreUnavailable",
-                "The authoritative run store is unavailable",
-            ),
-            RuntimeError::OutcomeUnknown => Self::backend(
-                ErrorClass::ServiceUnavailable,
-                "RunStoreOutcomeUnknown",
-                "The run store commit outcome is unknown",
-            ),
-            RuntimeError::CatalogSelection => Self::runtime_catalog_unavailable(),
-            RuntimeError::Journal(_)
-            | RuntimeError::Identity(_)
-            | RuntimeError::Canonical(_)
-            | RuntimeError::Program(_)
-            | RuntimeError::CandidateCertification(_)
-            | RuntimeError::Fact(_)
-            | RuntimeError::Spec(_)
-            | RuntimeError::Executor(_)
-            | RuntimeError::InvalidCallbackResult
-            | RuntimeError::AuthorityMismatch
-            | RuntimeError::EffectIdentityMismatch
-            | RuntimeError::ObservationConflict => Self::backend(
-                ErrorClass::Internal,
-                "RunExecutionInvalid",
-                "The run action failed integrity verification",
-            ),
-        }
-    }
-}
-
-impl From<mfm_replay::ReplayError> for PublicError {
-    fn from(error: mfm_replay::ReplayError) -> Self {
-        use mfm_replay::ReplayErrorKind;
-
-        match error.kind() {
-            ReplayErrorKind::RunNotFound => Self::run_not_found(),
-            ReplayErrorKind::InvalidPage => Self::bad_request(
-                "PageRequestInvalid",
-                "The page request or cursor is invalid",
-            ),
-            ReplayErrorKind::SourceRunExportDenied => Self::source_run_export_denied(),
-            ReplayErrorKind::CandidateUnavailable => Self::runtime_catalog_unavailable(),
-            ReplayErrorKind::ExportStreamIo => Self::internal(
-                "ExportStreamIoFailed",
-                "The export stream could not be processed",
-            ),
-            ReplayErrorKind::InvalidRecordedHistory
-            | ReplayErrorKind::CandidateExecutionFailed
-            | ReplayErrorKind::ComparisonIntegrityFailed
-            | ReplayErrorKind::AuthorityMismatch
-            | ReplayErrorKind::InvalidExport => Self::replay_verification_failed(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_canonical::{sha256_digest_bytes, RecoverabilityContract};
+    use mfm_ids::{DigestAlgorithm, StoreEpoch};
 
     #[test]
     fn public_errors_have_no_diagnostic_escape_hatch() {
@@ -326,55 +302,153 @@ mod tests {
     }
 
     #[test]
-    fn replay_run_not_found_uses_the_tenant_indistinguishable_contract() {
-        let error: PublicError = mfm_replay::ReplayError::RunNotFound.into();
-        assert_eq!(error, PublicError::run_not_found());
+    fn public_error_construction_and_decode_enforce_the_frozen_bounds() {
+        let oversized_code = "c".repeat(MAX_PUBLIC_ERROR_CODE_BYTES + 1);
+        let normalized = PublicError::bad_request(oversized_code, "private sentinel");
+        assert_eq!(normalized.class(), ErrorClass::Internal);
+        assert_eq!(normalized.code(), INVALID_PUBLIC_ERROR_CODE);
+        assert_eq!(normalized.message(), INVALID_PUBLIC_ERROR_MESSAGE);
+        assert!(!serde_json::to_string(&normalized)
+            .expect("normalized public error JSON")
+            .contains("private sentinel"));
+
+        let oversized_message = "m".repeat(MAX_PUBLIC_ERROR_MESSAGE_BYTES + 1);
+        serde_json::from_value::<PublicError>(serde_json::json!({
+            "code": "OversizedMessage",
+            "message": oversized_message,
+        }))
+        .expect_err("oversized public error message must be rejected");
     }
 
     #[test]
-    fn replay_dependency_denial_uses_the_export_specific_contract() {
-        let error: PublicError = mfm_replay::ReplayError::SourceRunExportDenied.into();
-        assert_eq!(error, PublicError::source_run_export_denied());
-    }
-
-    #[test]
-    fn replay_integrity_failures_share_one_redacted_contract() {
-        for replay_error in [
-            mfm_replay::ReplayError::InvalidRecordedHistory,
-            mfm_replay::ReplayError::CandidateExecutionFailed,
-            mfm_replay::ReplayError::ComparisonIntegrityFailed,
-            mfm_replay::ReplayError::InvalidExport,
+    fn public_error_runtime_vectors_match_the_frozen_corpus_and_annex() {
+        let contract = RecoverabilityContract::embedded().expect("recoverability annex");
+        for id in [
+            "schema/mfm.public-error.v1/minimum",
+            "schema/mfm.public-error.v1/runtime-process-fault",
         ] {
-            let error: PublicError = replay_error.into();
-            assert_eq!(error, PublicError::replay_verification_failed());
+            let bytes = corpus_vector_bytes(id);
+            contract
+                .strict_decode("mfm.public-error.v1", &bytes)
+                .expect("frozen public error vector");
+            let error: PublicError =
+                serde_json::from_slice(&bytes).expect("decode frozen public error vector");
+            assert_eq!(
+                serde_json::to_value(&error).expect("public error JSON"),
+                serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .expect("frozen public error JSON")
+            );
         }
-    }
-
-    #[test]
-    fn unavailable_candidate_uses_the_existing_runtime_catalog_contract() {
-        let error: PublicError = mfm_replay::ReplayError::CandidateUnavailable.into();
-        assert_eq!(error, PublicError::runtime_catalog_unavailable());
-        assert_eq!(error.class, ErrorClass::ServiceUnavailable);
-        assert_eq!(error.code, "RuntimeCatalogUnavailable");
-        assert_eq!(
-            error.message,
-            "The exact admitted runtime catalog is unavailable"
-        );
+        let process: PublicError = serde_json::from_slice(&corpus_vector_bytes(
+            "schema/mfm.public-error.v1/runtime-process-fault",
+        ))
+        .expect("decode process attribution");
+        assert!(matches!(
+            process.runtime_fault().map(|fault| &fault.subject),
+            Some(PublicRuntimeFaultSubject::Process { .. })
+        ));
     }
 
     #[test]
     fn caller_replay_artifact_errors_have_the_frozen_wire_text() {
         let invalid = PublicError::replay_artifact_invalid();
-        assert_eq!(invalid.class, ErrorClass::BadRequest);
-        assert_eq!(invalid.code, "ReplayArtifactInvalid");
-        assert_eq!(invalid.message, "The replay artifact is invalid.");
+        assert_eq!(invalid.class(), ErrorClass::BadRequest);
+        assert_eq!(invalid.code(), "ReplayArtifactInvalid");
+        assert_eq!(invalid.message(), "The replay artifact is invalid.");
 
         let too_large = PublicError::replay_artifact_too_large();
-        assert_eq!(too_large.class, ErrorClass::BadRequest);
-        assert_eq!(too_large.code, "ReplayArtifactTooLarge");
+        assert_eq!(too_large.class(), ErrorClass::BadRequest);
+        assert_eq!(too_large.code(), "ReplayArtifactTooLarge");
         assert_eq!(
-            too_large.message,
+            too_large.message(),
             "The replay artifact exceeds the allowed size."
         );
+    }
+
+    #[test]
+    fn runtime_fault_wire_is_exact_and_omits_private_implementation_identity() {
+        let run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"public runtime fault run"),
+        );
+        let store_scope_id =
+            StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "7".repeat(32)))
+                .expect("store scope");
+        let error = PublicError::backend(
+            ErrorClass::ServiceUnavailable,
+            "RunStoreUnavailable",
+            "The authoritative run store is unavailable",
+        )
+        .with_runtime_fault(PublicRuntimeFaultAttribution {
+            phase: PublicRuntimeFaultPhase::LoadHistory,
+            run_id: run_id.clone(),
+            pre_fault_head: None,
+            occurrence_id: None,
+            subject: PublicRuntimeFaultSubject::Store {
+                store_scope_id: store_scope_id.clone(),
+                store_epoch: StoreEpoch::new(7),
+            },
+        });
+        let value = serde_json::to_value(&error).expect("public Runtime fault JSON");
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "code": "RunStoreUnavailable",
+                "message": "The authoritative run store is unavailable",
+                "runtime_fault": {
+                    "phase": "load_history",
+                    "run_id": run_id,
+                    "pre_fault_head": null,
+                    "occurrence_id": null,
+                    "subject": {
+                        "kind": "store",
+                        "store_scope_id": store_scope_id,
+                        "store_epoch": "7",
+                    },
+                },
+            })
+        );
+        let encoded = serde_json::to_string(&error).expect("public Runtime fault bytes");
+        assert!(!encoded.contains("implementation"));
+        assert!(!encoded.contains("diagnostic"));
+
+        let mut hostile = value;
+        hostile["runtime_fault"]["subject"]["implementation_contract_ref"] =
+            serde_json::Value::String("private".to_owned());
+        serde_json::from_value::<PublicError>(hostile)
+            .expect_err("private implementation identity is not a public wire field");
+    }
+
+    fn corpus_vector_bytes(id: &str) -> Vec<u8> {
+        let corpus: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/recoverability/v1/corpus.json"
+        )))
+        .expect("recoverability corpus");
+        let encoded = corpus["positive_vectors"]
+            .as_array()
+            .expect("positive vectors")
+            .iter()
+            .find(|vector| vector["id"] == id)
+            .and_then(|vector| vector["input_hex"].as_str())
+            .expect("public error corpus vector");
+        decode_hex(encoded)
+    }
+
+    fn decode_hex(encoded: &str) -> Vec<u8> {
+        assert_eq!(encoded.len() % 2, 0, "hex length");
+        encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
+            .collect()
+    }
+
+    fn hex_nibble(byte: u8) -> u8 {
+        match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            _ => panic!("corpus contains non-lowercase-hex input"),
+        }
     }
 }

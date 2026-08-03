@@ -12,7 +12,7 @@ use mfm_ids::{ContentDigest, ContentRef, LocalPublicId, SchemaId};
 use mfm_program_derive::MfmValue;
 use serde::{de, Deserialize, Serialize};
 
-use crate::model::EvmBlockAnchor;
+use crate::{model::EvmBlockAnchor, EvmChainInstanceBinding};
 
 /// Maximum decoded bytes admitted for one EVM JSON-RPC result.
 pub const EVM_READ_MAX_RESPONSE_BYTES: usize = 128 * 1024;
@@ -136,26 +136,29 @@ impl<'de> Deserialize<'de> for EvmRoutingGenerationRef {
 )]
 pub struct EvmNetworkBinding {
     network_id: String,
-    chain_id: u64,
+    chain_instance: EvmChainInstanceBinding,
     routing_generation_ref: EvmRoutingGenerationRef,
 }
 
 impl EvmNetworkBinding {
-    /// Creates one semantic binding. Chain id zero is rejected.
+    /// Creates one semantic binding to an exact qualified physical chain.
     pub fn new(
         network_id: impl Into<String>,
-        chain_id: u64,
+        chain_instance: EvmChainInstanceBinding,
         routing_generation_ref: EvmRoutingGenerationRef,
     ) -> Result<Self> {
         let network_id = network_id.into();
         LocalPublicId::new(&network_id)
             .map_err(|_| EvmProtocolError::InvalidValue("network_id"))?;
-        if chain_id == 0 {
-            return Err(EvmProtocolError::InvalidValue("chain_id"));
-        }
+        chain_instance
+            .validate()
+            .map_err(|_| EvmProtocolError::InvalidValue("chain_instance"))?;
+        routing_generation_ref
+            .to_content_ref()
+            .map_err(|_| EvmProtocolError::InvalidValue("routing_generation_ref"))?;
         Ok(Self {
             network_id,
-            chain_id,
+            chain_instance,
             routing_generation_ref,
         })
     }
@@ -167,7 +170,12 @@ impl EvmNetworkBinding {
 
     /// Returns the required EVM chain id.
     pub const fn chain_id(&self) -> u64 {
-        self.chain_id
+        self.chain_instance.chain_id()
+    }
+
+    /// Returns the exact qualified physical-chain binding.
+    pub const fn chain_instance(&self) -> &EvmChainInstanceBinding {
+        &self.chain_instance
     }
 
     /// Returns the exact immutable routing generation.
@@ -185,13 +193,17 @@ impl<'de> Deserialize<'de> for EvmNetworkBinding {
         #[serde(deny_unknown_fields)]
         struct Wire {
             network_id: String,
-            chain_id: u64,
+            chain_instance: EvmChainInstanceBinding,
             routing_generation_ref: EvmRoutingGenerationRef,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.network_id, wire.chain_id, wire.routing_generation_ref)
-            .map_err(de::Error::custom)
+        Self::new(
+            wire.network_id,
+            wire.chain_instance,
+            wire.routing_generation_ref,
+        )
+        .map_err(de::Error::custom)
     }
 }
 
@@ -721,13 +733,15 @@ pub enum EvmSafeFailure {
     schema = "mfm.evm.read_failure"
 )]
 pub enum EvmReadFailure {
+    /// The selected exact route could not return reviewed evidence.
+    Unavailable,
     /// Returned chain identity did not match the certified semantic source.
     SourceMismatch,
     /// Final number-to-hash resolution did not preserve the initial anchor.
     AnchorChanged,
     /// A terminal HTTP or JSON-RPC numeric rejection was observed.
     DestinationRejected,
-    /// Pure aggregation input violated the certified graph contract.
+    /// Pure aggregation input violated the certified structured-program contract.
     InvalidAggregate,
 }
 

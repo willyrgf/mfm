@@ -5,13 +5,14 @@ use mfm_canonical::{
     ValidatedCanonicalValue,
 };
 use mfm_ids::{ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId};
-use mfm_journal::JournalHead;
-pub use mfm_replay::trace_export::{ExportKind, PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE};
-pub use mfm_replay::{
-    AccessAuditEntry, CanonicalReplayResult as ReplayResponse, CanonicalTransitionTrace,
+use mfm_journal::structured::JournalHead;
+pub use mfm_replay::portable::{ExportKind, PORTABLE_RUN_EXPORT_MEDIA_TYPE};
+pub use mfm_replay::structured::{
+    StructuredAccessAuditEntry as AccessAuditEntry, StructuredReplayResult as ReplayResponse,
+    StructuredTransitionTrace as CanonicalTransitionTrace,
 };
 pub use mfm_spec::{EntryPointContract, PlanningProfile};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncRead;
 
@@ -22,7 +23,6 @@ const ADMIT_RUN_RESPONSE_CONTRACT: &str = "mfm.admit-run-response.v1";
 const DRIVE_RESPONSE_CONTRACT: &str = "mfm.drive-response.v1";
 const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v1";
 const REPLAY_MODE_CONTRACT: &str = "mfm.replay-mode.v1";
-const INSPECTION_CURSOR_CONTRACT: &str = "mfm.primitive-canonical_value.v1";
 const INSPECTION_CURSOR_PREFIX: &str = "mfm.inspection-cursor.v1.";
 const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_CURSOR_ENCODED_BYTES: usize = (MAX_CURSOR_BYTES * 4).div_ceil(3);
@@ -144,14 +144,8 @@ pub(crate) fn decode_access_audit_page_request(
 pub(crate) fn decode_transition_trace_page_request(
     run_id: &RunId,
     request: &PageRequest,
-) -> Result<mfm_store::TransitionTracePageRequest, PublicError> {
-    let position = decode_inspection_page_request(run_id, request, InspectionPurpose::Trace)?;
-    mfm_store::TransitionTracePageRequest::new(
-        position.complete_as_of_journal_head,
-        position.start,
-        position.limit,
-    )
-    .map_err(|_| page_request_invalid())
+) -> Result<InspectionPagePosition, PublicError> {
+    decode_inspection_page_request(run_id, request, InspectionPurpose::Trace)
 }
 
 fn decode_inspection_page_request(
@@ -207,18 +201,17 @@ impl TransitionTracePage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_transition_trace_page(
-    page: mfm_replay::TransitionTracePage,
+    page: mfm_replay::structured::StructuredProjectionPage<CanonicalTransitionTrace>,
 ) -> Result<TransitionTracePage, PublicError> {
-    let (run_id, at_journal_head, transitions, has_more, next_index) = page.into_parts();
-    let next_cursor = match (has_more, next_index) {
-        (false, None) => None,
-        (true, Some(next_index)) => Some(encode_inspection_cursor(
+    let (run_id, at_journal_head, transitions, next_index) = page.into_parts();
+    let next_cursor = match next_index {
+        None => None,
+        Some(next_index) => Some(encode_inspection_cursor(
             InspectionPurpose::Trace,
             &run_id,
             &at_journal_head,
             next_index,
         )?),
-        (false, Some(_)) | (true, None) => return Err(PublicError::replay_verification_failed()),
     };
     Ok(TransitionTracePage {
         run_id,
@@ -261,18 +254,17 @@ impl AccessAuditPage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_access_audit_page(
-    page: mfm_replay::AccessAuditPage,
+    page: mfm_replay::structured::StructuredProjectionPage<AccessAuditEntry>,
 ) -> Result<AccessAuditPage, PublicError> {
-    let (run_id, complete_as_of_journal_head, entries, has_more, next_index) = page.into_parts();
-    let next_cursor = match (has_more, next_index) {
-        (false, None) => None,
-        (true, Some(next_index)) => Some(encode_inspection_cursor(
+    let (run_id, complete_as_of_journal_head, entries, next_index) = page.into_parts();
+    let next_cursor = match next_index {
+        None => None,
+        Some(next_index) => Some(encode_inspection_cursor(
             InspectionPurpose::Audit,
             &run_id,
             &complete_as_of_journal_head,
             next_index,
         )?),
-        (false, Some(_)) | (true, None) => return Err(PublicError::replay_verification_failed()),
     };
     Ok(AccessAuditPage {
         run_id,
@@ -302,36 +294,30 @@ struct InspectionCursor {
     next_index: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectionCursorWire {
+    version: String,
+    purpose: String,
+    run_id: RunId,
+    at_journal_head: JournalHead,
+    next_index: u32,
+}
+
 fn encode_inspection_cursor(
     purpose: InspectionPurpose,
     run_id: &RunId,
     complete_as_of_journal_head: &JournalHead,
     next_index: u32,
 ) -> Result<String, PublicError> {
-    let value = canonical_object([
-        (
-            "version",
-            CanonicalValue::String("mfm.inspection-cursor.v1".to_owned()),
-        ),
-        (
-            "purpose",
-            CanonicalValue::String(purpose.as_str().to_owned()),
-        ),
-        ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
-        (
-            "at_journal_head",
-            complete_as_of_journal_head
-                .canonical_value()
-                .map_err(|_| page_cursor_encoding_failed())?,
-        ),
-        (
-            "next_index",
-            CanonicalValue::Unsigned(u64::from(next_index)),
-        ),
-    ])?;
-    let cursor = recoverability_contract()?
-        .encode(INSPECTION_CURSOR_CONTRACT, &value)
-        .map_err(|_| page_cursor_encoding_failed())?;
+    let cursor = mfm_journal::structured::canonical_json(&InspectionCursorWire {
+        version: "mfm.inspection-cursor.v1".to_owned(),
+        purpose: purpose.as_str().to_owned(),
+        run_id: run_id.clone(),
+        at_journal_head: complete_as_of_journal_head.clone(),
+        next_index,
+    })
+    .map_err(|_| page_cursor_encoding_failed())?;
     if cursor.as_bytes().len() > MAX_CURSOR_BYTES {
         return Err(page_cursor_encoding_failed());
     }
@@ -357,55 +343,21 @@ fn decode_inspection_cursor(
     if bytes.as_bytes().len() > MAX_CURSOR_BYTES {
         return Err(page_request_invalid());
     }
-    let decoded = recoverability_contract()?
-        .strict_decode(INSPECTION_CURSOR_CONTRACT, bytes.as_bytes())
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes.as_bytes())
         .map_err(|_| page_request_invalid())?;
-    let value = decoded
-        .canonical_value()
-        .map_err(|_| page_request_invalid())?;
-    let CanonicalValue::Object(object) = &value else {
-        return Err(page_request_invalid());
-    };
-    if object.entries().count() != 5
-        || cursor_string(&value, "version")? != "mfm.inspection-cursor.v1"
-        || cursor_string(&value, "purpose")? != expected_purpose.as_str()
-        || cursor_string(&value, "run_id")? != expected_run_id.as_str()
+    let decoded: InspectionCursorWire =
+        serde_json::from_slice(canonical.as_bytes()).map_err(|_| page_request_invalid())?;
+    if decoded.version != "mfm.inspection-cursor.v1"
+        || decoded.purpose != expected_purpose.as_str()
+        || &decoded.run_id != expected_run_id
+        || decoded.at_journal_head.run_sequence == 0
     {
         return Err(page_request_invalid());
     }
-    let complete_as_of_journal_head =
-        JournalHead::from_canonical_value(cursor_field(&value, "at_journal_head")?.clone())
-            .map_err(|_| page_request_invalid())?;
-    let next_index = match cursor_field(&value, "next_index")? {
-        CanonicalValue::Unsigned(value) => {
-            u32::try_from(*value).map_err(|_| page_request_invalid())?
-        }
-        _ => return Err(page_request_invalid()),
-    };
     Ok(InspectionCursor {
-        complete_as_of_journal_head,
-        next_index,
+        complete_as_of_journal_head: decoded.at_journal_head,
+        next_index: decoded.next_index,
     })
-}
-
-fn cursor_field<'a>(
-    value: &'a CanonicalValue,
-    field: &str,
-) -> Result<&'a CanonicalValue, PublicError> {
-    let CanonicalValue::Object(object) = value else {
-        return Err(page_request_invalid());
-    };
-    object
-        .entries()
-        .find_map(|(key, value)| (key == field).then_some(value))
-        .ok_or_else(page_request_invalid)
-}
-
-fn cursor_string<'a>(value: &'a CanonicalValue, field: &str) -> Result<&'a str, PublicError> {
-    match cursor_field(value, field)? {
-        CanonicalValue::String(value) => Ok(value),
-        _ => Err(page_request_invalid()),
-    }
 }
 
 fn page_request_invalid() -> PublicError {
@@ -591,39 +543,43 @@ impl AdmissionStatus {
 }
 
 macro_rules! canonical_response {
-    ($name:ident, $contract:expr, $description:literal, with_builder) => {
+    ($name:ident, $contract:expr, $description:literal, canonical_value) => {
         canonical_response!(@base $name, $contract, $description);
 
         impl $name {
             pub(crate) fn from_canonical_value(value: CanonicalValue) -> Result<Self, PublicError> {
-                let validated = recoverability_contract()?
-                    .encode($contract, &value)
-                    .map_err(|_| {
-                        PublicError::backend(
-                            ErrorClass::Internal,
-                            "CanonicalResponseInvalid",
-                            "A canonical application response failed validation",
-                        )
-                    })?;
-                Ok(Self { validated })
+                let canonical = mfm_canonical::CanonicalJsonBytes::from_value(&value);
+                Self::strict_decode(canonical.as_bytes())
             }
         }
     };
-    ($name:ident, $contract:expr, $description:literal, sealed) => {
+    ($name:ident, $contract:expr, $description:literal, serializable) => {
         canonical_response!(@base $name, $contract, $description);
+
+        impl $name {
+            pub(crate) fn from_serializable(value: &impl Serialize) -> Result<Self, PublicError> {
+                let canonical = mfm_journal::structured::canonical_json(value).map_err(|_| {
+                    PublicError::internal(
+                        "CanonicalResponseConstructionFailed",
+                        "A canonical response could not be constructed",
+                    )
+                })?;
+                Self::strict_decode(canonical.as_bytes())
+            }
+        }
     };
     (@base $name:ident, $contract:expr, $description:literal) => {
         #[doc = $description]
         #[derive(Clone, PartialEq, Eq)]
         pub struct $name {
-            validated: ValidatedCanonicalValue,
+            canonical: PlainCanonicalJsonBytes,
+            schema_id: SchemaId,
         }
 
         impl $name {
-            /// Strictly decodes exact canonical bytes under the embedded annex.
+            /// Strictly decodes exact canonical float-free response bytes.
             pub fn strict_decode(bytes: &[u8]) -> Result<Self, PublicError> {
-                let validated = recoverability_contract()?
-                    .strict_decode($contract, bytes)
+                let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
                     .map_err(|_| {
                         PublicError::backend(
                             ErrorClass::Internal,
@@ -631,17 +587,29 @@ macro_rules! canonical_response {
                             "A canonical application response failed validation",
                         )
                     })?;
-                Ok(Self { validated })
+                let validated = recoverability_contract()?
+                    .strict_decode($contract, canonical.as_bytes())
+                    .map_err(|_| {
+                        PublicError::backend(
+                            ErrorClass::Internal,
+                            "CanonicalResponseInvalid",
+                            "A canonical application response failed validation",
+                        )
+                    })?;
+                Ok(Self {
+                    canonical,
+                    schema_id: validated.schema_id().clone(),
+                })
             }
 
-            /// Returns exact annex-validated canonical response bytes.
+            /// Returns exact canonical response bytes.
             pub fn as_bytes(&self) -> &[u8] {
-                self.validated.as_bytes()
+                self.canonical.as_bytes()
             }
 
-            /// Returns the annex-derived schema identity.
+            /// Returns the current response schema identity.
             pub const fn schema_id(&self) -> &SchemaId {
-                self.validated.schema_id()
+                &self.schema_id
             }
         }
 
@@ -660,34 +628,55 @@ canonical_response!(
     AdmitRunResponse,
     ADMIT_RUN_RESPONSE_CONTRACT,
     "Exact annex-validated admission response.",
-    with_builder
+    canonical_value
 );
 canonical_response!(
     DriveResponse,
     DRIVE_RESPONSE_CONTRACT,
     "Exact annex-validated result of one run action.",
-    with_builder
+    serializable
 );
 canonical_response!(
     PublicRunView,
     PUBLIC_RUN_VIEW_CONTRACT,
     "Exact annex-validated ordinary public run view.",
-    sealed
+    serializable
 );
 
 impl PublicRunView {
-    pub(crate) fn from_verified(
-        verified: mfm_store::VerifiedPublicRunView,
+    pub(crate) fn from_structured(
+        verified: &mfm_store::structured::VerifiedStructuredRun,
     ) -> Result<Self, PublicError> {
-        let validated = verified.into_validated();
-        if validated.schema_contract() != PUBLIC_RUN_VIEW_CONTRACT {
-            return Err(PublicError::backend(
-                ErrorClass::Internal,
-                "CanonicalResponseInvalid",
-                "A canonical application response failed validation",
-            ));
-        }
-        Ok(Self { validated })
+        let outcome = mfm_replay::structured::project_operation_outcome(verified)
+            .map_err(|_| PublicError::replay_verification_failed())?
+            .map(|outcome| {
+                let value: serde_json::Value =
+                    serde_json::from_slice(outcome.canonical_value().as_bytes())
+                        .map_err(|_| PublicError::replay_verification_failed())?;
+                Ok::<_, PublicError>(serde_json::json!({
+                    "kind": outcome.kind(),
+                    "value_ref": outcome.value(),
+                    "value": value,
+                }))
+            })
+            .transpose()?;
+        Self::from_serializable(&serde_json::json!({
+            "version": PUBLIC_RUN_VIEW_CONTRACT,
+            "run_id": verified.run_id(),
+            "tenant_scope_id": verified.admission().tenant_scope_id,
+            "invocation_identity": verified.admission().invocation_identity,
+            "entry_point_operation_id": verified.admission().entry_point_operation_id,
+            "journal_head": verified.journal_head(),
+            "semantic_head": verified.semantic_head(),
+            "status": match verified.frontier() {
+                mfm_store::structured::StructuredFrontier::Actions(_) => "actionable",
+                mfm_store::structured::StructuredFrontier::WaitingReads => "waiting_reads",
+                mfm_store::structured::StructuredFrontier::PossibleEntry => "possible_entry",
+                mfm_store::structured::StructuredFrontier::BlockedIntegrity => "blocked_integrity",
+                mfm_store::structured::StructuredFrontier::Complete => "closed",
+            },
+            "outcome": outcome,
+        }))
     }
 }
 
@@ -756,63 +745,32 @@ impl AdmitRunResponse {
 impl DriveResponse {
     pub(crate) fn from_runtime(
         run_id: &RunId,
-        outcome: mfm_runtime::DriveOutcome,
+        outcome: mfm_runtime::structured::DriveOutcome,
+        journal_head: &JournalHead,
     ) -> Result<Self, PublicError> {
-        let value = match outcome {
-            mfm_runtime::DriveOutcome::Advanced { journal_head } => canonical_object([
-                ("kind", CanonicalValue::String("advanced".to_owned())),
-                ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
-                (
-                    "journal_head",
-                    journal_head
-                        .canonical_value()
-                        .map_err(journal_value_error)?,
-                ),
-            ])?,
-            mfm_runtime::DriveOutcome::Waiting {
-                journal_head,
-                reason,
-            } => canonical_object([
-                ("kind", CanonicalValue::String("waiting".to_owned())),
-                ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
-                (
-                    "journal_head",
-                    journal_head
-                        .canonical_value()
-                        .map_err(journal_value_error)?,
-                ),
-                (
-                    "reason",
-                    CanonicalValue::String(
-                        match reason {
-                            mfm_runtime::DriveWaitReason::RetryableEvidenceGap => {
-                                "retryable_evidence_gap"
-                            }
-                            mfm_runtime::DriveWaitReason::OperationalBlock => "operational_block",
-                            mfm_runtime::DriveWaitReason::IntegrityBlock => "integrity_block",
-                        }
-                        .to_owned(),
-                    ),
-                ),
-            ])?,
-            mfm_runtime::DriveOutcome::Closed { closure_ref } => canonical_object([
-                ("kind", CanonicalValue::String("closed".to_owned())),
-                ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
-                (
-                    "closure_ref",
-                    closure_ref.canonical_value().map_err(journal_value_error)?,
-                ),
-            ])?,
+        let (kind, reason) = match outcome {
+            mfm_runtime::structured::DriveOutcome::TransitionCommitted { closed: true }
+            | mfm_runtime::structured::DriveOutcome::Closed => ("closed", None),
+            mfm_runtime::structured::DriveOutcome::TransitionCommitted { closed: false }
+            | mfm_runtime::structured::DriveOutcome::AccessObserved
+            | mfm_runtime::structured::DriveOutcome::ConcurrentProgress => ("advanced", None),
+            mfm_runtime::structured::DriveOutcome::WaitingReads => {
+                ("waiting", Some("retryable_evidence_gap"))
+            }
+            mfm_runtime::structured::DriveOutcome::PossibleEntry => {
+                ("waiting", Some("operational_block"))
+            }
+            mfm_runtime::structured::DriveOutcome::BlockedIntegrity => {
+                ("waiting", Some("integrity_block"))
+            }
         };
-        Self::from_canonical_value(value)
+        Self::from_serializable(&serde_json::json!({
+            "kind": kind,
+            "run_id": run_id,
+            "journal_head": journal_head,
+            "reason": reason,
+        }))
     }
-}
-
-fn journal_value_error(_error: mfm_journal::JournalError) -> PublicError {
-    PublicError::internal(
-        "CanonicalResponseConstructionFailed",
-        "A canonical response could not be constructed",
-    )
 }
 
 /// Public replay mode.
@@ -972,12 +930,12 @@ pub struct ExportedRun {
 }
 
 impl ExportedRun {
-    pub(crate) fn from_parts(
-        metadata: mfm_replay::trace_export::PortableRunExportMetadata,
+    pub(crate) const fn from_content_ref(
+        content_ref: ContentRef,
         reader: ExportAsyncReader,
     ) -> Self {
         Self {
-            content_ref: metadata.content_ref().clone(),
+            content_ref,
             reader,
         }
     }
@@ -992,7 +950,7 @@ impl ExportedRun {
 
     /// Returns the exact response media type.
     pub fn media_type(&self) -> &'static str {
-        PORTABLE_RUN_EXPORT_STREAM_MEDIA_TYPE
+        PORTABLE_RUN_EXPORT_MEDIA_TYPE
     }
 
     /// Returns the external digest over every exact stream byte.
@@ -1029,9 +987,7 @@ impl std::fmt::Debug for ExportedRun {
 #[cfg(test)]
 mod tests {
     use mfm_ids::JournalCommitDigest;
-    use mfm_journal::JournalHead;
-    use mfm_store::test_support::LegalAdmissionFixture;
-    use mfm_store::{open_in_memory, AppendOutcome, NewlyAppended};
+    use mfm_journal::structured::JournalHead;
     use serde::Deserialize;
     use static_assertions::assert_not_impl_any;
 
@@ -1108,52 +1064,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn sealed_store_public_view_maps_without_changing_verified_bytes() {
-        let fixture = LegalAdmissionFixture::new(31).expect("fixture");
-        let (store, issuer) = open_in_memory(fixture.store_identity().clone());
-        fixture
-            .provision_in_memory(&store)
-            .expect("provision configured value");
-        let support = fixture
-            .qualify_on(&store, &issuer)
-            .await
-            .expect("qualify fixture support");
-        let (writer, reader) = store.split();
-        let prepared = fixture
-            .prepare_on(&writer, &reader, &issuer, &support)
-            .await
-            .expect("prepare admission");
-        let (admission_authority, append) = prepared.into_parts();
-        let outcome = writer
-            .append_admission(&admission_authority, append)
-            .await
-            .expect("append admission");
-        let AppendOutcome::NewlyAppended(NewlyAppended::RunAdmitted(admitted)) = outcome else {
-            panic!("fixture admission must be newly committed");
-        };
-        let run_id = admitted.run_id().clone();
-        let expected_authority =
-            issuer.authorize_read_public(fixture.tenant_scope_id().clone(), run_id.clone());
-        let expected = reader
-            .read_public_run(&expected_authority)
-            .await
-            .expect("read expected public view")
-            .into_validated();
-        let mapped_authority =
-            issuer.authorize_read_public(fixture.tenant_scope_id().clone(), run_id);
-        let mapped = PublicRunView::from_verified(
-            reader
-                .read_public_run(&mapped_authority)
-                .await
-                .expect("read mapped public view"),
-        )
-        .expect("map verified public view");
-
-        assert_eq!(mapped.as_bytes(), expected.as_bytes());
-        assert_eq!(mapped.schema_id(), expected.schema_id());
-    }
-
     #[test]
     fn application_replay_mode_accepts_only_the_annex_spelling() {
         assert_eq!(
@@ -1170,7 +1080,10 @@ mod tests {
             RunId::parse(format!("run:sha256-jcs-v1:{}", "2".repeat(64))).expect("other run id");
         let commit_digest = JournalCommitDigest::parse(format!("sha256-jcs-v1:{}", "3".repeat(64)))
             .expect("commit digest");
-        let head = JournalHead::new(7, &commit_digest).expect("journal head");
+        let head = JournalHead {
+            run_sequence: 7,
+            commit_digest,
+        };
 
         let first = decode_access_audit_page_request(
             &run_id,
@@ -1186,9 +1099,9 @@ mod tests {
             &PageRequest::new(None, Some(1)).expect("first trace page"),
         )
         .expect("decode first trace page");
-        assert_eq!(first_trace.at_journal_head(), None);
-        assert_eq!(first_trace.start(), 0);
-        assert_eq!(first_trace.limit(), 1);
+        assert_eq!(first_trace.complete_as_of_journal_head, None);
+        assert_eq!(first_trace.start, 0);
+        assert_eq!(first_trace.limit, 1);
 
         let cursor = encode_inspection_cursor(InspectionPurpose::Audit, &run_id, &head, u32::MAX)
             .expect("encode cursor");
@@ -1208,9 +1121,9 @@ mod tests {
             PageRequest::new(Some(trace_cursor), None).expect("trace cursor request");
         let trace = decode_transition_trace_page_request(&run_id, &trace_request)
             .expect("decode trace cursor");
-        assert_eq!(trace.at_journal_head(), Some(&head));
-        assert_eq!(trace.start(), 8);
-        assert_eq!(trace.limit(), DEFAULT_PAGE_LIMIT);
+        assert_eq!(trace.complete_as_of_journal_head.as_ref(), Some(&head));
+        assert_eq!(trace.start, 8);
+        assert_eq!(trace.limit, DEFAULT_PAGE_LIMIT);
         assert_eq!(
             decode_access_audit_page_request(&run_id, &trace_request)
                 .expect_err("trace cursor must not continue audit"),
@@ -1288,7 +1201,7 @@ mod tests {
         .expect("wrong content ref");
         let error = ExportStreamInput::from_reader(wrong_ref, Box::pin(tokio::io::empty()))
             .expect_err("wrong stream schema");
-        assert_eq!(error.code, "ReplayArtifactInvalid");
+        assert_eq!(error.code(), "ReplayArtifactInvalid");
 
         let input =
             ExportStreamInput::from_reader(content_ref.clone(), Box::pin(tokio::io::empty()))

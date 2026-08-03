@@ -31,7 +31,7 @@ fn test_mnemonic_import_and_retrieval() {
         .unwrap();
 
     // Test retrieval and signing
-    let secure_key = keystore.get_private_key(key_id).unwrap();
+    let secure_key = keystore.private_key_for_test(key_id).unwrap();
     let test_hash = [2u8; 32];
     let signature = secure_key.sign_hash(&test_hash).unwrap();
     assert_eq!(signature.to_bytes().len(), 64);
@@ -66,8 +66,8 @@ fn test_mnemonic_passphrase_support() {
         )
         .unwrap();
 
-    let key_no_pass = keystore.get_private_key(id_no_pass).unwrap();
-    let key_with_pass = keystore.get_private_key(id_with_pass).unwrap();
+    let key_no_pass = keystore.private_key_for_test(id_no_pass).unwrap();
+    let key_with_pass = keystore.private_key_for_test(id_with_pass).unwrap();
 
     assert_ne!(
         key_no_pass.ethereum_address().unwrap(),

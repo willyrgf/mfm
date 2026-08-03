@@ -3,7 +3,7 @@
 Typed kernel crate for value, planning config, schema descriptor, and public-output contracts.
 
 The crate owns the one producer-independent `RetainedValueContract` used directly by
-certification, executor, journal, runtime, and replay. The contract is annex-validated and contains
+certification, journal, Runtime, store, and replay. The contract is annex-validated and contains
 only exact schema, semantic type, role, media type, and evidence-contract authority; journal
 producer and byte identity remain outside it.
 

@@ -1,0 +1,74 @@
+error[E0277]: the trait bound `mfm_program::structured::Never: MfmValue` is not satisfied
+  --> tests/ui/structured/fail/construct_never_failure.rs:15:23
+   |
+15 |     let _ = operation.fail(failure);
+   |                       ^^^^ the trait `MfmValue` is not implemented for `mfm_program::structured::Never`
+   |
+   = help: the following other types implement trait `MfmValue`:
+             ArtifactRef<T>
+             Input
+             mfm_facts::read::FactSelectionCompletenessMode
+             mfm_facts::read::FactSelectionReadFailure
+             mfm_facts::read::FactSelectionReadFailureCode
+             mfm_facts::read::FactSelectionReadResponse
+             mfm_facts::read::FactSelectionScanBounds
+             mfm_facts::selection::FactSelectionRequest
+             support::Output
+note: required by a bound in `OperationBuilder::<Output, Failure>::fail`
+  --> src/structured.rs
+   |
+   |     pub fn fail(&mut self, value: &Value<Failure>) -> Result<BlockCompletion<Output, Failure>>
+   |            ---- required by a bound in this associated function
+   |     where
+   |         Failure: MfmValue,
+   |                  ^^^^^^^^ required by this bound in `OperationBuilder::<Output, Failure>::fail`
+
+error[E0277]: the trait bound `mfm_program::structured::Never: MfmValue` is not satisfied
+  --> tests/ui/structured/fail/construct_never_failure.rs:22:19
+   |
+22 |     let _ = block.scope_failure::<Output>(failure);
+   |                   ^^^^^^^^^^^^^ the trait `MfmValue` is not implemented for `mfm_program::structured::Never`
+   |
+   = help: the following other types implement trait `MfmValue`:
+             ArtifactRef<T>
+             Input
+             mfm_facts::read::FactSelectionCompletenessMode
+             mfm_facts::read::FactSelectionReadFailure
+             mfm_facts::read::FactSelectionReadFailureCode
+             mfm_facts::read::FactSelectionReadResponse
+             mfm_facts::read::FactSelectionScanBounds
+             mfm_facts::selection::FactSelectionRequest
+             support::Output
+note: required by a bound in `BlockBuilder::<ScopeFailure, Policy>::scope_failure`
+  --> src/structured.rs
+   |
+   |     pub fn scope_failure<Output>(
+   |            ------------- required by a bound in this associated function
+...
+   |         ScopeFailure: MfmValue,
+   |                       ^^^^^^^^ required by this bound in `BlockBuilder::<ScopeFailure, Policy>::scope_failure`
+
+error[E0277]: the trait bound `mfm_program::structured::Never: MfmValue` is not satisfied
+  --> tests/ui/structured/fail/construct_never_failure.rs:34:14
+   |
+34 |         lane.scope_failure::<Output>(failure)
+   |              ^^^^^^^^^^^^^ the trait `MfmValue` is not implemented for `mfm_program::structured::Never`
+   |
+   = help: the following other types implement trait `MfmValue`:
+             ArtifactRef<T>
+             Input
+             mfm_facts::read::FactSelectionCompletenessMode
+             mfm_facts::read::FactSelectionReadFailure
+             mfm_facts::read::FactSelectionReadFailureCode
+             mfm_facts::read::FactSelectionReadResponse
+             mfm_facts::read::FactSelectionScanBounds
+             mfm_facts::selection::FactSelectionRequest
+             support::Output
+note: required by a bound in `BlockBuilder::<ScopeFailure, Policy>::scope_failure`
+  --> src/structured.rs
+   |
+   |     pub fn scope_failure<Output>(
+   |            ------------- required by a bound in this associated function
+...
+   |         ScopeFailure: MfmValue,
+   |                       ^^^^^^^^ required by this bound in `BlockBuilder::<ScopeFailure, Policy>::scope_failure`

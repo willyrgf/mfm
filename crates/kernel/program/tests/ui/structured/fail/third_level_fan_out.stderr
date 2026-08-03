@@ -1,0 +1,68 @@
+error[E0277]: the trait bound `FanOutAtLimit: AllowsFanOut` is not satisfied
+  --> tests/ui/structured/fail/third_level_fan_out.rs:18:37
+   |
+18 |             let _third = inner_lane.fan_out::<Input, Never>(stable("too-deep"))?;
+   |                                     ^^^^^^^ the trait `AllowsFanOut` is not implemented for `FanOutAtLimit`
+   |
+help: the following other types implement trait `AllowsFanOut`
+  --> src/structured.rs
+   |
+   | impl AllowsFanOut for Sequential {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Sequential`
+...
+   | impl AllowsFanOut for FanOutOneRemaining {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FanOutOneRemaining`
+note: required by a bound in `BlockBuilder::<ScopeFailure, Policy>::fan_out`
+  --> src/structured.rs
+   |
+   |     pub fn fan_out<'a, Output, LaneFailure>(
+   |            ------- required by a bound in this associated function
+...
+   |         Policy: AllowsFanOut,
+   |                 ^^^^^^^^^^^^ required by this bound in `BlockBuilder::<ScopeFailure, Policy>::fan_out`
+
+error[E0277]: the trait bound `FanOutAtLimit: AllowsFanOut` is not satisfied
+  --> tests/ui/structured/fail/third_level_fan_out.rs:18:26
+   |
+18 |             let _third = inner_lane.fan_out::<Input, Never>(stable("too-deep"))?;
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AllowsFanOut` is not implemented for `FanOutAtLimit`
+   |
+help: the following other types implement trait `AllowsFanOut`
+  --> src/structured.rs
+   |
+   | impl AllowsFanOut for Sequential {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Sequential`
+...
+   | impl AllowsFanOut for FanOutOneRemaining {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FanOutOneRemaining`
+note: required by a bound in `FanOutBuilder`
+  --> src/structured.rs
+   |
+   | pub struct FanOutBuilder<'a, Output, LaneFailure, ScopeFailure, Policy = Sequential>
+   |            ------------- required by a bound in this struct
+...
+   |     Policy: AllowsFanOut,
+   |             ^^^^^^^^^^^^ required by this bound in `FanOutBuilder`
+
+error[E0277]: the trait bound `FanOutAtLimit: AllowsFanOut` is not satisfied
+  --> tests/ui/structured/fail/third_level_fan_out.rs:18:26
+   |
+18 |             let _third = inner_lane.fan_out::<Input, Never>(stable("too-deep"))?;
+   |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `AllowsFanOut` is not implemented for `FanOutAtLimit`
+   |
+help: the following other types implement trait `AllowsFanOut`
+  --> src/structured.rs
+   |
+   | impl AllowsFanOut for Sequential {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Sequential`
+...
+   | impl AllowsFanOut for FanOutOneRemaining {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `FanOutOneRemaining`
+note: required by a bound in `FanOutBuilder`
+  --> src/structured.rs
+   |
+   | pub struct FanOutBuilder<'a, Output, LaneFailure, ScopeFailure, Policy = Sequential>
+   |            ------------- required by a bound in this struct
+...
+   |     Policy: AllowsFanOut,
+   |             ^^^^^^^^^^^^ required by this bound in `FanOutBuilder`

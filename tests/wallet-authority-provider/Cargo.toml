@@ -1,0 +1,28 @@
+[package]
+name = "mfm-wallet-authority-provider-test-support"
+version = "0.1.0"
+edition = "2021"
+description = "Separate-process wallet authority provider used only by qualification tests"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
+
+[package.metadata.mfm]
+layer = "test"
+domain-facing = false
+binary-facing = false
+
+[dependencies]
+hex = { workspace = true }
+ring = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+zeroize = { version = "1.7", features = ["serde"] }
+
+mfm-canonical = { path = "../../crates/kernel/canonical" }
+mfm-evm = { path = "../../crates/domains/evm" }
+mfm-ids = { path = "../../crates/kernel/ids" }
+mfm-journal = { path = "../../crates/kernel/journal" }

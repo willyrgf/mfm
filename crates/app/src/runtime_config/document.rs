@@ -10,7 +10,7 @@ use super::{Result, RuntimeConfigError, RuntimeConfigErrorKind};
 
 const MAX_CONFIG_DOCUMENT_BYTES: usize = 1024 * 1024;
 const MAX_RUNTIME_PATH_BYTES: usize = 4_096;
-const TOP_LEVEL_SECTIONS: [&str; 4] = ["bitcoin", "evm", "signers", "keystores"];
+const TOP_LEVEL_SECTIONS: [&str; 1] = ["keystores"];
 const SECRET_MARKERS: [&str; 16] = [
     "password",
     "passphrase",
@@ -69,12 +69,6 @@ impl RuntimeDocument {
             unreachable!("root was already checked as an object")
         };
         Ok(Self { root })
-    }
-
-    pub(super) fn take_section(mut self, section: &'static str) -> Result<Value> {
-        self.root
-            .remove(section)
-            .ok_or_else(|| RuntimeConfigError::new(RuntimeConfigErrorKind::MissingSection))
     }
 
     pub(super) fn take_entry(&mut self, section: &'static str, key: &str) -> Result<Value> {
@@ -154,27 +148,14 @@ fn scan_object(value: &Value, path: &mut Vec<String>) -> Result<()> {
                     normalized.clone()
                 };
                 path.push(path_key);
-                if !entry_keys {
-                    if normalized == "expected_chain_id" {
-                        return Err(RuntimeConfigError::new(
-                            RuntimeConfigErrorKind::ForbiddenExpectedChainId,
-                        ));
-                    }
-                    let reviewed_secret = is_reviewed_secret_slot(path);
-                    if !reviewed_secret
-                        && SECRET_MARKERS
-                            .iter()
-                            .any(|marker| normalized.contains(marker))
-                    {
-                        return Err(RuntimeConfigError::new(
-                            RuntimeConfigErrorKind::ForbiddenSecretField,
-                        ));
-                    }
-                    if reviewed_secret && !is_indirect_secret_source_shape(child) {
-                        return Err(RuntimeConfigError::new(
-                            RuntimeConfigErrorKind::DirectSecretValue,
-                        ));
-                    }
+                if !entry_keys
+                    && SECRET_MARKERS
+                        .iter()
+                        .any(|marker| normalized.contains(marker))
+                {
+                    return Err(RuntimeConfigError::new(
+                        RuntimeConfigErrorKind::ForbiddenSecretField,
+                    ));
                 }
                 scan_object(child, path)?;
                 path.pop();
@@ -192,34 +173,7 @@ fn scan_object(value: &Value, path: &mut Vec<String>) -> Result<()> {
 }
 
 fn is_entry_map(path: &[String]) -> bool {
-    matches!(
-        path,
-        [section] if section == "signers" || section == "keystores"
-    ) || matches!(
-        path,
-        [family, routes]
-            if (family == "bitcoin" || family == "evm") && routes == "routes"
-    )
-}
-
-fn is_reviewed_secret_slot(path: &[String]) -> bool {
-    matches!(
-        path,
-        [family, routes, _, field]
-            if routes == "routes"
-                && ((family == "bitcoin" && field == "rpc_password")
-                    || (family == "evm" && field == "auth_header"))
-    )
-}
-
-fn is_indirect_secret_source_shape(value: &Value) -> bool {
-    let Some(object) = value.as_object() else {
-        return false;
-    };
-    let Some((key, source)) = object.iter().next().filter(|_| object.len() == 1) else {
-        return false;
-    };
-    matches!(normalize_field(key).as_str(), "env" | "file" | "file_env") && source.is_string()
+    matches!(path, [section] if section == "keystores")
 }
 
 fn normalize_field(field: &str) -> String {

@@ -1,4 +1,4 @@
-//! Pure immutable EVM wallet request and evidence contracts.
+//! Pure immutable EVM transaction and transport-value contracts.
 //!
 //! The values in this module contain only reviewed public transaction
 //! material. Signatures, signed envelopes, endpoints, credentials, provider
@@ -10,18 +10,16 @@ use std::str::FromStr;
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_executor::{CanonicalExecutorRequest, EvidenceBounds, SchemaQualifiedCanonicalValue};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, LocalPublicId, SchemaId, TenantScopeId};
-use mfm_program::{boundary_content_ref, decode_boundary, encode_boundary};
-use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs, StateInput};
-use mfm_values::SchemaDescriptor;
-use serde::{de, Deserialize, Serialize};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, LocalPublicId, SchemaId};
+use mfm_program::boundary_content_ref;
+use mfm_program_derive::{MfmConfig, MfmValue};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::EvmBlockAnchor;
 
 /// Published transaction-submission entry point.
 pub const EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID: &str = "mfm.evm/submit-transaction@1";
-/// Stable operation and executor-operation identity.
+/// Stable structured submission operation identity.
 pub const EVM_SUBMIT_TRANSACTION_OPERATION_ID: &str = "mfm.evm/submit-transaction";
 /// Exact EVM transaction envelope type.
 pub const EVM_WALLET_TRANSACTION_TYPE: u8 = 2;
@@ -35,18 +33,23 @@ pub const EVM_WALLET_ACCESS_LIST_MAX_ENTRIES: usize = 256;
 pub const EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS: usize = 4_096;
 /// Maximum number of immutable EIP-1559 fee candidates.
 pub const EVM_WALLET_REPLACEMENT_LIMIT: usize = 32;
+/// Maximum UTF-8 bytes in an ordinary caller submission token.
+pub const EVM_CALLER_SUBMISSION_TOKEN_MAX_BYTES: usize = 256;
 /// Maximum receipt logs retained in terminal evidence.
 pub const EVM_WALLET_RECEIPT_LOG_LIMIT: usize = 4_096;
 /// Maximum unindexed bytes retained in one receipt log.
 pub const EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Exact version of the selected EVM account-sequence policy descriptor.
 pub const EVM_WALLET_NONCE_POLICY_VERSION: &str = "mfm.evm.wallet-nonce-policy.v1";
-/// Exact version of one deployment-attested initial nonce descriptor.
-pub const EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION: &str = "mfm.evm.wallet-initial-nonce.v1";
 /// Exact version of the finalized-tag finality policy.
 pub const EVM_WALLET_FINALITY_POLICY_VERSION: &str = "mfm.evm.wallet-finality-policy.v1";
 /// Exact version of the terminal wallet assurance policy.
 pub const EVM_WALLET_ASSURANCE_POLICY_VERSION: &str = "mfm.evm.wallet-assurance-policy.v1";
+/// Exact version of the deterministic EVM transaction-signing profile.
+pub const EVM_DETERMINISTIC_SIGNING_PROFILE_VERSION: &str =
+    "mfm.evm.deterministic-signing-profile.v1";
+/// Exact version of the bounded EVM submission-expansion policy.
+pub const EVM_SUBMISSION_EXPANSION_POLICY_VERSION: &str = "mfm.evm.submission-expansion-policy.v1";
 
 /// Exact target operation for a raw type-2 broadcast or rebroadcast.
 pub const EVM_WALLET_BROADCAST_OPERATION_ID: &str = "eth_send_raw_transaction";
@@ -177,109 +180,6 @@ pub fn evm_wallet_nonce_policy_ref() -> Result<EvmWalletReference, EvmWalletErro
         &evm_wallet_nonce_policy_canonical()?,
     )
 }
-
-/// Deployment-attested first unused nonce for one exact wallet generation.
-///
-/// The source attestation is public evidence identity only. This descriptor
-/// contains no endpoint, provider response, credential, or signing material.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct EvmWalletInitialNonceDescriptor {
-    version: String,
-    initial_nonce: String,
-    source_attestation_ref: EvmWalletReference,
-    wallet_domain_ref: EvmWalletReference,
-    chain_id: u64,
-    sender: String,
-    durable_generation_ref: EvmWalletReference,
-}
-
-impl EvmWalletInitialNonceDescriptor {
-    /// Constructs one complete content-addressed initial nonce descriptor.
-    pub fn new(
-        initial_nonce: u64,
-        source_attestation_ref: EvmWalletReference,
-        wallet_domain_ref: EvmWalletReference,
-        chain_id: u64,
-        sender: Address,
-        durable_generation_ref: EvmWalletReference,
-    ) -> Result<Self, EvmWalletError> {
-        let descriptor = Self {
-            version: EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION.to_owned(),
-            initial_nonce: initial_nonce.to_string(),
-            source_attestation_ref,
-            wallet_domain_ref,
-            chain_id,
-            sender: canonical_address(sender),
-            durable_generation_ref,
-        };
-        descriptor.validate()?;
-        Ok(descriptor)
-    }
-
-    /// Returns the deployment-attested first unused nonce.
-    pub fn initial_nonce(&self) -> Result<u64, EvmWalletError> {
-        parse_quantity(&self.initial_nonce)?
-            .try_into()
-            .map_err(|_| EvmWalletError::Invalid("initial_nonce"))
-    }
-
-    /// Returns the public source-attestation identity.
-    pub const fn source_attestation_ref(&self) -> &EvmWalletReference {
-        &self.source_attestation_ref
-    }
-
-    /// Returns the externally coordinated wallet domain.
-    pub const fn wallet_domain_ref(&self) -> &EvmWalletReference {
-        &self.wallet_domain_ref
-    }
-
-    /// Returns the exact EVM chain.
-    pub const fn chain_id(&self) -> u64 {
-        self.chain_id
-    }
-
-    /// Returns the canonical wallet sender.
-    pub fn sender(&self) -> &str {
-        &self.sender
-    }
-
-    /// Parses the checked wallet sender.
-    pub fn sender_address(&self) -> Result<Address, EvmWalletError> {
-        parse_address(&self.sender)
-    }
-
-    /// Returns the durable executor/wallet generation.
-    pub const fn durable_generation_ref(&self) -> &EvmWalletReference {
-        &self.durable_generation_ref
-    }
-
-    /// Returns exact canonical descriptor bytes.
-    pub fn canonical(&self) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-        self.validate()?;
-        wallet_descriptor_canonical(self)
-    }
-
-    /// Returns the exact descriptor identity used as nonce policy configuration.
-    pub fn reference(&self) -> Result<EvmWalletReference, EvmWalletError> {
-        wallet_descriptor_ref("mfm.evm.wallet-initial-nonce", &self.canonical()?)
-    }
-
-    fn validate(&self) -> Result<(), EvmWalletError> {
-        if self.version != EVM_WALLET_INITIAL_NONCE_DESCRIPTOR_VERSION
-            || self.chain_id == 0
-            || self.sender_address()?.is_zero()
-        {
-            return Err(EvmWalletError::Invalid("initial_nonce_descriptor"));
-        }
-        self.initial_nonce()?;
-        self.source_attestation_ref.to_content_ref()?;
-        self.wallet_domain_ref.to_content_ref()?;
-        self.durable_generation_ref.to_content_ref()?;
-        Ok(())
-    }
-}
-
 /// Returns the canonical finalized-tag finality policy.
 pub fn evm_wallet_finality_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
     wallet_descriptor_canonical(&serde_json::json!({
@@ -303,7 +203,7 @@ pub fn evm_wallet_assurance_policy_canonical() -> Result<PlainCanonicalJsonBytes
     wallet_descriptor_canonical(&serde_json::json!({
         "candidate_lineage": "complete_through_selected_candidate",
         "canonical_inclusion": "receipt_block_matches_fresh_number_lookup",
-        "executor_generation_and_fence": "exact",
+        "wallet_authority_lineage_and_fence": "exact",
         "finalized_head": "at_or_after_receipt",
         "outcomes": ["reverted", "succeeded"],
         "receipt": "exact_candidate_and_transaction",
@@ -321,6 +221,45 @@ pub fn evm_wallet_assurance_policy_ref() -> Result<EvmWalletReference, EvmWallet
     )
 }
 
+/// Returns the canonical RFC 6979, recoverable, low-s EVM signing profile.
+pub fn evm_deterministic_signing_profile_canonical(
+) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
+    wallet_descriptor_canonical(&serde_json::json!({
+        "algorithm": "secp256k1.keccak256.recoverable",
+        "canonical_low_s": true,
+        "deterministic_nonce": "rfc6979",
+        "recoverable": true,
+        "version": EVM_DETERMINISTIC_SIGNING_PROFILE_VERSION,
+    }))
+}
+
+/// Returns the exact deterministic EVM signing-profile identity.
+pub fn evm_deterministic_signing_profile_ref() -> Result<EvmWalletReference, EvmWalletError> {
+    wallet_descriptor_ref(
+        "mfm.evm.deterministic-signing-profile",
+        &evm_deterministic_signing_profile_canonical()?,
+    )
+}
+
+/// Returns the canonical bounded submission-expansion policy.
+pub fn evm_submission_expansion_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError>
+{
+    wallet_descriptor_canonical(&serde_json::json!({
+        "candidate_slots": EVM_WALLET_REPLACEMENT_LIMIT,
+        "expansion": "mfm.evm.expansion/submit-transaction",
+        "observation_round_limit": crate::EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+        "version": EVM_SUBMISSION_EXPANSION_POLICY_VERSION,
+    }))
+}
+
+/// Returns the exact bounded submission-expansion policy identity.
+pub fn evm_submission_expansion_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
+    wallet_descriptor_ref(
+        "mfm.evm.submission-expansion-policy",
+        &evm_submission_expansion_policy_canonical()?,
+    )
+}
+
 /// Stable configured-value target selected by the public entry-point input.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
 #[serde(transparent)]
@@ -328,7 +267,8 @@ pub fn evm_wallet_assurance_policy_ref() -> Result<EvmWalletReference, EvmWallet
     namespace = "mfm.evm",
     name = "transaction-target",
     version = "1",
-    schema = "mfm.evm.transaction_target"
+    schema = "mfm.evm.transaction_target",
+    transparent_string
 )]
 pub struct EvmTransactionTarget {
     value: String,
@@ -357,7 +297,58 @@ impl<'de> Deserialize<'de> for EvmTransactionTarget {
     }
 }
 
-/// Public value-only selector for one configured immutable transaction.
+/// Bounded ordinary-caller idempotency token.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
+#[serde(transparent)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "caller-submission-token",
+    version = "1",
+    schema = "mfm.evm.caller_submission_token",
+    transparent_string
+)]
+pub struct EvmCallerSubmissionToken {
+    value: String,
+}
+
+impl EvmCallerSubmissionToken {
+    /// Creates one non-empty, whitespace-free, bounded token.
+    pub fn new(value: impl Into<String>) -> Result<Self, EvmWalletError> {
+        let value = value.into();
+        validate_caller_submission_token(&value)?;
+        Ok(Self { value })
+    }
+
+    /// Returns the caller token exactly as admitted.
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.value
+    }
+}
+
+impl<'de> Deserialize<'de> for EvmCallerSubmissionToken {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+pub(crate) fn validate_caller_submission_token(value: &str) -> Result<(), EvmWalletError> {
+    if value.is_empty()
+        || value.len() > EVM_CALLER_SUBMISSION_TOKEN_MAX_BYTES
+        || value.chars().any(char::is_whitespace)
+    {
+        return Err(EvmWalletError::Invalid("caller_submission_token"));
+    }
+    Ok(())
+}
+
+/// Public value-only selector for one configured immutable transaction and caller intent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -368,17 +359,29 @@ impl<'de> Deserialize<'de> for EvmTransactionTarget {
 )]
 pub struct EvmSubmitTransactionSelector {
     target: EvmTransactionTarget,
+    caller_submission_token: EvmCallerSubmissionToken,
 }
 
 impl EvmSubmitTransactionSelector {
-    /// Selects one exact configured transaction target.
-    pub const fn new(target: EvmTransactionTarget) -> Self {
-        Self { target }
+    /// Selects one exact configured transaction target and caller intent.
+    pub const fn new(
+        target: EvmTransactionTarget,
+        caller_submission_token: EvmCallerSubmissionToken,
+    ) -> Self {
+        Self {
+            target,
+            caller_submission_token,
+        }
     }
 
     /// Returns the configured-value target.
     pub const fn target(&self) -> &EvmTransactionTarget {
         &self.target
+    }
+
+    /// Returns the bounded caller idempotency token.
+    pub const fn caller_submission_token(&self) -> &EvmCallerSubmissionToken {
+        &self.caller_submission_token
     }
 }
 
@@ -631,467 +634,6 @@ impl<'de> Deserialize<'de> for EvmWalletFeeCandidate {
         Ok(candidate)
     }
 }
-
-/// Finite, strictly monotonic replacement schedule.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-replacement-policy",
-    version = "1",
-    schema = "mfm.evm.wallet_replacement_policy"
-)]
-pub struct EvmWalletReplacementPolicy {
-    fee_candidates: Vec<EvmWalletFeeCandidate>,
-}
-
-impl EvmWalletReplacementPolicy {
-    /// Creates a non-empty finite fee schedule.
-    pub fn new(fee_candidates: Vec<EvmWalletFeeCandidate>) -> Result<Self, EvmWalletError> {
-        let policy = Self { fee_candidates };
-        policy.validate()?;
-        Ok(policy)
-    }
-
-    /// Returns fee candidates in immutable attempt order.
-    pub fn fee_candidates(&self) -> &[EvmWalletFeeCandidate] {
-        &self.fee_candidates
-    }
-
-    /// Returns one candidate by exact schedule ordinal.
-    pub fn candidate(&self, ordinal: u16) -> Option<&EvmWalletFeeCandidate> {
-        self.fee_candidates.get(usize::from(ordinal))
-    }
-
-    fn validate(&self) -> Result<(), EvmWalletError> {
-        if self.fee_candidates.is_empty()
-            || self.fee_candidates.len() > EVM_WALLET_REPLACEMENT_LIMIT
-        {
-            return Err(EvmWalletError::InvalidReplacementSchedule);
-        }
-        for candidate in &self.fee_candidates {
-            candidate.validate()?;
-        }
-        for pair in self.fee_candidates.windows(2) {
-            if pair[0].max_fee_quantity()? >= pair[1].max_fee_quantity()?
-                || pair[0].max_priority_fee_quantity()? >= pair[1].max_priority_fee_quantity()?
-            {
-                return Err(EvmWalletError::InvalidReplacementSchedule);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmWalletReplacementPolicy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            fee_candidates: Vec<EvmWalletFeeCandidate>,
-        }
-
-        Self::new(Wire::deserialize(deserializer)?.fee_candidates).map_err(de::Error::custom)
-    }
-}
-
-/// Fixed integer-bounded convergence script.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-convergence-plan",
-    version = "1",
-    schema = "mfm.evm.wallet_convergence_plan"
-)]
-pub struct EvmWalletConvergencePlan {
-    broadcasts_per_candidate: u16,
-    transaction_lookups_per_candidate: u16,
-    receipt_lookups_per_candidate: u16,
-    finalized_head_lookups: u16,
-    canonical_inclusion_lookups: u16,
-    max_attempt_result_bytes: u64,
-}
-
-impl EvmWalletConvergencePlan {
-    /// Creates one finite, clock-free convergence script.
-    pub fn new(
-        broadcasts_per_candidate: u16,
-        transaction_lookups_per_candidate: u16,
-        receipt_lookups_per_candidate: u16,
-        finalized_head_lookups: u16,
-        canonical_inclusion_lookups: u16,
-        max_attempt_result_bytes: u64,
-    ) -> Result<Self, EvmWalletError> {
-        let plan = Self {
-            broadcasts_per_candidate,
-            transaction_lookups_per_candidate,
-            receipt_lookups_per_candidate,
-            finalized_head_lookups,
-            canonical_inclusion_lookups,
-            max_attempt_result_bytes,
-        };
-        plan.validate()?;
-        Ok(plan)
-    }
-
-    /// Returns the maximum broadcasts or rebroadcasts per fee candidate.
-    pub const fn broadcasts_per_candidate(&self) -> u16 {
-        self.broadcasts_per_candidate
-    }
-
-    /// Returns the maximum transaction lookups per fee candidate.
-    pub const fn transaction_lookups_per_candidate(&self) -> u16 {
-        self.transaction_lookups_per_candidate
-    }
-
-    /// Returns the maximum receipt lookups per fee candidate.
-    pub const fn receipt_lookups_per_candidate(&self) -> u16 {
-        self.receipt_lookups_per_candidate
-    }
-
-    /// Returns the finite finalized-head lookup budget.
-    pub const fn finalized_head_lookups(&self) -> u16 {
-        self.finalized_head_lookups
-    }
-
-    /// Returns the finite canonical-inclusion lookup budget.
-    pub const fn canonical_inclusion_lookups(&self) -> u16 {
-        self.canonical_inclusion_lookups
-    }
-
-    /// Returns the admitted canonical size of any returned attempt result.
-    pub const fn max_attempt_result_bytes(&self) -> u64 {
-        self.max_attempt_result_bytes
-    }
-
-    /// Computes the script's maximum target-entry count.
-    pub fn max_attempts(&self, fee_candidates: usize) -> Result<u32, EvmWalletError> {
-        let fee_candidates =
-            u32::try_from(fee_candidates).map_err(|_| EvmWalletError::BoundExceeded("attempts"))?;
-        let per_candidate = u32::from(self.broadcasts_per_candidate)
-            .checked_add(u32::from(self.transaction_lookups_per_candidate))
-            .and_then(|value| value.checked_add(u32::from(self.receipt_lookups_per_candidate)))
-            .ok_or(EvmWalletError::BoundExceeded("attempts"))?;
-        fee_candidates
-            .checked_mul(per_candidate)
-            .and_then(|value| value.checked_add(u32::from(self.finalized_head_lookups)))
-            .and_then(|value| value.checked_add(u32::from(self.canonical_inclusion_lookups)))
-            .ok_or(EvmWalletError::BoundExceeded("attempts"))
-    }
-
-    fn validate(&self) -> Result<(), EvmWalletError> {
-        if self.broadcasts_per_candidate == 0
-            || self.transaction_lookups_per_candidate == 0
-            || self.receipt_lookups_per_candidate == 0
-            || self.finalized_head_lookups == 0
-            || self.canonical_inclusion_lookups == 0
-            || self.max_attempt_result_bytes == 0
-        {
-            return Err(EvmWalletError::Invalid("convergence_plan"));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-policy",
-    version = "1",
-    schema = "mfm.evm.wallet_policy"
-)]
-struct EvmWalletPolicyWire {
-    wallet_domain_ref: EvmWalletReference,
-    tenant_scope_id: String,
-    route_generation_ref: EvmWalletReference,
-    chain_id: u64,
-    sender: String,
-    signer_binding_ref: EvmWalletReference,
-    nonce_policy_ref: EvmWalletReference,
-    initial_nonce: String,
-    initial_nonce_descriptor_ref: EvmWalletReference,
-    replacement: EvmWalletReplacementPolicy,
-    already_known_classifier_ref: EvmWalletReference,
-    finality_policy_ref: EvmWalletReference,
-    assurance_policy_ref: EvmWalletReference,
-    convergence: EvmWalletConvergencePlan,
-    evidence_max_attempts: u32,
-    evidence_max_records: u32,
-    evidence_max_retained_bytes: String,
-    evidence_max_completion_record_bytes: String,
-    evidence_completion_reserve_records: u32,
-    evidence_completion_reserve_bytes: String,
-}
-
-/// Immutable wallet domain, allocation, replacement, and finality policy.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmWalletPolicy {
-    wire: EvmWalletPolicyWire,
-    evidence_bounds: EvidenceBounds,
-}
-
-impl EvmWalletPolicy {
-    /// Creates one exact wallet policy and validates its full finite script.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        wallet_domain_ref: EvmWalletReference,
-        tenant_scope_id: TenantScopeId,
-        route_generation_ref: EvmWalletReference,
-        chain_id: u64,
-        sender: Address,
-        signer_binding_ref: EvmWalletReference,
-        nonce_policy_ref: EvmWalletReference,
-        initial_nonce: u64,
-        initial_nonce_descriptor_ref: EvmWalletReference,
-        replacement: EvmWalletReplacementPolicy,
-        already_known_classifier_ref: EvmWalletReference,
-        finality_policy_ref: EvmWalletReference,
-        assurance_policy_ref: EvmWalletReference,
-        convergence: EvmWalletConvergencePlan,
-        evidence_bounds: EvidenceBounds,
-    ) -> Result<Self, EvmWalletError> {
-        let wire = EvmWalletPolicyWire {
-            wallet_domain_ref,
-            tenant_scope_id: tenant_scope_id.as_str().to_owned(),
-            route_generation_ref,
-            chain_id,
-            sender: canonical_address(sender),
-            signer_binding_ref,
-            nonce_policy_ref,
-            initial_nonce: initial_nonce.to_string(),
-            initial_nonce_descriptor_ref,
-            replacement,
-            already_known_classifier_ref,
-            finality_policy_ref,
-            assurance_policy_ref,
-            convergence,
-            evidence_max_attempts: evidence_bounds.max_attempts(),
-            evidence_max_records: evidence_bounds.max_records(),
-            evidence_max_retained_bytes: evidence_bounds.max_retained_bytes().to_string(),
-            evidence_max_completion_record_bytes: evidence_bounds
-                .max_completion_record_bytes()
-                .to_string(),
-            evidence_completion_reserve_records: evidence_bounds.completion_reserve_records(),
-            evidence_completion_reserve_bytes: evidence_bounds
-                .completion_reserve_bytes()
-                .to_string(),
-        };
-        let policy = Self {
-            wire,
-            evidence_bounds,
-        };
-        policy.validate()?;
-        Ok(policy)
-    }
-
-    /// Returns the exact externally coordinated wallet resource domain.
-    pub const fn wallet_domain_ref(&self) -> &EvmWalletReference {
-        &self.wire.wallet_domain_ref
-    }
-
-    /// Returns the exact tenant partition.
-    pub fn tenant_scope_id(&self) -> Result<TenantScopeId, EvmWalletError> {
-        TenantScopeId::from_str(&self.wire.tenant_scope_id)
-            .map_err(|_| EvmWalletError::Invalid("tenant_scope_id"))
-    }
-
-    /// Returns the immutable live-route generation.
-    pub const fn route_generation_ref(&self) -> &EvmWalletReference {
-        &self.wire.route_generation_ref
-    }
-
-    /// Returns the exact chain id.
-    pub const fn chain_id(&self) -> u64 {
-        self.wire.chain_id
-    }
-
-    /// Returns the canonical sender.
-    pub fn sender(&self) -> &str {
-        &self.wire.sender
-    }
-
-    /// Parses the checked sender.
-    pub fn sender_address(&self) -> Result<Address, EvmWalletError> {
-        parse_address(&self.wire.sender)
-    }
-
-    /// Returns the qualified wallet signer-binding identity.
-    pub const fn signer_binding_ref(&self) -> &EvmWalletReference {
-        &self.wire.signer_binding_ref
-    }
-
-    /// Returns the exact selected account-sequence policy identity.
-    pub const fn nonce_policy_ref(&self) -> &EvmWalletReference {
-        &self.wire.nonce_policy_ref
-    }
-
-    /// Returns the externally attested first unused nonce.
-    pub fn initial_nonce(&self) -> Result<u64, EvmWalletError> {
-        parse_quantity(&self.wire.initial_nonce)?
-            .try_into()
-            .map_err(|_| EvmWalletError::Invalid("initial_nonce"))
-    }
-
-    /// Returns the complete descriptor for the first unused nonce.
-    pub const fn initial_nonce_descriptor_ref(&self) -> &EvmWalletReference {
-        &self.wire.initial_nonce_descriptor_ref
-    }
-
-    /// Returns the finite replacement schedule.
-    pub const fn replacement(&self) -> &EvmWalletReplacementPolicy {
-        &self.wire.replacement
-    }
-
-    /// Returns the sole admitted exact already-known classifier.
-    pub const fn already_known_classifier_ref(&self) -> &EvmWalletReference {
-        &self.wire.already_known_classifier_ref
-    }
-
-    /// Returns the finalized-tag finality policy.
-    pub const fn finality_policy_ref(&self) -> &EvmWalletReference {
-        &self.wire.finality_policy_ref
-    }
-
-    /// Returns the exact terminal assurance policy.
-    pub const fn assurance_policy_ref(&self) -> &EvmWalletReference {
-        &self.wire.assurance_policy_ref
-    }
-
-    /// Returns the fixed integer-bounded convergence plan.
-    pub const fn convergence(&self) -> &EvmWalletConvergencePlan {
-        &self.wire.convergence
-    }
-
-    /// Returns the executor's exact finite evidence bounds.
-    pub const fn evidence_bounds(&self) -> &EvidenceBounds {
-        &self.evidence_bounds
-    }
-
-    /// Returns the maximum IO authorizations in the complete script.
-    pub fn max_attempts(&self) -> Result<u32, EvmWalletError> {
-        self.wire
-            .convergence
-            .max_attempts(self.wire.replacement.fee_candidates().len())
-    }
-
-    fn validate(&self) -> Result<(), EvmWalletError> {
-        self.wire.wallet_domain_ref.to_content_ref()?;
-        self.tenant_scope_id()?;
-        self.wire.route_generation_ref.to_content_ref()?;
-        if self.wire.chain_id == 0 || self.sender_address()?.is_zero() {
-            return Err(EvmWalletError::Invalid("wallet_policy_identity"));
-        }
-        self.wire.signer_binding_ref.to_content_ref()?;
-        self.wire.nonce_policy_ref.to_content_ref()?;
-        self.initial_nonce()?;
-        self.wire.initial_nonce_descriptor_ref.to_content_ref()?;
-        self.wire.replacement.validate()?;
-        self.wire.already_known_classifier_ref.to_content_ref()?;
-        self.wire.finality_policy_ref.to_content_ref()?;
-        self.wire.assurance_policy_ref.to_content_ref()?;
-        self.wire.convergence.validate()?;
-        if self.wire.evidence_max_attempts != self.evidence_bounds.max_attempts()
-            || self.wire.evidence_max_records != self.evidence_bounds.max_records()
-            || self.wire.evidence_max_retained_bytes
-                != self.evidence_bounds.max_retained_bytes().to_string()
-            || self.wire.evidence_max_completion_record_bytes
-                != self
-                    .evidence_bounds
-                    .max_completion_record_bytes()
-                    .to_string()
-            || self.wire.evidence_completion_reserve_records
-                != self.evidence_bounds.completion_reserve_records()
-            || self.wire.evidence_completion_reserve_bytes
-                != self.evidence_bounds.completion_reserve_bytes().to_string()
-        {
-            return Err(EvmWalletError::Invalid("evidence_bounds"));
-        }
-        self.validate_evidence_budget(0)
-    }
-
-    fn validate_evidence_budget(&self, request_bytes: usize) -> Result<(), EvmWalletError> {
-        let attempts = self.max_attempts()?;
-        if attempts > self.evidence_bounds.max_attempts() {
-            return Err(EvmWalletError::BoundExceeded("evidence_attempts"));
-        }
-        let records = attempts
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(3))
-            .ok_or(EvmWalletError::BoundExceeded("evidence_records"))?;
-        if records > self.evidence_bounds.max_records() {
-            return Err(EvmWalletError::BoundExceeded("evidence_records"));
-        }
-        if request_bytes > self.evidence_bounds.max_retained_bytes() {
-            return Err(EvmWalletError::BoundExceeded("evidence_bytes"));
-        }
-        Ok(())
-    }
-}
-
-impl Serialize for EvmWalletPolicy {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.wire.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmWalletPolicy {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = EvmWalletPolicyWire::deserialize(deserializer)?;
-        let max_retained_bytes = wire
-            .evidence_max_retained_bytes
-            .parse::<u64>()
-            .map_err(de::Error::custom)?;
-        let max_completion_record_bytes = wire
-            .evidence_max_completion_record_bytes
-            .parse::<u64>()
-            .map_err(de::Error::custom)?;
-        let completion_reserve_bytes = wire
-            .evidence_completion_reserve_bytes
-            .parse::<u64>()
-            .map_err(de::Error::custom)?;
-        let evidence_bounds = EvidenceBounds::new(
-            wire.evidence_max_attempts,
-            wire.evidence_max_records,
-            max_retained_bytes,
-            max_completion_record_bytes,
-            wire.evidence_completion_reserve_records,
-            completion_reserve_bytes,
-        )
-        .map_err(de::Error::custom)?;
-        let policy = Self {
-            wire,
-            evidence_bounds,
-        };
-        policy.validate().map_err(de::Error::custom)?;
-        Ok(policy)
-    }
-}
-
-impl mfm_values::MfmValue for EvmWalletPolicy {
-    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
-        EvmWalletPolicyWire::schema_descriptor()
-    }
-
-    fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
-        EvmWalletPolicyWire::semantic_id()
-    }
-}
-
-/// Complete immutable configured type-2 transaction template.
-///
-/// The externally attested first-unused nonce is fixed before admission. Live
-/// pending-nonce bootstrap, fee estimation, gas estimation, and route
 /// substitution are not represented.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue, MfmConfig)]
 #[serde(deny_unknown_fields)]
@@ -1261,385 +803,6 @@ impl<'de> Deserialize<'de> for EvmWalletTransactionTemplate {
         Ok(template)
     }
 }
-
-/// Exact state input binding the public selector to its configured template.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, StateInput)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.evm.input.submit_transaction", version = "1")]
-pub struct EvmSubmitTransactionInput {
-    request: EvmSubmitTransactionRequest,
-    selector: EvmSubmitTransactionSelector,
-}
-
-impl EvmSubmitTransactionInput {
-    /// Binds one configured semantic request to its public selector.
-    pub fn new(
-        request: EvmSubmitTransactionRequest,
-        selector: EvmSubmitTransactionSelector,
-    ) -> Result<Self, EvmWalletError> {
-        Self::from_request(request, selector)
-    }
-
-    /// Binds one already committed semantic request to its public selector.
-    pub fn from_request(
-        request: EvmSubmitTransactionRequest,
-        selector: EvmSubmitTransactionSelector,
-    ) -> Result<Self, EvmWalletError> {
-        if request.template().target() != selector.target() {
-            return Err(EvmWalletError::Invalid("configured_target_mismatch"));
-        }
-        Ok(Self { request, selector })
-    }
-
-    /// Returns the immutable configured template.
-    pub fn template(&self) -> &EvmWalletTransactionTemplate {
-        self.request.template()
-    }
-
-    /// Returns the already canonicalized semantic request.
-    pub const fn request(&self) -> &EvmSubmitTransactionRequest {
-        &self.request
-    }
-
-    /// Returns the public selector.
-    pub const fn selector(&self) -> &EvmSubmitTransactionSelector {
-        &self.selector
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmSubmitTransactionInput {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            request: EvmSubmitTransactionRequest,
-            selector: EvmSubmitTransactionSelector,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::from_request(wire.request, wire.selector).map_err(de::Error::custom)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "submit-transaction-request",
-    version = "1",
-    schema = "mfm.evm.submit_transaction_request"
-)]
-struct EvmSubmitTransactionRequestWire {
-    version: String,
-    template_ref: EvmWalletReference,
-    policy_ref: EvmWalletReference,
-    template: EvmWalletTransactionTemplate,
-    policy: EvmWalletPolicy,
-    wallet_domain_ref: EvmWalletReference,
-    tenant_scope_id: String,
-    route_generation_ref: EvmWalletReference,
-    chain_id: u64,
-    sender: String,
-    signer_binding_ref: EvmWalletReference,
-}
-
-/// Immutable semantic request committed before any wallet access.
-///
-/// This value contains no endpoint, credential, signature, signed envelope,
-/// provider body, key material, or secret-bearing path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EvmSubmitTransactionRequest {
-    wire: EvmSubmitTransactionRequestWire,
-    canonical: SchemaQualifiedCanonicalValue,
-}
-
-impl EvmSubmitTransactionRequest {
-    /// Returns the exact already committed request from validated state input.
-    pub fn from_input(input: &EvmSubmitTransactionInput) -> Self {
-        input.request.clone()
-    }
-
-    /// Constructs the exact request from separately referenced template and policy objects.
-    pub fn new(
-        template_ref: EvmWalletReference,
-        template: EvmWalletTransactionTemplate,
-        policy_ref: EvmWalletReference,
-        policy: EvmWalletPolicy,
-    ) -> Result<Self, EvmWalletError> {
-        template.validate()?;
-        policy.validate()?;
-        if template_ref != wallet_value_reference(&template)?
-            || policy_ref != wallet_value_reference(&policy)?
-        {
-            return Err(EvmWalletError::Invalid("request_object_reference"));
-        }
-        let wire = EvmSubmitTransactionRequestWire {
-            version: "mfm.evm.submit-transaction-request.v1".to_owned(),
-            template_ref,
-            policy_ref,
-            template,
-            wallet_domain_ref: policy.wallet_domain_ref().clone(),
-            tenant_scope_id: policy.tenant_scope_id()?.as_str().to_owned(),
-            route_generation_ref: policy.route_generation_ref().clone(),
-            chain_id: policy.chain_id(),
-            sender: policy.sender().to_owned(),
-            signer_binding_ref: policy.signer_binding_ref().clone(),
-            policy,
-        };
-        validate_request_wire(&wire)?;
-        let canonical = encode_boundary(&wire).map_err(|_| EvmWalletError::RequestEncoding)?;
-        let schema = <Self as mfm_values::MfmValue>::schema_id()
-            .map_err(|_| EvmWalletError::RequestEncoding)?;
-        let canonical = SchemaQualifiedCanonicalValue::new(schema, canonical.as_bytes())
-            .map_err(|_| EvmWalletError::RequestEncoding)?;
-        wire.policy
-            .validate_evidence_budget(canonical.as_bytes().len())?;
-        Ok(Self { wire, canonical })
-    }
-
-    /// Returns the fixed template.
-    pub const fn template(&self) -> &EvmWalletTransactionTemplate {
-        &self.wire.template
-    }
-
-    /// Returns the exact referenced wallet policy.
-    pub const fn policy(&self) -> &EvmWalletPolicy {
-        &self.wire.policy
-    }
-
-    /// Returns the immutable template object identity.
-    pub const fn template_ref(&self) -> &EvmWalletReference {
-        &self.wire.template_ref
-    }
-
-    /// Returns the immutable policy object identity.
-    pub const fn policy_ref(&self) -> &EvmWalletReference {
-        &self.wire.policy_ref
-    }
-
-    /// Reconstructs one exact unsigned candidate from an allocated nonce and fee ordinal.
-    pub fn unsigned_envelope(
-        &self,
-        allocated_nonce: u64,
-        fee_ordinal: u16,
-    ) -> Result<crate::UnsignedEip1559Envelope, EvmWalletError> {
-        if allocated_nonce < self.policy().initial_nonce()? {
-            return Err(EvmWalletError::Invalid("allocated_nonce"));
-        }
-        let fee = self
-            .policy()
-            .replacement()
-            .candidate(fee_ordinal)
-            .ok_or(EvmWalletError::Invalid("fee_ordinal"))?;
-        crate::UnsignedEip1559Envelope::new(
-            U256::from(self.policy().chain_id()),
-            U256::from(allocated_nonce),
-            fee.max_priority_fee_quantity()?,
-            fee.max_fee_quantity()?,
-            self.template().gas_limit_quantity()?,
-            self.template().action().to_alloy()?,
-            self.template().value_quantity()?,
-            self.template().access_list_alloy()?,
-            self.template().input_bytes()?,
-        )
-        .map_err(|_| EvmWalletError::InconsistentEvidence)
-    }
-
-    /// Strictly reconstructs a request from its canonical value.
-    pub fn strict_decode(canonical: &[u8]) -> Result<Self, EvmWalletError> {
-        let canonical =
-            mfm_canonical::PlainCanonicalJsonBytes::from_canonical_json_slice(canonical)
-                .map_err(|_| EvmWalletError::RequestEncoding)?;
-        let wire = decode_boundary::<EvmSubmitTransactionRequestWire>(&canonical)
-            .map_err(|_| EvmWalletError::RequestEncoding)?;
-        Self::new(
-            wire.template_ref,
-            wire.template,
-            wire.policy_ref,
-            wire.policy,
-        )
-    }
-}
-
-impl Serialize for EvmSubmitTransactionRequest {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.wire.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmSubmitTransactionRequest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let wire = EvmSubmitTransactionRequestWire::deserialize(deserializer)?;
-        Self::new(
-            wire.template_ref,
-            wire.template,
-            wire.policy_ref,
-            wire.policy,
-        )
-        .map_err(de::Error::custom)
-    }
-}
-
-impl mfm_values::MfmValue for EvmSubmitTransactionRequest {
-    fn schema_descriptor() -> mfm_values::Result<SchemaDescriptor> {
-        EvmSubmitTransactionRequestWire::schema_descriptor()
-    }
-
-    fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
-        EvmSubmitTransactionRequestWire::semantic_id()
-    }
-}
-
-impl CanonicalExecutorRequest for EvmSubmitTransactionRequest {
-    fn canonical_request(&self) -> &SchemaQualifiedCanonicalValue {
-        &self.canonical
-    }
-}
-
-/// One schedule-selected transaction candidate.
-///
-/// Candidate reconstruction is deterministic: every field other than the
-/// selected fee pair comes from the immutable template. The transaction hash
-/// is public signer/executor evidence; the signature and signed bytes remain
-/// transient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-transaction-candidate",
-    version = "1",
-    schema = "mfm.evm.wallet_transaction_candidate"
-)]
-pub struct EvmWalletTransactionCandidate {
-    request: EvmSubmitTransactionRequest,
-    allocated_nonce: String,
-    fee_ordinal: u16,
-    transaction_hash: String,
-}
-
-impl EvmWalletTransactionCandidate {
-    /// Binds one schedule ordinal to its exact signed transaction hash.
-    pub fn new(
-        request: EvmSubmitTransactionRequest,
-        allocated_nonce: u64,
-        fee_ordinal: u16,
-        transaction_hash: B256,
-    ) -> Result<Self, EvmWalletError> {
-        let candidate = Self {
-            request,
-            allocated_nonce: allocated_nonce.to_string(),
-            fee_ordinal,
-            transaction_hash: canonical_hash(transaction_hash),
-        };
-        candidate.validate()?;
-        Ok(candidate)
-    }
-
-    /// Returns the immutable request template.
-    pub fn template(&self) -> &EvmWalletTransactionTemplate {
-        self.request.template()
-    }
-
-    /// Returns the complete immutable semantic request.
-    pub const fn request(&self) -> &EvmSubmitTransactionRequest {
-        &self.request
-    }
-
-    /// Returns the immutable wallet policy.
-    pub fn policy(&self) -> &EvmWalletPolicy {
-        self.request.policy()
-    }
-
-    /// Returns the permanently allocated account nonce.
-    pub fn allocated_nonce(&self) -> Result<u64, EvmWalletError> {
-        parse_quantity(&self.allocated_nonce)?
-            .try_into()
-            .map_err(|_| EvmWalletError::Invalid("allocated_nonce"))
-    }
-
-    /// Returns the selected fee ordinal.
-    pub const fn fee_ordinal(&self) -> u16 {
-        self.fee_ordinal
-    }
-
-    /// Returns the exact selected fee pair.
-    pub fn fee(&self) -> Result<&EvmWalletFeeCandidate, EvmWalletError> {
-        self.policy()
-            .replacement()
-            .candidate(self.fee_ordinal)
-            .ok_or(EvmWalletError::Invalid("fee_ordinal"))
-    }
-
-    /// Returns the canonical signed transaction hash.
-    pub fn transaction_hash(&self) -> &str {
-        &self.transaction_hash
-    }
-
-    /// Parses the checked signed transaction hash.
-    pub fn transaction_hash_value(&self) -> Result<B256, EvmWalletError> {
-        parse_hash(&self.transaction_hash)
-    }
-
-    /// Returns this candidate's schema-qualified public content identity.
-    pub fn reference(&self) -> Result<EvmWalletReference, EvmWalletError> {
-        wallet_value_reference(self)
-    }
-
-    /// Reconstructs the exact unsigned Alloy envelope.
-    pub fn unsigned_envelope(&self) -> Result<crate::UnsignedEip1559Envelope, EvmWalletError> {
-        self.request
-            .unsigned_envelope(self.allocated_nonce()?, self.fee_ordinal)
-    }
-
-    /// Revalidates the immutable candidate relation.
-    pub fn validate(&self) -> Result<(), EvmWalletError> {
-        self.request.template().validate()?;
-        self.request.policy().validate()?;
-        if self.allocated_nonce()? < self.policy().initial_nonce()? {
-            return Err(EvmWalletError::Invalid("allocated_nonce"));
-        }
-        self.fee()?;
-        self.transaction_hash_value()?;
-        self.unsigned_envelope()?;
-        Ok(())
-    }
-}
-
-impl<'de> Deserialize<'de> for EvmWalletTransactionCandidate {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            request: EvmSubmitTransactionRequest,
-            allocated_nonce: String,
-            fee_ordinal: u16,
-            transaction_hash: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let candidate = Self {
-            request: wire.request,
-            allocated_nonce: wire.allocated_nonce,
-            fee_ordinal: wire.fee_ordinal,
-            transaction_hash: wire.transaction_hash,
-        };
-        candidate.validate().map_err(de::Error::custom)?;
-        Ok(candidate)
-    }
-}
-
 /// Exact inclusion placement of an observed transaction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -1767,32 +930,6 @@ impl EvmWalletObservedTransaction {
     /// Returns optional inclusion placement.
     pub const fn placement(&self) -> Option<&EvmWalletTransactionPlacement> {
         self.placement.as_ref()
-    }
-
-    /// Returns whether every immutable public field equals one candidate.
-    pub fn matches_candidate(
-        &self,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> Result<bool, EvmWalletError> {
-        self.validate()?;
-        candidate.validate()?;
-        let template = candidate.template();
-        let fee = candidate.fee()?;
-        let expected_to = template.action().call_destination()?.map(canonical_address);
-        Ok(self.transaction_hash == candidate.transaction_hash()
-            && self.transaction_type == EVM_WALLET_TRANSACTION_TYPE
-            && parse_quantity(&self.chain_id)? == U256::from(candidate.policy().chain_id())
-            && parse_quantity(&self.nonce)? == U256::from(candidate.allocated_nonce()?)
-            && parse_address(&self.from)? == candidate.policy().sender_address()?
-            && self.to == expected_to
-            && parse_quantity(&self.value)? == template.value_quantity()?
-            && parse_bytes(&self.input, EVM_WALLET_DATA_MAX_BYTES)?
-                == template.input_bytes()?.to_vec()
-            && parse_quantity(&self.gas_limit)? == template.gas_limit_quantity()?
-            && parse_quantity(&self.max_fee_per_gas)? == fee.max_fee_quantity()?
-            && parse_quantity(&self.max_priority_fee_per_gas)?
-                == fee.max_priority_fee_quantity()?
-            && self.access_list == template.access_list)
     }
 
     fn validate(&self) -> Result<(), EvmWalletError> {
@@ -2098,46 +1235,6 @@ impl EvmWalletReceipt {
         &self.logs
     }
 
-    /// Returns whether receipt and transaction fields exactly match a candidate.
-    pub fn matches_candidate(
-        &self,
-        candidate: &EvmWalletTransactionCandidate,
-        transaction: &EvmWalletObservedTransaction,
-    ) -> Result<bool, EvmWalletError> {
-        self.validate()?;
-        if !transaction.matches_candidate(candidate)? {
-            return Ok(false);
-        }
-        let Some(placement) = transaction.placement() else {
-            return Ok(false);
-        };
-        if self.transaction_hash != candidate.transaction_hash()
-            || self.transaction_hash != transaction.transaction_hash
-            || self.block != *placement.block()
-            || parse_quantity(&self.transaction_index)? != placement.transaction_index_quantity()?
-            || parse_address(&self.from)? != candidate.policy().sender_address()?
-            || self.to
-                != candidate
-                    .template()
-                    .action()
-                    .call_destination()?
-                    .map(canonical_address)
-        {
-            return Ok(false);
-        }
-
-        let expected_create = match (candidate.template().action(), self.status) {
-            (EvmWalletTransactionAction::Create, EvmWalletReceiptStatus::Success) => {
-                let nonce = candidate.allocated_nonce()?;
-                Some(canonical_address(
-                    candidate.policy().sender_address()?.create(nonce),
-                ))
-            }
-            _ => None,
-        };
-        Ok(self.contract_address == expected_create)
-    }
-
     fn validate(&self) -> Result<(), EvmWalletError> {
         parse_hash(&self.transaction_hash)?;
         parse_quantity(&self.transaction_index)?;
@@ -2209,488 +1306,67 @@ impl<'de> Deserialize<'de> for EvmWalletReceipt {
         Ok(receipt)
     }
 }
-
-/// One typed returned target-operation result.
-///
-/// Safe transport, cancellation, and generation-fence failures use the
-/// generic executor failure algebra and therefore do not appear in this
-/// domain union.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-broadcast-status",
-    version = "1",
-    schema = "mfm.evm.wallet_broadcast_status"
-)]
-pub enum EvmWalletBroadcastStatus {
-    /// The provider returned the exact candidate hash.
-    Accepted,
-    /// The provider response matched the sole reviewed already-known classifier.
-    AlreadyKnown,
-}
-
-/// One typed result returned by exactly one wallet target operation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+/// Closed, payload-free submission failure contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
-    name = "wallet-attempt-result",
+    name = "submission-failure",
     version = "1",
-    schema = "mfm.evm-wallet-attempt-result"
+    schema = "mfm.evm.submission_failure"
 )]
-// The terminal composite deliberately remains directly nested in the frozen
-// result union; an indirection wrapper would change that persisted schema.
-#[allow(clippy::large_enum_variant)]
-pub enum EvmWalletAttemptResult {
-    /// One `eth_sendRawTransaction` exchange.
-    Broadcast {
-        /// Content identity of the exact candidate whose transient bytes were sent.
-        candidate_ref: EvmWalletReference,
-        /// Exact locally derived transaction hash.
-        transaction_hash: String,
-        /// Closed accepted or already-known result.
-        status: EvmWalletBroadcastStatus,
-        /// Exact classifier identity, present only for already-known.
-        classifier_ref: Option<EvmWalletReference>,
-    },
-    /// Exact-hash transaction lookup returned present or absent.
-    TransactionLookup {
-        /// Exact candidate hash queried.
-        transaction_hash: String,
-        /// Returned public transaction fields, or `None`.
-        transaction: Option<EvmWalletObservedTransaction>,
-    },
-    /// Exact-hash receipt lookup returned present or absent.
-    ReceiptLookup {
-        /// Exact candidate hash queried.
-        transaction_hash: String,
-        /// Fresh receipt, or `None` after disappearance/reorganization.
-        receipt: Option<EvmWalletReceipt>,
-    },
-    /// Finalized-tag block lookup after one fresh receipt.
-    FinalizedHead {
-        /// Fresh strict block returned for the `finalized` tag.
-        block: EvmBlockAnchor,
-    },
-    /// Inclusion-number block lookup; only `terminal: Some` is terminal.
-    CanonicalInclusion {
-        /// Current strict block at the receipt inclusion number, or `None`.
-        block: Option<EvmBlockAnchor>,
-        /// Complete terminal composite when every exact relation is fresh.
-        terminal: Option<EvmWalletTerminalEvidence>,
-    },
+pub enum EvmSubmissionFailure {
+    /// The bounded transport was unavailable.
+    TransportUnavailable,
+    /// The selected provider was unavailable.
+    ProviderUnavailable,
+    /// The qualified signer was unavailable.
+    SignerUnavailable,
+    /// The wallet nonce authority was unavailable.
+    NonceAuthorityUnavailable,
+    /// The destination definitely rejected the candidate.
+    DestinationRejected,
+    /// The bounded observation policy was exhausted.
+    ObservationPolicyExhausted,
+    /// The bounded replacement policy was exhausted.
+    ReplacementPolicyExhausted,
+    /// Another submission intent currently owns the nonce domain.
+    NonceDomainBusy,
+    /// Provider pending state diverged from the exclusive local lineage.
+    NonceLineageDiverged,
+    /// The nonce space cannot advance without overflow.
+    NonceCapacityExhausted,
+    /// The canonically included transaction reverted.
+    ExecutionReverted,
 }
 
-impl EvmWalletAttemptResult {
-    /// Revalidates the exact typed result without inferring finality.
-    pub fn validate(&self) -> Result<(), EvmWalletError> {
-        match self {
-            Self::Broadcast {
-                candidate_ref,
-                transaction_hash,
-                status,
-                classifier_ref,
-            } => {
-                candidate_ref.to_content_ref()?;
-                parse_hash(transaction_hash)?;
-                match (status, classifier_ref) {
-                    (EvmWalletBroadcastStatus::Accepted, None) => {}
-                    (EvmWalletBroadcastStatus::AlreadyKnown, Some(reference)) => {
-                        reference.to_content_ref()?;
-                    }
-                    _ => {
-                        return Err(EvmWalletError::InconsistentEvidence);
-                    }
-                }
-            }
-            Self::TransactionLookup {
-                transaction_hash,
-                transaction,
-            } => {
-                parse_hash(transaction_hash)?;
-                if let Some(transaction) = transaction {
-                    transaction.validate()?;
-                    if transaction.transaction_hash() != transaction_hash {
-                        return Err(EvmWalletError::InconsistentEvidence);
-                    }
-                }
-            }
-            Self::ReceiptLookup {
-                transaction_hash,
-                receipt,
-            } => {
-                parse_hash(transaction_hash)?;
-                if let Some(receipt) = receipt {
-                    receipt.validate()?;
-                    if receipt.transaction_hash() != transaction_hash {
-                        return Err(EvmWalletError::InconsistentEvidence);
-                    }
-                }
-            }
-            Self::FinalizedHead { block } => {
-                block
-                    .validate()
-                    .map_err(|_| EvmWalletError::Invalid("finalized_head"))?;
-            }
-            Self::CanonicalInclusion { block, terminal } => {
-                if let Some(block) = block {
-                    block
-                        .validate()
-                        .map_err(|_| EvmWalletError::Invalid("inclusion_block"))?;
-                }
-                if let Some(terminal) = terminal {
-                    terminal.outcome()?;
-                    if block.as_ref() != Some(terminal.inclusion_block()) {
-                        return Err(EvmWalletError::InconsistentEvidence);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Verifies a candidate-bound result against the exact immutable request.
-    pub fn validate_for_candidate(
-        &self,
-        candidate: &EvmWalletTransactionCandidate,
-    ) -> Result<(), EvmWalletError> {
-        self.validate()?;
-        candidate.validate()?;
-        match self {
-            Self::Broadcast {
-                candidate_ref,
-                transaction_hash,
-                status,
-                classifier_ref,
-            } => {
-                if candidate_ref != &candidate.reference()?
-                    || transaction_hash != candidate.transaction_hash()
-                {
-                    return Err(EvmWalletError::InconsistentEvidence);
-                }
-                match status {
-                    EvmWalletBroadcastStatus::Accepted => {}
-                    EvmWalletBroadcastStatus::AlreadyKnown => {
-                        if classifier_ref.as_ref()
-                            != Some(candidate.policy().already_known_classifier_ref())
-                        {
-                            return Err(EvmWalletError::InconsistentEvidence);
-                        }
-                    }
-                }
-            }
-            Self::TransactionLookup {
-                transaction_hash,
-                transaction,
-            } => {
-                if transaction_hash != candidate.transaction_hash() {
-                    return Err(EvmWalletError::InconsistentEvidence);
-                }
-                if let Some(transaction) = transaction {
-                    if !transaction.matches_candidate(candidate)? {
-                        return Err(EvmWalletError::InconsistentEvidence);
-                    }
-                }
-            }
-            Self::ReceiptLookup {
-                transaction_hash,
-                receipt,
-            } => {
-                if transaction_hash != candidate.transaction_hash() {
-                    return Err(EvmWalletError::InconsistentEvidence);
-                }
-                if receipt.as_ref().is_some_and(|receipt| {
-                    receipt.transaction_hash() != candidate.transaction_hash()
-                }) {
-                    return Err(EvmWalletError::InconsistentEvidence);
-                }
-            }
-            Self::FinalizedHead { .. } | Self::CanonicalInclusion { .. } => {}
-        }
-        Ok(())
-    }
-
-    /// Returns whether this exact result proves the frozen terminal relation.
-    pub fn terminal_outcome(&self) -> Result<Option<EvmTransactionOutcome>, EvmWalletError> {
-        self.validate()?;
-        let Self::CanonicalInclusion {
-            terminal: Some(terminal),
-            ..
-        } = self
-        else {
-            return Ok(None);
-        };
-        terminal.outcome().map(Some)
-    }
-
-    /// Returns the complete terminal composite only for the terminal variant.
-    pub fn terminal_evidence(&self) -> Result<Option<&EvmWalletTerminalEvidence>, EvmWalletError> {
-        self.validate()?;
-        let Self::CanonicalInclusion { terminal, .. } = self else {
-            return Ok(None);
-        };
-        Ok(terminal.as_ref())
-    }
-}
-
-/// Complete domain evidence behind one executor terminal tombstone.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "wallet-terminal-evidence",
-    version = "1",
-    schema = "mfm.evm.wallet_terminal_evidence"
-)]
-pub struct EvmWalletTerminalEvidence {
-    request: EvmSubmitTransactionRequest,
-    attempt_result_refs: Vec<EvmWalletReference>,
-    candidate_lineage: Vec<EvmWalletTransactionCandidate>,
-    candidate: EvmWalletTransactionCandidate,
-    transaction: EvmWalletObservedTransaction,
-    receipt: EvmWalletReceipt,
-    finalized_head: EvmBlockAnchor,
-    inclusion_block: EvmBlockAnchor,
-    executor_generation_ref: EvmWalletReference,
-    generation_fence_ref: EvmWalletReference,
-    assurance_policy_ref: EvmWalletReference,
-}
-
-impl EvmWalletTerminalEvidence {
-    /// Constructs terminal evidence only from a sufficient final result.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        request: EvmSubmitTransactionRequest,
-        attempt_result_refs: Vec<EvmWalletReference>,
-        candidate_lineage: Vec<EvmWalletTransactionCandidate>,
-        candidate: EvmWalletTransactionCandidate,
-        transaction: EvmWalletObservedTransaction,
-        receipt: EvmWalletReceipt,
-        finalized_head: EvmBlockAnchor,
-        inclusion_block: EvmBlockAnchor,
-        executor_generation_ref: EvmWalletReference,
-        generation_fence_ref: EvmWalletReference,
-        assurance_policy_ref: EvmWalletReference,
-    ) -> Result<Self, EvmWalletError> {
-        let evidence = Self {
-            request,
-            attempt_result_refs,
-            candidate_lineage,
-            candidate,
-            transaction,
-            receipt,
-            finalized_head,
-            inclusion_block,
-            executor_generation_ref,
-            generation_fence_ref,
-            assurance_policy_ref,
-        };
-        evidence.outcome()?;
-        Ok(evidence)
-    }
-
-    /// Returns the exact immutable semantic request.
-    pub const fn request(&self) -> &EvmSubmitTransactionRequest {
-        &self.request
-    }
-
-    /// Returns the candidate whose receipt is terminal.
-    pub const fn candidate(&self) -> &EvmWalletTransactionCandidate {
-        &self.candidate
-    }
-
-    /// Returns the canonical inclusion block freshly re-read by number.
-    pub const fn inclusion_block(&self) -> &EvmBlockAnchor {
-        &self.inclusion_block
-    }
-
-    /// Returns the executor durable generation used for every attempt.
-    pub const fn executor_generation_ref(&self) -> &EvmWalletReference {
-        &self.executor_generation_ref
-    }
-
-    /// Returns the external generation-fence attestation.
-    pub const fn generation_fence_ref(&self) -> &EvmWalletReference {
-        &self.generation_fence_ref
-    }
-
-    /// Returns the terminal assurance policy.
-    pub const fn assurance_policy_ref(&self) -> &EvmWalletReference {
-        &self.assurance_policy_ref
-    }
-
-    /// Purely verifies and projects the terminal domain outcome.
-    pub fn outcome(&self) -> Result<EvmTransactionOutcome, EvmWalletError> {
-        self.executor_generation_ref.to_content_ref()?;
-        self.generation_fence_ref.to_content_ref()?;
-        self.assurance_policy_ref.to_content_ref()?;
-        self.request.template().validate()?;
-        self.request.policy().validate()?;
-        if self.attempt_result_refs.is_empty()
-            || self.attempt_result_refs.len()
-                > usize::try_from(self.request.policy().max_attempts()?)
-                    .map_err(|_| EvmWalletError::BoundExceeded("attempt_result_refs"))?
-            || self
-                .attempt_result_refs
-                .iter()
-                .any(|reference| reference.to_content_ref().is_err())
-            || self.candidate.request() != &self.request
-            || &self.assurance_policy_ref != self.request.policy().assurance_policy_ref()
-        {
-            return Err(EvmWalletError::InconsistentEvidence);
-        }
-        validate_candidate_lineage(&self.candidate_lineage, &self.candidate)?;
-        if !self.transaction.matches_candidate(&self.candidate)?
-            || !self
-                .receipt
-                .matches_candidate(&self.candidate, &self.transaction)?
-            || self.inclusion_block != *self.receipt.block()
-            || parse_quantity(self.finalized_head.number())?
-                < parse_quantity(self.receipt.block().number())?
-        {
-            return Err(EvmWalletError::InconsistentEvidence);
-        }
-        self.finalized_head
-            .validate()
-            .map_err(|_| EvmWalletError::Invalid("finalized_head"))?;
-        self.inclusion_block
-            .validate()
-            .map_err(|_| EvmWalletError::Invalid("inclusion_block"))?;
-        Ok(EvmTransactionOutcome::from_receipt(&self.receipt))
-    }
-}
-
-/// Successful semantic result of one finalized EVM transaction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "transaction-outcome",
-    version = "1",
-    schema = "mfm.evm.transaction_outcome"
-)]
-pub enum EvmTransactionOutcome {
-    /// The finalized top-level execution succeeded.
-    Succeeded {
-        /// Exact signed transaction hash.
-        transaction_hash: String,
-        /// Exact canonical inclusion block.
-        block: EvmBlockAnchor,
-        /// Canonical transaction index.
-        transaction_index: String,
-        /// Direct-create address, when applicable.
-        contract_address: Option<String>,
-        /// Canonical gas consumed.
-        gas_used: String,
-        /// Complete coherent receipt logs.
-        logs: Vec<EvmWalletReceiptLog>,
-    },
-    /// The finalized top-level execution reverted.
-    Reverted {
-        /// Exact signed transaction hash.
-        transaction_hash: String,
-        /// Exact canonical inclusion block.
-        block: EvmBlockAnchor,
-        /// Canonical transaction index.
-        transaction_index: String,
-        /// Canonical gas consumed.
-        gas_used: String,
-    },
-}
-
-impl EvmTransactionOutcome {
-    fn from_receipt(receipt: &EvmWalletReceipt) -> Self {
-        match receipt.status {
-            EvmWalletReceiptStatus::Success => Self::Succeeded {
-                transaction_hash: receipt.transaction_hash.clone(),
-                block: receipt.block.clone(),
-                transaction_index: receipt.transaction_index.clone(),
-                contract_address: receipt.contract_address.clone(),
-                gas_used: receipt.gas_used.clone(),
-                logs: receipt.logs.clone(),
-            },
-            EvmWalletReceiptStatus::Reverted => Self::Reverted {
-                transaction_hash: receipt.transaction_hash.clone(),
-                block: receipt.block.clone(),
-                transaction_index: receipt.transaction_index.clone(),
-                gas_used: receipt.gas_used.clone(),
-            },
-        }
-    }
-
-    /// Returns the finalized transaction hash.
-    pub fn transaction_hash(&self) -> &str {
-        match self {
-            Self::Succeeded {
-                transaction_hash, ..
-            }
-            | Self::Reverted {
-                transaction_hash, ..
-            } => transaction_hash,
-        }
-    }
-
-    /// Returns the exact canonical inclusion block.
-    pub const fn block(&self) -> &EvmBlockAnchor {
-        match self {
-            Self::Succeeded { block, .. } | Self::Reverted { block, .. } => block,
-        }
-    }
-}
-
-/// Value-only public output of the transaction entry point.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PublicOutputs)]
-#[serde(deny_unknown_fields)]
-#[mfm(schema = "mfm.evm.submit_transaction_public_outputs", version = "1")]
-pub struct EvmSubmitTransactionPublicOutputs {
-    /// Finalized success or revert.
-    pub outcome: EvmTransactionOutcome,
-}
-
-/// Uninhabited-by-construction semantic failure contract.
-///
-/// Revert is a successful terminal output. Invalid or insufficient evidence
-/// uses the generic evidence verdict and never fabricates a domain failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-#[mfm(
-    namespace = "mfm.evm",
-    name = "submit-transaction-failure",
-    version = "1",
-    schema = "mfm.evm.submit_transaction_failure"
-)]
-pub struct EvmSubmitTransactionFailure {}
-
-fn validate_request_wire(wire: &EvmSubmitTransactionRequestWire) -> Result<(), EvmWalletError> {
-    wire.template.validate()?;
-    wire.policy.validate()?;
-    if wire.version != "mfm.evm.submit-transaction-request.v1"
-        || wire.template_ref != wallet_value_reference(&wire.template)?
-        || wire.policy_ref != wallet_value_reference(&wire.policy)?
-        || wire.wallet_domain_ref != *wire.policy.wallet_domain_ref()
-        || wire.tenant_scope_id != wire.policy.tenant_scope_id()?.as_str()
-        || wire.route_generation_ref != *wire.policy.route_generation_ref()
-        || wire.chain_id != wire.policy.chain_id()
-        || wire.sender != wire.policy.sender()
-        || wire.signer_binding_ref != *wire.policy.signer_binding_ref()
+impl<'de> Deserialize<'de> for EvmSubmissionFailure {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
     {
-        return Err(EvmWalletError::InconsistentEvidence);
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: String,
+        }
+
+        match Wire::deserialize(deserializer)?.kind.as_str() {
+            "transport_unavailable" => Ok(Self::TransportUnavailable),
+            "provider_unavailable" => Ok(Self::ProviderUnavailable),
+            "signer_unavailable" => Ok(Self::SignerUnavailable),
+            "nonce_authority_unavailable" => Ok(Self::NonceAuthorityUnavailable),
+            "destination_rejected" => Ok(Self::DestinationRejected),
+            "observation_policy_exhausted" => Ok(Self::ObservationPolicyExhausted),
+            "replacement_policy_exhausted" => Ok(Self::ReplacementPolicyExhausted),
+            "nonce_domain_busy" => Ok(Self::NonceDomainBusy),
+            "nonce_lineage_diverged" => Ok(Self::NonceLineageDiverged),
+            "nonce_capacity_exhausted" => Ok(Self::NonceCapacityExhausted),
+            "execution_reverted" => Ok(Self::ExecutionReverted),
+            _ => Err(de::Error::custom("unknown EVM submission failure")),
+        }
     }
-    Ok(())
 }
-
-fn wallet_value_reference<T>(value: &T) -> Result<EvmWalletReference, EvmWalletError>
-where
-    T: mfm_values::MfmValue,
-{
-    let canonical = encode_boundary(value).map_err(|_| EvmWalletError::RequestEncoding)?;
-    let schema = T::schema_id().map_err(|_| EvmWalletError::RequestEncoding)?;
-    let reference =
-        boundary_content_ref(schema, &canonical).map_err(|_| EvmWalletError::RequestEncoding)?;
-    Ok(EvmWalletReference::from_content_ref(reference))
-}
-
 fn wallet_descriptor_canonical(
     value: &impl Serialize,
 ) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
@@ -2713,35 +1389,6 @@ fn wallet_descriptor_ref(
         boundary_content_ref(schema, canonical).map_err(|_| EvmWalletError::RequestEncoding)?;
     Ok(EvmWalletReference::from_content_ref(reference))
 }
-
-fn validate_candidate_lineage(
-    lineage: &[EvmWalletTransactionCandidate],
-    selected: &EvmWalletTransactionCandidate,
-) -> Result<(), EvmWalletError> {
-    if lineage.is_empty() || lineage.len() > EVM_WALLET_REPLACEMENT_LIMIT {
-        return Err(EvmWalletError::InconsistentEvidence);
-    }
-    for (index, candidate) in lineage.iter().enumerate() {
-        candidate.validate()?;
-        if usize::from(candidate.fee_ordinal()) != index
-            || candidate.request() != selected.request()
-        {
-            return Err(EvmWalletError::InconsistentEvidence);
-        }
-    }
-    if lineage.last() != Some(selected) {
-        return Err(EvmWalletError::InconsistentEvidence);
-    }
-    let unique_hashes = lineage
-        .iter()
-        .map(EvmWalletTransactionCandidate::transaction_hash)
-        .collect::<BTreeSet<_>>();
-    if unique_hashes.len() != lineage.len() {
-        return Err(EvmWalletError::InconsistentEvidence);
-    }
-    Ok(())
-}
-
 fn validate_access_list(entries: &[EvmWalletAccessListEntry]) -> Result<(), EvmWalletError> {
     if entries.len() > EVM_WALLET_ACCESS_LIST_MAX_ENTRIES {
         return Err(EvmWalletError::BoundExceeded("access_list_entries"));

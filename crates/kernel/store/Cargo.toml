@@ -2,6 +2,7 @@
 name = "mfm-store"
 version = "0.1.0"
 edition = "2021"
+autotests = false
 description = "Typed kernel store contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
@@ -22,12 +23,12 @@ backend-conformance = ["test-support"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-executor = { path = "../executor" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-spec = { path = "../spec" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
@@ -37,7 +38,3 @@ mfm-values = { path = "../values" }
 serde = { workspace = true }
 tokio = { workspace = true }
 trybuild = "1.0"
-
-[[test]]
-name = "memory_conformance"
-path = "tests/memory_conformance.rs"

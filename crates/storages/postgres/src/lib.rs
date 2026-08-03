@@ -1,29 +1,47 @@
 #![warn(missing_docs)]
-//! PostgreSQL representation of the recoverability-v1 committed journal.
+//! PostgreSQL representation of structured runtime history and configuration.
 //!
-//! Authority-bearing use starts only through [`open_authoritative`]. Schema migration uses the
+//! Authority-bearing use starts through [`open_structured_authoritative`] or the narrower
+//! application and configuration-maintenance assembly functions. Schema migration uses the
 //! separate owner path exposed by [`PostgresSchema`].
 
-mod configured_values;
+mod configuration;
 mod error;
-mod journal_store;
 mod qualification;
 mod schema;
-mod store;
+mod structured;
 
+pub use configuration::PostgresConfigurationHistoryBackend;
 pub use error::{PostgresStoreError, Result};
 #[cfg(any(test, feature = "parity-tests"))]
 pub use qualification::TestAuthoritativeWriterFence;
 pub use qualification::{
-    open_authoritative, AuthoritativeWriterContext, AuthoritativeWriterFence,
-    AuthoritativeWriterFenceFuture,
+    open_configuration_maintenance, open_structured_authoritative,
+    open_structured_authoritative_application, open_structured_authoritative_with_configuration,
+    AuthoritativeWriterContext, AuthoritativeWriterFence, AuthoritativeWriterFenceFuture,
 };
 pub use schema::PostgresSchema;
-#[doc(hidden)]
-pub use store::PostgresRunJournalBackend;
-#[cfg(any(test, feature = "parity-tests"))]
-#[doc(hidden)]
-pub use store::{TestAdmissionRunLockHook, TestCommitFailurePoint};
+pub use structured::PostgresStructuredHistoryBackend;
 
 #[cfg(all(test, feature = "parity-tests"))]
-mod tests;
+mod tests {
+    use sqlx::postgres::PgPoolOptions;
+
+    use crate::schema::validate_authoritative_schema;
+
+    #[tokio::test]
+    #[ignore = "the managed SQLx task probes its caller-selected schema"]
+    async fn verification_probe_accepts_the_current_authoritative_schema() {
+        let database_url =
+            std::env::var("DATABASE_URL").expect("DATABASE_URL is required for the schema probe");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("connect the caller-selected schema");
+        validate_authoritative_schema(&pool)
+            .await
+            .expect("current schema must match the authoritative structured-history model");
+        pool.close().await;
+    }
+}

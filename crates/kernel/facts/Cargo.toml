@@ -19,6 +19,9 @@ path = "src/lib.rs"
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
+mfm-program-derive = { path = "../program-derive" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

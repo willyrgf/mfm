@@ -17,8 +17,9 @@ use serde_json::value::RawValue;
 use zeroize::Zeroizing;
 
 use super::{
-    EVM_BLOCK_BY_NUMBER_METHOD, EVM_RECEIPT_BY_HASH_METHOD, EVM_SEND_RAW_TRANSACTION_METHOD,
-    EVM_TRANSACTION_BY_HASH_METHOD, EXACT_ALREADY_KNOWN_CODE, EXACT_ALREADY_KNOWN_MESSAGE,
+    EVM_BLOCK_BY_NUMBER_METHOD, EVM_PENDING_NONCE_METHOD, EVM_RECEIPT_BY_HASH_METHOD,
+    EVM_SEND_RAW_TRANSACTION_METHOD, EVM_TRANSACTION_BY_HASH_METHOD, EXACT_ALREADY_KNOWN_CODE,
+    EXACT_ALREADY_KNOWN_MESSAGE,
 };
 
 #[cfg(test)]
@@ -64,6 +65,9 @@ pub(super) enum ExactRpcRequest {
     ConfirmAnchor {
         number: U256,
     },
+    PendingNonce {
+        sender: Address,
+    },
     SendRawTransaction {
         signed: TransientSignedEip1559Envelope,
     },
@@ -87,6 +91,7 @@ pub(super) enum ExactRpcOperation {
     TokenDecimals,
     TokenBalance,
     ConfirmAnchor,
+    PendingNonce,
     SendRawTransaction,
     TransactionByHash,
     ReceiptByHash,
@@ -104,6 +109,7 @@ impl ExactRpcOperation {
             Self::NativeBalance => "eth_getBalance",
             Self::TokenDecimals | Self::TokenBalance => "eth_call",
             Self::ConfirmAnchor => EVM_BLOCK_BY_NUMBER_METHOD,
+            Self::PendingNonce => EVM_PENDING_NONCE_METHOD,
             Self::SendRawTransaction => EVM_SEND_RAW_TRANSACTION_METHOD,
             Self::TransactionByHash => EVM_TRANSACTION_BY_HASH_METHOD,
             Self::ReceiptByHash => EVM_RECEIPT_BY_HASH_METHOD,
@@ -119,6 +125,7 @@ impl ExactRpcOperation {
                 | Self::TokenDecimals
                 | Self::TokenBalance
                 | Self::ConfirmAnchor
+                | Self::PendingNonce
         )
     }
 }
@@ -189,6 +196,11 @@ impl ExactRpcRequest {
                 push_quantity(&mut body, number);
                 body.extend_from_slice(br#",false]"#);
             }
+            Self::PendingNonce { sender } => {
+                body.extend_from_slice(br#"["0x"#);
+                push_hex(&mut body, sender.as_slice());
+                body.extend_from_slice(br#"","pending"]"#);
+            }
             Self::SendRawTransaction { signed } => {
                 body.extend_from_slice(br#"["0x"#);
                 push_hex(&mut body, signed.bytes());
@@ -218,6 +230,7 @@ impl ExactRpcRequest {
             Self::TokenDecimals { .. } => ExactRpcOperation::TokenDecimals,
             Self::TokenBalance { .. } => ExactRpcOperation::TokenBalance,
             Self::ConfirmAnchor { .. } => ExactRpcOperation::ConfirmAnchor,
+            Self::PendingNonce { .. } => ExactRpcOperation::PendingNonce,
             Self::SendRawTransaction { .. } => ExactRpcOperation::SendRawTransaction,
             Self::TransactionByHash { .. } => ExactRpcOperation::TransactionByHash,
             Self::ReceiptByHash { .. } => ExactRpcOperation::ReceiptByHash,
@@ -256,6 +269,7 @@ impl ExactRpcRequest {
             Self::ConfirmAnchor { number } | Self::InclusionBlock { number } => {
                 12 + quantity_digits_len(*number)
             }
+            Self::PendingNonce { .. } => br#"["0x"#.len() + 40 + br#"","pending"]"#.len(),
             Self::SendRawTransaction { signed } => {
                 signed_transaction_params_len(signed.bytes().len())?
             }
@@ -315,6 +329,7 @@ pub(super) enum ExactRpcResponse {
     TokenDecimals(u8),
     TokenBalance(U256),
     ConfirmAnchor(EvmBlockAnchor),
+    PendingNonce(U256),
     SendRawTransaction(WalletBroadcastResponse),
     TransactionByHash(Option<EvmWalletObservedTransaction>),
     ReceiptByHash(Option<EvmWalletReceipt>),
@@ -427,6 +442,9 @@ fn decode_result(operation: ExactRpcOperation, raw: &RawValue) -> Result<ExactRp
             borrowed_json_string(raw.get().as_bytes()).ok_or(())?,
         )?)),
         ExactRpcOperation::ConfirmAnchor => Ok(ExactRpcResponse::ConfirmAnchor(parse_block(raw)?)),
+        ExactRpcOperation::PendingNonce => Ok(ExactRpcResponse::PendingNonce(parse_quantity(
+            borrowed_json_string(raw.get().as_bytes()).ok_or(())?,
+        )?)),
         ExactRpcOperation::SendRawTransaction => {
             let hash = parse_hash(borrowed_json_string(raw.get().as_bytes()).ok_or(())?)?;
             Ok(ExactRpcResponse::SendRawTransaction(

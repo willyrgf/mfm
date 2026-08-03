@@ -1,0 +1,5 @@
+error[E0599]: no method named `admit_run` found for reference `&StructuredRunHistoryReader<PostgresStructuredHistoryBackend>` in the current scope
+ --> tests/ui/structured/fail/run_history_reader_cannot_append.rs:9:12
+  |
+9 |     reader.admit_run(unavailable()).await;
+  |            ^^^^^^^^^ method not found in `&StructuredRunHistoryReader<PostgresStructuredHistoryBackend>`

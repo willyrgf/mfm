@@ -91,6 +91,12 @@ Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its
 declared service requirements; it does not inherit predecessor tasks that an
 enclosing composite adds. Use a leaf only when its test is independently valid.
 
+The `evm-postgres-submission-qualification` leaf is the sole production-scale
+exception to the normal test profile: it runs its unchanged two-process integration
+target with `cargo test --release`. The optimized build keeps the full certified EVM
+expansion, greater-than-16-MiB normalized history admission, and restart proof within
+the managed task bound; it is not a separate implementation or reduced fixture.
+
 For repeated parity debugging, the incremental lane can be faster: start the
 required service once, set explicit variables such as `DATABASE_URL` or
 provider values referenced by an explicit `--runtime-config <PATH>`, and
@@ -172,7 +178,7 @@ nix develop -c cargo clean --target-dir target/verification
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
 | `nix run .#check` | Run formatting, Clippy, architecture/Cargo metadata contracts, and offline SQLx checking. |
 | `nix run .#test` | Run main-workspace Nextest and doctests without managed external services. |
-| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative runtime schema model (including a hostile mutation probe), run the recoverability-v1 journal corpus/conformance target, and run the fenced executor PostgreSQL qualification matrix. |
+| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative run-history and wallet schemas (including a hostile mutation probe), run structured-history conformance, and run the wallet-nonce PostgreSQL qualification matrix. |
 | `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or

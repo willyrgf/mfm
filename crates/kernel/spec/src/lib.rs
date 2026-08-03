@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! Canonical recoverability-v1 program, planning, and execution contracts.
+//! Canonical structured-program and public entry-point contracts.
 //!
 //! This crate contains value contracts only. It does not author programs, run
 //! planners, execute states, bind live capabilities, or grant admission
@@ -20,15 +20,12 @@ pub enum SpecError {
     /// A canonical value violated the frozen recoverability contract.
     #[error("invalid recoverability contract value: {0}")]
     Contract(String),
-    /// A graph or manifest invariant was violated.
+    /// A structured-program or public-contract invariant was violated.
     #[error("invalid specification invariant: {0}")]
     Invariant(String),
     /// A shared retained-value contract failed exact validation.
     #[error(transparent)]
     RetainedValueContract(#[from] mfm_values::ValueError),
-    /// A journal-owned retained-value contract could not be reconstructed.
-    #[error(transparent)]
-    Journal(#[from] mfm_journal::JournalError),
 }
 
 impl From<IdentityError> for SpecError {
@@ -61,6 +58,8 @@ pub fn exact_content_ref(
     .map_err(Into::into)
 }
 
-mod model;
+mod public;
+pub mod structured;
 
-pub use model::*;
+pub use public::*;
+pub use structured::CertifiedFactSlot;

@@ -10,7 +10,7 @@
 mod error;
 
 mod secure_key;
-use self::secure_key::SecureKey;
+pub(crate) use self::secure_key::SecureKey;
 mod model;
 use self::model::{ArgonParams, AuditEvent, AuditLogEntry, KeyEntry, KeystoreFile, KeystoreHeader};
 pub use self::model::{KeyInfo, KeyType, KeystoreConfig};

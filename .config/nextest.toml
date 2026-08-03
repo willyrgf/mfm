@@ -13,7 +13,8 @@ trybuild-ui = { max-threads = 1 }
 filter = '''
 binary(=capability_ui)
 | binary(=derive_ui)
-| binary(=signing_ui)
-| binary(=application_privacy_ui)
+| binary(=signing-ui)
+| binary(=application-privacy-ui)
+| binary(=structured-ui)
 '''
 test-group = "trybuild-ui"

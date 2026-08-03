@@ -285,7 +285,7 @@ fn evm_native_scale_is_explicit_and_bitcoin_cannot_carry_one() {
 }
 
 #[test]
-fn portfolio_cardinality_bounds_fail_before_graph_expansion() {
+fn portfolio_cardinality_bounds_fail_before_structured_authoring() {
     for (field, limit, collection) in [
         ("networks", PORTFOLIO_NETWORK_LIMIT, "network"),
         ("wallets", PORTFOLIO_WALLET_LIMIT, "wallet"),

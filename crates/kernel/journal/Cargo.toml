@@ -2,7 +2,7 @@
 name = "mfm-journal"
 version = "0.1.0"
 edition = "2021"
-description = "Annex-backed recoverability journal contracts for MFM"
+description = "Canonical five-family structured RunHistory contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -18,11 +18,7 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
-mfm-values = { path = "../values" }
-thiserror = { workspace = true }
-
-[dev-dependencies]
+serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }

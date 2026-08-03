@@ -1,17 +1,11 @@
 # mfm-spec
 
-Frozen recoverability-v1 value contracts for authored programs, planning profiles, expanded
-graphs, implementation manifests, and certificates.
+Strict serialized algebra for authored, expanded, and certified structured programs.
 
-The crate owns canonical data and strict Annex-backed codecs only. It does not author programs,
-plan graphs, execute callbacks, bind live capabilities, or grant admission authority.
+It owns canonical `State`/`Match`/`FanOut`/fragment forms, lexical producers, failure plans,
+execution/capability contracts, expansion profiles/proofs, component manifests, secret-free
+implementation descriptors, and the certified root/document. Normalization derives exact
+occurrence, fragment-boundary, failure-plan, and slot identities and rejects hostile references.
 
-Persisted authored/spec/manifest/certificate bytes remain untrusted data until `mfm-certify`
-strictly decodes them and reproduces the exact expanded graph and certificate. A content reference
-or hash by itself is not certification authority.
-
-Certified retained slots use and re-export the single
-`mfm_values::RetainedValueContract`; the spec does not define a parallel retained metadata type.
-
-`docs/design.md` is the normative typed-core authority contract. This crate is framework-owned and
-must remain domain-free.
+The crate defines data and validation helpers only. Certification authority belongs to
+`mfm-certify`; cursor/history authority belongs to `mfm-store`.

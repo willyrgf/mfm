@@ -11,9 +11,9 @@ const RUN_ID: &str =
 #[test]
 fn standalone_ops_json_fails_the_same_production_bootstrap() {
     let error = json_error(vec!["ops", "list"]);
-    assert_eq!(error.error.code, "AuthoritativeWriterFenceUnavailable");
+    assert_eq!(error.error.code(), "AuthoritativeWriterFenceUnavailable");
     assert_eq!(
-        error.error.message,
+        error.error.message(),
         "A deployment-owned authoritative-writer fence is required"
     );
 }
@@ -50,7 +50,7 @@ fn every_run_command_requires_the_global_credential_file() {
 
     for args in cases {
         let error = json_error(args);
-        assert_eq!(error.error.code, "AuthenticationRequired");
+        assert_eq!(error.error.code(), "AuthenticationRequired");
     }
 }
 
@@ -67,7 +67,10 @@ fn standalone_run_composition_fails_closed_without_a_writer_fence() {
         "drive",
         RUN_ID,
     ]);
-    assert_eq!(run_error.error.code, "AuthoritativeWriterFenceUnavailable");
+    assert_eq!(
+        run_error.error.code(),
+        "AuthoritativeWriterFenceUnavailable"
+    );
 }
 
 #[test]
@@ -109,7 +112,7 @@ fn run_ids_and_page_limits_are_validated_before_process_composition() {
             ref_output,
         ],
     ] {
-        assert_eq!(json_error(args).error.code, "InvalidRunId");
+        assert_eq!(json_error(args).error.code(), "InvalidRunId");
     }
 
     for command in ["trace", "audit"] {
@@ -123,7 +126,7 @@ fn run_ids_and_page_limits_are_validated_before_process_composition() {
                 "--limit",
                 limit,
             ]);
-            assert_eq!(error.error.code, "PageLimitInvalid");
+            assert_eq!(error.error.code(), "PageLimitInvalid");
         }
         let error = json_error(vec![
             "--access-token-file",
@@ -134,7 +137,7 @@ fn run_ids_and_page_limits_are_validated_before_process_composition() {
             "--limit",
             "500",
         ]);
-        assert_eq!(error.error.code, "AuthoritativeWriterFenceUnavailable");
+        assert_eq!(error.error.code(), "AuthoritativeWriterFenceUnavailable");
     }
 }
 
@@ -164,7 +167,7 @@ fn removed_commands_and_raw_authority_arguments_are_absent() {
 #[test]
 fn compare_current_cli_syntax_maps_to_the_exact_annex_mode() {
     let error = json_error(vec!["run", "replay", RUN_ID, "--mode", "compare-current"]);
-    assert_eq!(error.error.code, "AuthenticationRequired");
+    assert_eq!(error.error.code(), "AuthenticationRequired");
 
     Command::cargo_bin("mfm_cli")
         .expect("CLI")
@@ -189,8 +192,8 @@ fn replay_portable_export_flags_are_required_only_for_non_verify_modes() {
         "--mode",
         "reproduce",
     ]);
-    assert_eq!(required.error.code, "ReplayArtifactInvalid");
-    assert_eq!(required.error.message, "The replay artifact is invalid.");
+    assert_eq!(required.error.code(), "ReplayArtifactInvalid");
+    assert_eq!(required.error.message(), "The replay artifact is invalid.");
 
     let forbidden = json_error(vec![
         "--access-token-file",
@@ -205,8 +208,8 @@ fn replay_portable_export_flags_are_required_only_for_non_verify_modes() {
         "--portable-export-ref-file",
         "unused.stream.ref",
     ]);
-    assert_eq!(forbidden.error.code, "ReplayArtifactInvalid");
-    assert_eq!(forbidden.error.message, "The replay artifact is invalid.");
+    assert_eq!(forbidden.error.code(), "ReplayArtifactInvalid");
+    assert_eq!(forbidden.error.message(), "The replay artifact is invalid.");
 }
 
 fn json_error(args: Vec<&str>) -> ErrorResponse {

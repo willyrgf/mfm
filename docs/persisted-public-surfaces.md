@@ -1,261 +1,147 @@
-# Persisted And Public Surfaces
+# Persisted and Public Surfaces
 
-This is the review inventory for every value MFM persists or returns through app, CLI, or REST.
-`docs/design.md` owns semantic authority; the frozen annex owns exact recoverability encodings.
+Status: current authority and redaction inventory
 
-No surface in this document may contain a password, mnemonic, private key, credential,
-authorization header, unlock material, raw signature, signed bearer payload, secret-bearing path,
-RPC URL, provider response body, provider message, or unreviewed diagnostic text.
+## Material uncertainties
 
-## Authority Classes
+none
 
-- **strict journal authority** — trusted only after canonical, identity, predecessor, object,
-  certificate, and fold verification against the exact run.
-- **strict executor authority** — trusted only inside the exact executor tenant/deployment/resource
-  binding and its independently durable ledger.
-- **pre-admission authority** — mutable current configuration that can influence only a future
-  root; selected values become immutable root material at admission.
-- **audit provenance** — reviewed non-secret information explaining an authorized access; it grants
-  no replay, retry, source selection, or object access.
-- **operational telemetry** — best-effort health/log/metric data with no semantic effect.
-- **public representation** — deliberately disclosed DTO or export data derived under an exact
-  purpose grant; it is not bearer authority.
+Persisted and public values are strict, bounded, float-free canonical JSON with denied unknown
+fields unless the frozen schema explicitly says otherwise. A content reference identifies exact
+bytes; it is never bearer authority.
 
-## Journal And PostgreSQL
+## RunHistory
 
-| Surface | Physical location | Secret boundary | Authority and validation |
-| --- | --- | --- | --- |
-| Store identity | `store_identity` | Non-secret store scope and epoch only. | Immutable strict store authority. A reset uses a never-reused scope and fresh epoch. |
-| Schema contract | `store_schema_metadata` | Non-secret version/contract data. | Store-open authority checked before any read or append. |
-| Native run commits | `journal_commits` | No secrets. Contains run/tenant, sequence, predecessor, candidate/commit digests, append id, batch purpose, tagged fact coordinate, count, and coarse operational commit time. | Strict journal authority. Exact predecessor and commit digest form the run head. |
-| Native run records | `journal_records` | No secrets. Contains one of the five canonical payloads plus identities, logical key, ordinal, schema/spec binding, and fact-routing fields. | Strict journal authority only as part of its verified containing commit. |
-| Immutable object bytes | `artifact_blobs` | Typed non-secret bytes only. | Raw content address is SHA-256 of exact bytes; bytes alone grant no run access. |
-| Object admission evidence | `artifact_admissions` | Non-secret schema, semantic type, digest, length, media type, role, and evidence identity. | Strict object evidence after exact byte verification. |
-| Journal-to-object reachability | `commit_artifact_bindings` | Non-secret `ValueRef` material and field path. | Strict authority tying every required object to one exact producing or consuming commit. |
-| Tenant fact frontier | `tenant_fact_order_heads` and tagged commit coordinates | Tenant id and dense unsigned order only. | Strict same-store fact completeness. Publication increments once; a selection barrier snapshots without incrementing. Direct arbitrary writes are forbidden. |
-| Current configured values | `configured_values` | Canonical non-secret semantic config only. | Pre-admission authority keyed by stable target. A run never rereads it after root admission. |
+| Family | Persisted meaning |
+| --- | --- |
+| `RunAdmitted` | Store/tenant/run/invocation identity, exact certified program and audit refs, immutable admission material, initial lexical bindings, and genesis semantic digest. |
+| `StateTransitionCommitted` | Exact occurrence/path/call, input binding, optional consumed observation, nominal outcome, facts, and before/after semantic digests. |
+| `ExternalAccessAuthorized` | Exact occurrence, attempt ordinal, semantic head, capability/adapter contracts and implementations, request/digest, public binding, and optional stable resource lineage. |
+| `ExternalAccessObserved` | Exact authorization/access-attempt linkage and one closed observation outcome. |
+| `RunClosed` | Exact terminal nominal operation-outcome reference. |
 
-Every authority-bearing read and write uses one qualified fenced authoritative PostgreSQL writer.
-The application role may insert/select through the store contract but cannot update, delete,
-truncate, or directly manipulate immutable rows, store identity, or tenant fact heads. A replica,
-backup clone, cursor, or apparent applied position cannot mint current store-backed authority.
+Each record is assigned a run sequence, ordinal, and record hash inside a predecessor-linked atomic
+batch. A batch also binds append request id, candidate digest, commit digest, store scope, writer
+epoch, and the exact new object set. No control record exists for Match, FanOut, lanes, joins,
+fragments, handlers, or result expressions.
 
-The in-memory store has the same logical surfaces. It validates one complete candidate in scratch
-state and performs one infallible swap only after every check succeeds.
+## Observation outcomes
 
-## Five Journal Records
-
-| Record | Retained data | Authority role |
+| Variant | Public/persisted fields | State-consumable |
 | --- | --- | --- |
-| `RunAdmitted` | Run/store/tenant identity, canonical invocation identity, entry point, planning profile, authored/expanded graph, certificate, config/seeds, cross-run source manifest, routing-generation refs, executable and implementation manifests, genesis digest. | Establishes the immutable root. Admission performs no semantic live IO. |
-| `StateTransitionCommitted` | Node occurrence, transition kind, before/after state, exact input lineage, request/selected observation where applicable, result, outputs, facts, evidence, typed failure or blocking sources, binding delta. | The only semantic state change. |
-| `ExternalAccessAuthorized` | Exact read or ensure scope, immutable request identity/value, capability/operation binding, and optional effect/executor binding. | Authorizes zero or one application-protocol operation and changes no semantic state. |
-| `ExternalAccessObserved` | Exact authorization reference and one `Returned`, `DidNotEnter`, `Indeterminate`, or audit-only `NonDomainFailure` typed outcome. | Audit evidence only; state changes only if a later transition consumes state-consumable evidence. A non-domain outcome is never consumable. |
-| `RunClosed` | Final transition reference and terminal semantic-state digest. | Structurally fixes closure in the same commit as the final transition. |
+| `Returned` | Exact typed value reference | yes |
+| `SafeFailure` | Exact reviewed typed failure reference | yes |
+| `SupersededBeforeEntry` | Public lineage-head and evidence references | no; Effect refresh only |
+| `EntryUnknown` | Fixed bounded fault code | no; parks Effect |
+| `IntegrityFault` | Fixed bounded fault code | no; blocks |
 
-`JournalHead` advances for every commit. `SemanticHead` advances only for admission or a semantic
-transition. A legal late observation after closure advances only the journal head.
+Raw provider bodies, arbitrary diagnostic text, endpoints, credentials, signed bytes, private
+sessions, fence keys, and mutation permits are never fields of these records or their object
+closure.
 
-## Retained Typed Values
+## Content-addressed objects
 
-| Surface | Secret boundary | Authority role |
-| --- | --- | --- |
-| `mfm_ids::ContentRef` | Schema id and raw-byte digest only. | Lightweight content identity; never journal reachability or access authority. |
-| `mfm_journal::ValueRef` | Full reviewed producer binding, role, schema/semantic type, digest/evidence, length, and media type. | Exact retained journal identity when reachable through a verified commit binding. |
-| Config and seed objects | Canonical typed non-secret values. | Root authority after admission binding. |
-| State request objects | Canonical typed non-secret requests. | Immutable state intent. A read request becomes committed by authorization; an effect request by `EffectRequested`. |
-| Observation objects | Reviewed typed result, closed `SafeFailure`, or closed audit-only `NonDomainFailure`. | Audit evidence selected by an exact authorization. Only the first two classes can reach state evidence policy. |
-| Output and fact objects | Canonical typed non-secret values. | Semantic result only through a verified transition binding. |
-| Typed failure objects | Closed domain failure values without provider diagnostics. | Committed domain truth for one terminal state. |
-| Public-output objects | Only fields approved by the certified public schema. | Strict source for `read_public_run`; rendered JSON is a representation. |
+Every `HistoryObject` contains an object-type tag, schema id plus raw canonical-byte digest, and
+the exact canonical JSON. The store validates bytes and identity on admission and load. Each append
+must introduce exactly the newly reachable closure required by its records—no missing member and no
+unreferenced extra object.
 
-Objects referenced by committed authority are retained indefinitely in the current contract.
-Garbage collection is not a semantic workflow and cannot delete a reachable object.
+The closure includes certified program components, immutable admission roots, lexical values,
+state outcomes, facts, access request/response values, and purpose-limited public physical
+evidence. Secret-free implementation descriptors identify semantic contract, implementation id,
+executable identity, and qualification artifact; they never identify credentials or endpoints.
 
 ## Facts
 
-A fact exists only as a typed emission inside `StateTransitionCommitted`. It contains complete
-canonical subject material, response value, descriptor/logical/content identities, and producer
-binding. Query terms are deterministic searchable projections of the retained subject; they do not
-replace identity.
+A committed fact binds dense emission ordinal, certified slot ordinal, descriptor, exact typed
+subject/response, and claim reference. Facts are transition members, not an independent mutable
+table of semantic truth. Backend indexes are rebuildable projections only.
 
-Same-run state data uses graph bindings. A prior-run selection records:
+## Configuration history
 
-1. `ExternalAccessAuthorized` for `mfm.journal.fact-selection.v1` at one tenant barrier;
-2. `ExternalAccessObserved` containing the complete typed `FactSelectionResponse`; and
-3. `ReadSettled` consuming that exact observation.
+Configured values use a separate append-only stream keyed by store, tenant, entry operation, and
+target. A revision contains sequence, predecessor, append request id, exact configured-value
+contract, content reference, canonical bytes, and writer lineage. Application paths can resolve but
+cannot append. Configuration is not a RunHistory record family.
 
-Private scan state, pagination, scratch material, and index rows are not persisted or public
-authority. Only exact coverage through the authorization barrier produces
-`FactSelectionCompleteness`.
+## Certified program
 
-There is no ordinary public fact DTO. Facts can appear only through separately authorized trace,
-replay, audit, or export closure when that surface's disclosure contract permits them.
+The certified root content-addresses the exact authored program, expanded program, expansion
+profile/proof, policy proof, state/capability/adapter/signer/resource manifest closure, and
+secret-free implementation manifest. Repeated refs in `RunAdmitted` are audit projections and must
+equal the certified root. Serialized authored or component bytes have no authority independently.
 
-## External-Access Evidence
+## Wallet authority
 
-The generic `SafeFailure` envelope retains:
+Wallet PostgreSQL persists only current-schema public semantic state:
 
-- selected safe-failure contract reference;
-- closed stable code;
-- closed failure class;
-- `before_boundary_entry | boundary_entry | boundary_observation`;
-- optional reviewed coarse size class; and
-- optional canonical typed diagnostic reference, bounded to 16 KiB.
+- permanent chain/domain activation and store-incarnation lineage;
+- stable intent/reservation identity and canonical intent closure;
+- nonce high water and one incomplete intent;
+- bounded candidate family and contiguous activated prefix;
+- permanent operation-key results; and
+- canonical terminal completion closure.
 
-It never retains provider-controlled strings or arbitrary maps.
+Target-held private keys, live sessions, transaction permits, database passwords, signer secrets,
+signatures, and signed transaction bytes are process/deployment authority and are not persisted in
+semantic tables. SQL role and session metadata is infrastructure, not portable semantic evidence.
 
-EVM read audit records may retain exact reviewed HTTP status, JSON-RPC numeric code, or closed
-response-invalid discriminator through the EVM diagnostic union. Semantic source mismatch and
-anchor change are typed returned values interpreted by the state, not provider diagnostics.
+## Public application DTOs
 
-Every normally returned provider or transport fault takes exactly one persisted route: a
-capability-certified `SafeFailure`, or the audit-only non-domain relation below. The linked
-authorization identifies the exact qualified operation, request, and binding. No outer error may
-bypass both routes; panic, abort, task loss, and process loss instead leave an unmatched
-authorization.
+The reviewed application surfaces are:
 
-### Audit-only non-domain failure
+- complete entry-point contracts;
+- admission response with logical run identity and admission disposition;
+- one-action drive response;
+- public run view with verified status/head and terminal output when closed;
+- fixed-head transition-trace pages;
+- fixed-head access-audit pages;
+- callback-free replay results; and
+- streamed current structured portable exports.
 
-`NonDomainFailure` is a distinct closed observation outcome:
+All JSON rendering uses a strict one-current schema. Cursor and content-reference strings are
+opaque identity, not authorization. Every protected method independently authenticates and
+authorizes its exact purpose and tenant/run target.
+
+## Portable export
+
+The current media type is:
 
 ```text
-NonDomainFailure {
-    entry_status: "proven_not_entered" | "may_have_entered",
-    disposition: "retryable_operational" | "integrity_blocked",
-    code:
-        "adapter_contract_violation" |
-        "result_encoding_failure" |
-        "fact_store_unavailable" |
-        "fact_history_invalid" |
-        "executor_store_unavailable" |
-        "executor_contention" |
-        "executor_history_invalid" |
-        "executor_capacity_exhausted",
-}
+application/vnd.mfm.structured-run-export.v1+json
 ```
 
-The layer is not a caller-authored field: store and replay derive it from committed history. The
-schema fixes each permitted code/status/disposition relation and each permitted read, fact, ensure,
-or executor-target layer. It contains no diagnostic reference, provider text, path, endpoint,
-credential, response body, source chain, arbitrary map, or typed domain value.
-`RetryableOperational` may enable a later separately authorized call after the observation commits;
-it defines no code-specific scheduling, backoff, circuit breaking, provider failover, or hidden
-adapter retry. `IntegrityBlocked` blocks progress. Both are audit-only: neither is a `SafeFailure`,
-neither enters a state callback, neither can satisfy a settlement, and neither can be transformed
-into a domain failure by replay or a public renderer.
+The canonical object binds version, requested semantic/audit kind, store, tenant, run, physical and
+semantic heads, assigned records, and the verified object closure. Replay input checks the supplied
+content digest, exact current recoverability schema, store/tenant/run identity, and size bound.
+Old framed or pre-structured bytes are rejected; no compatibility decoder exists.
 
-### Transient EVM transport ownership
+## Error and logging contract
 
-The exact-generation EVM transport changes no retained surface. MFM-owned authorization values,
-encoded request bodies, signed envelopes, response buffers, decoded error messages, and
-secret-bearing fixture captures are transient bounded zeroizing owners. Typed decoding borrows from
-the response owner; only reviewed typed results or closed safe failures may leave it. Provider text,
-error data, authorization, and raw signed bytes are discarded before any executor or journal value
-is built.
+CLI/REST/application errors use a non-empty code bounded to 128 UTF-8 bytes and a non-empty reviewed
+message bounded to 4096 UTF-8 bytes. Transport class is carried by HTTP status or process exit
+status, not JSON. A Runtime-classified error may additionally carry the frozen, secret-free
+`runtime_fault` attribution: phase, run, nullable verified pre-fault head, nullable occurrence, and
+either the semantic process contract or store scope and epoch. This attribution is public context,
+not persisted history or bearer authority; it excludes private implementation identity and
+diagnostics. JSON uses `mfm.public-error.v1` inside `mfm.error-response.v1`.
 
-The live wallet qualification privately retains a clone of the exact transport runtime and route
-catalog so execution cannot inject a parallel transport. That process-local handle is excluded from
-the qualification's secret-free canonical proof, content reference, and debug representation; it
-creates no persisted or public surface.
+Typed library errors may preserve internal sources, but the public boundary classifies and redacts
+them. Logs contain route, method, status, bounded latency, and reviewed operational identifiers
+only. They must not contain:
 
-The zeroization guarantee ends at allocations directly owned by MFM. HTTP/TLS libraries, allocators,
-the operating system, and remote peers can maintain internal transport copies outside that
-guarantee; none of those copies is a persisted or public MFM surface.
+- credentials, passwords, mnemonics, private keys, API tokens, or headers;
+- endpoints, filesystem paths, database URLs, raw SQL parameters, or provider response text;
+- signature material or signed transaction bytes; or
+- arbitrary `Debug` output from secret-bearing/private authority values.
 
-Production EVM portfolio reads retain separate authorization/observation pairs for:
+## Review checklist
 
-- routing-generation/source/chain bootstrap;
-- the initial anchor;
-- each independently meaningful token metadata, native balance, or token balance call;
-- final anchor confirmation.
+For every new persisted or public field:
 
-Pure aggregation consumes the typed graph outputs and may emit final facts and portfolio values.
-There is no aggregate multi-call observation that hides sibling calls.
-
-Bitcoin collection produces no current product records because its capability is unregistered.
-Its prospective audited surfaces are described in `docs/btc-rpc-routing.md`.
-
-## Executor Surfaces
-
-| Surface | Secret boundary | Authority role |
-| --- | --- | --- |
-| Committed executor request | Exact canonical safe request identity; no credential or bearer material. | Identity only; cannot enter a target. |
-| Delivery authorization | Tenant/deployment/effect/attempt and exact request digest. | Strict executor authority that precedes one target call. |
-| Target completion and sealed observation | The target returns one unbound closed returned/did-not-enter/indeterminate/non-domain outcome with reviewed safe result/failure material; the private completion seal binds it to the affine target-entry authority. | Exact sealed evidence for the committed delivery authorization; `execute_target_once` cannot return normally before this observation is persisted or resolved identically. |
-| Delivery frontier and tombstone | Bounded predecessor-linked audit, exact terminal proof, assurance-policy ref. | Strict executor terminal evidence. |
-| Typed resource stream | Resource ownership/key, policy/config refs, immutable allocation state. | Executor-private resource authority. |
-| EVM wallet request | Exact tenant, target, chain, public account, signer binding, policy, and unsigned transaction intent. No secret selector, key material, or signature. | Immutable effect identity and target intent. |
-| EVM wallet candidate | Exact public unsigned transaction fields, fee ordinal, allocated nonce, and signed-transaction hash. No signature or raw signed bytes. | Recoverable public candidate; permits hash lookup and finality recovery without reopening the signer. |
-| EVM wallet attempt evidence | Exact operation, request/result refs, and closed returned/did-not-enter/indeterminate/non-domain classification. Provider diagnostics and credentials are excluded. | Audited evidence for one authorized target exchange. A valid result above the retained bound is `ResultUnrepresentable`; invalid typed/contract or encoding construction outcomes carry the closed integrity-blocked non-domain codes. |
-| EVM wallet terminal evidence | Exact accepted transaction hash, inclusion/finality proof refs, and closure outcome. | Content-addressed terminal proof consumed by the journal only through audited ensure. |
-| PostgreSQL executor binding | One tenant, executor binding, durable generation, evidence authority, and optional resource owner in the dedicated executor schema. | Immutable strict executor authority admitted only after the independent deployment fence succeeds. |
-| PostgreSQL executor records | Immutable effect frontiers, resource records, exact effect/resource links, and content-addressed closure objects. | Raw executor authority accepted only after opaque decoding and shared-engine strict refold. |
-| PostgreSQL executor heads | Derived effect/resource views over immutable records. | Rebuildable acceleration only; never append, retry, target-entry, or recovery authority. |
-| Memory/file checkpoints | Checksummed bounded encodings. | Qualification only; no production freshness or non-rollback authority. |
-
-Executor delivery attempt identifiers remain valid inside this ledger only. They do not represent a
-state transition or run phase.
-
-The MFM journal retains executor evidence only after ordinary object admission through an audited
-ensure observation. An executor terminal claim contains `ContentRef` values and cannot create
-producer-bound journal references or append a run.
-
-## Configuration And Routing
-
-Deployment-provisioned current configuration contains domain intent and non-secret references.
-Admission resolves one exact tenant-, entry-point-, and target-scoped canonical value, records its
-complete producer-bound authority and bytes in the root, and never consults current configuration
-again for that run. Runtime app and transport surfaces cannot publish, list, or export configured
-values.
-
-Runtime routing may contain RPC endpoints, authorization sources, process-local signer selectors,
-keystore paths, unlock-file paths, or other process-local resources. Those values never enter a
-typed semantic surface. Admission binds only immutable non-secret routing-generation and wallet
-signer-binding references. The wallet request also fixes its expected public account, while the
-qualified signer resolves the process-local selector and secret sources only behind the guarded
-target boundary. Bootstrap resolution and source validation occur after admission through audited
-access; resume resolves the exact admitted generation without fallback.
-
-## Public App, CLI, And REST DTOs
-
-| Surface | Disclosure |
-| --- | --- |
-| Entry-point discovery | Exact entry-point/profile/input/output contract; no tenant or run data. |
-| Admit response | Run id, admission result, entry-point identities, invocation identity, planning-profile ref. |
-| Drive response | `advanced`, `waiting`, or `closed` plus only the frozen head/closure fields. |
-| Public run view | `active`, `succeeded`, or `failed`; reviewed active fields; certified public outputs. |
-| Replay response | Frozen verified, reproduced, or candidate-comparison result. Reproduction `unavailable` has no reason field. |
-| Transition trace | Separately authorized exact transition lineage and retained values; cross-run denial uses redacted lineage. |
-| Access audit | Separately authorized safe authorization/observation chronology, including the optional closed `non_domain_failure` value for that exact outcome. |
-| Portable export | Framed `mfm.portable-run-export-stream.v1` JSON text sequence plus one external `ContentRef`. |
-
-The portable stream begins with one header, emits root-first run material and deduplicated object
-payloads with every logical `ValueRef` authority, and ends with one terminal frame followed by
-EOF. It contains no self-digest. REST streams those exact bytes and returns SHA-256 over every
-record separator, canonical frame byte, and line feed only as external `Mfm-Content-Digest`
-metadata. CLI streams the same bytes to a secure same-directory temporary file and publishes it
-with its exact canonical `ContentRef` sidecar only after both files are durable.
-
-The public transport surface is limited to entry-point discovery and exact-run admit, drive, show,
-replay, trace, audit, and export operations. A run id, record ref, value ref, digest, cursor,
-portable stream, or export content reference is not bearer authority.
-
-## Operational Surfaces
-
-Health, readiness, logs, metrics, spans, wake hints, internal queues, and advisory cursors are
-operational telemetry. They may be lost, duplicated, rebuilt, or stale without changing semantic
-truth. They cannot schedule, authorize, settle, skip, close, prove completeness, or grant object
-access.
-
-## Review Checklist
-
-For every persisted or returned field:
-
-1. Identify its exact owner and authority class.
-2. Prove its schema is closed, canonical, float-free, and bounded.
-3. Prove its producer binding and reachability.
-4. Reject all secret classes and provider-controlled diagnostic text.
-5. Verify tenant, store, run, and purpose authority before dereference.
-6. Ensure no representation or routing/index row substitutes for the journal/executor source.
-7. Add positive and adversarial redaction, tamper, and wrong-authority tests.
+1. identify its semantic owner and exact schema;
+2. prove it is canonical, bounded, float-free, strict, and content-addressed where required;
+3. prove it is public evidence rather than a disguised credential or bearer;
+4. add hostile unknown-field, contract/provenance substitution, and redaction tests;
+5. update recoverability annex/corpus and regenerate them in place; and
+6. reject old bytes rather than adding a compatibility path.

@@ -31,10 +31,12 @@ use std::fmt;
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{keccak256, Address, Bytes, PrimitiveSignature, TxKind, B256, U256};
+use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, CanonicalJsonBytes, CanonicalValue};
+use mfm_ids::StableId;
 use mfm_signing::{
-    ContentRef, DeterministicSigningProvider, ExpectedSignerIdentity,
-    GenerationGuardedDeterministicSigningProvider, SignerRef, SigningAlgorithmId, SigningDomainId,
-    SigningError, SigningProfileId, SigningPurposeId, SigningRequest, SigningResult,
+    ContentRef, DeterministicSigningProvider, ExpectedSignerIdentity, PublicSigningIdentity,
+    QualifiedReadSigningProvider, SignerRef, SigningAlgorithmId, SigningDomainId, SigningError,
+    SigningProfileId, SigningPurposeId, SigningRequest, SigningResult,
     SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID, SECP256K1_RFC6979_LOW_S_PROFILE_ID,
 };
 use zeroize::Zeroizing;
@@ -45,6 +47,48 @@ const EVM_TRANSACTION_DOMAIN_ID: &str = "evm.transaction";
 const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
 /// Maximum admitted EIP-2718 signed transaction envelope length.
 pub const EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES: usize = 512 * 1024;
+
+/// Derives the stable semantic EVM signer identity from one exact public key/account.
+///
+/// Physical provider generation, fence, and implementation identities are
+/// deliberately absent, so compatible generations of the same key retain one
+/// semantic signer while distinct keys cannot collapse together.
+pub fn derive_evm_semantic_signer_id(identity: &PublicSigningIdentity) -> Result<StableId> {
+    let public_key = identity
+        .public_key()
+        .ok_or(EvmSigningError::InvalidSemanticSignerIdentity)?;
+    let account_id = identity
+        .account_id()
+        .ok_or(EvmSigningError::InvalidSemanticSignerIdentity)?;
+    let address = account_id
+        .parse::<Address>()
+        .map_err(|_| EvmSigningError::InvalidSemanticSignerIdentity)?;
+    if address.is_zero()
+        || account_id != format!("{address:#x}")
+        || identity.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
+    {
+        return Err(EvmSigningError::InvalidSemanticSignerIdentity);
+    }
+    let canonical = CanonicalJsonBytes::from_value(
+        &CanonicalValue::object([
+            ("account_id", CanonicalValue::String(account_id.to_owned())),
+            (
+                "public_key",
+                CanonicalValue::Bytes(CanonicalBytes::new(public_key.as_bytes().to_vec())),
+            ),
+            (
+                "version",
+                CanonicalValue::String("mfm.evm.semantic-signer.v1".to_owned()),
+            ),
+        ])
+        .map_err(|_| EvmSigningError::InvalidSemanticSignerIdentity)?,
+    );
+    StableId::new(format!(
+        "mfm.evm.signer/key-{}",
+        sha256_digest_bytes(canonical.as_bytes())
+    ))
+    .map_err(|_| EvmSigningError::InvalidSemanticSignerIdentity)
+}
 
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +377,7 @@ pub async fn sign_eip1559_guarded(
     signer_ref: SignerRef,
     expected_sender: Address,
     expected_generation_ref: &ContentRef,
-    provider: &dyn GenerationGuardedDeterministicSigningProvider,
+    provider: &QualifiedReadSigningProvider,
 ) -> Result<TransientSignedEip1559Envelope> {
     let binding = provider.binding();
     if binding.durable_generation_ref() != expected_generation_ref {
@@ -440,6 +484,9 @@ pub enum Eip1559QuantityField {
 /// Redaction-safe EVM signing failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum EvmSigningError {
+    /// Public key/account material could not identify one semantic signer.
+    #[error("EVM semantic signer identity is invalid")]
+    InvalidSemanticSignerIdentity,
     /// A U256 input was outside Alloy's exact representation.
     #[error("EIP-1559 quantity was outside the supported range for {field:?}")]
     QuantityOutOfRange {

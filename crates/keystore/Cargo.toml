@@ -37,8 +37,8 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 
 mfm-signing = { path = "../signing" }
+mfm-ids = { path = "../kernel/ids" }
 
 [dev-dependencies]
 tempfile = "3.8"
 static_assertions = "1"   # compile-time trait assertions
-mfm-ids = { path = "../kernel/ids" }

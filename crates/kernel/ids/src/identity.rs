@@ -357,26 +357,6 @@ macro_rules! branded_semantic_digest {
 }
 
 branded_semantic_digest!(
-    /// Logical identity used to make run admission idempotent.
-    AdmissionLogicalKey
-);
-
-branded_semantic_digest!(
-    /// Identity of one reviewed correction invocation.
-    CorrectionInvocationDigest
-);
-
-branded_semantic_digest!(
-    /// Digest of one executor frontier.
-    ExecutorFrontierDigest
-);
-
-branded_semantic_digest!(
-    /// Digest of one executor-owned recoverability record.
-    ExecutorRecordDigest
-);
-
-branded_semantic_digest!(
     /// Content identity digest for one retained fact.
     FactContentIdentityDigest
 );
@@ -392,16 +372,6 @@ branded_semantic_digest!(
 );
 
 branded_semantic_digest!(
-    /// Digest of one run genesis preimage.
-    GenesisDigest
-);
-
-branded_semantic_digest!(
-    /// Digest of one unassigned journal commit candidate.
-    JournalCandidateDigest
-);
-
-branded_semantic_digest!(
     /// Digest of one assigned journal commit.
     JournalCommitDigest
 );
@@ -409,16 +379,6 @@ branded_semantic_digest!(
 branded_semantic_digest!(
     /// Semantic hash of one complete journal record.
     JournalRecordHash
-);
-
-branded_semantic_digest!(
-    /// Digest of retained-object evidence.
-    ObjectEvidenceDigest
-);
-
-branded_semantic_digest!(
-    /// Logical identity digest for one output occurrence.
-    OutputLogicalIdentityDigest
 );
 
 branded_semantic_digest!(
@@ -431,35 +391,39 @@ branded_semantic_digest!(
     RunSemanticStateDigest
 );
 
-branded_semantic_digest!(
-    /// Digest of one closed cross-run source closure.
-    SourceClosureDigest
-);
-
-branded_semantic_digest!(
-    /// Digest of terminal effect evidence.
-    TerminalEffectEvidenceDigest
+semantic_identity!(
+    /// Stable semantic identity of one authored structured-program call.
+    SemanticCallId,
+    "semantic-call:",
+    "semantic call id"
 );
 
 semantic_identity!(
-    /// Immutable keyed-executor effect identity.
-    EffectKey,
-    "effect:",
-    "effect key"
+    /// Exact normalized identity of one executable structured-program occurrence.
+    OccurrenceId,
+    "occurrence:",
+    "occurrence id"
 );
 
 semantic_identity!(
-    /// Immutable executor delivery-attempt identity.
-    AttemptId,
-    "attempt:",
-    "attempt id"
+    /// Exact non-executable identity of one structured fragment boundary.
+    FragmentBoundaryId,
+    "fragment-boundary:",
+    "fragment boundary id"
 );
 
 semantic_identity!(
-    /// Immutable journal record identity.
-    RecordId,
-    "record:",
-    "record id"
+    /// Exact identity of one certified typed-failure continuation.
+    FailurePlanId,
+    "failure-plan:",
+    "failure plan id"
+);
+
+semantic_identity!(
+    /// Immutable identity of one structured Runtime access attempt.
+    AccessAttemptId,
+    "access-attempt:",
+    "access attempt id"
 );
 
 /// Category-branded identity with private fields and checked construction.

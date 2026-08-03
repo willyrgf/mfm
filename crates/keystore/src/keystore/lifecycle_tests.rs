@@ -28,7 +28,7 @@ fn test_keystore_persistence() {
     assert_eq!(keys[0].alias, Some("persistent_key".to_string()));
 
     // Verify we can still retrieve the key
-    let secure_key = keystore2.get_private_key(key_id).unwrap();
+    let secure_key = keystore2.private_key_for_test(key_id).unwrap();
     let test_hash = [1u8; 32];
     let _signature = secure_key.sign_hash(&test_hash).unwrap();
 }
@@ -75,7 +75,7 @@ fn test_locked_operations() {
     ));
 
     assert!(matches!(
-        keystore.get_private_key(Uuid::new_v4()),
+        keystore.private_key_for_test(Uuid::new_v4()),
         Err(KeystoreError::Locked)
     ));
 
@@ -250,7 +250,7 @@ fn test_import_mnemonic_edge_cases() {
 }
 
 #[test]
-fn test_get_private_key_comprehensive() {
+fn test_test_only_private_key_decryption_covers_imported_key_types() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();
 
@@ -271,8 +271,8 @@ fn test_get_private_key_comprehensive() {
         .unwrap();
 
     // Test retrieval of both key types
-    let private_key = keystore.get_private_key(key_id).unwrap();
-    let mnemonic_key = keystore.get_private_key(mnemonic_id).unwrap();
+    let private_key = keystore.private_key_for_test(key_id).unwrap();
+    let mnemonic_key = keystore.private_key_for_test(mnemonic_id).unwrap();
 
     // Verify they produce different addresses
     assert_ne!(
@@ -329,7 +329,7 @@ fn test_secure_key_methods() {
         .import_private_key(Some("test_key".to_string()), test_key)
         .unwrap();
 
-    let secure_key = keystore.get_private_key(key_id).unwrap();
+    let secure_key = keystore.private_key_for_test(key_id).unwrap();
 
     // Test sign_hash
     let test_hash1 = [1u8; 32];
@@ -378,7 +378,7 @@ fn test_error_conditions() {
 
     // Key not found
     assert!(matches!(
-        keystore.get_private_key(Uuid::new_v4()),
+        keystore.private_key_for_test(Uuid::new_v4()),
         Err(KeystoreError::KeyNotFound(_))
     ));
     assert!(matches!(

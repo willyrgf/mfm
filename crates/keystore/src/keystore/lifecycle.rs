@@ -1,4 +1,5 @@
 use super::*;
+use crate::signer::ReadAttestationKeyAccess;
 
 impl std::fmt::Debug for Keystore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -29,8 +30,30 @@ impl Keystore {
         config: KeystoreConfig,
     ) -> Result<Self, KeystoreError> {
         let path = path.as_ref().to_path_buf();
+        let mut keystore = Self::empty(path, config);
 
-        let mut keystore = Self {
+        if keystore.path.exists() {
+            keystore.load_from_disk()?;
+        }
+
+        Ok(keystore)
+    }
+
+    /// Opens and unlocks an existing keystore without initialization, audit mutation, or writes.
+    pub(crate) fn open_existing_for_read_attestation(
+        path: impl AsRef<Path>,
+        config: KeystoreConfig,
+        password: &str,
+        _access: &ReadAttestationKeyAccess,
+    ) -> Result<Self, KeystoreError> {
+        let mut keystore = Self::empty(path.as_ref().to_path_buf(), config);
+        keystore.load_from_disk()?;
+        keystore.unlock_existing(password)?;
+        Ok(keystore)
+    }
+
+    fn empty(path: PathBuf, config: KeystoreConfig) -> Self {
+        Self {
             path,
             config,
             master_key: None,
@@ -44,13 +67,7 @@ impl Keystore {
             #[cfg(test)]
             fail_next_write: Cell::new(false),
             _not_thread_safe: std::ptr::null(),
-        };
-
-        if keystore.path.exists() {
-            keystore.load_from_disk()?;
         }
-
-        Ok(keystore)
     }
 
     /// Initialize new keystore or unlock existing one.

@@ -1,122 +1,80 @@
 # MFM
 
-Experimental, WIP toolkit for recoverable on-chain operations built around a certified typed-state
-runtime and one append-only committed journal.
+Experimental toolkit for recoverable on-chain operations built around a declaration-ordered
+structured Runtime and append-only history.
 
 > WARNING: Not production-ready. Do not use on mainnet.
 
 ## Architecture at a glance
 
-```mermaid
-flowchart TD
-    B["bin/cli<br/>bin/rest-api<br/>(transport only)"] --> A["crates/app<br/>(typed assembly)"]
-    A --> P["program + spec + certify<br/>(deterministic planning)"]
-    A --> R["crates/kernel/runtime<br/>(one-action driver)"]
-    R --> S["crates/kernel/store<br/>(verified journal authority)"]
-    S --> J["crates/kernel/journal<br/>(frozen persisted values)"]
-    A --> RP["crates/kernel/replay<br/>(verification and export)"]
-    A --> AD["crates/live/*<br/>(audited capability adapters)"]
-    AD --> TP["protocol transports<br/>(one bounded operation)"]
-    S --> ST["crates/storages/postgres<br/>(qualified writer)"]
-    R --> EX["crates/kernel/executor<br/>(durable keyed effects)"]
-
-    classDef transport fill:#e8f0ff,stroke:#2f5aa8,color:#0f2d63,stroke-width:1px;
-    classDef orchestration fill:#eefbe7,stroke:#3a7a2a,color:#1d4d12,stroke-width:1px;
-    classDef statecore fill:#ffe8cf,stroke:#a84b00,color:#5a2b00,stroke-width:3px;
-    classDef engine fill:#fff3df,stroke:#a66a00,color:#5a3a00,stroke-width:1px;
-    classDef storage fill:#f3ebff,stroke:#6d3da8,color:#39136b,stroke-width:1px;
-    classDef adapter fill:#e9f8f7,stroke:#0d7a77,color:#084645,stroke-width:1px;
-
-    class B transport;
-    class A,P orchestration;
-    class R,J,RP,EX engine;
-    class S,ST storage;
-    class AD adapter;
-    class TP transport;
+```text
+CLI / REST
+  -> mfm-app (authorization and qualified assembly)
+  -> authored State / Match / FanOut program
+  -> pure expansion + certification
+  -> Runtime (sole RunHistory writer and one-action interpreter)
+       -> registered Read/Effect invokers -> transports, signers, resource authorities
+  -> mfm-store (atomic append and sole callback-free fold)
+       -> memory conformance or fenced PostgreSQL
+  -> mfm-replay (reader-only projections and export)
 ```
 
-Typed state programs are the semantic executable surface. Certification deterministically expands
-them into the one runtime graph. States own reusable semantics; adapters bind their intent to
-explicit capabilities; transports, executors, and signers remain reusable platform primitives.
-Binaries only parse input, invoke the application facade, and render its reviewed outputs.
+The run journal has exactly five record families. Runtime durably authorizes every external
+operation before possible entry and commits its observation before settlement. EVM nonce and
+candidate uniqueness live in a separate narrow PostgreSQL wallet authority rather than the generic
+kernel.
 
-## Core capabilities
+## Current product surface
 
-- Certified typed runs with five append-only journal record kinds.
-- Stateless, crash-safe `drive_once` scheduling derived from verified history.
-- Audited reads and durable keyed effects with authorization-before-access and
-  observation-before-settlement.
-- Content-addressed manifests, snapshots, facts, and outputs.
-- Callback-free recorded-history verification and deterministic portable export.
-- Purpose-bound tenant authorization at the application boundary.
-- Security-hardened Ethereum keystore (tamper checks + signing utilities).
-- Atomic in-memory conformance storage and a deployment-qualified PostgreSQL writer.
+The application publishes two entry points:
 
-## Current workflow surface
+- `mfm.portfolio/snapshot@1`, backed by the structured portfolio and EVM balance programs; and
+- `mfm.evm/submit-transaction@1`, backed by the registered structured submission expansion and
+  qualified wallet authority.
 
-The compiled application exposes exactly two public entry points:
-`mfm.portfolio/snapshot@1` composes an audited, anchor-confirmed EVM read graph and a pure portfolio
-aggregation, while `mfm.evm/submit-transaction@1` admits one qualified EIP-1559 request and drives
-it through the durable keyed wallet executor. Bitcoin collection remains unregistered until its
-provider work and concurrency behavior qualify.
+Bitcoin model/transport support is retained, but no Bitcoin collection entry point is registered.
+
+The repository's standalone CLI and REST bootstraps do not own deployment writer/session fencing
+and therefore fail closed for authority-bearing application construction. Deployments embed the
+libraries and inject a qualified application.
+
+## Core properties
+
+- declaration order, exhaustive Match, and bounded collect-all FanOut;
+- one content-addressed certified program closure;
+- exactly five append-only run record families and atomic object closure;
+- one callback-free history fold shared by mutation, replay, trace, audit, and export;
+- affine authorization/invocation/observation handling inside Runtime;
+- append-only configured-value history with deployment write/app resolve roles;
+- real PostgreSQL run-history and wallet-authority qualification;
+- content-addressed, canonical, float-free persisted/public values; and
+- no secrets, bearer bytes, provider text, or private authority in persisted surfaces.
 
 ## Documentation
 
-Start here:
-
-- Design contract (source of truth): [`docs/design.md`](docs/design.md)
-- Architecture taxonomy + placement rules: [`docs/architecture.md`](docs/architecture.md)
-- Rust build and verification contract: [`docs/build-and-verification.md`](docs/build-and-verification.md)
-- AI-agent contribution rules: [`AGENTS.md`](AGENTS.md)
-- Code quality policy: [`docs/code-quality.md`](docs/code-quality.md)
-
-User-facing docs:
-
-- Run execution from admission through fan-out and public output:
-  [`docs/run-execution.md`](docs/run-execution.md)
-- CLI docs + output contract: [`bin/cli/README.md`](bin/cli/README.md)
-- REST API docs: [`bin/rest-api/README.md`](bin/rest-api/README.md)
-- Portfolio snapshot workflow: [`docs/portfolio-snapshot.md`](docs/portfolio-snapshot.md)
-- EVM runtime routing runbook: [`docs/evm-rpc-routing.md`](docs/evm-rpc-routing.md)
-- EVM transaction contract: [`docs/evm-transactions.md`](docs/evm-transactions.md)
-- Persisted/public surface inventory: [`docs/persisted-public-surfaces.md`](docs/persisted-public-surfaces.md)
-
-Crate docs:
-
-- Keystore and crypto primitives: [`crates/keystore/README.md`](crates/keystore/README.md)
-- Frozen journal values: [`crates/kernel/journal/README.md`](crates/kernel/journal/README.md)
-- Typed runtime: [`crates/kernel/runtime/README.md`](crates/kernel/runtime/README.md)
-- Typed store contract: [`crates/kernel/store/README.md`](crates/kernel/store/README.md)
-- Typed replay: [`crates/kernel/replay/README.md`](crates/kernel/replay/README.md)
-- Pure EVM domain: [`crates/domains/evm/README.md`](crates/domains/evm/README.md)
-- Pure portfolio domain: [`crates/domains/portfolio/README.md`](crates/domains/portfolio/README.md)
-- EVM audited transport bindings: [`crates/live/evm/README.md`](crates/live/evm/README.md)
-- Qualified journal storage (PostgreSQL): [`crates/storages/postgres/README.md`](crates/storages/postgres/README.md)
-
-Development and operations:
-
-- Nixfied project model: [`nixfied.nix`](nixfied.nix)
-- Nixfied integration and upgrade guide:
-  [upstream adopter guide](https://github.com/willyrgf/nixfied/blob/HEAD/docs/GUIDE.md)
+- [Design contract](docs/design.md)
+- [Architecture and responsibility placement](docs/architecture.md)
+- [Structured run execution](docs/run-execution.md)
+- [EVM transaction submission](docs/evm-transactions.md)
+- [Portfolio snapshot](docs/portfolio-snapshot.md)
+- [Persisted/public surfaces](docs/persisted-public-surfaces.md)
+- [Build and verification](docs/build-and-verification.md)
+- [CLI](bin/cli/README.md) and [REST API](bin/rest-api/README.md)
 
 ## Development
 
-Use the pinned default Nix shell for Rust development. The
-[build and verification contract](docs/build-and-verification.md) owns the focused commands, task
-selection, gate composition, and artifact policy.
-
-Discover runnable flake apps and run binaries locally:
+All Cargo/Rust commands run through the pinned default Nix shell. Discover repository tasks and
+binary help with:
 
 ```bash
 nix run .#help
-nix run .#mfm -- --help
-nix run .#mfm -- ops list
 nix develop -c cargo run -p mfm -- --help
 nix develop -c cargo run -p mfm-rest-api
 ```
 
-The [CLI reference](bin/cli/README.md) owns commands, output behavior, and the custom `.#mfm`
-app's managed PostgreSQL lifecycle.
+Use the scope matrix in [docs/build-and-verification.md](docs/build-and-verification.md); do not
+run broad gates merely because a commit is about to be created.
 
 ## License
-MIT (see [`LICENSE`](LICENSE)).
+
+MIT; see [LICENSE](LICENSE).

@@ -24,6 +24,9 @@ pub(crate) enum RunCommand {
         /// Configured entry-point target.
         #[arg(long, value_name = "TARGET")]
         target: String,
+        /// Bounded caller idempotency token required for EVM submission.
+        #[arg(long, value_name = "TOKEN")]
+        caller_submission_token: Option<String>,
         /// Non-semantic process connection options.
         #[command(flatten)]
         connection: ApplicationConnectionArgs,
@@ -151,10 +154,18 @@ impl RunCommand {
                 entry_point_id,
                 invocation_identity,
                 target,
+                caller_submission_token,
                 connection,
             } => {
-                let result =
-                    admit(ctx, connection, entry_point_id, invocation_identity, target).await;
+                let result = admit(
+                    ctx,
+                    connection,
+                    entry_point_id,
+                    invocation_identity,
+                    target,
+                    caller_submission_token.as_deref(),
+                )
+                .await;
                 handle_public_result(result, &ctx.output_format, public_text)
             }
             Self::Drive { run_id, connection } => {
@@ -239,13 +250,30 @@ async fn admit(
     entry_point_id: &str,
     invocation_identity: &str,
     target: &str,
+    caller_submission_token: Option<&str>,
 ) -> Result<mfm_app::AdmitRunResponse, PublicError> {
     let credential = credential(ctx).await?;
+    let input = match (
+        entry_point_id == "mfm.evm/submit-transaction@1",
+        caller_submission_token,
+    ) {
+        (true, Some(token)) => serde_json::json!({
+            "target": target,
+            "caller_submission_token": token,
+        }),
+        (false, None) => serde_json::json!({ "target": target }),
+        _ => {
+            return Err(PublicError::bad_request(
+                "AdmissionRequestInvalid",
+                "Caller submission token is required only for EVM submission",
+            ));
+        }
+    };
     let bytes = serde_json::to_vec(&serde_json::json!({
         "version": mfm_app::ADMIT_RUN_REQUEST_VERSION,
         "entry_point_id": entry_point_id,
         "invocation_identity": invocation_identity,
-        "input": { "target": target },
+        "input": input,
     }))
     .map_err(|_| {
         PublicError::internal(
@@ -431,15 +459,115 @@ fn finish_export(result: Result<(), PublicError>, format: &super::OutputFormat) 
 
 #[cfg(test)]
 mod tests {
-    use mfm_app::ErrorClass;
+    use mfm_app::{
+        AdmitRunResponse, DriveResponse, ErrorClass, PublicJsonResponse, PublicRunView,
+        ReplayResponse,
+    };
+    use serde::Deserialize;
 
-    use super::{map_export_write_error, CreateNewFileError};
+    use super::{map_export_write_error, public_text, CreateNewFileError};
+    use crate::commands::OutputFormat;
+    use crate::presentation::output::render_public_result;
+
+    #[derive(Deserialize)]
+    struct Corpus {
+        positive_vectors: Vec<Vector>,
+    }
+
+    #[derive(Deserialize)]
+    struct Vector {
+        id: String,
+        canonical_hex: Option<String>,
+    }
 
     #[test]
     fn destination_copy_failures_use_only_the_fixed_export_write_contract() {
         let error = map_export_write_error(CreateNewFileError::WriteFailed);
-        assert_eq!(error.class, ErrorClass::Internal);
-        assert_eq!(error.code, "ExportWriteFailed");
-        assert_eq!(error.message, "Export could not be written");
+        assert_eq!(error.class(), ErrorClass::Internal);
+        assert_eq!(error.code(), "ExportWriteFailed");
+        assert_eq!(error.message(), "Export could not be written");
+    }
+
+    #[test]
+    fn structured_run_commands_render_the_exact_reviewed_success_contracts() {
+        let corpus: Corpus = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../contracts/recoverability/v1/corpus.json"
+        )))
+        .expect("frozen corpus");
+
+        let admission = vector_bytes(&corpus, "schema/mfm.admit-run-response.v1/minimum");
+        assert_cli_rendering(
+            &AdmitRunResponse::strict_decode(&admission).expect("strict admission response"),
+            &admission,
+        );
+
+        for id in [
+            "schema/mfm.drive-response.v1/minimum",
+            "schema/mfm.drive-response.v1/waiting",
+            "schema/mfm.drive-response.v1/closed",
+        ] {
+            let drive = vector_bytes(&corpus, id);
+            assert_cli_rendering(
+                &DriveResponse::strict_decode(&drive).expect("strict drive response"),
+                &drive,
+            );
+        }
+
+        let public = vector_bytes(&corpus, "schema/mfm.public-run-view.v1/minimum");
+        assert_cli_rendering(
+            &PublicRunView::strict_decode(&public).expect("strict public run view"),
+            &public,
+        );
+
+        const RUN_ID: &str =
+            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000";
+        let canonical = format!(
+            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{RUN_ID}\"}}"
+        );
+        let response =
+            ReplayResponse::strict_decode(canonical.as_bytes()).expect("strict replay response");
+        assert_cli_rendering(&response, canonical.as_bytes());
+    }
+
+    fn assert_cli_rendering<T>(response: &T, canonical: &[u8])
+    where
+        T: PublicJsonResponse,
+    {
+        let canonical_text = std::str::from_utf8(canonical).expect("canonical response is UTF-8");
+
+        assert_eq!(
+            render_public_result(response, &OutputFormat::Text, public_text)
+                .expect("reviewed CLI text"),
+            format!("{canonical_text}\n")
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(canonical).expect("canonical response JSON");
+        assert_eq!(
+            render_public_result(response, &OutputFormat::Json, public_text)
+                .expect("reviewed CLI JSON"),
+            format!(
+                "{}\n",
+                serde_json::to_string_pretty(&value).expect("pretty response JSON")
+            )
+        );
+    }
+
+    fn vector_bytes(corpus: &Corpus, id: &str) -> Vec<u8> {
+        let encoded = corpus
+            .positive_vectors
+            .iter()
+            .find(|vector| vector.id == id)
+            .and_then(|vector| vector.canonical_hex.as_deref())
+            .expect("golden response vector");
+        assert_eq!(encoded.len() % 2, 0);
+        encoded
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                let text = std::str::from_utf8(pair).expect("hex pair");
+                u8::from_str_radix(text, 16).expect("hex byte")
+            })
+            .collect()
     }
 }

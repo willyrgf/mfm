@@ -1,69 +1,18 @@
 # mfm-replay
 
-Callback-free recorded-history inspection and portable export for MFM.
+Callback-free projections over the sole `mfm-store` structured-history fold.
 
-The sole current codec and portable-stream registry is
-`contracts/recoverability/v1/annex.json`.
-`docs/design.md` is the normative authority contract. Every store-backed operation borrows a
-cloneable `RunHistoryReader<B>`, accepts the exact store-owned purpose authority for replay,
-transition trace, access audit, or export, and loads one fresh head-bound
-`CommittedRunJournal`. The reader consumes that journal into one opaque,
-non-cloneable `VerifiedRunView`; raw records, object bytes, cursors, and prior views cannot
-substitute for a grant.
+The crate verifies recorded history through a reader and projects:
 
-This crate traverses the verified view without a runtime catalog or historical callback. It owns:
+- canonical replay summary;
+- fixed-head transition trace pages;
+- fixed-head access audit pages;
+- exact terminal operation outcome; and
+- current portable structured export support.
 
-- canonical recorded-history replay results;
-- exact transition-trace and safe access-audit derivation;
-- deterministic semantic and audit export canonicalization;
-- complete source/object closure traversal; and
-- callback-free offline verification of portable streams.
+It owns no writer, callback, scheduler, process registry, provider, transport, signer, wallet
+authority, or alternate reducer. Exact reproduction and current comparison return a frozen
+unavailable result when no candidate is supplied; they never use live fallback behavior.
 
-It owns no writer, append path, scheduler, live capability, provider, executor, transport, signer,
-filesystem-domain reader, or replay broker. Exact reproduction gives an isolated historical
-executable resolver only canonical plan bytes. Candidate comparison instead resolves the
-capability-free authoring, certification, and state callbacks sealed by one qualified current
-program registry. Recorded verification returns one affine session that privately owns the sole
-authoritative verified view. Verification mode renders that session directly; non-verification
-modes consume it while strictly binding caller-held semantic export bytes and their expected
-`ContentRef` to the same store, tenant, run, semantic head, and closure. Replay never exposes the
-view, loads history twice, mints an export grant, or generates a fallback export. Candidate plans
-bind all six executable/planner/state/capability references, and replay derives the candidate
-identity, plan, and per-transition verdicts itself from the verified history. The recorded stable
-entry-point operation selects the current candidate across versioned entry-point ids; callers
-cannot supply an operation, entry point, candidate identity, or label. Incompatible candidate
-contract metadata produces `NotComparable` without consuming recorded evidence. Exact plans bind
-the semantic head and transition prefix, so later authorization or observation audit-tail commits
-do not change historical execution input.
-
-Same-store fact completeness is positive only when the authoritative store rechecks the immutable
-private scan attestation and its complete dense writer prefix. Portable/offline verification always
-returns `UnverifiedPortableStream`, because included portable bytes cannot prove tenant-wide
-omission completeness.
-
-Transition trace paging accepts only the application-decoded optional fixed head, start index, and
-limit, then returns the next scalar index; the application alone owns opaque transport cursors.
-Cross-run inputs require independent source-run `InspectTrace` authorities on every page; a denied
-or authorized-but-missing source emits the same digest-only redacted lineage, while an extra
-supplied source authority is rejected.
-
-Access-audit paging likewise fixes one physical journal head. Its public entries are replay-owned
-DTOs derived from the store's verified authorization, observation, and ensure-result relationships;
-they are not persisted journal entries. The journal retains only `delivery_audit_ref`, while the
-public projection annotates a verified returned ensure as pending or terminal without decoding
-retained values in the application. Replay accepts only the store seam's decoded head, start index,
-and limit and returns the next scalar index; the application alone owns opaque transport cursors.
-The fourth observation outcome, `NonDomainFailure`, remains callback-free audit-only evidence:
-replay validates its closed code/status/disposition relation, projects it through
-`non_domain_failure`, and never supplies it to semantic settlement.
-
-Portable transfer is one `mfm.portable-run-export-stream.v1` JSON text sequence. The header fixes
-the root and coordinate; run frames are root first and then dependencies by canonical `RunId`;
-journal payloads are dense; object payloads are ordered and transferred once; and every logical
-`ValueRef` authority follows its payload in canonical order. The final `end` frame is followed
-immediately by EOF. The sole transport integrity value is raw SHA-256 over every record separator,
-canonical frame byte, and line feed and is returned outside the stream. Export recursively follows
-the complete source closure fixed by each run's admission and requires the exact transitive
-`Export` authority set before any stream byte is written. A missing source authority is a denial;
-after that exact authority is supplied, an absent or corrupt append-only source is export
-integrity failure rather than another policy denial.
+The current export media type is
+`application/vnd.mfm.structured-run-export.v1+json`. Old framed/pre-structured bytes are rejected.

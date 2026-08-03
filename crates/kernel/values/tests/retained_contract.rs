@@ -60,7 +60,7 @@ fn component_object_evidence_contract_keeps_exact_bytes_and_identity() {
         .expect("component evidence annex shape");
     assert_eq!(
         content_ref.schema_id().as_str(),
-        "schema:mfm.component-object-evidence-contract:1:sha256-jcs-v1:2c550254b453721afbd169f011db14e8534cb7b4810b9739f5543218c34d755e"
+        "schema:mfm.component-object-evidence-contract:1:sha256-jcs-v1:8b6c7e24ab69e0f2b91a273f00c23108d75847d4be9e508ce74c0b9b4aa4245e"
     );
     assert_eq!(decoded.schema_id(), content_ref.schema_id());
     assert_eq!(

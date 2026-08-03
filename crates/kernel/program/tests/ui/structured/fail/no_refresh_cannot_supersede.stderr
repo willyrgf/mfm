@@ -1,0 +1,5 @@
+error[E0574]: expected struct, variant or union type, found enum `NoRefreshEvidence`
+ --> tests/ui/structured/fail/no_refresh_cannot_supersede.rs:4:20
+  |
+4 |     let evidence = NoRefreshEvidence {};
+  |                    ^^^^^^^^^^^^^^^^^ not a struct, variant or union type

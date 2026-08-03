@@ -1,35 +1,22 @@
 #![warn(missing_docs)]
-//! Exact-generation EVM transport, audited reads, and sealed wallet qualification.
-//!
-//! One live-owned [`EvmWalletRequestQualification`] closes the actual transport catalog, executor
-//! semantics, guarded signer, nonce/finality/assurance policies, and evidence bounds before app
-//! admission or executor allocation. The app admission path, durable wallet executor, and target
-//! share that proof. Replay, reducers, ingress validation, and aggregate-reader registration
-//! surfaces remain absent.
+//! Exact-generation EVM transport and structured runtime bindings.
 
-mod adapter;
+mod physical_release;
+mod structured;
+mod structured_balance;
+mod structured_wallet;
 pub mod transport;
-mod wallet_executor;
-mod wallet_qualification;
-mod wallet_rpc;
-
-pub use adapter::{
-    evm_adapter_callback_surface_canonical, evm_adapter_callback_surface_ref,
-    evm_adapter_callback_surface_support_contract, evm_safe_classifier_canonical,
-    evm_safe_classifier_contract_ref, evm_safe_classifier_support_contract,
-    qualify_evm_read_entries, EvmReadAdapter, EvmReadQualificationArtifacts,
-    QualifiedEvmReadEntries, EVM_ADAPTER_CALLBACK_SURFACE_VERSION,
+pub use physical_release::{
+    EvmPhysicalBindingPurpose, EvmPhysicalBindingRelease, EvmPhysicalBindingReleaseHistory,
 };
-pub use wallet_executor::EvmWalletExecutor;
-pub use wallet_qualification::EvmWalletRequestQualification;
-pub use wallet_rpc::{
-    evm_already_known_classifier_canonical, evm_already_known_classifier_ref,
-    evm_wallet_target_callback_surface_canonical, evm_wallet_target_callback_surface_ref,
-    evm_wallet_target_callback_surface_support_contract, EvmWalletLiveError,
-    EVM_ALREADY_KNOWN_CLASSIFIER_VERSION, EVM_WALLET_TARGET_CALLBACK_SURFACE_VERSION,
-    EVM_WALLET_TARGET_ENTRY_DESCRIPTOR_VERSION,
+pub use structured::{
+    register_evm_live_submission_bindings, EvmStructuredEffectBinding,
+    EvmStructuredLiveBindingError, EvmStructuredLiveBindings, EvmStructuredReadBinding,
 };
-
-#[cfg(test)]
-#[path = "wallet_executor_tests.rs"]
-mod wallet_executor_tests;
+pub use structured_balance::{
+    register_evm_balance_bindings, EvmStructuredBalanceBindings, EvmStructuredBalanceReadBinding,
+};
+pub use structured_wallet::{
+    register_evm_wallet_authority_bindings, EvmStructuredWalletBindings,
+    EvmStructuredWalletEffectBinding, EvmStructuredWalletReadBinding,
+};
