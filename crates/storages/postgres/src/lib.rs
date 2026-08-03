@@ -12,6 +12,7 @@ mod qualification;
 mod roles;
 mod schema;
 mod session;
+#[cfg(test)]
 mod sql_inventory;
 mod structured;
 mod transaction;

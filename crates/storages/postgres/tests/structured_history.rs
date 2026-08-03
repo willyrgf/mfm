@@ -7,12 +7,12 @@ use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_facts::{
     CanonicalFactPredicate, FactOrdering, FactProposal, FactSelectionLimit, FactSelectionQuery,
-    FactSelectionReadFailure, FactSelectionReadFailureCode, FactSelectionReadResponse,
-    FactSelectionRequest, FactSelectionScanBounds, FactSet, FactTieBreak, ProposedFactValue,
+    FactSelectionReadFailure, FactSelectionReadResponse, FactSelectionRequest,
+    FactSelectionScanBounds, FactSet, FactTieBreak, ProposedFactValue,
 };
 use mfm_ids::{
-    AppendRequestId, ContentRef, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId,
-    StoreScopeId, TenantScopeId,
+    AppendRequestId, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId, StoreScopeId,
+    TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, CommittedBatch, HistoryObject, ObservationOutcome,
@@ -21,9 +21,9 @@ use mfm_journal::structured::{
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
-    state_contract, CommittedObservation, Direct, Never, OperationBuilder,
-    PriorRunFactSelectionCapability, Pure, Read, SafeFailureNotApplicable, SafeFailureSuccessOnly,
-    State, StateFrame, StateSettlement, StructuredStateCallbacks,
+    state_contract, Direct, Never, OperationBuilder, PriorRunFactSelectionCapability, Pure, Read,
+    SafeFailureNotApplicable, SafeFailureSuccessOnly, State, StateFrame, StateSettlement,
+    StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
@@ -44,7 +44,7 @@ use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
     ConfigurationRevision, ConfigurationStreamKey, ExportRunReader, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    PublicRunReader, StructuredAdmissionMaterial, StructuredFrontier, StructuredHistoryBackend,
+    StructuredAdmissionMaterial, StructuredFrontier, StructuredHistoryBackend,
     StructuredStoreError, StructuredStoreIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -465,7 +465,6 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     drop(writer);
     drop(run_history);
 
-    let reopened_pool = database.admin_schema_pool().await;
     let (reopened_registry, reopened_document) = qualified_program(operation_id.clone());
     assert_eq!(reopened_document, document);
     let (reopened_history, reopened_configuration) =
@@ -941,7 +940,7 @@ async fn qualification_attempt(
 
 async fn assert_schema_reopen_rejected(database: &TestDatabase) {
     assert!(matches!(
-        qualification_attempt(&database).await,
+        qualification_attempt(database).await,
         Err(PostgresStoreError::SchemaAuthorityMismatch)
             | Err(PostgresStoreError::TargetSessionRejected)
             | Err(PostgresStoreError::WriterRequired)
@@ -950,7 +949,7 @@ async fn assert_schema_reopen_rejected(database: &TestDatabase) {
 
 async fn assert_session_reopen_rejected(database: &TestDatabase) {
     assert!(matches!(
-        qualification_attempt(&database).await,
+        qualification_attempt(database).await,
         Err(PostgresStoreError::WriterRequired) | Err(PostgresStoreError::TargetSessionRejected)
     ));
 }
@@ -1019,7 +1018,6 @@ async fn qualification_rejects_public_and_hostile_schema_or_table_grants() {
         .await
         .expect("drop hostile grantee");
 
-    let pool = database.run_writer_pool().await;
     drop(
         qualification_attempt(&database)
             .await
@@ -1268,7 +1266,6 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     );
 
     let (verification_registry, _) = qualified_program(operation_id.clone());
-    let verification_pool = database.run_writer_pool().await;
     let verification = open_structured_authoritative(
         database.application_sessions().await,
         verification_registry,
@@ -1337,7 +1334,6 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
         stable("mfm.postgres.fixture/tenant-fact-publication").expect("operation id");
     let (registry, document) = qualified_fact_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -1577,7 +1573,6 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
 async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let database = TestDatabase::create().await;
     let postgres_fixture = qualified_fact_scan_fixture();
-    let store_pool = database.run_writer_pool().await;
     let postgres_assembled = open_structured_authoritative(
         database.application_sessions().await,
         postgres_fixture.registry,
@@ -1611,7 +1606,6 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         &reopened_fixture.consumer_operation,
         &InvocationIdentity::new("00000000-0000-4000-8000-000000000081").expect("consumer inv"),
     );
-    let reopened_pool = database.run_writer_pool().await;
     let reopened_assembled = open_structured_authoritative(
         database.application_sessions().await,
         reopened_fixture.registry,
@@ -1657,7 +1651,6 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
 async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_source() {
     let database = TestDatabase::create().await;
     let allowed = qualified_fact_scan_fixture();
-    let allowed_pool = database.run_writer_pool().await;
     let allowed_assembled = open_structured_authoritative(
         database.application_sessions().await,
         allowed.registry,
@@ -1743,7 +1736,6 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     drop(allowed_reader);
 
     let excluded = qualified_fact_scan_fixture_excluding_producer();
-    let excluded_pool = database.run_writer_pool().await;
     let excluded_assembled = open_structured_authoritative(
         database.application_sessions().await,
         excluded.registry,
@@ -1803,7 +1795,6 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
 async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() {
     let database = TestDatabase::create().await;
     let fixture = qualified_fact_scan_fixture();
-    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         fixture.registry,
@@ -1987,7 +1978,6 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     let operation_id = stable("mfm.postgres.fixture/object-row-rollback").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -2048,7 +2038,6 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     let operation_id = stable("mfm.postgres.fixture/malformed-objects").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -2203,7 +2192,6 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     let operation_id = stable("mfm.postgres.fixture/numeric-batch-order").expect("operation id");
     let (registry, document) = qualified_program_with_state_count(operation_id.clone(), 10);
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store_pool = database.run_writer_pool().await;
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -2598,6 +2586,10 @@ fn fact_scan_profile() -> StructuredExpansionProfile {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the end-to-end fixture keeps each certified input explicit"
+)]
 async fn drive_qualified_fact_scan<B, P>(
     runtime: Runtime<P>,
     reader: &ExportRunReader<B>,
@@ -3098,7 +3090,6 @@ struct TestDatabase {
 }
 
 struct TargetRoleSet {
-    target_key: String,
     owner: String,
     qualification: String,
     run_reader: String,
@@ -3261,28 +3252,8 @@ impl TestDatabase {
         self.admin_schema_pool().await
     }
 
-    fn application_login_name(&self) -> &str {
-        &self.run_writer_login.role_name
-    }
-
     fn application_database_url(&self) -> String {
         self.run_writer_login.database_url(&self.database_url)
-    }
-
-    fn worker_env_material(&self) -> (String, String, String, String) {
-        (
-            self.run_reader_login.database_url(&self.database_url),
-            self.run_writer_login.database_url(&self.database_url),
-            self.configuration_reader_login
-                .database_url(&self.database_url),
-            self.schema.clone(),
-        )
-    }
-
-    async fn run_writer_pool(&self) -> PgPool {
-        self.run_writer_login
-            .isolated_pool(&self.database_url, &self.schema)
-            .await
     }
 
     async fn store_scope_id(&self) -> StoreScopeId {
@@ -3370,17 +3341,6 @@ impl TestLogin {
         }
     }
 
-    async fn isolated_pool(&self, database_url: &str, schema: &str) -> PgPool {
-        let options = self
-            .connect_options(database_url)
-            .options([("search_path", schema)]);
-        PgPoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
-            .await
-            .expect("connect restricted PostgreSQL test login")
-    }
-
     fn database_url(&self, database_url: &str) -> String {
         self.connect_options(database_url)
             .to_url_lossy()
@@ -3410,7 +3370,7 @@ async fn load_target_roles(schema: &str) -> TargetRoleSet {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
     let pool = isolated_pool(&database_url, schema).await;
     let row = sqlx::query(
-        "SELECT target_key, owner_role, qualification_role, run_reader_role, run_writer_role, \
+        "SELECT owner_role, qualification_role, run_reader_role, run_writer_role, \
                 configuration_reader_role, configuration_writer_role \
            FROM target_authority WHERE singleton",
     )
@@ -3419,7 +3379,6 @@ async fn load_target_roles(schema: &str) -> TargetRoleSet {
     .expect("load target authority roles");
     pool.close().await;
     TargetRoleSet {
-        target_key: row.try_get("target_key").expect("target key"),
         owner: row.try_get("owner_role").expect("owner"),
         qualification: row.try_get("qualification_role").expect("qualification"),
         run_reader: row.try_get("run_reader_role").expect("run reader"),
