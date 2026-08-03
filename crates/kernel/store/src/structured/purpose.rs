@@ -242,6 +242,11 @@ impl RecordedRunEvidence {
         Self(verified)
     }
 
+    /// Wraps one offline-folded verified run as recorded-replay evidence.
+    pub(crate) fn from_offline_verified(verified: VerifiedStructuredRun) -> Self {
+        Self::from_verified(verified)
+    }
+
     /// Returns the exact run identity.
     pub const fn run_id(&self) -> &RunId {
         self.0.run_id()
@@ -270,6 +275,11 @@ impl RecordedRunEvidence {
     /// Returns every verified assigned record in physical append order.
     pub fn records(&self) -> &[AssignedRecord] {
         self.0.records()
+    }
+
+    /// Returns every exact committed-batch envelope in append order.
+    pub fn batches(&self) -> &[mfm_journal::structured::CommittedBatch] {
+        self.0.batches()
     }
 }
 
@@ -310,6 +320,11 @@ impl ExportRunEvidence {
     /// Returns every verified physical append head in sequence order.
     pub fn journal_heads(&self) -> &[JournalHead] {
         self.0.journal_heads()
+    }
+
+    /// Returns every exact committed-batch envelope in append order.
+    pub fn batches(&self) -> &[mfm_journal::structured::CommittedBatch] {
+        self.0.batches()
     }
 
     /// Returns every verified assigned record in physical append order.

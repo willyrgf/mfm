@@ -132,7 +132,7 @@ serializes only after that closure succeeds. Missing, denied, wrong-target, wron
 cyclic, and otherwise inaccessible dependencies collapse to one redacted `SourceRunExportDenied`
 error and emit zero bytes.
 
-The one current export is a canonical JSON object, not a framed sequence:
+The one current export is a canonical JSON object owned by `mfm-replay`, not a framed sequence:
 
 ```text
 version = "mfm.structured-portable-run-export.v1"
@@ -140,11 +140,16 @@ kind = "semantic" | "audit"
 store_scope_id
 tenant_scope_id
 run_id
-journal_head
-semantic_head
-records
-objects
+fixation = { semantic_head, journal_head, store_scope_id, store_epoch }
+source_run_ids
+batches = exact committed-batch envelopes through the fixed head
+digest = raw SHA-256 over every required member except digest
 ```
+
+Semantic selection includes every full atomic batch through the semantic cutoff, so an adjacent
+`RunClosed` that shares the terminal transition batch is retained. Offline verification consumes
+only the bundle bytes and an explicit trust snapshot (concrete program verifier plus physical
+binding verifier) and invokes the store's sole read-only fold entry; it performs no live IO.
 
 Media type:
 
@@ -153,7 +158,7 @@ application/vnd.mfm.structured-run-export.v1+json
 ```
 
 The external `ContentRef` uses raw SHA-256 of the exact object bytes. Replay input checks size,
-digest, strict annex shape, and exact store/tenant/run equality before use.
+top-level digest, strict annex shape, and exact store/tenant/run equality before use.
 
 ## Access policy
 

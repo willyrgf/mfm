@@ -24,14 +24,15 @@ use super::mutation::StructuredAdmissionRequest as StoreAdmissionRequest;
 use mfm_runtime::history::StructuredAdmissionMaterial as StoreAdmissionMaterial;
 use super::qualification::PublicPhysicalBindingVerifier;
 
-/// Concrete registry-backed program verifier private to the store adapter.
-struct RegistryProgramVerifier {
+/// Concrete registry-backed program verifier for live assembly and offline trust snapshots.
+pub struct RegistryProgramVerifier {
     registry: AdmissionVerificationRegistry,
     verified_programs: Mutex<BTreeMap<ContentRef, Arc<VerifiedProgramData>>>,
 }
 
 impl RegistryProgramVerifier {
-    fn new(registry: AdmissionVerificationRegistry) -> Self {
+    /// Wraps one concrete admission-verification registry without live process authority.
+    pub fn new(registry: AdmissionVerificationRegistry) -> Self {
         Self {
             registry,
             verified_programs: Mutex::new(BTreeMap::new()),
