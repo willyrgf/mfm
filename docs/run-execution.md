@@ -93,10 +93,19 @@ self-upgrade its physical authority.
 
 ## Settlement and failure handling
 
-Only `Returned` and `SafeFailure` reach the exact registered state settlement callback. The
-callback receives typed committed evidence and returns either one exact proposed success/failure
-or `InvalidEvidence`. Invalid evidence does not append a diagnostic event and leaves the
-authoritative cursor unchanged.
+Only `Returned` and `SafeFailure` reach registered state settlement, through distinct callbacks:
+
+- **Returned-value settlement** receives one schema-valid returned observation and may propose
+  success, propose typed failure, or reject as `InvalidEvidence`.
+- **Safe-failure settlement** receives every inhabited admitted safe-failure value. Its return type
+  is disposition-typed: under `SafeFailureSuccessOnly` it is a success-only proposal (no `Failure`
+  or `InvalidEvidence` variant); under `SafeFailureMayFail` it is a proposed success or typed
+  failure. Totality is type-enforced for every valid value; qualification does not rely on a
+  reviewed sample corpus.
+
+Invalid returned evidence does not append a diagnostic event and leaves the authoritative cursor
+unchanged. Adapter unavailability and other infrastructure faults leave the attempt uncommitted;
+they are never translated into a semantic failure record by settlement.
 
 Typed state failure follows its certified failure plan. A default mapper is an ordinary infallible
 Pure state. Custom recovery is ordinary Match/State structure. An ordinary failed root closes

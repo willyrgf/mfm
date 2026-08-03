@@ -102,9 +102,12 @@ injects ordinary visible states and structure; no Runtime branch depends on expa
 ## State and capability placement
 
 A state selects `Pure`, `Read<C>`, or `Effect<C>` and declares exact input, output, failure,
-request, returned, safe-failure, fact, and capability contracts. Its callback receives typed
-canonical values and committed observation evidence only. A callback returns a proposed success or
-typed failure plus exact fact proposals; the store append creates durable authority.
+request, returned, safe-failure, fact, and capability contracts. Pure callbacks receive typed
+canonical inputs only. Read/Effect bind distinct returned-value and safe-failure settlement
+callbacks: returned settlement may propose success, typed failure, or `InvalidEvidence`;
+safe-failure settlement is disposition-typed and success-only under `SafeFailureSuccessOnly`, so
+every inhabited safe-failure value settles without a reviewed sample corpus. The store append
+creates durable authority from accepted proposals.
 
 A capability represents one application-protocol request. A registered process implementation
 validates request, returned value, and safe failure. A live adapter additionally owns the private

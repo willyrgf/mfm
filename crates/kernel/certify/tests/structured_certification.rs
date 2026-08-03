@@ -15,12 +15,12 @@ use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
 use mfm_journal::structured::HistoryObject;
 use mfm_program::structured::{
     state_contract, AuthoringPolicy, CapabilityExpansion, ChildOperation, ClosedSum,
-    CommittedObservationView, CustomFailureHandler, DefaultFailureMapper, Direct, FanOutResults,
-    Never, OperationBuilder, PolicyExpansionRecipe, PolicyFailurePostBuilder, PolicyRecipeBuilder,
-    Pure, Read, RecoveryRouteBuilder, RequiresCapability, ReviewedSafeFailureCase,
-    RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
-    SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly, State, StateFrame,
-    StateSettlement, StructuredStateCallbacks,
+    CustomFailureHandler, DefaultFailureMapper, Direct, FanOutResults, Never, OperationBuilder,
+    PolicyExpansionRecipe, PolicyFailurePostBuilder, PolicyRecipeBuilder, ProposedSuccessOutcome,
+    Pure, Read, RecoveryRouteBuilder, RequiresCapability, RuntimeReadAdapter,
+    RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner, SafeFailureMayFail,
+    SafeFailureNotApplicable, SafeFailureSuccessOnly, State, StateFrame, StateSettlement,
+    StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_spec::structured::{
@@ -895,27 +895,18 @@ where
         Request = Request,
         Returned = Response,
         SafeFailure = StateFailure,
+        Execution = Read<FixtureReadCapability>,
+        SafeFailureDisposition = SafeFailureMayFail,
     >,
 {
     StructuredStateCallbacks::Read {
         request: Arc::new(|frame| frame.input().clone()),
-        settle: Arc::new(
-            |_frame, observation: CommittedObservationView<'_, Response, StateFailure>| {
-                StateSettlement::Proposed(match observation.observation() {
-                    mfm_program::structured::CommittedObservation::Returned(value) => {
-                        ProposedStateOutcome::Success(value.clone())
-                    }
-                    mfm_program::structured::CommittedObservation::SafeFailure(failure) => {
-                        ProposedStateOutcome::Failure(failure.clone())
-                    }
-                })
-            },
-        ),
-        reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-            Request { value: 1 },
-            StateFailure { code: 1 },
-            ProposedStateOutcome::Failure(StateFailure { code: 1 }),
-        )],
+        settle_returned: Arc::new(|_frame, returned| {
+            StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+        }),
+        settle_safe_failure: Arc::new(|_frame, failure| {
+            ProposedStateOutcome::Failure(failure.clone())
+        }),
     }
 }
 
@@ -931,25 +922,14 @@ impl FixtureStateProcess for RecoveryReadState {
             request: Arc::new(|frame| Request {
                 value: frame.input().value,
             }),
-            settle: Arc::new(
-                |_frame, observation: CommittedObservationView<'_, Response, StateFailure>| {
-                    StateSettlement::Proposed(match observation.observation() {
-                        mfm_program::structured::CommittedObservation::Returned(value) => {
-                            ProposedStateOutcome::Success(value.clone())
-                        }
-                        mfm_program::structured::CommittedObservation::SafeFailure(failure) => {
-                            ProposedStateOutcome::Success(Response {
-                                value: failure.code,
-                            })
-                        }
-                    })
-                },
-            ),
-            reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                Response { value: 1 },
-                StateFailure { code: 1 },
-                ProposedStateOutcome::Success(Response { value: 1 }),
-            )],
+            settle_returned: Arc::new(|_frame, returned| {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }),
+            settle_safe_failure: Arc::new(|_frame, failure| {
+                ProposedSuccessOutcome::new(Response {
+                    value: failure.code,
+                })
+            }),
         }
     }
 }
@@ -958,25 +938,14 @@ impl FixtureStateProcess for ConcreteCapabilityState {
     fn callbacks() -> StructuredStateCallbacks<Self> {
         StructuredStateCallbacks::Read {
             request: Arc::new(|frame| frame.input().clone()),
-            settle: Arc::new(
-                |_frame, observation: CommittedObservationView<'_, Response, StateFailure>| {
-                    match observation.observation() {
-                        mfm_program::structured::CommittedObservation::Returned(value) => {
-                            StateSettlement::Proposed(ProposedStateOutcome::Success(value.clone()))
-                        }
-                        mfm_program::structured::CommittedObservation::SafeFailure(failure) => {
-                            StateSettlement::Proposed(ProposedStateOutcome::Success(Response {
-                                value: failure.code,
-                            }))
-                        }
-                    }
-                },
-            ),
-            reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                Request { value: 1 },
-                StateFailure { code: 1 },
-                ProposedStateOutcome::Success(Response { value: 1 }),
-            )],
+            settle_returned: Arc::new(|_frame, returned| {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }),
+            settle_safe_failure: Arc::new(|_frame, failure| {
+                ProposedSuccessOutcome::new(Response {
+                    value: failure.code,
+                })
+            }),
         }
     }
 }
@@ -4673,65 +4642,10 @@ fn certify_capability_fixture(
         .expect("certified capability program")
 }
 
-#[test]
-fn success_only_qualification_rejects_invalid_evidence_for_a_reviewed_safe_failure() {
-    let operation_id = stable("mfm.fixture/invalid-success-only-qualification");
-    let mut builder =
-        OperationBuilder::<Response, Never>::new(operation_id.clone(), stable("root"))
-            .expect("builder");
-    let input = builder.input::<Request>(stable("request")).expect("input");
-    let output = builder
-        .root()
-        .state::<ConcreteCapabilityState>(stable("read"), &input)
-        .expect("Read state")
-        .infallible()
-        .expect("infallible completion");
-    let completion = builder.succeed(&output).expect("success");
-    let authored = builder.finish(completion).expect("authored program");
-
-    let mut assembly = ProgramRegistryBuilder::new();
-    register_fixture_runtime_components(&mut assembly, false);
-    let semantic_contract_ref = state_contract::<ConcreteCapabilityState>()
-        .expect("state contract")
-        .state_contract_ref;
-    let descriptor = fixture_implementation_descriptor(
-        &mut assembly,
-        StructuredComponentKind::State,
-        semantic_contract_ref,
-        stable("mfm.fixture/invalid-success-only-state-implementation"),
-    )
-    .expect("state descriptor");
-    assembly
-        .register_state::<ConcreteCapabilityState>(
-            descriptor,
-            StructuredStateCallbacks::Read {
-                request: Arc::new(|frame| frame.input().clone()),
-                settle: Arc::new(|_frame, observation| match observation.observation() {
-                    mfm_program::structured::CommittedObservation::Returned(value) => {
-                        StateSettlement::Proposed(ProposedStateOutcome::Success(value.clone()))
-                    }
-                    mfm_program::structured::CommittedObservation::SafeFailure(_) => {
-                        StateSettlement::InvalidEvidence
-                    }
-                }),
-                reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                    Request { value: 7 },
-                    StateFailure { code: 7 },
-                    ProposedStateOutcome::Success(Response { value: 7 }),
-                )],
-            },
-        )
-        .expect("state registration");
-    assembly
-        .register_entry_point(operation_id.clone(), authored, profile())
-        .expect("entry point");
-    let error = assembly
-        .build(std::slice::from_ref(&operation_id))
-        .expect_err("reviewed valid safe failure cannot become InvalidEvidence");
-    assert!(error
-        .to_string()
-        .contains("differs from its exact expected settlement"));
-}
+// InvalidEvidence and Failure are unrepresentable on the SuccessOnly safe-failure
+// callback: see program compile-fail tests
+// `success_only_safe_failure_cannot_fail` and
+// `success_only_safe_failure_cannot_invalid_evidence`.
 
 fn certify_full_pipeline_fixture(
     operation_id: &StableId,

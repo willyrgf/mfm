@@ -36,12 +36,12 @@ use mfm_journal::structured::{
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
-    state_contract, AllowsExecution, ClosedSum, CommittedObservation, CommittedObservationView,
-    DefaultFailureMapper, Direct, Effect, FanOutResults, Never, OperationBuilder,
-    PriorRunFactSelectionCapability, Pure, Read, RefreshableBinding, ReviewedSafeFailureCase,
-    RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
-    RuntimeResourceAuthority, SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly,
-    Sequential, State, StateFrame, StateSettlement, StructuredStateCallbacks,
+    state_contract, AllowsExecution, ClosedSum, CommittedObservation, DefaultFailureMapper, Direct,
+    Effect, FanOutResults, Never, OperationBuilder, PriorRunFactSelectionCapability,
+    ProposedSuccessOutcome, Pure, Read, RefreshableBinding, RuntimeEffectAdapter,
+    RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority,
+    SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly, Sequential, State,
+    StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::history::{
@@ -1821,27 +1821,19 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
                     request_count.fetch_add(1, Ordering::SeqCst);
                     frame.input().clone()
                 }),
-                settle: Arc::new(
-                    move |_frame, observation: CommittedObservationView<'_, Value, Value>| {
+                settle_returned: Arc::new({
+                    let settlement_count = Arc::clone(&settlement_count);
+                    move |_frame, returned| {
                         settlement_count.fetch_add(1, Ordering::SeqCst);
-                        let outcome = match observation.observation() {
-                            CommittedObservation::Returned(value) => {
-                                ProposedStateOutcome::Success(value.clone())
-                            }
-                            CommittedObservation::SafeFailure(failure) => {
-                                ProposedStateOutcome::Failure(FailureValue {
-                                    code: failure.value,
-                                })
-                            }
-                        };
-                        StateSettlement::Proposed(outcome)
-                    },
-                ),
-                reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                    Value { value: 0 },
-                    Value { value: 91 },
-                    ProposedStateOutcome::Failure(FailureValue { code: 91 }),
-                )],
+                        StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+                    }
+                }),
+                settle_safe_failure: Arc::new(move |_frame, failure| {
+                    settlement_count.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Failure(FailureValue {
+                        code: failure.value,
+                    })
+                }),
             },
         )
         .expect("fallible Read state");
@@ -2214,21 +2206,17 @@ fn refreshable_effect_registry(
             state_descriptor,
             StructuredStateCallbacks::Effect {
                 request: Arc::new(|frame: StateFrame<'_, Value>| frame.input().clone()),
-                settle: Arc::new(
-                    move |_frame, observation: CommittedObservationView<'_, Value, Value>| {
+                settle_returned: Arc::new({
+                    let settle_counter = Arc::clone(&settle_counter);
+                    move |_frame, returned| {
                         settle_counter.fetch_add(1, Ordering::SeqCst);
-                        let value = match observation.observation() {
-                            CommittedObservation::Returned(value)
-                            | CommittedObservation::SafeFailure(value) => value.clone(),
-                        };
-                        StateSettlement::Proposed(ProposedStateOutcome::Success(value))
-                    },
-                ),
-                reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                    Value { value: 1 },
-                    Value { value: 2 },
-                    ProposedStateOutcome::Success(Value { value: 2 }),
-                )],
+                        StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+                    }
+                }),
+                settle_safe_failure: Arc::new(move |_frame, failure| {
+                    settle_counter.fetch_add(1, Ordering::SeqCst);
+                    ProposedSuccessOutcome::new(failure.clone())
+                }),
             },
         )
         .expect("effect state");

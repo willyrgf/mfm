@@ -3167,6 +3167,52 @@ impl<T, F> ProposedStateOutcome<T, F> {
     }
 }
 
+/// Success-only uncommitted proposal admitted by safe-failure settlement under
+/// [`super::StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess`].
+///
+/// The type has no `Failure` or `InvalidEvidence` variant: every inhabited
+/// safe-failure value that reaches this path proposes success.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProposedSuccessOutcome<T> {
+    value: T,
+    facts: mfm_facts::FactSet,
+}
+
+impl<T> ProposedSuccessOutcome<T> {
+    /// Constructs one successful proposal without facts.
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            facts: mfm_facts::FactSet::empty(),
+        }
+    }
+
+    /// Constructs one successful proposal with its exact fact proposals.
+    pub fn with_facts(value: T, facts: mfm_facts::FactSet) -> Self {
+        Self { value, facts }
+    }
+
+    /// Returns the proposed successful value.
+    pub const fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Returns facts in exact callback emission order.
+    pub const fn facts(&self) -> &mfm_facts::FactSet {
+        &self.facts
+    }
+
+    /// Consumes the proposal into its value and fact set.
+    pub fn into_parts(self) -> (T, mfm_facts::FactSet) {
+        (self.value, self.facts)
+    }
+
+    /// Lifts this success-only proposal into a general proposed outcome.
+    pub fn into_proposed_outcome<F>(self) -> ProposedStateOutcome<T, F> {
+        ProposedStateOutcome::success_with_facts(self.value, self.facts)
+    }
+}
+
 /// Nominal committed state result constructed only by an accepted transition.
 ///
 /// Structurally identical outcomes from another boundary are not substitutable:

@@ -22,7 +22,7 @@ use mfm_journal::structured::{
 };
 use mfm_program::structured::{
     state_contract, CommittedObservation, Direct, Never, OperationBuilder,
-    PriorRunFactSelectionCapability, Pure, Read, ReviewedSafeFailureCase, SafeFailureNotApplicable,
+    PriorRunFactSelectionCapability, Pure, Read, SafeFailureNotApplicable,
     SafeFailureSuccessOnly, State, StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
@@ -2665,45 +2665,23 @@ fn qualified_fact_scan_fixture_with_source_operation(
             consumer_descriptor,
             StructuredStateCallbacks::Read {
                 request: Arc::new(move |_| authored_request.clone()),
-                settle: Arc::new(|_frame, observation| {
-                    let output = match observation.observation() {
-                        CommittedObservation::Returned(returned) => {
-                            let response: PriorRunFactSelectionResponse =
-                                serde_json::from_str(returned.canonical_response_json())
-                                    .expect("typed fact response");
-                            response.query_results[0]
-                                .selected
-                                .first()
-                                .map(|selected| {
-                                    serde_json::from_str::<Value>(&selected.response_canonical_json)
-                                        .expect("selected fact response")
-                                })
-                                .unwrap_or(Value { value: 0 })
-                        }
-                        CommittedObservation::SafeFailure(_) => Value { value: 0 },
-                    };
+                settle_returned: Arc::new(|_frame, returned| {
+                    let response: PriorRunFactSelectionResponse =
+                        serde_json::from_str(returned.canonical_response_json())
+                            .expect("typed fact response");
+                    let output = response.query_results[0]
+                        .selected
+                        .first()
+                        .map(|selected| {
+                            serde_json::from_str::<Value>(&selected.response_canonical_json)
+                                .expect("selected fact response")
+                        })
+                        .unwrap_or(Value { value: 0 });
                     StateSettlement::Proposed(ProposedStateOutcome::Success(output))
                 }),
-                reviewed_safe_failures: [
-                    FactSelectionReadFailureCode::StoreUnavailable,
-                    FactSelectionReadFailureCode::PublicationBoundExceeded,
-                    FactSelectionReadFailureCode::FactBoundExceeded,
-                    FactSelectionReadFailureCode::RetainedSourceBoundExceeded,
-                    FactSelectionReadFailureCode::SelectedResultBoundExceeded,
-                    FactSelectionReadFailureCode::ResponseBoundExceeded,
-                ]
-                .into_iter()
-                .enumerate()
-                .map(|(ordinal, code)| {
-                    ReviewedSafeFailureCase::new(
-                        Value {
-                            value: u64::try_from(ordinal).expect("bounded failure ordinal"),
-                        },
-                        FactSelectionReadFailure::new(code),
-                        ProposedStateOutcome::Success(Value { value: 0 }),
-                    )
-                })
-                .collect(),
+                settle_safe_failure: Arc::new(|_frame, _failure| {
+                    mfm_program::structured::ProposedSuccessOutcome::new(Value { value: 0 })
+                }),
             },
         )
         .expect("consumer state registration");

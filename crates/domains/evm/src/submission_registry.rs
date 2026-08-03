@@ -11,8 +11,8 @@ use mfm_capabilities::{
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_ids::{ContentDigest, ContentRef, StableId, TenantScopeId};
 use mfm_program::structured::{
-    state_contract, CommittedObservation, CommittedObservationView, ReviewedSafeFailureCase, State,
-    StateFrame, StateSettlement, StructuredStateCallbacks,
+    state_contract, CommittedObservation, State, StateFrame, StateSettlement,
+    StructuredStateCallbacks,
 };
 use mfm_spec::structured::{
     ProposedStateOutcome, ProposedStateValue, SecretFreeImplementationDescriptor,
@@ -161,22 +161,33 @@ macro_rules! pure_process {
 macro_rules! read_process {
     ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
         impl SubmissionStateProcess for $state {
-            fn callbacks(fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
+            fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Read {
                     request: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
                     ),
-                    settle: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>,
-                         observation: CommittedObservationView<
-                            '_,
-                            <Self as State>::Returned,
-                            <Self as State>::SafeFailure,
-                         >| $settle(frame.input(), observation.observation()),
+                    settle_returned: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, returned| {
+                            $settle(
+                                frame.input(),
+                                &CommittedObservation::Returned(returned.clone()),
+                            )
+                        },
                     ),
-                    reviewed_safe_failures: reviewed_failure_cases::<Self>(
-                        fixture.$fixture.clone(),
-                        &[$($failure),+],
+                    settle_safe_failure: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
+                            match $settle(
+                                frame.input(),
+                                &CommittedObservation::SafeFailure(failure.clone()),
+                            ) {
+                                StateSettlement::Proposed(outcome) => outcome,
+                                StateSettlement::InvalidEvidence => {
+                                    unreachable!(
+                                        "safe-failure settlement cannot produce InvalidEvidence"
+                                    )
+                                }
+                            }
+                        },
                     ),
                 }
             }
@@ -187,23 +198,33 @@ macro_rules! read_process {
 macro_rules! reconciling_read_process {
     ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
         impl SubmissionStateProcess for $state {
-            fn callbacks(fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
+            fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Read {
                     request: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
                     ),
-                    settle: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>,
-                         observation: CommittedObservationView<
-                            '_,
-                            <Self as State>::Returned,
-                            <Self as State>::SafeFailure,
-                         >| $settle(frame.input(), observation.observation()),
+                    settle_returned: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, returned| {
+                            $settle(
+                                frame.input(),
+                                &CommittedObservation::Returned(returned.clone()),
+                            )
+                        },
                     ),
-                    reviewed_safe_failures: reviewed_pending_failure_cases::<Self>(
-                        fixture.$fixture.clone(),
-                        &[$($failure),+],
-                        $settle,
+                    settle_safe_failure: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
+                            match $settle(
+                                frame.input(),
+                                &CommittedObservation::SafeFailure(failure.clone()),
+                            ) {
+                                StateSettlement::Proposed(outcome) => outcome,
+                                StateSettlement::InvalidEvidence => {
+                                    unreachable!(
+                                        "safe-failure settlement cannot produce InvalidEvidence"
+                                    )
+                                }
+                            }
+                        },
                     ),
                 }
             }
@@ -214,23 +235,33 @@ macro_rules! reconciling_read_process {
 macro_rules! reconciling_effect_process {
     ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
         impl SubmissionStateProcess for $state {
-            fn callbacks(fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
+            fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Effect {
                     request: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
                     ),
-                    settle: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>,
-                         observation: CommittedObservationView<
-                            '_,
-                            <Self as State>::Returned,
-                            <Self as State>::SafeFailure,
-                         >| $settle(frame.input(), observation.observation()),
+                    settle_returned: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, returned| {
+                            $settle(
+                                frame.input(),
+                                &CommittedObservation::Returned(returned.clone()),
+                            )
+                        },
                     ),
-                    reviewed_safe_failures: reviewed_pending_failure_cases::<Self>(
-                        fixture.$fixture.clone(),
-                        &[$($failure),+],
-                        $settle,
+                    settle_safe_failure: Arc::new(
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
+                            match $settle(
+                                frame.input(),
+                                &CommittedObservation::SafeFailure(failure.clone()),
+                            ) {
+                                StateSettlement::Proposed(outcome) => outcome,
+                                StateSettlement::InvalidEvidence => {
+                                    unreachable!(
+                                        "safe-failure settlement cannot produce InvalidEvidence"
+                                    )
+                                }
+                            }
+                        },
                     ),
                 }
             }
@@ -456,59 +487,6 @@ reconciling_effect_process!(
     submission_process::settle_completion,
     [EvmSubmissionFailure::NonceAuthorityUnavailable]
 );
-
-fn reviewed_failure_cases<S>(
-    input: S::Input,
-    failures: &[EvmSubmissionFailure],
-) -> Vec<mfm_program::structured::ReviewedStateSafeFailureCase<S>>
-where
-    S: State<Failure = EvmSubmissionFailure, SafeFailure = EvmSubmissionFailure>,
-    S::Input: Clone,
-{
-    failures
-        .iter()
-        .copied()
-        .map(|failure| {
-            ReviewedSafeFailureCase::new(
-                input.clone(),
-                failure,
-                ProposedStateOutcome::Failure(failure),
-            )
-        })
-        .collect()
-}
-
-// The callback type mirrors `State::settle` exactly so reviewed cases use the
-// same implementation as live settlement.
-#[allow(clippy::type_complexity)]
-fn reviewed_pending_failure_cases<S>(
-    input: S::Input,
-    failures: &[EvmSubmissionFailure],
-    settle: fn(
-        &S::Input,
-        &CommittedObservation<S::Returned, EvmSubmissionFailure>,
-    ) -> StateSettlement<S::Output, PendingEvmSubmissionFailure>,
-) -> Vec<mfm_program::structured::ReviewedStateSafeFailureCase<S>>
-where
-    S: State<Failure = PendingEvmSubmissionFailure, SafeFailure = EvmSubmissionFailure>,
-    S::Input: Clone,
-{
-    failures
-        .iter()
-        .copied()
-        .filter_map(|failure| {
-            let observation = CommittedObservation::SafeFailure(failure);
-            match settle(&input, &observation) {
-                StateSettlement::Proposed(expected) => Some(ReviewedSafeFailureCase::new(
-                    input.clone(),
-                    failure,
-                    expected,
-                )),
-                StateSettlement::InvalidEvidence => None,
-            }
-        })
-        .collect()
-}
 
 /// Registers the complete state/capability side of the one structured EVM
 /// submission expansion. Live crates must separately register its concrete
@@ -1383,6 +1361,7 @@ fn valid_broadcast_lineage_head(head: &BroadcastLineageHead) -> bool {
         && valid_reference(&head.public_lineage_head_ref)
 }
 
+#[allow(dead_code)] // retained for process-registration fixture construction
 pub(crate) struct QualificationFixture {
     pub(crate) prepared: PreparedWalletSubmission,
     pub(crate) post_reserve: PostReservePreparedSubmission,

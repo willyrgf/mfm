@@ -19,11 +19,10 @@ use mfm_journal::structured::{
     TypedValueRef,
 };
 use mfm_program::structured::{
-    AllowsExecution, AuthoringPolicy, ChildOperation, ClosedSum, CommittedObservationView,
-    CustomFailureHandler, DefaultFailureMapper, Direct, Effect, FanOutResults, Never,
-    OperationBuilder, PolicyExpansionRecipe, PolicyFailurePostBuilder, PolicyRecipeBuilder, Pure,
-    Read, RecoveryRouteBuilder, RefreshableBinding, ReviewedSafeFailureCase, Sequential,
-    StateFrame, StateSettlement,
+    AllowsExecution, AuthoringPolicy, ChildOperation, ClosedSum, CustomFailureHandler,
+    DefaultFailureMapper, Direct, Effect, FanOutResults, Never, OperationBuilder,
+    PolicyExpansionRecipe, PolicyFailurePostBuilder, PolicyRecipeBuilder, ProposedSuccessOutcome,
+    Pure, Read, RecoveryRouteBuilder, RefreshableBinding, Sequential, StateFrame, StateSettlement,
 };
 use mfm_program_derive::MfmValue;
 use mfm_spec::structured::{ProposedStateOutcome, StructuredComponentDependency};
@@ -2263,39 +2262,25 @@ fn register_process_failure_mapper(assembly: &mut ProgramRegistryBuilder) {
 fn simple_read_callbacks() -> StructuredStateCallbacks<ReadProcessState> {
     StructuredStateCallbacks::Read {
         request: Arc::new(|frame| frame.input().clone()),
-        settle: Arc::new(|_frame, observation| {
-            StateSettlement::Proposed(match observation.observation() {
-                CommittedObservation::Returned(value) => {
-                    ProposedStateOutcome::Success(value.clone())
-                }
-                CommittedObservation::SafeFailure(failure) => {
-                    ProposedStateOutcome::Failure(failure.clone())
-                }
-            })
+        settle_returned: Arc::new(|_frame, returned| {
+            StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
         }),
-        reviewed_safe_failures: vec![mfm_program::structured::ReviewedSafeFailureCase::new(
-            ProcessValue { value: 1 },
-            ProcessFailure { code: 1 },
-            ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-        )],
+        settle_safe_failure: Arc::new(|_frame, failure| {
+            ProposedStateOutcome::Failure(failure.clone())
+        }),
     }
 }
 
 #[derive(Clone, Copy)]
-enum QualificationSettlement {
+enum MayFailSafeFailureSettlement {
     FailureEcho,
     SuccessFromFailure,
     FixedFailure(u64),
     SuccessOnOddFailureOtherwiseFailure,
-    InvalidEvidence,
-    ConsistentSuccess,
 }
 
-fn qualification_read_callbacks<S>(
-    behavior: QualificationSettlement,
-    reviewed_safe_failures: Vec<
-        ReviewedSafeFailureCase<ProcessValue, ProcessFailure, ProcessValue, ProcessFailure>,
-    >,
+fn may_fail_read_callbacks<S>(
+    behavior: MayFailSafeFailureSettlement,
     settlement_calls: Option<Arc<AtomicUsize>>,
 ) -> StructuredStateCallbacks<S>
 where
@@ -2306,57 +2291,85 @@ where
         Request = ProcessValue,
         Returned = ProcessValue,
         SafeFailure = ProcessFailure,
+        Execution = Read<ProcessReadCapability>,
+        SafeFailureDisposition = mfm_program::structured::SafeFailureMayFail,
     >,
 {
     StructuredStateCallbacks::Read {
         request: Arc::new(|frame| frame.input().clone()),
-        settle: Arc::new(move |frame, observation| {
+        settle_returned: Arc::new({
+            let settlement_calls = settlement_calls.clone();
+            move |_frame, returned| {
+                if let Some(calls) = &settlement_calls {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }
+        }),
+        settle_safe_failure: Arc::new(move |_frame, failure| {
             if let Some(calls) = &settlement_calls {
                 calls.fetch_add(1, Ordering::SeqCst);
             }
-            match observation.observation() {
-                CommittedObservation::Returned(value) => {
-                    StateSettlement::Proposed(ProposedStateOutcome::Success(value.clone()))
+            match behavior {
+                MayFailSafeFailureSettlement::FailureEcho => {
+                    ProposedStateOutcome::Failure(failure.clone())
                 }
-                CommittedObservation::SafeFailure(failure) => match behavior {
-                    QualificationSettlement::FailureEcho => {
-                        StateSettlement::Proposed(ProposedStateOutcome::Failure(failure.clone()))
-                    }
-                    QualificationSettlement::SuccessFromFailure => {
-                        StateSettlement::Proposed(ProposedStateOutcome::Success(ProcessValue {
+                MayFailSafeFailureSettlement::SuccessFromFailure => {
+                    ProposedStateOutcome::Success(ProcessValue {
+                        value: failure.code,
+                    })
+                }
+                MayFailSafeFailureSettlement::FixedFailure(code) => {
+                    ProposedStateOutcome::Failure(ProcessFailure { code })
+                }
+                MayFailSafeFailureSettlement::SuccessOnOddFailureOtherwiseFailure => {
+                    if failure.code % 2 == 1 {
+                        ProposedStateOutcome::Success(ProcessValue {
                             value: failure.code,
-                        }))
+                        })
+                    } else {
+                        ProposedStateOutcome::Failure(failure.clone())
                     }
-                    QualificationSettlement::FixedFailure(code) => {
-                        StateSettlement::Proposed(ProposedStateOutcome::Failure(ProcessFailure {
-                            code,
-                        }))
-                    }
-                    QualificationSettlement::SuccessOnOddFailureOtherwiseFailure => {
-                        if failure.code % 2 == 1 {
-                            StateSettlement::Proposed(ProposedStateOutcome::Success(ProcessValue {
-                                value: failure.code,
-                            }))
-                        } else {
-                            StateSettlement::Proposed(ProposedStateOutcome::Failure(
-                                failure.clone(),
-                            ))
-                        }
-                    }
-                    QualificationSettlement::InvalidEvidence => StateSettlement::InvalidEvidence,
-                    QualificationSettlement::ConsistentSuccess => {
-                        if frame.input().value == failure.code {
-                            StateSettlement::Proposed(ProposedStateOutcome::Success(ProcessValue {
-                                value: failure.code,
-                            }))
-                        } else {
-                            StateSettlement::InvalidEvidence
-                        }
-                    }
-                },
+                }
             }
         }),
-        reviewed_safe_failures,
+    }
+}
+
+fn success_only_read_callbacks<S>(
+    settlement_calls: Option<Arc<AtomicUsize>>,
+) -> StructuredStateCallbacks<S>
+where
+    S: State<
+        Input = ProcessValue,
+        Output = ProcessValue,
+        Failure = ProcessFailure,
+        Request = ProcessValue,
+        Returned = ProcessValue,
+        SafeFailure = ProcessFailure,
+        Execution = Read<ProcessReadCapability>,
+        SafeFailureDisposition = mfm_program::structured::SafeFailureSuccessOnly,
+    >,
+{
+    StructuredStateCallbacks::Read {
+        request: Arc::new(|frame| frame.input().clone()),
+        settle_returned: Arc::new({
+            let settlement_calls = settlement_calls.clone();
+            move |_frame, returned| {
+                if let Some(calls) = &settlement_calls {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                }
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }
+        }),
+        settle_safe_failure: Arc::new(move |_frame, failure| {
+            if let Some(calls) = &settlement_calls {
+                calls.fetch_add(1, Ordering::SeqCst);
+            }
+            ProposedSuccessOutcome::new(ProcessValue {
+                value: failure.code,
+            })
+        }),
     }
 }
 
@@ -2546,23 +2559,14 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
         effect_state_descriptor,
         StructuredStateCallbacks::Effect {
             request: Arc::new(|frame| frame.input().clone()),
-            settle: Arc::new(|_frame, observation| {
-                StateSettlement::Proposed(match observation.observation() {
-                    CommittedObservation::Returned(value) => {
-                        ProposedStateOutcome::Success(value.clone())
-                    }
-                    CommittedObservation::SafeFailure(failure) => {
-                        ProposedStateOutcome::Success(ProcessValue {
-                            value: failure.code,
-                        })
-                    }
+            settle_returned: Arc::new(|_frame, returned| {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }),
+            settle_safe_failure: Arc::new(|_frame, failure| {
+                ProposedSuccessOutcome::new(ProcessValue {
+                    value: failure.code,
                 })
             }),
-            reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 51 },
-                ProposedStateOutcome::Success(ProcessValue { value: 51 }),
-            )],
         },
     )?;
 
@@ -2654,7 +2658,6 @@ fn assert_process_graph_valid(assembly: &ProgramRegistryBuilder) {
         &assembly.registry,
         &assembly.process_components,
         &required,
-        &assembly.state_safe_failure_corpora,
     )
     .expect("valid process graph");
 }
@@ -2664,15 +2667,13 @@ fn assert_process_graph_rejected(
     mutate: impl FnOnce(
         &mut StructuredCertificationRegistry,
         &mut BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
-        &mut BTreeMap<ContentRef, Vec<RegisteredSafeFailureCase>>,
     ),
 ) {
     let mut registry = assembly.registry.clone();
     let mut process_components = assembly.process_components.clone();
-    let mut corpora = assembly.state_safe_failure_corpora.clone();
     let required = process_components.keys().cloned().collect::<BTreeSet<_>>();
-    mutate(&mut registry, &mut process_components, &mut corpora);
-    validate_process_component_graph(&registry, &process_components, &required, &corpora)
+    mutate(&mut registry, &mut process_components);
+    validate_process_component_graph(&registry, &process_components, &required)
         .expect_err("hostile process graph must be rejected");
 }
 
@@ -2759,21 +2760,12 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
     );
     let callbacks = StructuredStateCallbacks::<ReadProcessState>::Effect {
         request: Arc::new(|frame| frame.input().clone()),
-        settle: Arc::new(|_frame, observation| {
-            StateSettlement::Proposed(match observation.observation() {
-                CommittedObservation::Returned(value) => {
-                    ProposedStateOutcome::Success(value.clone())
-                }
-                CommittedObservation::SafeFailure(failure) => {
-                    ProposedStateOutcome::Failure(failure.clone())
-                }
-            })
+        settle_returned: Arc::new(|_frame, returned| {
+            StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
         }),
-        reviewed_safe_failures: vec![mfm_program::structured::ReviewedSafeFailureCase::new(
-            ProcessValue { value: 1 },
-            ProcessFailure { code: 1 },
-            ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-        )],
+        settle_safe_failure: Arc::new(|_frame, failure| {
+            ProposedStateOutcome::Failure(failure.clone())
+        }),
     };
     assembly
         .register_state::<ReadProcessState>(descriptor, callbacks)
@@ -3075,240 +3067,155 @@ fn default_propagation_rejects_every_authority_and_provenance_substitution() {
 }
 
 #[test]
-fn safe_failure_qualification_binds_each_reviewed_case_to_its_exact_proposal() {
-    let accepted = [
-        (
-            "mixed",
-            QualificationSettlement::SuccessOnOddFailureOtherwiseFailure,
-            vec![
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 1 },
-                    ProcessFailure { code: 1 },
-                    ProposedStateOutcome::Success(ProcessValue { value: 1 }),
-                ),
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 2 },
-                    ProcessFailure { code: 2 },
-                    ProposedStateOutcome::Failure(ProcessFailure { code: 2 }),
-                ),
-            ],
-        ),
-        (
-            "failure-only",
-            QualificationSettlement::FailureEcho,
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 3 },
-                ProcessFailure { code: 3 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 3 }),
-            )],
-        ),
-    ];
-    for (label, behavior, cases) in accepted {
-        let operation_id = sid(&format!("mfm.test/safe-failure-accepted-{label}"));
-        read_process_assembly::<ReadProcessState, _>(
-            operation_id,
-            qualification_read_callbacks(behavior, cases, None),
-            Arc::new(ProcessReadImplementation {
-                counts: Arc::new(ReadValidationCounts::default()),
-            }),
-        )
-        .expect("valid qualification assembly")
-        .build_fixture()
-        .expect("exact reviewed expectations qualify");
-    }
-
-    let rejected = [
-        (
-            "success-became-failure",
-            QualificationSettlement::FailureEcho,
-            vec![
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 1 },
-                    ProcessFailure { code: 1 },
-                    ProposedStateOutcome::Success(ProcessValue { value: 1 }),
-                ),
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 2 },
-                    ProcessFailure { code: 2 },
-                    ProposedStateOutcome::Failure(ProcessFailure { code: 2 }),
-                ),
-            ],
-        ),
-        (
-            "failure-became-success",
-            QualificationSettlement::SuccessFromFailure,
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 1 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-            )],
-        ),
-        (
-            "wrong-success-payload",
-            QualificationSettlement::SuccessOnOddFailureOtherwiseFailure,
-            vec![
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 1 },
-                    ProcessFailure { code: 1 },
-                    ProposedStateOutcome::Success(ProcessValue { value: 99 }),
-                ),
-                ReviewedSafeFailureCase::new(
-                    ProcessValue { value: 2 },
-                    ProcessFailure { code: 2 },
-                    ProposedStateOutcome::Failure(ProcessFailure { code: 2 }),
-                ),
-            ],
-        ),
-        (
-            "wrong-failure-payload",
-            QualificationSettlement::FixedFailure(99),
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 1 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-            )],
-        ),
-        (
-            "invalid-evidence",
-            QualificationSettlement::InvalidEvidence,
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 1 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-            )],
-        ),
-    ];
-    for (label, behavior, cases) in rejected {
-        let operation_id = sid(&format!("mfm.test/safe-failure-rejected-{label}"));
-        let error = read_process_assembly::<ReadProcessState, _>(
-            operation_id,
-            qualification_read_callbacks(behavior, cases, None),
-            Arc::new(ProcessReadImplementation {
-                counts: Arc::new(ReadValidationCounts::default()),
-            }),
-        )
-        .expect("hostile settlement remains inert until qualification")
-        .build_fixture()
-        .expect_err("actual settlement must equal its exact reviewed proposal");
-        assert!(
-            error
-                .to_string()
-                .contains("differs from its exact expected settlement"),
-            "{label}: {error}"
-        );
-    }
-
-    let no_negative = vec![ReviewedSafeFailureCase::new(
-        ProcessValue { value: 1 },
-        ProcessFailure { code: 1 },
-        ProposedStateOutcome::Success(ProcessValue { value: 1 }),
-    )];
-    let error = read_process_assembly::<ReadProcessState, _>(
-        sid("mfm.test/safe-failure-no-negative"),
-        qualification_read_callbacks(
-            QualificationSettlement::SuccessFromFailure,
-            no_negative,
-            None,
-        ),
-        Arc::new(ProcessReadImplementation {
-            counts: Arc::new(ReadValidationCounts::default()),
-        }),
-    )
-    .expect("no-negative assembly")
-    .build_fixture()
-    .expect_err("MayFail must declare one exact negative case");
-    assert!(error
-        .to_string()
-        .contains("no reviewed expected typed-failure"));
-
-    for conflicting in [false, true] {
-        let first = ReviewedSafeFailureCase::new(
-            ProcessValue { value: 1 },
-            ProcessFailure { code: 1 },
-            ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-        );
-        let second = ReviewedSafeFailureCase::new(
-            ProcessValue { value: 1 },
-            ProcessFailure { code: 1 },
-            if conflicting {
-                ProposedStateOutcome::Success(ProcessValue { value: 1 })
-            } else {
-                ProposedStateOutcome::Failure(ProcessFailure { code: 1 })
-            },
-        );
-        let error = read_process_assembly::<ReadProcessState, _>(
-            sid(if conflicting {
-                "mfm.test/conflicting-safe-failure-case"
-            } else {
-                "mfm.test/duplicate-safe-failure-case"
-            }),
-            qualification_read_callbacks(
-                QualificationSettlement::FailureEcho,
-                vec![first, second],
-                None,
-            ),
-            Arc::new(ProcessReadImplementation {
-                counts: Arc::new(ReadValidationCounts::default()),
-            }),
-        )
-        .expect_err("duplicate exact input/evidence pair must reject at registration");
-        assert!(error.to_string().contains("duplicated"));
-    }
-
-    let error = read_process_assembly::<ReadProcessState, _>(
-        sid("mfm.test/empty-safe-failure-corpus"),
-        qualification_read_callbacks(QualificationSettlement::FailureEcho, Vec::new(), None),
-        Arc::new(ProcessReadImplementation {
-            counts: Arc::new(ReadValidationCounts::default()),
-        }),
-    )
-    .expect_err("a live state cannot register an empty valid corpus");
-    assert!(error.to_string().contains("no reviewed valid safe-failure"));
-
-    let error = read_process_assembly::<ReadProcessState, _>(
-        sid("mfm.test/rejected-reviewed-safe-failure"),
-        qualification_read_callbacks(
-            QualificationSettlement::FailureEcho,
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 1 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-            )],
-            None,
-        ),
-        Arc::new(RejectingSafeFailureReadImplementation),
-    )
-    .expect("rejecting capability assembly")
-    .build_fixture()
-    .expect_err("capability must admit every purported reviewed-valid case");
-    assert!(error.to_string().contains("rejected safe-failure evidence"));
-}
-
-#[test]
-fn fallible_success_only_read_qualifies_and_keeps_invalid_evidence_outside_its_corpus() {
-    let operation_id = sid("mfm.test/fallible-success-only-read");
+fn may_fail_safe_failure_settlement_is_total_over_arbitrary_valid_values() {
+    let operation_id = sid("mfm.test/may-fail-safe-failure-total");
     let settlement_calls = Arc::new(AtomicUsize::new(0));
-    let assembly = read_process_assembly::<FallibleSuccessOnlyReadState, _>(
+    let registry = read_process_assembly::<ReadProcessState, _>(
         operation_id,
-        qualification_read_callbacks(
-            QualificationSettlement::ConsistentSuccess,
-            vec![ReviewedSafeFailureCase::new(
-                ProcessValue { value: 1 },
-                ProcessFailure { code: 1 },
-                ProposedStateOutcome::Success(ProcessValue { value: 1 }),
-            )],
+        may_fail_read_callbacks(
+            MayFailSafeFailureSettlement::SuccessOnOddFailureOtherwiseFailure,
             Some(settlement_calls.clone()),
         ),
         Arc::new(ProcessReadImplementation {
             counts: Arc::new(ReadValidationCounts::default()),
         }),
     )
-    .expect("success-only Read assembly");
-    let registry = assembly
-        .build_fixture()
-        .expect("fallible SuccessOnly Read qualifies");
-    let qualified_calls = settlement_calls.load(Ordering::SeqCst);
-    assert_eq!(qualified_calls, 1);
+    .expect("may-fail assembly")
+    .build_fixture()
+    .expect("may-fail qualifies without a sample corpus");
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
+
+    let state_ref = state_contract::<ReadProcessState>()
+        .expect("state contract")
+        .state_contract_ref;
+    let callbacks = registry
+        .process_components
+        .iter()
+        .find(|((kind, semantic_ref, _), _)| {
+            *kind == StructuredComponentKind::State && semantic_ref == &state_ref
+        })
+        .map(|(_, component)| &component.handle)
+        .expect("state process");
+    let ProcessHandle::State(callbacks) = callbacks else {
+        panic!("state callback handle");
+    };
+
+    let cases = [
+        (1u64, "success"),
+        (2, "failure"),
+        (3, "success"),
+        (4, "failure"),
+        (99, "success"),
+        (100, "failure"),
+    ];
+    for (code, expected_kind) in cases {
+        let input = encode_process_value(&ProcessValue { value: code }).expect("input");
+        let observation = encode_process_value(
+            &CommittedObservation::<ProcessValue, ProcessFailure>::SafeFailure(ProcessFailure {
+                code,
+            }),
+        )
+        .expect("observation");
+        let settlement = callbacks
+            .settle_observation(&input, &observation)
+            .expect("every inhabited safe failure settles");
+        let kind = settlement
+            .as_json()
+            .get("outcome")
+            .and_then(|value| value.get("kind"))
+            .and_then(|value| value.as_str())
+            .expect("outcome kind");
+        assert_eq!(kind, expected_kind, "code {code}");
+    }
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), cases.len());
+}
+
+#[test]
+fn returned_value_settlement_retains_full_invalid_evidence_behavior() {
+    let operation_id = sid("mfm.test/returned-settlement-invalid-evidence");
+    let registry = read_process_assembly::<ReadProcessState, _>(
+        operation_id,
+        StructuredStateCallbacks::Read {
+            request: Arc::new(|frame| frame.input().clone()),
+            settle_returned: Arc::new(|frame, returned| {
+                if frame.input().value == returned.value {
+                    StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+                } else {
+                    StateSettlement::InvalidEvidence
+                }
+            }),
+            settle_safe_failure: Arc::new(|_frame, failure| {
+                ProposedStateOutcome::Failure(failure.clone())
+            }),
+        },
+        Arc::new(ProcessReadImplementation {
+            counts: Arc::new(ReadValidationCounts::default()),
+        }),
+    )
+    .expect("assembly")
+    .build_fixture()
+    .expect("qualifies");
+
+    let state_ref = state_contract::<ReadProcessState>()
+        .expect("state contract")
+        .state_contract_ref;
+    let callbacks = registry
+        .process_components
+        .iter()
+        .find(|((kind, semantic_ref, _), _)| {
+            *kind == StructuredComponentKind::State && semantic_ref == &state_ref
+        })
+        .map(|(_, component)| &component.handle)
+        .expect("state process");
+    let ProcessHandle::State(callbacks) = callbacks else {
+        panic!("state callback handle");
+    };
+
+    let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
+    let returned = encode_process_value(
+        &CommittedObservation::<ProcessValue, ProcessFailure>::Returned(ProcessValue { value: 2 }),
+    )
+    .expect("returned observation");
+    let settlement = callbacks
+        .settle_observation(&input, &returned)
+        .expect("returned settlement");
+    assert_eq!(
+        settlement,
+        encode_process_value(&StateSettlement::<ProcessValue, ProcessFailure>::InvalidEvidence)
+            .expect("invalid evidence")
+    );
+
+    let consistent = encode_process_value(
+        &CommittedObservation::<ProcessValue, ProcessFailure>::Returned(ProcessValue { value: 1 }),
+    )
+    .expect("consistent returned");
+    let settlement = callbacks
+        .settle_observation(&input, &consistent)
+        .expect("consistent returned settlement");
+    assert_eq!(
+        settlement
+            .as_json()
+            .get("kind")
+            .and_then(|value| value.as_str()),
+        Some("proposed")
+    );
+}
+
+#[test]
+fn fallible_success_only_safe_failure_always_settles_success() {
+    let operation_id = sid("mfm.test/fallible-success-only-read");
+    let settlement_calls = Arc::new(AtomicUsize::new(0));
+    let registry = read_process_assembly::<FallibleSuccessOnlyReadState, _>(
+        operation_id,
+        success_only_read_callbacks(Some(settlement_calls.clone())),
+        Arc::new(ProcessReadImplementation {
+            counts: Arc::new(ReadValidationCounts::default()),
+        }),
+    )
+    .expect("success-only Read assembly")
+    .build_fixture()
+    .expect("fallible SuccessOnly Read qualifies without a sample corpus");
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
 
     let state_ref = state_contract::<FallibleSuccessOnlyReadState>()
         .expect("state contract")
@@ -3322,26 +3229,42 @@ fn fallible_success_only_read_qualifies_and_keeps_invalid_evidence_outside_its_c
         .map(|(_, component)| &component.handle)
         .expect("success-only state process");
     let ProcessHandle::State(callbacks) = callbacks else {
-        panic!("state callback handle")
+        panic!("state callback handle");
     };
-    let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
-    let inconsistent = encode_process_value(
-        &CommittedObservation::<ProcessValue, ProcessFailure>::SafeFailure(ProcessFailure {
-            code: 2,
-        }),
-    )
-    .expect("inconsistent observation");
-    let settlement = callbacks
-        .settle_observation(&input, &inconsistent)
-        .expect("schema-valid inconsistent evidence reaches settlement");
-    assert_eq!(
-        settlement,
-        encode_process_value(&StateSettlement::<ProcessValue, ProcessFailure>::InvalidEvidence)
-            .expect("invalid-evidence settlement")
-    );
-    assert_eq!(settlement_calls.load(Ordering::SeqCst), qualified_calls + 1);
+
+    for code in [0u64, 1, 2, 41, 99, 1_000_000] {
+        let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
+        let observation = encode_process_value(
+            &CommittedObservation::<ProcessValue, ProcessFailure>::SafeFailure(ProcessFailure {
+                code,
+            }),
+        )
+        .expect("safe-failure observation");
+        let settlement = callbacks
+            .settle_observation(&input, &observation)
+            .expect("every inhabited safe failure settles successfully");
+        let outcome = settlement
+            .as_json()
+            .get("outcome")
+            .expect("proposed outcome");
+        assert_eq!(
+            outcome.get("kind").and_then(|value| value.as_str()),
+            Some("success"),
+            "code {code}"
+        );
+        assert_eq!(
+            outcome
+                .get("value")
+                .and_then(|value| value.get("value"))
+                .and_then(|value| value.as_u64()),
+            Some(code),
+            "code {code}"
+        );
+    }
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 6);
 
     let before_malformed = settlement_calls.load(Ordering::SeqCst);
+    let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
     let malformed = CanonicalJsonValue::new(serde_json::json!({
         "kind": "safe_failure",
         "value": {"code": "not-an-integer"},
@@ -3351,25 +3274,6 @@ fn fallible_success_only_read_qualifies_and_keeps_invalid_evidence_outside_its_c
         .settle_observation(&input, &malformed)
         .expect_err("schema-invalid evidence must fail before callback invocation");
     assert_eq!(settlement_calls.load(Ordering::SeqCst), before_malformed);
-
-    let expected_failure = vec![ReviewedSafeFailureCase::new(
-        ProcessValue { value: 1 },
-        ProcessFailure { code: 1 },
-        ProposedStateOutcome::Failure(ProcessFailure { code: 1 }),
-    )];
-    let error = read_process_assembly::<FallibleSuccessOnlyReadState, _>(
-        sid("mfm.test/success-only-negative-expectation"),
-        qualification_read_callbacks(QualificationSettlement::FailureEcho, expected_failure, None),
-        Arc::new(ProcessReadImplementation {
-            counts: Arc::new(ReadValidationCounts::default()),
-        }),
-    )
-    .expect("hostile success-only assembly")
-    .build_fixture()
-    .expect_err("SuccessOnly cannot declare a reviewed negative outcome");
-    assert!(error
-        .to_string()
-        .contains("expectation violates the state disposition"));
 }
 
 #[test]
@@ -3928,7 +3832,8 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     let callback_owner_weak = Arc::downgrade(&callback_owner);
     let request_calls = callback_calls.clone();
     let request_owner = callback_owner.clone();
-    let settle_calls = callback_calls.clone();
+    let settle_returned_calls = callback_calls.clone();
+    let settle_safe_calls = callback_calls.clone();
     let callbacks =
         StructuredStateCallbacks::<ReadProcessState>::Read {
             request: Arc::new(move |frame: StateFrame<'_, ProcessValue>| {
@@ -3936,32 +3841,14 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
                 request_calls.fetch_add(1, Ordering::SeqCst);
                 frame.input().clone()
             }),
-            settle:
-                Arc::new(
-                    move |_frame,
-                          observation: CommittedObservationView<
-                        '_,
-                        ProcessValue,
-                        ProcessFailure,
-                    >| {
-                        settle_calls.fetch_add(1, Ordering::SeqCst);
-                        match observation.observation() {
-                            CommittedObservation::Returned(value) => StateSettlement::Proposed(
-                                ProposedStateOutcome::Success(value.clone()),
-                            ),
-                            CommittedObservation::SafeFailure(failure) => {
-                                StateSettlement::Proposed(ProposedStateOutcome::Failure(
-                                    failure.clone(),
-                                ))
-                            }
-                        }
-                    },
-                ),
-            reviewed_safe_failures: vec![mfm_program::structured::ReviewedSafeFailureCase::new(
-                ProcessValue { value: 7 },
-                ProcessFailure { code: 41 },
-                ProposedStateOutcome::Failure(ProcessFailure { code: 41 }),
-            )],
+            settle_returned: Arc::new(move |_frame, returned| {
+                settle_returned_calls.fetch_add(1, Ordering::SeqCst);
+                StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+            }),
+            settle_safe_failure: Arc::new(move |_frame, failure| {
+                settle_safe_calls.fetch_add(1, Ordering::SeqCst);
+                ProposedStateOutcome::Failure(failure.clone())
+            }),
         };
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
@@ -4028,7 +3915,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     assert_process_graph_valid(&assembly);
     for field in ["request", "returned", "safe_failure"] {
         let capability_ref = capability_ref.clone();
-        assert_process_graph_rejected(&assembly, move |registry, _, _| {
+        assert_process_graph_rejected(&assembly, move |registry, _| {
             let capability = registry
                 .live_components
                 .get_mut(&(StructuredComponentKind::Capability, capability_ref))
@@ -4053,7 +3940,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
         });
     }
     let read_capability_ref = capability_ref.clone();
-    assert_process_graph_rejected(&assembly, move |registry, _, _| {
+    assert_process_graph_rejected(&assembly, move |registry, _| {
         let capability = registry
             .live_components
             .get_mut(&(StructuredComponentKind::Capability, read_capability_ref))
@@ -4076,7 +3963,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
         });
     });
     let read_capability_ref = capability_ref.clone();
-    assert_process_graph_rejected(&assembly, move |_, process_components, _| {
+    assert_process_graph_rejected(&assembly, move |_, process_components| {
         let capability = process_components
             .iter_mut()
             .find(|((kind, semantic_ref, _), _)| {
@@ -4126,7 +4013,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     assert_eq!(exact_returned, alternate_returned);
     assert_eq!(exact_safe_failure, alternate_safe_failure);
     let read_capability_ref = capability_ref.clone();
-    assert_process_graph_rejected(&assembly, move |_, process_components, _| {
+    assert_process_graph_rejected(&assembly, move |_, process_components| {
         let capability = process_components
             .iter_mut()
             .find(|((kind, semantic_ref, _), _)| {
@@ -4145,10 +4032,12 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     assert!(callback_owner_weak.upgrade().is_some());
     assert!(capability_weak.upgrade().is_some());
     assert!(adapter_weak.upgrade().is_some());
+    // Safe-failure totality is type-enforced; qualification no longer invokes
+    // settlement or capability sample validation against a reviewed corpus.
     let qualified_callback_calls = callback_calls.load(Ordering::SeqCst);
     let qualified_safe_failure_validations = validation_counts.safe_failure.load(Ordering::SeqCst);
-    assert!(qualified_callback_calls >= 1);
-    assert!(qualified_safe_failure_validations >= 1);
+    assert_eq!(qualified_callback_calls, 0);
+    assert_eq!(qualified_safe_failure_validations, 0);
 
     let certified = registry
         .certifier(&operation_id)
@@ -4369,25 +4258,14 @@ fn infallible_no_refresh_effect_settles_reviewed_safe_failure_as_success() {
             state_descriptor,
             StructuredStateCallbacks::Effect {
                 request: Arc::new(|frame| frame.input().clone()),
-                settle: Arc::new(|_frame, observation| {
-                    StateSettlement::Proposed(match observation.observation() {
-                        CommittedObservation::Returned(value) => {
-                            ProposedStateOutcome::Success(value.clone())
-                        }
-                        CommittedObservation::SafeFailure(failure) => {
-                            ProposedStateOutcome::Success(ProcessValue {
-                                value: failure.code,
-                            })
-                        }
+                settle_returned: Arc::new(|_frame, returned| {
+                    StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+                }),
+                settle_safe_failure: Arc::new(|_frame, failure| {
+                    ProposedSuccessOutcome::new(ProcessValue {
+                        value: failure.code,
                     })
                 }),
-                reviewed_safe_failures: vec![
-                    mfm_program::structured::ReviewedSafeFailureCase::new(
-                        ProcessValue { value: 9 },
-                        ProcessFailure { code: 51 },
-                        ProposedStateOutcome::Success(ProcessValue { value: 51 }),
-                    ),
-                ],
             },
         )
         .expect("state registration");
@@ -4520,24 +4398,17 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
                     request_calls.fetch_add(1, Ordering::SeqCst);
                     frame.input().clone()
                 }),
-                settle: Arc::new(move |_frame, observation| {
-                    settle_calls.fetch_add(1, Ordering::SeqCst);
-                    match observation.observation() {
-                        CommittedObservation::Returned(value) => {
-                            StateSettlement::Proposed(ProposedStateOutcome::Success(value.clone()))
-                        }
-                        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-                            ProposedStateOutcome::Failure(failure.clone()),
-                        ),
+                settle_returned: Arc::new({
+                    let settle_calls = settle_calls.clone();
+                    move |_frame, returned| {
+                        settle_calls.fetch_add(1, Ordering::SeqCst);
+                        StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
                     }
                 }),
-                reviewed_safe_failures: vec![
-                    mfm_program::structured::ReviewedSafeFailureCase::new(
-                        ProcessValue { value: 9 },
-                        ProcessFailure { code: 42 },
-                        ProposedStateOutcome::Failure(ProcessFailure { code: 42 }),
-                    ),
-                ],
+                settle_safe_failure: Arc::new(move |_frame, failure| {
+                    settle_calls.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Failure(failure.clone())
+                }),
             },
         )
         .expect("effect state registration");
@@ -4616,7 +4487,7 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         .expect("entry point");
     assert_process_graph_valid(&assembly);
     let effect_adapter_ref = adapter_ref.clone();
-    assert_process_graph_rejected(&assembly, move |registry, _, _| {
+    assert_process_graph_rejected(&assembly, move |registry, _| {
         let adapter = registry
             .live_components
             .get_mut(&(StructuredComponentKind::Adapter, effect_adapter_ref))
@@ -4629,7 +4500,7 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         resource.component_kind = StructuredComponentKind::Signer;
     });
     let effect_adapter_ref = adapter_ref.clone();
-    assert_process_graph_rejected(&assembly, move |registry, _, _| {
+    assert_process_graph_rejected(&assembly, move |registry, _| {
         let adapter = registry
             .live_components
             .get_mut(&(StructuredComponentKind::Adapter, effect_adapter_ref))
@@ -4644,7 +4515,7 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
                 .expect("foreign resource lineage");
     });
     let effect_adapter_ref = adapter_ref.clone();
-    assert_process_graph_rejected(&assembly, move |_, process_components, _| {
+    assert_process_graph_rejected(&assembly, move |_, process_components| {
         let adapter = process_components
             .iter_mut()
             .find(|((kind, semantic_ref, _), _)| {
@@ -4667,7 +4538,7 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         ));
     });
     let effect_adapter_ref = adapter_ref.clone();
-    assert_process_graph_rejected(&assembly, move |_, process_components, _| {
+    assert_process_graph_rejected(&assembly, move |_, process_components| {
         let adapter = process_components
             .iter_mut()
             .find(|((kind, semantic_ref, _), _)| {
@@ -4684,10 +4555,12 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
     assert!(capability_weak.upgrade().is_some());
     assert!(adapter_weak.upgrade().is_some());
     assert!(resource_weak.upgrade().is_some());
+    // Safe-failure totality is type-enforced; qualification no longer invokes
+    // settlement or capability sample validation against a reviewed corpus.
     let qualified_callback_calls = callback_calls.load(Ordering::SeqCst);
     let qualified_safe_failure_validations = validation_counts.safe_failure.load(Ordering::SeqCst);
-    assert!(qualified_callback_calls >= 1);
-    assert!(qualified_safe_failure_validations >= 1);
+    assert_eq!(qualified_callback_calls, 0);
+    assert_eq!(qualified_safe_failure_validations, 0);
 
     let certified = registry
         .certifier(&operation_id)

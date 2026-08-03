@@ -1,0 +1,8 @@
+error[E0308]: mismatched types
+  --> tests/ui/structured/fail/success_only_safe_failure_cannot_invalid_evidence.rs:39:58
+   |
+39 |         settle_safe_failure: Arc::new(|_frame, _failure| StateSettlement::InvalidEvidence),
+   |                                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ProposedSuccessOutcome<Output>`, found `StateSettlement<_, _>`
+   |
+   = note: expected struct `ProposedSuccessOutcome<support::Output>`
+                found enum `StateSettlement<_, _>`

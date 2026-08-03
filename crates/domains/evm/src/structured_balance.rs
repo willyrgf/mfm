@@ -11,8 +11,7 @@ use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_ids::{ContentRef, StableId};
 use mfm_program::structured::{
     state_contract, AllowsExecution, AllowsFanOut, AuthoringPolicy, BlockBuilder,
-    CommittedObservation, CommittedObservationView, DefaultFailureMapper, Direct, FailureValue,
-    FanOutResults, Never, OperationBuilder, Pure, Read, ReviewedSafeFailureCase,
+    DefaultFailureMapper, Direct, FailureValue, FanOutResults, Never, OperationBuilder, Pure, Read,
     RuntimeReadCapability, SafeFailureMayFail, SafeFailureNotApplicable, State, StateFrame,
     StateSettlement, StructuredStateCallbacks, Value,
 };
@@ -718,13 +717,15 @@ trait BalanceStateProcess: State {
 }
 
 macro_rules! registered_read_state {
-    ($state:ty, $field:ident, $request:expr, $settle:expr) => {
+    ($state:ty, $field:ident, $request:expr, $settle_returned:expr) => {
         impl BalanceStateProcess for $state {
-            fn callbacks(fixture: &BalanceFixture) -> StructuredStateCallbacks<Self> {
+            fn callbacks(_fixture: &BalanceFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Read {
                     request: Arc::new($request),
-                    settle: Arc::new($settle),
-                    reviewed_safe_failures: reviewed_failures::<Self>(fixture.$field.clone()),
+                    settle_returned: Arc::new($settle_returned),
+                    settle_safe_failure: Arc::new(|_frame, failure| {
+                        ProposedStateOutcome::Failure(*failure)
+                    }),
                 }
             }
         }
@@ -830,13 +831,9 @@ fn bootstrap_request(frame: StateFrame<'_, EvmBalanceLaneCursor>) -> EvmChainIde
 
 fn settle_bootstrap(
     frame: StateFrame<'_, EvmBalanceLaneCursor>,
-    observation: CommittedObservationView<'_, EvmChainIdentityResponse, EvmReadFailure>,
+    response: &EvmChainIdentityResponse,
 ) -> StateSettlement<BootstrapBalanceWork, EvmReadFailure> {
     let input = frame.input().selected();
-    let response = match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => return failed(*failure),
-        CommittedObservation::Returned(response) => response,
-    };
     if !input.validate() || response.chain_id != input.binding().chain_id() {
         return failed(EvmReadFailure::SourceMismatch);
     }
@@ -859,13 +856,9 @@ fn latest_request(frame: StateFrame<'_, BootstrapBalanceWork>) -> EvmLatestAncho
 
 fn settle_latest(
     frame: StateFrame<'_, BootstrapBalanceWork>,
-    observation: CommittedObservationView<'_, EvmBlockResponse, EvmReadFailure>,
+    response: &EvmBlockResponse,
 ) -> StateSettlement<AnchoredBalanceWork, EvmReadFailure> {
     let input = frame.input();
-    let response = match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => return failed(*failure),
-        CommittedObservation::Returned(response) => response,
-    };
     match EvmAnchoredSource::new(input.checked_source.clone(), response.anchor.clone()) {
         Ok(anchored_source) => succeeded(AnchoredBalanceWork {
             lane: input.lane.clone(),
@@ -889,20 +882,16 @@ fn decimals_request(frame: StateFrame<'_, AnchoredBalanceWork>) -> EvmTokenDecim
 
 fn settle_decimals(
     frame: StateFrame<'_, AnchoredBalanceWork>,
-    observation: CommittedObservationView<'_, EvmTokenDecimalsResponse, EvmReadFailure>,
+    response: &EvmTokenDecimalsResponse,
 ) -> StateSettlement<TokenBalanceWork, EvmReadFailure> {
     let input = frame.input();
-    match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => failed(*failure),
-        CommittedObservation::Returned(response)
-            if matches!(input.lane.source().asset(), EvmBalanceAsset::Erc20 { .. }) =>
-        {
-            succeeded(TokenBalanceWork {
-                anchored: input.clone(),
-                decimals: response.decimals,
-            })
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if matches!(input.lane.source().asset(), EvmBalanceAsset::Erc20 { .. }) {
+        succeeded(TokenBalanceWork {
+            anchored: input.clone(),
+            decimals: response.decimals,
+        })
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -918,22 +907,18 @@ fn native_request(frame: StateFrame<'_, AnchoredBalanceWork>) -> EvmNativeBalanc
 
 fn settle_native(
     frame: StateFrame<'_, AnchoredBalanceWork>,
-    observation: CommittedObservationView<'_, EvmQuantityResponse, EvmReadFailure>,
+    response: &EvmQuantityResponse,
 ) -> StateSettlement<ObservedBalanceWork, EvmReadFailure> {
     let input = frame.input();
-    match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => failed(*failure),
-        CommittedObservation::Returned(response)
-            if matches!(input.lane.source().asset(), EvmBalanceAsset::Native)
-                && response.quantity().is_ok() =>
-        {
-            succeeded(ObservedBalanceWork {
-                anchored: input.clone(),
-                raw_units: response.quantity_dec().to_owned(),
-                decimals: input.lane.native_decimals(),
-            })
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if matches!(input.lane.source().asset(), EvmBalanceAsset::Native) && response.quantity().is_ok()
+    {
+        succeeded(ObservedBalanceWork {
+            anchored: input.clone(),
+            raw_units: response.quantity_dec().to_owned(),
+            decimals: input.lane.native_decimals(),
+        })
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -958,24 +943,21 @@ fn token_request(frame: StateFrame<'_, TokenBalanceWork>) -> EvmTokenBalanceRequ
 
 fn settle_token(
     frame: StateFrame<'_, TokenBalanceWork>,
-    observation: CommittedObservationView<'_, EvmQuantityResponse, EvmReadFailure>,
+    response: &EvmQuantityResponse,
 ) -> StateSettlement<ObservedBalanceWork, EvmReadFailure> {
     let input = frame.input();
-    match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => failed(*failure),
-        CommittedObservation::Returned(response)
-            if matches!(
-                input.anchored.lane.source().asset(),
-                EvmBalanceAsset::Erc20 { .. }
-            ) && response.quantity().is_ok() =>
-        {
-            succeeded(ObservedBalanceWork {
-                anchored: input.anchored.clone(),
-                raw_units: response.quantity_dec().to_owned(),
-                decimals: input.decimals,
-            })
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if matches!(
+        input.anchored.lane.source().asset(),
+        EvmBalanceAsset::Erc20 { .. }
+    ) && response.quantity().is_ok()
+    {
+        succeeded(ObservedBalanceWork {
+            anchored: input.anchored.clone(),
+            raw_units: response.quantity_dec().to_owned(),
+            decimals: input.decimals,
+        })
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -985,13 +967,9 @@ fn confirm_request(frame: StateFrame<'_, ObservedBalanceWork>) -> EvmAnchorConfi
 
 fn settle_confirmation(
     frame: StateFrame<'_, ObservedBalanceWork>,
-    observation: CommittedObservationView<'_, EvmBlockResponse, EvmReadFailure>,
+    response: &EvmBlockResponse,
 ) -> StateSettlement<EvmBalanceLaneResult, EvmReadFailure> {
     let input = frame.input();
-    let response = match observation.observation() {
-        CommittedObservation::SafeFailure(failure) => return failed(*failure),
-        CommittedObservation::Returned(response) => response,
-    };
     let anchored = &input.anchored;
     if response.anchor.number() != anchored.anchored_source.anchor().number() {
         return StateSettlement::InvalidEvidence;
@@ -1054,28 +1032,7 @@ fn failed<T>(failure: EvmReadFailure) -> StateSettlement<T, EvmReadFailure> {
     StateSettlement::Proposed(ProposedStateOutcome::Failure(failure))
 }
 
-fn reviewed_failures<S>(
-    input: S::Input,
-) -> Vec<mfm_program::structured::ReviewedStateSafeFailureCase<S>>
-where
-    S: State<Failure = EvmReadFailure, SafeFailure = EvmReadFailure>,
-    S::Input: Clone,
-{
-    [
-        EvmReadFailure::Unavailable,
-        EvmReadFailure::DestinationRejected,
-    ]
-    .into_iter()
-    .map(|failure| {
-        ReviewedSafeFailureCase::new(
-            input.clone(),
-            failure,
-            ProposedStateOutcome::Failure(failure),
-        )
-    })
-    .collect()
-}
-
+#[allow(dead_code)] // retained for process-registration fixture construction
 struct BalanceFixture {
     cursor: EvmBalanceLaneCursor,
     bootstrap: BootstrapBalanceWork,
