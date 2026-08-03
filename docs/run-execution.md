@@ -148,11 +148,13 @@ sibling lineages fail closed. This fence is independent from the EVM wallet targ
 
 ## Replay and inspection
 
-Run read, replay verification, transition trace, access audit, and portable export all load a
-`VerifiedStructuredRun` through the store reader. They do not execute callbacks or live IO.
-Trace/audit pages bind one exact journal head and use stable zero-based positions. Portable exports
-contain the exact records and content-addressed object closure under the current structured export
-schema.
+Run read, replay verification, transition trace, access audit, and portable export each load
+through a distinct purpose reader and receive only that purpose's sealed evidence newtype. The
+shared fold still derives one internal `VerifiedStructuredRun`, but purpose APIs never return it:
+public-read, trace, audit, replay, and export evidence types are not interchangeable. They do not
+execute callbacks or live IO. Trace/audit pages bind one exact journal head and use stable
+zero-based positions. Portable exports contain the exact records and content-addressed object
+closure under the current structured export schema.
 
 ## Public one-action behavior
 

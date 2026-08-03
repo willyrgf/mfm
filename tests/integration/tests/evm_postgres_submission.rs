@@ -659,7 +659,7 @@ async fn evm_postgres_submission_worker() {
             );
             assert!(!matches!(
                 reader
-                    .load(&run_id)
+                    .load_public(&run_id)
                     .await
                     .expect("verify pre-restart history")
                     .frontier(),
@@ -698,7 +698,7 @@ async fn evm_postgres_submission_worker() {
             );
             assert!(matches!(
                 reader
-                    .load(&run_id)
+                    .load_public(&run_id)
                     .await
                     .expect("verify closed history")
                     .frontier(),

@@ -1161,7 +1161,7 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
     assert_eq!(history_loads.load(Ordering::SeqCst), 1);
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
     assert_eq!(callback_input.load(Ordering::SeqCst), 4);
-    let verified = reader.load(&run_id).await.expect("closed");
+    let verified = reader.load_public(&run_id).await.expect("closed");
     assert!(verified
         .admission()
         .admission_material_refs
@@ -1238,7 +1238,7 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
         .await
         .expect("admission");
     let pre_fault_head = reader
-        .load(&run_id)
+        .load_public(&run_id)
         .await
         .expect("admitted run")
         .journal_head()
@@ -1343,7 +1343,7 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
         .await
         .expect("admission");
     let pre_fault_head = reader
-        .load(&run_id)
+        .load_public(&run_id)
         .await
         .expect("admitted run")
         .journal_head()
@@ -1447,17 +1447,17 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
     }
     assert_eq!(callback_calls.load(Ordering::SeqCst), 2);
 
-    // Same memory backend is shared; purpose reader reloads through the sole fold.
-    let verified = assembled
-        .public_reader
-        .load(&run_id)
+    // Same memory backend is shared; purpose readers reload through the sole fold.
+    let export = assembled
+        .export_reader
+        .load_for_export(&run_id)
         .await
         .expect("fresh persisted fold");
-    let mfm_store::structured::ProgramCursor::Closed { .. } = verified.cursor() else {
+    let mfm_store::structured::ProgramCursor::Closed { .. } = export.cursor() else {
         panic!("fan-out run must close");
     };
-    let semantic_records = verified.semantic_records().collect::<Vec<_>>();
-    assert_eq!(semantic_records.len() + 1, verified.records().len());
+    let semantic_records = export.semantic_records().collect::<Vec<_>>();
+    assert_eq!(semantic_records.len() + 1, export.records().len());
     assert!(matches!(
         semantic_records
             .last()
@@ -1466,10 +1466,15 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
         RunRecord::StateTransitionCommitted(_)
     ));
     assert!(matches!(
-        verified.records().last().expect("audit head record").record,
+        export.records().last().expect("audit head record").record,
         RunRecord::RunClosed(_)
     ));
-    let outcome = mfm_replay::structured::project_operation_outcome(&verified)
+    let public = assembled
+        .public_reader
+        .load_public(&run_id)
+        .await
+        .expect("public projection");
+    let outcome = mfm_replay::structured::project_operation_outcome(&public)
         .expect("project persisted root outcome")
         .expect("closed root outcome");
     assert_eq!(outcome.kind(), "success");
@@ -1526,7 +1531,7 @@ async fn exact_root_program_cache_rejects_authored_object_substitution() {
     );
     let verified = assembled
         .public_reader
-        .load(&run_id)
+        .load_public(&run_id)
         .await
         .expect("purpose load");
     assert!(verified.closed_outcome_ref().is_some());
@@ -1623,7 +1628,7 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
     let fact = &transition.facts[0];
     assert_eq!(fact.emission_ordinal, 0);
     assert_eq!(fact.fact_slot_ordinal, 0);
-    let verified = reader.load(&run_id).await.expect("verified facts");
+    let verified = reader.load_public(&run_id).await.expect("verified facts");
     let subject: Value = verified
         .object(&fact.subject.value_ref)
         .expect("fact subject")
@@ -1760,12 +1765,10 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let failed = reader
-        .load(&failed_run_id)
+        .load_public(&failed_run_id)
         .await
         .expect("failed run");
-    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = failed.cursor() else {
-        panic!("ordinary failure must close the run");
-    };
+    let outcome_ref = failed.closed_outcome_ref().expect("ordinary failure must close the run");
     let failed_outcome: serde_json::Value = failed
         .object(outcome_ref)
         .expect("failed outcome object")
@@ -1781,12 +1784,10 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let succeeded = reader
-        .load(&successful_run_id)
+        .load_public(&successful_run_id)
         .await
         .expect("successful run");
-    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = succeeded.cursor() else {
-        panic!("successful run must close");
-    };
+    let outcome_ref = succeeded.closed_outcome_ref().expect("successful run must close");
     let successful_outcome: serde_json::Value = succeeded
         .object(outcome_ref)
         .expect("successful outcome object")
@@ -1982,12 +1983,10 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
     );
 
     let failed = reader
-        .load(&failed_run_id)
+        .load_public(&failed_run_id)
         .await
         .expect("failed run");
-    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = failed.cursor() else {
-        panic!("safe failure must close the run");
-    };
+    let outcome_ref = failed.closed_outcome_ref().expect("safe failure must close the run");
     let failed_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = failed
         .object(outcome_ref)
         .expect("failed outcome object")
@@ -2005,12 +2004,10 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         FailureValue { code: 91 }
     );
     let succeeded = reader
-        .load(&successful_run_id)
+        .load_public(&successful_run_id)
         .await
         .expect("successful run");
-    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = succeeded.cursor() else {
-        panic!("successful run must close");
-    };
+    let outcome_ref = succeeded.closed_outcome_ref().expect("successful run must close");
     let successful_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = succeeded
         .object(outcome_ref)
         .expect("successful outcome object")
@@ -2108,7 +2105,7 @@ async fn frozen_effect_supersession_is_not_rewritten_after_persistence_integrity
         assert_eq!(binding_calls.load(Ordering::SeqCst), 1);
         assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
         let verified = reader
-            .load(&run_id)
+            .load_public(&run_id)
             .await
             .expect("integrity failure remains auditable");
         match expected_frontier {
@@ -2187,7 +2184,7 @@ async fn invalid_supersession_evidence_is_rejected_without_a_diagnostic_observat
     assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
         reader
-            .load(&run_id)
+            .load_public(&run_id)
             .await
             .expect("authorization-only prefix")
             .frontier(),
@@ -2425,7 +2422,7 @@ async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation(
     assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
     assert!(matches!(
         reader
-            .load(&run_id)
+            .load_public(&run_id)
             .await
             .expect("parked Effect")
             .frontier(),

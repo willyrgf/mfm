@@ -29,10 +29,11 @@ use mfm_storage_postgres::{
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
 };
 use mfm_store::structured::{
-    ConfigurationHistoryReader, ConfigurationStreamKey, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, PhysicalBindingVerificationMode, ProposedCanonicalValue,
-    PublicPhysicalBindingVerifier, PublicRunReader, StructuredAdmissionMaterial,
-    StructuredStoreError, VerifiedConfiguredValue, VerifiedStructuredRun,
+    AuditRunReader, ConfigurationHistoryReader, ConfigurationStreamKey, ExportRunEvidence,
+    ExportRunReader, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    PhysicalBindingVerificationMode, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
+    PublicRunEvidence, PublicRunReader, ReplayRunReader, StructuredAdmissionMaterial,
+    StructuredStoreError, TraceRunReader, VerifiedConfiguredValue,
 };
 use mfm_values::{MfmConfig, MfmValue};
 use serde::Serialize;
@@ -40,7 +41,7 @@ use sqlx::postgres::PgPoolOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::application::{
-    ApplicationBackend, AuthorizedAdmissionCall, AuthorizedRunCall, EvmWalletDeployment,
+    run_grant, ApplicationBackend, AuthorizedAdmissionCall, AuthorizedRunCall, EvmWalletDeployment,
     EvmWalletDeploymentParts,
 };
 use crate::stream_spool::{snapshot_input, WritableSpool};
@@ -63,13 +64,17 @@ const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revisi
 const STRUCTURED_EXPORT_VERSION: &str = "mfm.structured-portable-run-export.v1";
 const MAX_REPLAY_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
 
-type RunReader = PublicRunReader<PostgresStructuredHistoryBackend>;
+type HistoryBackend = PostgresStructuredHistoryBackend;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
 
 struct ProductionBackend {
-    reader: RunReader,
+    public_reader: PublicRunReader<HistoryBackend>,
+    trace_reader: TraceRunReader<HistoryBackend>,
+    audit_reader: AuditRunReader<HistoryBackend>,
+    replay_reader: ReplayRunReader<HistoryBackend>,
+    export_reader: ExportRunReader<HistoryBackend>,
     configuration: ConfigReader,
-    runtime: Arc<Runtime<mfm_store::structured::StoreHistoryAdapter<PostgresStructuredHistoryBackend>>>,
+    runtime: Arc<Runtime<mfm_store::structured::StoreHistoryAdapter<HistoryBackend>>>,
     certifier: AdmissionCertificationRegistry,
     routing_manifest: mfm_portfolio::PortfolioRoutingManifest,
     routing_catalog: mfm_evm::EvmRoutingCatalogDescriptor,
@@ -130,10 +135,17 @@ where
     .await
     .map_err(|_| run_store_unavailable())?;
     let runtime = Arc::new(assembled.runtime);
-    let reader = assembled.public_reader;
-    let store_scope_id = reader.store_identity().store_scope_id.clone();
+    let store_scope_id = assembled
+        .public_reader
+        .store_identity()
+        .store_scope_id
+        .clone();
     let backend = ProductionBackend {
-        reader,
+        public_reader: assembled.public_reader,
+        trace_reader: assembled.trace_reader,
+        audit_reader: assembled.audit_reader,
+        replay_reader: assembled.replay_reader,
+        export_reader: assembled.export_reader,
         configuration,
         runtime,
         certifier: assembly.certifier,
@@ -363,7 +375,7 @@ fn balance_coverage_inputs(
 #[async_trait]
 impl ApplicationBackend for ProductionBackend {
     async fn check_ready(&self) -> Result<(), PublicError> {
-        self.reader
+        self.public_reader
             .check_ready()
             .await
             .map_err(classify_store_error)
@@ -423,41 +435,62 @@ impl ApplicationBackend for ProductionBackend {
         )
     }
 
-    async fn drive_once(&self, call: &AuthorizedRunCall<'_>) -> Result<DriveResponse, PublicError> {
-        self.load_authorized(call).await?;
+    async fn drive_once(
+        &self,
+        call: &AuthorizedRunCall<'_, run_grant::Drive>,
+    ) -> Result<DriveResponse, PublicError> {
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Drive);
+        self.load_public_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
         let outcome = self
             .runtime
             .drive_once(call.run_id())
             .await
             .map_err(classify_runtime_error)?;
-        let verified = self.load_authorized(call).await?;
-        DriveResponse::from_runtime(call.run_id(), outcome, verified.journal_head())
+        let evidence = self
+            .load_public_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
+        DriveResponse::from_runtime(call.run_id(), outcome, evidence.journal_head())
     }
 
     async fn read_public_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::ReadPublic>,
     ) -> Result<PublicRunView, PublicError> {
-        let verified = self.load_authorized(call).await?;
-        PublicRunView::from_structured(&verified)
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::ReadPublic);
+        let evidence = self
+            .load_public_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
+        PublicRunView::from_structured(&evidence)
     }
 
     async fn replay_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::Replay>,
         request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError> {
-        let verified = self.load_authorized(call).await?;
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Replay);
         match request {
-            ReplayRequest::Verify => mfm_replay::structured::project_replay_result(&verified)
-                .map_err(|_| PublicError::replay_verification_failed()),
+            ReplayRequest::Verify => {
+                let evidence = self
+                    .load_replay_authorized(call.tenant_scope_id(), call.run_id())
+                    .await?;
+                mfm_replay::structured::project_replay_result(&evidence)
+                    .map_err(|_| PublicError::replay_verification_failed())
+            }
             ReplayRequest::Reproduce(input) => {
-                validate_replay_export(&verified, input).await?;
+                let evidence = self
+                    .load_export_authorized(call.tenant_scope_id(), call.run_id())
+                    .await?;
+                validate_replay_export(&evidence, input).await?;
                 mfm_replay::structured::project_unavailable_reproduction(call.run_id())
                     .map_err(|_| PublicError::replay_verification_failed())
             }
             ReplayRequest::CompareCurrent(input) => {
-                validate_replay_export(&verified, input).await?;
+                let evidence = self
+                    .load_export_authorized(call.tenant_scope_id(), call.run_id())
+                    .await?;
+                validate_replay_export(&evidence, input).await?;
                 mfm_replay::structured::project_unavailable_comparison(call.run_id())
                     .map_err(|_| PublicError::replay_verification_failed())
             }
@@ -466,13 +499,16 @@ impl ApplicationBackend for ProductionBackend {
 
     async fn read_transition_trace(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::InspectTrace>,
         page: PageRequest,
     ) -> Result<TransitionTracePage, PublicError> {
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::InspectTrace);
         let position = decode_transition_trace_page_request(call.run_id(), &page)?;
-        let verified = self.load_authorized(call).await?;
+        let evidence = self
+            .load_trace_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
         let page = mfm_replay::structured::project_transition_trace(
-            &verified,
+            &evidence,
             position.complete_as_of_journal_head.as_ref(),
             position.start,
             position.limit,
@@ -483,13 +519,16 @@ impl ApplicationBackend for ProductionBackend {
 
     async fn read_access_audit(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::InspectAudit>,
         page: PageRequest,
     ) -> Result<AccessAuditPage, PublicError> {
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::InspectAudit);
         let position = decode_access_audit_page_request(call.run_id(), &page)?;
-        let verified = self.load_authorized(call).await?;
+        let evidence = self
+            .load_audit_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
         let page = mfm_replay::structured::project_access_audit(
-            &verified,
+            &evidence,
             position.complete_as_of_journal_head.as_ref(),
             position.start,
             position.limit,
@@ -500,11 +539,14 @@ impl ApplicationBackend for ProductionBackend {
 
     async fn export_run(
         &self,
-        call: &AuthorizedRunCall<'_>,
+        call: &AuthorizedRunCall<'_, run_grant::Export>,
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
-        let verified = self.load_authorized(call).await?;
-        write_structured_export(&verified, request).await
+        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Export);
+        let evidence = self
+            .load_export_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
+        write_structured_export(&evidence, request).await
     }
 }
 
@@ -672,7 +714,7 @@ impl ProductionBackend {
         contract_ref: ContentRef,
     ) -> Result<VerifiedConfiguredValue, PublicError> {
         let key = ConfigurationStreamKey::new(
-            self.reader.store_identity().store_scope_id.clone(),
+            self.public_reader.store_identity().store_scope_id.clone(),
             tenant.clone(),
             operation_id.clone(),
             target,
@@ -709,19 +751,84 @@ impl ProductionBackend {
         .map_err(classify_store_error)
     }
 
-    async fn load_authorized(
+    async fn load_public_authorized(
         &self,
-        call: &AuthorizedRunCall<'_>,
-    ) -> Result<VerifiedStructuredRun, PublicError> {
-        let verified = self
-            .reader
-            .load(call.run_id())
+        tenant_scope_id: &TenantScopeId,
+        run_id: &RunId,
+    ) -> Result<PublicRunEvidence, PublicError> {
+        let evidence = self
+            .public_reader
+            .load_public(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &verified.admission().tenant_scope_id != call.tenant_scope_id() {
+        if &evidence.admission().tenant_scope_id != tenant_scope_id {
             return Err(PublicError::run_not_found());
         }
-        Ok(verified)
+        Ok(evidence)
+    }
+
+    async fn load_trace_authorized(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        run_id: &RunId,
+    ) -> Result<mfm_store::structured::TraceRunEvidence, PublicError> {
+        let evidence = self
+            .trace_reader
+            .load_transition_trace(run_id)
+            .await
+            .map_err(classify_store_error)?;
+        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+            return Err(PublicError::run_not_found());
+        }
+        Ok(evidence)
+    }
+
+    async fn load_audit_authorized(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        run_id: &RunId,
+    ) -> Result<mfm_store::structured::AuditRunEvidence, PublicError> {
+        let evidence = self
+            .audit_reader
+            .load_access_audit(run_id)
+            .await
+            .map_err(classify_store_error)?;
+        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+            return Err(PublicError::run_not_found());
+        }
+        Ok(evidence)
+    }
+
+    async fn load_replay_authorized(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        run_id: &RunId,
+    ) -> Result<mfm_store::structured::RecordedRunEvidence, PublicError> {
+        let evidence = self
+            .replay_reader
+            .load_for_recorded_verify(run_id)
+            .await
+            .map_err(classify_store_error)?;
+        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+            return Err(PublicError::run_not_found());
+        }
+        Ok(evidence)
+    }
+
+    async fn load_export_authorized(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        run_id: &RunId,
+    ) -> Result<ExportRunEvidence, PublicError> {
+        let evidence = self
+            .export_reader
+            .load_for_export(run_id)
+            .await
+            .map_err(classify_store_error)?;
+        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+            return Err(PublicError::run_not_found());
+        }
+        Ok(evidence)
     }
 }
 
@@ -923,10 +1030,10 @@ struct StructuredPortableExport {
 }
 
 async fn write_structured_export(
-    verified: &VerifiedStructuredRun,
+    evidence: &ExportRunEvidence,
     request: ExportRequest,
 ) -> Result<ExportedRun, PublicError> {
-    let export = structured_export(verified, request.kind())?;
+    let export = structured_export(evidence, request.kind())?;
     let bytes = structured_export_bytes(&export)?;
     let contract = RecoverabilityContract::embedded().map_err(|_| export_stream_io_error())?;
     let content_ref = ContentRef::new(
@@ -949,31 +1056,31 @@ async fn write_structured_export(
 }
 
 fn structured_export(
-    verified: &VerifiedStructuredRun,
+    evidence: &ExportRunEvidence,
     kind: mfm_replay::portable::ExportKind,
 ) -> Result<StructuredPortableExport, PublicError> {
-    let semantic_cutoff = match verified.semantic_head() {
+    let semantic_cutoff = match evidence.semantic_head() {
         mfm_journal::structured::SemanticHead::Genesis { admission_ref, .. } => admission_ref,
         mfm_journal::structured::SemanticHead::Transition { transition_ref, .. } => transition_ref,
     };
     let run_sequence = match kind {
         mfm_replay::portable::ExportKind::Semantic => semantic_cutoff.run_sequence,
-        mfm_replay::portable::ExportKind::Audit => verified.journal_head().run_sequence,
+        mfm_replay::portable::ExportKind::Audit => evidence.journal_head().run_sequence,
     };
     let index = usize::try_from(run_sequence)
         .ok()
         .and_then(|sequence| sequence.checked_sub(1))
         .ok_or_else(export_stream_io_error)?;
-    let journal_head = verified
+    let journal_head = evidence
         .journal_heads()
         .get(index)
         .cloned()
         .ok_or_else(export_stream_io_error)?;
     let records = match kind {
         mfm_replay::portable::ExportKind::Semantic => {
-            verified.semantic_records().cloned().collect::<Vec<_>>()
+            evidence.semantic_records().cloned().collect::<Vec<_>>()
         }
-        mfm_replay::portable::ExportKind::Audit => verified.records().to_vec(),
+        mfm_replay::portable::ExportKind::Audit => evidence.records().to_vec(),
     };
     if records.is_empty() {
         return Err(export_stream_io_error());
@@ -981,13 +1088,13 @@ fn structured_export(
     Ok(StructuredPortableExport {
         version: STRUCTURED_EXPORT_VERSION.to_owned(),
         kind: kind.into(),
-        store_scope_id: verified.admission().store_scope_id.clone(),
-        tenant_scope_id: verified.admission().tenant_scope_id.clone(),
-        run_id: verified.run_id().clone(),
+        store_scope_id: evidence.admission().store_scope_id.clone(),
+        tenant_scope_id: evidence.admission().tenant_scope_id.clone(),
+        run_id: evidence.run_id().clone(),
         journal_head,
-        semantic_head: verified.semantic_head().clone(),
+        semantic_head: evidence.semantic_head().clone(),
         records,
-        objects: verified.objects_through(run_sequence).cloned().collect(),
+        objects: evidence.objects_through(run_sequence).cloned().collect(),
     })
 }
 
@@ -998,7 +1105,7 @@ fn structured_export_bytes(export: &StructuredPortableExport) -> Result<Vec<u8>,
 }
 
 async fn validate_replay_export(
-    verified: &VerifiedStructuredRun,
+    evidence: &ExportRunEvidence,
     input: crate::ExportStreamInput,
 ) -> Result<(), PublicError> {
     let (content_ref, spool) = snapshot_input(input)
@@ -1023,7 +1130,7 @@ async fn validate_replay_export(
         .map_err(|_| PublicError::replay_artifact_invalid())?;
     let supplied: StructuredPortableExport = serde_json::from_slice(validated.as_bytes())
         .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected = structured_export(verified, mfm_replay::portable::ExportKind::Semantic)
+    let expected = structured_export(evidence, mfm_replay::portable::ExportKind::Semantic)
         .map_err(|_| PublicError::replay_artifact_invalid())?;
     let expected_bytes =
         structured_export_bytes(&expected).map_err(|_| PublicError::replay_artifact_invalid())?;

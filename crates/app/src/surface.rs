@@ -645,9 +645,9 @@ canonical_response!(
 
 impl PublicRunView {
     pub(crate) fn from_structured(
-        verified: &mfm_store::structured::VerifiedStructuredRun,
+        evidence: &mfm_store::structured::PublicRunEvidence,
     ) -> Result<Self, PublicError> {
-        let outcome = mfm_replay::structured::project_operation_outcome(verified)
+        let outcome = mfm_replay::structured::project_operation_outcome(evidence)
             .map_err(|_| PublicError::replay_verification_failed())?
             .map(|outcome| {
                 let value: serde_json::Value =
@@ -662,13 +662,13 @@ impl PublicRunView {
             .transpose()?;
         Self::from_serializable(&serde_json::json!({
             "version": PUBLIC_RUN_VIEW_CONTRACT,
-            "run_id": verified.run_id(),
-            "tenant_scope_id": verified.admission().tenant_scope_id,
-            "invocation_identity": verified.admission().invocation_identity,
-            "entry_point_operation_id": verified.admission().entry_point_operation_id,
-            "journal_head": verified.journal_head(),
-            "semantic_head": verified.semantic_head(),
-            "status": match verified.frontier() {
+            "run_id": evidence.run_id(),
+            "tenant_scope_id": evidence.admission().tenant_scope_id,
+            "invocation_identity": evidence.admission().invocation_identity,
+            "entry_point_operation_id": evidence.admission().entry_point_operation_id,
+            "journal_head": evidence.journal_head(),
+            "semantic_head": evidence.semantic_head(),
+            "status": match evidence.frontier() {
                 mfm_store::structured::StructuredFrontier::Actions(_) => "actionable",
                 mfm_store::structured::StructuredFrontier::WaitingReads => "waiting_reads",
                 mfm_store::structured::StructuredFrontier::PossibleEntry => "possible_entry",
