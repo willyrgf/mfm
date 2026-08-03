@@ -1,6 +1,6 @@
 //! Private production composition for the structured Runtime and RunHistory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use alloy_primitives::Address;
@@ -29,11 +29,12 @@ use mfm_storage_postgres::{
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
 };
 use mfm_store::structured::{
-    AuditRunReader, ConfigurationHistoryReader, ConfigurationStreamKey, ExportRunEvidence,
-    ExportRunReader, PhysicalBindingAuthorization, PhysicalBindingSupersession,
-    PhysicalBindingVerificationMode, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    PublicRunEvidence, PublicRunReader, ReplayRunReader, StructuredAdmissionMaterial,
-    StructuredStoreError, TraceRunReader, VerifiedConfiguredValue,
+    expand_export_source_closure, AuditRunReader, ConfigurationHistoryReader,
+    ConfigurationStreamKey, ExportRunEvidence, ExportRunReader, ExportSourceClosureError,
+    PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,
+    ProposedCanonicalValue, PublicPhysicalBindingVerifier, PublicRunEvidence, PublicRunReader,
+    ReplayRunReader, StructuredAdmissionMaterial, StructuredStoreError, TraceRunReader,
+    VerifiedConfiguredValue,
 };
 use mfm_values::{MfmConfig, MfmValue};
 use serde::Serialize;
@@ -542,9 +543,9 @@ impl ApplicationBackend for ProductionBackend {
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
         debug_assert_eq!(call.grant(), crate::RunAccessGrant::Export);
-        let evidence = self
-            .load_export_authorized(call.tenant_scope_id(), call.run_id())
-            .await?;
+        // Phase one: authorize the complete recursive source closure with zero
+        // bytes emitted. Phase two serializes only after that succeeds.
+        let evidence = self.authorize_export_source_closure(call).await?;
         write_structured_export(&evidence, request).await
     }
 }
@@ -835,6 +836,80 @@ impl ProductionBackend {
         }
         Ok(evidence)
     }
+
+    /// Authorizes every recursively referenced source run before serialization.
+    ///
+    /// Missing, denied, wrong-tenant, wrong-target, stale, cyclic, and over-budget
+    /// dependencies collapse to one redacted public error and emit no bytes.
+    async fn authorize_export_source_closure(
+        &self,
+        call: &AuthorizedRunCall<'_, run_grant::Export>,
+    ) -> Result<ExportRunEvidence, PublicError> {
+        let root = self
+            .load_export_authorized(call.tenant_scope_id(), call.run_id())
+            .await?;
+        let root_sources = root
+            .direct_source_run_ids()
+            .map_err(|_| PublicError::source_run_export_denied())?;
+        if root_sources.is_empty() {
+            return Ok(root);
+        }
+
+        let root_run_id = call.run_id().clone();
+        let mut discovery: BTreeMap<RunId, BTreeSet<RunId>> =
+            BTreeMap::from([(root_run_id.clone(), root_sources.clone())]);
+        let mut authorized = BTreeSet::new();
+        let mut pending = root_sources;
+
+        while let Some(source_run_id) = pending.pop_first() {
+            if source_run_id == root_run_id || !authorized.insert(source_run_id.clone()) {
+                continue;
+            }
+            if authorized.len() > mfm_store::structured::MAX_EXPORT_SOURCE_RUNS {
+                return Err(PublicError::source_run_export_denied());
+            }
+            call.authorize_required_dependency(source_run_id.clone())
+                .await?;
+            let evidence = self
+                .export_reader
+                .load_for_export(&source_run_id)
+                .await
+                .map_err(classify_export_dependency_store_error)?;
+            if &evidence.admission().tenant_scope_id != call.tenant_scope_id()
+                || evidence.run_id() != &source_run_id
+            {
+                return Err(PublicError::source_run_export_denied());
+            }
+            let nested = evidence
+                .direct_source_run_ids()
+                .map_err(|_| PublicError::source_run_export_denied())?;
+            discovery.insert(source_run_id.clone(), nested.clone());
+            for nested_run in nested {
+                if nested_run != root_run_id && !authorized.contains(&nested_run) {
+                    pending.insert(nested_run);
+                }
+            }
+        }
+
+        // Re-run the pure expander over the completed discovery map so shared,
+        // cyclic, and over-budget graphs share one deterministic proof path.
+        let root_sources = discovery
+            .get(&root_run_id)
+            .cloned()
+            .unwrap_or_default();
+        expand_export_source_closure(&root_run_id, root_sources, |run_id| {
+            discovery
+                .get(run_id)
+                .cloned()
+                .ok_or(ExportSourceClosureError::OverBudget)
+        })
+        .map_err(|_| PublicError::source_run_export_denied())?;
+        Ok(root)
+    }
+}
+
+fn classify_export_dependency_store_error(_error: StructuredStoreError) -> PublicError {
+    PublicError::source_run_export_denied()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

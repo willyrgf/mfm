@@ -53,8 +53,9 @@ pub use mutation::{
 // Runtime-facing authorization proof type.
 pub use mfm_certify::structured::NewlyAppendedAuthorization;
 pub use purpose::{
-    AuditRunEvidence, AuditRunReader, ExportRunEvidence, ExportRunReader, PublicRunEvidence,
-    PublicRunReader, RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader,
+    expand_export_source_closure, AuditRunEvidence, AuditRunReader, ExportRunEvidence,
+    ExportRunReader, ExportSourceClosureError, PublicRunEvidence, PublicRunReader,
+    RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader, MAX_EXPORT_SOURCE_RUNS,
 };
 pub use qualification::{
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,

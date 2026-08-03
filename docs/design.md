@@ -246,7 +246,9 @@ treat a merely well-shaped completeness claim as authoritative.
 
 `mfm-replay` accepts a verified run from the store reader. It projects the reviewed public run
 view, transition trace, access audit, replay summary, and portable structured export directly from
-folded records and objects. Pages are fixed to one journal head. Current portable exports use
+folded records and objects. Pages are fixed to one journal head. Portable export first authorizes
+every recursively referenced prior-run source under the sealed export purpose and only then
+serializes; denied or incomplete source closures emit zero bytes. Current portable exports use
 `application/vnd.mfm.structured-run-export.v1+json` and the one current recoverability schema;
 retired bytes are rejected.
 
