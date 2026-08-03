@@ -41,22 +41,21 @@ use mfm_spec::structured::{
     fan_out_join_contract_ref, lane_outcome_contract_canonical_json, lane_outcome_contract_ref,
     never_failure_contract_canonical_json, never_failure_contract_ref, policy_proceed_program_ref,
     prior_run_fact_scanner_adapter_contract, prior_run_fact_selection_capability_contract,
-    retained_value_contract_ref, structured_value_contract, AuthoredBlock, AuthoredDeclaration,
-    AuthoredFailureDirective, AuthoredFanOut, AuthoredMatch, AuthoredOperationCall,
-    AuthoredStateCall, AuthoredStructuredProgram, BlockTail, CertifiedComponentObject,
-    CertifiedFailureBoundary, CertifiedProgramComponents, CertifiedProgramDocument,
-    CertifiedProgramRoot, CertifiedStructuralBounds, ClosedSumContract, ComponentObjectReference,
-    ExpandedBlock, ExpandedDeclaration, ExpandedFanOut, ExpandedFanOutLane, ExpandedFragment,
-    ExpandedMatch, ExpandedMatchArm, ExpandedStateBinding, ExpandedStructuredProgram,
-    ExpansionBoundaryId, ExpansionPolicyContract, ExpansionStage, ExpansionTraceEntry,
-    FailureMapperRegistration, FailureMappingLink, FailurePlan, FailurePlanIdentity,
-    FailureScopeBinding, FragmentInputBinding, HandlerContinuation, LexicalProducer, LexicalSlot,
-    NoFailureBoundary, PolicyCoverageEntry, ProposedStateValue, ResultRole,
-    SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
-    SecretFreeImplementationManifest, SecretFreeImplementationManifestEntry,
-    SecretFreeQualificationArtifact, SemanticCallPath, SemanticPathSegment,
-    StateCapabilityAdapterSignerResourceManifest, StructuralPath, StructuralPathSegment,
-    StructuredCapabilityProtocolContract, StructuredComponentKind,
+    retained_value_contract_ref, AuthoredBlock, AuthoredDeclaration, AuthoredFailureDirective,
+    AuthoredFanOut, AuthoredMatch, AuthoredOperationCall, AuthoredStateCall,
+    AuthoredStructuredProgram, BlockTail, CertifiedComponentObject, CertifiedFailureBoundary,
+    CertifiedProgramComponents, CertifiedProgramDocument, CertifiedProgramRoot,
+    CertifiedStructuralBounds, ClosedSumContract, ComponentObjectReference, ExpandedBlock,
+    ExpandedDeclaration, ExpandedFanOut, ExpandedFanOutLane, ExpandedFragment, ExpandedMatch,
+    ExpandedMatchArm, ExpandedStateBinding, ExpandedStructuredProgram, ExpansionBoundaryId,
+    ExpansionPolicyContract, ExpansionStage, ExpansionTraceEntry, FailureMapperRegistration,
+    FailureMappingLink, FailurePlan, FailurePlanIdentity, FailureScopeBinding,
+    FragmentInputBinding, HandlerContinuation, LexicalProducer, LexicalSlot, NoFailureBoundary,
+    PolicyCoverageEntry, ProposedStateValue, ResultRole, SecretFreeExecutableIdentity,
+    SecretFreeImplementationDescriptor, SecretFreeImplementationManifest,
+    SecretFreeImplementationManifestEntry, SecretFreeQualificationArtifact, SemanticCallPath,
+    SemanticPathSegment, StateCapabilityAdapterSignerResourceManifest, StructuralPath,
+    StructuralPathSegment, StructuredCapabilityProtocolContract, StructuredComponentKind,
     StructuredComponentManifestEntry, StructuredEffectRefreshContract, StructuredExecutionKind,
     StructuredExpansionProfile, StructuredExpansionProof, StructuredFactDescriptor,
     StructuredFailureContract, StructuredLiveComponentContract, StructuredPolicyCoverageProof,
@@ -2723,7 +2722,9 @@ impl ProgramRegistryBuilder {
         definition: &mfm_spec::structured::StructuredValueDefinition,
     ) -> Result<ContentRef> {
         match definition {
-            mfm_spec::structured::StructuredValueDefinition::Retained { contract, schema } => {
+            mfm_spec::structured::StructuredValueDefinition::Retained { payload } => {
+                let contract = &payload.contract;
+                let schema = &payload.schema;
                 let evidence_ref = component_object_evidence_contract_ref()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?;
                 let evidence_value = CanonicalJsonValue::from_canonical_json(

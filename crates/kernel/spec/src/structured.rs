@@ -2583,7 +2583,7 @@ impl StructuredProgramDenormalizer {
         // size: a shallow table can encode a long acyclic reference chain.
         enum Phase {
             Enter,
-            Finish(ExpandedLexicalSlot),
+            Finish(Box<ExpandedLexicalSlot>),
         }
         struct Frame {
             reference: ExpandedSlotRef,
@@ -2627,7 +2627,7 @@ impl StructuredProgramDenormalizer {
                     stack.push(Frame {
                         reference: frame.reference,
                         depth: frame.depth,
-                        phase: Phase::Finish(definition),
+                        phase: Phase::Finish(Box::new(definition)),
                     });
                     for child in children.into_iter().rev() {
                         stack.push(Frame {
@@ -2638,6 +2638,7 @@ impl StructuredProgramDenormalizer {
                     }
                 }
                 Phase::Finish(definition) => {
+                    let definition = *definition;
                     let producer = self.assemble_resolved_producer(definition.producer)?;
                     let slot = LexicalSlot {
                         lexical_path: self.resolve_path(ExpandedPathRef {
@@ -3633,10 +3634,8 @@ pub fn fan_out_join_contract_canonical_json(
 pub enum StructuredValueDefinition {
     /// Exact retained MFM value schema and role contract.
     Retained {
-        /// Annex-validated retained-value contract.
-        contract: RetainedValueContract,
-        /// Qualified schema identity paired with the retained contract.
-        schema: mfm_values::SchemaIdentity,
+        /// Annex-validated retained-value contract and paired schema identity.
+        payload: Box<RetainedStructuredValueDefinition>,
     },
     /// Non-empty fan-out join of recursively defined lane success values.
     NonEmptyFanOutJoin {
@@ -3645,6 +3644,16 @@ pub enum StructuredValueDefinition {
         /// Exact lane failure contract (`Never` or typed retained failure).
         lane_failure: StructuredFailureContract,
     },
+}
+
+/// Owned payload for a retained structured-value leaf.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedStructuredValueDefinition {
+    /// Annex-validated retained-value contract.
+    pub contract: RetainedValueContract,
+    /// Qualified schema identity paired with the retained contract.
+    pub schema: mfm_values::SchemaIdentity,
 }
 
 impl StructuredValueDefinition {
@@ -3663,7 +3672,9 @@ impl StructuredValueDefinition {
                 "structured value definition schema differs from its retained contract".to_owned(),
             ));
         }
-        Ok(Self::Retained { contract, schema })
+        Ok(Self::Retained {
+            payload: Box::new(RetainedStructuredValueDefinition { contract, schema }),
+        })
     }
 
     /// Constructs a non-empty recursive fan-out join definition.
@@ -3681,7 +3692,7 @@ impl StructuredValueDefinition {
     /// Derives the exact nominal contract identity for this definition.
     pub fn contract_ref(&self) -> Result<ContentRef> {
         match self {
-            Self::Retained { contract, .. } => retained_value_contract_ref(contract),
+            Self::Retained { payload } => retained_value_contract_ref(&payload.contract),
             Self::NonEmptyFanOutJoin {
                 lane_success,
                 lane_failure,
@@ -3715,7 +3726,7 @@ impl StructuredValueDefinition {
         leaves: &mut Vec<(&'a RetainedValueContract, &'a mfm_values::SchemaIdentity)>,
     ) {
         match self {
-            Self::Retained { contract, schema } => leaves.push((contract, schema)),
+            Self::Retained { payload } => leaves.push((&payload.contract, &payload.schema)),
             Self::NonEmptyFanOutJoin { lane_success, .. } => {
                 lane_success.collect_retained_leaves(leaves);
             }
