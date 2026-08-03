@@ -111,10 +111,6 @@ enum StructuredReplayResultWire {
         run_id: RunId,
         result: StructuredUnavailableResult,
     },
-    ComparisonUnavailable {
-        run_id: RunId,
-        result: StructuredUnavailableResult,
-    },
 }
 
 impl StructuredReplayResultWire {
@@ -146,8 +142,7 @@ impl StructuredReplayResultWire {
                     | StructuredReplayStatus::Closed => Ok(()),
                 }
             }
-            Self::ReproductionUnavailable { run_id, result }
-            | Self::ComparisonUnavailable { run_id, result } => {
+            Self::ReproductionUnavailable { run_id, result } => {
                 if run_id.as_str().is_empty() {
                     return Err(StructuredReplayError::InvalidRecordedHistory);
                 }
@@ -278,19 +273,10 @@ pub fn project_replay_result(run: &RecordedRunEvidence) -> Result<StructuredRepl
 
 /// Projects the frozen result for exact reproduction when the admitted executable is unavailable.
 pub fn project_unavailable_reproduction(run_id: &RunId) -> Result<StructuredReplayResult> {
-    project_unavailable("reproduction_unavailable", run_id)
-}
-
-/// Projects the frozen result for current-candidate comparison when no candidate is available.
-pub fn project_unavailable_comparison(run_id: &RunId) -> Result<StructuredReplayResult> {
-    project_unavailable("comparison_unavailable", run_id)
-}
-
-fn project_unavailable(kind: &'static str, run_id: &RunId) -> Result<StructuredReplayResult> {
     StructuredCanonicalProjection::encode(
         "mfm.structured-replay-result",
         &serde_json::json!({
-            "kind": kind,
+            "kind": "reproduction_unavailable",
             "run_id": run_id,
             "result": "unavailable",
         }),

@@ -486,14 +486,6 @@ impl ApplicationBackend for ProductionBackend {
                 mfm_replay::structured::project_unavailable_reproduction(call.run_id())
                     .map_err(|_| PublicError::replay_verification_failed())
             }
-            ReplayRequest::CompareCurrent(input) => {
-                let evidence = self
-                    .load_export_authorized(call.tenant_scope_id(), call.run_id())
-                    .await?;
-                validate_replay_export(&evidence, input).await?;
-                mfm_replay::structured::project_unavailable_comparison(call.run_id())
-                    .map_err(|_| PublicError::replay_verification_failed())
-            }
         }
     }
 

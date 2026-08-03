@@ -165,13 +165,15 @@ fn removed_commands_and_raw_authority_arguments_are_absent() {
 }
 
 #[test]
-fn compare_current_cli_syntax_maps_to_the_exact_annex_mode() {
-    let error = json_error(vec!["run", "replay", RUN_ID, "--mode", "compare-current"]);
-    assert_eq!(error.error.code(), "AuthenticationRequired");
-
+fn compare_current_cli_syntax_is_rejected_by_current_parser() {
     Command::cargo_bin("mfm_cli")
         .expect("CLI")
         .args(["run", "replay", RUN_ID, "--mode", "compare_current"])
+        .assert()
+        .code(2);
+    Command::cargo_bin("mfm_cli")
+        .expect("CLI")
+        .args(["run", "replay", RUN_ID, "--mode", "compare-current"])
         .assert()
         .code(2);
 }

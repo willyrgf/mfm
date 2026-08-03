@@ -11,7 +11,7 @@ GET  /v1/entry-points
 POST /v1/runs
 GET  /v1/runs/:run_id
 POST /v1/runs/:run_id/drive
-POST /v1/runs/:run_id/replay?mode=verify|reproduce|compare_current
+POST /v1/runs/:run_id/replay?mode=verify|reproduce
 GET  /v1/runs/:run_id/trace
 GET  /v1/runs/:run_id/audit
 POST /v1/runs/:run_id/exports
@@ -27,7 +27,7 @@ qualified structured RunHistory store and never performs EVM/provider/callback w
 
 Ordinary success uses the current strict application response inside the API success envelope.
 Unknown fields, duplicate keys, malformed typed ids, invalid cursors, and noncanonical replay input
-are rejected. Reproduction and current-comparison replay also reject any media type other than the
+are rejected. Reproduction replay also rejects any media type other than the
 portable-export media contract below. Error responses use reviewed HTTP status plus the frozen
 `mfm.error-response.v1` JSON envelope. The nested error has a non-empty code bounded to 128 UTF-8
 bytes, a non-empty reviewed message bounded to 4096 UTF-8 bytes, and optional secret-free
@@ -56,8 +56,7 @@ head.
 
 ## Replay and export
 
-`verify` requires an empty body. `reproduce` and `compare_current` require the exact portable export
-body and headers:
+`verify` requires an empty body. `reproduce` requires the exact portable export body and headers:
 
 ```http
 Content-Type: application/vnd.mfm.structured-run-export.v1+json
@@ -65,8 +64,8 @@ Mfm-Content-Digest: content:sha256-v1:<64 lowercase hex>
 ```
 
 The body is a single strict canonical object. Digest, size, schema, store, tenant, and run are
-validated before replay. Reproduction/comparison never use live callbacks and return the frozen
-unavailable result when no candidate is supplied.
+validated before replay. Reproduction never uses live callbacks and returns the frozen unavailable
+result when no candidate is supplied.
 
 Export accepts `{"kind":"semantic"}` or `{"kind":"audit"}`. It is the only non-envelope success:
 the response streams the exact canonical object with the media type above and a raw-byte

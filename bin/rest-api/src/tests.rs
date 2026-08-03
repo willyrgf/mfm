@@ -136,16 +136,13 @@ fn replay_query_requires_one_exact_mode() {
         decode_replay_query(Some("mode=reproduce")).expect("reproduce mode"),
         ReplayMode::Reproduce
     );
-    assert_eq!(
-        decode_replay_query(Some("mode=compare_current")).expect("compare mode"),
-        ReplayMode::CompareCurrent
-    );
     for query in [
         None,
         Some(""),
         Some("tenant=forbidden"),
         Some("mode=verify&mode=reproduce"),
         Some("mode=unknown"),
+        Some("mode=compare_current"),
     ] {
         assert!(decode_replay_query(query).is_err(), "{query:?}");
     }
@@ -618,7 +615,7 @@ async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
         TestApplicationMode::Replay(replay_response()),
     )
     .oneshot(replay_stream_http_request(
-        &format!("/v1/runs/{RUN_ID}/replay?mode=compare_current"),
+        &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
         Body::from(artifact.as_slice()),
         artifact,
         Some("Bearer opaque"),
@@ -643,7 +640,7 @@ async fn replay_raw_stream_has_no_old_rest_total_body_cap() {
     let policy = RecordingPolicy::allowing('1');
     let response = test_router(policy, TestApplicationMode::Replay(replay_response()))
         .oneshot(replay_stream_http_request(
-            &format!("/v1/runs/{RUN_ID}/replay?mode=compare_current"),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
             Body::from(bytes.clone()),
             &bytes,
             Some("Bearer opaque"),
