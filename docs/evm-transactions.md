@@ -191,6 +191,11 @@ roles cannot cross-write. Target/session issuance, registry/catalog authenticati
 are supplied by qualified deployment infrastructure in a distinct process. Public request/reply
 values are evidence only; they cannot mint authority. Normal status and mutation verify the
 immutable activation proof offline and make zero chain-registry queries.
+Status and mutation also validate the bounded current frontier closure: the highest retained
+reservation, its candidate prefix, and its optional completion are revalidated before use. Older
+completed rows remain behind the append-only audit boundary; the current projection's count,
+maximum nonce, and incomplete-row checks prevent a frontier skip without walking the lifetime
+lineage.
 
 ## Promotion
 
