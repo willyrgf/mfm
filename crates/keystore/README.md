@@ -7,6 +7,12 @@ Import signing keys with `mfm_cli keystore import` first, then reference the key
 non-secret id or label from runtime code. Raw key retrieval and key wrappers are crate-private;
 the public surface supports import, public metadata/listing, deletion, and signing.
 
+Decrypted private-key bytes never cross an ordinary by-value `[u8; 32]` constructor.
+AES-GCM output is written into a zeroizing allocation and ownership of that same
+protected container is transferred into the crate-private `SecureKey`. Every decrypt
+error path drops zeroizing buffers without secret-bearing diagnostics. `Keystore` is
+deliberately neither `Send` nor `Sync`.
+
 `KeystoreSignerProvider` accepts one exact structurally verified public binding
 and one mandatory deployment-supplied generation guard, but is not itself
 production qualification. Consuming `qualify` checks that guard and verifies

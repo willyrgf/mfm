@@ -1,11 +1,16 @@
 //! Encrypted Ethereum private-key storage and one-time mnemonic import.
 //!
 //! - **Full disk encryption** (including swap) assumed to be enabled
-//! - **Single-threaded usage** - not designed for concurrent access
+//! - **Single-threaded usage** - not designed for concurrent access (`Keystore` is
+//!   neither `Send` nor `Sync`)
 //! - **Local-only operation** - no network features or remote storage
 //! - **Trusted application environment** - assumes application is not compromised
 //! - **No raw-key export** - decrypted key material is reachable only by the sibling signer
 //!   implementation
+//! - **Protected decrypt ownership** - AES-GCM plaintext lands only in zeroizing
+//!   allocations and is moved into [`SecureKey`] without an ordinary plaintext
+//!   `[u8; 32]` constructor or stack intermediate. Error paths drop those
+//!   zeroizing buffers without secret-bearing output.
 
 mod error;
 
