@@ -98,7 +98,7 @@ fn binding(address: Address, generation_seed: u8) -> VerifiedGenerationGuardedSi
         KEYSTORE_SIGNING_IMPLEMENTATION_ID,
         algorithm(),
         profile(),
-        PublicSigningIdentity::new(algorithm(), None, Some(format!("{address:?}")))
+        PublicSigningIdentity::new(algorithm(), None, Some(format!("{address:#x}")))
             .expect("public identity"),
         content_ref(generation_seed),
         content_ref(generation_seed.wrapping_add(1)),
@@ -131,7 +131,7 @@ fn qualified_binding_for_implementation(
         PublicSigningIdentity::new(
             algorithm(),
             Some(test_public_key()),
-            Some(format!("{address:?}")),
+            Some(format!("{address:#x}")),
         )
         .expect("complete public identity"),
         content_ref(generation_seed),
@@ -349,7 +349,7 @@ async fn qualification_checks_key_identity_and_guard_before_consuming_handoff() 
     .require_public_identity(
         ExpectedSignerIdentity::public_key_and_account_id(
             test_public_key(),
-            format!("{:?}", keystore.address),
+            format!("{:#x}", keystore.address),
         )
         .expect("identity"),
     );
@@ -555,7 +555,7 @@ fn request(
         mfm_ids::DigestBytes::from_array([0x42; 32]),
     )
     .require_public_identity(
-        ExpectedSignerIdentity::account_id(format!("{address:?}")).expect("identity"),
+        ExpectedSignerIdentity::account_id(format!("{address:#x}")).expect("identity"),
     )
 }
 
@@ -632,7 +632,7 @@ async fn provider_accepts_caller_owned_domain_and_purpose() {
     assert_eq!(result.signer_ref(), request.signer_ref());
     assert_eq!(
         result.public_identity().account_id(),
-        Some(format!("{:?}", keystore.address).as_str())
+        Some(format!("{:#x}", keystore.address).as_str())
     );
 }
 
@@ -819,7 +819,7 @@ fn keystore_provider_rejects_wrong_implementation_algorithm_and_profile_bindings
     let dir = tempfile::tempdir().expect("tempdir");
     let address = Address::from([0x11; 20]);
     let identity = |algorithm: SigningAlgorithmId| {
-        PublicSigningIdentity::new(algorithm, None, Some(format!("{address:?}"))).expect("identity")
+        PublicSigningIdentity::new(algorithm, None, Some(format!("{address:#x}"))).expect("identity")
     };
     let cases = [
         qualified_binding_for_implementation(address, 0x49, "mfm.signing.keystore.rfc6979.v1"),

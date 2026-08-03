@@ -6,6 +6,15 @@
 //! transient signed envelope. Alloy is the only transaction hashing and
 //! encoding implementation.
 //!
+//! Identity roles are deliberately separated:
+//! - [`AccountAddress`] is the on-chain account identifier only; it is never
+//!   treated as public-key material.
+//! - [`PublicSigningIdentity`] carries the full public key plus account used
+//!   by qualification and guarded signing requests.
+//! - Secret signing authority remains behind
+//!   [`QualifiedReadSigningProvider`] / keystore types and never appears on
+//!   this surface.
+//!
 //! ```rust
 //! use alloy_eips::eip2930::AccessList;
 //! use alloy_primitives::{address, Bytes, TxKind, U256};
@@ -27,6 +36,7 @@
 //! ```
 
 use std::fmt;
+use std::str::FromStr;
 
 use alloy_consensus::{SignableTransaction, TxEip1559};
 use alloy_eips::eip2930::AccessList;
@@ -48,6 +58,51 @@ const EVM_EIP1559_TRANSACTION_PURPOSE_ID: &str = "evm.transaction.eip1559";
 /// Maximum admitted EIP-2718 signed transaction envelope length.
 pub const EVM_WALLET_SIGNED_TRANSACTION_MAX_BYTES: usize = 512 * 1024;
 
+/// Validated non-zero EVM account address.
+///
+/// This newtype is only an on-chain account identifier. It cannot carry public
+/// key material and must not be used as a substitute for
+/// [`PublicSigningIdentity`] when constructing a production signing request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AccountAddress(Address);
+
+impl AccountAddress {
+    /// Admits one non-zero account address.
+    pub fn new(address: Address) -> Result<Self> {
+        if address.is_zero() {
+            return Err(EvmSigningError::InvalidSemanticSignerIdentity);
+        }
+        Ok(Self(address))
+    }
+
+    /// Parses a lowercase `0x`-prefixed account id.
+    pub fn from_account_id(account_id: &str) -> Result<Self> {
+        let address = Address::from_str(account_id)
+            .map_err(|_| EvmSigningError::InvalidSemanticSignerIdentity)?;
+        let admitted = Self::new(address)?;
+        if admitted.account_id() != account_id {
+            return Err(EvmSigningError::InvalidSemanticSignerIdentity);
+        }
+        Ok(admitted)
+    }
+
+    /// Returns the underlying address.
+    pub const fn address(self) -> Address {
+        self.0
+    }
+
+    /// Returns the canonical lowercase `0x`-prefixed account id.
+    pub fn account_id(self) -> String {
+        format!("{:#x}", self.0)
+    }
+}
+
+impl From<AccountAddress> for Address {
+    fn from(value: AccountAddress) -> Self {
+        value.0
+    }
+}
+
 /// Derives the stable semantic EVM signer identity from one exact public key/account.
 ///
 /// Physical provider generation, fence, and implementation identities are
@@ -60,13 +115,10 @@ pub fn derive_evm_semantic_signer_id(identity: &PublicSigningIdentity) -> Result
     let account_id = identity
         .account_id()
         .ok_or(EvmSigningError::InvalidSemanticSignerIdentity)?;
-    let address = account_id
-        .parse::<Address>()
-        .map_err(|_| EvmSigningError::InvalidSemanticSignerIdentity)?;
-    if address.is_zero()
-        || account_id != format!("{address:#x}")
-        || identity.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID
-    {
+    // Account id is validated as an account address only; it is never treated
+    // as public-key material.
+    let _account = AccountAddress::from_account_id(account_id)?;
+    if identity.algorithm().as_str() != SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID {
         return Err(EvmSigningError::InvalidSemanticSignerIdentity);
     }
     let canonical = CanonicalJsonBytes::from_value(
@@ -233,11 +285,16 @@ impl UnsignedEip1559Envelope {
         self.transaction.signature_hash()
     }
 
-    /// Builds the one generic signing request for this envelope.
+    /// Builds one generic signing request bound to the supplied public identity.
+    ///
+    /// Production guarded signing must pass a complete
+    /// public-key-plus-account expectation. Account-only expectations remain
+    /// available only for direct deterministic test providers that do not
+    /// expose a qualified binding.
     fn signing_request(
         &self,
         signer_ref: SignerRef,
-        expected_sender: Address,
+        expected_identity: ExpectedSignerIdentity,
     ) -> Result<SigningRequest> {
         let request = SigningRequest::from_digest(
             signer_ref,
@@ -247,11 +304,43 @@ impl UnsignedEip1559Envelope {
             SigningPurposeId::new(EVM_EIP1559_TRANSACTION_PURPOSE_ID)?,
             mfm_ids::DigestBytes::from_array(self.signing_digest().0),
         );
-        Ok(
-            request.require_public_identity(ExpectedSignerIdentity::account_id(format!(
-                "{expected_sender:?}"
-            ))?),
-        )
+        Ok(request.require_public_identity(expected_identity))
+    }
+
+    /// Account-only signing expectation for direct (non-guarded) providers.
+    fn account_only_expected_identity(
+        expected_sender: AccountAddress,
+    ) -> Result<ExpectedSignerIdentity> {
+        Ok(ExpectedSignerIdentity::account_id(
+            expected_sender.account_id(),
+        )?)
+    }
+
+    /// Complete public-key-plus-account expectation from a qualified binding.
+    ///
+    /// The account identifier is taken from the qualified
+    /// [`PublicSigningIdentity`]; the caller-supplied account is only used to
+    /// prove that the binding's account derives to the intended sender. An
+    /// account identifier is never interpreted as public-key material.
+    fn qualified_expected_identity(
+        qualified_identity: &PublicSigningIdentity,
+        expected_sender: AccountAddress,
+    ) -> Result<ExpectedSignerIdentity> {
+        let public_key = qualified_identity
+            .public_key()
+            .ok_or(EvmSigningError::IncompletePublicSigningIdentity)?
+            .clone();
+        let account_id = qualified_identity
+            .account_id()
+            .ok_or(EvmSigningError::IncompletePublicSigningIdentity)?;
+        let bound_account = AccountAddress::from_account_id(account_id)?;
+        if bound_account != expected_sender {
+            return Err(EvmSigningError::RecoveredAddressMismatch);
+        }
+        Ok(ExpectedSignerIdentity::public_key_and_account_id(
+            public_key,
+            account_id,
+        )?)
     }
 
     /// Verifies one provider result and finalizes the exact Alloy envelope.
@@ -355,27 +444,32 @@ fn hash_admitted_signed_bytes(bytes: &[u8]) -> B256 {
 pub async fn sign_eip1559(
     envelope: &UnsignedEip1559Envelope,
     signer_ref: SignerRef,
-    expected_sender: Address,
+    expected_sender: AccountAddress,
     provider: &dyn DeterministicSigningProvider,
 ) -> Result<TransientSignedEip1559Envelope> {
     if provider.deterministic_profile_id() != SECP256K1_RFC6979_LOW_S_PROFILE_ID {
         return Err(EvmSigningError::DeterministicProfileMismatch);
     }
-    let request = envelope.signing_request(signer_ref, expected_sender)?;
+    let request = envelope.signing_request(
+        signer_ref,
+        UnsignedEip1559Envelope::account_only_expected_identity(expected_sender)?,
+    )?;
     let result = provider.sign(&request).await?;
-    envelope.finalize_signed(&request, expected_sender, &result)
+    envelope.finalize_signed(&request, expected_sender.address(), &result)
 }
 
 /// Signs one checked envelope through the wallet-only generation-guarded boundary.
 ///
-/// The exact public binding is verified before the provider performs its
-/// mandatory generation guard. Qualified wallet providers do not implement
-/// the general direct-sign trait, so this path cannot bypass the deployment
-/// fence.
+/// The signing request is built from the qualified binding's full
+/// [`PublicSigningIdentity`] (public key and account). An account address is
+/// never treated as public-key material. The exact public binding is verified
+/// before the provider performs its mandatory generation guard. Qualified
+/// wallet providers do not implement the general direct-sign trait, so this
+/// path cannot bypass the deployment fence.
 pub async fn sign_eip1559_guarded(
     envelope: &UnsignedEip1559Envelope,
     signer_ref: SignerRef,
-    expected_sender: Address,
+    expected_sender: AccountAddress,
     expected_generation_ref: &ContentRef,
     provider: &QualifiedReadSigningProvider,
 ) -> Result<TransientSignedEip1559Envelope> {
@@ -386,12 +480,53 @@ pub async fn sign_eip1559_guarded(
         }
         .into());
     }
-    let request = envelope.signing_request(signer_ref, expected_sender)?;
+    binding.require_complete_public_identity()?;
+    let request = envelope.signing_request(
+        signer_ref,
+        UnsignedEip1559Envelope::qualified_expected_identity(
+            binding.expected_public_identity(),
+            expected_sender,
+        )?,
+    )?;
     binding.verify_request(&request)?;
     let result = provider
         .sign_guarded(expected_generation_ref, &request)
         .await?;
-    envelope.finalize_signed(&request, expected_sender, &result)
+    // Integrity: signature and recovered address must match the qualified
+    // public identity before the transient signed envelope is returned.
+    envelope.finalize_signed(&request, expected_sender.address(), &result)
+}
+
+/// Classifies a signing failure as operational unavailability versus integrity.
+///
+/// Integrity and contract violations must not be retried as ordinary signer
+/// unavailability. Reserve unavailability for genuine capability/transport
+/// absence (failed provider IO, generation-guard unavailable, generation fenced,
+/// or read-attestation ineligibility that blocks operational access).
+pub fn signing_failure_is_integrity(error: &EvmSigningError) -> bool {
+    match error {
+        EvmSigningError::Signing(SigningError::Provider { reason }) => !matches!(
+            reason,
+            mfm_signing::SigningProviderError::Failed
+                | mfm_signing::SigningProviderError::GenerationGuardUnavailable
+                | mfm_signing::SigningProviderError::GenerationFenced
+                | mfm_signing::SigningProviderError::ReadAttestationIneligible
+        ),
+        EvmSigningError::Signing(SigningError::PublicIdentityMismatch { .. })
+        | EvmSigningError::Signing(SigningError::InvalidRequest { .. })
+        | EvmSigningError::Signing(SigningError::InvalidIdentifier { .. })
+        | EvmSigningError::InvalidSemanticSignerIdentity
+        | EvmSigningError::IncompletePublicSigningIdentity
+        | EvmSigningError::DeterministicProfileMismatch
+        | EvmSigningError::SigningResultMismatch { .. }
+        | EvmSigningError::InvalidSignature { .. }
+        | EvmSigningError::RecoveredAddressMismatch
+        | EvmSigningError::SignedHashMismatch => true,
+        EvmSigningError::QuantityOutOfRange { .. }
+        | EvmSigningError::ZeroChainId
+        | EvmSigningError::PriorityFeeExceedsMaxFee
+        | EvmSigningError::SignedTransactionTooLarge => false,
+    }
 }
 
 /// Returns the generic recoverable secp256k1 EVM signing algorithm id.
@@ -422,7 +557,10 @@ fn verify_result_contract(
     if result.profile() != request.profile() {
         return Err(EvmSigningError::SigningResultMismatch { field: "profile" });
     }
-    let expected_account = format!("{expected_sender:?}");
+    let expected_account = AccountAddress::new(expected_sender)?.account_id();
+    if let Some(expected) = request.expected_identity() {
+        expected.verify(result.signer_ref(), result.public_identity())?;
+    }
     if result.public_identity().account_id() != Some(expected_account.as_str()) {
         return Err(EvmSigningError::SigningResultMismatch {
             field: "public_identity",
@@ -487,6 +625,9 @@ pub enum EvmSigningError {
     /// Public key/account material could not identify one semantic signer.
     #[error("EVM semantic signer identity is invalid")]
     InvalidSemanticSignerIdentity,
+    /// Qualified signing required a complete public key and account identity.
+    #[error("EVM signing identity is incomplete")]
+    IncompletePublicSigningIdentity,
     /// A U256 input was outside Alloy's exact representation.
     #[error("EIP-1559 quantity was outside the supported range for {field:?}")]
     QuantityOutOfRange {
