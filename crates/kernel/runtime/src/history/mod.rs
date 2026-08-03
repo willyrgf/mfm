@@ -23,8 +23,7 @@ pub use cursor::{
 pub use error::HistoryError;
 pub use identity::StructuredStoreIdentity;
 pub use port::{
-    AppendAttemptApi, AuthorizationApi, HistoryFuture, ObservationCommitApi, RuntimeHistoryPort,
-    VerifiedRunView,
+    AppendAttemptApi, AuthorizationApi, HistoryFuture, RuntimeHistoryPort, VerifiedRunView,
 };
 pub use proofs::{
     HistoryAppendOutcome, NewlyAppendedAuthorization, ObservationCommit,

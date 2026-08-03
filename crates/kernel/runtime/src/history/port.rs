@@ -14,7 +14,6 @@ use super::commands::{
     StructuredAdmissionCommand,
 };
 use super::cursor::{ObservationQualification, StructuredFrontier};
-use super::error::HistoryError;
 use super::identity::StructuredStoreIdentity;
 use super::proofs::{ObservationCommit, StructuredAppendAttempt};
 use super::Result;
@@ -82,14 +81,6 @@ pub trait AuthorizationApi: Send {
 
     /// Returns the complete immutable committed authorization.
     fn authorization(&self) -> &ExternalAccessAuthorized;
-}
-
-/// Observation commit operations required by Runtime observation loops.
-pub trait ObservationCommitApi: Send {
-    /// Converts this commit into either an existing-same signal or an attempt.
-    fn into_attempt(self) -> std::result::Result<StructuredAppendAttempt, ()>
-    where
-        Self: Sized;
 }
 
 /// Consumer-side port through which Runtime requests semantic history mutation.
@@ -183,28 +174,5 @@ impl AuthorizationApi for super::NewlyAppendedAuthorization {
 
     fn authorization(&self) -> &ExternalAccessAuthorized {
         self.authorization()
-    }
-}
-
-impl ObservationCommitApi for ObservationCommit {
-    fn into_attempt(self) -> std::result::Result<StructuredAppendAttempt, ()> {
-        match self {
-            ObservationCommit::ExistingSame => Err(()),
-            ObservationCommit::Attempt(attempt) => Ok(*attempt),
-        }
-    }
-}
-
-/// Maps a history error into a display string without leaking diagnostics.
-pub fn history_error_code(error: &HistoryError) -> &'static str {
-    match error {
-        HistoryError::RunNotFound => "run_not_found",
-        HistoryError::InvalidHistory => "invalid_history",
-        HistoryError::CandidateRejected => "candidate_rejected",
-        HistoryError::Certification => "certification",
-        HistoryError::StaleHead => "stale_head",
-        HistoryError::AppendConflict => "append_conflict",
-        HistoryError::BackendUnavailable => "backend_unavailable",
-        HistoryError::AcknowledgementUnknown => "acknowledgement_unknown",
     }
 }
