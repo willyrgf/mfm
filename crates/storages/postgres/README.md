@@ -91,7 +91,18 @@ request replay returns the original revision; a stale predecessor or changed val
 ```sh
 nix run .#run -- --task recoverability-postgres-v1
 nix run .#run -- --task postgres-sqlx-check
+nix run .#run -- --task postgres-sqlx-offline-check
+nix run .#run -- --task postgres-sql-inventory-check
 ```
+
+Fact frontiers and publication counts live on the locked `tenant_fact_heads` row and advance
+atomically with each publication. Bounded fact scans use the primary-key cursor
+`(store_scope_id, store_epoch, tenant_scope_id, fact_order)` with a fixed `LIMIT`; they do not
+`COUNT`/`MIN`/`MAX` over lifetime history.
+
+The SQLx offline/online checks cover migration metadata and the schema probe. Dynamic runtime
+`sqlx::query` families are inventoried by `postgres-sql-inventory-check`; documentation claims no
+broader compile-time SQL coverage than those executable owners.
 
 The suite covers exact-target role/ACL matrices, sibling-target denial, retained-input hostility,
 configuration durability, fresh-process continuation, dense concurrent fact publication, rollback,

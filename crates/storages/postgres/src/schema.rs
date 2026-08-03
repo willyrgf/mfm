@@ -9,18 +9,18 @@ use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v4";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v5";
 
 // These SHA-256 values bind canonical, schema-name-independent catalog rows. They are
 // regenerated only with the destructive baseline and deliberately fail closed across
 // PostgreSQL catalog-rendering changes. Placeholders are filled after the first online
 // catalog probe against the v4 baseline.
 const RELATION_MANIFEST_SHA256: &str =
-    "f47471638d25408bc1b5e61840c59eaccf6db12f2bcc470c445d556752e6ba58";
+    "cf3b8c51d969611e9f6ca7ca9585ac58aab35358cd3bbd46418b29a05adcbb76";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "29edbcb642b4915c04c35ed424b7d19ff109a43cd5b1eaac9bda89752bc2f262";
+    "023fca709cdf093c44b51f79b74a372172e85df7edf86381c530f883c50bba5c";
 const INDEX_MANIFEST_SHA256: &str =
-    "f191bf7df8eed0a3fa596165414925f20365f7b89110b9bf2ca3c1222596aee1";
+    "8ae2874ce7db6d9186a54776764748579716aeec882a739a6189281aacb4ee81";
 const EXECUTABLE_MANIFEST_SHA256: &str =
     "665fd6cb23c59ee9116c63c9b80f42cd85fc32d6fd994a30a3c11a538f58b920";
 const ACL_MANIFEST_SHA256: &str =
@@ -941,23 +941,37 @@ async fn validate_prefix_integrity(
                  OR batch.batch_envelope_json::jsonb \
                         #>> '{records,0,record_ref,record_hash}' \
                         <> publication.transition_record_hash \
-         ), fact_publication_heads AS ( \
-             SELECT store_scope_id, store_epoch, tenant_scope_id, \
-                    count(*) AS publication_count, min(fact_order) AS minimum_order, \
-                    max(fact_order) AS maximum_order \
-               FROM tenant_fact_publications \
-              GROUP BY store_scope_id, store_epoch, tenant_scope_id \
          ), invalid_fact_heads AS ( \
              SELECT 1 FROM tenant_fact_heads AS head \
-              FULL OUTER JOIN fact_publication_heads AS publications \
-                ON publications.store_scope_id = head.store_scope_id \
-               AND publications.store_epoch = head.store_epoch \
-               AND publications.tenant_scope_id = head.tenant_scope_id \
-              WHERE head.store_scope_id IS NULL \
-                 OR head.store_scope_id <> $1 OR head.store_epoch::text <> $2 \
-                 OR head.fact_order <> COALESCE(publications.maximum_order, 0) \
-                 OR head.fact_order <> COALESCE(publications.publication_count, 0) \
-                 OR (head.fact_order > 0 AND publications.minimum_order <> 1) \
+              WHERE head.store_scope_id <> $1 OR head.store_epoch::text <> $2 \
+                 OR head.publication_count <> head.fact_order \
+                 OR (head.fact_order = 0 AND (head.minimum_order IS NOT NULL OR head.maximum_order IS NOT NULL)) \
+                 OR (head.fact_order > 0 AND (head.minimum_order <> 1 OR head.maximum_order <> head.fact_order)) \
+                 OR ( \
+                        SELECT count(*)::numeric FROM tenant_fact_publications AS publication \
+                         WHERE publication.store_scope_id = head.store_scope_id \
+                           AND publication.store_epoch = head.store_epoch \
+                           AND publication.tenant_scope_id = head.tenant_scope_id \
+                    ) <> head.publication_count \
+                 OR ( \
+                        SELECT min(publication.fact_order) FROM tenant_fact_publications AS publication \
+                         WHERE publication.store_scope_id = head.store_scope_id \
+                           AND publication.store_epoch = head.store_epoch \
+                           AND publication.tenant_scope_id = head.tenant_scope_id \
+                    ) IS DISTINCT FROM head.minimum_order \
+                 OR ( \
+                        SELECT max(publication.fact_order) FROM tenant_fact_publications AS publication \
+                         WHERE publication.store_scope_id = head.store_scope_id \
+                           AND publication.store_epoch = head.store_epoch \
+                           AND publication.tenant_scope_id = head.tenant_scope_id \
+                    ) IS DISTINCT FROM head.maximum_order \
+             UNION ALL \
+             SELECT 1 FROM tenant_fact_publications AS publication \
+              LEFT JOIN tenant_fact_heads AS head \
+                ON head.store_scope_id = publication.store_scope_id \
+               AND head.store_epoch = publication.store_epoch \
+               AND head.tenant_scope_id = publication.tenant_scope_id \
+              WHERE head.tenant_scope_id IS NULL \
          ), ordered_configuration AS ( \
              SELECT revision.*, \
                     lag(revision_sequence) OVER configuration_stream AS prior_sequence, \

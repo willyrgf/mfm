@@ -12,6 +12,7 @@ mod qualification;
 mod roles;
 mod schema;
 mod session;
+mod sql_inventory;
 mod structured;
 mod transaction;
 
