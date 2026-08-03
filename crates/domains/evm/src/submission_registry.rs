@@ -58,11 +58,11 @@ use crate::submission_expansion::{
 use crate::submission_process;
 use crate::{
     canonical_wallet_reference, derive_evm_candidate_operation_key, derive_evm_chain_lineage_id,
-    derive_evm_nonce_completion_key, derive_evm_nonce_reservation_key, derive_wallet_nonce_domain,
+    derive_evm_nonce_reservation_key, derive_wallet_nonce_domain,
     evm_wallet_assurance_policy_ref, evm_wallet_nonce_policy_ref, ActivateCandidateResponse,
     ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, ActiveWalletCandidate,
     AttestCandidateIdentityRequest, AttestedWalletCandidate, BroadcastExactCandidateRequest,
-    CandidateActivationPermit, CanonicalTerminalOutcome, ChainInstanceDeclaration,
+    CandidateActivationPermit, ChainInstanceDeclaration,
     ChainInstanceRegistryAttestation, CompleteEvmNonceRequest, CompleteWalletNonceCapability,
     CompleteWalletNonceResponse, CompletedWalletNonce, EvmCallerSubmissionToken,
     EvmCandidateFamily, EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionTarget,
@@ -1137,25 +1137,8 @@ fn valid_active_prefix(
     .is_ok()
 }
 
-fn valid_terminal_outcome(outcome: &CanonicalTerminalOutcome) -> bool {
-    outcome.validate().is_ok()
-}
-
 fn valid_completed(completion: &CompletedWalletNonce) -> bool {
-    completion.nonce_domain.validate().is_ok()
-        && completion.semantic_reservation_key.validate().is_ok()
-        && completion.semantic_completion_key.validate().is_ok()
-        && valid_terminal_outcome(&completion.canonical_terminal_outcome)
-        && completion.nonce_domain == completion.canonical_terminal_outcome.nonce_domain
-        && completion.nonce == completion.canonical_terminal_outcome.nonce
-        && completion.semantic_reservation_key
-            == completion
-                .canonical_terminal_outcome
-                .semantic_reservation_key
-        && derive_evm_nonce_completion_key(&completion.semantic_reservation_key)
-            .is_ok_and(|key| key == completion.semantic_completion_key)
-        && valid_digest(&completion.original_terminal_witnesses_ref)
-        && valid_reference(&completion.completion_evidence_ref)
+    completion.validate().is_ok()
 }
 
 fn valid_wallet_status(status: &WalletNonceStatus) -> bool {
@@ -1560,6 +1543,7 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
         activated_candidates: Vec::new(),
         current_candidate: None,
         next_candidate_ordinal: 0,
+        observed_prefix_len: 0,
         status_baseline: status_baseline.clone(),
     };
     let mut candidate = fixture_success(submission_process::build_unsigned_candidate(&work))?;

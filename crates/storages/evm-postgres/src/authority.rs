@@ -13,7 +13,8 @@ use mfm_evm::{
     canonical_wallet_reference, derive_evm_candidate_operation_key,
     derive_evm_nonce_completion_key, derive_exact_candidate_activation_permit,
     ActivateCandidateResponse, ActivateEvmCandidateRequest, ActivateWalletCandidateCapability,
-    ActiveWalletCandidate, CanonicalTerminalOutcome, CompleteEvmNonceRequest,
+    ActiveWalletCandidate, CandidateActivationPermit, CanonicalTerminalOutcome,
+    CompleteEvmNonceRequest,
     CompleteWalletNonceCapability, CompleteWalletNonceResponse, CompletedWalletNonce,
     EvmCandidateFamily, EvmReceiptLookupObservation, EvmSubmissionCapabilityImplementation,
     EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionLookupObservation,
@@ -333,6 +334,9 @@ impl PostgresWalletNonceAuthority {
                 == reservation.reservation.semantic_reservation_key
             && completion.semantic_completion_key == request.completion_key
             && completion.canonical_terminal_outcome == request.canonical_terminal_outcome
+            && completion.terminal_witnesses == request.terminal_witnesses
+            && completion.sealed_activated_candidates == candidates
+            && completion.validate().is_ok()
             && expected_witness_ref.is_ok_and(|reference| {
                 completion.original_terminal_witnesses_ref == reference.content_digest()
             })
@@ -907,9 +911,38 @@ impl PostgresWalletNonceAuthority {
             .load_validated_candidates(transaction, &reservation)
             .await?;
         let ordinal = usize::from(request.next_candidate.candidate_ordinal);
-        Ok(candidates.get(ordinal) == Some(&retained.candidate)
-            && candidate_progression_matches(request, &reservation, &candidates[..ordinal])
-            && attested_candidate_semantics_match(request, &reservation))
+        let Some(existing) = candidates.get(ordinal) else {
+            return Ok(false);
+        };
+        if existing != &retained.candidate
+            || !attested_candidate_semantics_match(request, &reservation)
+        {
+            return Ok(false);
+        }
+        // First-activation replay uses the original Initial/Replacement permit
+        // against the prior prefix. Recovery reobservation uses the Reobservation
+        // permit against the full retained prefix (EVM-03).
+        match &request.activation_permit {
+            CandidateActivationPermit::Reobservation {
+                exact_ordinal,
+                retained_activation_ref,
+            } => Ok(
+                *exact_ordinal == request.next_candidate.candidate_ordinal
+                    && retained_activation_ref == &existing.activation_evidence_ref
+                    && derive_exact_candidate_activation_permit(
+                        &reservation.reservation,
+                        &candidates,
+                        request.next_candidate.candidate_ordinal,
+                        request.next_candidate.candidate_ordinal,
+                    )
+                    .is_ok_and(|expected| expected == request.activation_permit),
+            ),
+            _ => Ok(candidate_progression_matches(
+                request,
+                &reservation,
+                &candidates[..ordinal],
+            )),
+        }
     }
 
     async fn resolve_reservation_after_commit(
@@ -2145,7 +2178,7 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                         return self.abort_write(write, completion).await;
                     }
                 };
-                let completion = CompletedWalletNonce {
+                let completed = CompletedWalletNonce {
                     nonce_domain: request.nonce_domain.clone(),
                     nonce: reservation.reservation.nonce,
                     semantic_reservation_key: reservation
@@ -2154,15 +2187,22 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                         .clone(),
                     semantic_completion_key: request.completion_key.clone(),
                     canonical_terminal_outcome: request.canonical_terminal_outcome.clone(),
+                    terminal_witnesses: request.terminal_witnesses.clone(),
+                    sealed_activated_candidates: candidates.clone(),
                     original_terminal_witnesses_ref,
                     completion_evidence_ref,
                 };
+                if completed.validate().is_err() {
+                    let failure =
+                        EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+                    return self.abort_write(write, failure).await;
+                }
                 if let Err(failure) = self
                     .prepare_mutation(
                         &mut write,
                         Box::new(ProviderMutation::Completion {
                             request: request.clone(),
-                            completion: completion.clone(),
+                            completion: completed.clone(),
                             state_input_ref: state_input_ref.clone(),
                         }),
                     )
@@ -2173,19 +2213,20 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 if insert_completion(
                     &mut write.transaction,
                     request,
-                    &completion,
+                    &completed,
                     state_input_ref,
                 )
                 .await
                 .is_err()
                 {
-                    let completion = EffectAdapterCompletion::SafeFailure(
+                    let failure = EffectAdapterCompletion::SafeFailure(
                         EvmSubmissionFailure::NonceAuthorityUnavailable,
                     );
-                    return self.abort_write(write, completion).await;
+                    return self.abort_write(write, failure).await;
                 }
-                let response =
-                    self.returned_completion(CompleteWalletNonceResponse::Completed { completion });
+                let response = self.returned_completion(CompleteWalletNonceResponse::Completed {
+                    completion: completed,
+                });
                 match self.bound_database_attempt(
                     self.commit_completion_attempt(write, request, response)
                         .await,
@@ -2561,7 +2602,9 @@ fn decode_completion_row(row: Option<sqlx::postgres::PgRow>) -> Result<Option<Re
                 != completion.semantic_reservation_key
             || request.canonical_terminal_outcome != terminal_outcome
             || request.canonical_terminal_outcome != completion.canonical_terminal_outcome
+            || request.terminal_witnesses != completion.terminal_witnesses
             || completion.original_terminal_witnesses_ref != terminal_witnesses_ref.content_digest()
+            || completion.validate().is_err()
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
@@ -2620,9 +2663,14 @@ fn candidate_progression_matches(
     reservation: &ReservationClosure,
     candidates: &[ActiveWalletCandidate],
 ) -> bool {
+    // Authority re-derives the permit under the certified-order observation
+    // frontier equal to the requested ordinal. Expansion only produces that
+    // frontier after independent observation of every earlier activated
+    // candidate; the permit eligibility preimage binds that fact (EVM-04).
     derive_exact_candidate_activation_permit(
         &reservation.reservation,
         candidates,
+        request.next_candidate.candidate_ordinal,
         request.next_candidate.candidate_ordinal,
     )
     .is_ok_and(|expected| expected == request.activation_permit)

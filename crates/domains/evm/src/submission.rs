@@ -1243,7 +1243,7 @@ pub(crate) struct PostReservePreparedSubmission {
 #[mfm(
     namespace = "mfm.evm",
     name = "submission-work",
-    version = "1",
+    version = "2",
     schema = "mfm.evm.submission_work"
 )]
 pub(crate) struct SubmissionWork {
@@ -1251,7 +1251,14 @@ pub(crate) struct SubmissionWork {
     pub(crate) reservation: ReservedWalletNonce,
     pub(crate) activated_candidates: Vec<ActiveWalletCandidate>,
     pub(crate) current_candidate: Option<ActiveWalletCandidate>,
+    /// Next family ordinal to visit in certified order (recovery starts at 0).
     pub(crate) next_candidate_ordinal: u16,
+    /// Exclusive upper bound of activated ordinals observed in this recovery walk.
+    ///
+    /// Replacement admission requires `observed_prefix_len == activated_candidates.len()`
+    /// so every retained activated candidate has independent producer observation
+    /// evidence before a later ordinal may activate (EVM-03/EVM-04).
+    pub(crate) observed_prefix_len: u16,
     pub(crate) status_baseline: WalletStatusBaseline,
 }
 
@@ -1701,7 +1708,7 @@ pure_state!(
 pure_state!(
     MarkObservationReconcileState,
     CandidateObservationWork,
-    PreparedWalletSubmission,
+    CandidateResolution,
     "mfm.evm.state/mark-observation-reconcile"
 );
 pure_state!(

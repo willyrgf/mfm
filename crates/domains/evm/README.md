@@ -30,10 +30,13 @@ mismatches are classified separately from ordinary signer unavailability.
 incomplete-reservation projection rather than replaying the full lifetime candidate lineage on
 every access.
 
-Candidate recovery re-enters retained activated candidates for observation before declaring
-family exhaustion. Replacement permits bind producer-facing activation evidence (v2 eligibility).
-Submission intent identity freezes observation rounds, candidate-family digest, and expansion
-contract so resume under changed behavior is rejected.
+Candidate recovery walks every retained activated candidate in certified order on every later run
+before replacement is considered; there is no shortcut that only reobserves the last member or
+starts at `activated_len`. Replacement permits are affine and consumptive: eligibility binds the
+full activated prefix, predecessor activation evidence, and the observed-prefix frontier so every
+earlier candidate has independent producer observation evidence. Completion retains a content-
+addressed public recovery closure with the sealed activated prefix and full terminal-witness
+preimage so outputs rehash offline without ambient reconstruction.
 
 Concrete JSON-RPC and signer bindings live in `mfm-evm-live`. Real cross-run wallet authority lives
 in `mfm-storage-evm-postgres`.
