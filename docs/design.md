@@ -80,6 +80,12 @@ checks declaration order, lexical dominance, exhaustive closed-sum matching, exa
 boundary substitution, nominal results, failure plans, fan-out restrictions, implementation
 manifests, entry policy coverage, and one total root outcome.
 
+Structured normalization and denormalization use explicit bounded work stacks. They enforce the
+same path-depth, provenance-depth, component-definition, and JSON-node limits at construction,
+certification, decoding, and replay; the JSON-node limit is four times the component-definition
+limit because a normalized definition has several JSON nodes of its own. Exceeding any bound is a
+typed rejection and never a process-stack operation.
+
 Only the canonical `CertifiedProgramDocument` is execution authority. Its content-addressed root
 binds the authored program, expanded program, expansion profile and proof, policy proof, component
 closure, and secret-free implementation manifest. Admission resolves the trusted entry profile
