@@ -46,15 +46,3 @@ pub use self::surface::*;
 
 /// Shared observability configuration used by typed binaries.
 pub mod observability;
-
-pub(crate) fn production_database_url(database_url: Option<&str>) -> Result<String, PublicError> {
-    match database_url {
-        Some(database_url) => Ok(database_url.to_owned()),
-        None => std::env::var("DATABASE_URL").map_err(|_| {
-            PublicError::bad_request(
-                "MissingDatabaseUrl",
-                "Missing DATABASE_URL (or pass --database-url)",
-            )
-        }),
-    }
-}

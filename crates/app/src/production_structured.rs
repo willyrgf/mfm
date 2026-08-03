@@ -37,7 +37,6 @@ use mfm_store::structured::{
     VerifiedConfiguredValue,
 };
 use mfm_values::{MfmConfig, MfmValue};
-use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::application::{
@@ -1310,6 +1309,7 @@ fn export_stream_io_error() -> PublicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
 
     #[test]
     fn route_and_certificate_refresh_survives_fresh_verifier_construction() {
