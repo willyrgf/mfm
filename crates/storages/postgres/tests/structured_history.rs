@@ -2731,6 +2731,18 @@ where
         .load_for_export(&consumer_run)
         .await
         .expect("export-recompute consumer history");
+    let sources = consumer
+        .direct_source_run_ids()
+        .expect("export source discovery");
+    assert_eq!(
+        sources,
+        std::collections::BTreeSet::from([producer_run.clone()]),
+        "export discovery must surface the exact prior-run producer identity"
+    );
+    let producer_sources = producer
+        .direct_source_run_ids()
+        .expect("producer has no prior-run sources");
+    assert!(producer_sources.is_empty());
     let output = consumer
         .records()
         .iter()

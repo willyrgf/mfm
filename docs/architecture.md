@@ -265,9 +265,11 @@ registry, opens the fenced store, gives Runtime the writer, and retains only rea
 application facade. Access grants are re-evaluated for each admit, drive, read, replay, trace,
 audit, and export call. The policy derives tenant and stable principal from the credential;
 admission authorization names the exact operation, configured target, and invocation before
-configuration resolution. EVM configured values own semantic transaction material only, and the
-app constructs the identity-bound request after authorization from that configuration plus the
-selector's bounded caller token. Tenant equality is checked after callback-free load.
+configuration resolution. Export authorizes the sealed root and every recursively referenced
+prior-run source under the same target, tenant, principal, and export purpose before any byte is
+serialized. EVM configured values own semantic transaction material only, and the app constructs
+the identity-bound request after authorization from that configuration plus the selector's bounded
+caller token. Tenant equality is checked after callback-free load.
 
 CLI and REST preserve their transport contracts. Standalone binaries do not mint deployment
 authority. They fail closed until an embedding deployment supplies the fenced store and sealed EVM

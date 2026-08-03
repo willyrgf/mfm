@@ -963,6 +963,40 @@ impl<G: run_grant::RunGrantMarker> AuthorizedRunCall<'_, G> {
     }
 }
 
+impl AuthorizedRunCall<'_, run_grant::Export> {
+    /// Reauthorizes one required export dependency without copying the caller credential.
+    ///
+    /// Missing, denied, wrong-tenant, wrong-principal, and otherwise inaccessible
+    /// dependencies collapse to the same redacted `SourceRunExportDenied` contract.
+    /// Dependency identities never appear in the public error.
+    pub(crate) async fn authorize_required_dependency(
+        &self,
+        run_id: RunId,
+    ) -> Result<(), PublicError> {
+        debug_assert_eq!(self.grant, RunAccessGrant::Export);
+        let target = AccessTarget::RunTarget {
+            store_scope_id: self.store_scope_id.clone(),
+            run_id,
+        };
+        let authorized = self
+            .policy
+            .authorize(&self.credential, RunAccessGrant::Export, &target)
+            .await
+            .map_err(|error| match error {
+                crate::AccessPolicyError::AuthenticationRequired => {
+                    PublicError::authentication_required()
+                }
+                crate::AccessPolicyError::GrantDenied => PublicError::source_run_export_denied(),
+            })?;
+        if authorized.tenant_scope_id() != &self.tenant_scope_id
+            || authorized.authenticated_principal_id() != &self.authenticated_principal_id
+        {
+            return Err(PublicError::source_run_export_denied());
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct AuthorizedAdmissionCall {
     tenant_scope_id: TenantScopeId,
     authenticated_principal_id: StableId,
@@ -1342,6 +1376,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn export_dependencies_have_their_own_redacted_denial_contract() {
+        let root_tenant = tenant('1');
+        let run_id = run_id();
+        let store_scope_id = store_scope();
+
+        let granted = FixedPolicy {
+            expected_grant: RunAccessGrant::Export,
+            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('1'))),
+        };
+        let call = authorized_export_call(
+            &granted,
+            &store_scope_id,
+            root_tenant.clone(),
+            run_id.clone(),
+        );
+        call.authorize_required_dependency(run_id.clone())
+            .await
+            .expect("authorized source export");
+
+        let denied = FixedPolicy {
+            expected_grant: RunAccessGrant::Export,
+            result: Err(AccessPolicyError::GrantDenied),
+        };
+        let call = authorized_export_call(
+            &denied,
+            &store_scope_id,
+            root_tenant.clone(),
+            run_id.clone(),
+        );
+        let error = call
+            .authorize_required_dependency(run_id.clone())
+            .await
+            .expect_err("denied source export");
+        assert_eq!(error.code(), "SourceRunExportDenied");
+
+        let other_tenant = FixedPolicy {
+            expected_grant: RunAccessGrant::Export,
+            result: Ok(AuthorizedTenant::new(tenant('2'), principal('1'))),
+        };
+        let call = authorized_export_call(
+            &other_tenant,
+            &store_scope_id,
+            root_tenant.clone(),
+            run_id.clone(),
+        );
+        let error = call
+            .authorize_required_dependency(run_id.clone())
+            .await
+            .expect_err("cross-tenant source export");
+        assert_eq!(error.code(), "SourceRunExportDenied");
+
+        let other_principal = FixedPolicy {
+            expected_grant: RunAccessGrant::Export,
+            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('2'))),
+        };
+        let call = authorized_export_call(
+            &other_principal,
+            &store_scope_id,
+            root_tenant,
+            run_id.clone(),
+        );
+        let error = call
+            .authorize_required_dependency(run_id)
+            .await
+            .expect_err("cross-principal source export");
+        assert_eq!(error.code(), "SourceRunExportDenied");
+    }
+
+    #[tokio::test]
     async fn non_verify_replay_requires_a_separate_same_identity_export_grant() {
         let root_tenant = tenant('1');
         let run_id = run_id();
@@ -1551,6 +1654,24 @@ mod tests {
             authenticated_principal_id: principal('1'),
             run_id,
             grant,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    fn authorized_export_call<'policy>(
+        policy: &'policy dyn RunAccessPolicy,
+        store_scope_id: &'policy StoreScopeId,
+        tenant_scope_id: TenantScopeId,
+        run_id: RunId,
+    ) -> AuthorizedRunCall<'policy, run_grant::Export> {
+        AuthorizedRunCall {
+            credential: SecretCredential::new(b"opaque".to_vec()).expect("credential"),
+            policy,
+            store_scope_id,
+            tenant_scope_id,
+            authenticated_principal_id: principal('1'),
+            run_id,
+            grant: RunAccessGrant::Export,
             _marker: std::marker::PhantomData,
         }
     }

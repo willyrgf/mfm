@@ -125,6 +125,13 @@ or wallet authority.
 
 ## Portable export
 
+Export is two-phase and purpose-sealed. Phase one discovers every recursively referenced prior-run
+source from identifier-only fact-selection metadata, authorizes each source under the same target,
+tenant, principal, and `Export` purpose, and rejects cyclic or over-budget graphs. Phase two
+serializes only after that closure succeeds. Missing, denied, wrong-target, wrong-tenant, stale,
+cyclic, and otherwise inaccessible dependencies collapse to one redacted `SourceRunExportDenied`
+error and emit zero bytes.
+
 The one current export is a canonical JSON object, not a framed sequence:
 
 ```text

@@ -20,9 +20,11 @@ Every protected call consumes a fresh `SecretCredential` and derives both tenant
 stable authenticated principal only from the injected policy. Each call requests its exact
 purpose grant; replay reproduction and
 current-comparison additionally request a fresh same-run `Export` grant because they consume a
-caller-held export. Compound same-run grants must return the same tenant and principal. The app
-verifies the loaded run's tenant before rendering. IDs, cursors, DTOs, and exports are not bearer
-authority.
+caller-held export. Compound same-run grants must return the same tenant and principal. Export
+first authorizes the full recursive prior-run source closure under the same target, tenant,
+principal, and `Export` purpose, then serializes only after that succeeds; denied dependencies emit
+zero bytes. The app verifies the loaded run's tenant before rendering. IDs, cursors, DTOs, and
+exports are not bearer authority.
 
 The current public entry points are `mfm.portfolio/snapshot@1` and
 `mfm.evm/submit-transaction@1`. Admission authorizes the exact store, operation, configured target,
