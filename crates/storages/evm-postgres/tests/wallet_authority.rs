@@ -1474,42 +1474,53 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     assert_eq!(retry.submission_intent_id, request.submission_intent_id);
     assert_eq!(retry.reservation_key, request.reservation_key);
 
+    let (activation_request, expected_unsigned_digest) =
+        fixture.activation_request(&request, &reservation);
     let busy_ack_target = commit_proxy
-        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
-        .expect("arm busy disposition acknowledgement fault");
-    assert!(matches!(
+        .arm_held_lost_acknowledgement()
+        .expect("arm held busy disposition acknowledgement fault");
+    let (busy_result, ambiguity_candidate) = tokio::join!(
         tokio::time::timeout(
-            Duration::from_secs(10),
+            Duration::from_secs(30),
             ambiguity_authority.reserve(&state_input, &sibling_issuer_request),
-        )
-        .await
-        .expect("bounded busy disposition ambiguity resolution"),
+        ),
+        async {
+            commit_proxy
+                .wait_for_held_lost_acknowledgements(busy_ack_target)
+                .await;
+            assert_reservation_absent(&probe_pool, &sibling_issuer_request).await;
+            assert_candidate_absent(&probe_pool, &activation_request).await;
+            assert_domain_high_water(&probe_pool, fixture.nonce_domain.as_str(), 7).await;
+
+            let absent_activation_target = commit_proxy
+                .arm(CommitFault::RollBackBeforeCommit, 1)
+                .expect("arm absent candidate acknowledgement fault");
+            let candidate = match tokio::time::timeout(
+                Duration::from_secs(10),
+                ambiguity_authority.activate_candidate(&state_input, &activation_request),
+            )
+            .await
+            .expect("bounded absent candidate ambiguity resolution")
+            {
+                EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+                    candidate,
+                }) => candidate,
+                other => panic!("unexpected absent candidate result: {other:?}"),
+            };
+            commit_proxy
+                .wait_for_intercepts(absent_activation_target)
+                .await;
+            commit_proxy.release_held_transactions();
+            candidate
+        },
+    );
+    assert!(matches!(
+        busy_result.expect("bounded busy disposition ambiguity resolution"),
         EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::NonceDomainBusy)
     ));
-    commit_proxy.wait_for_intercepts(busy_ack_target).await;
     assert_reservation_absent(&probe_pool, &sibling_issuer_request).await;
     assert_domain_high_water(&probe_pool, fixture.nonce_domain.as_str(), 7).await;
 
-    let (activation_request, expected_unsigned_digest) =
-        fixture.activation_request(&request, &reservation);
-    let absent_activation_target = commit_proxy
-        .arm(CommitFault::RollBackBeforeCommit, 1)
-        .expect("arm absent candidate acknowledgement fault");
-    let ambiguity_candidate = match tokio::time::timeout(
-        Duration::from_secs(10),
-        ambiguity_authority.activate_candidate(&state_input, &activation_request),
-    )
-    .await
-    .expect("bounded absent candidate ambiguity resolution")
-    {
-        EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated { candidate }) => {
-            candidate
-        }
-        other => panic!("unexpected absent candidate result: {other:?}"),
-    };
-    commit_proxy
-        .wait_for_intercepts(absent_activation_target)
-        .await;
     let (left_activation, right_activation) = tokio::join!(
         authority_a.activate_candidate(&state_input, &activation_request),
         authority_b.activate_candidate(&state_input, &activation_request),
@@ -1632,23 +1643,6 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         .as_str()
         .to_owned(),
     };
-    let progression_ack_target = commit_proxy
-        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
-        .expect("arm candidate-progression acknowledgement fault");
-    assert!(matches!(
-        tokio::time::timeout(
-            Duration::from_secs(10),
-            ambiguity_authority.activate_candidate(&state_input, &skipped_replacement),
-        )
-        .await
-        .expect("bounded candidate-progression ambiguity resolution"),
-        EffectAdapterCompletion::Returned(ActivateCandidateResponse::CandidateProgressionConflict)
-    ));
-    commit_proxy
-        .wait_for_intercepts(progression_ack_target)
-        .await;
-    assert_candidate_absent(&probe_pool, &skipped_replacement).await;
-
     let mut wrong_predecessor = replacement_request.clone();
     if let CandidateActivationPermit::Replacement {
         predecessor_activation_ref,
@@ -1702,25 +1696,48 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     ));
     assert_candidate_absent(&probe_pool, &wrong_eligibility).await;
 
-    let replacement_state_input = fixture.refreshed_state_input();
-    let (replacement_a, replacement_b) = tokio::join!(
-        authority_a.activate_candidate(&state_input, &replacement_request),
-        authority_b.activate_candidate(&replacement_state_input, &replacement_request),
+    let progression_ack_target = commit_proxy
+        .arm_held_lost_acknowledgement()
+        .expect("arm candidate-progression acknowledgement fault");
+    let (progression_result, replacement_candidate) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            ambiguity_authority.activate_candidate(&state_input, &skipped_replacement),
+        ),
+        async {
+            commit_proxy
+                .wait_for_held_lost_acknowledgements(progression_ack_target)
+                .await;
+            assert_candidate_absent(&probe_pool, &skipped_replacement).await;
+            assert_candidate_absent(&probe_pool, &replacement_request).await;
+            let replacement_state_input = fixture.refreshed_state_input();
+            let (replacement_a, replacement_b) = tokio::join!(
+                authority_a.activate_candidate(&state_input, &replacement_request),
+                authority_b.activate_candidate(&replacement_state_input, &replacement_request),
+            );
+            let candidate = match (replacement_a, replacement_b) {
+                (
+                    EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+                        candidate: left,
+                    }),
+                    EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+                        candidate: right,
+                    }),
+                ) => {
+                    assert_eq!(left, right);
+                    left
+                }
+                other => panic!("unexpected concurrent replacement results: {other:?}"),
+            };
+            commit_proxy.release_held_transactions();
+            candidate
+        },
     );
-    let replacement_candidate = match (replacement_a, replacement_b) {
-        (
-            EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                candidate: left,
-            }),
-            EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                candidate: right,
-            }),
-        ) => {
-            assert_eq!(left, right);
-            left
-        }
-        other => panic!("unexpected concurrent replacement results: {other:?}"),
-    };
+    assert!(matches!(
+        progression_result.expect("bounded candidate-progression ambiguity resolution"),
+        EffectAdapterCompletion::Returned(ActivateCandidateResponse::CandidateProgressionConflict)
+    ));
+    assert_candidate_absent(&probe_pool, &skipped_replacement).await;
     assert_eq!(
         replacement_candidate.attested_candidate.candidate_ordinal,
         1
@@ -1954,26 +1971,52 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             && retained.canonical_terminal_outcome.winning_candidate_ordinal == 0
     ));
 
-    let later_provider_ahead =
-        fixture.reserve_request(qualified_activation.clone(), 9, "later-provider-ahead");
+    let provider_ahead_probe =
+        fixture.reserve_request(qualified_activation.clone(), 9, "provider-ahead-probe");
     assert!(matches!(
         authority_a
-            .reserve(&state_input, &later_provider_ahead)
+            .reserve(&state_input, &provider_ahead_probe)
             .await,
         EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::NonceLineageDiverged)
     ));
-    assert_reservation_absent(&probe_pool, &later_provider_ahead).await;
+    assert_reservation_absent(&probe_pool, &provider_ahead_probe).await;
     assert_domain_high_water(&probe_pool, fixture.nonce_domain.as_str(), 7).await;
 
-    let sibling_issuer_reservation = match authority_a
-        .reserve(&fixture.refreshed_state_input(), &sibling_issuer_request)
-        .await
-    {
-        EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved { reservation }) => {
+    let later_provider_ahead =
+        fixture.reserve_request(qualified_activation.clone(), 9, "later-provider-ahead");
+    let divergence_ack_target = commit_proxy
+        .arm_held_lost_acknowledgement()
+        .expect("arm held provider-ahead acknowledgement fault");
+    let (later_provider_ahead_result, sibling_issuer_reservation) = tokio::join!(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            ambiguity_authority.reserve(&state_input, &later_provider_ahead),
+        ),
+        async {
+            commit_proxy
+                .wait_for_held_lost_acknowledgements(divergence_ack_target)
+                .await;
+            assert_reservation_absent(&probe_pool, &later_provider_ahead).await;
+            assert_domain_high_water(&probe_pool, fixture.nonce_domain.as_str(), 7).await;
+            let reservation = match authority_a
+                .reserve(&fixture.refreshed_state_input(), &sibling_issuer_request)
+                .await
+            {
+                EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved {
+                    reservation,
+                }) => reservation,
+                other => panic!("unexpected sibling-issuer reservation result: {other:?}"),
+            };
+            commit_proxy.release_held_transactions();
             reservation
-        }
-        other => panic!("unexpected sibling-issuer reservation result: {other:?}"),
-    };
+        },
+    );
+    assert!(matches!(
+        later_provider_ahead_result.expect("bounded provider-ahead ambiguity resolution"),
+        EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::NonceDomainBusy)
+    ));
+    assert_reservation_absent(&probe_pool, &later_provider_ahead).await;
+    assert_domain_high_water(&probe_pool, fixture.nonce_domain.as_str(), 8).await;
     assert_eq!(sibling_issuer_reservation.nonce, 8);
     let (sibling_issuer_activation, _) =
         fixture.activation_request(&sibling_issuer_request, &sibling_issuer_reservation);

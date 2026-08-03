@@ -780,6 +780,59 @@ async fn persisted_root_outcomes_bind_every_applicable_provenance_exactly() {
                 .await
                 .expect("raw provenance history")
                 .expect("persisted provenance history");
+            if case == RootProvenanceCase::FanOutJoin {
+                let [admission_batch] = raw.batches.as_slice() else {
+                    panic!("admission-only fan-out must close in one batch");
+                };
+                assert_eq!(admission_batch.records.len(), 2);
+                assert!(matches!(
+                    admission_batch.records[0].record,
+                    RunRecord::RunAdmitted(_)
+                ));
+                assert!(matches!(
+                    admission_batch.records[1].record,
+                    RunRecord::RunClosed(_)
+                ));
+                assert!(admission_batch.records.iter().all(|assigned| matches!(
+                    assigned.record,
+                    RunRecord::RunAdmitted(_) | RunRecord::RunClosed(_)
+                )));
+                let lane_objects = admission_batch
+                    .objects
+                    .iter()
+                    .filter(|object| object.canonical_json.as_str() == r#"{"Success":7}"#)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    lane_objects.len(),
+                    1,
+                    "two identical lanes must share one exact wrapper object"
+                );
+                let join_objects = admission_batch
+                    .objects
+                    .iter()
+                    .filter(|object| {
+                        object.canonical_json.as_str()
+                            == r#"{"declaration_ordered":[{"Success":7},{"Success":7}]}"#
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(join_objects.len(), 1, "one exact fan-out join object");
+                for (attack, omitted_ref) in [
+                    ("omit-lane-wrapper", lane_objects[0].content_ref.clone()),
+                    ("omit-join-value", join_objects[0].content_ref.clone()),
+                ] {
+                    let forged =
+                        forge_object_omission(raw.clone(), &identity, &omitted_ref, attack);
+                    assert_eq!(
+                        super::fold::verify_recorded_history(
+                            forged,
+                            &verifier(&root.fixture),
+                            &NoPhysicalBindings,
+                        )
+                        .expect_err("omitted generated fan-out object must fail closed"),
+                        StructuredStoreError::InvalidHistory
+                    );
+                }
+            }
             let exact_outcome = closed_outcome_object(&raw);
             let exact_json = exact_outcome
                 .decode::<serde_json::Value>()
@@ -3317,6 +3370,41 @@ fn forge_closed_outcome(
         },
     )
     .expect("well-formed hostile closure envelope");
+    raw.batches.push(forged);
+    raw
+}
+
+fn forge_object_omission(
+    mut raw: RawRunHistory,
+    identity: &StructuredStoreIdentity,
+    omitted_ref: &ContentRef,
+    append_id: &str,
+) -> RawRunHistory {
+    let original = raw.batches.pop().expect("object-producing batch");
+    let records = original
+        .records
+        .iter()
+        .map(|assigned| assigned.record.clone())
+        .collect();
+    let original_object_count = original.objects.len();
+    let objects = original
+        .objects
+        .into_iter()
+        .filter(|object| &object.content_ref != omitted_ref)
+        .collect::<Vec<_>>();
+    assert_eq!(objects.len() + 1, original_object_count);
+    let forged = super::fold::assign_candidate(
+        identity,
+        CommitCandidate {
+            run_id: raw.run_id.clone(),
+            expected_head: raw.batches.last().map(|batch| batch.head.clone()),
+            append_request_id: AppendRequestId::new(append_id).expect("omission append id"),
+            tenant_fact_coordinate: original.tenant_fact_coordinate,
+            records,
+            objects,
+        },
+    )
+    .expect("well-formed omission envelope");
     raw.batches.push(forged);
     raw
 }

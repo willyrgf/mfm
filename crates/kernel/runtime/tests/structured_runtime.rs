@@ -37,8 +37,8 @@ use mfm_program::structured::{
     DefaultFailureMapper, Direct, Effect, FanOutResults, Never, OperationBuilder,
     PriorRunFactSelectionCapability, Pure, Read, RefreshableBinding, ReviewedSafeFailureCase,
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
-    RuntimeResourceAuthority, SafeFailureNotApplicable, SafeFailureSuccessOnly, Sequential, State,
-    StateFrame, StateSettlement, StructuredStateCallbacks,
+    RuntimeResourceAuthority, SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly,
+    Sequential, State, StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::structured::{
@@ -46,9 +46,10 @@ use mfm_runtime::structured::{
     RuntimeStoreFaultKind, StoreProgramVerifier,
 };
 use mfm_spec::structured::{
-    ProposedStateOutcome, SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
-    SecretFreeQualificationArtifact, StructuredComponentDependency, StructuredComponentKind,
-    StructuredExpansionProfile, StructuredFactDescriptor, StructuredLiveComponentContract,
+    OperationOutcome, ProposedStateOutcome, SecretFreeExecutableIdentity,
+    SecretFreeImplementationDescriptor, SecretFreeQualificationArtifact,
+    StructuredComponentDependency, StructuredComponentKind, StructuredExpansionProfile,
+    StructuredFactDescriptor, StructuredLiveComponentContract,
 };
 use mfm_store::structured::{
     AccessAuthorizationProposal, AccessObservationProposal, BackendAppendOutcome,
@@ -302,6 +303,24 @@ impl State for ReadState {
     }
 }
 
+struct FallibleReadState;
+
+impl State for FallibleReadState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = FailureValue;
+    type Request = Value;
+    type Returned = Value;
+    type SafeFailure = Value;
+    type Execution = Read<FixtureReadCapability>;
+    type SafeFailureDisposition = SafeFailureMayFail;
+    type Capability = Direct;
+
+    fn semantic_state_id() -> mfm_program::Result<StableId> {
+        stable("mfm.runtime.fixture/fallible-read-state")
+    }
+}
+
 struct FixtureResource;
 struct FixtureResourceInvoker;
 
@@ -485,6 +504,58 @@ impl RuntimeReadAdapter<FixtureReadCapability> for CountingReadAdapter {
 impl RuntimeReadPhysicalBinding<FixtureReadCapability> for CountingReadAdapter {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+}
+
+struct ConditionalFailureReadAdapter {
+    calls: Arc<AtomicUsize>,
+    certificate: HistoryObject,
+}
+
+impl ReadAdapterInvoker<FixtureReadCapability> for ConditionalFailureReadAdapter {
+    fn invoke<'a>(
+        &'a self,
+        request: &'a Value,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<Value, Value>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if request.value == 0 {
+                ReadAdapterCompletion::SafeFailure(Value { value: 91 })
+            } else {
+                ReadAdapterCompletion::Returned(Value {
+                    value: request.value + 1,
+                })
+            }
+        })
+    }
+}
+
+impl RuntimeReadAdapter<FixtureReadCapability> for ConditionalFailureReadAdapter {
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        read_adapter_contract()
+    }
+}
+
+impl RuntimeReadPhysicalBinding<FixtureReadCapability> for ConditionalFailureReadAdapter {
+    fn public_certificate(&self) -> &HistoryObject {
+        &self.certificate
+    }
+}
+
+struct ConditionalReadBindingSource {
+    binding: Arc<ConditionalFailureReadAdapter>,
+}
+
+impl RuntimeReadPhysicalBindingSource<FixtureReadCapability> for ConditionalReadBindingSource {
+    type Binding = ConditionalFailureReadAdapter;
+
+    fn current_binding<'a>(
+        &'a self,
+        _selection: PhysicalBindingSelection<'a>,
+        _request: &'a Value,
+    ) -> ComponentFuture<'a, Option<Arc<Self::Binding>>> {
+        let binding = Arc::clone(&self.binding);
+        Box::pin(async move { Some(binding) })
     }
 }
 
@@ -2804,6 +2875,253 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
 }
 
 #[tokio::test]
+async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelated_run() {
+    let request_calls = Arc::new(AtomicUsize::new(0));
+    let adapter_calls = Arc::new(AtomicUsize::new(0));
+    let settlement_calls = Arc::new(AtomicUsize::new(0));
+    let mapper_calls = Arc::new(AtomicUsize::new(0));
+    let operation_id = stable("mfm.runtime.fixture/fallible-read-operation").expect("operation id");
+    let certificate = binding_object(52);
+    let mut assembly = ProgramRegistryBuilder::new();
+    assembly.register_value::<Value>().expect("value contract");
+    assembly
+        .register_value::<FailureValue>()
+        .expect("failure value contract");
+    assembly
+        .register_closed_sum::<FailureRoute>()
+        .expect("failure route contract");
+
+    let request_count = Arc::clone(&request_calls);
+    let settlement_count = Arc::clone(&settlement_calls);
+    let state_descriptor =
+        implementation_descriptor::<FallibleReadState>(&mut assembly, "fallible-read-state");
+    assembly
+        .register_state::<FallibleReadState>(
+            state_descriptor,
+            StructuredStateCallbacks::Read {
+                request: Arc::new(move |frame: StateFrame<'_, Value>| {
+                    request_count.fetch_add(1, Ordering::SeqCst);
+                    frame.input().clone()
+                }),
+                settle: Arc::new(
+                    move |_frame, observation: CommittedObservationView<'_, Value, Value>| {
+                        settlement_count.fetch_add(1, Ordering::SeqCst);
+                        let outcome = match observation.observation() {
+                            CommittedObservation::Returned(value) => {
+                                ProposedStateOutcome::Success(value.clone())
+                            }
+                            CommittedObservation::SafeFailure(failure) => {
+                                ProposedStateOutcome::Failure(FailureValue {
+                                    code: failure.value,
+                                })
+                            }
+                        };
+                        StateSettlement::Proposed(outcome)
+                    },
+                ),
+                reviewed_safe_failures: vec![ReviewedSafeFailureCase::new(
+                    Value { value: 0 },
+                    Value { value: 91 },
+                    ProposedStateOutcome::Failure(FailureValue { code: 91 }),
+                )],
+            },
+        )
+        .expect("fallible Read state");
+
+    let mapper_count = Arc::clone(&mapper_calls);
+    let mapper_descriptor =
+        implementation_descriptor::<FailureMapperState>(&mut assembly, "read-failure-mapper");
+    assembly
+        .register_state::<FailureMapperState>(
+            mapper_descriptor,
+            StructuredStateCallbacks::Pure {
+                apply: Arc::new(move |frame: StateFrame<'_, FailureValue>| {
+                    mapper_count.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Success(FailureRoute::Propagate {
+                        failure: frame.input().clone(),
+                    })
+                }),
+            },
+        )
+        .expect("failure mapper state");
+
+    let capability_descriptor = implementation_descriptor_for_contract(
+        &mut assembly,
+        StructuredComponentKind::Capability,
+        read_capability_contract()
+            .expect("capability contract")
+            .content_ref()
+            .expect("capability ref"),
+        "fallible-read-capability",
+    );
+    assembly
+        .register_read_capability::<FixtureReadCapability, _>(
+            capability_descriptor,
+            Arc::new(FixtureReadCapabilityImplementation),
+        )
+        .expect("Read capability");
+    let adapter_descriptor = implementation_descriptor_for_contract(
+        &mut assembly,
+        StructuredComponentKind::Adapter,
+        read_adapter_contract()
+            .expect("adapter contract")
+            .content_ref()
+            .expect("adapter ref"),
+        "fallible-read-adapter",
+    );
+    assembly
+        .register_read_adapter::<FixtureReadCapability, _>(
+            adapter_descriptor,
+            Arc::new(ConditionalReadBindingSource {
+                binding: Arc::new(ConditionalFailureReadAdapter {
+                    calls: Arc::clone(&adapter_calls),
+                    certificate: certificate.clone(),
+                }),
+            }),
+        )
+        .expect("Read adapter");
+    assembly
+        .register_entry_point(
+            operation_id.clone(),
+            fallible_read_program(operation_id.clone()),
+            profile(),
+        )
+        .expect("entry point");
+    let registry = assembly
+        .build(std::slice::from_ref(&operation_id))
+        .expect("qualified registry");
+    let document = registry
+        .certifier(&operation_id)
+        .expect("certifier")
+        .certify(fallible_read_program(operation_id.clone()))
+        .expect("certified program")
+        .into_document();
+    let (program_verifier, processes) = split_qualified_registry(registry);
+    let store = StructuredRunStore::new(
+        StructuredMemoryBackend::new(store_identity(52)),
+        program_verifier,
+        Arc::new(ExactPublicBindingVerifier {
+            certificate: certificate.clone(),
+        }),
+    );
+    let (writer, reader) = store.split();
+    let runtime = Runtime::new(writer, processes);
+    let failed_run_id = run_id(52);
+    let successful_run_id = run_id(53);
+    runtime
+        .admit_run(admission(
+            failed_run_id.clone(),
+            operation_id.clone(),
+            document.clone(),
+            0,
+            "safe-failure-run-admit",
+        ))
+        .await
+        .expect("safe-failure run admission");
+    runtime
+        .admit_run(admission(
+            successful_run_id.clone(),
+            operation_id,
+            document,
+            7,
+            "safe-failure-success-run-admit",
+        ))
+        .await
+        .expect("successful run admission");
+    request_calls.store(0, Ordering::SeqCst);
+    adapter_calls.store(0, Ordering::SeqCst);
+    settlement_calls.store(0, Ordering::SeqCst);
+    mapper_calls.store(0, Ordering::SeqCst);
+
+    assert_eq!(
+        runtime
+            .drive_once(&failed_run_id)
+            .await
+            .expect("safe-failure observation"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(
+        runtime
+            .drive_once(&failed_run_id)
+            .await
+            .expect("safe-failure settlement"),
+        DriveOutcome::TransitionCommitted { closed: false }
+    );
+    assert_eq!(
+        runtime
+            .drive_once(&failed_run_id)
+            .await
+            .expect("default failure mapping"),
+        DriveOutcome::TransitionCommitted { closed: true }
+    );
+    assert_eq!(
+        runtime
+            .drive_once(&successful_run_id)
+            .await
+            .expect("successful observation"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(
+        runtime
+            .drive_once(&successful_run_id)
+            .await
+            .expect("successful settlement"),
+        DriveOutcome::TransitionCommitted { closed: true }
+    );
+
+    let failed = reader
+        .load_verified(&failed_run_id)
+        .await
+        .expect("failed run");
+    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = failed.cursor() else {
+        panic!("safe failure must close the run");
+    };
+    let failed_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = failed
+        .object(outcome_ref)
+        .expect("failed outcome object")
+        .decode()
+        .expect("typed failed outcome");
+    let OperationOutcome::Failure(failure_ref) = failed_outcome else {
+        panic!("safe failure must retain the root Failure variant");
+    };
+    assert_eq!(
+        failed
+            .object(&failure_ref.value.value_ref)
+            .expect("root failure value")
+            .decode::<FailureValue>()
+            .expect("typed root failure value"),
+        FailureValue { code: 91 }
+    );
+    let succeeded = reader
+        .load_verified(&successful_run_id)
+        .await
+        .expect("successful run");
+    let mfm_store::structured::ProgramCursor::Closed { outcome_ref } = succeeded.cursor() else {
+        panic!("successful run must close");
+    };
+    let successful_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = succeeded
+        .object(outcome_ref)
+        .expect("successful outcome object")
+        .decode()
+        .expect("typed successful outcome");
+    let OperationOutcome::Success(success_ref) = successful_outcome else {
+        panic!("successful run must retain the root Success variant");
+    };
+    assert_eq!(
+        succeeded
+            .object(&success_ref.value.value_ref)
+            .expect("root success value")
+            .decode::<Value>()
+            .expect("typed root success value"),
+        Value { value: 8 }
+    );
+    assert_eq!(request_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(mapper_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn access_invokes_once_and_persists_before_success_under_observation_retries() {
     for injection in [
         InjectAppend::None,
@@ -4227,6 +4545,29 @@ fn fallible_program(operation_id: StableId) -> mfm_spec::structured::AuthoredStr
         .expect("default failure handler");
     let completion = builder.succeed(&output).expect("success");
     builder.finish(completion).expect("fallible program")
+}
+
+fn fallible_read_program(
+    operation_id: StableId,
+) -> mfm_spec::structured::AuthoredStructuredProgram {
+    let mut builder =
+        OperationBuilder::<Value, FailureValue>::new(operation_id, stable("root").expect("root"))
+            .expect("builder");
+    builder
+        .root()
+        .failure_map::<FailureValue, ValueFailureMapper>()
+        .expect("failure mapper");
+    let input = builder
+        .input::<Value>(stable("input").expect("input"))
+        .expect("input root");
+    let output = builder
+        .root()
+        .state::<FallibleReadState>(stable("state").expect("state label"), &input)
+        .expect("state")
+        .or_default()
+        .expect("default failure handler");
+    let completion = builder.succeed(&output).expect("success");
+    builder.finish(completion).expect("fallible Read program")
 }
 
 fn implementation_descriptor<S: State>(
