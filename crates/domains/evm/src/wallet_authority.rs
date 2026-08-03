@@ -76,9 +76,7 @@ impl TransactionNonce {
 
     /// Returns the checked successor when it remains protocol-valid.
     pub fn checked_successor(self) -> Option<Self> {
-        self.0
-            .checked_add(1)
-            .and_then(|next| Self::new(next).ok())
+        self.0.checked_add(1).and_then(|next| Self::new(next).ok())
     }
 }
 

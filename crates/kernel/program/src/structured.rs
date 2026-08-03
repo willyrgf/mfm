@@ -892,10 +892,8 @@ impl<S: State> StructuredStateCallbacks<S> {
                 settle_safe_failure,
                 ..
             } => {
-                let proposal = settle_safe_failure(
-                    StateFrame::from_verified_input(input),
-                    safe_failure,
-                );
+                let proposal =
+                    settle_safe_failure(StateFrame::from_verified_input(input), safe_failure);
                 Some(S::SafeFailureDisposition::into_settlement(proposal))
             }
             Self::Pure { .. } => None,

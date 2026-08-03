@@ -1206,8 +1206,6 @@ pub(super) enum PreparedObservation {
     Append(Box<PreparedSuccessor>),
 }
 
-
-
 pub(super) fn qualify_observation(
     verified: &VerifiedStructuredRun,
     authorization_ref: &RecordRef,
@@ -2652,11 +2650,8 @@ fn walk_fan_out(
                     source_value_ref: value.reference.value.value_ref.clone(),
                 };
                 let lane_json = tagged_wrapper(variant, value.value);
-                let lane_value = engine.bind_derived_with_origin(
-                    &lane.outcome_slot,
-                    lane_json,
-                    Some(origin),
-                )?;
+                let lane_value =
+                    engine.bind_derived_with_origin(&lane.outcome_slot, lane_json, Some(origin))?;
                 lane_cursors.push(LaneCursor::Completed {
                     outcome_ref: lane_value.reference.value.value_ref.clone(),
                 });

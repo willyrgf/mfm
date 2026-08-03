@@ -315,10 +315,8 @@ fn decrypt_missing_entry_fails_closed_without_secret_output() {
     match keystore.private_key_for_test(missing) {
         Err(err @ KeystoreError::KeyNotFound(_)) => {
             let rendered = format!("{err:?}{err}");
-            assert!(
-                !rendered
-                    .contains("0000000000000000000000000000000000000000000000000000000000000001")
-            );
+            assert!(!rendered
+                .contains("0000000000000000000000000000000000000000000000000000000000000001"));
         }
         Ok(_) => panic!("missing key must fail closed"),
         Err(other) => panic!("unexpected error: {other:?}"),
@@ -336,8 +334,7 @@ fn decrypt_locked_keystore_fails_closed() {
         let test_key = "0000000000000000000000000000000000000000000000000000000000000001";
         keystore.import_private_key(None, test_key).unwrap()
     };
-    let locked =
-        Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
+    let locked = Keystore::new_with_config(&keystore_path, KeystoreConfig::development()).unwrap();
     match locked.private_key_for_test(key_id) {
         Err(KeystoreError::Locked) => {}
         Ok(_) => panic!("locked keystore must fail closed"),

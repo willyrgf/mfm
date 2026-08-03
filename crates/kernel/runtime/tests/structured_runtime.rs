@@ -43,10 +43,7 @@ impl VerifiedRunView for EmptyVerified {
     ) -> Option<(&RecordRef, &ExternalAccessAuthorized)> {
         None
     }
-    fn observation(
-        &self,
-        _: &AccessAttemptId,
-    ) -> Option<(&RecordRef, &ExternalAccessObserved)> {
+    fn observation(&self, _: &AccessAttemptId) -> Option<(&RecordRef, &ExternalAccessObserved)> {
         None
     }
 }

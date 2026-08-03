@@ -817,8 +817,16 @@ async fn validate_target_authority(
     let release_epoch = row
         .try_get::<String, _>("release_epoch")
         .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
-    if fence_generation.parse::<u64>().ok().filter(|v| *v >= 1).is_none()
-        || release_epoch.parse::<u64>().ok().filter(|v| *v >= 1).is_none()
+    if fence_generation
+        .parse::<u64>()
+        .ok()
+        .filter(|v| *v >= 1)
+        .is_none()
+        || release_epoch
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v >= 1)
+            .is_none()
         || fence_generation.parse::<u64>().ok().map(|v| v.to_string())
             != Some(fence_generation.clone())
         || release_epoch.parse::<u64>().ok().map(|v| v.to_string()) != Some(release_epoch)

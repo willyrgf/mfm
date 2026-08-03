@@ -47,12 +47,11 @@ use crate::application::{
 use crate::stream_spool::{snapshot_input, WritableSpool};
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
-    decode_transition_trace_page_request, AccessAuditPage,
-    AdmissionStatus, AdmitRunRequest, AdmitRunResponse, Application, DriveResponse,
-    EntryPointContract as PublicEntryPointContract, ErrorClass, ExportRequest, ExportedRun,
-    PageRequest, PublicError, PublicRunView, PublicRuntimeFaultAttribution,
-    PublicRuntimeFaultPhase, PublicRuntimeFaultSubject, ReplayRequest, ReplayResponse,
-    RunAccessPolicy, TransitionTracePage,
+    decode_transition_trace_page_request, AccessAuditPage, AdmissionStatus, AdmitRunRequest,
+    AdmitRunResponse, Application, DriveResponse, EntryPointContract as PublicEntryPointContract,
+    ErrorClass, ExportRequest, ExportedRun, PageRequest, PublicError, PublicRunView,
+    PublicRuntimeFaultAttribution, PublicRuntimeFaultPhase, PublicRuntimeFaultSubject,
+    ReplayRequest, ReplayResponse, RunAccessPolicy, TransitionTracePage,
 };
 
 const EXECUTABLE_ID: &str = "mfm.application/structured-runtime";
@@ -124,13 +123,10 @@ pub(super) async fn connect(
             assembly.broadcast_resource_ref.clone(),
             wallet_bindings.resource_contract_ref().clone(),
         )?);
-    let (assembled, configuration) = open_structured_authoritative_application(
-        sessions,
-        assembly.registry,
-        physical_verifier,
-    )
-    .await
-    .map_err(|_| run_store_unavailable())?;
+    let (assembled, configuration) =
+        open_structured_authoritative_application(sessions, assembly.registry, physical_verifier)
+            .await
+            .map_err(|_| run_store_unavailable())?;
     let runtime = Arc::new(assembled.runtime);
     let store_scope_id = assembled
         .public_reader
@@ -884,10 +880,7 @@ impl ProductionBackend {
 
         // Re-run the pure expander over the completed discovery map so shared,
         // cyclic, and over-budget graphs share one deterministic proof path.
-        let root_sources = discovery
-            .get(&root_run_id)
-            .cloned()
-            .unwrap_or_default();
+        let root_sources = discovery.get(&root_run_id).cloned().unwrap_or_default();
         expand_export_source_closure(&root_run_id, root_sources, |run_id| {
             discovery
                 .get(run_id)
@@ -1074,11 +1067,9 @@ async fn write_structured_export(
     evidence: &ExportRunEvidence,
     request: ExportRequest,
 ) -> Result<ExportedRun, PublicError> {
-    let export = mfm_replay::portable::PortableRunExport::from_export_evidence(
-        evidence,
-        request.kind(),
-    )
-    .map_err(|_| export_stream_io_error())?;
+    let export =
+        mfm_replay::portable::PortableRunExport::from_export_evidence(evidence, request.kind())
+            .map_err(|_| export_stream_io_error())?;
     let bytes = export
         .to_canonical_bytes()
         .map_err(|_| export_stream_io_error())?;

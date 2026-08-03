@@ -27,8 +27,8 @@ pub use port::{
     VerifiedRunView,
 };
 pub use proofs::{
-    HistoryAppendOutcome, NewlyAppendedAuthorization, ObservationCommit, PriorRunFactScanCompletion,
-    StructuredAppendAttempt,
+    HistoryAppendOutcome, NewlyAppendedAuthorization, ObservationCommit,
+    PriorRunFactScanCompletion, StructuredAppendAttempt,
 };
 
 /// Result type for history-port operations.

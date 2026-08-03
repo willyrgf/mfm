@@ -34,11 +34,9 @@ use mfm_values::{
     SchemaKind, SchemaShape,
 };
 
-use super::*;
-use super::backend::{
-    StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredRunStore,
-};
+use super::backend::{StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredRunStore};
 use super::fold::ProgramVerifier;
+use super::*;
 
 #[derive(Clone)]
 struct FixtureProgramVerifier {

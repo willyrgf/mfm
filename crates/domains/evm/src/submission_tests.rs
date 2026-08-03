@@ -1191,8 +1191,8 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
         completed.terminal_witnesses,
         fixture.completion.request.terminal_witnesses
     );
-    let witnesses_ref = canonical_wallet_reference(&completed.terminal_witnesses)
-        .expect("witnesses reference");
+    let witnesses_ref =
+        canonical_wallet_reference(&completed.terminal_witnesses).expect("witnesses reference");
     assert_eq!(
         completed.original_terminal_witnesses_ref,
         witnesses_ref.content_digest()
@@ -1215,8 +1215,7 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
     assert!(forged.validate().is_err(), "empty sealed prefix rejected");
 
     let mut forged = completed.clone();
-    forged.original_terminal_witnesses_ref =
-        format!("{:#x}", B256::repeat_byte(0xee));
+    forged.original_terminal_witnesses_ref = format!("{:#x}", B256::repeat_byte(0xee));
     assert!(
         forged.validate().is_err(),
         "witness digest mismatch rejected"

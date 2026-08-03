@@ -560,10 +560,8 @@ impl EvmWalletDeployment {
         {
             return Err(wallet_deployment_invalid());
         }
-        let sealed_public_signing_identity = signer_provider
-            .binding()
-            .expected_public_identity()
-            .clone();
+        let sealed_public_signing_identity =
+            signer_provider.binding().expected_public_identity().clone();
         let chain_instance = submission.transaction_intent().chain_instance().clone();
         let submission_bindings = Arc::new(
             mfm_evm_live::EvmStructuredLiveBindings::new(

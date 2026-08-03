@@ -96,7 +96,16 @@ fn md5_hex(input: &[u8]) -> String {
     fn i(x: u32, y: u32, z: u32) -> u32 {
         y ^ (x | !z)
     }
-    fn op(a: u32, b: u32, c: u32, d: u32, x: u32, s: u32, ac: u32, func: fn(u32, u32, u32) -> u32) -> u32 {
+    fn op(
+        a: u32,
+        b: u32,
+        c: u32,
+        d: u32,
+        x: u32,
+        s: u32,
+        ac: u32,
+        func: fn(u32, u32, u32) -> u32,
+    ) -> u32 {
         a.wrapping_add(func(b, c, d))
             .wrapping_add(x)
             .wrapping_add(ac)

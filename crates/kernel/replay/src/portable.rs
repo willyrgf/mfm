@@ -422,8 +422,9 @@ fn classify_fold_error(error: StructuredStoreError) -> PortableExportError {
         | StructuredStoreError::Certification
         | StructuredStoreError::StaleHead
         | StructuredStoreError::AppendConflict => PortableExportError::Invalid,
-        StructuredStoreError::BackendUnavailable
-        | StructuredStoreError::AcknowledgementUnknown => PortableExportError::Invalid,
+        StructuredStoreError::BackendUnavailable | StructuredStoreError::AcknowledgementUnknown => {
+            PortableExportError::Invalid
+        }
     }
 }
 
@@ -477,4 +478,3 @@ mod tests {
         assert!(PortableRunExport::strict_decode(br#"{"kind":"semantic"}"#).is_err());
     }
 }
-

@@ -235,8 +235,7 @@ impl KeyMaterialWitness {
     }
 
     pub(super) fn observed_transfer(&self) -> bool {
-        self.transferred
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.transferred.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(super) fn observed_cleanup(&self) -> bool {

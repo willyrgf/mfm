@@ -18,7 +18,9 @@ use mfm_journal::structured::{
 use serde::Serialize;
 
 use super::backend::{RawRunHistory, StructuredBackendFuture, TenantFactPublication};
-use super::fold::{verify_recorded_history, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun};
+use super::fold::{
+    verify_recorded_history, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
+};
 use super::qualification::PublicPhysicalBindingVerifier;
 
 const SCAN_PAGE_ITEMS: u32 = 1_024;

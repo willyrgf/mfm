@@ -286,9 +286,7 @@ fn match_merges_aggregate_results_and_state_returns_aggregate() {
     let merged = builder
         .root()
         .match_value(stable("choice"), &selector, |arms| {
-            arms.arm("left", stable("left-arm"), |block, _| {
-                block.normal(&join)
-            })?;
+            arms.arm("left", stable("left-arm"), |block, _| block.normal(&join))?;
             arms.arm("right", stable("right-arm"), |block, _| {
                 block.normal(&returned)
             })

@@ -317,9 +317,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             HistoryError::StaleHead => RuntimeStoreFaultKind::StaleHead,
             HistoryError::AppendConflict => RuntimeStoreFaultKind::AppendConflict,
             HistoryError::BackendUnavailable => RuntimeStoreFaultKind::BackendUnavailable,
-            HistoryError::AcknowledgementUnknown => {
-                RuntimeStoreFaultKind::AcknowledgementUnknown
-            }
+            HistoryError::AcknowledgementUnknown => RuntimeStoreFaultKind::AcknowledgementUnknown,
         };
         let code = match store_fault_kind {
             RuntimeStoreFaultKind::BackendUnavailable
@@ -521,8 +519,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                     )
                 })?;
             match attempt.outcome() {
-                HistoryAppendOutcome::NewlyCommitted(_)
-                | HistoryAppendOutcome::ExistingSame(_) => {
+                HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
                     let closed = attempt.closed();
                     return Ok(DriveOutcome::TransitionCommitted { closed });
                 }

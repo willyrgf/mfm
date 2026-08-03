@@ -116,7 +116,6 @@ struct RegisteredComponentObject {
     outbound_references: Vec<ComponentObjectReference>,
 }
 
-
 /// Closed completion produced only by the store-owned prior-run fact scanner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PriorRunFactScanCompletion {

@@ -5,8 +5,7 @@ use mfm_replay::structured::{project_unavailable_reproduction, StructuredReplayR
 #[test]
 fn unavailable_replay_results_have_the_current_structured_shape() {
     let run_id = run_id();
-    let projection =
-        project_unavailable_reproduction(&run_id).expect("reproduction projection");
+    let projection = project_unavailable_reproduction(&run_id).expect("reproduction projection");
     assert_eq!(
         projection.as_bytes(),
         format!(

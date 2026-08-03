@@ -58,21 +58,20 @@ use crate::submission_expansion::{
 use crate::submission_process;
 use crate::{
     canonical_wallet_reference, derive_evm_candidate_operation_key, derive_evm_chain_lineage_id,
-    derive_evm_nonce_reservation_key, derive_wallet_nonce_domain,
-    evm_wallet_assurance_policy_ref, evm_wallet_nonce_policy_ref, ActivateCandidateResponse,
-    ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, ActiveWalletCandidate,
-    AttestCandidateIdentityRequest, AttestedWalletCandidate, BroadcastExactCandidateRequest,
-    CandidateActivationPermit, ChainInstanceDeclaration,
-    ChainInstanceRegistryAttestation, CompleteEvmNonceRequest, CompleteWalletNonceCapability,
-    CompleteWalletNonceResponse, CompletedWalletNonce, EvmCallerSubmissionToken,
-    EvmCandidateFamily, EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionTarget,
-    EvmWalletFeeCandidate, EvmWalletTransactionAction, EvmWalletTransactionTemplate,
-    ExclusiveCurrentControl, ObservedPendingNonceFloor, PriorEffectDisposition,
-    PriorResourceDisposition, ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability,
-    ReplayExclusionDisposition, ReserveEvmNonceRequest, ReserveWalletNonceCapability,
-    ReserveWalletNonceResponse, ReservedWalletNonce, SubmittedCandidateProof,
-    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
-    WalletNonceStoreLineageHead,
+    derive_evm_nonce_reservation_key, derive_wallet_nonce_domain, evm_wallet_assurance_policy_ref,
+    evm_wallet_nonce_policy_ref, ActivateCandidateResponse, ActivateEvmCandidateRequest,
+    ActivateWalletCandidateCapability, ActiveWalletCandidate, AttestCandidateIdentityRequest,
+    AttestedWalletCandidate, BroadcastExactCandidateRequest, CandidateActivationPermit,
+    ChainInstanceDeclaration, ChainInstanceRegistryAttestation, CompleteEvmNonceRequest,
+    CompleteWalletNonceCapability, CompleteWalletNonceResponse, CompletedWalletNonce,
+    EvmCallerSubmissionToken, EvmCandidateFamily, EvmSubmissionFailure, EvmTransactionIntent,
+    EvmTransactionTarget, EvmWalletFeeCandidate, EvmWalletTransactionAction,
+    EvmWalletTransactionTemplate, ExclusiveCurrentControl, ObservedPendingNonceFloor,
+    PriorEffectDisposition, PriorResourceDisposition, ReadEvmWalletNonceStatusRequest,
+    ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
+    ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
+    SubmittedCandidateProof, WalletNonceDomainActivationAttestation,
+    WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreLineageHead,
 };
 
 /// Registered executable and qualification objects shared by every EVM
@@ -163,9 +162,9 @@ macro_rules! read_process {
         impl SubmissionStateProcess for $state {
             fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Read {
-                    request: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
-                    ),
+                    request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
+                        $request(frame.input())
+                    }),
                     settle_returned: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>, returned| {
                             $settle(
@@ -175,17 +174,15 @@ macro_rules! read_process {
                         },
                     ),
                     settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
-                            match $settle(
-                                frame.input(),
-                                &CommittedObservation::SafeFailure(failure.clone()),
-                            ) {
-                                StateSettlement::Proposed(outcome) => outcome,
-                                StateSettlement::InvalidEvidence => {
-                                    unreachable!(
-                                        "safe-failure settlement cannot produce InvalidEvidence"
-                                    )
-                                }
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
+                            frame.input(),
+                            &CommittedObservation::SafeFailure(failure.clone()),
+                        ) {
+                            StateSettlement::Proposed(outcome) => outcome,
+                            StateSettlement::InvalidEvidence => {
+                                unreachable!(
+                                    "safe-failure settlement cannot produce InvalidEvidence"
+                                )
                             }
                         },
                     ),
@@ -200,9 +197,9 @@ macro_rules! reconciling_read_process {
         impl SubmissionStateProcess for $state {
             fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Read {
-                    request: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
-                    ),
+                    request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
+                        $request(frame.input())
+                    }),
                     settle_returned: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>, returned| {
                             $settle(
@@ -212,17 +209,15 @@ macro_rules! reconciling_read_process {
                         },
                     ),
                     settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
-                            match $settle(
-                                frame.input(),
-                                &CommittedObservation::SafeFailure(failure.clone()),
-                            ) {
-                                StateSettlement::Proposed(outcome) => outcome,
-                                StateSettlement::InvalidEvidence => {
-                                    unreachable!(
-                                        "safe-failure settlement cannot produce InvalidEvidence"
-                                    )
-                                }
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
+                            frame.input(),
+                            &CommittedObservation::SafeFailure(failure.clone()),
+                        ) {
+                            StateSettlement::Proposed(outcome) => outcome,
+                            StateSettlement::InvalidEvidence => {
+                                unreachable!(
+                                    "safe-failure settlement cannot produce InvalidEvidence"
+                                )
                             }
                         },
                     ),
@@ -237,9 +232,9 @@ macro_rules! reconciling_effect_process {
         impl SubmissionStateProcess for $state {
             fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
                 StructuredStateCallbacks::Effect {
-                    request: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>| $request(frame.input()),
-                    ),
+                    request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
+                        $request(frame.input())
+                    }),
                     settle_returned: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>, returned| {
                             $settle(
@@ -249,17 +244,15 @@ macro_rules! reconciling_effect_process {
                         },
                     ),
                     settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
-                            match $settle(
-                                frame.input(),
-                                &CommittedObservation::SafeFailure(failure.clone()),
-                            ) {
-                                StateSettlement::Proposed(outcome) => outcome,
-                                StateSettlement::InvalidEvidence => {
-                                    unreachable!(
-                                        "safe-failure settlement cannot produce InvalidEvidence"
-                                    )
-                                }
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
+                            frame.input(),
+                            &CommittedObservation::SafeFailure(failure.clone()),
+                        ) {
+                            StateSettlement::Proposed(outcome) => outcome,
+                            StateSettlement::InvalidEvidence => {
+                                unreachable!(
+                                    "safe-failure settlement cannot produce InvalidEvidence"
+                                )
                             }
                         },
                     ),

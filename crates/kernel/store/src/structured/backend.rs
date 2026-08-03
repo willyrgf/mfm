@@ -6,7 +6,9 @@ use mfm_ids::{AppendRequestId, ContentDigest, RunId, TenantScopeId};
 use mfm_journal::structured::{CommittedBatch, JournalHead, RecordRef, TenantFactFrontier};
 
 use super::fact_scan::{verify_actionable_history, PriorRunFactSource};
-use super::fold::{validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun};
+use super::fold::{
+    validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
+};
 use super::mutation::StructuredAppendAttempt;
 use super::qualification::PublicPhysicalBindingVerifier;
 
