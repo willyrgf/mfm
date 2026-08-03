@@ -30,6 +30,10 @@ use mfm_spec::structured::{
     StructuredSafeFailureDispositionContract, StructuredStateContract,
     StructuredStateExecutionContract,
 };
+
+/// Success-only proposal admitted by safe-failure settlement under
+/// [`SafeFailureSuccessOnly`].
+pub use mfm_spec::structured::ProposedSuccessOutcome;
 use mfm_values::{
     component_object_evidence_contract_ref, MfmValue, RetainedValueContract, SchemaShape,
 };
@@ -189,16 +193,35 @@ where
     }
 }
 
-/// Sealed relation deriving one exact state safe-failure disposition.
+/// Sealed relation deriving one exact state safe-failure disposition and the
+/// exact proposal type admitted by safe-failure settlement.
 pub trait SafeFailureDisposition<ExecutionKind, Failure>:
     private::SafeFailureDispositionSealed<ExecutionKind, Failure> + Send + Sync + 'static
 where
     ExecutionKind: Execution,
     Failure: FailureValue,
 {
+    /// Exact safe-failure settlement proposal admitted by this disposition.
+    ///
+    /// Success-only dispositions expose [`ProposedSuccessOutcome`], which cannot
+    /// express `Failure` or `InvalidEvidence`. May-fail dispositions expose
+    /// [`ProposedStateOutcome`] (success or typed failure only). Pure states
+    /// expose an uninhabited proposal because they never settle observations.
+    type SafeFailureProposal<Output>: Serialize + Send + Sync + 'static
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     /// Derives the canonical state-contract disposition.
     #[doc(hidden)]
     fn contract() -> StructuredSafeFailureDispositionContract;
+
+    /// Lifts one disposition-admitted safe-failure proposal into store settlement.
+    #[doc(hidden)]
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static;
 }
 
 /// Marker for `Pure` states, which cannot receive access observations.
@@ -208,12 +231,29 @@ impl<Failure> SafeFailureDisposition<Pure, Failure> for SafeFailureNotApplicable
 where
     Failure: FailureValue,
 {
+    type SafeFailureProposal<Output>
+        = Never
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     fn contract() -> StructuredSafeFailureDispositionContract {
         StructuredSafeFailureDispositionContract::NotApplicable {}
+    }
+
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static,
+    {
+        match proposal {}
     }
 }
 
 /// Marker requiring every admitted safe failure to settle successfully.
+///
+/// The safe-failure callback returns [`ProposedSuccessOutcome`] only: the type
+/// system rejects `Failure` and `InvalidEvidence` for every inhabited value.
 pub enum SafeFailureSuccessOnly {}
 
 impl<Capability, Failure> SafeFailureDisposition<Read<Capability>, Failure>
@@ -222,8 +262,22 @@ where
     Capability: RuntimeReadCapability,
     Failure: FailureValue,
 {
+    type SafeFailureProposal<Output>
+        = ProposedSuccessOutcome<Output>
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     fn contract() -> StructuredSafeFailureDispositionContract {
         StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {}
+    }
+
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static,
+    {
+        StateSettlement::Proposed(proposal.into_proposed_outcome())
     }
 }
 
@@ -233,12 +287,29 @@ where
     Capability: RuntimeEffectCapability,
     Failure: FailureValue,
 {
+    type SafeFailureProposal<Output>
+        = ProposedSuccessOutcome<Output>
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     fn contract() -> StructuredSafeFailureDispositionContract {
         StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {}
+    }
+
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static,
+    {
+        StateSettlement::Proposed(proposal.into_proposed_outcome())
     }
 }
 
 /// Marker allowing admitted safe failures to settle to an inhabited typed failure.
+///
+/// The safe-failure callback returns [`ProposedStateOutcome`] only: success or
+/// typed failure. `InvalidEvidence` remains reserved for returned-value settlement.
 pub enum SafeFailureMayFail {}
 
 impl<Capability, Failure> SafeFailureDisposition<Read<Capability>, Failure> for SafeFailureMayFail
@@ -246,8 +317,22 @@ where
     Capability: RuntimeReadCapability,
     Failure: MfmValue,
 {
+    type SafeFailureProposal<Output>
+        = ProposedStateOutcome<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     fn contract() -> StructuredSafeFailureDispositionContract {
         StructuredSafeFailureDispositionContract::MaySettleTypedFailure {}
+    }
+
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static,
+    {
+        StateSettlement::Proposed(proposal)
     }
 }
 
@@ -256,8 +341,22 @@ where
     Capability: RuntimeEffectCapability,
     Failure: MfmValue,
 {
+    type SafeFailureProposal<Output>
+        = ProposedStateOutcome<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static;
+
     fn contract() -> StructuredSafeFailureDispositionContract {
         StructuredSafeFailureDispositionContract::MaySettleTypedFailure {}
+    }
+
+    fn into_settlement<Output>(
+        proposal: Self::SafeFailureProposal<Output>,
+    ) -> StateSettlement<Output, Failure>
+    where
+        Output: Serialize + Send + Sync + 'static,
+    {
+        StateSettlement::Proposed(proposal)
     }
 }
 
@@ -617,13 +716,17 @@ impl<'a, Returned, SafeFailure> CommittedObservationView<'a, Returned, SafeFailu
     }
 }
 
-/// Closed result of deterministic Read/Effect settlement.
+/// Closed result of deterministic returned-value settlement.
+///
+/// Safe-failure settlement cannot produce [`StateSettlement::InvalidEvidence`];
+/// disposition-specific proposal types exclude that variant and, under
+/// success-only disposition, also exclude typed failure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "outcome", rename_all = "snake_case")]
 pub enum StateSettlement<Output, Failure> {
     /// One uncommitted typed semantic outcome proposal.
     Proposed(ProposedStateOutcome<Output, Failure>),
-    /// The committed observation is malformed or inconsistent.
+    /// The committed returned observation is malformed or inconsistent.
     InvalidEvidence,
 }
 
@@ -636,66 +739,33 @@ type PureApply<S> = Arc<
 >;
 type RequestAuthor<S> =
     Arc<dyn for<'a> Fn(StateFrame<'a, <S as State>::Input>) -> <S as State>::Request + Send + Sync>;
-type ObservationSettlement<S> = Arc<
+type ReturnedObservationSettlement<S> = Arc<
     dyn for<'a> Fn(
             StateFrame<'a, <S as State>::Input>,
-            CommittedObservationView<'a, <S as State>::Returned, <S as State>::SafeFailure>,
+            &'a <S as State>::Returned,
         ) -> StateSettlement<<S as State>::Output, <S as State>::Failure>
         + Send
         + Sync,
 >;
-
-/// One reviewed valid safe-failure settlement case used during qualification.
-pub struct ReviewedSafeFailureCase<Input, SafeFailure, Output, Failure> {
-    input: Input,
-    safe_failure: SafeFailure,
-    expected: ProposedStateOutcome<Output, Failure>,
-}
-
-impl<Input, SafeFailure, Output, Failure>
-    ReviewedSafeFailureCase<Input, SafeFailure, Output, Failure>
-{
-    /// Binds one verified input and admitted safe failure to its exact proposal.
-    pub const fn new(
-        input: Input,
-        safe_failure: SafeFailure,
-        expected: ProposedStateOutcome<Output, Failure>,
-    ) -> Self {
-        Self {
-            input,
-            safe_failure,
-            expected,
-        }
-    }
-
-    /// Returns the reviewed verified input.
-    #[doc(hidden)]
-    pub const fn input(&self) -> &Input {
-        &self.input
-    }
-
-    /// Returns the reviewed admitted safe failure.
-    #[doc(hidden)]
-    pub const fn safe_failure(&self) -> &SafeFailure {
-        &self.safe_failure
-    }
-
-    /// Returns the exact reviewed settlement proposal.
-    #[doc(hidden)]
-    pub const fn expected(&self) -> &ProposedStateOutcome<Output, Failure> {
-        &self.expected
-    }
-}
-
-/// One reviewed safe-failure qualification case derived from an exact state.
-pub type ReviewedStateSafeFailureCase<S> = ReviewedSafeFailureCase<
-    <S as State>::Input,
-    <S as State>::SafeFailure,
-    <S as State>::Output,
-    <S as State>::Failure,
+type SafeFailureObservationSettlement<S> = Arc<
+    dyn for<'a> Fn(
+            StateFrame<'a, <S as State>::Input>,
+            &'a <S as State>::SafeFailure,
+        ) -> <<S as State>::SafeFailureDisposition as SafeFailureDisposition<
+            <S as State>::Execution,
+            <S as State>::Failure,
+        >>::SafeFailureProposal<<S as State>::Output>
+        + Send
+        + Sync,
 >;
 
 /// Real typed process callbacks selected for one semantic state implementation.
+///
+/// Read and Effect bind distinct returned-value and safe-failure settlement
+/// callbacks. The safe-failure callback's return type is the disposition's
+/// [`SafeFailureDisposition::SafeFailureProposal`], so success-only states cannot
+/// construct `Failure` or `InvalidEvidence` for any inhabited safe-failure value.
+/// Totality is type-enforced; qualification does not rely on a reviewed sample corpus.
 pub enum StructuredStateCallbacks<S: State> {
     /// One deterministic local callback.
     Pure {
@@ -706,19 +776,19 @@ pub enum StructuredStateCallbacks<S: State> {
     Read {
         /// Exact typed request callback.
         request: RequestAuthor<S>,
-        /// Exact typed settlement callback.
-        settle: ObservationSettlement<S>,
-        /// Non-empty reviewed valid safe-failure qualification corpus.
-        reviewed_safe_failures: Vec<ReviewedStateSafeFailureCase<S>>,
+        /// Settlement for one schema-valid returned observation.
+        settle_returned: ReturnedObservationSettlement<S>,
+        /// Disposition-typed settlement for every inhabited safe-failure value.
+        settle_safe_failure: SafeFailureObservationSettlement<S>,
     },
     /// Total request authorship plus deterministic effect settlement.
     Effect {
         /// Exact typed request callback.
         request: RequestAuthor<S>,
-        /// Exact typed settlement callback.
-        settle: ObservationSettlement<S>,
-        /// Non-empty reviewed valid safe-failure qualification corpus.
-        reviewed_safe_failures: Vec<ReviewedStateSafeFailureCase<S>>,
+        /// Settlement for one schema-valid returned observation.
+        settle_returned: ReturnedObservationSettlement<S>,
+        /// Disposition-typed settlement for every inhabited safe-failure value.
+        settle_safe_failure: SafeFailureObservationSettlement<S>,
     },
 }
 
@@ -738,22 +808,6 @@ impl<S: State> StructuredStateCallbacks<S> {
             Self::Pure { .. } => StructuredExecutionKind::Pure,
             Self::Read { .. } => StructuredExecutionKind::Read,
             Self::Effect { .. } => StructuredExecutionKind::Effect,
-        }
-    }
-
-    /// Returns the reviewed valid safe-failure qualification corpus.
-    #[doc(hidden)]
-    pub fn reviewed_safe_failures(&self) -> &[ReviewedStateSafeFailureCase<S>] {
-        match self {
-            Self::Pure { .. } => &[],
-            Self::Read {
-                reviewed_safe_failures,
-                ..
-            }
-            | Self::Effect {
-                reviewed_safe_failures,
-                ..
-            } => reviewed_safe_failures,
         }
     }
 
@@ -780,19 +834,72 @@ impl<S: State> StructuredStateCallbacks<S> {
         }
     }
 
+    /// Settles one exact schema-valid returned observation, when applicable.
+    #[doc(hidden)]
+    pub fn settle_returned(
+        &self,
+        input: &S::Input,
+        returned: &S::Returned,
+    ) -> Option<StateSettlement<S::Output, S::Failure>> {
+        match self {
+            Self::Read {
+                settle_returned, ..
+            }
+            | Self::Effect {
+                settle_returned, ..
+            } => Some(settle_returned(
+                StateFrame::from_verified_input(input),
+                returned,
+            )),
+            Self::Pure { .. } => None,
+        }
+    }
+
+    /// Settles one exact inhabited safe-failure value, when applicable.
+    ///
+    /// The callback cannot return `InvalidEvidence`. Under
+    /// [`SafeFailureSuccessOnly`], it also cannot return typed failure.
+    #[doc(hidden)]
+    pub fn settle_safe_failure(
+        &self,
+        input: &S::Input,
+        safe_failure: &S::SafeFailure,
+    ) -> Option<StateSettlement<S::Output, S::Failure>> {
+        match self {
+            Self::Read {
+                settle_safe_failure,
+                ..
+            }
+            | Self::Effect {
+                settle_safe_failure,
+                ..
+            } => {
+                let proposal = settle_safe_failure(
+                    StateFrame::from_verified_input(input),
+                    safe_failure,
+                );
+                Some(S::SafeFailureDisposition::into_settlement(proposal))
+            }
+            Self::Pure { .. } => None,
+        }
+    }
+
     /// Settles one exact committed normal observation, when applicable.
+    ///
+    /// Returned observations use the full returned settlement. Safe-failure
+    /// observations use the disposition-typed success-or-failure proposal path
+    /// and never invent an infrastructure semantic failure.
     #[doc(hidden)]
     pub fn settle_observation(
         &self,
         input: &S::Input,
         observation: &CommittedObservation<S::Returned, S::SafeFailure>,
     ) -> Option<StateSettlement<S::Output, S::Failure>> {
-        match self {
-            Self::Read { settle, .. } | Self::Effect { settle, .. } => Some(settle(
-                StateFrame::from_verified_input(input),
-                CommittedObservationView::from_committed(observation),
-            )),
-            Self::Pure { .. } => None,
+        match observation {
+            CommittedObservation::Returned(returned) => self.settle_returned(input, returned),
+            CommittedObservation::SafeFailure(safe_failure) => {
+                self.settle_safe_failure(input, safe_failure)
+            }
         }
     }
 }

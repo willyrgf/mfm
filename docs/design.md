@@ -179,11 +179,15 @@ Read   = Returned | SafeFailure | IntegrityFault
 Effect = Returned | SafeFailure | SupersededBeforeEntry | EntryUnknown | IntegrityFault
 ```
 
-Only reviewed `Returned` and `SafeFailure` evidence reaches state settlement. An ordinary typed
-failure follows its certified handler and may close the run as failed. `SupersededBeforeEntry` is
-Effect-only and, after purpose-limited physical-lineage verification, creates exactly the next
-attempt ordinal. `EntryUnknown` parks possible entry. Committed `IntegrityFault` blocks. An
-unmatched Read waits. None of these statuses blocks an unrelated run id.
+Only reviewed `Returned` and `SafeFailure` evidence reaches state settlement, through distinct
+returned-value and safe-failure callbacks. Safe-failure settlement is disposition-typed and, under
+success-only disposition, admits only a success proposal for every inhabited value—no `Failure`,
+no `InvalidEvidence`, and no author-selected sample corpus. An ordinary typed failure follows its
+certified handler and may close the run as failed. `SupersededBeforeEntry` is Effect-only and,
+after purpose-limited physical-lineage verification, creates exactly the next attempt ordinal.
+`EntryUnknown` parks possible entry. Committed `IntegrityFault` blocks. An unmatched Read waits.
+None of these statuses blocks an unrelated run id. Adapter unavailability may leave an attempt
+uncommitted; it cannot be recorded as a semantic failure by settlement.
 
 Runtime commits the exact callback proposal. It does not synthesize an output, fact, failure, or
 terminal meaning. Stale-head settlement reloads only when the semantic head is unchanged.

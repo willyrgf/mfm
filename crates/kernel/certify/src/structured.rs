@@ -872,14 +872,6 @@ struct RegisteredState {
 
 type ProcessComponentKey = (StructuredComponentKind, ContentRef, ContentRef);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RegisteredSafeFailureCase {
-    input: CanonicalJsonValue,
-    safe_failure: CanonicalJsonValue,
-    expected: CanonicalJsonValue,
-    observation: CanonicalJsonValue,
-}
-
 /// Exact registry-issued identity of one qualified live process component.
 ///
 /// Fields remain private so callers can inspect attribution but cannot author a
@@ -2636,7 +2628,6 @@ pub struct ProgramRegistryBuilder {
     registry: StructuredCertificationRegistry,
     entry_points: BTreeMap<StableId, EntryPointDefinition>,
     process_components: BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
-    state_safe_failure_corpora: BTreeMap<ContentRef, Vec<RegisteredSafeFailureCase>>,
     kernel_baseline_process_components: BTreeSet<ProcessComponentKey>,
     initialization_error: Option<CertifyError>,
 }
@@ -2647,7 +2638,6 @@ impl Default for ProgramRegistryBuilder {
             registry: StructuredCertificationRegistry::default(),
             entry_points: BTreeMap::new(),
             process_components: BTreeMap::new(),
-            state_safe_failure_corpora: BTreeMap::new(),
             kernel_baseline_process_components: BTreeSet::new(),
             initialization_error: None,
         };
@@ -2878,46 +2868,36 @@ impl ProgramRegistryBuilder {
             None => {}
         }
 
-        let mut reviewed_safe_failures = Vec::new();
-        for case in callbacks.reviewed_safe_failures() {
-            let input = encode_process_value(case.input())?;
-            let safe_failure = encode_process_value(case.safe_failure())?;
-            if reviewed_safe_failures
-                .iter()
-                .any(|registered: &RegisteredSafeFailureCase| {
-                    registered.input == input && registered.safe_failure == safe_failure
-                })
-            {
+        // Safe-failure totality is type-enforced by the disposition's proposal type on
+        // settle_safe_failure; qualification does not accept or require a sample corpus.
+        match (
+            &contract.execution,
+            contract.safe_failure_disposition,
+            callbacks.kind(),
+        ) {
+            (
+                StructuredStateExecutionContract::Pure,
+                StructuredSafeFailureDispositionContract::NotApplicable {},
+                mfm_spec::structured::StructuredExecutionKind::Pure,
+            ) => {}
+            (
+                StructuredStateExecutionContract::Read { .. }
+                | StructuredStateExecutionContract::Effect { .. },
+                StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {}
+                | StructuredSafeFailureDispositionContract::MaySettleTypedFailure {},
+                mfm_spec::structured::StructuredExecutionKind::Read
+                | mfm_spec::structured::StructuredExecutionKind::Effect,
+            ) if callbacks.kind() == contract.execution.kind() => {}
+            _ => {
                 return Err(CertifyError::Certification(
-                    "a reviewed safe-failure case is duplicated".to_owned(),
+                    "returned and safe-failure callback contracts differ from the state disposition"
+                        .to_owned(),
                 ));
             }
-            let expected = encode_process_value(case.expected())?;
-            let observation = CanonicalJsonValue::new(serde_json::json!({
-                "kind": "safe_failure",
-                "value": safe_failure.as_json(),
-            }))?;
-            reviewed_safe_failures.push(RegisteredSafeFailureCase {
-                input,
-                safe_failure,
-                expected,
-                observation,
-            });
-        }
-        if matches!(
-            contract.execution,
-            StructuredStateExecutionContract::Read { .. }
-                | StructuredStateExecutionContract::Effect { .. }
-        ) && reviewed_safe_failures.is_empty()
-        {
-            return Err(CertifyError::Certification(
-                "a live state qualification has no reviewed valid safe-failure cases".to_owned(),
-            ));
         }
 
         let mut registry = self.registry.clone();
         let mut process_components = self.process_components.clone();
-        let mut state_safe_failure_corpora = self.state_safe_failure_corpora.clone();
         registry.register_state(contract.clone())?;
         let implementation_contract_ref = register_implementation_binding(
             &mut registry,
@@ -2927,15 +2907,8 @@ impl ProgramRegistryBuilder {
             &contract.state_contract_ref,
             ProcessHandle::State(Arc::new(TypedStateCallbacks { callbacks })),
         )?;
-        insert_exact(
-            &mut state_safe_failure_corpora,
-            contract.state_contract_ref.clone(),
-            reviewed_safe_failures,
-            "state safe-failure qualification corpus",
-        )?;
         self.registry = registry;
         self.process_components = process_components;
-        self.state_safe_failure_corpora = state_safe_failure_corpora;
         Ok(implementation_contract_ref)
     }
 
@@ -3445,7 +3418,6 @@ impl ProgramRegistryBuilder {
             &self.registry,
             &self.process_components,
             &required_process_components,
-            &self.state_safe_failure_corpora,
         )?;
         let qualified = QualifiedProgramRegistry {
             registry: self.registry,
@@ -3460,27 +3432,10 @@ fn validate_process_component_graph(
     registry: &StructuredCertificationRegistry,
     process_components: &BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
     required: &BTreeSet<ProcessComponentKey>,
-    state_safe_failure_corpora: &BTreeMap<ContentRef, Vec<RegisteredSafeFailureCase>>,
 ) -> Result<()> {
     let reserved_fact_capability_ref =
         prior_run_fact_selection_capability_contract()?.content_ref()?;
     let reserved_fact_adapter_ref = prior_run_fact_scanner_adapter_contract()?.content_ref()?;
-    let required_state_contracts = required
-        .iter()
-        .filter_map(|(kind, contract_ref, _)| {
-            (*kind == StructuredComponentKind::State).then_some(contract_ref.clone())
-        })
-        .collect::<BTreeSet<_>>();
-    if required_state_contracts
-        != state_safe_failure_corpora
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>()
-    {
-        return Err(CertifyError::Certification(
-            "state qualification corpora are missing, unused, or state-substituted".to_owned(),
-        ));
-    }
     for key @ (component_kind, semantic_contract_ref, implementation_contract_ref) in required {
         let component = process_components.get(key).ok_or_else(|| {
             CertifyError::Certification("required process component is missing".to_owned())
@@ -3500,6 +3455,31 @@ fn validate_process_component_graph(
             return Err(CertifyError::Certification(
                 "process component differs from the secret-free implementation manifest".to_owned(),
             ));
+        }
+        // Live semantic contracts must re-hash to the exact map key so hostile
+        // in-place protocol/evidence field substitution cannot remain qualified.
+        if matches!(
+            component_kind,
+            StructuredComponentKind::Capability
+                | StructuredComponentKind::Adapter
+                | StructuredComponentKind::Signer
+                | StructuredComponentKind::Resource
+        ) {
+            let live = registry
+                .live_components
+                .get(&(*component_kind, semantic_contract_ref.clone()))
+                .ok_or_else(|| {
+                    CertifyError::Certification(
+                        "process live component has no exact semantic contract".to_owned(),
+                    )
+                })?;
+            if live.component_kind != *component_kind
+                || live.content_ref()? != *semantic_contract_ref
+            {
+                return Err(CertifyError::Certification(
+                    "live semantic component kind or contract identity mismatch".to_owned(),
+                ));
+            }
         }
         let handle_kind_matches = matches!(
             (component_kind, &component.handle),
@@ -3549,13 +3529,6 @@ fn validate_process_component_graph(
                         .to_owned(),
                 ));
             }
-            let reviewed_safe_failures = state_safe_failure_corpora
-                .get(semantic_contract_ref)
-                .ok_or_else(|| {
-                    CertifyError::Certification(
-                        "process state has no exact reviewed safe-failure corpus".to_owned(),
-                    )
-                })?;
             if let Some(capability_contract_ref) =
                 state.contract.execution.capability_contract_ref()
             {
@@ -3585,20 +3558,13 @@ fn validate_process_component_graph(
                         "state execution kind differs from its capability protocol".to_owned(),
                     ));
                 }
-                qualify_state_safe_failure_settlement(
-                    state,
-                    callbacks.as_ref(),
-                    capability,
-                    reviewed_safe_failures,
-                    registry,
-                    process_components,
-                )?;
-            } else if !reviewed_safe_failures.is_empty()
-                || state.contract.safe_failure_disposition
-                    != (StructuredSafeFailureDispositionContract::NotApplicable {})
+                qualify_live_state_settlement_contracts(state, callbacks.as_ref())?;
+            } else if state.contract.safe_failure_disposition
+                != (StructuredSafeFailureDispositionContract::NotApplicable {})
+                || callbacks.kind() != StructuredExecutionKind::Pure
             {
                 return Err(CertifyError::Certification(
-                    "Pure state retained a live safe-failure qualification".to_owned(),
+                    "Pure state retained a live settlement qualification".to_owned(),
                 ));
             }
         }
@@ -3729,97 +3695,35 @@ fn validate_process_component_graph(
     Ok(())
 }
 
-fn qualify_state_safe_failure_settlement(
+/// Verifies live returned/safe-failure settlement contracts against the
+/// disposition declared on the semantic state. Totality of safe-failure
+/// settlement is owned by the disposition's proposal type, not a sample corpus.
+fn qualify_live_state_settlement_contracts(
     state: &RegisteredState,
     callbacks: &dyn ErasedStateCallbacks,
-    capability: &StructuredLiveComponentContract,
-    reviewed_safe_failures: &[RegisteredSafeFailureCase],
-    registry: &StructuredCertificationRegistry,
-    process_components: &BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
 ) -> Result<()> {
-    if reviewed_safe_failures.is_empty() {
-        return Err(CertifyError::Certification(
-            "live state qualification has no reviewed valid safe-failure case".to_owned(),
-        ));
+    match (
+        &state.contract.execution,
+        state.contract.safe_failure_disposition,
+        callbacks.kind(),
+    ) {
+        (
+            StructuredStateExecutionContract::Read { .. },
+            StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {}
+            | StructuredSafeFailureDispositionContract::MaySettleTypedFailure {},
+            StructuredExecutionKind::Read,
+        )
+        | (
+            StructuredStateExecutionContract::Effect { .. },
+            StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {}
+            | StructuredSafeFailureDispositionContract::MaySettleTypedFailure {},
+            StructuredExecutionKind::Effect,
+        ) => Ok(()),
+        _ => Err(CertifyError::Certification(
+            "returned and safe-failure callback contracts differ from the state disposition"
+                .to_owned(),
+        )),
     }
-    let capability_ref = capability.content_ref()?;
-    let capability_implementation_ref = registry
-        .component_implementations
-        .get(&(StructuredComponentKind::Capability, capability_ref.clone()))
-        .ok_or_else(|| {
-            CertifyError::Certification(
-                "live state capability implementation is missing".to_owned(),
-            )
-        })?;
-    let capability_process = process_components
-        .get(&(
-            StructuredComponentKind::Capability,
-            capability_ref,
-            capability_implementation_ref.clone(),
-        ))
-        .ok_or_else(|| {
-            CertifyError::Certification("live state capability process is missing".to_owned())
-        })?;
-
-    let mut saw_expected_typed_failure = false;
-    for case in reviewed_safe_failures {
-        let expected_kind = case
-            .expected
-            .as_json()
-            .get("kind")
-            .and_then(serde_json::Value::as_str);
-        match (state.contract.safe_failure_disposition, expected_kind) {
-            (
-                StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {},
-                Some("success"),
-            )
-            | (
-                StructuredSafeFailureDispositionContract::MaySettleTypedFailure {},
-                Some("success"),
-            ) => {}
-            (
-                StructuredSafeFailureDispositionContract::MaySettleTypedFailure {},
-                Some("failure"),
-            ) => saw_expected_typed_failure = true,
-            _ => {
-                return Err(CertifyError::Certification(
-                    "reviewed safe-failure expectation violates the state disposition".to_owned(),
-                ));
-            }
-        }
-        match &capability_process.handle {
-            ProcessHandle::ReadCapability(implementation) => {
-                implementation.validate_safe_failure(&case.safe_failure)?;
-            }
-            ProcessHandle::EffectCapability(implementation) => {
-                implementation.validate_safe_failure(&case.safe_failure)?;
-            }
-            _ => {
-                return Err(CertifyError::Certification(
-                    "live state capability process kind differs from its execution".to_owned(),
-                ));
-            }
-        }
-        let settlement = callbacks.settle_observation(&case.input, &case.observation)?;
-        let expected_settlement = CanonicalJsonValue::new(serde_json::json!({
-            "kind": "proposed",
-            "outcome": case.expected.as_json(),
-        }))?;
-        if settlement != expected_settlement {
-            return Err(CertifyError::Certification(
-                "reviewed valid safe failure differs from its exact expected settlement".to_owned(),
-            ));
-        }
-    }
-    if state.contract.safe_failure_disposition
-        == (StructuredSafeFailureDispositionContract::MaySettleTypedFailure {})
-        && !saw_expected_typed_failure
-    {
-        return Err(CertifyError::Certification(
-            "may-fail qualification has no reviewed expected typed-failure settlement".to_owned(),
-        ));
-    }
-    Ok(())
 }
 
 /// Immutable process-qualified structured-program registry.
