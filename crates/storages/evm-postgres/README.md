@@ -23,6 +23,8 @@ boundary. Every pool open verifies the authenticated and active identities, the 
 membership graph, and the closed schema/table/function ACLs before use. Role-specific constructors
 reset any caller-supplied active role before selecting their one expected role; the separate
 provider process requests that same activation-admin role explicitly at connection startup.
+The catalog manifests are generated against the pinned PostgreSQL 18 verification service; a
+PostgreSQL major-version change requires a deliberate manifest regeneration and qualification.
 
 Every status read requires a sealed current target session. Every mutation additionally consumes a
 fresh non-cloneable permit bound to the physical target, database session, transaction, store
