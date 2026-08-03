@@ -14,10 +14,15 @@ use mfm_store::structured::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Postgres, QueryBuilder, Row, Transaction};
+use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 
-use crate::qualification::AuthoritativeWriterContext;
-use crate::schema::SCHEMA_CONTRACT_VERSION;
+use crate::session::{
+    ApplicationTargetSessions, CombinedTargetSessions, RoleSession, TargetBinding,
+};
+use crate::transaction::{
+    begin_read, begin_run_write, lock_run, lock_tenant_fact, store_identity_from_binding,
+    CommitOutcome, LockedWriteTx, ReadTx,
+};
 
 const MAX_STORED_FRAME_BYTES: usize = 16_777_216;
 const MAX_BATCH_OBJECTS: usize = 65_536;
@@ -179,8 +184,9 @@ impl TenantFactRouteSummary {
 
 /// Real PostgreSQL implementation of the shared structured-history backend seam.
 pub struct PostgresStructuredHistoryBackend {
-    pool: PgPool,
-    context: AuthoritativeWriterContext,
+    run_reader: RoleSession,
+    run_writer: RoleSession,
+    target: TargetBinding,
     identity: StructuredStoreIdentity,
 }
 
@@ -194,115 +200,41 @@ impl std::fmt::Debug for PostgresStructuredHistoryBackend {
 }
 
 impl PostgresStructuredHistoryBackend {
-    pub(crate) fn new(pool: PgPool, context: AuthoritativeWriterContext) -> Self {
-        let identity = StructuredStoreIdentity {
-            store_scope_id: context.store_scope_id().clone(),
-            store_epoch: context.store_epoch(),
-        };
+    pub(crate) fn from_application_sessions(sessions: ApplicationTargetSessions) -> Self {
+        let (run_reader, run_writer, target) = sessions.into_run_parts();
+        let identity = store_identity_from_binding(&target);
         Self {
-            pool,
-            context,
+            run_reader,
+            run_writer,
+            target,
             identity,
         }
     }
 
-    async fn begin(
-        &self,
-        read_only: bool,
-    ) -> Result<Transaction<'_, Postgres>, StructuredStoreError> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        if read_only {
-            sqlx::query("SET TRANSACTION READ ONLY")
-                .execute(&mut *transaction)
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        } else {
-            sqlx::query("SET TRANSACTION READ WRITE")
-                .execute(&mut *transaction)
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    pub(crate) fn from_run_parts(
+        run_reader: RoleSession,
+        run_writer: RoleSession,
+        target: TargetBinding,
+    ) -> Self {
+        let identity = store_identity_from_binding(&target);
+        Self {
+            run_reader,
+            run_writer,
+            target,
+            identity,
         }
-        sqlx::query("SET LOCAL ROLE mfm_store_application")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        sqlx::query(
-            "SELECT pg_catalog.set_config( \
-                 'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
-             )",
-        )
-        .bind(self.context.schema_name())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        self.validate_local_authority(&mut transaction, read_only)
-            .await?;
-        Ok(transaction)
     }
 
-    async fn validate_local_authority(
+    async fn begin_read(&self) -> Result<ReadTx<'_>, StructuredStoreError> {
+        begin_read(&self.run_reader, &self.target).await
+    }
+
+    async fn begin_locked_write(
         &self,
-        transaction: &mut Transaction<'_, Postgres>,
-        read_only: bool,
-    ) -> Result<(), StructuredStoreError> {
-        let row = sqlx::query(
-            "SELECT pg_catalog.current_database()::text AS database_name, \
-                    pg_catalog.current_schema()::text AS schema_name, \
-                    database.oid::bigint AS database_oid, \
-                    pg_catalog.pg_is_in_recovery() AS in_recovery, \
-                    pg_catalog.current_setting('transaction_read_only') AS transaction_read_only, \
-                    identity.store_scope_id, identity.store_epoch::text AS store_epoch, \
-                    metadata.schema_contract_version \
-               FROM pg_catalog.pg_database AS database \
-               CROSS JOIN store_identity AS identity \
-               CROSS JOIN store_schema_metadata AS metadata \
-              WHERE database.datname = pg_catalog.current_database() \
-                AND identity.singleton AND metadata.singleton",
-        )
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?
-        .ok_or_else(|| invalid("structured PostgreSQL identity is absent"))?;
-        let database_oid = row
-            .try_get::<i64, _>("database_oid")
-            .ok()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| invalid("structured PostgreSQL database identity is invalid"))?;
-        let expected_read_only = if read_only { "on" } else { "off" };
-        if row.try_get::<String, _>("database_name").ok().as_deref()
-            != Some(self.context.database_name())
-            || row.try_get::<String, _>("schema_name").ok().as_deref()
-                != Some(self.context.schema_name())
-            || database_oid != self.context.database_oid()
-            || row.try_get::<bool, _>("in_recovery").ok() != Some(false)
-            || row
-                .try_get::<String, _>("transaction_read_only")
-                .ok()
-                .as_deref()
-                != Some(expected_read_only)
-            || row.try_get::<String, _>("store_scope_id").ok().as_deref()
-                != Some(self.identity.store_scope_id.as_str())
-            || row.try_get::<String, _>("store_epoch").ok().as_deref()
-                != Some(self.identity.store_epoch.get().to_string().as_str())
-            || row
-                .try_get::<String, _>("schema_contract_version")
-                .ok()
-                .as_deref()
-                != Some(SCHEMA_CONTRACT_VERSION)
-        {
-            return Err(invalid(
-                "structured PostgreSQL authority changed after qualification",
-            ));
-        }
-        Ok(())
+        run_id: &str,
+    ) -> Result<LockedWriteTx<'_>, StructuredStoreError> {
+        let write = begin_run_write(&self.run_writer, &self.target).await?;
+        lock_run(write, run_id).await
     }
 }
 
@@ -313,9 +245,9 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
 
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
-            let mut transaction = self.begin(true).await?;
+            let mut transaction = self.begin_read().await?;
             let rows = select_batch_rows(
-                &mut transaction,
+                transaction.conn(),
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                         candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
                         predecessor_commit_digest, head_commit_digest, batch_envelope_json \
@@ -326,13 +258,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             )
             .await?;
             if rows.is_empty() {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.commit().await?;
                 return Ok(None);
             }
-            let mut objects = load_object_rows(&mut transaction, run_id, None).await?;
+            let mut objects = load_object_rows(transaction.conn(), run_id, None).await?;
             let mut batches = Vec::with_capacity(rows.len());
             for row in rows {
                 let sequence = row.run_sequence;
@@ -344,10 +273,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     "structured PostgreSQL object rows have no retained batch",
                 ));
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            transaction.commit().await?;
             Ok(Some(RawRunHistory {
                 run_id: run_id.clone(),
                 batches,
@@ -366,7 +292,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     "structured PostgreSQL prefix sequence must be positive",
                 ));
             }
-            let mut transaction = self.begin(true).await?;
+            let mut transaction = self.begin_read().await?;
             let rows = sqlx::query(
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                         candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
@@ -377,21 +303,18 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             )
             .bind(run_id.as_str())
             .bind(through_sequence.to_string())
-            .fetch_all(&mut *transaction)
+            .fetch_all(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?
             .iter()
             .map(StoredBatchRow::decode)
             .collect::<Result<Vec<_>, _>>()?;
             if rows.is_empty() {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.commit().await?;
                 return Ok(None);
             }
             let mut objects =
-                load_object_rows_through(&mut transaction, run_id, through_sequence).await?;
+                load_object_rows_through(transaction.conn(), run_id, through_sequence).await?;
             let mut batches = Vec::with_capacity(rows.len());
             for row in rows {
                 let sequence = row.run_sequence;
@@ -403,10 +326,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     "structured PostgreSQL prefix objects have no retained batch",
                 ));
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            transaction.commit().await?;
             Ok(Some(RawRunHistory {
                 run_id: run_id.clone(),
                 batches,
@@ -419,18 +339,18 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         tenant_scope_id: &'a TenantScopeId,
     ) -> StructuredBackendFuture<'a, TenantFactFrontier> {
         Box::pin(async move {
-            let mut transaction = self.begin(true).await?;
+            let mut transaction = self.begin_read().await?;
             let rows = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, \
                         tenant_scope_id, fact_order::text AS fact_order \
                    FROM tenant_fact_heads WHERE tenant_scope_id = $1",
             )
             .bind(tenant_scope_id.as_str())
-            .fetch_all(&mut *transaction)
+            .fetch_all(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
             let route_summary =
-                load_tenant_fact_route_summary(&mut transaction, tenant_scope_id).await?;
+                load_tenant_fact_route_summary(transaction.conn(), tenant_scope_id).await?;
             let fact_order = match rows.as_slice() {
                 [] => 0,
                 [row]
@@ -453,10 +373,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     "structured PostgreSQL tenant fact head differs from dense routes",
                 ));
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            transaction.commit().await?;
             Ok(TenantFactFrontier::new(
                 self.identity.store_scope_id.clone(),
                 self.identity.store_epoch,
@@ -482,7 +399,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             if first_order > through_order {
                 return Ok(Vec::new());
             }
-            let mut transaction = self.begin(true).await?;
+            let mut transaction = self.begin_read().await?;
             let rows = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
                         fact_order::text AS fact_order, run_id, \
@@ -500,7 +417,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .bind(first_order.to_string())
             .bind(through_order.to_string())
             .bind(i64::from(maximum_items))
-            .fetch_all(&mut *transaction)
+            .fetch_all(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
             let mut publications = Vec::with_capacity(rows.len());
@@ -545,10 +462,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     },
                 });
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            transaction.commit().await?;
             Ok(publications)
         })
     }
@@ -588,17 +502,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 ));
             }
 
-            let mut transaction = self.begin(false).await?;
-            sqlx::query(
-                "SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))",
-            )
-            .bind(run_id.as_str())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let mut transaction = self.begin_locked_write(run_id.as_str()).await?;
 
             let existing_rows = select_batch_rows(
-                &mut transaction,
+                transaction.conn(),
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                         candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
                         predecessor_commit_digest, head_commit_digest, batch_envelope_json \
@@ -611,7 +518,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             if let Some(existing_row) = exactly_one_or_none(existing_rows)? {
                 let existing_sequence = existing_row.run_sequence;
                 let mut object_rows =
-                    load_object_rows(&mut transaction, &run_id, Some(existing_sequence)).await?;
+                    load_object_rows(transaction.conn(), &run_id, Some(existing_sequence)).await?;
                 let existing = existing_row
                     .reconstruct(object_rows.remove(&existing_sequence).unwrap_or_default())?;
                 if !object_rows.is_empty() {
@@ -619,10 +526,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                         "structured PostgreSQL idempotent objects differ from their batch",
                     ));
                 }
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.commit().await?;
                 return if existing == committed {
                     Ok(BackendAppendOutcome::ExistingSame(existing))
                 } else {
@@ -635,7 +539,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                    FROM run_history_heads WHERE run_id = $1 FOR UPDATE",
             )
             .bind(run_id.as_str())
-            .fetch_optional(&mut *transaction)
+            .fetch_optional(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
             let predecessor_matches = match (head.as_ref(), committed.predecessor.as_ref()) {
@@ -652,10 +556,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 _ => false,
             };
             if !predecessor_matches {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.rollback().await?;
                 return Ok(BackendAppendOutcome::StaleHead);
             }
 
@@ -666,10 +567,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     if frontier.store_scope_id != self.identity.store_scope_id
                         || frontier.store_epoch != self.identity.store_epoch
                     {
-                        transaction
-                            .rollback()
-                            .await
-                            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                        transaction.rollback().await?;
                         return Ok(BackendAppendOutcome::StaleHead);
                     }
                     let tenant_lock_key = format!(
@@ -678,14 +576,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                         frontier.store_epoch.get(),
                         frontier.tenant_scope_id.as_str()
                     );
-                    sqlx::query(
-                        "SELECT pg_catalog.pg_advisory_xact_lock(\
-                            pg_catalog.hashtextextended($1, 1))",
-                    )
-                    .bind(tenant_lock_key)
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                    lock_tenant_fact(&mut transaction, &tenant_lock_key).await?;
                     sqlx::query(
                         "INSERT INTO tenant_fact_heads ( \
                             store_scope_id, store_epoch, tenant_scope_id, fact_order \
@@ -694,7 +585,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     .bind(self.identity.store_scope_id.as_str())
                     .bind(self.identity.store_epoch.get().to_string())
                     .bind(frontier.tenant_scope_id.as_str())
-                    .execute(&mut *transaction)
+                    .execute(&mut **transaction.conn())
                     .await
                     .map_err(|_| StructuredStoreError::BackendUnavailable)?;
                     let rows = sqlx::query(
@@ -703,7 +594,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                            FROM tenant_fact_heads WHERE tenant_scope_id = $1 FOR UPDATE",
                     )
                     .bind(frontier.tenant_scope_id.as_str())
-                    .fetch_all(&mut *transaction)
+                    .fetch_all(&mut **transaction.conn())
                     .await
                     .map_err(|_| StructuredStoreError::BackendUnavailable)?;
                     let [head] = rows.as_slice() else {
@@ -724,7 +615,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     }
                     let current_order =
                         parse_fact_order(&required_text(head, "fact_order")?, true)?;
-                    if !load_tenant_fact_route_summary(&mut transaction, &frontier.tenant_scope_id)
+                    if !load_tenant_fact_route_summary(transaction.conn(), &frontier.tenant_scope_id)
                         .await?
                         .is_dense_through(current_order)
                     {
@@ -735,20 +626,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     match &committed.tenant_fact_coordinate {
                         TenantFactCoordinate::FactSelectionBarrier { .. } => {
                             if frontier.fact_order != current_order {
-                                transaction
-                                    .rollback()
-                                    .await
-                                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                                transaction.rollback().await?;
                                 return Ok(BackendAppendOutcome::StaleHead);
                             }
                             None
                         }
                         TenantFactCoordinate::FactPublication { .. } => {
                             if current_order.checked_add(1) != Some(frontier.fact_order) {
-                                transaction
-                                    .rollback()
-                                    .await
-                                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                                transaction.rollback().await?;
                                 return Ok(BackendAppendOutcome::StaleHead);
                             }
                             let transition = committed.records.first().ok_or_else(|| {
@@ -803,11 +688,11 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .bind(predecessor_digest)
             .bind(committed.head.commit_digest.as_str())
             .bind(canonical_envelope.as_str())
-            .execute(&mut *transaction)
+            .execute(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
             insert_object_rows(
-                &mut transaction,
+                transaction.conn(),
                 &run_id,
                 committed.head.run_sequence,
                 &committed.objects,
@@ -829,7 +714,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(predecessor.commit_digest.as_str())
                 .bind(self.identity.store_scope_id.as_str())
                 .bind(self.identity.store_epoch.get().to_string())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction.conn())
                 .await
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .rows_affected()
@@ -844,7 +729,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(self.identity.store_epoch.get().to_string())
                 .bind(committed.head.run_sequence.to_string())
                 .bind(committed.head.commit_digest.as_str())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction.conn())
                 .await
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .rows_affected()
@@ -871,7 +756,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     })?,
                 )
                 .bind(publication.transition_ref.record_hash.as_str())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction.conn())
                 .await
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .rows_affected();
@@ -885,22 +770,23 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(publication.frontier.tenant_scope_id.as_str())
                 .bind(publication.frontier.fact_order.to_string())
                 .bind(publication.predecessor_order.to_string())
-                .execute(&mut *transaction)
+                .execute(&mut **transaction.conn())
                 .await
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .rows_affected();
                 if inserted != 1 || advanced != 1 {
-                    transaction
-                        .rollback()
-                        .await
-                        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                    transaction.rollback().await?;
                     return Ok(BackendAppendOutcome::StaleHead);
                 }
             }
-            if transaction.commit().await.is_err() {
-                return Ok(BackendAppendOutcome::AcknowledgementUnknown);
+            match transaction.commit_outcome().await? {
+                crate::transaction::CommitOutcome::Committed => {
+                    Ok(BackendAppendOutcome::NewlyCommitted(committed))
+                }
+                crate::transaction::CommitOutcome::AcknowledgementUnknown => {
+                    Ok(BackendAppendOutcome::AcknowledgementUnknown)
+                }
             }
-            Ok(BackendAppendOutcome::NewlyCommitted(committed))
         })
     }
 
@@ -911,9 +797,9 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         candidate_digest: &'a ContentDigest,
     ) -> StructuredBackendFuture<'a, Option<CommittedBatch>> {
         Box::pin(async move {
-            let mut transaction = self.begin(true).await?;
+            let mut transaction = self.begin_read().await?;
             let rows = select_batch_rows(
-                &mut transaction,
+                transaction.conn(),
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                         candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
                         predecessor_commit_digest, head_commit_digest, batch_envelope_json \
@@ -924,15 +810,12 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             )
             .await?;
             let Some(row) = exactly_one_or_none(rows)? else {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.commit().await?;
                 return Ok(None);
             };
             let sequence = row.run_sequence;
             let mut object_rows =
-                load_object_rows(&mut transaction, run_id, Some(sequence)).await?;
+                load_object_rows(transaction.conn(), run_id, Some(sequence)).await?;
             let batch = row.reconstruct(object_rows.remove(&sequence).unwrap_or_default())?;
             if !object_rows.is_empty() {
                 return Err(invalid(
@@ -948,10 +831,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             {
                 return Err(StructuredStoreError::AppendConflict);
             }
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            transaction.commit().await?;
             Ok(Some(batch))
         })
     }

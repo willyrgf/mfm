@@ -7,27 +7,15 @@ use mfm_store::structured::{
     ValidatedConfigurationRevision,
 };
 use sqlx::postgres::PgRow;
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
-use crate::qualification::AuthoritativeWriterContext;
-use crate::schema::{APPLICATION_ROLE, CONFIGURATION_MAINTENANCE_ROLE, SCHEMA_CONTRACT_VERSION};
+use crate::session::{RoleSession, TargetBinding};
+use crate::transaction::{
+    begin_configuration_read, begin_configuration_write_locked, CommitOutcome,
+    LockedConfigurationWriteTx, ReadTx,
+};
 
 const MAX_REVISION_BYTES: usize = 16_777_216;
-
-#[derive(Clone, Copy)]
-enum ConfigurationRole {
-    Application,
-    Maintenance,
-}
-
-impl ConfigurationRole {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::Application => APPLICATION_ROLE,
-            Self::Maintenance => CONFIGURATION_MAINTENANCE_ROLE,
-        }
-    }
-}
 
 struct StoredConfigurationRow {
     revision_sequence: u64,
@@ -158,10 +146,10 @@ impl StoredConfigurationRow {
 
 /// PostgreSQL implementation of append-only configured-value history.
 pub struct PostgresConfigurationHistoryBackend {
-    pool: PgPool,
-    context: AuthoritativeWriterContext,
+    configuration_reader: RoleSession,
+    configuration_writer: Option<RoleSession>,
+    target: TargetBinding,
     store_scope_id: StoreScopeId,
-    load_role: ConfigurationRole,
 }
 
 impl std::fmt::Debug for PostgresConfigurationHistoryBackend {
@@ -174,143 +162,32 @@ impl std::fmt::Debug for PostgresConfigurationHistoryBackend {
 }
 
 impl PostgresConfigurationHistoryBackend {
-    pub(crate) fn new_application(pool: PgPool, context: AuthoritativeWriterContext) -> Self {
-        Self::new(pool, context, ConfigurationRole::Application)
-    }
-
-    pub(crate) fn new_maintenance(pool: PgPool, context: AuthoritativeWriterContext) -> Self {
-        Self::new(pool, context, ConfigurationRole::Maintenance)
-    }
-
-    fn new(
-        pool: PgPool,
-        context: AuthoritativeWriterContext,
-        load_role: ConfigurationRole,
+    pub(crate) fn from_sessions(
+        configuration_reader: RoleSession,
+        configuration_writer: Option<RoleSession>,
+        target: TargetBinding,
     ) -> Self {
         Self {
-            store_scope_id: context.store_scope_id().clone(),
-            pool,
-            context,
-            load_role,
+            store_scope_id: target.store_scope_id().clone(),
+            configuration_reader,
+            configuration_writer,
+            target,
         }
     }
 
-    async fn begin(
-        &self,
-        role: ConfigurationRole,
-    ) -> Result<Transaction<'_, Postgres>, StructuredStoreError> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        let isolation = match role {
-            ConfigurationRole::Application => "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
-            // The per-stream advisory lock is the append linearization point. A
-            // READ COMMITTED snapshot taken after that lock has been acquired
-            // must observe the preceding lock holder's commit.
-            ConfigurationRole::Maintenance => "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
-        };
-        sqlx::query(isolation)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        match role {
-            ConfigurationRole::Application => {
-                sqlx::query("SET TRANSACTION READ ONLY")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-                sqlx::query("SET LOCAL ROLE mfm_store_application")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            }
-            ConfigurationRole::Maintenance => {
-                sqlx::query("SET TRANSACTION READ WRITE")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-                sqlx::query("SET LOCAL ROLE mfm_store_configuration_maintenance")
-                    .execute(&mut *transaction)
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            }
-        }
-        sqlx::query(
-            "SELECT pg_catalog.set_config( \
-                 'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
-             )",
-        )
-        .bind(self.context.schema_name())
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        self.validate_local_authority(&mut transaction, role)
-            .await?;
-        Ok(transaction)
+    async fn begin_read(&self) -> Result<ReadTx<'_>, StructuredStoreError> {
+        begin_configuration_read(&self.configuration_reader, &self.target).await
     }
 
-    async fn validate_local_authority(
+    async fn begin_locked_write(
         &self,
-        transaction: &mut Transaction<'_, Postgres>,
-        role: ConfigurationRole,
-    ) -> Result<(), StructuredStoreError> {
-        let row = sqlx::query(
-            "SELECT pg_catalog.current_database()::text AS database_name, \
-                    pg_catalog.current_schema()::text AS schema_name, \
-                    current_user::text AS role_name, \
-                    database.oid::bigint AS database_oid, \
-                    pg_catalog.pg_is_in_recovery() AS in_recovery, \
-                    pg_catalog.current_setting('transaction_read_only') AS transaction_read_only, \
-                    identity.store_scope_id, identity.store_epoch::text AS store_epoch, \
-                    metadata.schema_contract_version \
-               FROM pg_catalog.pg_database AS database \
-               CROSS JOIN store_identity AS identity \
-               CROSS JOIN store_schema_metadata AS metadata \
-              WHERE database.datname = pg_catalog.current_database() \
-                AND identity.singleton AND metadata.singleton",
-        )
-        .fetch_optional(&mut **transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?
-        .ok_or_else(|| invalid("PostgreSQL configuration authority is absent"))?;
-        let database_oid = row
-            .try_get::<i64, _>("database_oid")
-            .ok()
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| invalid("PostgreSQL configuration database identity is invalid"))?;
-        let expected_read_only = match role {
-            ConfigurationRole::Application => "on",
-            ConfigurationRole::Maintenance => "off",
-        };
-        if row.try_get::<String, _>("database_name").ok().as_deref()
-            != Some(self.context.database_name())
-            || row.try_get::<String, _>("schema_name").ok().as_deref()
-                != Some(self.context.schema_name())
-            || row.try_get::<String, _>("role_name").ok().as_deref() != Some(role.name())
-            || database_oid != self.context.database_oid()
-            || row.try_get::<bool, _>("in_recovery").ok() != Some(false)
-            || row
-                .try_get::<String, _>("transaction_read_only")
-                .ok()
-                .as_deref()
-                != Some(expected_read_only)
-            || row.try_get::<String, _>("store_scope_id").ok().as_deref()
-                != Some(self.store_scope_id.as_str())
-            || row.try_get::<String, _>("store_epoch").ok().as_deref()
-                != Some(self.context.store_epoch().get().to_string().as_str())
-            || row
-                .try_get::<String, _>("schema_contract_version")
-                .ok()
-                .as_deref()
-                != Some(SCHEMA_CONTRACT_VERSION)
-        {
-            return Err(invalid(
-                "PostgreSQL configuration authority changed after qualification",
-            ));
-        }
-        Ok(())
+        stream_lock_key: &str,
+    ) -> Result<LockedConfigurationWriteTx<'_>, StructuredStoreError> {
+        let writer = self
+            .configuration_writer
+            .as_ref()
+            .ok_or(StructuredStoreError::BackendUnavailable)?;
+        begin_configuration_write_locked(writer, &self.target, stream_lock_key).await
     }
 }
 
@@ -324,13 +201,10 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
         key: &'a ConfigurationStreamKey,
     ) -> ConfigurationBackendFuture<'a, Option<RawConfigurationHistory>> {
         Box::pin(async move {
-            let mut transaction = self.begin(self.load_role).await?;
-            let rows = select_rows(&mut transaction, key, None).await?;
-            let head = select_head(&mut transaction, key).await?;
-            transaction
-                .commit()
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let mut transaction = self.begin_read().await?;
+            let rows = select_rows(transaction.conn(), key, None).await?;
+            let head = select_head(transaction.conn(), key).await?;
+            transaction.commit().await?;
             reconstruct_history(key, rows, head)
         })
     }
@@ -350,21 +224,12 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                 return Err(invalid("configuration revision exceeds its byte bound"));
             }
 
-            let mut transaction = self.begin(ConfigurationRole::Maintenance).await?;
             let lock_key = canonical_json(revision.key())
                 .map_err(|_| invalid("configuration stream key cannot be canonicalized"))?;
-            sqlx::query(
-                "SELECT pg_catalog.pg_advisory_xact_lock( \
-                    pg_catalog.hashtextextended($1, 0) \
-                 )",
-            )
-            .bind(lock_key.as_str())
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let mut transaction = self.begin_locked_write(lock_key.as_str()).await?;
 
-            let rows = select_rows(&mut transaction, revision.key(), None).await?;
-            let head = select_head(&mut transaction, revision.key()).await?;
+            let rows = select_rows(transaction.conn(), revision.key(), None).await?;
+            let head = select_head(transaction.conn(), revision.key()).await?;
             let history = reconstruct_history(revision.key(), rows, head)?;
             if let Some(history) = history.as_ref() {
                 verify_configuration_history(history.clone())?;
@@ -376,10 +241,7 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                     .find(|existing| existing.append_request_id() == revision.append_request_id())
             }) {
                 let existing = existing.clone();
-                transaction
-                    .commit()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.commit().await?;
                 return if existing == revision {
                     Ok(ConfigurationBackendAppendOutcome::ExistingSame(existing))
                 } else {
@@ -394,25 +256,23 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                 .map_or(1, |current| current.sequence().saturating_add(1))
                 == revision.sequence();
             if !predecessor_matches || !sequence_matches {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+                transaction.rollback().await?;
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
 
-            insert_revision(&mut transaction, &revision, canonical_revision.as_str()).await?;
-            if !advance_head(&mut transaction, &revision, current).await? {
-                transaction
-                    .rollback()
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            insert_revision(transaction.conn(), &revision, canonical_revision.as_str()).await?;
+            if !advance_head(transaction.conn(), &revision, current).await? {
+                transaction.rollback().await?;
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
-            if transaction.commit().await.is_err() {
-                return Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown);
+            match transaction.commit_outcome().await? {
+                CommitOutcome::Committed => {
+                    Ok(ConfigurationBackendAppendOutcome::NewlyCommitted(revision))
+                }
+                CommitOutcome::AcknowledgementUnknown => {
+                    Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown)
+                }
             }
-            Ok(ConfigurationBackendAppendOutcome::NewlyCommitted(revision))
         })
     }
 }

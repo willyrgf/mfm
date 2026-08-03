@@ -1,26 +1,32 @@
 #![warn(missing_docs)]
 //! PostgreSQL representation of structured runtime history and configuration.
 //!
-//! Authority-bearing use starts through [`open_structured_authoritative`] or the narrower
-//! application and configuration-maintenance assembly functions. Schema migration uses the
-//! separate owner path exposed by [`PostgresSchema`].
+//! Authority-bearing use starts through the opaque target-session openers. Schema
+//! migration uses the separate owner path exposed by [`PostgresSchema`]. Ordinary
+//! application code never receives a pool, URL, connection option, raw fence, or
+//! DML transaction handle.
 
 mod configuration;
 mod error;
 mod qualification;
+mod roles;
 mod schema;
+mod session;
 mod structured;
+mod transaction;
 
 pub use configuration::PostgresConfigurationHistoryBackend;
 pub use error::{PostgresStoreError, Result};
-#[cfg(any(test, feature = "parity-tests"))]
-pub use qualification::TestAuthoritativeWriterFence;
 pub use qualification::{
     open_configuration_maintenance, open_structured_authoritative,
     open_structured_authoritative_application, open_structured_authoritative_with_configuration,
-    AuthoritativeWriterContext, AuthoritativeWriterFence, AuthoritativeWriterFenceFuture,
 };
 pub use schema::PostgresSchema;
+pub use session::{
+    issue_application_sessions, issue_combined_sessions,
+    issue_configuration_maintenance_sessions, ApplicationTargetSessions, CombinedTargetSessions,
+    ConfigurationMaintenanceSessions, SessionLoginMaterial, TargetBinding, TargetSessionMaterials,
+};
 pub use structured::PostgresStructuredHistoryBackend;
 
 #[cfg(all(test, feature = "parity-tests"))]

@@ -121,7 +121,10 @@ history. This catalog contains evidence only and confers no invocation or mutati
 
 `mfm-store` is the choke point for persisted legality. Its backend accepts a store-validated
 candidate, not arbitrary records. The in-memory backend is a conformance implementation. The
-PostgreSQL backend owns SQL transactions and writer-fence enforcement but reuses the same fold.
+PostgreSQL backend owns exact-target session capabilities, role-separated pools, per-transaction
+target permits, SQL transactions, and fence-generation enforcement but reuses the same fold.
+Ordinary assembly receives only opaque deployment-issued session bundles, never a pool, URL, raw
+fence, or DML transaction.
 The fold marks physical checks as retained-history replay or current-candidate qualification and
 supplies the exact prior binding plus folded minimum lineage head for refresh. A deployment
 verifier can consequently retain historical releases for callback-free restart while requiring

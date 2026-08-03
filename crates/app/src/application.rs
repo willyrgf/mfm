@@ -1185,20 +1185,18 @@ impl ApplicationBackend for TestApplicationBackend {
     }
 }
 
-/// Connects a production application using independently fenced run and wallet authorities.
+/// Connects a production application using opaque exact-target sessions and wallet authorities.
 ///
 /// Production exact reproduction is deliberately unavailable in this cutover. `reproduce`
 /// returns the frozen `unavailable` result and never falls back to live runtime capabilities.
-pub async fn connect_production_application<RunFence>(
-    database_url: Option<&str>,
+/// Deployment infrastructure issues the session bundle; ordinary assembly never receives a pool,
+/// URL, connection option, or raw fence.
+pub async fn connect_production_application(
+    sessions: mfm_storage_postgres::ApplicationTargetSessions,
     policy: Arc<dyn RunAccessPolicy>,
-    deployment_writer_fence: RunFence,
     wallet: EvmWalletDeployment,
-) -> Result<Application, PublicError>
-where
-    RunFence: mfm_storage_postgres::AuthoritativeWriterFence + 'static,
-{
-    crate::production::connect(database_url, policy, deployment_writer_fence, wallet).await
+) -> Result<Application, PublicError> {
+    crate::production::connect(sessions, policy, wallet).await
 }
 
 fn wallet_deployment_invalid() -> PublicError {
