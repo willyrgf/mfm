@@ -8,6 +8,9 @@ MFM is in clean-slate, pre-release development: keep one current design. Superse
 data have no compatibility claim unless an explicit repository-wide policy creates one; versioning
 alone does not. Historical invariant and hostile-input fixtures are not compatibility.
 
+Optimize for correctness, dexterity, and simplicity: place guarantees at the strongest practical
+boundary, make changes local and complete, and retain only the smallest current design.
+
 Minimize concepts, code paths, public types and schemas, duplicated responsibilities, future change
 sites, and LOC. Give each responsibility one owner and implementation. Breaking APIs, CLI/REST
 contracts, schemas, persisted formats, and documented behavior is allowed.
