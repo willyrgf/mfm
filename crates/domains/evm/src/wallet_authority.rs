@@ -34,7 +34,7 @@ const QUALIFIED_CHAIN_INSTANCE_DOMAIN: &str = "mfm.evm.qualified-chain-instance.
 const CHAIN_LINEAGE_DOMAIN: &str = "mfm.evm.chain-lineage.v1";
 const WALLET_NONCE_DOMAIN: &str = "mfm.evm.wallet-nonce-domain.v1";
 const INTENT_ISSUER_DOMAIN: &str = "mfm.evm.intent-issuer.v1";
-const SUBMISSION_INTENT_DOMAIN: &str = "mfm.evm.submission-intent.v1";
+const SUBMISSION_INTENT_DOMAIN: &str = "mfm.evm.submission-intent.v2";
 const RESERVATION_KEY_DOMAIN: &str = "mfm.evm.nonce-reservation.v1";
 const CANDIDATE_KEY_DOMAIN: &str = "mfm.evm.nonce-candidate.v1";
 const COMPLETION_KEY_DOMAIN: &str = "mfm.evm.nonce-completion.v1";
@@ -384,19 +384,38 @@ pub fn derive_authenticated_intent_issuer_id(
     )?))
 }
 
-/// Derives the stable submission intent from its authenticated namespace.
+/// Derives the stable submission intent from its authenticated namespace and
+/// every behavior-affecting policy identity.
+///
+/// Observation-round bound, candidate-family digest, and expansion contract
+/// are frozen so resume under changed branching/expansion behavior is rejected
+/// before wallet mutation (EVM-08).
 pub fn derive_submission_intent_id(
     domain: &WalletNonceDomain,
     issuer: &AuthenticatedIntentIssuerId,
     caller_submission_token: &str,
+    observation_rounds: u8,
+    candidate_family_digest: &str,
+    expansion_contract_ref: &EvmWalletReference,
 ) -> Result<SubmissionIntentId, WalletAuthorityContractError> {
     domain.validate()?;
     issuer.validate()?;
     validate_caller_submission_token(caller_submission_token)
         .map_err(|_| WalletAuthorityContractError::Invalid("submission_token"))?;
+    if observation_rounds == 0 || observation_rounds > EVM_WALLET_OBSERVATION_ROUND_LIMIT {
+        return Err(WalletAuthorityContractError::Invalid("observation_rounds"));
+    }
+    validate_reference(expansion_contract_ref)?;
     Ok(SubmissionIntentId::from_digest(hash(
         SUBMISSION_INTENT_DOMAIN,
-        &(domain, issuer, caller_submission_token),
+        &(
+            domain,
+            issuer,
+            caller_submission_token,
+            observation_rounds,
+            candidate_family_digest,
+            expansion_contract_ref,
+        ),
     )?))
 }
 
@@ -1174,6 +1193,16 @@ pub enum CandidateActivationPermit {
         /// Exact expected next ordinal, necessarily zero.
         exact_next_ordinal: u16,
     },
+    /// Re-entry of an already retained activated candidate for recovery observation.
+    ///
+    /// Affine and consumptive: binds the reservation, ordinal, and retained
+    /// activation evidence identity. Cannot certify replacement eligibility.
+    Reobservation {
+        /// Exact retained ordinal being re-entered.
+        exact_ordinal: u16,
+        /// Retained activation evidence for that ordinal.
+        retained_activation_ref: EvmWalletReference,
+    },
     /// Statically next replacement candidate.
     Replacement {
         /// Exact predecessor activation proof.
@@ -1184,28 +1213,47 @@ pub enum CandidateActivationPermit {
         exact_next_ordinal: u16,
         /// Frozen replacement policy.
         replacement_policy_ref: EvmWalletReference,
-        /// Producer-bound eligibility digest.
+        /// Producer-bound eligibility digest (observation evidence, not state self-certification).
         eligibility_ref: String,
     },
 }
 
 /// Derives the one exact activation permit for the next member of a retained
-/// candidate prefix.
+/// candidate prefix, or reobservation of an already activated ordinal.
 pub fn derive_exact_candidate_activation_permit(
     reservation: &ReservedWalletNonce,
     activated_candidates: &[ActiveWalletCandidate],
     next_candidate_ordinal: u16,
 ) -> Result<CandidateActivationPermit, WalletAuthorityContractError> {
+    if activated_candidates
+        .iter()
+        .enumerate()
+        .any(|(ordinal, candidate)| {
+            candidate.attested_candidate.semantic_reservation_key
+                != reservation.semantic_reservation_key
+                || usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
+        })
+    {
+        return Err(WalletAuthorityContractError::Invalid(
+            "candidate_progression",
+        ));
+    }
+
+    // Recovery reobservation of an already-activated ordinal.
+    if let Some(retained) = activated_candidates
+        .get(usize::from(next_candidate_ordinal))
+        .filter(|candidate| {
+            candidate.attested_candidate.candidate_ordinal == next_candidate_ordinal
+        })
+    {
+        return Ok(CandidateActivationPermit::Reobservation {
+            exact_ordinal: next_candidate_ordinal,
+            retained_activation_ref: retained.activation_evidence_ref.clone(),
+        });
+    }
+
     if usize::from(next_candidate_ordinal) != activated_candidates.len()
         || activated_candidates.len() >= EVM_WALLET_REPLACEMENT_LIMIT
-        || activated_candidates
-            .iter()
-            .enumerate()
-            .any(|(ordinal, candidate)| {
-                candidate.attested_candidate.semantic_reservation_key
-                    != reservation.semantic_reservation_key
-                    || usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
-            })
     {
         return Err(WalletAuthorityContractError::Invalid(
             "candidate_progression",
@@ -1234,13 +1282,17 @@ pub fn derive_exact_candidate_activation_permit(
 
     let replacement_policy_ref = crate::evm_wallet_nonce_policy_ref()
         .map_err(|_| WalletAuthorityContractError::Canonical)?;
+    // EVM-04: eligibility binds producer-facing activation evidence for every
+    // earlier candidate, not a state-authored claim alone.
     let eligibility_ref = domain_content_digest(
-        "mfm.evm.candidate-replacement-eligibility.v1",
+        "mfm.evm.candidate-replacement-eligibility.v2",
         &(
             reservation,
             activated_candidates,
             &predecessor.activation_evidence_ref,
             next_candidate_ordinal,
+            &replacement_policy_ref,
+            "requires_producer_terminal_or_rejection_evidence",
         ),
     )
     .map_err(|_| WalletAuthorityContractError::Canonical)?

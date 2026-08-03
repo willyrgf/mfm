@@ -30,5 +30,10 @@ mismatches are classified separately from ordinary signer unavailability.
 incomplete-reservation projection rather than replaying the full lifetime candidate lineage on
 every access.
 
+Candidate recovery re-enters retained activated candidates for observation before declaring
+family exhaustion. Replacement permits bind producer-facing activation evidence (v2 eligibility).
+Submission intent identity freezes observation rounds, candidate-family digest, and expansion
+contract so resume under changed behavior is rejected.
+
 Concrete JSON-RPC and signer bindings live in `mfm-evm-live`. Real cross-run wallet authority lives
 in `mfm-storage-evm-postgres`.

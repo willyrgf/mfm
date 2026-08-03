@@ -5086,8 +5086,16 @@ impl Fixture {
             &self.activation_record.issuer_namespace_contract_ref,
         )
         .expect("issuer");
-        let submission_intent_id =
-            derive_submission_intent_id(&self.nonce_domain, &issuer, token).expect("intent id");
+        let expansion = mfm_evm::evm_submission_expansion_policy_ref().expect("expansion");
+        let submission_intent_id = derive_submission_intent_id(
+            &self.nonce_domain,
+            &issuer,
+            token,
+            1,
+            candidate_family.digest(),
+            &expansion,
+        )
+        .expect("intent id");
         let reservation_key =
             derive_evm_nonce_reservation_key(&self.nonce_domain, &submission_intent_id)
                 .expect("reservation key");
