@@ -724,3 +724,265 @@ Independent re-checks of `postgres-sql-inventory-check`, `recoverability-postgre
 
 _End of PostgreSQL store checkpoint. Gate PASS recorded at exact HEAD
 `67e9a549c3aa908e4c957289bcb482ab57961d34`._
+
+## EVM / keystore checkpoint (after Commit 13 + residual multi-candidate recovery)
+
+### Identity
+
+| Field | Value |
+| --- | --- |
+| Reviewed revision (full hash) | `a83b8a780b87369dddfde1e21fd7866eeeceb875` |
+| Reviewed subject | `make evm multi-candidate recovery visit every activated candidate` |
+| Reviewer identity | independent EVM/keystore remediation reviewer subagent |
+| Review date (UTC) | 2026-08-03T20:13:35Z |
+| Branch | `refact-runtime` |
+| Scope | EVM-01..11, SEC-01, provider-frame/currentness, related QUALITY-01 / VERIFY-01 |
+| Gate decision | **PASS** |
+
+### Preceding implementation revisions reviewed
+
+| Order | Full hash | Subject |
+| --- | --- | --- |
+| 9 | `26733a5e20a1a6d855403763d0bc3644b2706185` | `move decrypted keys without plaintext copies` |
+| 10 | `5438d7093447fa6332934ab6e4af47ec697b6122` | `bind evm submission semantics to the qualified signer` |
+| 11 | `bdbe2054722ea24221322068cf607061219cfe05` | `preserve evm entry ambiguity and physical currentness` |
+| 12 | `7623f11364fc62795cd42596d9e1a532f459f918` | `bound evm nonce values and wallet status cost` |
+| 13 | `c7383ca0e1ffa7de9222a320e6a5c306843d4373` | `make evm candidate recovery evidence driven` |
+| residual | `a83b8a780b87369dddfde1e21fd7866eeeceb875` | `make evm multi-candidate recovery visit every activated candidate` |
+
+HEAD after the residual multi-candidate recovery commit matches the required subject chain. PostgreSQL store checkpoint at `67e9a549c3aa908e4c957289bcb482ab57961d34` and kernel checkpoint at `e636b4d326e98b1647d512e28bf93d18fa6bbcc1` remain recorded above and are not reopened.
+
+### Commands and generated evidence reviewed
+
+#### Implementer verification logs
+
+| Log | Path | Disposition used |
+| --- | --- | --- |
+| Commit 9 keystore/signing | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-09.log` | `mfm-keystore` 86 unit + 9 doctest ok; `mfm-signing` ok |
+| Commit 10 app/evm/keystore | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-10.log` | app 39, keystore 86, mfm-evm 44 (pre-residual count), live 35 ok |
+| Commit 11 live/app | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-11.log` | mfm-evm-live 35 ok; frame test present |
+| Commit 12 (intermediate) | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-12.log` | dirty-tree compile noise on mfm-evm tests; later logs supersede |
+| Commit 13 | `/tmp/grok-goal-649474994ccb/implementer/verify/commit-13.log` | mfm-evm 45 ok |
+| Residual compile fail | `/tmp/grok-goal-649474994ccb/implementer/verify/evm-residual-fix.log` | intermediate pattern-match compile error only |
+| Residual retest | `/tmp/grok-goal-649474994ccb/implementer/verify/evm-residual-test2.log` | mfm-evm 47 ok after residual |
+| EVM final unit | `/tmp/grok-goal-649474994ccb/implementer/verify/evm-final.log` | mfm-evm 47 ok |
+| evm-postgres lib | `/tmp/grok-goal-649474994ccb/implementer/verify/evm-postgres-lib.log` | frame test ok (schema probe ignored without managed PG) |
+| Qualification harness | `/tmp/grok-goal-649474994ccb/implementer/verify/evm-postgres-submission-qualification.log` | **env residual fail** — see below |
+
+#### Independent reviewer re-checks (this review)
+
+All commands run under the Nix development shell from repository root at
+`a83b8a780b87369dddfde1e21fd7866eeeceb875`.
+
+| Command | Local evidence | Result |
+| --- | --- | --- |
+| `nix develop -c cargo test -p mfm-keystore` | `/tmp/review-evm-keystore.log` | pass (86 unit + 9 doctest, includes decrypt ownership + compile-fail plaintext ctor) |
+| `nix develop -c cargo test -p mfm-evm --lib` | `/tmp/review-evm-lib.log` | pass (47 tests, ~143s) |
+| `nix develop -c cargo test -p mfm-evm-live --lib` | `/tmp/review-evm-live.log` | pass (35 tests) |
+
+#### Qualification env residual (not treated as structural FAIL)
+
+`nix run .#run -- --task evm-postgres-submission-qualification` at HEAD failed during harness
+bootstrap:
+
+```text
+create restricted history login: Database(PgDatabaseError {
+  code: "42710",
+  message: "role \"mfm_evm_history_r_0b90a41374ab9df1\" already exists",
+})
+```
+
+This is fixture/role-issuance collision against a shared PostgreSQL instance, not an EVM domain
+property failure. No prior-tip green qualification log was present in the implementer evidence set
+to re-prove E2E at this checkpoint. Documented as residual under VERIFY-01 / env hygiene; does not
+reopen structural dispositions where unit proofs hold.
+
+### Fresh-keystore evidence
+
+| Path | Evidence at HEAD | Disposition |
+| --- | --- | --- |
+| Structural production binding | `AccountAddress` vs full `PublicSigningIdentity`; `qualified_expected_identity` requires public key + account; `sign_eip1559_guarded` binds qualified identity and verifies recovery (`crates/domains/evm/src/signing.rs`) | **present** |
+| Live adapter integrity map | Integrity → `LiveInvocationFailure::Integrity` / `IntegrityFault`; unavailability only for genuine provider absence (`crates/live/evm/src/structured.rs`) | **present** |
+| Deployment assembly | Production assembly consumes `QualifiedKeystoreSigner` (`tests/integration/.../evm_postgres_submission.rs` `production_deployment_material` / `qualified_production_signer`) | **present** |
+| Identity fixture | `production_keystore_fixture_matches_declared_signer_identity` proves fixture keystore semantic id + public identity | **present (identity only)** |
+| Fresh unique-intent complete production path | Qualification phases still complete under `DeterministicTestSigner`; production admit/resume assert `eth_sendRawTransaction == 1` (converge on already-completed intent without a second real-keystore broadcast of a fresh unique intent) | **incomplete residual** (R-EVM-01-FRESH-E2E) |
+| Qualification harness E2E | Failed on role-already-exists env residual | **env residual** (R-EVM-QUAL-ENV) |
+
+Adversarial note: the original EVM-01 defect (account-only expectation rejected by keystore qualification
+before any signing) is structurally closed. The stronger plan proof “fresh unique semantic intent
+reaches `QualifiedKeystoreSigner` and completes without fixture cache state” is not fully re-proved
+at this checkpoint; residual under VERIFY-01, not a reopened binding mismatch.
+
+### Secret-surface audit
+
+Searches and proofs executed against the working tree / unit suites:
+
+| Surface | Search / proof | Result at HEAD |
+| --- | --- | --- |
+| Plaintext `SecureKey::new([u8;32])` constructor | `rg SecureKey::new` | Only compile-fail rustdoc example; production ctor is `from_protected` / `ProtectedKeyMaterial::into_secure_key` |
+| Decrypt → SecureKey ownership | `operations.rs` decrypt returns `ProtectedKeyMaterial` then `into_secure_key`; tests `decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup`, `secure_key_from_protected_moves_zeroizing_allocation` | **pass** |
+| Wrong-length / oversized decrypt | `wrong_length_decrypted_material_fails_closed`, `oversized_decrypted_material_fails_closed` | **pass** (source zeroizes on drop) |
+| Keystore not `Send`/`Sync` | `keystore_is_not_send_nor_sync` | **pass** |
+| Debug redaction | `keystore_debug_output_redacts_secret_material`; signer failure/debug redaction suite | **pass** |
+| Qualified signer non-cloneable / non-serializable | compile-fail doctests + `assert_not_impl_any!(QualifiedKeystoreSigner: Clone, Serialize)` | **pass** |
+| Unlock-file zeroization | `unlock_reader_zeroizes_success_and_every_error_path` | **pass** |
+| Raw signatures in adapter evidence | Live attest/broadcast drops signed envelope after hash; README states raw signature bytes not retained | **structural** |
+| Persisted public surfaces | Integration canaries (`assert_canaries_absent_from_persistence`) present in qualification fixture (not re-run green here due to env residual) | residual re-prove |
+
+### Phase / fault matrix (entry ambiguity)
+
+Reviewed transport boundary table (`crates/live/evm/src/transport/mod.rs` `wallet_boundary_failure`)
+and broadcast mapping (`crates/live/evm/src/structured.rs`):
+
+| Boundary outcome | Classification | Broadcast disposition | Disposition |
+| --- | --- | --- | --- |
+| Pre-entry routing generation unavailable | `GenerationFenced` | `SupersededBeforeEntry` | **present** |
+| Pre-entry access cancelled | `AccessCancelled` | `SafeFailure(TransportUnavailable)` | **present** |
+| Pre-entry validation/other | `UnavailableBeforeEntry` | `SafeFailure(TransportUnavailable)` | **present** |
+| Post-entry transport disconnect/timeout | `ResponseLost` | `EntryUnknown` | **present** |
+| Post-entry HTTP non-200 after send | `InvalidResponse` | `EntryUnknown` | **present** |
+| Post-entry generic JSON-RPC error | `InvalidResponse` | `EntryUnknown` | **present** |
+| Post-entry decode/envelope/result faults | `InvalidResponse` | `EntryUnknown` | **present** |
+| Exact `already known` | successful `AlreadyKnown` | submitted proof | **present** |
+| Reviewed definite non-entry rejection after possible entry | `DestinationRejected` enum reserved `#[allow(dead_code)]`; transport **no longer maps** post-entry faults here | n/a | **structural seal** |
+
+Adversarial check: earlier problem path mapped post-entry HTTP/JSON-RPC → `DestinationRejected` →
+`SafeFailure`. At HEAD that path is removed; residual `DestinationRejected` match arms in
+`structured.rs` are dead for transport-produced faults.
+
+Crash-at-every-boundary multi-process resume matrix remains partial (R-EVM-05-FAULT).
+
+### Release-permit / physical currentness
+
+| Property | Code | Evidence |
+| --- | --- | --- |
+| Binding construction requires every retained release target = authority incarnation | `EvmStructuredWalletBindings::new` compares all read/effect releases to `initial_store_incarnation_ref` | construction fail-closed |
+| Per-access permit | `consume_physical_release_permit` revalidates admitted routing policy + authority incarnation + release chain consistency | called from `read_selection` / `effect_selection` |
+| Release history integrity | `physical_release::tests::*` (predecessor chain, successor digest change) | live lib green |
+| Provider-frame bound | `MAX_MESSAGE_BYTES = 1 MiB`; `MAX_DEPLOYMENT_PROOF_BYTES = 4 KiB`; finish path encodes envelope and rejects if `encoded_finish.len() > MAX_MESSAGE_BYTES` | `provider.rs`; `client_frame_reader_rejects_oversized_and_unterminated_peers` green |
+
+Residual: permit compares against `initial_store_incarnation_ref` naming; long-lived promotion
+scenarios that re-point “current” independently of that field are not fully matrixed here
+(R-EVM-11-PROMOTE). Structure still rejects successor releases that name a foreign target while
+the concrete authority represents another incarnation.
+
+### Nonce / status cost
+
+| Property | Evidence | Disposition |
+| --- | --- | --- |
+| `TransactionNonce` rejects `u64::MAX`; max valid `u64::MAX - 1` has checked successor | `wallet_tests::transaction_nonce_rejects_u64_max_and_has_checked_successor` | **PASS** |
+| SQL rejects invalid nonce / high-water | `wallet_nonce_reservations_quantity_v1` and `wallet_nonce_domains_high_water_v1` cap at `18446744073709551614` | **PASS** |
+| Authority rejects provider/local `u64::MAX` before reservation | `authority.rs` pending/high-water decode through `TransactionNonce::new` | **PASS** |
+| Status projection | `load_validated_domain_aggregate`: high-water row + COUNT/MAX + at most one incomplete reservation (not per-candidate historical N+1 walk) | **PASS with residual** |
+| Long-lineage EXPLAIN / fixed query-count harness | not re-proved at this checkpoint | residual R-EVM-10-PLAN |
+
+Adversarial note: aggregate `COUNT(*)`/`MAX(nonce)` over `wallet_nonce_reservations` is still
+lifetime-scoped index work for a long domain. This is strictly better than N+1 candidate reloads
+and is independent of activated-candidate history; residual is plan-level constant-cost / EXPLAIN
+proof, not reintroduction of per-candidate mutation cost.
+
+### Candidate recovery matrix
+
+| Scenario | Mechanism | Unit evidence | Disposition |
+| --- | --- | --- | --- |
+| Recovery walk starts at ordinal 0 | `validated_wallet_status` sets `next_candidate_ordinal = 0`, `observed_prefix_len = 0` | residual commit | **present** |
+| Every activated candidate before replacement | `derive_exact_candidate_activation_permit` requires `observed_prefix_len == next_candidate_ordinal`; replacement only after full prefix | `recovery_visits_every_activated_candidate_before_replacement` | **PASS** |
+| Partial observation blocks replacement | permit with `observed_prefix_len < activated_len` fails | same test | **PASS** |
+| Advance after non-terminal observation | `mark_observation_reconcile` advances ordinal and `observed_prefix_len` by one | same test | **PASS** |
+| No “start at activated_len” shortcut | residual commit deleted skip-to-end recovery path in `select_candidate_slot` | code diff `a83b8a78` | **present** |
+| Completion public recovery closure | `CompletedWalletNonce` retains sealed activated prefix + terminal witnesses; `validate()` rehashes | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` | **PASS** |
+| Intent freezes observation/expansion behavior | `deployment_semantics` / intent derivation bind observation rounds + expansion contract | `submission_expansion_freezes_all_candidate_and_observation_occurrences`, `deployment_semantics_reject_syntax_valid_substitutes_and_derive_known_contracts` | **PASS** |
+| Crash matrix at every candidate/broadcast/finality boundary across distinct run IDs (E2E) | qualification harness | env residual / incomplete | residual R-EVM-03-E2E |
+
+Adversarial note on EVM-04: replacement `eligibility_ref` is a content digest over reservation,
+activated prefix, predecessor activation evidence, ordinals, policy, and a fixed observation-order
+claim. Independent producer observation is enforced by the certified walk (`observed_prefix_len`)
+rather than by embedding external receipt/tx proof objects into the permit preimage. Structure
+blocks self-certified skip-ahead; residual is richer producer-evidence binding if required later
+(R-EVM-04-EVIDENCE-SHAPE).
+
+### Proof dispositions
+
+| Proof | Disposition | Notes |
+| --- | --- | --- |
+| SEC-01 | **PASS** | Protected ownership transfer; no plaintext array ctor; witness cleanup; non-Send/Sync; redaction |
+| EVM-01 | **PASS with residual** | Structural qualified full-identity signing; fresh unique-intent production E2E incomplete |
+| EVM-02 | **PASS** | Admission recomputes `deployment_semantics` against sealed live signer/identity; syntax-valid substitutes rejected in unit proof |
+| EVM-03 | **PASS with residual** | Recovery walk starts at 0 and visits every activated candidate; full multi-run crash E2E residual |
+| EVM-04 | **PASS with residual** | Affine permit + observed-prefix gate; eligibility shape residual |
+| EVM-05 | **PASS with residual** | Post-entry faults → EntryUnknown; DestinationRejected not produced by transport; full fault inject residual |
+| EVM-06 | **PASS** | Newtype + SQL + authority reject `u64::MAX` |
+| EVM-07 | **PASS** | `signing_failure_is_integrity` + live IntegrityFault path; unit classifier test green |
+| EVM-08 | **PASS** | Observation rounds / expansion contract frozen into durable intent identity |
+| EVM-09 | **PASS** | Completion retains rehashable sealed prefix + terminal witnesses |
+| EVM-10 | **PASS with residual** | Bounded current projection vs N+1 candidate lineage; COUNT/MAX residual; no EXPLAIN harness |
+| EVM-11 | **PASS with residual** | Per-access release permit bound to authority incarnation; promotion matrix residual |
+| Provider frame | **PASS** | Ingress proof budget + encoded finish frame reject oversize |
+| Per-access currentness | **PASS with residual** | Permit on every wallet read/effect selection; process-local release history deleted as sole check |
+| QUALITY-01 (EVM portion) | **PASS with residual** | Splits exist (signing/submission/process/registry/wallet); large modules remain (~1.4–3k LOC) |
+| VERIFY-01 (EVM portion) | **PASS with residual** | Unit/hostile proofs green; qualification env + fresh-keystore E2E incomplete |
+
+### Adversarial checks against FAIL criteria
+
+| FAIL criterion | Observed | Gate impact |
+| --- | --- | --- |
+| Production signing still account-only / BindingMismatch | Guarded path requires public key + account from qualified identity | does not fail |
+| Post-entry HTTP/JSON-RPC becomes SafeFailure DestinationRejected | Mapping sealed to EntryUnknown; DestinationRejected dead for transport | does not fail |
+| Allocator can reserve `u64::MAX` | Rejected at type, SQL, and authority | does not fail |
+| Recovery skips retained activated prefix | Walk forces ordinal 0..n with observed_prefix gate | does not fail |
+| Plaintext key copy constructor | Deleted; compile-fail doctest | does not fail |
+| Provider proof collection can exceed 1 MiB frame | Finish encodes and bounds full envelope | does not fail |
+| Integrity faults retried as SignerUnavailable | Classifier + live IntegrityFault | does not fail |
+| Qualification harness red | Role-already-exists env residual only | residual, not structural FAIL |
+
+### Findings and residuals
+
+No open structural blockers found at this checkpoint. Non-blocking residuals:
+
+| ID | Severity | Finding | Disposition |
+| --- | --- | --- | --- |
+| R-EVM-01-FRESH-E2E | Residual | No green proof that a fresh unique semantic intent completes solely via `QualifiedKeystoreSigner` without prior completed authority state | VERIFY-01; extend qualification / production phase |
+| R-EVM-QUAL-ENV | Residual | `evm-postgres-submission-qualification` fails creating history role that already exists on shared PG | Env/fixture hygiene; re-run after clean roles |
+| R-EVM-03-E2E | Residual | Multi-run crash matrix (before receipt/after receipt/before finality/after finality/exhaustion) not fully re-proved under green harness | VERIFY-01 |
+| R-EVM-04-EVIDENCE-SHAPE | Residual | Replacement eligibility digest binds walk frontier + activation refs, not full external observation objects | Optional strengthen |
+| R-EVM-05-FAULT | Residual | Full post-entry ambiguity inject across all transports/process-crash stages incomplete | VERIFY-01 |
+| R-EVM-10-PLAN | Residual | Status still uses COUNT/MAX over reservations; no long-history EXPLAIN assertion | Optional STORE/EVM harness |
+| R-EVM-11-PROMOTE | Residual | Release currentness uses activation `initial_store_incarnation_ref`; successor promotion matrix thin at unit layer | VERIFY-01 |
+| R-QUALITY-01-EVM | Residual | `wallet_authority.rs`, `authority.rs`, submission modules remain large | Later QUALITY-01 |
+| R-SEC-01-COPY | Residual | `ProtectedKeyMaterial::from_decrypted_exact` copies 32 bytes between two Zeroizing containers (AES-GCM `Vec` → fixed array); intentional, not an ordinary plaintext stack API | Accept; no reintroduction of `SecureKey::new([u8;32])` |
+
+### Fixing revisions and re-review ledger
+
+| Event | Revision | Outcome |
+| --- | --- | --- |
+| Commit 9 SEC-01 | `26733a5e20a1a6d855403763d0bc3644b2706185` | Protected decrypt ownership; delete plaintext SecureKey ctor |
+| Commit 10 EVM-01/02/07 | `5438d7093447fa6332934ab6e4af47ec697b6122` | Qualified full-identity signing; deployment semantics requalify; integrity classification |
+| Commit 11 EVM-05/11 + frame/currentness | `bdbe2054722ea24221322068cf607061219cfe05` | EntryUnknown preservation; physical release permit; provider frame bounds |
+| Commit 12 EVM-06/10 | `7623f11364fc62795cd42596d9e1a532f459f918` | TransactionNonce + SQL bounds; current status projection |
+| Commit 13 EVM-03/04/08/09 | `c7383ca0e1ffa7de9222a320e6a5c306843d4373` | Evidence-driven replacement; intent freeze; completion closure |
+| Residual multi-candidate recovery | `a83b8a780b87369dddfde1e21fd7866eeeceb875` | Recovery walk starts at 0; visit every activated candidate before replacement |
+| Independent review | `a83b8a780b87369dddfde1e21fd7866eeeceb875` | **PASS** — structural properties + unit proofs hold; qualification env residual documented |
+
+### Explicit gate decision
+
+```text
+GATE: PASS
+```
+
+Rationale: HEAD `a83b8a780b87369dddfde1e21fd7866eeeceb875` closes SEC-01 and EVM-01..11 for the
+structural production properties required by the plan. Decrypted keys move only through protected
+zeroizing ownership without a plaintext array constructor; production signing binds full qualified
+public identity and maps integrity faults distinctly from unavailability; admission recomputes sealed
+deployment semantics; post-entry transport faults preserve EntryUnknown; nonces reject `u64::MAX` at
+type/SQL/authority boundaries; wallet status uses a bounded current projection rather than per-candidate
+lifetime N+1 reloads; physical release currentness is revalidated per access; provider finish frames
+cannot admit an oversize encoded proof collection; candidate recovery visits every activated ordinal
+before replacement and completion retains a rehashable public closure. Independent unit re-checks of
+`mfm-keystore`, `mfm-evm --lib`, and `mfm-evm-live --lib` are green. Incomplete fresh unique-intent
+production E2E, qualification harness role collision, full crash/fault matrices, and some cost/EXPLAIN
+proofs remain residuals and do not reopen a production bypass or unsafe entry/nonce/recovery path.
+
+---
+
+_End of EVM / keystore checkpoint. Gate PASS recorded at exact HEAD
+`a83b8a780b87369dddfde1e21fd7866eeeceb875`._
