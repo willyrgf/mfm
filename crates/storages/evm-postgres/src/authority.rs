@@ -304,6 +304,45 @@ impl PostgresWalletNonceAuthority {
         })
     }
 
+    async fn load_validated_current_domain(
+        &self,
+        connection: &mut PgConnection,
+        domain_id: &str,
+        retained_activation: Option<&WalletNonceDomainActivationAttestation>,
+    ) -> Result<ValidatedDomainAggregate> {
+        let aggregate = self
+            .load_validated_domain_aggregate(connection, domain_id, retained_activation)
+            .await?;
+        let Some(high_water) = aggregate.high_water else {
+            return Ok(aggregate);
+        };
+        let frontier_key = sqlx::query_scalar::<_, String>(
+            "SELECT semantic_reservation_key FROM wallet_nonce_reservations \
+             WHERE wallet_nonce_domain_id = $1 AND nonce = $2::numeric",
+        )
+        .bind(domain_id)
+        .bind(high_water.to_string())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| PostgresEvmWalletError::Unavailable)?
+        .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+        let frontier = self
+            .load_validated_reservation(connection, &frontier_key)
+            .await?
+            .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+        if frontier.reservation.nonce != high_water
+            || frontier.reservation.nonce_domain.as_str() != domain_id
+        {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
+        let frontier_candidates = self
+            .load_validated_candidates(connection, &frontier)
+            .await?;
+        self.load_validated_completion(connection, &frontier, &frontier_candidates)
+            .await?;
+        Ok(aggregate)
+    }
+
     fn retained_completion_is_valid(
         &self,
         retained: &RetainedCompletion,
@@ -681,7 +720,7 @@ impl PostgresWalletNonceAuthority {
             load_domain_activation(&mut read.transaction, request.nonce_domain.as_str(), false)
                 .await?;
         let aggregate = self
-            .load_validated_domain_aggregate(
+            .load_validated_current_domain(
                 &mut read.transaction,
                 request.nonce_domain.as_str(),
                 retained_activation.as_ref(),
@@ -1422,7 +1461,7 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                     }
                 }
                 let aggregate = match self
-                    .load_validated_domain_aggregate(
+                    .load_validated_current_domain(
                         &mut write.transaction,
                         request.nonce_domain.as_str(),
                         retained_domain.as_ref(),
