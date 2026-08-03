@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_certify::structured::{
-    AccessTargetSelection, ProgramRegistryBuilder, ReadPhysicalBindingKind, RuntimeProcessRegistry,
-};
+use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_facts::{
     CanonicalFactPredicate, FactOrdering, FactProposal, FactSelectionLimit, FactSelectionQuery,
     FactSelectionReadFailure, FactSelectionReadFailureCode, FactSelectionReadResponse,
@@ -28,7 +26,8 @@ use mfm_program::structured::{
     SafeFailureSuccessOnly, State, StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
-use mfm_runtime::structured::{split_qualified_registry, DriveOutcome, Runtime};
+use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
+use mfm_runtime::structured::{DriveOutcome, Runtime, RuntimeFaultCode, RuntimeStoreFaultKind};
 use mfm_spec::structured::{
     ProposedStateOutcome, SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
     SecretFreeQualificationArtifact, StructuredComponentKind, StructuredExpansionProfile,
@@ -41,12 +40,10 @@ use mfm_storage_postgres::{
     PostgresStructuredHistoryBackend, TestAuthoritativeWriterFence,
 };
 use mfm_store::structured::{
-    AccessAuthorizationProposal, BackendAppendOutcome, ConfigurationAppendRequest,
+    assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
     ConfigurationRevision, ConfigurationStreamKey, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    StateTransitionProposal, StructuredAdmissionMaterial, StructuredAdmissionRequest,
-    StructuredFrontier, StructuredHistoryBackend, StructuredMemoryBackend,
-    StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredRunStore,
+    PublicRunReader, StructuredAdmissionMaterial, StructuredFrontier, StructuredHistoryBackend,
     StructuredStoreError, StructuredStoreIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -161,14 +158,14 @@ impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
 async fn configured_value_history_is_durable_append_only_and_application_read_only() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured").expect("operation id");
-    let (program_verifier, _) = qualified_program(operation_id.clone());
+    let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let pool = database.combined_pool().await;
     let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
@@ -335,14 +332,14 @@ async fn maintenance_only_login_can_preflight_and_append_configuration() {
 async fn configured_value_history_linearizes_same_stream_append_races() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-race").expect("operation id");
-    let (program_verifier, document) = qualified_program(operation_id.clone());
+    let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let pool = database.combined_pool().await;
     let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&program_verifier),
+        registry,
         Arc::clone(&physical_verifier),
     )
     .await
@@ -478,11 +475,13 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
 
     let reopened_pool = database.combined_pool().await;
     let reopened_pool_control = reopened_pool.clone();
+    let (reopened_registry, reopened_document) = qualified_program(operation_id.clone());
+    assert_eq!(reopened_document, document);
     let (reopened_history, reopened_configuration) =
         open_structured_authoritative_with_configuration(
             reopened_pool,
             TestAuthoritativeWriterFence,
-            program_verifier,
+            reopened_registry,
             physical_verifier,
         )
         .await
@@ -529,11 +528,10 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
         Vec::new(),
     )
     .expect("configured-race admission material");
-    let (history_writer, history_reader) = reopened_history.split();
-    let admitted_run_id = run_id(96);
-    history_writer
-        .admit_run(StructuredAdmissionRequest::new(
-            admitted_run_id.clone(),
+    let runtime = reopened_history.runtime;
+    let history_reader = reopened_history.public_reader;
+    let (admitted_run_id, _attempt) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
             stream.tenant_scope_id().clone(),
             InvocationIdentity::new("00000000-0000-4000-8000-000000000096")
                 .expect("configured-race invocation"),
@@ -570,7 +568,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     );
 
     let admitted = history_reader
-        .load_verified(&admitted_run_id)
+        .load(&admitted_run_id)
         .await
         .expect("reload admitted race winner");
     assert_eq!(
@@ -589,7 +587,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     assert_eq!(retained_revision, conflict_winner);
 
     drop(history_reader);
-    drop(history_writer);
+    drop(runtime);
     drop(reopened_reader);
     drop(reopened_writer);
     reopened_pool_control.close().await;
@@ -600,14 +598,14 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
 async fn configured_value_head_update_is_atomic_and_target_isolated() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-head").expect("operation id");
-    let (program_verifier, _) = qualified_program(operation_id.clone());
+    let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let pool = database.combined_pool().await;
     let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
@@ -940,14 +938,14 @@ impl AuthoritativeWriterFence for PinnedConfigurationHeadFence {
 async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-rollback").expect("operation id");
-    let (program_verifier, _) = qualified_program(operation_id.clone());
+    let (registry, _) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let pool = database.combined_pool().await;
     let pool_control = pool.clone();
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&program_verifier),
+        registry,
         Arc::clone(&physical_verifier),
     )
     .await
@@ -956,7 +954,7 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "8".repeat(32))).expect("tenant"),
-        operation_id,
+        operation_id.clone(),
         StableId::new("mfm.postgres.fixture/configured-rollback-target").expect("target"),
     );
     let contract = admission_object(
@@ -1014,10 +1012,11 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
 
     let local_pool = database.combined_pool().await;
     let local_pool_control = local_pool.clone();
+    let (local_registry, _) = qualified_program(operation_id.clone());
     let local = open_structured_authoritative_with_configuration(
         local_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&program_verifier),
+        local_registry,
         Arc::clone(&physical_verifier),
     )
     .await
@@ -1027,10 +1026,11 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
 
     let fenced_pool = database.combined_pool().await;
     let fenced_pool_control = fenced_pool.clone();
+    let (fenced_registry, _) = qualified_program(operation_id);
     let rejected = open_structured_authoritative_with_configuration(
         fenced_pool,
         external_checkpoint,
-        program_verifier,
+        fenced_registry,
         physical_verifier,
     )
     .await;
@@ -1044,13 +1044,13 @@ async fn external_writer_fence_rejects_a_coordinated_configuration_rollback() {
 
 async fn qualification_attempt(
     pool: PgPool,
-) -> mfm_storage_postgres::Result<StructuredRunStore<PostgresStructuredHistoryBackend>> {
-    let (program_verifier, _) =
+) -> mfm_storage_postgres::Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
+    let (registry, _) =
         qualified_program(stable("mfm.postgres.fixture/qualification").expect("operation id"));
     open_structured_authoritative(
         pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
@@ -1249,53 +1249,52 @@ async fn structured_history_fresh_process_worker() {
     let pool = isolated_pool(&database_url, &schema).await;
     let pool_control = pool.clone();
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
-    let (program_verifier, document) = qualified_program(operation_id.clone());
+    let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
     .expect("qualify fresh-process structured store");
-    let (writer, reader) = store.split();
-    let run_id = run_id(1);
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let store_scope = reader.store_identity().store_scope_id.clone();
+    let run_id = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &operation_id,
+        &default_invocation(),
+    );
 
     match mode.to_str().expect("worker mode is UTF-8") {
         "admit" => {
-            let replay_document = document.clone();
-            let replay_operation_id = operation_id.clone();
-            let first_attempt = writer
+            let (admitted_run_id, first_attempt) = runtime
                 .admit_run(admission(
-                    run_id.clone(),
-                    operation_id,
-                    document,
+                    operation_id.clone(),
+                    document.clone(),
                     "postgres-admit",
                 ))
                 .await
                 .expect("persist admission in first process");
+            assert_eq!(admitted_run_id, run_id);
             assert!(matches!(
                 first_attempt.outcome(),
-                mfm_store::structured::BackendAppendOutcome::NewlyCommitted(_)
+                HistoryAppendOutcome::NewlyCommitted(_)
             ));
-            let replay = writer
-                .admit_run(admission(
-                    run_id.clone(),
-                    replay_operation_id,
-                    replay_document,
-                    "postgres-admit",
-                ))
+            let (_replay_run_id, replay) = runtime
+                .admit_run(admission(operation_id, document, "postgres-admit"))
                 .await
                 .expect("replay exact admission in first process");
             assert!(matches!(
                 replay.outcome(),
-                mfm_store::structured::BackendAppendOutcome::ExistingSame(_)
+                HistoryAppendOutcome::ExistingSame(_)
             ));
-            assert_eq!(first_attempt.committed(), replay.committed());
             assert!(matches!(
                 reader
-                    .load_verified(&run_id)
+                    .load(&run_id)
                     .await
                     .expect("first-process refold")
                     .frontier(),
@@ -1303,36 +1302,18 @@ async fn structured_history_fresh_process_worker() {
             ));
         }
         "continue" => {
-            let verified = reader
-                .load_verified(&run_id)
-                .await
-                .expect("second-process refold");
+            let verified = reader.load(&run_id).await.expect("second-process refold");
             assert!(matches!(
                 verified.frontier(),
                 StructuredFrontier::Actions(_)
             ));
-            let transition = writer
-                .commit_state_transition(
-                    verified,
-                    &StateTransitionProposal::success(
-                        AppendRequestId::new("postgres-transition").expect("transition append id"),
-                        ProposedCanonicalValue::from_value(&Value { value: 8 })
-                            .expect("transition value"),
-                        mfm_facts::FactSet::empty(),
-                    ),
-                )
-                .await
-                .expect("continue in second process");
-            let batch = transition.committed().expect("known transition commit");
-            assert_eq!(batch.records.len(), 2);
-            assert!(matches!(
-                &batch.records[0].record,
-                RunRecord::StateTransitionCommitted(_)
-            ));
-            assert!(matches!(&batch.records[1].record, RunRecord::RunClosed(_)));
+            assert_eq!(
+                runtime.drive_once(&run_id).await.expect("continue in second process"),
+                DriveOutcome::TransitionCommitted { closed: true }
+            );
             assert!(matches!(
                 reader
-                    .load_verified(&run_id)
+                    .load(&run_id)
                     .await
                     .expect("second-process closed refold")
                     .frontier(),
@@ -1343,7 +1324,7 @@ async fn structured_history_fresh_process_worker() {
     }
 
     drop(reader);
-    drop(writer);
+    drop(runtime);
     pool_control.close().await;
 }
 
@@ -1354,9 +1335,15 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     run_fresh_process_worker(&database, "continue").await;
 
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
-    let (program_verifier, document) = qualified_program(operation_id.clone());
+    let (_registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
-    let run_id = run_id(1);
+    let store_scope = database.store_scope_id().await;
+    let run_id = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &operation_id,
+        &default_invocation(),
+    );
     let audit_pool = database.independent_pool().await;
     let batches = load_normalized_batches(&audit_pool, &run_id).await;
     audit_pool.close().await;
@@ -1378,92 +1365,62 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
         RunRecord::RunClosed(_)
     ));
 
-    let (memory_program_verifier, memory_document) = qualified_program(operation_id.clone());
+    let (memory_registry, memory_document) = qualified_program(operation_id.clone());
     assert_eq!(memory_document, document);
-    let memory = StructuredRunStore::new(
-        StructuredMemoryBackend::new(StructuredStoreIdentity {
+    let memory = assemble_in_memory_runtime(
+        StructuredStoreIdentity {
             store_scope_id: postgres_admission_batch.store_scope_id.clone(),
             store_epoch: postgres_admission_batch.store_epoch,
-        }),
-        memory_program_verifier,
+        },
+        memory_registry,
         Arc::clone(&physical_verifier),
     );
-    let (memory_writer, memory_reader) = memory.split();
-    let memory_admission = memory_writer
+    let memory_runtime = memory.runtime;
+    let memory_reader = memory.public_reader;
+    let (memory_run_id, memory_admission) = memory_runtime
         .admit_run(admission(
-            run_id.clone(),
-            operation_id,
+            operation_id.clone(),
             memory_document,
             "postgres-admit",
         ))
         .await
         .expect("persist identical admission through memory");
-    assert_eq!(memory_admission.committed(), Some(postgres_admission_batch));
-    let memory_verified = memory_reader
-        .load_verified(&run_id)
-        .await
-        .expect("refold memory admission");
-    let memory_transition = memory_writer
-        .commit_state_transition(
-            memory_verified,
-            &StateTransitionProposal::success(
-                AppendRequestId::new("postgres-transition").expect("transition append id"),
-                ProposedCanonicalValue::from_value(&Value { value: 8 }).expect("transition value"),
-                mfm_facts::FactSet::empty(),
-            ),
-        )
-        .await
-        .expect("commit identical transition through memory");
+    assert_eq!(memory_run_id, run_id);
+    assert!(matches!(
+        memory_admission.outcome(),
+        HistoryAppendOutcome::NewlyCommitted(_)
+    ));
     assert_eq!(
-        memory_transition.committed(),
-        Some(postgres_transition_batch)
+        memory_runtime
+            .drive_once(&run_id)
+            .await
+            .expect("commit identical transition through memory"),
+        DriveOutcome::TransitionCommitted { closed: true }
     );
 
+    let (verification_registry, _) = qualified_program(operation_id.clone());
     let verification_pool = database.application_pool().await;
     let verification_pool_control = verification_pool.clone();
     let verification = open_structured_authoritative(
         verification_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&program_verifier),
+        verification_registry,
         Arc::clone(&physical_verifier),
     )
     .await
     .expect("qualify verification structured store");
-    let (verification_writer, verification_reader) = verification.split();
-    assert_eq!(
-        verification_writer
-            .resolve_append(
-                &run_id,
-                &postgres_admission_batch.append_request_id,
-                &postgres_admission_batch.candidate_digest,
-            )
-            .await
-            .expect("resolve first-process admission")
-            .as_ref(),
-        Some(postgres_admission_batch)
-    );
-    assert_eq!(
-        verification_writer
-            .resolve_append(
-                &run_id,
-                &postgres_transition_batch.append_request_id,
-                &postgres_transition_batch.candidate_digest,
-            )
-            .await
-            .expect("resolve second-process transition")
-            .as_ref(),
-        Some(postgres_transition_batch)
-    );
+    let verification_reader = verification.public_reader;
+    let verification_replay = verification.replay_reader;
     assert!(matches!(
         verification_reader
-            .load_verified(&run_id)
+            .load(&run_id)
             .await
             .expect("verification-process closed refold")
             .frontier(),
         StructuredFrontier::Complete
     ));
     assert!(matches!(
-        mfm_replay::structured::verify_recorded_history(&verification_reader, &run_id)
+        mfm_replay::structured::verify_recorded_history(&verification_replay, &run_id)
             .await
             .expect("callback-free replay after fresh-process continuation")
             .frontier(),
@@ -1471,31 +1428,33 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
     ));
     assert!(matches!(
         memory_reader
-            .load_verified(&run_id)
+            .load(&run_id)
             .await
             .expect("memory parity closed refold")
             .frontier(),
         StructuredFrontier::Complete
     ));
     drop(verification_reader);
-    drop(verification_writer);
+    drop(verification_replay);
+    drop(verification.runtime);
     verification_pool_control.close().await;
 
+    let (unavailable_registry, _) = qualified_program(operation_id);
     let unavailable_pool = database.application_pool().await;
     let unavailable_control = unavailable_pool.clone();
     let unavailable = open_structured_authoritative(
         unavailable_pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        unavailable_registry,
         physical_verifier,
     )
     .await
     .expect("qualify store before outage");
-    let (_unavailable_writer, unavailable_reader) = unavailable.split();
+    let unavailable_reader = unavailable.public_reader;
     unavailable_control.close().await;
     assert_eq!(
         unavailable_reader
-            .load_verified(&run_id)
+            .load(&run_id)
             .await
             .expect_err("closed PostgreSQL pool must fail without fallback"),
         StructuredStoreError::BackendUnavailable
@@ -1509,103 +1468,106 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
     let database = TestDatabase::create().await;
     let operation_id =
         stable("mfm.postgres.fixture/tenant-fact-publication").expect("operation id");
-    let (program_verifier, document) = qualified_fact_program(operation_id.clone());
+    let (registry, document) = qualified_fact_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&program_verifier),
+        registry,
         Arc::clone(&physical_verifier),
     )
     .await
     .expect("qualify fact publication store");
-    let (writer, reader) = store.split();
-    let first_run = run_id(40);
-    let second_run = run_id(41);
-    writer
-        .admit_run(admission(
-            first_run.clone(),
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let store_scope = reader.store_identity().store_scope_id.clone();
+    let first_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000040").expect("first inv");
+    let second_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000041").expect("second inv");
+    let first_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &operation_id,
+        &first_invocation,
+    );
+    let second_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &operation_id,
+        &second_invocation,
+    );
+
+    let (got_first, _) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
+            default_tenant(),
+            first_invocation,
             operation_id.clone(),
             document.clone(),
-            "first-fact-publication-admit",
+            admission_material(9),
+            vec![ProposedCanonicalValue::from_value(&Value { value: 7 }).expect("initial value")],
+            AppendRequestId::new("first-fact-publication-admit").expect("append id"),
         ))
         .await
         .expect("admit first fact producer");
-    writer
-        .admit_run(admission(
-            second_run.clone(),
+    assert_eq!(got_first, first_run);
+    let (got_second, _) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
+            default_tenant(),
+            second_invocation,
             operation_id.clone(),
             document.clone(),
-            "second-fact-publication-admit",
+            admission_material(9),
+            vec![ProposedCanonicalValue::from_value(&Value { value: 7 }).expect("initial value")],
+            AppendRequestId::new("second-fact-publication-admit").expect("append id"),
         ))
         .await
         .expect("admit second fact producer");
-    let first_verified = reader
-        .load_verified(&first_run)
-        .await
-        .expect("verify first fact producer");
-    let second_verified = reader
-        .load_verified(&second_run)
-        .await
-        .expect("verify second fact producer");
-    let first_proposal = StateTransitionProposal::success(
-        AppendRequestId::new("first-fact-publication").expect("first append id"),
-        ProposedCanonicalValue::from_value(&Value { value: 8 }).expect("first output"),
-        fact_set(Value { value: 7 }, Value { value: 8 }),
-    );
-    let second_proposal = StateTransitionProposal::success(
-        AppendRequestId::new("second-fact-publication").expect("second append id"),
-        ProposedCanonicalValue::from_value(&Value { value: 9 }).expect("second output"),
-        fact_set(Value { value: 7 }, Value { value: 9 }),
-    );
+    assert_eq!(got_second, second_run);
 
-    let (first_attempt, second_attempt) = tokio::join!(
-        writer.commit_state_transition(first_verified, &first_proposal),
-        writer.commit_state_transition(second_verified, &second_proposal),
+    let (first_drive, second_drive) = tokio::join!(
+        runtime.drive_once(&first_run),
+        runtime.drive_once(&second_run),
     );
-    for attempt in [&first_attempt, &second_attempt] {
+    for attempt in [&first_drive, &second_drive] {
         match attempt {
-            Ok(attempt)
-                if matches!(
-                    attempt.outcome(),
-                    BackendAppendOutcome::NewlyCommitted(_)
-                        | BackendAppendOutcome::StaleHead
-                        | BackendAppendOutcome::AcknowledgementUnknown
-                ) => {}
-            Err(StructuredStoreError::BackendUnavailable) => {}
+            Ok(DriveOutcome::TransitionCommitted { .. })
+            | Ok(DriveOutcome::ConcurrentProgress)
+            | Ok(DriveOutcome::Closed)
+            | Err(_) => {}
             other => panic!("unexpected racing fact publication outcome: {other:?}"),
         }
     }
 
-    let first_verified = reader
-        .load_verified(&first_run)
-        .await
-        .expect("reload first fact producer");
-    if matches!(first_verified.frontier(), StructuredFrontier::Actions(_)) {
-        let retry = writer
-            .commit_state_transition(first_verified, &first_proposal)
-            .await
-            .expect("retry first fact publication");
-        assert!(matches!(
-            retry.outcome(),
-            BackendAppendOutcome::NewlyCommitted(_)
-        ));
+    if matches!(
+        reader.load(&first_run).await.expect("reload first").frontier(),
+        StructuredFrontier::Actions(_)
+    ) {
+        assert_eq!(
+            runtime
+                .drive_once(&first_run)
+                .await
+                .expect("retry first fact publication"),
+            DriveOutcome::TransitionCommitted { closed: true }
+        );
     }
-    let second_verified = reader
-        .load_verified(&second_run)
-        .await
-        .expect("reload second fact producer");
-    if matches!(second_verified.frontier(), StructuredFrontier::Actions(_)) {
-        let retry = writer
-            .commit_state_transition(second_verified, &second_proposal)
+    if matches!(
+        reader
+            .load(&second_run)
             .await
-            .expect("retry second fact publication");
-        assert!(matches!(
-            retry.outcome(),
-            BackendAppendOutcome::NewlyCommitted(_)
-        ));
+            .expect("reload second")
+            .frontier(),
+        StructuredFrontier::Actions(_)
+    ) {
+        assert_eq!(
+            runtime
+                .drive_once(&second_run)
+                .await
+                .expect("retry second fact publication"),
+            DriveOutcome::TransitionCommitted { closed: true }
+        );
     }
 
     let audit_pool = database.independent_pool().await;
@@ -1689,40 +1651,43 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
         .execute(&audit_pool)
         .await
         .expect("inject missing tenant fact head");
-    let corrupted_run = run_id(42);
-    writer
-        .admit_run(admission(
-            corrupted_run.clone(),
-            operation_id,
+    let corrupted_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000042").expect("corrupted inv");
+    let corrupted_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &operation_id,
+        &corrupted_invocation,
+    );
+    let (got_corrupted, _) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
+            default_tenant(),
+            corrupted_invocation,
+            operation_id.clone(),
             document,
-            "corrupted-head-producer-admit",
+            admission_material(9),
+            vec![ProposedCanonicalValue::from_value(&Value { value: 7 }).expect("initial value")],
+            AppendRequestId::new("corrupted-head-producer-admit").expect("append id"),
         ))
         .await
         .expect("admit producer after tenant head corruption");
-    assert!(matches!(
-        writer
-            .commit_state_transition(
-                reader
-                    .load_verified(&corrupted_run)
-                    .await
-                    .expect("verify producer after tenant head corruption"),
-                &StateTransitionProposal::success(
-                    AppendRequestId::new("corrupted-head-publication")
-                        .expect("corrupted head append id"),
-                    ProposedCanonicalValue::from_value(&Value { value: 8 })
-                        .expect("corrupted head output"),
-                    fact_set(Value { value: 7 }, Value { value: 8 }),
-                ),
-            )
-            .await,
-        Err(StructuredStoreError::InvalidHistory)
-    ));
+    assert_eq!(got_corrupted, corrupted_run);
+    let corrupted_drive = runtime.drive_once(&corrupted_run).await;
+    assert!(
+        matches!(
+            corrupted_drive,
+            Err(ref error)
+                if error.store_fault_kind() == Some(RuntimeStoreFaultKind::InvalidHistory)
+        ),
+        "missing tenant fact head must fail closed: {corrupted_drive:?}"
+    );
+    let (corrupted_registry, _) = qualified_fact_program(operation_id);
     let corrupted_pool = database.application_pool().await;
     assert!(matches!(
         open_structured_authoritative(
             corrupted_pool,
             TestAuthoritativeWriterFence,
-            program_verifier,
+            corrupted_registry,
             physical_verifier,
         )
         .await,
@@ -1731,7 +1696,7 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
 
     audit_pool.close().await;
     drop(reader);
-    drop(writer);
+    drop(runtime);
     store_pool_control.close().await;
     database.cleanup().await;
 }
@@ -1742,49 +1707,81 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let postgres_fixture = qualified_fact_scan_fixture();
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let postgres_store = open_structured_authoritative(
+    let postgres_assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&postgres_fixture.program_verifier),
+        postgres_fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
     .expect("qualify fact scanner store");
-    let (postgres_writer, postgres_reader) = postgres_store.split();
+    let AssembledStructuredRuntime {
+        runtime: postgres_runtime,
+        public_reader: postgres_reader,
+        ..
+    } = postgres_assembled;
     let postgres_identity = postgres_reader.store_identity().clone();
-    let postgres_response =
-        drive_qualified_fact_scan(postgres_writer, &postgres_reader, postgres_fixture).await;
+    let postgres_response = drive_qualified_fact_scan(
+        postgres_runtime,
+        &postgres_reader,
+        postgres_fixture.producer_operation,
+        postgres_fixture.consumer_operation,
+        postgres_fixture.producer_document,
+        postgres_fixture.consumer_document,
+        postgres_fixture.source_object,
+        postgres_fixture.request,
+    )
+    .await;
 
     let reopened_fixture = qualified_fact_scan_fixture();
+    let consumer_run = derive_run_id(
+        &postgres_identity.store_scope_id,
+        &default_tenant(),
+        &reopened_fixture.consumer_operation,
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000081")
+            .expect("consumer inv"),
+    );
     let reopened_pool = database.application_pool().await;
     let reopened_pool_control = reopened_pool.clone();
-    let reopened_store = open_structured_authoritative(
+    let reopened_assembled = open_structured_authoritative(
         reopened_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&reopened_fixture.program_verifier),
+        reopened_fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
     .expect("reopen fact scanner store through an independent pool");
-    let (reopened_writer, reopened_reader) = reopened_store.split();
-    let reopened_response = retained_fact_response(&reopened_reader, &run_id(81)).await;
+    let reopened_response =
+        retained_fact_response(&reopened_assembled.public_reader, &consumer_run).await;
     assert_eq!(reopened_response, postgres_response);
 
     let memory_fixture = qualified_fact_scan_fixture();
-    let memory_store = StructuredRunStore::new(
-        StructuredMemoryBackend::new(postgres_identity),
-        Arc::clone(&memory_fixture.program_verifier),
+    let memory_assembled = assemble_in_memory_runtime(
+        postgres_identity,
+        memory_fixture.registry,
         Arc::new(NoPhysicalBindings),
     );
-    let (memory_writer, memory_reader) = memory_store.split();
-    let memory_response =
-        drive_qualified_fact_scan(memory_writer, &memory_reader, memory_fixture).await;
+    let AssembledStructuredRuntime {
+        runtime: memory_runtime,
+        public_reader: memory_reader,
+        ..
+    } = memory_assembled;
+    let memory_response = drive_qualified_fact_scan(
+        memory_runtime,
+        &memory_reader,
+        memory_fixture.producer_operation,
+        memory_fixture.consumer_operation,
+        memory_fixture.producer_document,
+        memory_fixture.consumer_document,
+        memory_fixture.source_object,
+        memory_fixture.request,
+    )
+    .await;
     assert_eq!(memory_response, postgres_response);
 
     drop(memory_reader);
-    drop(reopened_reader);
-    drop(reopened_writer);
     drop(postgres_reader);
+    drop(reopened_assembled);
     reopened_pool_control.close().await;
     store_pool_control.close().await;
     database.cleanup().await;
@@ -1796,20 +1793,29 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     let allowed = qualified_fact_scan_fixture();
     let allowed_pool = database.application_pool().await;
     let allowed_pool_control = allowed_pool.clone();
-    let allowed_store = open_structured_authoritative(
+    let allowed_assembled = open_structured_authoritative(
         allowed_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&allowed.program_verifier),
+        allowed.registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
     .expect("qualify empty-frontier scanner store");
-    let (allowed_writer, allowed_reader) = allowed_store.split();
-    let allowed_runtime = Runtime::new(allowed_writer, allowed.processes);
-    let empty_run = run_id(84);
-    allowed_runtime
+    let allowed_runtime = allowed_assembled.runtime;
+    let allowed_reader = allowed_assembled.public_reader;
+    let store_scope = allowed_reader.store_identity().store_scope_id.clone();
+    let empty_tenant =
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "3".repeat(32))).expect("tenant");
+    let empty_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000084").expect("empty inv");
+    let empty_run = derive_run_id(
+        &store_scope,
+        &empty_tenant,
+        &allowed.consumer_operation,
+        &empty_invocation,
+    );
+    let (got_empty, _) = allowed_runtime
         .admit_run(fact_scan_admission_for_tenant(
-            empty_run.clone(),
             allowed.consumer_operation.clone(),
             allowed.consumer_document.clone(),
             admission_material_with_source(84, allowed.source_object.clone()),
@@ -1820,6 +1826,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         ))
         .await
         .expect("admit empty-frontier consumer");
+    assert_eq!(got_empty, empty_run);
     assert_eq!(
         allowed_runtime
             .drive_once(&empty_run)
@@ -1841,10 +1848,16 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     assert_eq!(empty_response.query_results.len(), 1);
     assert!(empty_response.query_results[0].selected.is_empty());
 
-    let producer_run = run_id(85);
-    allowed_runtime
+    let producer_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000085").expect("producer inv");
+    let producer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &allowed.producer_operation,
+        &producer_invocation,
+    );
+    let (got_producer, _) = allowed_runtime
         .admit_run(fact_scan_admission(
-            producer_run.clone(),
             allowed.producer_operation,
             allowed.producer_document,
             admission_material(85),
@@ -1854,6 +1867,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         ))
         .await
         .expect("admit excluded-source producer");
+    assert_eq!(got_producer, producer_run);
     assert_eq!(
         allowed_runtime
             .drive_once(&producer_run)
@@ -1868,20 +1882,26 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     let excluded = qualified_fact_scan_fixture_excluding_producer();
     let excluded_pool = database.application_pool().await;
     let excluded_pool_control = excluded_pool.clone();
-    let excluded_store = open_structured_authoritative(
+    let excluded_assembled = open_structured_authoritative(
         excluded_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&excluded.program_verifier),
+        excluded.registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
     .expect("reopen scanner with an excluding manifest");
-    let (excluded_writer, excluded_reader) = excluded_store.split();
-    let excluded_runtime = Runtime::new(excluded_writer, excluded.processes);
-    let excluded_run = run_id(86);
-    excluded_runtime
+    let excluded_runtime = excluded_assembled.runtime;
+    let excluded_reader = excluded_assembled.public_reader;
+    let excluded_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000086").expect("excluded inv");
+    let excluded_run = derive_run_id(
+        &excluded_reader.store_identity().store_scope_id,
+        &default_tenant(),
+        &excluded.consumer_operation,
+        &excluded_invocation,
+    );
+    let (got_excluded, _) = excluded_runtime
         .admit_run(fact_scan_admission(
-            excluded_run.clone(),
             excluded.consumer_operation,
             excluded.consumer_document,
             admission_material_with_source(86, excluded.source_object),
@@ -1891,6 +1911,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         ))
         .await
         .expect("admit excluded-source consumer");
+    assert_eq!(got_excluded, excluded_run);
     assert_eq!(
         excluded_runtime
             .drive_once(&excluded_run)
@@ -1924,20 +1945,35 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
     let fixture = qualified_fact_scan_fixture();
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        Arc::clone(&fixture.program_verifier),
+        fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
     .await
     .expect("qualify publication-barrier race store");
-    let (writer, reader) = store.split();
-    let producer_run = run_id(82);
-    let consumer_run = run_id(83);
-    writer
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let store_scope = reader.store_identity().store_scope_id.clone();
+    let producer_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000082").expect("producer inv");
+    let consumer_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000083").expect("consumer inv");
+    let producer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &fixture.producer_operation,
+        &producer_invocation,
+    );
+    let consumer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &fixture.consumer_operation,
+        &consumer_invocation,
+    );
+    let (got_producer, _) = runtime
         .admit_run(fact_scan_admission(
-            producer_run.clone(),
             fixture.producer_operation.clone(),
             fixture.producer_document.clone(),
             admission_material(82),
@@ -1947,9 +1983,9 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
         ))
         .await
         .expect("admit racing producer");
-    writer
+    assert_eq!(got_producer, producer_run);
+    let (got_consumer, _) = runtime
         .admit_run(fact_scan_admission(
-            consumer_run.clone(),
             fixture.consumer_operation.clone(),
             fixture.consumer_document.clone(),
             admission_material_with_source(83, fixture.source_object.clone()),
@@ -1959,124 +1995,87 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
         ))
         .await
         .expect("admit racing consumer");
+    assert_eq!(got_consumer, consumer_run);
 
-    let producer = reader
-        .load_verified(&producer_run)
-        .await
-        .expect("verify racing producer");
-    let consumer = reader
-        .load_verified(&consumer_run)
-        .await
-        .expect("verify racing consumer");
-    let StructuredFrontier::Actions(actions) = consumer.frontier() else {
-        panic!("racing consumer must be actionable");
-    };
-    let [action] = actions.as_slice() else {
-        panic!("racing consumer must expose one fact read");
-    };
-    let action = action.clone();
-    let target = AccessTargetSelection {
-        run_id: consumer.run_id(),
-        occurrence_id: &action.occurrence_id,
-        state_input_ref: &action.input,
-        store_scope_id: &consumer.admission().store_scope_id,
-        store_epoch: consumer.admission().store_epoch,
-        tenant_scope_id: &consumer.admission().tenant_scope_id,
-        admitted_prior_run_source_manifest_ref: &consumer
-            .admission()
-            .admission_material_refs
-            .prior_run_source_manifest_ref,
-        admitted_routing_policy_ref: &consumer
-            .admission()
-            .admission_material_refs
-            .routing_policy_ref,
-        stable_resource_lineage_contract_ref: None,
-        minimum_lineage_head_ref: None,
-    };
-    let capability_identity = fixture
-        .processes
-        .component_identity(
-            StructuredComponentKind::Capability,
-            action
-                .capability_contract_ref
-                .as_ref()
-                .expect("fact scanner capability"),
-        )
-        .expect("qualified fact scanner capability");
-    let binding = fixture
-        .processes
-        .prepare_access::<ReadPhysicalBindingKind>(
-            &capability_identity,
-            target,
-            mfm_spec::CanonicalJsonValue::new(
-                serde_json::to_value(&fixture.request).expect("fact request JSON"),
-            )
-            .expect("canonical fact request"),
-        )
-        .await
-        .expect("prepare fact scanner binding")
-        .expect("qualified fact scanner binding");
-    let authorization = AccessAuthorizationProposal::new(
-        AppendRequestId::new("publication-barrier-authorization").expect("authorization append"),
-        action.input,
-        ProposedCanonicalValue::from_value(&fixture.request).expect("fact request proposal"),
-        binding.public_certificate().clone(),
+    let (publication_drive, barrier_drive) = tokio::join!(
+        runtime.drive_once(&producer_run),
+        runtime.drive_once(&consumer_run),
     );
-    let publication = StateTransitionProposal::success(
-        AppendRequestId::new("publication-barrier-transition").expect("transition append"),
-        ProposedCanonicalValue::from_value(&Value { value: 8 }).expect("producer output"),
-        fact_set(Value { value: 7 }, Value { value: 8 }),
-    );
+    assert_tenant_race_drive(&publication_drive);
+    assert_tenant_race_drive(&barrier_drive);
 
-    let (publication_attempt, barrier_attempt) = tokio::join!(
-        writer.commit_state_transition(producer, &publication),
-        writer.authorize_access(consumer, &authorization),
-    );
-    assert_tenant_race_attempt(&publication_attempt);
-    assert_tenant_race_attempt(&barrier_attempt);
-
-    let producer = reader
-        .load_verified(&producer_run)
-        .await
-        .expect("reload racing producer");
-    if matches!(producer.frontier(), StructuredFrontier::Actions(_)) {
-        let retry = writer
-            .commit_state_transition(producer, &publication)
+    if matches!(
+        reader
+            .load(&producer_run)
+            .await
+            .expect("reload racing producer")
+            .frontier(),
+        StructuredFrontier::Actions(_)
+    ) {
+        let retry = runtime
+            .drive_once(&producer_run)
             .await
             .expect("retry racing publication");
         assert!(matches!(
-            retry.outcome(),
-            BackendAppendOutcome::NewlyCommitted(_)
-                | BackendAppendOutcome::ExistingSame(_)
-                | BackendAppendOutcome::AcknowledgementUnknown
+            retry,
+            DriveOutcome::TransitionCommitted { .. } | DriveOutcome::ConcurrentProgress
         ));
     }
-    let consumer = reader
-        .load_verified(&consumer_run)
-        .await
-        .expect("reload racing consumer");
-    if matches!(consumer.frontier(), StructuredFrontier::Actions(_)) {
-        let retry = writer
-            .authorize_access(consumer, &authorization)
+    if matches!(
+        reader
+            .load(&consumer_run)
+            .await
+            .expect("reload racing consumer")
+            .frontier(),
+        StructuredFrontier::Actions(_)
+    ) {
+        let retry = runtime
+            .drive_once(&consumer_run)
             .await
             .expect("retry racing selection barrier");
         assert!(matches!(
-            retry.outcome(),
-            BackendAppendOutcome::NewlyCommitted(_)
-                | BackendAppendOutcome::ExistingSame(_)
-                | BackendAppendOutcome::AcknowledgementUnknown
+            retry,
+            DriveOutcome::AccessObserved
+                | DriveOutcome::TransitionCommitted { .. }
+                | DriveOutcome::ConcurrentProgress
         ));
+    }
+
+    // Finish the consumer if authorization landed but observation/settlement remains open.
+    for _ in 0..4 {
+        let frontier = reader
+            .load(&consumer_run)
+            .await
+            .expect("poll consumer frontier")
+            .frontier()
+            .clone();
+        if matches!(frontier, StructuredFrontier::Complete) {
+            break;
+        }
+        let _ = runtime.drive_once(&consumer_run).await;
     }
 
     let audit_pool = database.independent_pool().await;
     let producer_batches = load_normalized_batches(&audit_pool, &producer_run).await;
     let consumer_batches = load_normalized_batches(&audit_pool, &consumer_run).await;
-    let [_, publication_batch] = producer_batches.as_slice() else {
-        panic!("racing producer must commit one atomic publication");
-    };
-    let [_, barrier_batch] = consumer_batches.as_slice() else {
-        panic!("racing consumer must commit one atomic authorization barrier");
-    };
+    assert!(
+        producer_batches.len() >= 2,
+        "racing producer must commit one atomic publication"
+    );
+    let publication_batch = &producer_batches[1];
+    assert!(
+        consumer_batches.len() >= 2,
+        "racing consumer must commit one atomic authorization barrier"
+    );
+    let barrier_batch = consumer_batches
+        .iter()
+        .find(|batch| {
+            matches!(
+                batch.tenant_fact_coordinate,
+                TenantFactCoordinate::FactSelectionBarrier { .. }
+            )
+        })
+        .expect("consumer authorization must capture a selection barrier");
     let TenantFactCoordinate::FactPublication {
         frontier: publication_frontier,
     } = &publication_batch.tenant_fact_coordinate
@@ -2105,30 +2104,22 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
         i64::try_from(barrier_frontier.fact_order).expect("barrier order fits i64")
     );
 
-    drop(binding);
     drop(reader);
-    drop(writer);
+    drop(runtime);
     audit_pool.close().await;
     store_pool_control.close().await;
     database.cleanup().await;
 }
 
-fn assert_tenant_race_attempt(
-    attempt: &std::result::Result<
-        mfm_store::structured::StructuredAppendAttempt,
-        StructuredStoreError,
-    >,
+fn assert_tenant_race_drive(
+    attempt: &std::result::Result<DriveOutcome, mfm_runtime::structured::RuntimeError>,
 ) {
     match attempt {
-        Ok(attempt)
-            if matches!(
-                attempt.outcome(),
-                BackendAppendOutcome::NewlyCommitted(_)
-                    | BackendAppendOutcome::ExistingSame(_)
-                    | BackendAppendOutcome::StaleHead
-                    | BackendAppendOutcome::AcknowledgementUnknown
-            ) => {}
-        Err(StructuredStoreError::BackendUnavailable) => {}
+        Ok(DriveOutcome::TransitionCommitted { .. })
+        | Ok(DriveOutcome::AccessObserved)
+        | Ok(DriveOutcome::ConcurrentProgress)
+        | Ok(DriveOutcome::Closed)
+        | Err(_) => {}
         other => panic!("unexpected publication-barrier race outcome: {other:?}"),
     }
 }
@@ -2137,19 +2128,20 @@ fn assert_tenant_race_attempt(
 async fn object_row_failure_rolls_back_batch_objects_and_head() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/object-row-rollback").expect("operation id");
-    let (program_verifier, document) = qualified_program(operation_id.clone());
+    let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
     .expect("qualify store before injecting object failure");
-    let (writer, reader) = store.split();
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
     let mutation_pool = database.independent_pool().await;
     sqlx::query(
         "CREATE FUNCTION reject_structured_object_insert() RETURNS trigger \
@@ -2167,18 +2159,21 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     .await
     .expect("create object-row failure trigger");
 
-    let run_id = run_id(31);
-    assert_eq!(
-        writer
-            .admit_run(admission(
-                run_id.clone(),
-                operation_id,
-                document,
-                "object-row-rollback",
-            ))
-            .await
-            .expect_err("injected child-row failure must reject the append"),
-        StructuredStoreError::BackendUnavailable
+    let admit = runtime
+        .admit_run(admission(
+            operation_id,
+            document,
+            "object-row-rollback",
+        ))
+        .await;
+    assert!(
+        matches!(
+            admit,
+            Err(ref error)
+                if error.store_fault_kind() == Some(RuntimeStoreFaultKind::BackendUnavailable)
+                    || error.code() == RuntimeFaultCode::StoreUnavailable
+        ),
+        "injected child-row failure must reject the append: {admit:?}"
     );
     let retained_rows = sqlx::query_scalar::<_, i64>(
         "SELECT (SELECT count(*) FROM run_history_batches) \
@@ -2189,16 +2184,9 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     .await
     .expect("count rows after injected failure");
     assert_eq!(retained_rows, 0);
-    assert_eq!(
-        reader
-            .load_verified(&run_id)
-            .await
-            .expect_err("rolled-back append must leave no run"),
-        StructuredStoreError::RunNotFound
-    );
 
     drop(reader);
-    drop(writer);
+    drop(runtime);
     mutation_pool.close().await;
     store_pool_control.close().await;
     database.cleanup().await;
@@ -2208,23 +2196,22 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
 async fn malformed_object_rows_fail_closed_after_qualification() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/malformed-objects").expect("operation id");
-    let (program_verifier, document) = qualified_program(operation_id.clone());
+    let (registry, document) = qualified_program(operation_id.clone());
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
     .expect("qualify store before hostile object mutations");
-    let (writer, reader) = store.split();
-    let run_id = run_id(32);
-    writer
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _) = runtime
         .admit_run(admission(
-            run_id.clone(),
             operation_id,
             document,
             "malformed-object-rows",
@@ -2266,7 +2253,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("remove one object row");
     assert!(matches!(
-        reader.load_verified(&run_id).await,
+        reader.load(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     insert_object_snapshot(&mutation_pool, &run_id, first).await;
@@ -2286,7 +2273,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("append one extra object row");
     assert!(matches!(
-        reader.load_verified(&run_id).await,
+        reader.load(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     sqlx::query(
@@ -2302,7 +2289,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, second).await;
     update_object_snapshot(&mutation_pool, &run_id, second.ordinal, first).await;
     assert!(matches!(
-        reader.load_verified(&run_id).await,
+        reader.load(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2319,7 +2306,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("mismatch object content reference");
     assert!(matches!(
-        reader.load_verified(&run_id).await,
+        reader.load(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2342,7 +2329,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("persist oversized hostile object row");
     assert!(matches!(
-        reader.load_verified(&run_id).await,
+        reader.load(&run_id).await,
         Err(StructuredStoreError::InvalidHistory)
     ));
     update_object_snapshot(&mutation_pool, &run_id, first.ordinal, first).await;
@@ -2356,12 +2343,12 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .await
     .expect("restore object frame bound");
     reader
-        .load_verified(&run_id)
+        .load(&run_id)
         .await
         .expect("restored object rows must refold");
 
     drop(reader);
-    drop(writer);
+    drop(runtime);
     mutation_pool.close().await;
     store_pool_control.close().await;
     database.cleanup().await;
@@ -2371,53 +2358,38 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
 async fn numeric_batch_order_refolds_across_the_tenth_append() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/numeric-batch-order").expect("operation id");
-    let (program_verifier, document) = qualified_program_with_state_count(operation_id.clone(), 10);
+    let (registry, document) = qualified_program_with_state_count(operation_id.clone(), 10);
     let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
     let store_pool = database.application_pool().await;
     let store_pool_control = store_pool.clone();
-    let store = open_structured_authoritative(
+    let assembled = open_structured_authoritative(
         store_pool,
         TestAuthoritativeWriterFence,
-        program_verifier,
+        registry,
         physical_verifier,
     )
     .await
     .expect("qualify numeric-order store");
-    let (writer, reader) = store.split();
-    let run_id = run_id(33);
-    writer
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _) = runtime
         .admit_run(admission(
-            run_id.clone(),
             operation_id,
             document,
             "numeric-order-admit",
         ))
         .await
         .expect("admit numeric-order fixture");
-    for transition in 0..10 {
-        let verified = reader
-            .load_verified(&run_id)
-            .await
-            .expect("refold numeric-order prefix");
-        writer
-            .commit_state_transition(
-                verified,
-                &StateTransitionProposal::success(
-                    AppendRequestId::new(format!("numeric-order-transition-{transition}"))
-                        .expect("transition append id"),
-                    ProposedCanonicalValue::from_value(&Value {
-                        value: u64::try_from(transition).expect("transition index") + 8,
-                    })
-                    .expect("transition value"),
-                    mfm_facts::FactSet::empty(),
-                ),
-            )
-            .await
-            .expect("commit sequential transition");
+    for _transition in 0..10 {
+        match runtime.drive_once(&run_id).await.expect("commit sequential transition") {
+            DriveOutcome::TransitionCommitted { closed: false }
+            | DriveOutcome::TransitionCommitted { closed: true } => {}
+            other => panic!("unexpected numeric-order drive: {other:?}"),
+        }
     }
     assert!(matches!(
         reader
-            .load_verified(&run_id)
+            .load(&run_id)
             .await
             .expect("refold eleven numeric batches")
             .frontier(),
@@ -2435,7 +2407,7 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     audit_pool.close().await;
 
     drop(reader);
-    drop(writer);
+    drop(runtime);
     store_pool_control.close().await;
     database.cleanup().await;
 }
@@ -2466,7 +2438,7 @@ async fn run_fresh_process_worker(database: &TestDatabase, mode: &str) {
 fn qualified_program(
     operation_id: StableId,
 ) -> (
-    Arc<dyn mfm_store::structured::StructuredProgramVerifier>,
+    mfm_certify::structured::QualifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     qualified_program_with_state_count(operation_id, 1)
@@ -2476,7 +2448,7 @@ fn qualified_program_with_state_count(
     operation_id: StableId,
     state_count: usize,
 ) -> (
-    Arc<dyn mfm_store::structured::StructuredProgramVerifier>,
+    mfm_certify::structured::QualifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     let mut assembly = ProgramRegistryBuilder::new();
@@ -2524,15 +2496,13 @@ fn qualified_program_with_state_count(
         .certify(authored)
         .expect("certified program")
         .into_document();
-    let (verifier, processes) = split_qualified_registry(registry);
-    drop(processes);
-    (verifier, document)
+    (registry, document)
 }
 
 fn qualified_fact_program(
     operation_id: StableId,
 ) -> (
-    Arc<dyn mfm_store::structured::StructuredProgramVerifier>,
+    mfm_certify::structured::QualifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     let mut assembly = ProgramRegistryBuilder::new();
@@ -2591,9 +2561,7 @@ fn qualified_fact_program(
         .certify(authored)
         .expect("certified fact program")
         .into_document();
-    let (verifier, processes) = split_qualified_registry(registry);
-    drop(processes);
-    (verifier, document)
+    (registry, document)
 }
 
 struct QualifiedFactScanFixture {
@@ -2601,8 +2569,7 @@ struct QualifiedFactScanFixture {
     consumer_operation: StableId,
     producer_document: mfm_spec::structured::CertifiedProgramDocument,
     consumer_document: mfm_spec::structured::CertifiedProgramDocument,
-    program_verifier: Arc<dyn mfm_store::structured::StructuredProgramVerifier>,
-    processes: RuntimeProcessRegistry,
+    registry: mfm_certify::structured::QualifiedProgramRegistry,
     source_object: HistoryObject,
     request: FactSelectionRequest,
 }
@@ -2773,14 +2740,12 @@ fn qualified_fact_scan_fixture_with_source_operation(
         .certify(consumer_program)
         .expect("consumer certification")
         .into_document();
-    let (program_verifier, processes) = split_qualified_registry(registry);
     QualifiedFactScanFixture {
         producer_operation,
         consumer_operation,
         producer_document,
         consumer_document,
-        program_verifier,
-        processes,
+        registry,
         source_object,
         request,
     }
@@ -2797,21 +2762,20 @@ fn fact_scan_profile() -> StructuredExpansionProfile {
     }
 }
 
-async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
-    writer: StructuredRunHistoryWriter<B>,
-    reader: &StructuredRunHistoryReader<B>,
-    fixture: QualifiedFactScanFixture,
-) -> String {
-    let QualifiedFactScanFixture {
-        producer_operation,
-        consumer_operation,
-        producer_document,
-        consumer_document,
-        program_verifier: _,
-        processes,
-        source_object,
-        request,
-    } = fixture;
+async fn drive_qualified_fact_scan<B, P>(
+    runtime: Runtime<P>,
+    reader: &PublicRunReader<B>,
+    producer_operation: StableId,
+    consumer_operation: StableId,
+    producer_document: mfm_spec::structured::CertifiedProgramDocument,
+    consumer_document: mfm_spec::structured::CertifiedProgramDocument,
+    source_object: HistoryObject,
+    request: FactSelectionRequest,
+) -> String
+where
+    B: StructuredHistoryBackend,
+    P: mfm_runtime::history::RuntimeHistoryPort,
+{
     assert_eq!(
         request
             .scan_bounds()
@@ -2819,13 +2783,26 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
             .maximum_publications(),
         1
     );
-    let runtime = Runtime::new(writer, processes);
-    let producer_run = run_id(80);
-    let consumer_run = run_id(81);
+    let store_scope = reader.store_identity().store_scope_id.clone();
+    let producer_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000080").expect("producer inv");
+    let consumer_invocation =
+        InvocationIdentity::new("00000000-0000-4000-8000-000000000081").expect("consumer inv");
+    let producer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &producer_operation,
+        &producer_invocation,
+    );
+    let consumer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &consumer_operation,
+        &consumer_invocation,
+    );
 
-    runtime
+    let (got_producer, _) = runtime
         .admit_run(fact_scan_admission(
-            producer_run.clone(),
             producer_operation,
             producer_document,
             admission_material(80),
@@ -2835,6 +2812,7 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
         ))
         .await
         .expect("admit fact scan producer");
+    assert_eq!(got_producer, producer_run);
     assert_eq!(
         runtime
             .drive_once(&producer_run)
@@ -2843,9 +2821,8 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
         DriveOutcome::TransitionCommitted { closed: true }
     );
 
-    runtime
+    let (got_consumer, _) = runtime
         .admit_run(fact_scan_admission(
-            consumer_run.clone(),
             consumer_operation,
             consumer_document,
             admission_material_with_source(81, source_object),
@@ -2855,6 +2832,7 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
         ))
         .await
         .expect("admit fact scan consumer");
+    assert_eq!(got_consumer, consumer_run);
     assert_eq!(
         runtime
             .drive_once(&consumer_run)
@@ -2889,7 +2867,7 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
     assert_eq!(selected.response_canonical_json, r#"{"value":8}"#);
 
     let producer = reader
-        .load_verified(&producer_run)
+        .load(&producer_run)
         .await
         .expect("publicly recompute producer prefix");
     assert_eq!(
@@ -2915,7 +2893,7 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
     );
 
     let consumer = reader
-        .load_verified(&consumer_run)
+        .load(&consumer_run)
         .await
         .expect("publicly recompute consumer history");
     let output = consumer
@@ -2937,11 +2915,11 @@ async fn drive_qualified_fact_scan<B: StructuredHistoryBackend>(
 }
 
 async fn retained_fact_response<B: StructuredHistoryBackend>(
-    reader: &StructuredRunHistoryReader<B>,
+    reader: &PublicRunReader<B>,
     run_id: &RunId,
 ) -> String {
     let verified = reader
-        .load_verified(run_id)
+        .load(run_id)
         .await
         .expect("publicly recompute retained fact response");
     let returned = verified
@@ -3087,13 +3065,11 @@ fn implementation_descriptor(
 }
 
 fn admission(
-    run_id: RunId,
     operation_id: StableId,
     document: mfm_spec::structured::CertifiedProgramDocument,
     append_id: &str,
-) -> StructuredAdmissionRequest {
-    StructuredAdmissionRequest::new(
-        run_id,
+) -> StructuredAdmissionCommand {
+    StructuredAdmissionCommand::new(
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant"),
         InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("invocation"),
         operation_id,
@@ -3105,16 +3081,14 @@ fn admission(
 }
 
 fn fact_scan_admission(
-    run_id: RunId,
     operation_id: StableId,
     document: mfm_spec::structured::CertifiedProgramDocument,
     material: StructuredAdmissionMaterial,
     input: Value,
     append_id: &str,
     invocation_discriminator: u8,
-) -> StructuredAdmissionRequest {
+) -> StructuredAdmissionCommand {
     fact_scan_admission_for_tenant(
-        run_id,
         operation_id,
         document,
         material,
@@ -3127,7 +3101,6 @@ fn fact_scan_admission(
 
 #[allow(clippy::too_many_arguments)]
 fn fact_scan_admission_for_tenant(
-    run_id: RunId,
     operation_id: StableId,
     document: mfm_spec::structured::CertifiedProgramDocument,
     material: StructuredAdmissionMaterial,
@@ -3135,9 +3108,8 @@ fn fact_scan_admission_for_tenant(
     append_id: &str,
     invocation_discriminator: u8,
     tenant_discriminator: char,
-) -> StructuredAdmissionRequest {
-    StructuredAdmissionRequest::new(
-        run_id,
+) -> StructuredAdmissionCommand {
+    StructuredAdmissionCommand::new(
         TenantScopeId::new(format!(
             "{}{}",
             TenantScopeId::PREFIX,
@@ -3222,11 +3194,44 @@ fn admission_object(object_type: &str, schema: &str, discriminator: u8) -> Histo
     .expect("admission object")
 }
 
-fn run_id(discriminator: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&[discriminator, 5]),
-    )
+fn derive_run_id(
+    store_scope_id: &StoreScopeId,
+    tenant_scope_id: &TenantScopeId,
+    entry_point_operation_id: &StableId,
+    invocation_identity: &InvocationIdentity,
+) -> RunId {
+    let preimage = mfm_canonical::CanonicalValue::object([
+        (
+            "store_scope_id",
+            mfm_canonical::CanonicalValue::String(store_scope_id.as_str().to_owned()),
+        ),
+        (
+            "tenant_scope_id",
+            mfm_canonical::CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
+        ),
+        (
+            "entry_point_operation_id",
+            mfm_canonical::CanonicalValue::String(entry_point_operation_id.as_str().to_owned()),
+        ),
+        (
+            "invocation_identity",
+            mfm_canonical::CanonicalValue::String(invocation_identity.as_str().to_owned()),
+        ),
+    ])
+    .expect("run-id preimage");
+    let contract = mfm_canonical::RecoverabilityContract::embedded().expect("annex");
+    let validated = contract
+        .encode("mfm.run-id-preimage.v1", &preimage)
+        .expect("validated run-id preimage");
+    contract.derive_run_id(&validated).expect("derive run id")
+}
+
+fn default_tenant() -> TenantScopeId {
+    TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant")
+}
+
+fn default_invocation() -> InvocationIdentity {
+    InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("invocation")
 }
 
 fn stable(value: &str) -> mfm_program::Result<StableId> {

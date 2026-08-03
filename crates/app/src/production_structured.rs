@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
-use mfm_canonical::{CanonicalValue, RecoverabilityContract};
+use mfm_canonical::RecoverabilityContract;
 use mfm_certify::structured::{AdmissionCertificationRegistry, ProgramRegistryBuilder};
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
@@ -15,9 +15,10 @@ use mfm_journal::structured::{
     canonical_json, AccessKind, HistoryObject, ADMISSION_CONFIGURATION_OBJECT_TYPE,
 };
 use mfm_program::structured::RuntimeResourceAuthority;
+use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
 use mfm_runtime::structured::{
-    split_qualified_registry, Runtime, RuntimeError, RuntimeFaultCode, RuntimeFaultPhase,
-    RuntimeFaultSubject, RuntimeStoreFaultKind,
+    Runtime, RuntimeError, RuntimeFaultCode, RuntimeFaultPhase, RuntimeFaultSubject,
+    RuntimeStoreFaultKind,
 };
 use mfm_spec::structured::{
     SecretFreeExecutableIdentity, SecretFreeQualificationArtifact, StructuredExpansionProfile,
@@ -28,11 +29,10 @@ use mfm_storage_postgres::{
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
 };
 use mfm_store::structured::{
-    BackendAppendOutcome, ConfigurationHistoryReader, ConfigurationStreamKey,
-    PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,
-    ProposedCanonicalValue, PublicPhysicalBindingVerifier, StructuredAdmissionMaterial,
-    StructuredAdmissionRequest, StructuredRunHistoryReader, StructuredStoreError,
-    VerifiedConfiguredValue, VerifiedStructuredRun,
+    ConfigurationHistoryReader, ConfigurationStreamKey, PhysicalBindingAuthorization,
+    PhysicalBindingSupersession, PhysicalBindingVerificationMode, ProposedCanonicalValue,
+    PublicPhysicalBindingVerifier, PublicRunReader, StructuredAdmissionMaterial,
+    StructuredStoreError, VerifiedConfiguredValue, VerifiedStructuredRun,
 };
 use mfm_values::{MfmConfig, MfmValue};
 use serde::Serialize;
@@ -63,13 +63,13 @@ const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revisi
 const STRUCTURED_EXPORT_VERSION: &str = "mfm.structured-portable-run-export.v1";
 const MAX_REPLAY_EXPORT_BYTES: u64 = 512 * 1024 * 1024;
 
-type RunReader = StructuredRunHistoryReader<PostgresStructuredHistoryBackend>;
+type RunReader = PublicRunReader<PostgresStructuredHistoryBackend>;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
 
 struct ProductionBackend {
     reader: RunReader,
     configuration: ConfigReader,
-    runtime: Arc<Runtime<PostgresStructuredHistoryBackend>>,
+    runtime: Arc<Runtime<mfm_store::structured::StoreHistoryAdapter<PostgresStructuredHistoryBackend>>>,
     certifier: AdmissionCertificationRegistry,
     routing_manifest: mfm_portfolio::PortfolioRoutingManifest,
     routing_catalog: mfm_evm::EvmRoutingCatalogDescriptor,
@@ -121,17 +121,16 @@ where
             assembly.broadcast_resource_ref.clone(),
             wallet_bindings.resource_contract_ref().clone(),
         )?);
-    let (program_verifier, processes) = split_qualified_registry(assembly.registry);
-    let (run_store, configuration) = open_structured_authoritative_application(
+    let (assembled, configuration) = open_structured_authoritative_application(
         pool,
         deployment_writer_fence,
-        program_verifier,
+        assembly.registry,
         physical_verifier,
     )
     .await
     .map_err(|_| run_store_unavailable())?;
-    let (writer, reader) = run_store.split();
-    let runtime = Arc::new(Runtime::new(writer, processes));
+    let runtime = Arc::new(assembled.runtime);
+    let reader = assembled.public_reader;
     let store_scope_id = reader.store_identity().store_scope_id.clone();
     let backend = ProductionBackend {
         reader,
@@ -395,16 +394,9 @@ impl ApplicationBackend for ProductionBackend {
         } else {
             return Err(admission_invalid());
         };
-        let run_id = derive_run_id(
-            self.reader.store_identity().store_scope_id.clone(),
-            call.tenant_scope_id().clone(),
-            operation_id.clone(),
-            request.invocation_identity().clone(),
-        )?;
-        let attempt = self
+        let (run_id, attempt) = self
             .runtime
-            .admit_run(StructuredAdmissionRequest::new(
-                run_id.clone(),
+            .admit_run(StructuredAdmissionCommand::new(
                 call.tenant_scope_id().clone(),
                 request.invocation_identity().clone(),
                 operation_id.clone(),
@@ -416,10 +408,10 @@ impl ApplicationBackend for ProductionBackend {
             .await
             .map_err(classify_runtime_error)?;
         let status = match attempt.outcome() {
-            BackendAppendOutcome::NewlyCommitted(_) => AdmissionStatus::NewlyAdmitted,
-            BackendAppendOutcome::ExistingSame(_) => AdmissionStatus::Attached,
-            BackendAppendOutcome::AcknowledgementUnknown => AdmissionStatus::OutcomeUnknown,
-            BackendAppendOutcome::StaleHead => return Err(admission_conflict()),
+            HistoryAppendOutcome::NewlyCommitted(_) => AdmissionStatus::NewlyAdmitted,
+            HistoryAppendOutcome::ExistingSame(_) => AdmissionStatus::Attached,
+            HistoryAppendOutcome::AcknowledgementUnknown => AdmissionStatus::OutcomeUnknown,
+            HistoryAppendOutcome::StaleHead => return Err(admission_conflict()),
         };
         AdmitRunResponse::new(
             &run_id,
@@ -723,7 +715,7 @@ impl ProductionBackend {
     ) -> Result<VerifiedStructuredRun, PublicError> {
         let verified = self
             .reader
-            .load_verified(call.run_id())
+            .load(call.run_id())
             .await
             .map_err(classify_store_error)?;
         if &verified.admission().tenant_scope_id != call.tenant_scope_id() {
@@ -1044,40 +1036,6 @@ async fn validate_replay_export(
         return Err(PublicError::replay_artifact_invalid());
     }
     Ok(())
-}
-
-fn derive_run_id(
-    store_scope_id: mfm_ids::StoreScopeId,
-    tenant_scope_id: TenantScopeId,
-    operation_id: StableId,
-    invocation_identity: InvocationIdentity,
-) -> Result<RunId, PublicError> {
-    let preimage = CanonicalValue::object([
-        (
-            "store_scope_id",
-            CanonicalValue::String(store_scope_id.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            CanonicalValue::String(operation_id.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            CanonicalValue::String(invocation_identity.as_str().to_owned()),
-        ),
-    ])
-    .map_err(|_| admission_invalid())?;
-    let contract = RecoverabilityContract::embedded().map_err(|_| admission_invalid())?;
-    let validated = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .map_err(|_| admission_invalid())?;
-    contract
-        .derive_run_id(&validated)
-        .map_err(|_| admission_invalid())
 }
 
 fn admission_append_request_id(

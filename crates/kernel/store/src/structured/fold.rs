@@ -50,33 +50,7 @@ use super::qualification::{
 };
 
 /// Stable redaction-safe structured store failure.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum StructuredStoreError {
-    /// The requested run does not exist.
-    #[error("structured run was not found")]
-    RunNotFound,
-    /// Durable bytes or successor semantics are invalid.
-    #[error("structured history is invalid")]
-    InvalidHistory,
-    /// A proposed semantic candidate was rejected before backend append.
-    #[error("structured history candidate was rejected")]
-    CandidateRejected,
-    /// Persisted certification does not match the qualified registry.
-    #[error("structured certification verification failed")]
-    Certification,
-    /// The locked backend head differs from the candidate predecessor.
-    #[error("structured history head changed")]
-    StaleHead,
-    /// An append identity was reused for different content.
-    #[error("structured append identity conflicts")]
-    AppendConflict,
-    /// The durable backend is unavailable.
-    #[error("structured history backend is unavailable")]
-    BackendUnavailable,
-    /// Commit acknowledgement must be resolved before any rebase.
-    #[error("structured append acknowledgement is unknown")]
-    AcknowledgementUnknown,
-}
+pub type StructuredStoreError = mfm_runtime::history::HistoryError;
 
 const CERTIFIED_ROOT_OBJECT_TYPE: &str = "structured.certified_program_root";
 const TYPED_VALUE_OBJECT_TYPE: &str = "structured.typed_value";
@@ -101,11 +75,9 @@ pub struct VerifiedProgramData {
 }
 
 impl VerifiedProgramData {
-    /// Constructs data only after a qualified verifier has rechecked the exact
-    /// document. Production callers obtain this through
-    /// [`StructuredProgramVerifier`].
-    #[doc(hidden)]
-    pub const fn new(
+    /// Constructs data only after concrete registry verification rechecked the
+    /// exact document. Not public: only the store adapter may mint this value.
+    pub(super) const fn new(
         document: CertifiedProgramDocument,
         expanded: ExpandedStructuredProgram,
         value_schemas: BTreeMap<ContentRef, SchemaIdentity>,
@@ -134,14 +106,9 @@ impl VerifiedProgramData {
     }
 }
 
-/// Purpose-limited callback-free persisted-program verification port.
-///
-/// The production implementation is backed by the process-qualified
-/// certification registry. It may perform deterministic expansion and proof
-/// checks but receives no state callback, live invoker, store, or writer.
-pub trait StructuredProgramVerifier: Send + Sync {
-    /// Verifies one exact entry-point root and its content-addressed authored
-    /// object, then reconstructs the qualified closure.
+/// Private callback-free persisted-program verification seam used only inside
+/// the store fold and adapter. Production uses [`AdmissionVerificationRegistry`].
+pub(super) trait ProgramVerifier: Send + Sync {
     fn verify(
         &self,
         entry_point_id: &StableId,
@@ -150,125 +117,10 @@ pub trait StructuredProgramVerifier: Send + Sync {
     ) -> std::result::Result<Arc<VerifiedProgramData>, StructuredStoreError>;
 }
 
-/// Folded state of one current executable occurrence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StateLeaf {
-    /// No callback or access has yet committed for this occurrence.
-    Ready,
-    /// One exact access authorization is outstanding.
-    Authorized {
-        /// Read or Effect access kind.
-        access_kind: AccessKind,
-        /// Immutable attempt identity.
-        access_attempt_id: AccessAttemptId,
-    },
-    /// One normal observation is committed and awaits settlement.
-    ObservedForSettlement {
-        /// Immutable attempt identity.
-        access_attempt_id: AccessAttemptId,
-        /// Exact committed observation.
-        observation_ref: RecordRef,
-    },
-    /// A refreshable Effect may authorize exactly this next ordinal.
-    Refreshable {
-        /// Next attempt ordinal.
-        next_attempt_ordinal: u64,
-        /// Monotonic lower-bound lineage head.
-        public_lineage_head_ref: ContentRef,
-    },
-    /// Effect entry may have happened and no successor is legal.
-    EntryUnknown {
-        /// Immutable ambiguous attempt identity.
-        access_attempt_id: AccessAttemptId,
-    },
-    /// Committed integrity evidence blocks semantic progress.
-    BlockedIntegrity {
-        /// Exact integrity observation.
-        observation_ref: RecordRef,
-    },
-}
-
-/// One current or completed fan-out lane cursor.
-// Cursor payloads are certification-bounded and rebuilt on every fold; keeping
-// them inline avoids one heap allocation per active lane during drive/replay.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LaneCursor {
-    /// One exact executable state inside this lane.
-    AtState(ActionableState),
-    /// One nested depth-two fan-out.
-    InFanOut {
-        /// Exact nested group path.
-        group_path: StructuralPath,
-        /// Lane cursors in declaration order.
-        lanes: Vec<LaneCursor>,
-    },
-    /// Exact completed nominal lane outcome.
-    Completed {
-        /// Content-addressed lane outcome value.
-        outcome_ref: ContentRef,
-    },
-}
-
-/// Exact current executable state and its access leaf.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ActionableState {
-    /// Exact normalized occurrence identity.
-    pub occurrence_id: OccurrenceId,
-    /// Exact normalized occurrence path.
-    pub occurrence_path: StructuralPath,
-    /// Stable authored or injected semantic call identity.
-    pub semantic_call_id: mfm_ids::SemanticCallId,
-    /// Exact semantic state contract selected by certification.
-    pub state_contract_ref: ContentRef,
-    /// Exact current producer-bound input passed to the state callback.
-    pub input: LexicalValueRef,
-    /// Exact semantic capability contract for Read or Effect.
-    pub capability_contract_ref: Option<ContentRef>,
-    /// Exact admitted stable Resource lineage for a refreshable Effect.
-    pub stable_resource_lineage_contract_ref: Option<ContentRef>,
-    /// Certified Pure, Read, or Effect execution kind.
-    pub execution_kind: StructuredExecutionKind,
-    /// Folded local/access state.
-    pub leaf: StateLeaf,
-}
-
-/// Sole recursive cursor for an open or closed structured program.
-// The current action is certification-bounded and remains inline so the hot
-// fold does not allocate merely to distinguish an open cursor from closure.
-#[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProgramCursor {
-    /// One current sequential state.
-    AtState(ActionableState),
-    /// One active collect-all fan-out.
-    InFanOut {
-        /// Exact group path.
-        group_path: StructuralPath,
-        /// Lane cursors in declaration order.
-        lanes: Vec<LaneCursor>,
-    },
-    /// One exact terminal operation outcome.
-    Closed {
-        /// Content-addressed nominal operation outcome.
-        outcome_ref: ContentRef,
-    },
-}
-
-/// Closed action frontier derived only from the verified cursor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StructuredFrontier {
-    /// Declaration-ordered actionable state paths.
-    Actions(Vec<ActionableState>),
-    /// Every unresolved action is an already-authorized Read.
-    WaitingReads,
-    /// Possible Effect entry blocks all later work.
-    PossibleEntry,
-    /// Committed integrity evidence blocks all later work.
-    BlockedIntegrity,
-    /// Root outcome is closed.
-    Complete,
-}
+pub use mfm_runtime::history::{
+    ActionableState, LaneCursor, ObservationQualification, ProgramCursor, StateLeaf,
+    StructuredFrontier,
+};
 
 /// One complete callback-free verified structured run view.
 pub struct VerifiedStructuredRun {
@@ -437,7 +289,7 @@ pub(super) fn verified_runs_equivalent(
 /// Callback-free verifies a complete raw structured history.
 pub(super) fn verify_recorded_history(
     raw: RawRunHistory,
-    program_verifier: &dyn StructuredProgramVerifier,
+    program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
 ) -> super::Result<VerifiedStructuredRun> {
     let (machine, journal_head, derived) =
@@ -447,7 +299,7 @@ pub(super) fn verify_recorded_history(
 
 fn fold_recorded_history(
     raw: RawRunHistory,
-    program_verifier: &dyn StructuredProgramVerifier,
+    program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
 ) -> super::Result<(FoldMachine, JournalHead, DerivedProgram)> {
     if raw.batches.is_empty() {
@@ -668,7 +520,7 @@ pub(super) struct PreparedSuccessor {
 fn prepare_validated_genesis(
     identity: &StructuredStoreIdentity,
     candidate: CommitCandidate,
-    program_verifier: &dyn StructuredProgramVerifier,
+    program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
 ) -> super::Result<CommittedBatch> {
     if candidate.expected_head.is_some() {
@@ -753,7 +605,7 @@ fn extend_verified_candidate(
 pub(super) fn prepare_admission(
     identity: &StructuredStoreIdentity,
     request: StructuredAdmissionRequest,
-    program_verifier: &dyn StructuredProgramVerifier,
+    program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
 ) -> super::Result<CommittedBatch> {
     let authored = request
@@ -946,7 +798,7 @@ pub(super) fn prepare_state_transition(
         .ok_or_else(|| invalid("current state input binding is absent"))?;
 
     let mut objects = Vec::new();
-    let (outcome, facts) = match &proposal.value {
+    let (outcome, facts) = match proposal.value() {
         ProposedTransitionValue::Success { value, facts } => {
             let (object, typed) =
                 proposed_typed_object(value, &state.output_slot.contract_ref, machine.program()?)?;
@@ -1066,7 +918,7 @@ pub(super) fn prepare_state_transition(
         CommitCandidate {
             run_id: machine.run_id.clone(),
             expected_head: Some(journal_head.clone()),
-            append_request_id: proposal.append_request_id.clone(),
+            append_request_id: proposal.append_request_id().clone(),
             tenant_fact_coordinate,
             records,
             objects,
@@ -1211,13 +1063,13 @@ pub(super) fn prepare_authorization(
         .capability_protocol
         .as_ref()
         .ok_or_else(|| invalid("authorization capability protocol is absent"))?;
-    if proposal.state_input_ref != actionable.input {
+    if *proposal.state_input_ref() != actionable.input {
         return Err(invalid(
             "authorization state input differs from the current producer binding",
         ));
     }
     let (request_object, request_ref) = proposed_typed_object(
-        &proposal.request,
+        proposal.request(),
         protocol.request_contract_ref(),
         machine.program()?,
     )?;
@@ -1239,7 +1091,7 @@ pub(super) fn prepare_authorization(
         occurrence_id: actionable.occurrence_id.clone(),
         occurrence_path_ref,
         semantic_call_id: state.semantic_call_id.clone(),
-        state_input_ref: proposal.state_input_ref.clone(),
+        state_input_ref: proposal.state_input_ref().clone(),
         access_kind,
         semantic_head,
         capability_contract_ref: capability_contract_ref.clone(),
@@ -1248,7 +1100,7 @@ pub(super) fn prepare_authorization(
         adapter_implementation_ref,
         request: request_ref,
         request_digest,
-        physical_binding_ref: proposal.physical_binding_certificate.content_ref.clone(),
+        physical_binding_ref: proposal.physical_binding_certificate().content_ref.clone(),
         stable_resource_lineage_contract_ref,
     };
     authorization.access_attempt_id = derive_access_attempt_id(&AccessAttemptPreimage {
@@ -1272,7 +1124,7 @@ pub(super) fn prepare_authorization(
     .map_err(|_| invalid("authorization access identity cannot be derived"))?;
     let mut objects = vec![
         request_object,
-        proposal.physical_binding_certificate.clone(),
+        proposal.physical_binding_certificate().clone(),
     ];
     filter_existing_objects(&mut objects, &machine.objects)?;
     let run_id = verified.run_id().clone();
@@ -1283,7 +1135,7 @@ pub(super) fn prepare_authorization(
         CommitCandidate {
             run_id,
             expected_head: Some(expected_head),
-            append_request_id: proposal.append_request_id.clone(),
+            append_request_id: proposal.append_request_id().clone(),
             tenant_fact_coordinate,
             records: vec![RunRecord::ExternalAccessAuthorized(authorization)],
             objects,
@@ -1331,18 +1183,7 @@ pub(super) enum PreparedObservation {
     Append(Box<PreparedSuccessor>),
 }
 
-/// Store-owned preflight of one invoked completion before Runtime freezes its
-/// pending observation bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservationQualification {
-    /// The proposed completion is valid and has not already committed.
-    Ready,
-    /// The exact logical observation already committed with identical bytes.
-    ExistingSame,
-    /// Proposed Effect supersession evidence failed its purpose-limited
-    /// physical-lineage verification.
-    InvalidSupersessionEvidence,
-}
+
 
 pub(super) fn qualify_observation(
     verified: &VerifiedStructuredRun,
@@ -1411,13 +1252,13 @@ pub(super) fn prepare_observation(
         let authorization = machine
             .authorizations
             .values()
-            .find(|authorization| authorization.record_ref == proposal.authorization_ref)
+            .find(|authorization| authorization.record_ref == *proposal.authorization_ref())
             .ok_or_else(|| invalid("observation authorization reference is absent"))?;
         let (observation, objects) = proposed_observation(
             machine,
             authorization,
-            proposal.authorization_ref.clone(),
-            &proposal.outcome,
+            proposal.authorization_ref().clone(),
+            proposal.outcome(),
         )?;
         if let Some(existing) = machine
             .observations
@@ -1441,7 +1282,7 @@ pub(super) fn prepare_observation(
         CommitCandidate {
             run_id,
             expected_head: Some(expected_head),
-            append_request_id: proposal.append_request_id.clone(),
+            append_request_id: proposal.append_request_id().clone(),
             tenant_fact_coordinate: TenantFactCoordinate::None,
             records: vec![RunRecord::ExternalAccessObserved(observation)],
             objects,

@@ -8,8 +8,7 @@ use mfm_journal::structured::{
 };
 use mfm_spec::structured::OperationOutcome;
 use mfm_store::structured::{
-    StructuredHistoryBackend, StructuredRunHistoryReader, StructuredStoreError,
-    VerifiedStructuredRun,
+    ReplayRunReader, StructuredHistoryBackend, StructuredStoreError, VerifiedStructuredRun,
 };
 use serde::{Deserialize, Serialize};
 
@@ -251,13 +250,10 @@ impl StructuredOperationOutcomeView {
 /// authority. The returned view is derived only from committed records and
 /// content-addressed objects.
 pub async fn verify_recorded_history<B: StructuredHistoryBackend>(
-    reader: &StructuredRunHistoryReader<B>,
+    reader: &ReplayRunReader<B>,
     run_id: &RunId,
 ) -> Result<VerifiedStructuredRun> {
-    reader
-        .load_verified(run_id)
-        .await
-        .map_err(classify_store_error)
+    reader.load(run_id).await.map_err(classify_store_error)
 }
 
 /// Projects the canonical callback-free replay summary of one verified prefix.

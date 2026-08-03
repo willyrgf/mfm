@@ -27,123 +27,39 @@ use super::fold::{
     PreparedObservation, PreparedSuccessor, VerifiedStructuredRun,
 };
 
-/// Producer-free canonical value proposed by a qualified callback or admission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProposedCanonicalValue {
-    canonical: PlainCanonicalJsonBytes,
-}
+pub use mfm_runtime::history::{
+    AccessAuthorizationProposal, AccessObservationProposal, ProposedCanonicalValue,
+    ProposedObservationOutcome, ProposedTransitionValue, StateTransitionProposal,
+    StructuredAdmissionMaterial,
+};
 
-/// Exact producer-free public objects selected before run admission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuredAdmissionMaterial {
-    pub(super) configuration: HistoryObject,
-    pub(super) context_manifest: HistoryObject,
-    pub(super) prior_run_source_manifest: HistoryObject,
-    pub(super) routing_policy: HistoryObject,
-    pub(super) stable_resource_lineage_contract_refs: Vec<ContentRef>,
-}
-
-impl StructuredAdmissionMaterial {
-    /// Validates and canonically orders one complete non-secret admission bundle.
-    pub fn new(
-        configuration: HistoryObject,
-        context_manifest: HistoryObject,
-        prior_run_source_manifest: HistoryObject,
-        routing_policy: HistoryObject,
-        mut stable_resource_lineage_contract_refs: Vec<ContentRef>,
-    ) -> super::Result<Self> {
-        validate_admission_object(&configuration, ADMISSION_CONFIGURATION_OBJECT_TYPE)?;
-        validate_admission_object(&context_manifest, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE)?;
-        validate_admission_object(
-            &prior_run_source_manifest,
-            ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE,
-        )?;
-        PriorRunFactSourceManifest::from_history_object(&prior_run_source_manifest)
-            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-        validate_admission_object(&routing_policy, ADMISSION_ROUTING_POLICY_OBJECT_TYPE)?;
-        stable_resource_lineage_contract_refs.sort();
-        if stable_resource_lineage_contract_refs
-            .windows(2)
-            .any(|pair| pair[0] == pair[1])
-        {
-            return Err(super::StructuredStoreError::InvalidHistory);
-        }
-        let mut all_refs = vec![
-            &configuration.content_ref,
-            &context_manifest.content_ref,
-            &prior_run_source_manifest.content_ref,
-            &routing_policy.content_ref,
-        ];
-        all_refs.extend(stable_resource_lineage_contract_refs.iter());
-        all_refs.sort();
-        if all_refs.windows(2).any(|pair| pair[0] == pair[1]) {
-            return Err(super::StructuredStoreError::InvalidHistory);
-        }
-        Ok(Self {
-            configuration,
-            context_manifest,
-            prior_run_source_manifest,
-            routing_policy,
-            stable_resource_lineage_contract_refs,
-        })
-    }
-}
-
-fn validate_admission_object(object: &HistoryObject, expected_type: &str) -> super::Result<()> {
-    object
-        .validate()
-        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-    if object.object_type.as_str() != expected_type {
-        return Err(super::StructuredStoreError::InvalidHistory);
-    }
-    Ok(())
-}
-
-impl ProposedCanonicalValue {
-    /// Canonicalizes one float-free serializable value.
-    pub fn from_value<T: Serialize>(value: &T) -> super::Result<Self> {
-        let json = serde_json::to_string(value)
-            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-        Self::from_json(&json)
-    }
-
-    /// Parses one exact float-free JSON value into canonical bytes.
-    pub fn from_json(json: &str) -> super::Result<Self> {
-        let canonical = PlainCanonicalJsonBytes::from_json_str(json)
-            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-        Ok(Self { canonical })
-    }
-
-    /// Returns the exact canonical proposal bytes.
-    pub const fn canonical(&self) -> &PlainCanonicalJsonBytes {
-        &self.canonical
-    }
-}
-
-/// Complete producer-free request to admit one certified run.
+/// Complete producer-free request to admit one certified run (store-internal).
+///
+/// Run identity is supplied only after the adapter derives it from the annex
+/// preimage; public callers use [`mfm_runtime::history::StructuredAdmissionCommand`].
 pub struct StructuredAdmissionRequest {
-    pub(super) run_id: RunId,
-    pub(super) tenant_scope_id: TenantScopeId,
-    pub(super) invocation_identity: InvocationIdentity,
-    pub(super) entry_point_operation_id: StableId,
-    pub(super) certified_program: CertifiedProgramDocument,
+    pub(super) run_id: mfm_ids::RunId,
+    pub(super) tenant_scope_id: mfm_ids::TenantScopeId,
+    pub(super) invocation_identity: mfm_ids::InvocationIdentity,
+    pub(super) entry_point_operation_id: mfm_ids::StableId,
+    pub(super) certified_program: mfm_spec::structured::CertifiedProgramDocument,
     pub(super) material: StructuredAdmissionMaterial,
     pub(super) initial_values: Vec<ProposedCanonicalValue>,
-    pub(super) append_request_id: AppendRequestId,
+    pub(super) append_request_id: mfm_ids::AppendRequestId,
 }
 
 impl StructuredAdmissionRequest {
     /// Binds one exact qualified program document and declaration-ordered roots.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        run_id: RunId,
-        tenant_scope_id: TenantScopeId,
-        invocation_identity: InvocationIdentity,
-        entry_point_operation_id: StableId,
-        certified_program: CertifiedProgramDocument,
+    pub(super) fn new(
+        run_id: mfm_ids::RunId,
+        tenant_scope_id: mfm_ids::TenantScopeId,
+        invocation_identity: mfm_ids::InvocationIdentity,
+        entry_point_operation_id: mfm_ids::StableId,
+        certified_program: mfm_spec::structured::CertifiedProgramDocument,
         material: StructuredAdmissionMaterial,
         initial_values: Vec<ProposedCanonicalValue>,
-        append_request_id: AppendRequestId,
+        append_request_id: mfm_ids::AppendRequestId,
     ) -> Self {
         Self {
             run_id,
@@ -157,127 +73,8 @@ impl StructuredAdmissionRequest {
         }
     }
 
-    /// Returns the exact run this admission would create.
-    pub const fn run_id(&self) -> &RunId {
+    pub(super) const fn run_id(&self) -> &mfm_ids::RunId {
         &self.run_id
-    }
-}
-
-/// Producer-free state callback result selected for one current occurrence.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProposedTransitionValue {
-    /// Successful state output plus exact fact proposals.
-    Success {
-        /// Canonical successful value.
-        value: ProposedCanonicalValue,
-        /// Exact callback-authored facts.
-        facts: FactSet,
-    },
-    /// Typed state failure; failed transitions cannot emit facts.
-    Failure(ProposedCanonicalValue),
-}
-
-/// One physical transition append request.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StateTransitionProposal {
-    pub(super) append_request_id: AppendRequestId,
-    pub(super) value: ProposedTransitionValue,
-}
-
-impl StateTransitionProposal {
-    /// Constructs one successful callback proposal.
-    pub fn success(
-        append_request_id: AppendRequestId,
-        value: ProposedCanonicalValue,
-        facts: FactSet,
-    ) -> Self {
-        Self {
-            append_request_id,
-            value: ProposedTransitionValue::Success { value, facts },
-        }
-    }
-
-    /// Constructs one typed failure callback proposal.
-    pub fn failure(append_request_id: AppendRequestId, value: ProposedCanonicalValue) -> Self {
-        Self {
-            append_request_id,
-            value: ProposedTransitionValue::Failure(value),
-        }
-    }
-}
-
-/// Exact current input, request, and public certificate for one current access.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessAuthorizationProposal {
-    pub(super) append_request_id: AppendRequestId,
-    pub(super) state_input_ref: LexicalValueRef,
-    pub(super) request: ProposedCanonicalValue,
-    pub(super) physical_binding_certificate: HistoryObject,
-}
-
-impl AccessAuthorizationProposal {
-    /// Constructs one access proposal from a sealed binding's public material.
-    pub fn new(
-        append_request_id: AppendRequestId,
-        state_input_ref: LexicalValueRef,
-        request: ProposedCanonicalValue,
-        physical_binding_certificate: HistoryObject,
-    ) -> Self {
-        Self {
-            append_request_id,
-            state_input_ref,
-            request,
-            physical_binding_certificate,
-        }
-    }
-}
-
-/// Producer-free completion returned after consuming one affine invocation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ProposedObservationOutcome {
-    /// Exact returned response.
-    Returned(ProposedCanonicalValue),
-    /// Exact reviewed state-facing safe failure.
-    SafeFailure(ProposedCanonicalValue),
-    /// Qualified proof that a refreshable Effect did not enter.
-    SupersededBeforeEntry {
-        /// Current public lineage-head certificate.
-        public_lineage_head: Box<HistoryObject>,
-        /// Exact typed refresh evidence.
-        evidence: ProposedCanonicalValue,
-    },
-    /// Effect entry may have happened.
-    EntryUnknown {
-        /// Stable reviewed redaction-safe fault code.
-        fault_code: StableId,
-    },
-    /// Integrity evidence blocks semantic progress.
-    IntegrityFault {
-        /// Stable reviewed redaction-safe fault code.
-        fault_code: StableId,
-    },
-}
-
-/// Stable observation material independent of a predecessor-bound envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccessObservationProposal {
-    pub(super) append_request_id: AppendRequestId,
-    pub(super) authorization_ref: RecordRef,
-    pub(super) outcome: ProposedObservationOutcome,
-}
-
-impl AccessObservationProposal {
-    /// Binds one completion to the exact committed authorization it consumed.
-    pub fn new(
-        append_request_id: AppendRequestId,
-        authorization_ref: RecordRef,
-        outcome: ProposedObservationOutcome,
-    ) -> Self {
-        Self {
-            append_request_id,
-            authorization_ref,
-            outcome,
-        }
     }
 }
 
@@ -427,6 +224,94 @@ impl StructuredAppendAttempt {
     pub(super) fn confirm_existing_same(&mut self) {
         self.outcome = BackendAppendOutcome::ExistingSame(self.candidate.clone());
     }
+
+    /// Converts a store attempt into the Runtime-facing sealed attempt.
+    pub(super) fn into_runtime_attempt(self) -> mfm_runtime::history::StructuredAppendAttempt {
+        use mfm_journal::structured::RunRecord;
+        use mfm_runtime::history::{HistoryAppendOutcome, NewlyAppendedAuthorization};
+
+        let closed = self
+            .committed()
+            .is_some_and(|batch| {
+                batch
+                    .records
+                    .iter()
+                    .any(|record| matches!(&record.record, RunRecord::RunClosed(_)))
+            });
+        let outcome = match &self.outcome {
+            BackendAppendOutcome::NewlyCommitted(batch) => {
+                HistoryAppendOutcome::NewlyCommitted(batch.clone())
+            }
+            BackendAppendOutcome::ExistingSame(batch) => {
+                HistoryAppendOutcome::ExistingSame(batch.clone())
+            }
+            BackendAppendOutcome::StaleHead => HistoryAppendOutcome::StaleHead,
+            BackendAppendOutcome::AcknowledgementUnknown => {
+                HistoryAppendOutcome::AcknowledgementUnknown
+            }
+        };
+        let authorization = if matches!(self.outcome, BackendAppendOutcome::NewlyCommitted(_)) {
+            let batch = &self.candidate;
+            if let [assigned] = batch.records.as_slice() {
+                if let RunRecord::ExternalAccessAuthorized(authorization) = &assigned.record {
+                    let fact_scan = self.fact_scan_permit.map(|permit| {
+                        let port: Box<
+                            dyn FnOnce(
+                                    mfm_facts::FactSelectionRequest,
+                                ) -> std::pin::Pin<
+                                    Box<
+                                        dyn std::future::Future<
+                                                Output = mfm_certify::structured::PriorRunFactScanCompletion,
+                                            > + Send
+                                            + 'static,
+                                    >,
+                                > + Send,
+                        > = Box::new(move |request| {
+                            Box::pin(async move {
+                                match permit.invoke(request).await {
+                                    super::fact_scan::PriorRunFactScanCompletion::Returned(v) => {
+                                        mfm_certify::structured::PriorRunFactScanCompletion::Returned(v)
+                                    }
+                                    super::fact_scan::PriorRunFactScanCompletion::SafeFailure(v) => {
+                                        mfm_certify::structured::PriorRunFactScanCompletion::SafeFailure(
+                                            v,
+                                        )
+                                    }
+                                    super::fact_scan::PriorRunFactScanCompletion::IntegrityFault(
+                                        code,
+                                    ) => {
+                                        mfm_certify::structured::PriorRunFactScanCompletion::IntegrityFault(
+                                            code,
+                                        )
+                                    }
+                                }
+                            })
+                        });
+                        port
+                    });
+                    Some(NewlyAppendedAuthorization::from_store_mint(
+                        assigned.record_ref.clone(),
+                        authorization.clone(),
+                        fact_scan,
+                    ))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        mfm_runtime::history::StructuredAppendAttempt::from_store_attempt(
+            self.append_request_id,
+            self.candidate_digest,
+            self.candidate,
+            outcome,
+            authorization,
+            closed,
+        )
+    }
 }
 
 impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
@@ -451,7 +336,7 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
         verified: VerifiedStructuredRun,
         proposal: &StateTransitionProposal,
     ) -> super::Result<StructuredAppendAttempt> {
-        let tenant_fact_coordinate = match &proposal.value {
+        let tenant_fact_coordinate = match proposal.value() {
             ProposedTransitionValue::Success { facts, .. } if !facts.as_slice().is_empty() => {
                 let current = self
                     .backend

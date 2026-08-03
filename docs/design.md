@@ -43,8 +43,11 @@ structural values; they are not instructions.
   No mutable cursor row and no second reducer exist.
 - `RunClosed` shares the append that first makes the root outcome derivable, including a
   zero-state `RunAdmitted + RunClosed` append. No record is legal after closure.
-- Runtime owns the only production `StructuredRunHistoryWriter` and performs at most one semantic
-  transition or one audited external-access operation per `drive_once` call.
+- Runtime owns the only production path that can request semantic run-history mutation through
+  `RuntimeHistoryPort`. The store's private adapter owns the sole fold and append authority.
+  Runtime performs at most one semantic transition or one audited external-access operation per
+  `drive_once` call. Callers never supply a trusted run digest for admission; the store derives
+  `RunId` from the annex `mfm.run-id-preimage.v1`.
 - Every external operation is authorized durably before possible entry. One committed
   authorization can mint exactly one affine invocation authority.
 - Every normal invoker completion is frozen as pending observation material and committed before
@@ -83,6 +86,13 @@ closure, and secret-free implementation manifest. Admission resolves the trusted
 from the qualified registry; a caller cannot select weaker predicates. A persisted verifier
 extracts the authored object, repeats certification, and requires the exact root and complete
 document. Its cache is keyed by certified content identity, never by a nominal entry-point id.
+
+Registered authored programs may be replaced only through the support-envelope API of process
+qualification before a registry is finalized. That replacement changes which authored candidate a
+future certification may accept under an entry's frozen signature. It does not grant callers the
+ability to substitute a different expanded program or schema set for an already admitted certified
+root: on cache miss the store invokes the concrete `AdmissionVerificationRegistry::verify_root` and
+consumes private-field `CertifiedProgram` data keyed by certified content identity.
 
 ### Failure algebra
 

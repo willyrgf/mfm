@@ -113,9 +113,21 @@ fn structured_history_ownership_edges_are_one_way() {
 
     assert_dependencies(
         &packages,
+        "mfm-certify",
+        &["mfm-program", "mfm-journal"],
+        &["mfm-store", "mfm-runtime", "mfm-app", "mfm-storage-postgres"],
+    );
+    assert_dependencies(
+        &packages,
         "mfm-runtime",
-        &["mfm-certify", "mfm-program", "mfm-store"],
-        &["mfm-app", "mfm-replay", "mfm-storage-postgres"],
+        &["mfm-certify", "mfm-program", "mfm-journal"],
+        &["mfm-store", "mfm-app", "mfm-replay", "mfm-storage-postgres"],
+    );
+    assert_dependencies(
+        &packages,
+        "mfm-store",
+        &["mfm-runtime", "mfm-certify", "mfm-journal"],
+        &["mfm-app", "mfm-storage-postgres"],
     );
     assert_dependencies(
         &packages,
@@ -126,8 +138,8 @@ fn structured_history_ownership_edges_are_one_way() {
     assert_dependencies(
         &packages,
         "mfm-storage-postgres",
-        &["mfm-journal", "mfm-store"],
-        &["mfm-app", "mfm-replay", "mfm-runtime"],
+        &["mfm-journal", "mfm-store", "mfm-certify"],
+        &["mfm-app", "mfm-replay"],
     );
     assert_dependencies(
         &packages,

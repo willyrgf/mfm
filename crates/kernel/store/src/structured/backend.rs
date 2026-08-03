@@ -2,24 +2,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_ids::{AppendRequestId, ContentDigest, RunId, StoreEpoch, StoreScopeId, TenantScopeId};
+use mfm_ids::{AppendRequestId, ContentDigest, RunId, TenantScopeId};
 use mfm_journal::structured::{CommittedBatch, JournalHead, RecordRef, TenantFactFrontier};
 
 use super::fact_scan::{verify_actionable_history, PriorRunFactSource};
-use super::fold::{
-    validate_resolved_batch, StructuredProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
-};
+use super::fold::{validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun};
 use super::mutation::StructuredAppendAttempt;
 use super::qualification::PublicPhysicalBindingVerifier;
 
-/// Immutable qualified identity of one structured-history writer lineage.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuredStoreIdentity {
-    /// Qualified store lineage.
-    pub store_scope_id: StoreScopeId,
-    /// Monotonic authoritative writer epoch.
-    pub store_epoch: StoreEpoch,
-}
+pub use mfm_runtime::history::StructuredStoreIdentity;
 
 /// Boxed asynchronous structured-history backend operation.
 pub type StructuredBackendFuture<'a, T> =
@@ -211,20 +202,17 @@ pub(super) fn prior_run_fact_source<B: StructuredHistoryBackend>(
     })
 }
 
-/// One-shot qualified store assembly before writer/read authority separation.
-pub struct StructuredRunStore<B: StructuredHistoryBackend> {
+/// Private one-shot qualified store assembly before writer/read authority separation.
+pub(super) struct StructuredRunStore<B: StructuredHistoryBackend> {
     backend: Arc<B>,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    program_verifier: Arc<dyn ProgramVerifier>,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 }
 
 impl<B: StructuredHistoryBackend> StructuredRunStore<B> {
-    /// Binds one qualified backend to its exact callback-free certification
-    /// verification snapshot.
-    #[doc(hidden)]
-    pub fn new(
+    pub(super) fn new(
         backend: B,
-        program_verifier: Arc<dyn StructuredProgramVerifier>,
+        program_verifier: Arc<dyn ProgramVerifier>,
         physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
     ) -> Self {
         Self {
@@ -234,8 +222,7 @@ impl<B: StructuredHistoryBackend> StructuredRunStore<B> {
         }
     }
 
-    /// Consumes assembly into the sole writer and cloneable purpose reader.
-    pub fn split(self) -> (StructuredRunHistoryWriter<B>, StructuredRunHistoryReader<B>) {
+    pub(super) fn split(self) -> (StructuredRunHistoryWriter<B>, StructuredRunHistoryReader<B>) {
         (
             StructuredRunHistoryWriter {
                 backend: Arc::clone(&self.backend),
@@ -251,10 +238,10 @@ impl<B: StructuredHistoryBackend> StructuredRunStore<B> {
     }
 }
 
-/// Sole non-cloneable structured RunHistory mutation authority.
-pub struct StructuredRunHistoryWriter<B: StructuredHistoryBackend> {
+/// Private non-cloneable structured RunHistory mutation authority.
+pub(super) struct StructuredRunHistoryWriter<B: StructuredHistoryBackend> {
     pub(super) backend: Arc<B>,
-    pub(super) program_verifier: Arc<dyn StructuredProgramVerifier>,
+    pub(super) program_verifier: Arc<dyn ProgramVerifier>,
     pub(super) physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 }
 
@@ -334,10 +321,10 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
     }
 }
 
-/// Cloneable callback-free structured RunHistory read authority.
-pub struct StructuredRunHistoryReader<B: StructuredHistoryBackend> {
+/// Private complete-history reader used only to build sealed purpose readers.
+pub(super) struct StructuredRunHistoryReader<B: StructuredHistoryBackend> {
     backend: Arc<B>,
-    program_verifier: Arc<dyn StructuredProgramVerifier>,
+    program_verifier: Arc<dyn ProgramVerifier>,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 }
 

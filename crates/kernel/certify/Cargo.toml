@@ -26,7 +26,6 @@ mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
-mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }

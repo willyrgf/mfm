@@ -1,30 +1,28 @@
 //! One-action interpreter over the sole structured RunHistory fold.
 
-use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
-use std::sync::{Arc, Mutex};
 
 use futures_util::FutureExt;
 use mfm_canonical::sha256_digest_bytes;
 use mfm_certify::structured::{
-    AccessTargetSelection, AdmissionVerificationRegistry, EffectPhysicalBindingKind,
+    AccessTargetSelection, EffectPhysicalBindingKind, NewlyAppendedAuthorization,
     PhysicalBindingKind, QualifiedAccessCompletion, QualifiedComponentIdentity,
     QualifiedPhysicalBinding, QualifiedProcessFault, QualifiedProcessFaultCode,
-    QualifiedProgramRegistry, QualifiedStateProposal, QualifiedStateProposalValue,
-    QualifiedStateSettlement, ReadPhysicalBindingKind, RuntimeProcessRegistry,
+    QualifiedStateProposal, QualifiedStateProposalValue, QualifiedStateSettlement,
+    ReadPhysicalBindingKind, RuntimeProcessRegistry,
 };
-use mfm_ids::{AccessAttemptId, AppendRequestId, ContentRef, OccurrenceId, RunId, StableId};
-use mfm_journal::structured::{JournalHead, ObservationOutcome, RecordRef, RunRecord};
+use mfm_ids::{AccessAttemptId, AppendRequestId, ContentRef, OccurrenceId, RunId};
+use mfm_journal::structured::{JournalHead, ObservationOutcome, RecordRef};
 use mfm_spec::structured::{StructuredComponentKind, StructuredExecutionKind};
 use mfm_spec::CanonicalJsonValue;
-use mfm_store::structured::{
-    AccessAuthorizationProposal, AccessObservationProposal, BackendAppendOutcome,
-    NewlyAppendedAuthorization, ObservationCommit, ObservationQualification,
-    ProposedCanonicalValue, ProposedObservationOutcome, StateLeaf, StateTransitionProposal,
-    StructuredAdmissionRequest, StructuredAppendAttempt, StructuredFrontier,
-    StructuredHistoryBackend, StructuredProgramVerifier, StructuredRunHistoryWriter,
-    StructuredStoreError, StructuredStoreIdentity, VerifiedProgramData, VerifiedStructuredRun,
+
+use crate::history::{
+    AccessAuthorizationProposal, AccessObservationProposal, ActionableState, HistoryAppendOutcome,
+    HistoryError, ObservationCommit, ObservationQualification, ProposedCanonicalValue,
+    ProposedObservationOutcome, RuntimeHistoryPort, StateLeaf, StateTransitionProposal,
+    StructuredAdmissionCommand, StructuredAppendAttempt, StructuredFrontier,
+    StructuredStoreIdentity, VerifiedRunView,
 };
 
 /// Result returned by structured Runtime preparation and drive operations.
@@ -183,113 +181,38 @@ pub enum DriveOutcome {
     Closed,
 }
 
-/// Callback-free adapter from the certifier's qualified admission snapshot to
-/// the store's persisted-program verification port.
-#[derive(Debug, Clone)]
-pub struct StoreProgramVerifier {
-    registry: AdmissionVerificationRegistry,
-    verified_programs: Arc<Mutex<BTreeMap<ContentRef, Arc<VerifiedProgramData>>>>,
-}
-
-impl StoreProgramVerifier {
-    /// Wraps the exact callback-free registry half returned by qualified assembly.
-    pub fn new(registry: AdmissionVerificationRegistry) -> Self {
-        Self {
-            registry,
-            verified_programs: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-}
-
-impl StructuredProgramVerifier for StoreProgramVerifier {
-    fn verify(
-        &self,
-        entry_point_id: &StableId,
-        root: &mfm_spec::structured::CertifiedProgramRoot,
-        authored: &mfm_spec::CanonicalJsonValue,
-    ) -> std::result::Result<Arc<VerifiedProgramData>, StructuredStoreError> {
-        let program_ref = root
-            .content_ref()
-            .map_err(|_| StructuredStoreError::Certification)?;
-        if let Some(cached) = self
-            .verified_programs
-            .lock()
-            .map_err(|_| StructuredStoreError::Certification)?
-            .get(&program_ref)
-            .cloned()
-        {
-            let authored_matches = cached
-                .document()
-                .component_closure
-                .iter()
-                .find(|object| {
-                    object.content_ref == cached.document().root.components.authored_program_ref
-                })
-                .is_some_and(|object| &object.value == authored);
-            return if &cached.document().root == root
-                && cached.expanded().operation_id == *entry_point_id
-                && authored_matches
-            {
-                Ok(cached)
-            } else {
-                Err(StructuredStoreError::Certification)
-            };
-        }
-        let certified = self
-            .registry
-            .verify_root(entry_point_id, root, authored)
-            .map_err(|_| StructuredStoreError::Certification)?;
-        let (document, expanded, value_schemas) = certified.into_verification_parts();
-        let verified = Arc::new(VerifiedProgramData::new(document, expanded, value_schemas));
-        let mut cache = self
-            .verified_programs
-            .lock()
-            .map_err(|_| StructuredStoreError::Certification)?;
-        match cache.get(&program_ref) {
-            Some(existing) if existing.document().root == verified.document().root => {
-                Ok(Arc::clone(existing))
-            }
-            Some(_) => Err(StructuredStoreError::Certification),
-            None => {
-                cache.insert(program_ref, Arc::clone(&verified));
-                Ok(verified)
-            }
-        }
-    }
-}
-
-/// Consumes one qualified program registry into matching store-verification and
-/// Runtime process authorities.
-pub fn split_qualified_registry(
-    registry: QualifiedProgramRegistry,
-) -> (Arc<StoreProgramVerifier>, RuntimeProcessRegistry) {
-    let (admission, processes) = registry.into_runtime_parts();
-    (Arc::new(StoreProgramVerifier::new(admission)), processes)
-}
-
-/// Sole structured Runtime holder of a non-cloneable history writer.
-pub struct Runtime<B: StructuredHistoryBackend> {
-    writer: StructuredRunHistoryWriter<B>,
+/// Sole structured Runtime holder of history-port mutation authority.
+pub struct Runtime<P: RuntimeHistoryPort> {
+    history: P,
     processes: RuntimeProcessRegistry,
 }
 
-impl<B: StructuredHistoryBackend> Runtime<B> {
-    /// Binds the sole writer to its matching process registry.
-    pub fn new(writer: StructuredRunHistoryWriter<B>, processes: RuntimeProcessRegistry) -> Self {
-        Self { writer, processes }
+impl<P: RuntimeHistoryPort> Runtime<P> {
+    /// Binds one history port to its matching process registry.
+    ///
+    /// Production assembly constructs both halves from one complete qualified
+    /// registry and a private store adapter. Callers cannot extract the port.
+    pub fn new(history: P, processes: RuntimeProcessRegistry) -> Self {
+        Self { history, processes }
     }
 
     /// Verifies and atomically admits one exact structured run.
+    ///
+    /// Run identity is derived by the store adapter; the derived id is returned
+    /// with the append attempt.
     pub async fn admit_run(
         &self,
-        request: StructuredAdmissionRequest,
-    ) -> Result<StructuredAppendAttempt> {
-        let run_id = request.run_id().clone();
-        self.writer.admit_run(request).await.map_err(|error| {
+        command: StructuredAdmissionCommand,
+    ) -> Result<(RunId, StructuredAppendAttempt)> {
+        self.history.admit_run(command).await.map_err(|error| {
             self.store_fault(
                 error,
                 RuntimeFaultPhase::AppendCandidate,
-                run_id,
+                // Run id is not known before derivation failures; use a placeholder digest-free fault subject only via store identity.
+                RunId::from_digest(
+                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                    mfm_canonical::sha256_digest_bytes(b"mfm.runtime.admission-fault.v1"),
+                ),
                 None,
                 None,
             )
@@ -348,21 +271,21 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
             run_id,
             pre_fault_head,
             occurrence_id,
-            subject: RuntimeFaultSubject::Store(self.writer.store_identity().clone()),
+            subject: RuntimeFaultSubject::Store(self.history.store_identity().clone()),
             store_fault_kind: None,
         }
     }
 
     fn proposal_store_fault(
         &self,
-        error: StructuredStoreError,
+        error: HistoryError,
         phase: RuntimeFaultPhase,
         run_id: RunId,
         pre_fault_head: Option<JournalHead>,
         occurrence_id: Option<OccurrenceId>,
         component: QualifiedComponentIdentity,
     ) -> RuntimeError {
-        if error == StructuredStoreError::CandidateRejected {
+        if error == HistoryError::CandidateRejected {
             self.component_fault(
                 RuntimeFaultCode::CandidateRejected,
                 phase,
@@ -378,23 +301,23 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     fn store_fault(
         &self,
-        error: StructuredStoreError,
+        error: HistoryError,
         phase: RuntimeFaultPhase,
         run_id: RunId,
         pre_fault_head: Option<JournalHead>,
         occurrence_id: Option<OccurrenceId>,
     ) -> RuntimeError {
         let store_fault_kind = match error {
-            StructuredStoreError::RunNotFound => RuntimeStoreFaultKind::RunNotFound,
-            StructuredStoreError::InvalidHistory => RuntimeStoreFaultKind::InvalidHistory,
-            StructuredStoreError::CandidateRejected => {
+            HistoryError::RunNotFound => RuntimeStoreFaultKind::RunNotFound,
+            HistoryError::InvalidHistory => RuntimeStoreFaultKind::InvalidHistory,
+            HistoryError::CandidateRejected => {
                 return self.candidate_fault(phase, run_id, pre_fault_head, occurrence_id);
             }
-            StructuredStoreError::Certification => RuntimeStoreFaultKind::Certification,
-            StructuredStoreError::StaleHead => RuntimeStoreFaultKind::StaleHead,
-            StructuredStoreError::AppendConflict => RuntimeStoreFaultKind::AppendConflict,
-            StructuredStoreError::BackendUnavailable => RuntimeStoreFaultKind::BackendUnavailable,
-            StructuredStoreError::AcknowledgementUnknown => {
+            HistoryError::Certification => RuntimeStoreFaultKind::Certification,
+            HistoryError::StaleHead => RuntimeStoreFaultKind::StaleHead,
+            HistoryError::AppendConflict => RuntimeStoreFaultKind::AppendConflict,
+            HistoryError::BackendUnavailable => RuntimeStoreFaultKind::BackendUnavailable,
+            HistoryError::AcknowledgementUnknown => {
                 RuntimeStoreFaultKind::AcknowledgementUnknown
             }
         };
@@ -412,14 +335,14 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
             run_id,
             pre_fault_head,
             occurrence_id,
-            subject: RuntimeFaultSubject::Store(self.writer.store_identity().clone()),
+            subject: RuntimeFaultSubject::Store(self.history.store_identity().clone()),
             store_fault_kind: Some(store_fault_kind),
         }
     }
 
     /// Interprets and performs at most one fold-derived semantic or audited action.
     pub async fn drive_once(&self, run_id: &RunId) -> Result<DriveOutcome> {
-        let verified = self.writer.load_verified(run_id).await.map_err(|error| {
+        let verified = self.history.load_verified(run_id).await.map_err(|error| {
             self.store_fault(
                 error,
                 RuntimeFaultPhase::LoadHistory,
@@ -548,8 +471,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn commit_state_proposal(
         &self,
-        mut verified: VerifiedStructuredRun,
-        state: mfm_store::structured::ActionableState,
+        mut verified: P::VerifiedRun,
+        state: ActionableState,
         proposal: QualifiedStateProposal,
     ) -> Result<DriveOutcome> {
         let run_id = verified.run_id().clone();
@@ -584,7 +507,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                     )
                 })?;
             let mut attempt = self
-                .writer
+                .history
                 .commit_state_transition(verified, &transition)
                 .await
                 .map_err(|error| {
@@ -598,25 +521,14 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                     )
                 })?;
             match attempt.outcome() {
-                BackendAppendOutcome::NewlyCommitted(batch)
-                | BackendAppendOutcome::ExistingSame(batch) => {
-                    let closed = batch
-                        .records
-                        .iter()
-                        .any(|record| matches!(&record.record, RunRecord::RunClosed(_)));
-                    let _successor = attempt.into_committed_successor().ok_or_else(|| {
-                        self.candidate_fault(
-                            RuntimeFaultPhase::QualifyCandidate,
-                            run_id.clone(),
-                            Some(pre_fault_head.clone()),
-                            Some(occurrence_id.clone()),
-                        )
-                    })?;
+                HistoryAppendOutcome::NewlyCommitted(_)
+                | HistoryAppendOutcome::ExistingSame(_) => {
+                    let closed = attempt.closed();
                     return Ok(DriveOutcome::TransitionCommitted { closed });
                 }
-                BackendAppendOutcome::AcknowledgementUnknown => {
+                HistoryAppendOutcome::AcknowledgementUnknown => {
                     if self
-                        .writer
+                        .history
                         .resolve_attempt(&mut attempt)
                         .await
                         .map_err(|error| {
@@ -629,32 +541,21 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                             )
                         })?
                     {
-                        let batch = attempt.committed().ok_or_else(|| {
-                            self.candidate_fault(
+                        if attempt.committed().is_none() {
+                            return Err(self.candidate_fault(
                                 RuntimeFaultPhase::QualifyCandidate,
                                 run_id.clone(),
                                 Some(pre_fault_head.clone()),
                                 Some(occurrence_id.clone()),
-                            )
-                        })?;
-                        let closed = batch
-                            .records
-                            .iter()
-                            .any(|record| matches!(&record.record, RunRecord::RunClosed(_)));
-                        let _successor = attempt.into_committed_successor().ok_or_else(|| {
-                            self.candidate_fault(
-                                RuntimeFaultPhase::QualifyCandidate,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            )
-                        })?;
+                            ));
+                        }
+                        let closed = attempt.closed();
                         return Ok(DriveOutcome::TransitionCommitted { closed });
                     }
                 }
-                BackendAppendOutcome::StaleHead => {}
+                HistoryAppendOutcome::StaleHead => {}
             }
-            let current = self.writer.load_verified(&run_id).await.map_err(|error| {
+            let current = self.history.load_verified(&run_id).await.map_err(|error| {
                 self.store_fault(
                     error,
                     RuntimeFaultPhase::LoadHistory,
@@ -674,8 +575,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn drive_access<K: AccessMarker>(
         &self,
-        verified: VerifiedStructuredRun,
-        state: mfm_store::structured::ActionableState,
+        verified: P::VerifiedRun,
+        state: ActionableState,
         state_identity: QualifiedComponentIdentity,
         input: CanonicalJsonValue,
     ) -> Result<DriveOutcome> {
@@ -791,7 +692,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                 ));
             }
         };
-        let prepared = Prepared::<K> {
+        let prepared = Prepared::<K, P::VerifiedRun> {
             state,
             binding,
             verified,
@@ -812,8 +713,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn authorize<K: AccessMarker>(
         &self,
-        prepared: Prepared<K>,
-    ) -> Result<Option<Authorized<K>>> {
+        prepared: Prepared<K, P::VerifiedRun>,
+    ) -> Result<Option<Authorized<K, P::VerifiedRun>>> {
         let Prepared {
             state,
             binding,
@@ -856,7 +757,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                 binding.public_certificate().clone(),
             );
             let mut attempt = self
-                .writer
+                .history
                 .authorize_access(verified, &proposal)
                 .await
                 .map_err(|error| {
@@ -870,8 +771,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                     )
                 })?;
             match attempt.outcome() {
-                BackendAppendOutcome::NewlyCommitted(_) => {
-                    let (authorization, verified) =
+                HistoryAppendOutcome::NewlyCommitted(_) => {
+                    let authorization =
                         attempt.into_newly_appended_authorization().ok_or_else(|| {
                             self.candidate_fault(
                                 RuntimeFaultPhase::QualifyCandidate,
@@ -880,6 +781,15 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                                 Some(occurrence_id.clone()),
                             )
                         })?;
+                    let verified = self.history.load_verified(&run_id).await.map_err(|error| {
+                        self.store_fault(
+                            error,
+                            RuntimeFaultPhase::LoadHistory,
+                            run_id.clone(),
+                            Some(pre_fault_head.clone()),
+                            Some(occurrence_id.clone()),
+                        )
+                    })?;
                     return Ok(Some(Authorized {
                         binding,
                         authorization,
@@ -887,20 +797,12 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                         adapter_origin,
                     }));
                 }
-                BackendAppendOutcome::ExistingSame(_) => {
-                    let _successor = attempt.into_committed_successor().ok_or_else(|| {
-                        self.candidate_fault(
-                            RuntimeFaultPhase::QualifyCandidate,
-                            run_id.clone(),
-                            Some(pre_fault_head.clone()),
-                            Some(occurrence_id.clone()),
-                        )
-                    })?;
+                HistoryAppendOutcome::ExistingSame(_) => {
                     return Ok(None);
                 }
-                BackendAppendOutcome::AcknowledgementUnknown => {
+                HistoryAppendOutcome::AcknowledgementUnknown => {
                     if self
-                        .writer
+                        .history
                         .resolve_attempt(&mut attempt)
                         .await
                         .map_err(|error| {
@@ -913,20 +815,12 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                             )
                         })?
                     {
-                        let _successor = attempt.into_committed_successor().ok_or_else(|| {
-                            self.candidate_fault(
-                                RuntimeFaultPhase::QualifyCandidate,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            )
-                        })?;
                         return Ok(None);
                     }
                 }
-                BackendAppendOutcome::StaleHead => {}
+                HistoryAppendOutcome::StaleHead => {}
             }
-            let current = self.writer.load_verified(&run_id).await.map_err(|error| {
+            let current = self.history.load_verified(&run_id).await.map_err(|error| {
                 self.store_fault(
                     error,
                     RuntimeFaultPhase::LoadHistory,
@@ -946,8 +840,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn invoke_authorized<K: AccessMarker>(
         &self,
-        authorized: Authorized<K>,
-    ) -> Result<InvokedObservation<K>> {
+        authorized: Authorized<K, P::VerifiedRun>,
+    ) -> Result<InvokedObservation<K, P::VerifiedRun>> {
         let Authorized {
             binding,
             authorization,
@@ -998,8 +892,8 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn qualify_invoked_observation<K: AccessMarker>(
         &self,
-        invoked: InvokedObservation<K>,
-    ) -> Result<Option<PendingObservation<K>>> {
+        invoked: InvokedObservation<K, P::VerifiedRun>,
+    ) -> Result<Option<PendingObservation<K, P::VerifiedRun>>> {
         let InvokedObservation {
             run_id,
             authorization_ref,
@@ -1022,7 +916,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                 )
             })?;
         match self
-            .writer
+            .history
             .qualify_observation(&verified, &authorization_ref, &outcome)
             .await
             .map_err(|error| {
@@ -1097,7 +991,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
 
     async fn commit_pending_observation<K: AccessMarker>(
         &self,
-        pending: PendingObservation<K>,
+        pending: PendingObservation<K, P::VerifiedRun>,
     ) -> Result<DriveOutcome> {
         let PendingObservation {
             run_id,
@@ -1142,14 +1036,14 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                 authorization_ref.clone(),
                 outcome.clone(),
             );
-            let commit = match self.writer.commit_observation(verified, &proposal).await {
+            let commit = match self.history.commit_observation(verified, &proposal).await {
                 Ok(commit) => commit,
-                Err(StructuredStoreError::BackendUnavailable) => {
+                Err(HistoryError::BackendUnavailable) => {
                     backoff.wait().await;
                     verified = loop {
-                        match self.writer.load_verified(&run_id).await {
+                        match self.history.load_verified(&run_id).await {
                             Ok(current) => break current,
-                            Err(StructuredStoreError::BackendUnavailable) => {
+                            Err(HistoryError::BackendUnavailable) => {
                                 backoff.wait().await;
                             }
                             Err(error) => {
@@ -1177,43 +1071,26 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                 }
             };
             let mut attempt = match commit {
-                ObservationCommit::ExistingSame(_verified) => {
+                ObservationCommit::ExistingSame => {
                     let _committed = CommittedObservation::<K> {
                         _access_attempt_id: access_attempt_id,
                         _kind: PhantomData,
                     };
                     return Ok(DriveOutcome::AccessObserved);
                 }
-                ObservationCommit::Attempt(attempt) => attempt,
+                ObservationCommit::Attempt(attempt) => *attempt,
             };
             match attempt.outcome() {
-                BackendAppendOutcome::NewlyCommitted(_) | BackendAppendOutcome::ExistingSame(_) => {
-                    let _successor = attempt.into_committed_successor().ok_or_else(|| {
-                        self.candidate_fault(
-                            RuntimeFaultPhase::QualifyCandidate,
-                            run_id.clone(),
-                            Some(pre_fault_head.clone()),
-                            Some(occurrence_id.clone()),
-                        )
-                    })?;
+                HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
                     let _committed = CommittedObservation::<K> {
                         _access_attempt_id: access_attempt_id,
                         _kind: PhantomData,
                     };
                     return Ok(DriveOutcome::AccessObserved);
                 }
-                BackendAppendOutcome::AcknowledgementUnknown => loop {
-                    match self.writer.resolve_attempt(&mut attempt).await {
+                HistoryAppendOutcome::AcknowledgementUnknown => loop {
+                    match self.history.resolve_attempt(&mut attempt).await {
                         Ok(true) => {
-                            let _successor =
-                                attempt.into_committed_successor().ok_or_else(|| {
-                                    self.candidate_fault(
-                                        RuntimeFaultPhase::QualifyCandidate,
-                                        run_id.clone(),
-                                        Some(pre_fault_head.clone()),
-                                        Some(occurrence_id.clone()),
-                                    )
-                                })?;
                             let _committed = CommittedObservation::<K> {
                                 _access_attempt_id: access_attempt_id,
                                 _kind: PhantomData,
@@ -1221,7 +1098,7 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                             return Ok(DriveOutcome::AccessObserved);
                         }
                         Ok(false) => break,
-                        Err(StructuredStoreError::BackendUnavailable) => {
+                        Err(HistoryError::BackendUnavailable) => {
                             backoff.wait().await;
                         }
                         Err(error) => {
@@ -1235,12 +1112,12 @@ impl<B: StructuredHistoryBackend> Runtime<B> {
                         }
                     }
                 },
-                BackendAppendOutcome::StaleHead => {}
+                HistoryAppendOutcome::StaleHead => {}
             }
             verified = loop {
-                match self.writer.load_verified(&run_id).await {
+                match self.history.load_verified(&run_id).await {
                     Ok(current) => break current,
-                    Err(StructuredStoreError::BackendUnavailable) => {
+                    Err(HistoryError::BackendUnavailable) => {
                         backoff.wait().await;
                     }
                     Err(error) => {
@@ -1267,37 +1144,37 @@ trait AccessMarker: PhysicalBindingKind {}
 impl AccessMarker for ReadPhysicalBindingKind {}
 impl AccessMarker for EffectPhysicalBindingKind {}
 
-struct Prepared<K: AccessMarker> {
-    state: mfm_store::structured::ActionableState,
+struct Prepared<K: AccessMarker, V> {
+    state: ActionableState,
     binding: QualifiedPhysicalBinding<K>,
-    verified: VerifiedStructuredRun,
+    verified: V,
     request_origin: QualifiedComponentIdentity,
     adapter_origin: QualifiedComponentIdentity,
 }
 
-struct Authorized<K: AccessMarker> {
+struct Authorized<K: AccessMarker, V> {
     binding: QualifiedPhysicalBinding<K>,
     authorization: NewlyAppendedAuthorization,
-    verified: VerifiedStructuredRun,
+    verified: V,
     adapter_origin: QualifiedComponentIdentity,
 }
 
-struct InvokedObservation<K: AccessMarker> {
+struct InvokedObservation<K: AccessMarker, V> {
     run_id: RunId,
     authorization_ref: RecordRef,
     access_attempt_id: AccessAttemptId,
     outcome: ProposedObservationOutcome,
-    verified: VerifiedStructuredRun,
+    verified: V,
     adapter_origin: QualifiedComponentIdentity,
     _kind: PhantomData<fn() -> K>,
 }
 
-struct PendingObservation<K: AccessMarker> {
+struct PendingObservation<K: AccessMarker, V> {
     run_id: RunId,
     authorization_ref: RecordRef,
     access_attempt_id: AccessAttemptId,
     outcome: ProposedObservationOutcome,
-    verified: VerifiedStructuredRun,
+    verified: V,
     adapter_origin: QualifiedComponentIdentity,
     _kind: PhantomData<fn() -> K>,
 }
@@ -1347,16 +1224,16 @@ fn proposed(value: &CanonicalJsonValue) -> std::result::Result<ProposedCanonical
     ProposedCanonicalValue::from_json(canonical.as_str()).map_err(|_| ())
 }
 
-fn canonical_object(
-    verified: &VerifiedStructuredRun,
+fn canonical_object<V: VerifiedRunView>(
+    verified: &V,
     content_ref: &ContentRef,
 ) -> std::result::Result<CanonicalJsonValue, ()> {
     let object = verified.object(content_ref).ok_or(())?;
     CanonicalJsonValue::from_canonical_json(object.canonical_json.as_bytes()).map_err(|_| ())
 }
 
-fn committed_observation(
-    verified: &VerifiedStructuredRun,
+fn committed_observation<V: VerifiedRunView>(
+    verified: &V,
     access_attempt_id: &AccessAttemptId,
 ) -> std::result::Result<CanonicalJsonValue, ()> {
     let (_, observation) = verified.observation(access_attempt_id).ok_or(())?;
@@ -1377,9 +1254,7 @@ fn committed_observation(
     .map_err(|_| ())
 }
 
-fn minimum_action(
-    frontier: &StructuredFrontier,
-) -> Option<&mfm_store::structured::ActionableState> {
+fn minimum_action(frontier: &StructuredFrontier) -> Option<&ActionableState> {
     let StructuredFrontier::Actions(actions) = frontier else {
         return None;
     };

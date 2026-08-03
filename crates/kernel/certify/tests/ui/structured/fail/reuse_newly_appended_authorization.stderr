@@ -10,7 +10,7 @@ error[E0382]: use of moved value: `authorization`
    |                   ^^^^^^^^^^^^^ value used here after move
    |
 note: `NewlyAppendedAuthorization::invoke_prior_run_fact_scan` takes ownership of the receiver `self`, which moves `authorization`
-  --> $WORKSPACE/crates/kernel/store/src/structured/mutation.rs
+  --> src/structured.rs
    |
    |         self,
    |         ^^^^

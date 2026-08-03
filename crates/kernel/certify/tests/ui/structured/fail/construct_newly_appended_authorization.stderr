@@ -18,4 +18,12 @@ error: cannot construct `NewlyAppendedAuthorization` with struct literal syntax 
 6 |         authorization: todo!(),
   |         ---------------------- private field
   |
-  = note: ...and other private field `fact_scan_permit` that was not provided
+  = note: ...and other private field `fact_scan` that was not provided
+help: you might have meant to use the `from_store_mint` associated function
+  |
+4 -     let _authorization = NewlyAppendedAuthorization {
+5 -         authorization_ref: todo!(),
+6 -         authorization: todo!(),
+7 -     };
+4 +     let _authorization = NewlyAppendedAuthorization::from_store_mint(_, _, _);
+  |

@@ -13,15 +13,15 @@ none
 
 ```text
 operation DSL
-  -> pure expansion and certification
+  -> pure expansion and certification (mfm-certify)
   -> CertifiedProgramDocument
-  -> Runtime -- sole writer --> RunHistory store
-       |                         |
-       |                         +-> sole callback-free fold
+  -> Runtime -- RuntimeHistoryPort --> private store adapter
+       |                                  |
+       |                                  +-> sole callback-free fold + backend
        +-> authorized Read  -> registered invoker -> transport/scanner/status port
        +-> authorized Effect -> registered invoker -> transport/signer/resource authority
 
-store reader -> same fold -> app/replay/trace/audit/export
+store purpose readers -> same fold -> public-read/trace/audit/replay/export
 ```
 
 Only `State` is executable. `Match` and `FanOut` are structural. Runtime performs one verified
@@ -71,8 +71,9 @@ canonical + ids
   -> program + spec
   -> certify
   -> journal
-  -> store
-  -> runtime + replay
+  -> runtime  (process authority + RuntimeHistoryPort)
+  -> store    (private adapter, sole fold, purpose readers)
+  -> replay
 ```
 
 Some lower primitives are siblings rather than a strict linear chain, but dependencies always
@@ -135,14 +136,15 @@ Prior-run fact selection keeps its pure and persisted responsibilities separate:
 - storage backends atomically compare both the run predecessor and tenant fact head. The memory
   backend mirrors the production contract; PostgreSQL retains dense heads and append-only
   publication routes in `tenant_fact_heads` and `tenant_fact_publications`.
-- `mfm-certify` privately installs the exact capability and sealed stateless scanner binding source
-  as a non-optional kernel process baseline. The pair remains available to Runtime but is excluded
-  from unrelated entry support closures; arbitrary unused bindings still fail registry
-  qualification. Registry finalization requires the complete expected entry-point identity set and
-  rejects missing, extra, or duplicate identities. The source retains no backend, pool, writer, or
-  generic query handle.
+- `mfm-certify` owns deterministic expansion, predicates, proof construction, and the concrete
+  `AdmissionVerificationRegistry`. Process/live invocation authority is held by Runtime after
+  store assembly consumes one complete `QualifiedProgramRegistry`. The reserved prior-run fact
+  scanner remains a kernel process baseline installed during registry qualification. The source
+  retains no backend, pool, writer, or generic query handle. Registry finalization requires the
+  complete expected entry-point identity set and rejects missing, extra, or duplicate identities.
 
-Runtime holds the non-cloneable writer and process registry. It never receives a raw backend. It
+Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. Production adapters
+and backends stay private to store assembly; Runtime never receives a raw backend or writer. It
 loads one verified prefix, selects the minimum actionable occurrence path, and performs exactly one
 action. The scanner travels through the same ordinary Read
 authorization/invocation/observation/settlement protocol. Runtime passes the newly committed

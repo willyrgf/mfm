@@ -1,4 +1,4 @@
-use mfm_store::structured::NewlyAppendedAuthorization;
+use mfm_certify::structured::NewlyAppendedAuthorization;
 use serde::Serialize;
 
 fn require_serialize<T: Serialize>() {}

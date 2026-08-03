@@ -21,11 +21,13 @@ path = "src/lib.rs"
 futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }
 mfm-certify = { path = "../certify" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
-mfm-store = { path = "../store" }
+mfm-values = { path = "../values" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
@@ -38,8 +40,6 @@ path = "tests/structured_runtime.rs"
 mfm-capabilities = { path = "../capabilities" }
 mfm-facts = { path = "../facts" }
 mfm-program-derive = { path = "../program-derive" }
-mfm-replay = { path = "../replay" }
-mfm-store = { path = "../store", features = ["backend-conformance"] }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
