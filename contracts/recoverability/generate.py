@@ -553,7 +553,7 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
         ),
         "mfm.replay-mode.v1": (
             ["P-AP-01"],
-            enum("verify", "reproduce", "compare_current"),
+            enum("verify", "reproduce"),
         ),
         "mfm.structured-record-ref.v1": (
             ["P-RH-01"],

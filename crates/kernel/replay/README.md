@@ -11,8 +11,8 @@ The crate verifies recorded history through a reader and projects:
 - current portable structured export support.
 
 It owns no writer, callback, scheduler, process registry, provider, transport, signer, wallet
-authority, or alternate reducer. Exact reproduction and current comparison return a frozen
-unavailable result when no candidate is supplied; they never use live fallback behavior.
+authority, or alternate reducer. Exact reproduction returns a frozen unavailable result when no
+candidate is supplied; it never uses live fallback behavior.
 
 The current export media type is
 `application/vnd.mfm.structured-run-export.v1+json`. Old framed/pre-structured bytes are rejected.

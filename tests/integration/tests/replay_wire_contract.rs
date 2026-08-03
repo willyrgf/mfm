@@ -1,36 +1,34 @@
 use mfm_app::{PageRequest, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use mfm_ids::{DigestAlgorithm, DigestBytes, RunId};
-use mfm_replay::structured::{
-    project_unavailable_comparison, project_unavailable_reproduction, StructuredReplayResult,
-};
+use mfm_replay::structured::{project_unavailable_reproduction, StructuredReplayResult};
 
 #[test]
 fn unavailable_replay_results_have_the_current_structured_shape() {
     let run_id = run_id();
-    let cases = [
-        (
-            project_unavailable_reproduction(&run_id).expect("reproduction projection"),
-            "reproduction_unavailable",
-        ),
-        (
-            project_unavailable_comparison(&run_id).expect("comparison projection"),
-            "comparison_unavailable",
-        ),
-    ];
+    let projection =
+        project_unavailable_reproduction(&run_id).expect("reproduction projection");
+    assert_eq!(
+        projection.as_bytes(),
+        format!(
+            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{run_id}\"}}"
+        )
+        .as_bytes()
+    );
+    assert_eq!(
+        StructuredReplayResult::strict_decode(projection.as_bytes())
+            .expect("strict structured replay decode")
+            .as_bytes(),
+        projection.as_bytes(),
+    );
+}
 
-    for (projection, kind) in cases {
-        assert_eq!(
-            projection.as_bytes(),
-            format!("{{\"kind\":\"{kind}\",\"result\":\"unavailable\",\"run_id\":\"{run_id}\"}}")
-                .as_bytes()
-        );
-        assert_eq!(
-            StructuredReplayResult::strict_decode(projection.as_bytes())
-                .expect("strict structured replay decode")
-                .as_bytes(),
-            projection.as_bytes(),
-        );
-    }
+#[test]
+fn comparison_unavailable_shapes_are_rejected() {
+    let run_id = run_id();
+    let bytes = format!(
+        r#"{{"kind":"comparison_unavailable","result":"unavailable","run_id":"{run_id}"}}"#
+    );
+    assert!(StructuredReplayResult::strict_decode(bytes.as_bytes()).is_err());
 }
 
 #[test]

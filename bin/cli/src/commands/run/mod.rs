@@ -124,8 +124,6 @@ pub(crate) enum ReplayModeArg {
     Verify,
     /// Qualified exact reproduction.
     Reproduce,
-    /// Non-authoritative current candidate comparison.
-    CompareCurrent,
 }
 
 /// CLI portable-export kinds.
@@ -331,7 +329,7 @@ async fn replay(
             }
             ReplayRequest::Verify
         }
-        ReplayModeArg::Reproduce | ReplayModeArg::CompareCurrent => {
+        ReplayModeArg::Reproduce => {
             let (Some(portable_export), Some(portable_export_ref_file)) =
                 (portable_export, portable_export_ref_file)
             else {
@@ -339,11 +337,7 @@ async fn replay(
             };
             let input =
                 read_portable_export_input(portable_export, portable_export_ref_file).await?;
-            if matches!(mode, ReplayModeArg::Reproduce) {
-                ReplayRequest::Reproduce(input)
-            } else {
-                ReplayRequest::CompareCurrent(input)
-            }
+            ReplayRequest::Reproduce(input)
         }
     };
     application(connection)

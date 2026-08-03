@@ -1525,7 +1525,7 @@ mod tests {
                 .replay_run(
                     SecretCredential::new(b"opaque".to_vec()).expect("credential"),
                     run_id(),
-                    ReplayRequest::CompareCurrent(stream_input(Arc::clone(&polls))),
+                    ReplayRequest::Reproduce(stream_input(Arc::clone(&polls))),
                 )
                 .await;
             assert!(result.is_err());

@@ -12,7 +12,6 @@ mfm run drive <run-id>
 mfm run show <run-id>
 mfm run replay <run-id> --mode verify
 mfm run replay <run-id> --mode reproduce --portable-export <export> --portable-export-ref-file <sidecar>
-mfm run replay <run-id> --mode compare-current --portable-export <export> --portable-export-ref-file <sidecar>
 mfm run trace <run-id> [--cursor <cursor>] [--limit <n>]
 mfm run audit <run-id> [--cursor <cursor>] [--limit <n>]
 mfm run export <run-id> --kind semantic|audit --output <new-path> --ref-output <new-sidecar-path>

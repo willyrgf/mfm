@@ -18,10 +18,9 @@ export_run
 
 Every protected call consumes a fresh `SecretCredential` and derives both tenant scope and a
 stable authenticated principal only from the injected policy. Each call requests its exact
-purpose grant; replay reproduction and
-current-comparison additionally request a fresh same-run `Export` grant because they consume a
-caller-held export. Compound same-run grants must return the same tenant and principal. Export
-first authorizes the full recursive prior-run source closure under the same target, tenant,
+purpose grant; replay reproduction additionally requests a fresh same-run `Export` grant because it
+consumes a caller-held export. Compound same-run grants must return the same tenant and principal.
+Export first authorizes the full recursive prior-run source closure under the same target, tenant,
 principal, and `Export` purpose, then serializes only after that succeeds; denied dependencies emit
 zero bytes. The app verifies the loaded run's tenant before rendering. IDs, cursors, DTOs, and
 exports are not bearer authority.
@@ -35,8 +34,8 @@ and the selector's bounded caller submission token. The invocation identity rema
 per-run identity. Admission performs no provider or signer IO and does not drive the run.
 
 `drive_once` performs at most one structured Runtime action. Reads, replay, trace, audit, and export
-use the callback-free store fold. Exact reproduction/current comparison return the frozen
-unavailable result when no qualified candidate is supplied; there is no live fallback.
+use the callback-free store fold. Exact reproduction returns the frozen unavailable result when no
+qualified candidate is supplied; there is no live fallback.
 
 ## Production composition
 

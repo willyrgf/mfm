@@ -262,9 +262,7 @@ async fn replay_run(
             require_empty_body(&body)?;
             ReplayRequest::Verify
         }
-        ReplayMode::Reproduce | ReplayMode::CompareCurrent => {
-            replay_stream_request(mode, &headers, body)?
-        }
+        ReplayMode::Reproduce => replay_stream_request(mode, &headers, body)?,
     };
     let response = state
         .application
@@ -543,7 +541,6 @@ fn replay_stream_request(
         mfm_app::ExportStreamInput::from_reader(content_ref, Box::pin(StreamReader::new(stream)))?;
     match mode {
         ReplayMode::Reproduce => Ok(ReplayRequest::Reproduce(input)),
-        ReplayMode::CompareCurrent => Ok(ReplayRequest::CompareCurrent(input)),
         ReplayMode::Verify => Err(PublicError::replay_artifact_invalid().into()),
     }
 }

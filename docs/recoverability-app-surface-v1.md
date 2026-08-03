@@ -117,11 +117,11 @@ signature, or signed bytes.
 
 ## Replay
 
-Replay verification loads and folds recorded history only. `reproduce` and `compare_current`
-require the corresponding replay plus export grants and a current strict portable export. When no
-qualified historical executable/current candidate is supplied, the response is the frozen
-`unavailable` result. No replay mode calls a state callback, transport, provider, signer, scanner,
-or wallet authority.
+Replay verification loads and folds recorded history only. `reproduce` requires the corresponding
+replay plus export grants and a current strict portable export. When no qualified historical
+executable is supplied, the response is the frozen `unavailable` result. No replay mode calls a
+state callback, transport, provider, signer, scanner, or wallet authority. Current-candidate
+comparison is not part of the public contract.
 
 ## Portable export
 
@@ -168,12 +168,12 @@ grant:
 - `InspectAudit`
 - `Export`
 
-Replay verification requests only `Replay`. Replay reproduction and current comparison request
-both a fresh `Replay` grant and a fresh same-run `Export` grant because they consume a
-caller-held export. Policy returns a tenant identity and a stable authenticated principal derived
-from the credential. Every additional same-run grant must return both values unchanged. The app
-then loads the run callback-free and requires exact tenant equality. A prior grant, run id, page
-cursor, content reference, or export is never bearer authorization.
+Replay verification requests only `Replay`. Replay reproduction requests both a fresh `Replay`
+grant and a fresh same-run `Export` grant because it consumes a caller-held export. Policy returns
+a tenant identity and a stable authenticated principal derived from the credential. Every
+additional same-run grant must return both values unchanged. The app then loads the run
+callback-free and requires exact tenant equality. A prior grant, run id, page cursor, content
+reference, or export is never bearer authorization.
 
 ## CLI and REST
 

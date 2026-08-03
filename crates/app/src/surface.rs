@@ -780,8 +780,6 @@ pub enum ReplayMode {
     Verify,
     /// Reproduce under the exact admitted executable when available.
     Reproduce,
-    /// Compare the serving executable without authority upgrade.
-    CompareCurrent,
 }
 
 impl ReplayMode {
@@ -790,11 +788,10 @@ impl ReplayMode {
         let mode = match value {
             "verify" => Self::Verify,
             "reproduce" => Self::Reproduce,
-            "compare_current" => Self::CompareCurrent,
             _ => {
                 return Err(invalid_request(
                     "ReplayModeInvalid",
-                    "Replay mode must be verify, reproduce, or compare_current",
+                    "Replay mode must be verify or reproduce",
                 ))
             }
         };
@@ -817,7 +814,6 @@ impl ReplayMode {
         match self {
             Self::Verify => "verify",
             Self::Reproduce => "reproduce",
-            Self::CompareCurrent => "compare_current",
         }
     }
 }
@@ -883,8 +879,6 @@ pub enum ReplayRequest {
     Verify,
     /// Validate caller-held semantic export evidence before exact reproduction.
     Reproduce(ExportStreamInput),
-    /// Validate caller-held semantic export evidence before current-candidate comparison.
-    CompareCurrent(ExportStreamInput),
 }
 
 impl ReplayRequest {
@@ -893,7 +887,6 @@ impl ReplayRequest {
         match self {
             Self::Verify => ReplayMode::Verify,
             Self::Reproduce(_) => ReplayMode::Reproduce,
-            Self::CompareCurrent(_) => ReplayMode::CompareCurrent,
         }
     }
 
@@ -1067,9 +1060,14 @@ mod tests {
     #[test]
     fn application_replay_mode_accepts_only_the_annex_spelling() {
         assert_eq!(
-            ReplayMode::parse("compare_current").expect("annex mode"),
-            ReplayMode::CompareCurrent
+            ReplayMode::parse("verify").expect("annex mode"),
+            ReplayMode::Verify
         );
+        assert_eq!(
+            ReplayMode::parse("reproduce").expect("annex mode"),
+            ReplayMode::Reproduce
+        );
+        assert!(ReplayMode::parse("compare_current").is_err());
         assert!(ReplayMode::parse("compare-current").is_err());
     }
 
@@ -1187,8 +1185,8 @@ mod tests {
                 .expect("stream input");
         assert_eq!(input.content_ref(), &content_ref);
         assert_eq!(
-            ReplayRequest::CompareCurrent(input).mode(),
-            ReplayMode::CompareCurrent
+            ReplayRequest::Reproduce(input).mode(),
+            ReplayMode::Reproduce
         );
 
         let wrong_ref = ContentRef::new(
