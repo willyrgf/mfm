@@ -116,14 +116,14 @@ pub use wallet_authority::{
     EvmNonceCompletionKey, EvmNonceReservationKey, EvmTransactionIntent, ExclusiveCurrentControl,
     ExecutionDisposition, ObservedPendingNonceFloor, PriorEffectDisposition,
     PriorResourceDisposition, QualifiedChainInstanceId, QualifiedPendingNonceFloor,
-    ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability, ReplayExclusionDisposition,
-    ReserveEvmNonceRequest, ReserveWalletNonceCapability, ReserveWalletNonceResponse,
-    ReservedWalletNonce, SubmissionIntentId, TerminalWitnesses, TransactionNonce,
-    WalletAuthorityContractError, WalletNonceAuthority, WalletNonceAuthorityResource,
-    WalletNonceDomain, WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord,
-    WalletNonceStatus, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
-    WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX,
-    EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
+    ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
+    ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
+    SubmissionIntentId, TerminalWitnesses, TransactionNonce, WalletAuthorityContractError,
+    WalletNonceAuthority, WalletNonceAuthorityResource, WalletNonceDomain,
+    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
+    WalletNonceStoreIncarnation, WalletNonceStoreLineageHead, WalletNonceStorePromotionAttestation,
+    WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
 };
 
 #[cfg(test)]

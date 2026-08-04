@@ -70,7 +70,7 @@ use crate::{
     PriorEffectDisposition, PriorResourceDisposition, ReadEvmWalletNonceStatusRequest,
     ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
     ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
-    SubmittedCandidateProof, WalletNonceDomainActivationAttestation,
+    SubmittedCandidateProof, TransactionNonce, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreLineageHead,
 };
 
@@ -1005,6 +1005,7 @@ fn valid_pending_nonce_request(request: &EvmPendingNonceRequest) -> bool {
 fn valid_pending_nonce_observation(observation: &ObservedPendingNonceFloor) -> bool {
     observation.nonce_domain.validate().is_ok()
         && valid_reference(&observation.route_generation_ref)
+        && observation.pending_nonce.validate().is_ok()
 }
 
 fn valid_transaction_lookup_request(request: &EvmTransactionLookupRequest) -> bool {
@@ -1486,7 +1487,7 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
     let observed = ObservedPendingNonceFloor {
         nonce_domain: nonce_domain.clone(),
         route_generation_ref: common_ref.clone(),
-        pending_nonce: 0,
+        pending_nonce: TransactionNonce::new(0).expect("fixture nonce"),
     };
     let observed_submission = ObservedPendingSubmission {
         prepared: prepared.clone(),

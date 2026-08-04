@@ -2763,9 +2763,11 @@ dependencies = [
  "mfm-spec",
  "mfm-store",
  "mfm-values",
+ "proc-macro2",
  "serde",
  "serde_json",
  "sqlx",
+ "syn 2.0.118",
  "thiserror",
  "tokio",
 ]

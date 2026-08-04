@@ -22,21 +22,21 @@ use mfm_evm::{
     sign_eip1559_guarded, signing_failure_is_integrity, AccountAddress,
     AttestCandidateIdentityCapability, AttestCandidateIdentityRequest, AttestedWalletCandidate,
     BroadcastExactCandidateCapability, BroadcastExactCandidateRequest, BroadcastLineageHead,
-    EvmBroadcastResource, EvmCandidateSigner, EvmChainInstanceBinding, EvmFinalizedHeadCapability,
+    EvmBroadcastResource, EvmChainInstanceBinding, EvmFinalizedHeadCapability,
     EvmFinalizedHeadObservation, EvmFinalizedHeadRequest, EvmInclusionBlockCapability,
     EvmInclusionBlockObservation, EvmInclusionBlockRequest, EvmPendingNonceCapability,
     EvmPendingNonceRequest, EvmReceiptLookupCapability, EvmReceiptLookupObservation,
     EvmReceiptLookupRequest, EvmRoutingGenerationRef, EvmSubmissionFailure,
     EvmSubmissionProcessQualification, EvmTransactionLookupCapability,
     EvmTransactionLookupObservation, EvmTransactionLookupRequest, EvmWalletReceiptStatus,
-    EvmWalletReference, ObservedPendingNonceFloor, SubmittedCandidateProof,
+    EvmWalletReference, ObservedPendingNonceFloor, SubmittedCandidateProof, TransactionNonce,
     UnsignedWalletCandidate,
 };
 use mfm_ids::{ContentRef, StableId};
 use mfm_journal::structured::{AccessKind, HistoryObject};
 use mfm_program::structured::{
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
-    RuntimeResourceAuthority, RuntimeSigner,
+    RuntimeResourceAuthority,
 };
 use mfm_signing::QualifiedReadSigningProvider;
 use mfm_spec::structured::{
@@ -544,15 +544,18 @@ impl StructuredReadSpec for EvmPendingNonceCapability {
                 .pending_nonce(&route, &source.chain_instance, source.expected_sender)
                 .await
             {
-                Ok(pending) => match u64::try_from(pending) {
-                    Ok(pending_nonce) => {
+                Ok(pending) => match u64::try_from(pending)
+                    .ok()
+                    .and_then(|value| TransactionNonce::new(value).ok())
+                {
+                    Some(pending_nonce) => {
                         ReadAdapterCompletion::Returned(ObservedPendingNonceFloor {
                             nonce_domain: request.nonce_domain.clone(),
                             route_generation_ref: request.route_generation_ref.clone(),
                             pending_nonce,
                         })
                     }
-                    Err(_) => ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone()),
+                    None => ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone()),
                 },
                 Err(failure) => source.read_failure(failure),
             }
@@ -906,26 +909,6 @@ where
     }
 }
 
-impl BoundedComponentInvoker<EvmCandidateSigner> for EvmStructuredLiveBindings {
-    fn invoke<'a>(
-        &'a self,
-        request: &'a AttestCandidateIdentityRequest,
-    ) -> ComponentFuture<'a, Result<AttestedWalletCandidate, EvmSubmissionFailure>> {
-        // Bounded resource invocation cannot express integrity faults; only
-        // genuine operational unavailability is reported here. The structured
-        // Read attestation path maps integrity to IntegrityFault instead.
-        Box::pin(async move {
-            match self.attest_candidate(request).await {
-                Ok(attested) => Ok(attested),
-                Err(LiveInvocationFailure::Safe(failure)) => Err(failure),
-                Err(LiveInvocationFailure::Integrity) => {
-                    Err(EvmSubmissionFailure::SignerUnavailable)
-                }
-            }
-        })
-    }
-}
-
 impl BoundedComponentInvoker<EvmBroadcastResource> for EvmStructuredLiveBindings {
     fn invoke<'a>(&'a self, _request: &'a ()) -> ComponentFuture<'a, ()> {
         Box::pin(async {})
@@ -986,17 +969,6 @@ pub fn register_evm_live_submission_bindings(
         )?,
     ];
 
-    registry.register_signer::<EvmCandidateSigner, _>(
-        implementation_descriptor(
-            StructuredComponentKind::Signer,
-            EvmCandidateSigner::contract()
-                .and_then(|contract| contract.content_ref().map_err(Into::into))
-                .map_err(certification_error)?,
-            stable("mfm.evm-live.implementation/candidate-signer")?,
-            qualification,
-        ),
-        Arc::clone(&bindings),
-    )?;
     registry.register_resource_authority::<EvmBroadcastResource, _>(
         implementation_descriptor(
             StructuredComponentKind::Resource,

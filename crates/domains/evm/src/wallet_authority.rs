@@ -9,8 +9,8 @@ use mfm_capabilities::{
     ComponentFuture, EffectAdapterCompletion, EffectCapabilityContract, ReadAdapterCompletion,
     ReadCapabilityContract, Refreshable, ResourceAuthorityContract,
 };
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId, TenantScopeId};
-use mfm_journal::structured::{domain_content_digest, LexicalValueRef};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, RunId, StableId, TenantScopeId};
+use mfm_journal::structured::{domain_content_digest, LexicalValueRef, RecordRef};
 use mfm_program::structured::{
     RefreshableBinding, RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority,
 };
@@ -56,9 +56,19 @@ pub const EVM_TRANSACTION_NONCE_MAX: u64 = u64::MAX - 1;
 ///
 /// Values equal to `u64::MAX` are rejected at every construction and decode
 /// boundary. Zero through [`EVM_TRANSACTION_NONCE_MAX`] are admitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TransactionNonce(u64);
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue,
+)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "transaction-nonce",
+    version = "1",
+    schema = "mfm.evm.transaction_nonce"
+)]
+pub struct TransactionNonce {
+    /// Protocol nonce value.
+    pub(crate) value: u64,
+}
 
 impl TransactionNonce {
     /// Admits one protocol-valid nonce.
@@ -66,23 +76,34 @@ impl TransactionNonce {
         if value > EVM_TRANSACTION_NONCE_MAX {
             return Err(WalletAuthorityContractError::Invalid("transaction_nonce"));
         }
-        Ok(Self(value))
+        Ok(Self { value })
     }
 
     /// Returns the raw nonce value.
     pub const fn get(self) -> u64 {
-        self.0
+        self.value
+    }
+
+    /// Revalidates the protocol nonce boundary.
+    pub const fn validate(self) -> Result<(), WalletAuthorityContractError> {
+        if self.value > EVM_TRANSACTION_NONCE_MAX {
+            Err(WalletAuthorityContractError::Invalid("transaction_nonce"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Returns the checked successor when it remains protocol-valid.
     pub fn checked_successor(self) -> Option<Self> {
-        self.0.checked_add(1).and_then(|next| Self::new(next).ok())
+        self.value
+            .checked_add(1)
+            .and_then(|next| Self::new(next).ok())
     }
 }
 
 impl From<TransactionNonce> for u64 {
     fn from(value: TransactionNonce) -> Self {
-        value.0
+        value.value
     }
 }
 
@@ -98,7 +119,7 @@ impl FromStr for TransactionNonce {
 
 impl std::fmt::Display for TransactionNonce {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.value)
     }
 }
 
@@ -1081,7 +1102,7 @@ pub struct ObservedPendingNonceFloor {
     /// Exact qualified route generation.
     pub route_generation_ref: EvmWalletReference,
     /// Strictly decoded pending nonce.
-    pub pending_nonce: u64,
+    pub pending_nonce: TransactionNonce,
 }
 
 /// Policy-qualified fresh pending nonce floor.
@@ -1098,6 +1119,87 @@ pub struct QualifiedPendingNonceFloor {
     pub observed: ObservedPendingNonceFloor,
     /// Immutable pending-floor policy.
     pub pending_floor_policy_ref: EvmWalletReference,
+}
+
+/// Producer-bound pending-nonce observation accepted by wallet reservation.
+///
+/// The origin binds the provider result to the exact chain, sender, route release,
+/// policy, request, and committed authorization that caused the observation. Fields
+/// are private so callers cannot fabricate a qualified observation from a raw quantity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QualifiedPendingNonceObservation {
+    /// Qualified pending-nonce floor.
+    floor: QualifiedPendingNonceFloor,
+    /// Exact chain-instance declaration reference.
+    chain_instance_ref: EvmWalletReference,
+    /// Authenticated sender address.
+    sender: String,
+    /// Physical release certificate used for the read.
+    physical_release_ref: EvmWalletReference,
+    /// Producer run that committed the authorization.
+    source_run_id: RunId,
+    /// Authorization record that originated the request.
+    authorization_ref: RecordRef,
+    /// Request object reference retained by the authorization.
+    request_ref: ContentRef,
+}
+
+impl QualifiedPendingNonceObservation {
+    /// Constructs one observation only from an already committed origin tuple.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_committed_origin(
+        floor: QualifiedPendingNonceFloor,
+        chain_instance_ref: EvmWalletReference,
+        sender: Address,
+        physical_release_ref: EvmWalletReference,
+        source_run_id: RunId,
+        authorization_ref: RecordRef,
+        request_ref: ContentRef,
+    ) -> Result<Self, WalletAuthorityContractError> {
+        floor.observed.pending_nonce.validate()?;
+        floor.observed.nonce_domain.validate()?;
+        if floor.observed.route_generation_ref != physical_release_ref {
+            return Err(WalletAuthorityContractError::Invalid("pending_release"));
+        }
+        let sender_text = format!("{sender:#x}");
+        if floor.observed.nonce_domain.sender() != sender_text {
+            return Err(WalletAuthorityContractError::Invalid("pending_sender"));
+        }
+        Ok(Self {
+            floor,
+            chain_instance_ref,
+            sender: format!("{sender:#x}"),
+            physical_release_ref,
+            source_run_id,
+            authorization_ref,
+            request_ref,
+        })
+    }
+
+    /// Returns the qualified floor for the reservation port.
+    pub const fn floor(&self) -> &QualifiedPendingNonceFloor {
+        &self.floor
+    }
+
+    /// Returns the exact producer run.
+    pub const fn source_run_id(&self) -> &RunId {
+        &self.source_run_id
+    }
+
+    /// Revalidates the complete producer-bound origin.
+    pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
+        self.floor.observed.pending_nonce.validate()?;
+        self.floor.observed.nonce_domain.validate()?;
+        validate_reference(&self.chain_instance_ref)?;
+        validate_reference(&self.physical_release_ref)?;
+        if self.floor.observed.route_generation_ref != self.physical_release_ref
+            || self.authorization_ref.run_id != self.source_run_id
+            || self.request_ref.content_digest().as_str().is_empty()
+        {
+            return Err(WalletAuthorityContractError::Invalid("pending_origin"));
+        }
+        validate_address(&self.sender)
+    }
 }
 
 /// Permanently reserved nonce and exact intent/family identity.
