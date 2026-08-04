@@ -2302,6 +2302,13 @@ async fn deterministic_signer(
 ) -> QualifiedReadSigningProvider {
     let key = SigningKey::from_slice(&INTEGRATION_SIGNING_KEY).expect("fixed test signing key");
     assert_eq!(signing_address(&key), sender);
+    let public_key = PublicKeyBytes::new(
+        key.verifying_key()
+            .to_encoded_point(true)
+            .as_bytes()
+            .to_vec(),
+    )
+    .expect("compressed test signer public key");
     let binding = VerifiedGenerationGuardedSignerBinding::verify(
         SignerRef::new("structured-integration-wallet").expect("signer ref"),
         "mfm.evm.integration-signer-provider",
@@ -2311,7 +2318,7 @@ async fn deterministic_signer(
         PublicSigningIdentity::new(
             SigningAlgorithmId::new(SECP256K1_KECCAK256_RECOVERABLE_ALGORITHM_ID)
                 .expect("public signing algorithm"),
-            None,
+            Some(public_key),
             Some(format!("{sender:#x}")),
         )
         .expect("public signer identity"),

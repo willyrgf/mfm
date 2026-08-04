@@ -22,8 +22,9 @@ Runtime/store never imports these types.
 Signing separates `AccountAddress` (on-chain account only), full `PublicSigningIdentity` (public
 key plus account), and secret signing authority (keystore / qualified read provider). Guarded
 production signing requests bind the complete public identity from the qualified live signer; an
-account identifier is never interpreted as public-key material. Signer integrity and binding
-mismatches are classified separately from ordinary signer unavailability.
+account identifier is never interpreted as public-key material. Test and in-memory signer
+providers use the same complete-identity contract. Signer integrity and binding mismatches are
+classified separately from ordinary signer unavailability.
 
 `TransactionNonce` admits only protocol-valid values with a representable checked successor
 (EIP-2681 rejects `u64::MAX`). Wallet status and mutation load a bounded current high-water /
