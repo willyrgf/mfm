@@ -7,8 +7,8 @@ use mfm_capabilities::{
     ComponentFuture, ReadAdapterCompletion, ReadAdapterInvoker, ReadCapabilityContract,
 };
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    CertifiedAccessAuthorization, PhysicalBindingSelection, ProgramRegistryBuilder,
+    QualifiedReadPhysicalBinding, QualifiedReadPhysicalBindingSource,
 };
 use mfm_evm::{
     balance_adapter_contract, register_evm_balance_process,
@@ -218,12 +218,21 @@ where
     }
 }
 
-impl<C> RuntimeReadPhysicalBinding<C> for TestBinding<C>
+impl<C> QualifiedReadPhysicalBinding<C> for TestBinding<C>
 where
     C: TestBalanceCapability,
 {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
+        drop(authorization);
+        self.invoke(request)
     }
 }
 
@@ -233,7 +242,7 @@ struct TestBindingSource<C> {
     capability: PhantomData<fn() -> C>,
 }
 
-impl<C> RuntimeReadPhysicalBindingSource<C> for TestBindingSource<C>
+impl<C> QualifiedReadPhysicalBindingSource<C> for TestBindingSource<C>
 where
     C: TestBalanceCapability,
 {
@@ -451,7 +460,8 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
         },
         registry,
         Arc::new(TestPublicBindingVerifier),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime

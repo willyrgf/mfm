@@ -17,6 +17,10 @@ binary-facing = false
 name = "mfm_runtime"
 path = "src/lib.rs"
 
+[features]
+# Internal bridge used by mfm-store to consume the complete certified bundle.
+store-authority = ["mfm-certify/runtime-authority"]
+
 [dependencies]
 futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }

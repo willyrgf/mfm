@@ -260,11 +260,13 @@ treat a merely well-shaped completeness claim as authoritative.
 run view, transition trace, access audit, and replay summary from the sole store fold. Pages are
 fixed to one journal head. Portable export first authorizes every recursively referenced prior-run
 source under the sealed export purpose and only then serializes exact committed-batch envelopes,
-source relationships, and semantic/physical fixation with a top-level digest; denied or incomplete
+source relationships, and semantic/physical fixation with a closure reference; denied or incomplete
 source closures emit zero bytes. Offline verification uses only bundle bytes and an explicit trust
-snapshot against the store's read-only fold entry. Current portable exports use
-`application/vnd.mfm.structured-run-export.v1+json` and the one current recoverability schema;
-retired bytes are rejected.
+snapshot against the store's read-only fold entry. Current portable exports use a bounded
+newline-delimited frame stream with media type
+`application/vnd.mfm.structured-run-export-stream.v2`; each canonical frame carries an ordinal,
+kind, payload, and predecessor digest, and a terminal seal binds the exact closure, fixation,
+counts, bytes, and chain. Legacy monolithic JSON objects and retired bytes are rejected.
 
 Recorded replay is verification-only: it folds the committed prefix and returns its bounded
 summary. It never falls back to live callbacks or compares current history.
@@ -386,6 +388,29 @@ predecessor, successor, operation, and optional successor target before SQL muta
 prepared predecessor retains the preparation and permits only its byte-identical retry; startup at
 the prepared successor acknowledges it. Rollback, database-ahead state, a competing successor,
 or any target/incarnation/public-head mismatch rejects readiness without repair or fallback.
+
+## Snapshot, export, and authorization boundaries
+
+The indexed checkpoint head is the first decision-bearing query in every PostgreSQL snapshot. A
+repeatable-read transaction then loads the selected prefix and validates its exact external target
+and checkpoint successor before commit. Configuration and run stream identities are stable across
+successors; predecessor digests are compare-and-append preconditions only.
+
+Store ingress rejects any record that names an absent content-addressed object. Structural path
+references and other semantic identities are not falsely treated as standalone objects; object
+closure covers only values and history objects that the append actually retains. Both in-memory and
+PostgreSQL backends invoke this same validator.
+
+The portable encoder receives sealed canonical batch frames and purpose-specific fact routes. It
+cannot enumerate raw `CommittedBatch` values through export evidence. Source prefixes are folded
+once at the maximum required producer head, with recursive graph, tenant, and route checks before
+bytes are emitted.
+
+Every qualified Read and Effect adapter receives the one-use committed authorization proof. It
+must bind the access kind and retained physical certificate (and the exact state input for
+stateful adapters) before entering its provider. An ordinary public Effect adapter call returns an
+integrity fault. Wallet completion records retain a bounded canonical recovery closure so schema
+validation remains within the generated frame budget while preserving rehashable public evidence.
 
 ## Application and transport surface
 

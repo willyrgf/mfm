@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -162,6 +162,33 @@ struct BackendFactScanPort {
     integrity_fault_code: StableId,
 }
 
+/// One bounded recursive producer-verification session.  A session owns the
+/// only producer cache used by a fact read, so shared producers are folded at
+/// most once and an active producer cannot be re-entered through a cycle.
+struct FactScanSession {
+    producer_cache: BTreeMap<RunId, Arc<VerifiedStructuredRun>>,
+    active_producers: BTreeSet<RunId>,
+    producer_history_bytes: u64,
+    fold_work: u64,
+    maximum_distinct_producers: u64,
+    maximum_retained_source_bytes: u64,
+    maximum_producer_fold_batches: u64,
+}
+
+impl FactScanSession {
+    fn new(bounds: &mfm_facts::FactSelectionScanBounds) -> Self {
+        Self {
+            producer_cache: BTreeMap::new(),
+            active_producers: BTreeSet::new(),
+            producer_history_bytes: 0,
+            fold_work: 0,
+            maximum_distinct_producers: bounds.maximum_distinct_producers(),
+            maximum_retained_source_bytes: bounds.maximum_retained_source_bytes(),
+            maximum_producer_fold_batches: bounds.maximum_producer_fold_batches(),
+        }
+    }
+}
+
 impl PriorRunFactScanPort for BackendFactScanPort {
     fn invoke(
         self: Box<Self>,
@@ -201,108 +228,247 @@ type ScanResult<T> = std::result::Result<T, ScanError>;
 
 impl BackendFactScanPort {
     async fn scan(&self, request: FactSelectionRequest) -> ScanResult<FactSelectionReadResponse> {
-        if request != self.expected_request
-            || request
-                .admitted_source_manifest_ref()
-                .map_err(|_| ScanError::Integrity)?
-                != self
-                    .consumer_admission
-                    .admission_material_refs
-                    .prior_run_source_manifest_ref
-            || request
-                .selector_contract_ref()
-                .map_err(|_| ScanError::Integrity)?
-                != prior_run_fact_selector_contract_ref().map_err(|_| ScanError::Integrity)?
-        {
-            return Err(ScanError::Integrity);
-        }
         let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
-        if self.frontier.fact_order > bounds.maximum_publications() {
-            return Err(ScanError::Safe(
-                FactSelectionReadFailureCode::PublicationBoundExceeded,
-            ));
-        }
-        let queries = request.queries().map_err(|_| ScanError::Integrity)?;
-        let mut accumulators = queries
-            .into_iter()
-            .map(|query| {
-                let query_ref = query.content_ref().map_err(|_| ScanError::Integrity)?;
-                Ok((query_ref, FactTopK::new(query)))
-            })
-            .collect::<ScanResult<Vec<_>>>()?;
-        let mut fact_count = 0_u64;
-        let mut retained_source_bytes = 0_u64;
-        let mut next_order = 1_u64;
-        let mut publications_by_order = Vec::new();
-        while next_order <= self.frontier.fact_order {
-            let publications = self
-                .source
-                .scan_publications(
-                    &self.consumer_admission.tenant_scope_id,
-                    next_order,
-                    self.frontier.fact_order,
-                    SCAN_PAGE_ITEMS,
-                )
-                .await
-                .map_err(classify_backend_scan_error)?;
-            if publications.is_empty()
-                || publications.len()
-                    > usize::try_from(SCAN_PAGE_ITEMS).map_err(|_| ScanError::Integrity)?
+        let mut session = FactScanSession::new(&bounds);
+        self.scan_with_session(request, &mut session).await
+    }
+
+    fn scan_with_session<'a>(
+        &'a self,
+        request: FactSelectionRequest,
+        session: &'a mut FactScanSession,
+    ) -> Pin<Box<dyn Future<Output = ScanResult<FactSelectionReadResponse>> + Send + 'a>> {
+        Box::pin(async move {
+            if request != self.expected_request
+                || request
+                    .admitted_source_manifest_ref()
+                    .map_err(|_| ScanError::Integrity)?
+                    != self
+                        .consumer_admission
+                        .admission_material_refs
+                        .prior_run_source_manifest_ref
+                || request
+                    .selector_contract_ref()
+                    .map_err(|_| ScanError::Integrity)?
+                    != prior_run_fact_selector_contract_ref().map_err(|_| ScanError::Integrity)?
             {
                 return Err(ScanError::Integrity);
             }
-            for publication in publications {
-                if publication.frontier.store_scope_id != self.frontier.store_scope_id
-                    || publication.frontier.store_epoch != self.frontier.store_epoch
-                    || publication.frontier.tenant_scope_id != self.frontier.tenant_scope_id
-                    || publication.frontier.fact_order != next_order
-                    || publication.frontier.fact_order > self.frontier.fact_order
+            let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
+            if self.frontier.fact_order > bounds.maximum_publications() {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::PublicationBoundExceeded,
+                ));
+            }
+            let queries = request.queries().map_err(|_| ScanError::Integrity)?;
+            let mut accumulators = queries
+                .into_iter()
+                .map(|query| {
+                    let query_ref = query.content_ref().map_err(|_| ScanError::Integrity)?;
+                    Ok((query_ref, FactTopK::new(query)))
+                })
+                .collect::<ScanResult<Vec<_>>>()?;
+            let mut fact_count = 0_u64;
+            let mut retained_source_bytes = 0_u64;
+            let mut next_order = 1_u64;
+            let mut page_count = 0_u64;
+            let mut publications_by_order = Vec::new();
+            while next_order <= self.frontier.fact_order {
+                page_count = page_count.checked_add(1).ok_or(ScanError::Integrity)?;
+                if page_count > bounds.maximum_pages() {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::PublicationBoundExceeded,
+                    ));
+                }
+                let publications = self
+                    .source
+                    .scan_publications(
+                        &self.consumer_admission.tenant_scope_id,
+                        next_order,
+                        self.frontier.fact_order,
+                        SCAN_PAGE_ITEMS,
+                    )
+                    .await
+                    .map_err(classify_backend_scan_error)?;
+                if publications.is_empty()
+                    || publications.len()
+                        > usize::try_from(SCAN_PAGE_ITEMS).map_err(|_| ScanError::Integrity)?
                 {
                     return Err(ScanError::Integrity);
                 }
-                publications_by_order.push(publication);
-                next_order = next_order.checked_add(1).ok_or(ScanError::Integrity)?;
+                for publication in publications {
+                    if publication.frontier.store_scope_id != self.frontier.store_scope_id
+                        || publication.frontier.store_epoch != self.frontier.store_epoch
+                        || publication.frontier.tenant_scope_id != self.frontier.tenant_scope_id
+                        || publication.frontier.fact_order != next_order
+                        || publication.frontier.fact_order > self.frontier.fact_order
+                    {
+                        return Err(ScanError::Integrity);
+                    }
+                    publications_by_order.push(publication);
+                    next_order = next_order.checked_add(1).ok_or(ScanError::Integrity)?;
+                }
             }
-        }
 
-        if u64::try_from(publications_by_order.len()).map_err(|_| ScanError::Integrity)?
-            > bounds.maximum_publications()
-        {
-            return Err(ScanError::Safe(
-                FactSelectionReadFailureCode::PublicationBoundExceeded,
-            ));
-        }
-        // Determine one maximum required prefix per producer before any producer load. This
-        // keeps recursive/shared routes linear in distinct producers instead of repeatedly
-        // folding a growing prefix for every publication.
-        let mut producer_heads = BTreeMap::<RunId, u64>::new();
-        for publication in &publications_by_order {
-            producer_heads
-                .entry(publication.transition_ref.run_id.clone())
-                .and_modify(|sequence| {
-                    *sequence = (*sequence).max(publication.transition_ref.run_sequence)
-                })
-                .or_insert(publication.transition_ref.run_sequence);
-        }
-        if u64::try_from(producer_heads.len()).map_err(|_| ScanError::Integrity)?
-            > bounds.maximum_publications()
-        {
-            return Err(ScanError::Safe(
-                FactSelectionReadFailureCode::PublicationBoundExceeded,
-            ));
-        }
-        let mut producer_cache = BTreeMap::<RunId, VerifiedStructuredRun>::new();
-        let mut producer_history_bytes = 0_u64;
-        let mut fold_work = 0_u64;
-        for (producer, through_sequence) in producer_heads {
-            let raw = self
-                .source
-                .load_producer_prefix(&producer, through_sequence)
-                .await
-                .map_err(classify_backend_scan_error)?
-                .ok_or(ScanError::Integrity)?;
-            producer_history_bytes = producer_history_bytes
-                .checked_add(raw.batches.iter().try_fold(0_u64, |total, batch| {
+            if u64::try_from(publications_by_order.len()).map_err(|_| ScanError::Integrity)?
+                > bounds.maximum_publications()
+            {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::PublicationBoundExceeded,
+                ));
+            }
+            // Determine one maximum required prefix per producer before any producer load. This
+            // keeps recursive/shared routes linear in distinct producers instead of repeatedly
+            // folding a growing prefix for every publication.
+            let mut producer_heads = BTreeMap::<RunId, u64>::new();
+            for publication in &publications_by_order {
+                producer_heads
+                    .entry(publication.transition_ref.run_id.clone())
+                    .and_modify(|sequence| {
+                        *sequence = (*sequence).max(publication.transition_ref.run_sequence)
+                    })
+                    .or_insert(publication.transition_ref.run_sequence);
+            }
+            if u64::try_from(producer_heads.len()).map_err(|_| ScanError::Integrity)?
+                > bounds.maximum_distinct_producers()
+            {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::PublicationBoundExceeded,
+                ));
+            }
+            for (producer, through_sequence) in producer_heads {
+                let _ = self
+                    .load_producer(&producer, through_sequence, session)
+                    .await?;
+            }
+            for publication in &publications_by_order {
+                let producer = session
+                    .producer_cache
+                    .get(&publication.transition_ref.run_id)
+                    .ok_or(ScanError::Integrity)?;
+                self.scan_publication(
+                    publication,
+                    producer,
+                    &mut accumulators,
+                    &mut fact_count,
+                    &mut retained_source_bytes,
+                    bounds.maximum_facts(),
+                    bounds.maximum_retained_source_bytes(),
+                )
+                .await?;
+            }
+
+            let mut selected_count = 0_u64;
+            let mut response_source_bytes = 0_u64;
+            let mut query_results = Vec::with_capacity(accumulators.len());
+            for (query_ordinal, (query_ref, accumulator)) in accumulators.into_iter().enumerate() {
+                let selected = accumulator
+                    .finish()
+                    .into_iter()
+                    .map(FactCandidate::into_value)
+                    .collect::<Vec<_>>();
+                selected_count = selected_count
+                    .checked_add(u64::try_from(selected.len()).map_err(|_| ScanError::Integrity)?)
+                    .ok_or(ScanError::Integrity)?;
+                if selected_count > bounds.maximum_selected_results() {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::SelectedResultBoundExceeded,
+                    ));
+                }
+                for fact in &selected {
+                    let subject_bytes = u64::try_from(fact.subject_canonical_json.len())
+                        .map_err(|_| ScanError::Integrity)?;
+                    let response_bytes = u64::try_from(fact.response_canonical_json.len())
+                        .map_err(|_| ScanError::Integrity)?;
+                    let claim_bytes = u64::try_from(fact.claim_canonical_json.len())
+                        .map_err(|_| ScanError::Integrity)?;
+                    response_source_bytes = response_source_bytes
+                        .checked_add(subject_bytes)
+                        .and_then(|total| total.checked_add(response_bytes))
+                        .and_then(|total| total.checked_add(claim_bytes))
+                        .ok_or(ScanError::Integrity)?;
+                }
+                if response_source_bytes > bounds.maximum_response_bytes() {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::ResponseBoundExceeded,
+                    ));
+                }
+                query_results.push(PriorRunFactQueryResult {
+                    query_ordinal: u32::try_from(query_ordinal)
+                        .map_err(|_| ScanError::Integrity)?,
+                    query_ref,
+                    selected: selected
+                        .into_iter()
+                        .map(|fact| fact.as_ref().clone())
+                        .collect(),
+                });
+            }
+            let response = PriorRunFactSelectionResponse {
+                version: PriorRunFactSelectionResponse::VERSION.to_owned(),
+                request_digest: request.request_digest().map_err(|_| ScanError::Integrity)?,
+                admitted_source_manifest_ref: self
+                    .consumer_admission
+                    .admission_material_refs
+                    .prior_run_source_manifest_ref
+                    .clone(),
+                selector_contract_ref: prior_run_fact_selector_contract_ref()
+                    .map_err(|_| ScanError::Integrity)?,
+                attestation: PriorRunFactScanAttestation {
+                    frontier: self.frontier.clone(),
+                    tenant_scope_id: self.consumer_admission.tenant_scope_id.clone(),
+                    authorization_ref: self.authorization_ref.clone(),
+                    physical_binding_ref: self.physical_binding_ref.clone(),
+                    completeness_mode:
+                        PriorRunFactCompletenessMode::CompleteThroughAuthorizationFrontier,
+                },
+                query_results,
+            };
+            let canonical = canonical_json(&response).map_err(|_| ScanError::Integrity)?;
+            if u64::try_from(canonical.as_bytes().len()).map_err(|_| ScanError::Integrity)?
+                > bounds.maximum_response_bytes()
+            {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::ResponseBoundExceeded,
+                ));
+            }
+            let returned =
+                FactSelectionReadResponse::from_canonical_json(canonical.as_str().to_owned())
+                    .map_err(|_| ScanError::Integrity)?;
+            let persisted = canonical_json(&returned).map_err(|_| ScanError::Integrity)?;
+            if u64::try_from(persisted.as_bytes().len()).map_err(|_| ScanError::Integrity)?
+                > bounds.maximum_response_bytes()
+            {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::ResponseBoundExceeded,
+                ));
+            }
+            Ok(returned)
+        })
+    }
+
+    fn load_producer<'a>(
+        &'a self,
+        producer: &'a RunId,
+        through_sequence: u64,
+        session: &'a mut FactScanSession,
+    ) -> Pin<Box<dyn Future<Output = ScanResult<Arc<VerifiedStructuredRun>>> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(cached) = session.producer_cache.get(producer) {
+                if cached.journal_head().run_sequence >= through_sequence {
+                    return Ok(Arc::clone(cached));
+                }
+            }
+            if !session.active_producers.insert(producer.clone()) {
+                return Err(ScanError::Integrity);
+            }
+            let result = async {
+                let raw = self
+                    .source
+                    .load_producer_prefix(producer, through_sequence)
+                    .await
+                    .map_err(classify_backend_scan_error)?
+                    .ok_or(ScanError::Integrity)?;
+                let raw_bytes = raw.batches.iter().try_fold(0_u64, |total, batch| {
                     let batch_bytes = u64::try_from(
                         canonical_json(batch)
                             .map_err(|_| ScanError::Integrity)?
@@ -310,130 +476,133 @@ impl BackendFactScanPort {
                             .len(),
                     )
                     .map_err(|_| ScanError::Integrity)?;
-                    total.checked_add(batch_bytes).ok_or(ScanError::Integrity)
-                })?)
-                .ok_or(ScanError::Integrity)?;
-            if producer_history_bytes > bounds.maximum_retained_source_bytes() {
-                return Err(ScanError::Safe(
-                    FactSelectionReadFailureCode::RetainedSourceBoundExceeded,
-                ));
-            }
-            fold_work = fold_work
-                .checked_add(u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?)
-                .ok_or(ScanError::Integrity)?;
-            if fold_work > bounds.maximum_publications() {
-                return Err(ScanError::Safe(
-                    FactSelectionReadFailureCode::PublicationBoundExceeded,
-                ));
-            }
-            let verified = verify_recorded_history(
-                raw,
-                self.program_verifier.as_ref(),
-                self.physical_binding_verifier.as_ref(),
-            )
-            .map_err(|_| ScanError::Integrity)?;
-            producer_cache.insert(producer, verified);
-        }
-        for publication in &publications_by_order {
-            let producer = producer_cache
-                .get(&publication.transition_ref.run_id)
-                .ok_or(ScanError::Integrity)?;
-            self.scan_publication(
-                publication,
-                producer,
-                &mut accumulators,
-                &mut fact_count,
-                &mut retained_source_bytes,
-                bounds.maximum_facts(),
-                bounds.maximum_retained_source_bytes(),
-            )
-            .await?;
-        }
-
-        let mut selected_count = 0_u64;
-        let mut response_source_bytes = 0_u64;
-        let mut query_results = Vec::with_capacity(accumulators.len());
-        for (query_ordinal, (query_ref, accumulator)) in accumulators.into_iter().enumerate() {
-            let selected = accumulator
-                .finish()
-                .into_iter()
-                .map(FactCandidate::into_value)
-                .collect::<Vec<_>>();
-            selected_count = selected_count
-                .checked_add(u64::try_from(selected.len()).map_err(|_| ScanError::Integrity)?)
-                .ok_or(ScanError::Integrity)?;
-            if selected_count > bounds.maximum_selected_results() {
-                return Err(ScanError::Safe(
-                    FactSelectionReadFailureCode::SelectedResultBoundExceeded,
-                ));
-            }
-            for fact in &selected {
-                let subject_bytes = u64::try_from(fact.subject_canonical_json.len())
-                    .map_err(|_| ScanError::Integrity)?;
-                let response_bytes = u64::try_from(fact.response_canonical_json.len())
-                    .map_err(|_| ScanError::Integrity)?;
-                let claim_bytes = u64::try_from(fact.claim_canonical_json.len())
-                    .map_err(|_| ScanError::Integrity)?;
-                response_source_bytes = response_source_bytes
-                    .checked_add(subject_bytes)
-                    .and_then(|total| total.checked_add(response_bytes))
-                    .and_then(|total| total.checked_add(claim_bytes))
+                    let object_bytes = batch.objects.iter().try_fold(0_u64, |total, object| {
+                        let bytes = u64::try_from(
+                            canonical_json(object)
+                                .map_err(|_| ScanError::Integrity)?
+                                .as_bytes()
+                                .len(),
+                        )
+                        .map_err(|_| ScanError::Integrity)?;
+                        total.checked_add(bytes).ok_or(ScanError::Integrity)
+                    })?;
+                    total
+                        .checked_add(batch_bytes)
+                        .and_then(|total| total.checked_add(object_bytes))
+                        .ok_or(ScanError::Integrity)
+                })?;
+                session.producer_history_bytes = session
+                    .producer_history_bytes
+                    .checked_add(raw_bytes)
                     .ok_or(ScanError::Integrity)?;
+                if session.producer_history_bytes > session.maximum_retained_source_bytes {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::RetainedSourceBoundExceeded,
+                    ));
+                }
+                session.fold_work = session
+                    .fold_work
+                    .checked_add(
+                        u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?,
+                    )
+                    .ok_or(ScanError::Integrity)?;
+                if session.fold_work > session.maximum_producer_fold_batches {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::PublicationBoundExceeded,
+                    ));
+                }
+                if session.producer_cache.len() as u64 >= session.maximum_distinct_producers
+                    && !session.producer_cache.contains_key(producer)
+                {
+                    return Err(ScanError::Safe(
+                        FactSelectionReadFailureCode::PublicationBoundExceeded,
+                    ));
+                }
+                let verified = Arc::new(
+                    verify_recorded_history(
+                        raw,
+                        self.program_verifier.as_ref(),
+                        self.physical_binding_verifier.as_ref(),
+                    )
+                    .map_err(|_| ScanError::Integrity)?,
+                );
+                self.verify_nested_barriers(&verified, session).await?;
+                session
+                    .producer_cache
+                    .insert(producer.clone(), Arc::clone(&verified));
+                Ok(verified)
             }
-            if response_source_bytes > bounds.maximum_response_bytes() {
-                return Err(ScanError::Safe(
-                    FactSelectionReadFailureCode::ResponseBoundExceeded,
-                ));
-            }
-            query_results.push(PriorRunFactQueryResult {
-                query_ordinal: u32::try_from(query_ordinal).map_err(|_| ScanError::Integrity)?,
-                query_ref,
-                selected: selected
-                    .into_iter()
-                    .map(|fact| fact.as_ref().clone())
-                    .collect(),
-            });
-        }
-        let response = PriorRunFactSelectionResponse {
-            version: PriorRunFactSelectionResponse::VERSION.to_owned(),
-            request_digest: request.request_digest().map_err(|_| ScanError::Integrity)?,
-            admitted_source_manifest_ref: self
-                .consumer_admission
-                .admission_material_refs
-                .prior_run_source_manifest_ref
-                .clone(),
-            selector_contract_ref: prior_run_fact_selector_contract_ref()
-                .map_err(|_| ScanError::Integrity)?,
-            attestation: PriorRunFactScanAttestation {
-                frontier: self.frontier.clone(),
-                tenant_scope_id: self.consumer_admission.tenant_scope_id.clone(),
-                authorization_ref: self.authorization_ref.clone(),
-                physical_binding_ref: self.physical_binding_ref.clone(),
-                completeness_mode:
-                    PriorRunFactCompletenessMode::CompleteThroughAuthorizationFrontier,
-            },
-            query_results,
-        };
-        let canonical = canonical_json(&response).map_err(|_| ScanError::Integrity)?;
-        if u64::try_from(canonical.as_bytes().len()).map_err(|_| ScanError::Integrity)?
-            > bounds.maximum_response_bytes()
-        {
-            return Err(ScanError::Safe(
-                FactSelectionReadFailureCode::ResponseBoundExceeded,
-            ));
-        }
-        let returned =
-            FactSelectionReadResponse::from_canonical_json(canonical.as_str().to_owned())
+            .await;
+            session.active_producers.remove(producer);
+            result
+        })
+    }
+
+    fn verify_nested_barriers<'a>(
+        &'a self,
+        verified: &'a VerifiedStructuredRun,
+        session: &'a mut FactScanSession,
+    ) -> Pin<Box<dyn Future<Output = ScanResult<()>> + Send + 'a>> {
+        Box::pin(async move {
+            let source_object = verified
+                .object(
+                    &verified
+                        .admission()
+                        .admission_material_refs
+                        .prior_run_source_manifest_ref,
+                )
+                .ok_or(ScanError::Integrity)?;
+            let source_manifest = PriorRunFactSourceManifest::from_history_object(source_object)
                 .map_err(|_| ScanError::Integrity)?;
-        let persisted = canonical_json(&returned).map_err(|_| ScanError::Integrity)?;
-        if u64::try_from(persisted.as_bytes().len()).map_err(|_| ScanError::Integrity)?
-            > bounds.maximum_response_bytes()
-        {
-            return Err(ScanError::Safe(
-                FactSelectionReadFailureCode::ResponseBoundExceeded,
-            ));
-        }
-        Ok(returned)
+            for batch in verified.batches() {
+                let TenantFactCoordinate::FactSelectionBarrier { frontier } =
+                    &batch.tenant_fact_coordinate
+                else {
+                    continue;
+                };
+                let [assigned] = batch.records.as_slice() else {
+                    return Err(ScanError::Integrity);
+                };
+                let RunRecord::ExternalAccessAuthorized(authorization) = &assigned.record else {
+                    return Err(ScanError::Integrity);
+                };
+                let Some((_, observation)) = verified.observation(&authorization.access_attempt_id)
+                else {
+                    continue;
+                };
+                let ObservationOutcome::Returned { value } = &observation.outcome else {
+                    continue;
+                };
+                let request_object = verified
+                    .object(&authorization.request.value_ref)
+                    .ok_or(ScanError::Integrity)?;
+                let request: FactSelectionRequest =
+                    request_object.decode().map_err(|_| ScanError::Integrity)?;
+                let returned_object = verified
+                    .object(&value.value_ref)
+                    .ok_or(ScanError::Integrity)?;
+                let recorded: FactSelectionReadResponse =
+                    returned_object.decode().map_err(|_| ScanError::Integrity)?;
+                let nested = BackendFactScanPort {
+                    source: Arc::clone(&self.source),
+                    program_verifier: Arc::clone(&self.program_verifier),
+                    physical_binding_verifier: Arc::clone(&self.physical_binding_verifier),
+                    consumer_run_id: verified.run_id().clone(),
+                    consumer_admission: verified.admission().clone(),
+                    source_manifest: source_manifest.clone(),
+                    expected_request: request.clone(),
+                    authorization_ref: assigned.record_ref.clone(),
+                    physical_binding_ref: authorization.physical_binding_ref.clone(),
+                    frontier: frontier.clone(),
+                    integrity_fault_code: self.integrity_fault_code.clone(),
+                };
+                let recomputed = nested.scan_with_session(request, session).await?;
+                if recomputed != recorded {
+                    return Err(ScanError::Integrity);
+                }
+            }
+            Ok(())
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -481,7 +650,10 @@ impl BackendFactScanPort {
             return Err(ScanError::Integrity);
         }
         if producer.run_id() == &self.consumer_run_id {
-            return Ok(());
+            // A consumer cannot satisfy its own prior-run completeness witness.
+            // Treating this route as an empty source would let a self-listed
+            // publication bypass the independent producer closure.
+            return Err(ScanError::Integrity);
         }
         for fact in &transition.facts {
             *fact_count = fact_count.checked_add(1).ok_or(ScanError::Integrity)?;

@@ -12,6 +12,12 @@ layer = "domain"
 domain = "evm"
 domain-role = "source"
 
+[features]
+test-support = []
+# Internal storage bridge for the authority-produced activation permit.  The
+# pure domain crate does not expose the permit derivation by default.
+authority-integration = []
+
 [dependencies]
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }

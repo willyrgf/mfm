@@ -9,7 +9,7 @@ use mfm_store::structured::{
 };
 
 use crate::configuration::PostgresConfigurationHistoryBackend;
-use crate::error::Result;
+use crate::error::{PostgresStoreError, Result};
 use crate::session::{
     PostgresApplicationSessions, PostgresCombinedSessions, PostgresConfigurationSessions,
 };
@@ -26,11 +26,8 @@ pub async fn open_structured_authoritative(
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
     let backend = PostgresStructuredHistoryBackend::from_application_sessions(sessions);
-    Ok(assemble_structured_runtime(
-        backend,
-        registry,
-        physical_binding_verifier,
-    ))
+    assemble_structured_runtime(backend, registry, physical_binding_verifier)
+        .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))
 }
 
 /// Opens structured RunHistory together with append-only configured-value history.
@@ -55,7 +52,9 @@ pub async fn open_structured_authoritative_with_configuration(
     );
     let run_backend =
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target);
-    let assembled = assemble_structured_runtime(run_backend, registry, physical_binding_verifier);
+    let assembled =
+        assemble_structured_runtime(run_backend, registry, physical_binding_verifier)
+            .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))?;
     Ok((
         assembled,
         ConfigurationHistoryStore::new(configuration_backend),
@@ -82,7 +81,8 @@ pub async fn open_structured_authoritative_application(
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target),
         registry,
         physical_binding_verifier,
-    );
+    )
+    .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))?;
     let (_writer, reader) = configuration.split();
     Ok((assembled, reader))
 }

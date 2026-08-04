@@ -154,8 +154,8 @@ and backends stay private to store assembly; Runtime never receives a raw backen
 loads one verified prefix, selects the minimum actionable occurrence path, and performs exactly one
 action. The scanner travels through the same ordinary Read
 authorization/invocation/observation/settlement protocol. Runtime passes the newly committed
-authorization proof into the sealed invoker, while ordinary adapters discard that proof. No normal
-live return can escape recording. The private store adapter retains at most one same-fold verified
+authorization proof into the sealed invoker, and every protected adapter retains that proof until
+its provider call completes. No normal live return can escape recording. The private store adapter retains at most one same-fold verified
 successor between drives and validates its journal head against the indexed backend head before
 reuse; a stale or absent entry uses the sole full fold. The indexed-head query is the snapshot point
 for a non-mutating load, while exact-head compare-and-append protects every mutation from a later
@@ -278,6 +278,25 @@ caller token. Tenant equality is checked after callback-free load.
 CLI and REST preserve their transport contracts. Standalone binaries do not mint deployment
 authority. They fail closed until an embedding deployment supplies the fenced store and sealed EVM
 bindings.
+
+## Current runtime-history cutover
+
+The store's canonical ingress is shared by memory and PostgreSQL. It validates the complete
+append envelope, persisted-object closure, bounded counts, canonical bytes, and exact predecessor
+before either backend performs DML. PostgreSQL loads query the indexed head before loading any
+batch, object, or revision rows and revalidate target and external-checkpoint lineage before the
+snapshot is released. Checkpoint state is keyed by the stable `(store, epoch, target, stream,
+stream-id)` identity; a predecessor is a mutation precondition, never a second stream identity.
+
+Runtime access proofs are consumed by both Read and Effect adapters. A qualified adapter must bind
+the proof's access kind, state input where applicable, and retained physical certificate before
+entering a target. The unqualified Effect invoker is integrity-fault-only. EVM recovery observes
+every retained candidate in ordinal order before replacement and stores one compact, canonical
+recovery closure for completed wallet state.
+
+Portable export evidence hands the encoder canonical batch frames rather than mutable store batch
+objects. Recursive source closure is checked for exact direct dependencies, cycles, and maximum
+required producer heads before encoding.
 
 ## Contributor checks
 

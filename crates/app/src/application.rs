@@ -251,7 +251,7 @@ impl EvmWalletDeploymentAssemblyInput {
                 catalog,
                 semantics.route_generation_ref(),
                 signer.binding().durable_generation_ref(),
-                wallet_authority.domain_activation_attestation(),
+                &wallet_authority.current_incarnation_ref(),
             )
             .is_err()
         {
@@ -286,18 +286,6 @@ impl EvmWalletDeploymentAssemblyInput {
         &self.pending_rpc_inventory
     }
 
-    /// Returns the concrete provider-qualified wallet authority.
-    pub const fn wallet_authority(
-        &self,
-    ) -> &mfm_storage_evm_postgres::PostgresWalletNonceAuthority {
-        &self.wallet_authority
-    }
-
-    /// Returns the qualified concrete signer bearer without releasing it.
-    pub const fn signer(&self) -> &mfm_keystore::QualifiedKeystoreSigner {
-        &self.signer
-    }
-
     /// Returns the exact configured submission semantics.
     pub const fn submission(&self) -> &mfm_evm::EvmSubmissionConfiguration {
         &self.submission
@@ -330,7 +318,7 @@ fn release_material_matches(
     catalog: &mfm_evm::EvmRoutingCatalogDescriptor,
     route_generation_ref: &mfm_evm::EvmWalletReference,
     signer_generation_ref: &mfm_ids::ContentRef,
-    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    current_wallet_incarnation_ref: &mfm_evm::EvmWalletReference,
 ) -> Result<(), PublicError> {
     let histories = [
         &releases.rpc,
@@ -346,24 +334,17 @@ fn release_material_matches(
     let catalog_target_ref = catalog
         .content_ref()
         .map_err(|_| wallet_deployment_invalid())?;
-    let wallet_target_ref = activation
-        .initial_store_incarnation_ref
+    let wallet_target_ref = current_wallet_incarnation_ref
         .to_content_ref()
         .map_err(|_| wallet_deployment_invalid())?;
-    // Every retained wallet release (including successors) must name the
-    // authority's actual current physical incarnation, not only the root.
-    let wallet_releases_current = releases
-        .wallet_read
-        .releases()
-        .chain(releases.wallet_effect.releases())
-        .all(|release| release.physical_target_ref() == &wallet_target_ref);
     if histories
         .iter()
         .any(|history| history.current().admitted_routing_policy_ref() != routing_policy_ref)
         || releases.rpc.current().physical_target_ref() != &route_target_ref
         || releases.signer.current().physical_target_ref() != signer_generation_ref
         || releases.balance.current().physical_target_ref() != &catalog_target_ref
-        || !wallet_releases_current
+        || releases.wallet_read.current().physical_target_ref() != &wallet_target_ref
+        || releases.wallet_effect.current().physical_target_ref() != &wallet_target_ref
         || releases.broadcast.current().physical_target_ref()
             != &releases.broadcast_lineage_head_object.content_ref
         || releases

@@ -4,11 +4,14 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
+use mfm_canonical::limits::MAX_COMPLETION_RECOVERY_BYTES;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
-    ComponentFuture, EffectAdapterCompletion, EffectCapabilityContract, ReadAdapterCompletion,
-    ReadCapabilityContract, Refreshable, ResourceAuthorityContract,
+    AccessFaultCode, ComponentFuture, EffectAdapterCompletion, EffectCapabilityContract,
+    EffectContractCompletion, ReadAdapterCompletion, ReadCapabilityContract, Refreshable,
+    ResourceAuthorityContract,
 };
+use mfm_certify::structured::CertifiedAccessAuthorization;
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, RunId, StableId, TenantScopeId};
 use mfm_journal::structured::{domain_content_digest, LexicalValueRef, RecordRef};
 use mfm_program::structured::{
@@ -57,9 +60,7 @@ pub const EVM_TRANSACTION_NONCE_MAX: u64 = u64::MAX - 1;
 ///
 /// Values equal to `u64::MAX` are rejected at every construction and decode
 /// boundary. Zero through [`EVM_TRANSACTION_NONCE_MAX`] are admitted.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, MfmValue,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, MfmValue)]
 #[mfm(
     namespace = "mfm.evm",
     name = "transaction-nonce",
@@ -69,6 +70,21 @@ pub const EVM_TRANSACTION_NONCE_MAX: u64 = u64::MAX - 1;
 pub struct TransactionNonce {
     /// Protocol nonce value.
     pub(crate) value: u64,
+}
+
+impl<'de> Deserialize<'de> for TransactionNonce {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            value: u64,
+        }
+
+        Self::new(Wire::deserialize(deserializer)?.value).map_err(serde::de::Error::custom)
+    }
 }
 
 impl TransactionNonce {
@@ -138,7 +154,64 @@ pub enum WalletAuthorityContractError {
     Canonical,
 }
 
-/// Immutable declaration of one qualified physical EVM chain instance.
+/// Full recovery preimages carried as one bounded canonical object. Keeping
+/// this closure behind one string keeps the public completion schema bounded
+/// while retaining every typed preimage for offline verification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletedRecoveryClosure {
+    reservation_request: ReserveEvmNonceRequest,
+    completion_request: CompleteEvmNonceRequest,
+    activation_requests: Vec<ActivateEvmCandidateRequest>,
+    activation_state_inputs: Vec<LexicalValueRef>,
+    reservation_state_input: LexicalValueRef,
+    completion_state_input: LexicalValueRef,
+    reservation: ReservedWalletNonce,
+    transaction_intent: EvmTransactionIntent,
+    candidate_family: EvmCandidateFamily,
+    domain_activation_attestation: WalletNonceDomainActivationAttestation,
+    qualified_floor: QualifiedPendingNonceFloor,
+    route_generation_ref: EvmWalletReference,
+    issuer_namespace_contract_ref: EvmWalletReference,
+    observation_rounds: u8,
+    submission_semantics_digest: SubmissionSemanticsDigest,
+    canonical_terminal_outcome: CanonicalTerminalOutcome,
+    terminal_witnesses: TerminalWitnesses,
+    sealed_activated_candidates: Vec<ActiveWalletCandidate>,
+    original_terminal_witnesses_ref: String,
+    completion_evidence_ref: EvmWalletReference,
+}
+
+fn encode_completed_recovery(
+    closure: &CompletedRecoveryClosure,
+) -> Result<String, WalletAuthorityContractError> {
+    let json =
+        serde_json::to_string(closure).map_err(|_| WalletAuthorityContractError::Canonical)?;
+    let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+        .map_err(|_| WalletAuthorityContractError::Canonical)?;
+    if canonical.as_bytes().len() > MAX_COMPLETION_RECOVERY_BYTES {
+        return Err(WalletAuthorityContractError::BoundExceeded(
+            "completion_recovery",
+        ));
+    }
+    String::from_utf8(canonical.as_bytes().to_vec())
+        .map_err(|_| WalletAuthorityContractError::Canonical)
+}
+
+fn decode_completed_recovery(
+    value: &str,
+) -> Result<CompletedRecoveryClosure, WalletAuthorityContractError> {
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
+        .map_err(|_| WalletAuthorityContractError::Canonical)?;
+    if canonical.as_bytes().len() > MAX_COMPLETION_RECOVERY_BYTES {
+        return Err(WalletAuthorityContractError::BoundExceeded(
+            "completion_recovery",
+        ));
+    }
+    serde_json::from_slice(canonical.as_bytes())
+        .map_err(|_| WalletAuthorityContractError::Canonical)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
@@ -147,6 +220,7 @@ pub enum WalletAuthorityContractError {
     version = "1",
     schema = "mfm.evm.chain_instance_declaration"
 )]
+/// Immutable declaration of one qualified physical EVM chain instance.
 pub struct ChainInstanceDeclaration {
     qualified_chain_registry_lineage_ref: EvmWalletReference,
     never_reused_instance_namespace_id: String,
@@ -435,6 +509,9 @@ pub fn derive_submission_semantics_digest(
     candidate_family: &EvmCandidateFamily,
     observation_rounds: u8,
     expansion_contract_ref: &EvmWalletReference,
+    route_generation_ref: &EvmWalletReference,
+    domain_activation_attestation: &WalletNonceDomainActivationAttestation,
+    issuer_namespace_contract_ref: &EvmWalletReference,
 ) -> Result<SubmissionSemanticsDigest, WalletAuthorityContractError> {
     transaction_intent.validate()?;
     candidate_family.validate(transaction_intent)?;
@@ -442,6 +519,14 @@ pub fn derive_submission_semantics_digest(
         return Err(WalletAuthorityContractError::Invalid("observation_rounds"));
     }
     validate_reference(expansion_contract_ref)?;
+    validate_reference(route_generation_ref)?;
+    domain_activation_attestation.validate()?;
+    validate_reference(issuer_namespace_contract_ref)?;
+    // The replacement policy is code-owned but still behavior-changing.  It
+    // belongs in the retained semantics closure so a policy-contract change
+    // cannot silently reuse an old intent/token digest.
+    let replacement_policy_ref = crate::evm_wallet_nonce_policy_ref()
+        .map_err(|_| WalletAuthorityContractError::Invalid("replacement_policy"))?;
     Ok(SubmissionSemanticsDigest::from_digest(hash(
         SUBMISSION_SEMANTICS_DOMAIN,
         &(
@@ -449,6 +534,10 @@ pub fn derive_submission_semantics_digest(
             candidate_family,
             observation_rounds,
             expansion_contract_ref,
+            route_generation_ref,
+            domain_activation_attestation,
+            issuer_namespace_contract_ref,
+            &replacement_policy_ref,
         ),
     )?))
 }
@@ -614,6 +703,7 @@ impl EvmTransactionIntent {
         nonce: u64,
         fee: &EvmWalletFeeCandidate,
     ) -> Result<UnsignedEip1559Envelope, WalletAuthorityContractError> {
+        TransactionNonce::new(nonce)?;
         UnsignedEip1559Envelope::new(
             U256::from(self.chain_instance.chain_id()),
             U256::from(nonce),
@@ -886,7 +976,7 @@ pub enum PriorResourceDisposition {
 }
 
 /// Permanent current-schema domain activation record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -959,6 +1049,7 @@ impl WalletNonceDomainActivationRecord {
         }
         validate_reference(&self.issuer_namespace_contract_ref)?;
         validate_reference(&self.replay_exclusion_contract_ref)?;
+        TransactionNonce::new(self.finalized_sender_nonce_floor)?;
         let finalized_block_number = U256::from_str(&self.finalized_block_number)
             .map_err(|_| WalletAuthorityContractError::Invalid("finalized_block_number"))?;
         if finalized_block_number.to_string() != self.finalized_block_number {
@@ -982,6 +1073,66 @@ impl WalletNonceDomainActivationRecord {
             ));
         }
         Ok(())
+    }
+}
+
+impl<'de> Deserialize<'de> for WalletNonceDomainActivationRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            activation_contract_ref: EvmWalletReference,
+            qualified_activation_registry_lineage_ref: EvmWalletReference,
+            wallet_nonce_store_lineage_id: String,
+            initial_store_incarnation_ref: EvmWalletReference,
+            wallet_nonce_domain: WalletNonceDomain,
+            chain_instance_attestation: ChainInstanceRegistryAttestation,
+            initial_route_generation_ref: EvmRoutingGenerationRef,
+            initial_route_membership_issuance_ref: EvmWalletReference,
+            sender_identity: String,
+            issuer_namespace_contract_ref: EvmWalletReference,
+            replay_exclusion_contract_ref: EvmWalletReference,
+            replay_exclusion_disposition: ReplayExclusionDisposition,
+            finalized_sender_nonce_floor: u64,
+            finalized_block_number: String,
+            finalized_block_hash: String,
+            qualified_observation_proof_ref: EvmWalletReference,
+            exhaustive_sender_path_inventory_digest: String,
+            exclusive_current_control: ExclusiveCurrentControl,
+            prior_effect_disposition: PriorEffectDisposition,
+            prior_resource_disposition: PriorResourceDisposition,
+            new_idempotency_epoch: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        TransactionNonce::new(wire.finalized_sender_nonce_floor)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            activation_contract_ref: wire.activation_contract_ref,
+            qualified_activation_registry_lineage_ref: wire
+                .qualified_activation_registry_lineage_ref,
+            wallet_nonce_store_lineage_id: wire.wallet_nonce_store_lineage_id,
+            initial_store_incarnation_ref: wire.initial_store_incarnation_ref,
+            wallet_nonce_domain: wire.wallet_nonce_domain,
+            chain_instance_attestation: wire.chain_instance_attestation,
+            initial_route_generation_ref: wire.initial_route_generation_ref,
+            initial_route_membership_issuance_ref: wire.initial_route_membership_issuance_ref,
+            sender_identity: wire.sender_identity,
+            issuer_namespace_contract_ref: wire.issuer_namespace_contract_ref,
+            replay_exclusion_contract_ref: wire.replay_exclusion_contract_ref,
+            replay_exclusion_disposition: wire.replay_exclusion_disposition,
+            finalized_sender_nonce_floor: wire.finalized_sender_nonce_floor,
+            finalized_block_number: wire.finalized_block_number,
+            finalized_block_hash: wire.finalized_block_hash,
+            qualified_observation_proof_ref: wire.qualified_observation_proof_ref,
+            exhaustive_sender_path_inventory_digest: wire.exhaustive_sender_path_inventory_digest,
+            exclusive_current_control: wire.exclusive_current_control,
+            prior_effect_disposition: wire.prior_effect_disposition,
+            prior_resource_disposition: wire.prior_resource_disposition,
+            new_idempotency_epoch: wire.new_idempotency_epoch,
+        })
     }
 }
 
@@ -1162,7 +1313,8 @@ pub struct QualifiedPendingNonceObservation {
 impl QualifiedPendingNonceObservation {
     /// Constructs one observation only from an already committed origin tuple.
     #[allow(clippy::too_many_arguments)]
-    pub fn from_committed_origin(
+    #[doc(hidden)]
+    pub(crate) fn from_committed_origin(
         floor: QualifiedPendingNonceFloor,
         chain_instance_ref: EvmWalletReference,
         sender: Address,
@@ -1173,9 +1325,9 @@ impl QualifiedPendingNonceObservation {
     ) -> Result<Self, WalletAuthorityContractError> {
         floor.observed.pending_nonce.validate()?;
         floor.observed.nonce_domain.validate()?;
-        if floor.observed.route_generation_ref != physical_release_ref {
-            return Err(WalletAuthorityContractError::Invalid("pending_release"));
-        }
+        physical_release_ref
+            .to_content_ref()
+            .map_err(|_| WalletAuthorityContractError::Invalid("pending_release"))?;
         let sender_text = format!("{sender:#x}");
         if floor.observed.nonce_domain.sender() != sender_text {
             return Err(WalletAuthorityContractError::Invalid("pending_sender"));
@@ -1189,6 +1341,29 @@ impl QualifiedPendingNonceObservation {
             authorization_ref,
             request_ref,
         })
+    }
+
+    /// Builds a fixture-only observation for storage parity tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn from_test_origin(
+        floor: QualifiedPendingNonceFloor,
+        chain_instance_ref: EvmWalletReference,
+        sender: Address,
+        physical_release_ref: EvmWalletReference,
+        source_run_id: RunId,
+        authorization_ref: RecordRef,
+        request_ref: ContentRef,
+    ) -> Result<Self, WalletAuthorityContractError> {
+        Self::from_committed_origin(
+            floor,
+            chain_instance_ref,
+            sender,
+            physical_release_ref,
+            source_run_id,
+            authorization_ref,
+            request_ref,
+        )
     }
 
     /// Returns the qualified floor for the reservation port.
@@ -1211,6 +1386,12 @@ impl QualifiedPendingNonceObservation {
         &self.physical_release_ref
     }
 
+    /// Returns the exact persisted request object reference that originated
+    /// this provider observation.
+    pub const fn request_ref(&self) -> &ContentRef {
+        &self.request_ref
+    }
+
     /// Returns the authenticated sender bound to the pending read.
     pub fn sender(&self) -> Result<Address, WalletAuthorityContractError> {
         Address::from_str(&self.sender)
@@ -1221,10 +1402,12 @@ impl QualifiedPendingNonceObservation {
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.floor.observed.pending_nonce.validate()?;
         self.floor.observed.nonce_domain.validate()?;
+        validate_reference(&self.floor.observed.route_generation_ref)?;
+        validate_reference(&self.floor.pending_floor_policy_ref)?;
         validate_reference(&self.chain_instance_ref)?;
         validate_reference(&self.physical_release_ref)?;
-        if self.floor.observed.route_generation_ref != self.physical_release_ref
-            || self.authorization_ref.run_id != self.source_run_id
+        if self.authorization_ref.run_id != self.source_run_id
+            || self.authorization_ref.run_sequence == 0
             || self.request_ref.content_digest().as_str().is_empty()
         {
             return Err(WalletAuthorityContractError::Invalid("pending_origin"));
@@ -1234,7 +1417,7 @@ impl QualifiedPendingNonceObservation {
 }
 
 /// Permanently reserved nonce and exact intent/family identity.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -1263,6 +1446,61 @@ pub struct ReservedWalletNonce {
     pub resource_lineage_ref: EvmWalletReference,
     /// Permanent reservation proof.
     pub reservation_evidence_ref: EvmWalletReference,
+}
+
+impl<'de> Deserialize<'de> for ReservedWalletNonce {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            nonce_domain: WalletNonceDomain,
+            domain_activation_record_ref: EvmWalletReference,
+            nonce: u64,
+            semantic_reservation_key: EvmNonceReservationKey,
+            submission_intent_id: SubmissionIntentId,
+            transaction_intent_digest: String,
+            candidate_family_ref: String,
+            observed_floor_ref: String,
+            resource_lineage_ref: EvmWalletReference,
+            reservation_evidence_ref: EvmWalletReference,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        TransactionNonce::new(wire.nonce).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            nonce_domain: wire.nonce_domain,
+            domain_activation_record_ref: wire.domain_activation_record_ref,
+            nonce: wire.nonce,
+            semantic_reservation_key: wire.semantic_reservation_key,
+            submission_intent_id: wire.submission_intent_id,
+            transaction_intent_digest: wire.transaction_intent_digest,
+            candidate_family_ref: wire.candidate_family_ref,
+            observed_floor_ref: wire.observed_floor_ref,
+            resource_lineage_ref: wire.resource_lineage_ref,
+            reservation_evidence_ref: wire.reservation_evidence_ref,
+        })
+    }
+}
+
+impl ReservedWalletNonce {
+    /// Revalidates the complete immutable reservation closure.
+    pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
+        TransactionNonce::new(self.nonce)?;
+        self.nonce_domain.validate()?;
+        validate_reference(&self.domain_activation_record_ref)?;
+        self.semantic_reservation_key.validate()?;
+        self.submission_intent_id.validate()?;
+        ContentDigest::from_str(&self.transaction_intent_digest)
+            .map_err(|_| WalletAuthorityContractError::Invalid("transaction_intent_digest"))?;
+        ContentDigest::from_str(&self.candidate_family_ref)
+            .map_err(|_| WalletAuthorityContractError::Invalid("candidate_family_ref"))?;
+        ContentDigest::from_str(&self.observed_floor_ref)
+            .map_err(|_| WalletAuthorityContractError::Invalid("observed_floor_ref"))?;
+        validate_reference(&self.resource_lineage_ref)?;
+        validate_reference(&self.reservation_evidence_ref)
+    }
 }
 
 /// Secret-free signer attestation for one exact unsigned candidate.
@@ -1348,12 +1586,13 @@ pub enum CandidateActivationPermit {
 /// before any activation (initial or replacement). Replacement
 /// therefore cannot admit until every retained activated candidate has been
 /// observed (EVM-03/EVM-04).
-pub fn derive_exact_candidate_activation_permit(
+pub(crate) fn derive_exact_candidate_activation_permit_inner(
     reservation: &ReservedWalletNonce,
     activated_candidates: &[ActiveWalletCandidate],
     next_candidate_ordinal: u16,
     observed_prefix_len: u16,
 ) -> Result<CandidateActivationPermit, WalletAuthorityContractError> {
+    TransactionNonce::new(reservation.nonce)?;
     if activated_candidates
         .iter()
         .enumerate()
@@ -1446,6 +1685,25 @@ pub fn derive_exact_candidate_activation_permit(
     })
 }
 
+/// Derives the exact activation permit used by the qualified wallet-authority
+/// adapter.  The public domain surface intentionally omits this constructor;
+/// only the storage bridge and in-crate certification tests enable it.
+#[doc(hidden)]
+#[cfg(any(test, feature = "authority-integration"))]
+pub fn derive_exact_candidate_activation_permit(
+    reservation: &ReservedWalletNonce,
+    activated_candidates: &[ActiveWalletCandidate],
+    next_candidate_ordinal: u16,
+    observed_prefix_len: u16,
+) -> Result<CandidateActivationPermit, WalletAuthorityContractError> {
+    derive_exact_candidate_activation_permit_inner(
+        reservation,
+        activated_candidates,
+        next_candidate_ordinal,
+        observed_prefix_len,
+    )
+}
+
 /// Reconstructs and validates one complete retained active-candidate prefix.
 pub fn validate_active_wallet_candidate_prefix(
     reservation: &ReservedWalletNonce,
@@ -1453,6 +1711,7 @@ pub fn validate_active_wallet_candidate_prefix(
     candidate_family: &EvmCandidateFamily,
     activated_candidates: &[ActiveWalletCandidate],
 ) -> Result<(), WalletAuthorityContractError> {
+    TransactionNonce::new(reservation.nonce)?;
     transaction_intent.validate()?;
     candidate_family.validate(transaction_intent)?;
     if transaction_intent.nonce_domain() != &reservation.nonce_domain
@@ -1530,7 +1789,7 @@ fn canonical_public_result(disposition: ExecutionDisposition) -> &'static str {
 }
 
 /// Run-independent canonical completion claim.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -1567,10 +1826,53 @@ pub struct CanonicalTerminalOutcome {
     pub canonical_public_result: String,
 }
 
+impl<'de> Deserialize<'de> for CanonicalTerminalOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            nonce_domain: WalletNonceDomain,
+            semantic_reservation_key: EvmNonceReservationKey,
+            submission_intent_id: SubmissionIntentId,
+            transaction_intent_digest: String,
+            nonce: u64,
+            winning_candidate_ordinal: u16,
+            winning_activation_evidence_ref: EvmWalletReference,
+            transaction_hash: String,
+            inclusion_block_number: String,
+            inclusion_block_hash: String,
+            terminal_assurance_contract_ref: EvmWalletReference,
+            execution_disposition: ExecutionDisposition,
+            canonical_public_result: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        TransactionNonce::new(wire.nonce).map_err(serde::de::Error::custom)?;
+        Ok(Self {
+            nonce_domain: wire.nonce_domain,
+            semantic_reservation_key: wire.semantic_reservation_key,
+            submission_intent_id: wire.submission_intent_id,
+            transaction_intent_digest: wire.transaction_intent_digest,
+            nonce: wire.nonce,
+            winning_candidate_ordinal: wire.winning_candidate_ordinal,
+            winning_activation_evidence_ref: wire.winning_activation_evidence_ref,
+            transaction_hash: wire.transaction_hash,
+            inclusion_block_number: wire.inclusion_block_number,
+            inclusion_block_hash: wire.inclusion_block_hash,
+            terminal_assurance_contract_ref: wire.terminal_assurance_contract_ref,
+            execution_disposition: wire.execution_disposition,
+            canonical_public_result: wire.canonical_public_result,
+        })
+    }
+}
+
 impl CanonicalTerminalOutcome {
     /// Revalidates the complete run-independent terminal claim.
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.nonce_domain.validate()?;
+        TransactionNonce::new(self.nonce)?;
         self.semantic_reservation_key.validate()?;
         self.submission_intent_id.validate()?;
         ContentDigest::from_str(&self.transaction_intent_digest)
@@ -1695,7 +1997,7 @@ impl TerminalWitnesses {
 #[mfm(
     namespace = "mfm.evm",
     name = "completed-wallet-nonce",
-    version = "2",
+    version = "3",
     schema = "mfm.evm.completed_wallet_nonce"
 )]
 pub struct CompletedWalletNonce {
@@ -1717,14 +2019,256 @@ pub struct CompletedWalletNonce {
     pub original_terminal_witnesses_ref: String,
     /// Permanent completion evidence.
     pub completion_evidence_ref: EvmWalletReference,
+    /// Canonical, bounded full recovery closure.
+    pub recovery_closure: String,
 }
 
 impl CompletedWalletNonce {
+    /// Constructs a completion with its full bounded recovery preimage.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_recovery_closure(
+        nonce_domain: WalletNonceDomain,
+        nonce: u64,
+        semantic_reservation_key: EvmNonceReservationKey,
+        semantic_completion_key: EvmNonceCompletionKey,
+        canonical_terminal_outcome: CanonicalTerminalOutcome,
+        terminal_witnesses: TerminalWitnesses,
+        sealed_activated_candidates: Vec<ActiveWalletCandidate>,
+        original_terminal_witnesses_ref: String,
+        completion_evidence_ref: EvmWalletReference,
+        reservation: ReservedWalletNonce,
+        transaction_intent: EvmTransactionIntent,
+        candidate_family: EvmCandidateFamily,
+        domain_activation_attestation: WalletNonceDomainActivationAttestation,
+        qualified_floor: QualifiedPendingNonceFloor,
+        route_generation_ref: EvmWalletReference,
+        issuer_namespace_contract_ref: EvmWalletReference,
+        observation_rounds: u8,
+        submission_semantics_digest: SubmissionSemanticsDigest,
+        reservation_request: ReserveEvmNonceRequest,
+        completion_request: CompleteEvmNonceRequest,
+        activation_requests: Vec<ActivateEvmCandidateRequest>,
+        activation_state_inputs: Vec<LexicalValueRef>,
+        reservation_state_input: LexicalValueRef,
+        completion_state_input: LexicalValueRef,
+    ) -> Result<Self, WalletAuthorityContractError> {
+        let recovery_closure = encode_completed_recovery(&CompletedRecoveryClosure {
+            reservation_request,
+            completion_request,
+            activation_requests,
+            activation_state_inputs,
+            reservation_state_input,
+            completion_state_input,
+            reservation,
+            transaction_intent,
+            candidate_family,
+            domain_activation_attestation,
+            qualified_floor,
+            route_generation_ref,
+            issuer_namespace_contract_ref,
+            observation_rounds,
+            submission_semantics_digest,
+            canonical_terminal_outcome: canonical_terminal_outcome.clone(),
+            terminal_witnesses: terminal_witnesses.clone(),
+            sealed_activated_candidates: sealed_activated_candidates.clone(),
+            original_terminal_witnesses_ref: original_terminal_witnesses_ref.clone(),
+            completion_evidence_ref: completion_evidence_ref.clone(),
+        })?;
+        Ok(Self {
+            nonce_domain,
+            nonce,
+            semantic_reservation_key,
+            semantic_completion_key,
+            canonical_terminal_outcome,
+            terminal_witnesses,
+            sealed_activated_candidates,
+            original_terminal_witnesses_ref,
+            completion_evidence_ref,
+            recovery_closure,
+        })
+    }
+
     /// Revalidates the complete public recovery closure against itself.
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.nonce_domain.validate()?;
+        TransactionNonce::new(self.nonce)?;
         self.semantic_reservation_key.validate()?;
         self.semantic_completion_key.validate()?;
+        let closure = decode_completed_recovery(&self.recovery_closure)?;
+        let reservation = &closure.reservation;
+        let reservation_request = &closure.reservation_request;
+        let completion_request = &closure.completion_request;
+        let transaction_intent = &closure.transaction_intent;
+        let candidate_family = &closure.candidate_family;
+        let domain_activation_attestation = &closure.domain_activation_attestation;
+        let qualified_floor = &closure.qualified_floor;
+        reservation.validate()?;
+        completion_request.validate()?;
+        transaction_intent.validate()?;
+        candidate_family.validate(transaction_intent)?;
+        domain_activation_attestation.validate()?;
+        qualified_floor.observed.pending_nonce.validate()?;
+        qualified_floor.observed.nonce_domain.validate()?;
+        validate_reference(&qualified_floor.observed.route_generation_ref)?;
+        validate_reference(&qualified_floor.pending_floor_policy_ref)?;
+        validate_reference(&closure.route_generation_ref)?;
+        validate_reference(&closure.issuer_namespace_contract_ref)?;
+        if !(1..=EVM_WALLET_OBSERVATION_ROUND_LIMIT).contains(&closure.observation_rounds) {
+            return Err(WalletAuthorityContractError::Invalid("observation_rounds"));
+        }
+        let activation_record = &domain_activation_attestation.current_schema_record;
+        if qualified_floor.observed.nonce_domain != self.nonce_domain
+            || transaction_intent.nonce_domain() != &self.nonce_domain
+            || activation_record.wallet_nonce_domain != self.nonce_domain
+            || activation_record.issuer_namespace_contract_ref
+                != closure.issuer_namespace_contract_ref
+            || activation_record
+                .initial_route_generation_ref
+                .to_content_ref()
+                .ok()
+                .as_ref()
+                != closure.route_generation_ref.to_content_ref().ok().as_ref()
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_scope",
+            ));
+        }
+        if reservation_request.nonce_domain != self.nonce_domain
+            || reservation_request.domain_activation_attestation != *domain_activation_attestation
+            || reservation_request.issuer_namespace_contract_ref
+                != closure.issuer_namespace_contract_ref
+            || reservation_request.submission_intent_id != reservation.submission_intent_id
+            || reservation_request.submission_semantics_digest
+                != closure.submission_semantics_digest
+            || reservation_request.transaction_intent != *transaction_intent
+            || reservation_request.candidate_family != *candidate_family
+            || reservation_request.qualified_floor != *qualified_floor
+            || reservation_request.reservation_key != reservation.semantic_reservation_key
+            || completion_request.nonce_domain != self.nonce_domain
+            || completion_request.completion_key != self.semantic_completion_key
+            || completion_request.current_reservation != *reservation
+            || completion_request.canonical_terminal_outcome != self.canonical_terminal_outcome
+            || completion_request.terminal_witnesses != self.terminal_witnesses
+            || closure.activation_requests.len() != self.sealed_activated_candidates.len()
+            || closure.activation_state_inputs.len() != closure.activation_requests.len()
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_requests",
+            ));
+        }
+        let expansion_contract_ref = crate::evm_submission_expansion_policy_ref()
+            .map_err(|_| WalletAuthorityContractError::Invalid("expansion_contract"))?;
+        let expected_semantics = derive_submission_semantics_digest(
+            transaction_intent,
+            candidate_family,
+            closure.observation_rounds,
+            &expansion_contract_ref,
+            &closure.route_generation_ref,
+            domain_activation_attestation,
+            &closure.issuer_namespace_contract_ref,
+        )?;
+        let activation_record_ref = canonical_wallet_reference(activation_record)?;
+        if expected_semantics != closure.submission_semantics_digest
+            || reservation.semantic_reservation_key != self.semantic_reservation_key
+            || reservation.nonce_domain != self.nonce_domain
+            || reservation.nonce != self.nonce
+            || reservation.transaction_intent_digest != transaction_intent.digest()
+            || reservation.candidate_family_ref != candidate_family.digest()
+            || activation_record_ref != reservation.domain_activation_record_ref
+            || qualified_floor.observed.route_generation_ref != closure.route_generation_ref
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_preimages",
+            ));
+        }
+        let observed_floor_ref = domain_content_digest(
+            "mfm.evm.wallet-observed-floor-provenance.v1",
+            &(
+                &reservation_request.qualified_floor,
+                &closure.reservation_state_input,
+            ),
+        )
+        .map_err(|_| WalletAuthorityContractError::Canonical)?;
+        let reservation_evidence_ref = domain_content_digest(
+            "mfm.evm.wallet-reservation-evidence.v1",
+            &(
+                reservation_request,
+                &closure.reservation_state_input,
+                &reservation.resource_lineage_ref,
+                reservation.nonce,
+            ),
+        )
+        .map_err(|_| WalletAuthorityContractError::Canonical)?;
+        if reservation.observed_floor_ref != observed_floor_ref.as_str()
+            || reservation.reservation_evidence_ref.content_digest()
+                != reservation_evidence_ref.as_str()
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_reservation_evidence",
+            ));
+        }
+        for ((request, state_input), candidate) in closure
+            .activation_requests
+            .iter()
+            .zip(&closure.activation_state_inputs)
+            .zip(&self.sealed_activated_candidates)
+        {
+            let expected_activation = domain_content_digest(
+                "mfm.evm.wallet-candidate-activation-evidence.v1",
+                &(request, state_input, &reservation.resource_lineage_ref),
+            )
+            .map_err(|_| WalletAuthorityContractError::Canonical)?;
+            let expected_operation_key = derive_evm_candidate_operation_key(
+                &reservation.semantic_reservation_key,
+                request.next_candidate.candidate_ordinal,
+            )?;
+            if request.next_candidate != candidate.attested_candidate
+                || request.nonce_domain != self.nonce_domain
+                || request.candidate_operation_key != expected_operation_key
+                || candidate.activation_evidence_ref.content_digest()
+                    != expected_activation.as_str()
+            {
+                return Err(WalletAuthorityContractError::Invalid(
+                    "completed_wallet_nonce_activation_evidence",
+                ));
+            }
+        }
+        let completion_evidence_ref = domain_content_digest(
+            "mfm.evm.wallet-completion-evidence.v1",
+            &(
+                completion_request,
+                &closure.completion_state_input,
+                &reservation.resource_lineage_ref,
+            ),
+        )
+        .map_err(|_| WalletAuthorityContractError::Canonical)?;
+        if closure.completion_evidence_ref.content_digest() != completion_evidence_ref.as_str() {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_completion_evidence",
+            ));
+        }
+        if closure.canonical_terminal_outcome != self.canonical_terminal_outcome
+            || closure.terminal_witnesses != self.terminal_witnesses
+            || closure.sealed_activated_candidates != self.sealed_activated_candidates
+            || closure.original_terminal_witnesses_ref != self.original_terminal_witnesses_ref
+            || closure.completion_evidence_ref != self.completion_evidence_ref
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_terminal_closure",
+            ));
+        }
+        if reservation.submission_intent_id != self.canonical_terminal_outcome.submission_intent_id
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_intent",
+            ));
+        }
+        validate_active_wallet_candidate_prefix(
+            reservation,
+            transaction_intent,
+            candidate_family,
+            &self.sealed_activated_candidates,
+        )?;
         self.canonical_terminal_outcome.validate()?;
         self.terminal_witnesses
             .validate_against(&self.canonical_terminal_outcome)?;
@@ -1832,6 +2376,8 @@ pub struct ReadEvmWalletNonceStatusRequest {
     pub nonce_domain: WalletNonceDomain,
     /// Secret-free permanent activation attestation.
     pub domain_activation_attestation: WalletNonceDomainActivationAttestation,
+    /// Immutable issuer namespace included in the behavior identity.
+    pub issuer_namespace_contract_ref: EvmWalletReference,
     /// Stable reservation key.
     pub semantic_reservation_key: EvmNonceReservationKey,
     /// Stable authenticated intent.
@@ -1842,6 +2388,14 @@ pub struct ReadEvmWalletNonceStatusRequest {
     pub transaction_intent_digest: String,
     /// Exact candidate family digest.
     pub candidate_family_ref: String,
+    /// Complete transaction-intent preimage for behavior revalidation.
+    pub transaction_intent: EvmTransactionIntent,
+    /// Complete candidate-family preimage for behavior revalidation.
+    pub candidate_family: EvmCandidateFamily,
+    /// Exact bounded observation-round policy.
+    pub observation_rounds: u8,
+    /// Exact route generation included in the behavior identity.
+    pub route_generation_ref: EvmWalletReference,
 }
 
 /// Exact idempotent reservation request.
@@ -1858,6 +2412,8 @@ pub struct ReserveEvmNonceRequest {
     pub nonce_domain: WalletNonceDomain,
     /// Secret-free permanent activation attestation.
     pub domain_activation_attestation: WalletNonceDomainActivationAttestation,
+    /// Immutable issuer namespace included in the behavior identity.
+    pub issuer_namespace_contract_ref: EvmWalletReference,
     /// Stable authenticated intent.
     pub submission_intent_id: SubmissionIntentId,
     /// Complete behavior identity for this intent.
@@ -1947,6 +2503,13 @@ pub enum ActivateCandidateResponse {
         /// Exact permanent candidate activation proof.
         candidate: ActiveWalletCandidate,
     },
+    /// The exact candidate was already retained by an earlier activation
+    /// commit. Callers must observe its chain status; they must not broadcast
+    /// it again.
+    AlreadyRetained {
+        /// Exact retained candidate proof.
+        candidate: ActiveWalletCandidate,
+    },
     /// Another contender changed the prefix first.
     CandidateProgressionConflict,
 }
@@ -1978,7 +2541,7 @@ impl CompleteEvmNonceRequest {
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.nonce_domain.validate()?;
         self.completion_key.validate()?;
-        self.current_reservation.nonce_domain.validate()?;
+        self.current_reservation.validate()?;
         self.current_reservation
             .semantic_reservation_key
             .validate()?;
@@ -2067,18 +2630,45 @@ pub trait WalletNonceAuthority: Send + Sync + 'static {
     /// Returns the exact provider-qualified activation sealed into this authority.
     fn domain_activation_attestation(&self) -> &WalletNonceDomainActivationAttestation;
 
+    /// Returns the provider-issued current physical store incarnation.
+    ///
+    /// This is intentionally separate from the activation's historical initial
+    /// incarnation. Promotion changes this value without rewriting activation.
+    fn current_incarnation_ref(&self) -> EvmWalletReference;
+
     /// Reads one transactionally consistent exact-intent status.
     fn read_status<'a>(
         &'a self,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a ReadEvmWalletNonceStatusRequest,
-    ) -> ComponentFuture<'a, ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>>;
+        _state_input_ref: &'a LexicalValueRef,
+        _request: &'a ReadEvmWalletNonceStatusRequest,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>> {
+        Box::pin(std::future::ready(ReadAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
 
-    /// Applies or exactly resolves one reservation operation.
-    fn reserve<'a>(
+    /// Reads status only after consuming the exact committed Runtime
+    /// authorization that originated the request.
+    fn read_status_authorized<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
+        request: &'a ReadEvmWalletNonceStatusRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>> {
+        let _ = (state_input_ref, request, authorization);
+        Box::pin(std::future::ready(ReadAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
+
+    /// Applies a reservation after the live adapter has paired the request
+    /// with producer-bound pending-floor evidence.
+    fn reserve_qualified<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        observation: &'a QualifiedPendingNonceObservation,
         request: &'a ReserveEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<
         'a,
         EffectAdapterCompletion<
@@ -2088,30 +2678,55 @@ pub trait WalletNonceAuthority: Send + Sync + 'static {
         >,
     >;
 
-    /// Applies a reservation only after the live adapter has paired the
-    /// request with the committed producer-bound pending observation.
-    fn reserve_qualified<'a>(
+    /// Explicitly denied legacy mutation entry point.
+    ///
+    /// Candidate mutation is only available through the Runtime-authorized
+    /// method. This retained method exists solely so stale external callers
+    /// receive a typed denial instead of finding an ambient mutation path.
+    #[doc(hidden)]
+    fn activate_candidate<'a>(
         &'a self,
-        state_input_ref: &'a LexicalValueRef,
-        observation: &'a QualifiedPendingNonceObservation,
-        request: &'a ReserveEvmNonceRequest,
+        _state_input_ref: &'a LexicalValueRef,
+        _request: &'a ActivateEvmCandidateRequest,
     ) -> ComponentFuture<
         'a,
         EffectAdapterCompletion<
-            ReserveWalletNonceResponse,
+            ActivateCandidateResponse,
             EvmSubmissionFailure,
             WalletNonceStoreLineageHead,
         >,
     > {
-        let _ = observation;
-        self.reserve(state_input_ref, request)
+        Box::pin(std::future::ready(EffectAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
     }
 
-    /// Applies or exactly resolves one candidate activation.
-    fn activate_candidate<'a>(
+    /// Explicitly denied legacy mutation entry point.
+    #[doc(hidden)]
+    fn complete<'a>(
+        &'a self,
+        _state_input_ref: &'a LexicalValueRef,
+        _request: &'a CompleteEvmNonceRequest,
+    ) -> ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            CompleteWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        Box::pin(std::future::ready(EffectAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
+
+    /// Applies one candidate activation with the exact committed Runtime
+    /// authorization still attached to the authority call.
+    fn activate_candidate_authorized<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
         request: &'a ActivateEvmCandidateRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<
         'a,
         EffectAdapterCompletion<
@@ -2121,11 +2736,13 @@ pub trait WalletNonceAuthority: Send + Sync + 'static {
         >,
     >;
 
-    /// Applies or exactly resolves one canonical completion.
-    fn complete<'a>(
+    /// Applies one completion with the exact committed Runtime authorization
+    /// still attached to the authority call.
+    fn complete_authorized<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
         request: &'a CompleteEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<
         'a,
         EffectAdapterCompletion<
@@ -2141,6 +2758,175 @@ pub trait WalletNonceAuthority: Send + Sync + 'static {
         &'a self,
         evidence: &'a WalletNonceStoreLineageHead,
     ) -> ComponentFuture<'a, Option<mfm_journal::structured::HistoryObject>>;
+}
+
+/// Domain-owned effect contract used by the live wallet binding.
+///
+/// Keeping the authorization-origin conversion beside the private observation
+/// constructor means a live adapter cannot mint producer-bound pending evidence
+/// from a raw floor. The binding only supplies the committed record and the
+/// already checked authorization payload selected by Runtime.
+pub trait WalletEffectSpec: RuntimeEffectCapability {
+    /// Returns the semantic adapter contract for this capability.
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract>;
+
+    /// Invokes the ordinary unqualified effect path.
+    fn invoke<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a Self::Request,
+    ) -> ComponentFuture<'a, EffectContractCompletion<Self>>;
+
+    /// Invokes the effect after Runtime has supplied the exact committed
+    /// authorization origin.
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a Self::Request,
+        authorization: CertifiedAccessAuthorization,
+        integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, EffectContractCompletion<Self>> {
+        let _ = (authority, state_input_ref, request, authorization);
+        Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+            integrity_fault.clone(),
+        )))
+    }
+}
+
+impl WalletEffectSpec for ReserveWalletNonceCapability {
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        reserve_wallet_nonce_adapter_contract()
+    }
+
+    fn invoke<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReserveEvmNonceRequest,
+    ) -> ComponentFuture<'a, EffectContractCompletion<ReserveWalletNonceCapability>> {
+        let _ = (authority, state_input_ref, request);
+        Box::pin(std::future::ready(EffectAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
+
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReserveEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+        integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, EffectContractCompletion<ReserveWalletNonceCapability>> {
+        let chain_instance_ref = match request
+            .domain_activation_attestation
+            .current_schema_record
+            .chain_instance_attestation
+            .content_ref()
+        {
+            Ok(reference) => reference,
+            Err(_) => {
+                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                    integrity_fault.clone(),
+                )));
+            }
+        };
+        let sender = match Address::from_str(request.nonce_domain.sender()) {
+            Ok(sender) => sender,
+            Err(_) => {
+                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                    integrity_fault.clone(),
+                )));
+            }
+        };
+        let observation = QualifiedPendingNonceObservation::from_committed_origin(
+            request.qualified_floor.clone(),
+            chain_instance_ref,
+            sender,
+            authority.current_incarnation_ref(),
+            authorization.authorization_ref().run_id.clone(),
+            authorization.authorization_ref().clone(),
+            authorization.request_value_ref().clone(),
+        );
+        let Ok(observation) = observation else {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                integrity_fault.clone(),
+            )));
+        };
+        Box::pin(async move {
+            authority
+                .reserve_qualified(state_input_ref, &observation, request, authorization)
+                .await
+        })
+    }
+}
+
+impl WalletEffectSpec for ActivateWalletCandidateCapability {
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        activate_wallet_candidate_adapter_contract()
+    }
+
+    fn invoke<'a>(
+        _authority: &'a dyn WalletNonceAuthority,
+        _state_input_ref: &'a LexicalValueRef,
+        _request: &'a ActivateEvmCandidateRequest,
+    ) -> ComponentFuture<'a, EffectContractCompletion<ActivateWalletCandidateCapability>> {
+        // Mutation has no unqualified path. Runtime must supply the affine
+        // committed authorization to `invoke_authorized`.
+        Box::pin(std::future::ready(EffectAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
+
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ActivateEvmCandidateRequest,
+        authorization: CertifiedAccessAuthorization,
+        integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, EffectContractCompletion<ActivateWalletCandidateCapability>> {
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.state_input_ref() != state_input_ref
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                integrity_fault.clone(),
+            )));
+        }
+        authority.activate_candidate_authorized(state_input_ref, request, authorization)
+    }
+}
+
+impl WalletEffectSpec for CompleteWalletNonceCapability {
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        complete_wallet_nonce_adapter_contract()
+    }
+
+    fn invoke<'a>(
+        _authority: &'a dyn WalletNonceAuthority,
+        _state_input_ref: &'a LexicalValueRef,
+        _request: &'a CompleteEvmNonceRequest,
+    ) -> ComponentFuture<'a, EffectContractCompletion<CompleteWalletNonceCapability>> {
+        // Mutation has no unqualified path. Runtime must supply the affine
+        // committed authorization to `invoke_authorized`.
+        Box::pin(std::future::ready(EffectAdapterCompletion::SafeFailure(
+            EvmSubmissionFailure::NonceLineageDiverged,
+        )))
+    }
+
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a CompleteEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+        integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, EffectContractCompletion<CompleteWalletNonceCapability>> {
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.state_input_ref() != state_input_ref
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                integrity_fault.clone(),
+            )));
+        }
+        authority.complete_authorized(state_input_ref, request, authorization)
+    }
 }
 
 /// Semantic resource lineage for the cross-run wallet nonce authority.

@@ -23,12 +23,12 @@ use crate::submission_expansion::{PendingEvmSubmissionFailureRoute, SubmissionFa
 use crate::{
     canonical_wallet_reference, derive_authenticated_intent_issuer_id,
     derive_evm_candidate_operation_key, derive_evm_nonce_completion_key,
-    derive_evm_nonce_reservation_key, derive_exact_candidate_activation_permit,
-    derive_submission_intent_id, derive_submission_semantics_digest, ActivateCandidateResponse,
-    ActivateEvmCandidateRequest, ActiveWalletCandidate, AttestedWalletCandidate,
-    CanonicalTerminalOutcome, CompleteEvmNonceRequest, CompleteWalletNonceResponse,
-    CompletedWalletNonce, EvmPendingNonceRequest, EvmReceiptLookupRequest, EvmSubmissionFailure,
-    EvmSubmissionRequest, EvmTransactionLookupRequest, EvmWalletReference, ExecutionDisposition,
+    derive_evm_nonce_reservation_key, derive_submission_intent_id,
+    derive_submission_semantics_digest, ActivateCandidateResponse, ActivateEvmCandidateRequest,
+    ActiveWalletCandidate, AttestedWalletCandidate, CanonicalTerminalOutcome,
+    CompleteEvmNonceRequest, CompleteWalletNonceResponse, CompletedWalletNonce,
+    EvmPendingNonceRequest, EvmReceiptLookupRequest, EvmSubmissionFailure, EvmSubmissionRequest,
+    EvmTransactionLookupRequest, EvmWalletReference, ExecutionDisposition,
     ObservedPendingNonceFloor, QualifiedPendingNonceFloor, ReadEvmWalletNonceStatusRequest,
     ReserveEvmNonceRequest, ReserveWalletNonceResponse, ReservedWalletNonce,
     SubmittedCandidateProof, TerminalWitnesses, WalletNonceStatus,
@@ -114,6 +114,9 @@ pub(crate) fn derive_submission_intent(
         request.candidate_family(),
         request.observation_rounds(),
         &expansion_contract_ref,
+        request.route_generation_ref(),
+        request.domain_activation_attestation(),
+        request.issuer_namespace_contract_ref(),
     ) {
         Ok(value) => value,
         Err(_) => return ProposedStateOutcome::Failure(EvmSubmissionFailure::DestinationRejected),
@@ -148,12 +151,23 @@ pub(crate) fn read_status_request(
     ReadEvmWalletNonceStatusRequest {
         nonce_domain: prepared.intent.derived.nonce_domain.clone(),
         domain_activation_attestation: request.domain_activation_attestation().clone(),
+        issuer_namespace_contract_ref: request.issuer_namespace_contract_ref().clone(),
         semantic_reservation_key: prepared.reservation_key.clone(),
         submission_intent_id: prepared.intent.submission_intent_id.clone(),
         submission_semantics_digest: prepared.intent.semantics_digest.clone(),
         transaction_intent_digest: request.transaction_intent().digest().to_owned(),
         candidate_family_ref: request.candidate_family().digest().to_owned(),
+        transaction_intent: request.transaction_intent().clone(),
+        candidate_family: request.candidate_family().clone(),
+        observation_rounds: request.observation_rounds(),
+        route_generation_ref: request.route_generation_ref().clone(),
     }
+}
+
+pub(crate) fn read_observed_candidate_status_request(
+    observed: &CandidateObservationWork,
+) -> ReadEvmWalletNonceStatusRequest {
+    read_status_request(&observed.active.candidate.work.prepared)
 }
 
 pub(crate) fn post_reserve_status_request(
@@ -344,6 +358,67 @@ pub(crate) fn settle_candidate_wallet_status(
         WalletStatusDecision::Completed { completion } => StateSettlement::Proposed(
             ProposedStateOutcome::Success(CandidateResolution::Completed { completion }),
         ),
+        WalletStatusDecision::Absent | WalletStatusDecision::Busy { .. } => {
+            StateSettlement::InvalidEvidence
+        }
+    }
+}
+
+/// Reconciles a non-terminal chain observation against a fresh, exact wallet
+/// status before advancing the replacement frontier.  A status change causes
+/// the authoritative retained work to be resumed from ordinal zero; only an
+/// unchanged status may consume the producer-bound observation and advance
+/// the observed prefix.
+pub(crate) fn settle_observed_candidate_status(
+    observed: &CandidateObservationWork,
+    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+) -> StateSettlement<CandidateResolution, PendingEvmSubmissionFailure> {
+    let returned = match observation {
+        CommittedObservation::SafeFailure(failure) => {
+            return StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
+                &observed.active.candidate.work,
+                *failure,
+            )));
+        }
+        CommittedObservation::Returned(returned) => returned,
+    };
+    let Some(status) = validated_wallet_status(&observed.active.candidate.work.prepared, returned)
+    else {
+        return StateSettlement::InvalidEvidence;
+    };
+    match status {
+        WalletStatusDecision::Completed { completion } => StateSettlement::Proposed(
+            ProposedStateOutcome::Success(CandidateResolution::Completed { completion }),
+        ),
+        WalletStatusDecision::Reserved { mut work } => {
+            if work.status_baseline != observed.active.candidate.work.status_baseline {
+                return StateSettlement::Proposed(ProposedStateOutcome::Success(
+                    CandidateResolution::Resume { work },
+                ));
+            }
+            let ordinal = observed
+                .active
+                .active_candidate
+                .attested_candidate
+                .candidate_ordinal;
+            let Some(retained) = work.activated_candidates.get(usize::from(ordinal)) else {
+                return StateSettlement::InvalidEvidence;
+            };
+            if retained != &observed.active.active_candidate
+                || work.current_candidate.as_ref() != work.activated_candidates.last()
+            {
+                return StateSettlement::InvalidEvidence;
+            }
+            let Some(next) = ordinal.checked_add(1) else {
+                return StateSettlement::InvalidEvidence;
+            };
+            work.current_candidate = Some(retained.clone());
+            work.next_candidate_ordinal = next;
+            work.observed_prefix_len = next;
+            StateSettlement::Proposed(ProposedStateOutcome::Success(CandidateResolution::Resume {
+                work,
+            }))
+        }
         WalletStatusDecision::Absent | WalletStatusDecision::Busy { .. } => {
             StateSettlement::InvalidEvidence
         }
@@ -579,6 +654,7 @@ pub(crate) fn reserve_nonce_request(
     ReserveEvmNonceRequest {
         nonce_domain: prepared.intent.derived.nonce_domain.clone(),
         domain_activation_attestation: request.domain_activation_attestation().clone(),
+        issuer_namespace_contract_ref: request.issuer_namespace_contract_ref().clone(),
         submission_intent_id: prepared.intent.submission_intent_id.clone(),
         transaction_intent: request.transaction_intent().clone(),
         candidate_family: request.candidate_family().clone(),
@@ -907,7 +983,7 @@ pub(crate) fn derive_candidate_activation_permit(
             EvmSubmissionFailure::ReplacementPolicyExhausted,
         ));
     }
-    let permit = match derive_exact_candidate_activation_permit(
+    let permit = match super::wallet_authority::derive_exact_candidate_activation_permit_inner(
         &candidate.work.reservation,
         &candidate.work.activated_candidates,
         candidate.work.next_candidate_ordinal,
@@ -995,6 +1071,22 @@ pub(crate) fn settle_candidate_activation(
                         active_candidate: active.clone(),
                     },
                 },
+            ))
+        }
+        CommittedObservation::Returned(ActivateCandidateResponse::AlreadyRetained {
+            candidate: active,
+        }) if candidate
+            .attested_candidate
+            .as_ref()
+            .is_some_and(|attested| active.attested_candidate == *attested)
+            && active.activation_evidence_ref.to_content_ref().is_ok() =>
+        {
+            // The database already contains this exact candidate. Reconcile
+            // through the fresh wallet-status read; the state machine's
+            // retained route then performs chain observation without a
+            // broadcast capability call.
+            StateSettlement::Proposed(ProposedStateOutcome::Success(
+                CandidateActivationDecision::Reconcile,
             ))
         }
         CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
@@ -1244,38 +1336,6 @@ pub(crate) fn select_terminal_evidence(
         _ => TerminalEvidenceDecision::Reconcile,
     };
     ProposedStateOutcome::Success(terminal)
-}
-
-/// After non-terminal observation of ordinal *k*, advance the certified recovery
-/// walk to *k + 1* without resetting to the end of the activated prefix.
-///
-/// This is the sole path that records observation evidence for replacement
-/// admission: `observed_prefix_len` becomes exclusive upper bound *k + 1*.
-pub(crate) fn mark_observation_reconcile(
-    work: &CandidateObservationWork,
-) -> ProposedStateOutcome<CandidateResolution, mfm_program::structured::Never> {
-    let active = &work.active.active_candidate;
-    let ordinal = active.attested_candidate.candidate_ordinal;
-    let mut submission = work.active.candidate.work.clone();
-    // Retain a contiguous activated prefix including the candidate just observed.
-    if submission
-        .activated_candidates
-        .get(usize::from(ordinal))
-        .is_none()
-        && submission.activated_candidates.len() == usize::from(ordinal)
-    {
-        submission.activated_candidates.push(active.clone());
-    }
-    if let Some(retained) = submission.activated_candidates.get(usize::from(ordinal)) {
-        // Prefer the authority-retained activation evidence when present.
-        submission.current_candidate = Some(retained.clone());
-    } else {
-        submission.current_candidate = Some(active.clone());
-    }
-    let next = ordinal.saturating_add(1);
-    submission.next_candidate_ordinal = next;
-    submission.observed_prefix_len = next;
-    ProposedStateOutcome::Success(CandidateResolution::Resume { work: submission })
 }
 
 pub(crate) fn finalized_head_request(

@@ -24,7 +24,7 @@ backend-conformance = ["test-support"]
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-certify = { path = "../certify" }
-mfm-runtime = { path = "../runtime" }
+mfm-runtime = { path = "../runtime", features = ["store-authority"] }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }

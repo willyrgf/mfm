@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use mfm_certify::structured::QualifiedProgramRegistry;
-use mfm_runtime::structured::Runtime;
+use mfm_runtime::history::HistoryError;
+use mfm_runtime::structured::{Runtime, RuntimeProcessRegistry};
 
 use super::adapter::{build_program_verifier, StoreHistoryAdapter};
 use super::backend::{StructuredHistoryBackend, StructuredRunStore};
@@ -37,21 +38,24 @@ pub fn assemble_structured_runtime<B: StructuredHistoryBackend>(
     backend: B,
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-) -> AssembledStructuredRuntime<B> {
-    let (admission, processes) = registry.into_runtime_parts();
+) -> std::result::Result<AssembledStructuredRuntime<B>, HistoryError> {
+    let (admission, processes, assembly_token) = registry.into_runtime_parts();
     let program_verifier = build_program_verifier(admission);
     let store = StructuredRunStore::new(backend, program_verifier, physical_binding_verifier);
     let (writer, reader) = store.split();
     let history = StoreHistoryAdapter::from_writer(writer);
-    let runtime = Runtime::new(history, processes);
-    AssembledStructuredRuntime {
+    let processes = RuntimeProcessRegistry::from_certified(processes, &assembly_token)
+        .map_err(|_| HistoryError::InvalidHistory)?;
+    let runtime = Runtime::from_assembled(history, processes, assembly_token)
+        .map_err(|_| HistoryError::InvalidHistory)?;
+    Ok(AssembledStructuredRuntime {
         runtime,
         public_reader: PublicRunReader::new(reader.clone()),
         trace_reader: TraceRunReader::new(reader.clone()),
         audit_reader: AuditRunReader::new(reader.clone()),
         replay_reader: ReplayRunReader::new(reader.clone()),
         export_reader: ExportRunReader::new(reader),
-    }
+    })
 }
 
 /// Test-support assembly over an arbitrary backend.
@@ -60,6 +64,6 @@ pub fn assemble_with_backend<B: StructuredHistoryBackend>(
     backend: B,
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-) -> AssembledStructuredRuntime<B> {
+) -> std::result::Result<AssembledStructuredRuntime<B>, HistoryError> {
     assemble_structured_runtime(backend, registry, physical_binding_verifier)
 }

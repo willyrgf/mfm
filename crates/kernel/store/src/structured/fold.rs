@@ -16,11 +16,12 @@ use mfm_journal::structured::{
     domain_content_digest, AccessKind, AdmissionMaterialRefs, AssignedRecord,
     CertifiedProgramAuditRefs, CommitCandidate, CommittedBatch, CommittedFactRef,
     ExternalAccessAuthorized, ExternalAccessObserved, HistoryObject, JournalHead, LexicalValueRef,
-    ObservationOutcome, PriorRunFactScannerBindingCertificate, PriorRunFactSourceManifest,
-    RecordLogicalKey, RecordRef, RunAdmitted, RunClosed, RunRecord, SemanticHead, StateOutcomeRef,
-    StateTransitionCommitted, StructuralValueOrigin, TenantFactCoordinate, TypedValueRef,
-    ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
-    ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
+    ObservationOutcome, PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse,
+    PriorRunFactSourceManifest, RecordLogicalKey, RecordRef, RunAdmitted, RunClosed, RunRecord,
+    SemanticHead, StateOutcomeRef, StateTransitionCommitted, StructuralValueOrigin,
+    TenantFactCoordinate, TypedValueRef, ADMISSION_CONFIGURATION_OBJECT_TYPE,
+    ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE,
+    ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_spec::structured::{
     fan_out_join_contract_ref, lane_outcome_contract_ref, prior_run_fact_scanner_adapter_contract,
@@ -39,6 +40,7 @@ use serde_json::Value;
 
 use super::backend::RawRunHistory;
 use super::backend::StructuredStoreIdentity;
+use super::canonical_append::MAX_BATCH_RECORDS;
 use super::mutation::{
     AccessAuthorizationProposal, AccessObservationProposal, ProposedCanonicalValue,
     ProposedObservationOutcome, ProposedTransitionValue, StateTransitionProposal,
@@ -206,6 +208,34 @@ impl VerifiedStructuredRun {
         self.state.continuation.objects.values()
     }
 
+    /// Validates one candidate's exact object closure against this successor's
+    /// callback-free fold state before backend dispatch.
+    pub(super) fn validate_append_object_closure(
+        &self,
+        batch: &CommittedBatch,
+    ) -> super::Result<()> {
+        let actual = batch
+            .objects
+            .iter()
+            .map(|object| object.content_ref.clone())
+            .collect::<BTreeSet<_>>();
+        let prior = batch
+            .predecessor
+            .as_ref()
+            .map_or(0, |head| head.run_sequence);
+        let prior_object_refs = self
+            .objects_through(prior)
+            .map(|object| object.content_ref.clone())
+            .collect::<BTreeSet<_>>();
+        validate_batch_object_closure(
+            &batch.records,
+            &actual,
+            &prior_object_refs,
+            &self.state.continuation,
+            &self.state.derived,
+        )
+    }
+
     /// Returns verified objects first admitted no later than one physical append sequence.
     pub fn objects_through(&self, run_sequence: u64) -> impl Iterator<Item = &HistoryObject> {
         self.state
@@ -275,6 +305,50 @@ impl VerifiedStructuredRun {
     /// Returns every exact committed-batch envelope in append order.
     pub fn batches(&self) -> &[CommittedBatch] {
         &self.state.continuation.batches
+    }
+
+    /// Derives the distinct prior-run producers referenced by verified fact
+    /// selections. The result is computed from folded objects rather than
+    /// accepted from an export envelope.
+    pub fn direct_source_run_ids(&self) -> super::Result<BTreeSet<RunId>> {
+        let mut sources = BTreeSet::new();
+        let consumer = self.run_id();
+        let fact_response_contract =
+            mfm_spec::structured::structured_value_contract_ref::<FactSelectionReadResponse>()
+                .map_err(|_| invalid("fact response contract cannot be derived"))?;
+        for assigned in self.records() {
+            let RunRecord::ExternalAccessObserved(observation) = &assigned.record else {
+                continue;
+            };
+            let ObservationOutcome::Returned { value } = &observation.outcome else {
+                continue;
+            };
+            if value.contract_ref != fact_response_contract {
+                continue;
+            }
+            let Some(object) = self.object(&value.value_ref) else {
+                return Err(invalid("fact response object is absent"));
+            };
+            let returned = object
+                .decode::<FactSelectionReadResponse>()
+                .map_err(|_| invalid("fact response object is invalid"))?;
+            let response = serde_json::from_str::<PriorRunFactSelectionResponse>(
+                returned.canonical_response_json(),
+            )
+            .map_err(|_| invalid("fact selection response is invalid"))?;
+            for query in &response.query_results {
+                for selected in &query.selected {
+                    let producer = &selected.producer_transition_ref.run_id;
+                    if producer != consumer {
+                        sources.insert(producer.clone());
+                    }
+                }
+            }
+        }
+        if sources.len() > super::MAX_PORTABLE_SOURCE_RUNS {
+            return Err(invalid("fact source count exceeds export bound"));
+        }
+        Ok(sources)
     }
 
     /// Returns the terminal nominal operation-outcome reference, when closed.
@@ -1104,6 +1178,13 @@ pub(super) fn prepare_authorization(
     ));
     let stable_resource_lineage_contract_ref =
         actionable.stable_resource_lineage_contract_ref.clone();
+    let minimum_lineage_head_ref = match &actionable.leaf {
+        StateLeaf::Refreshable {
+            public_lineage_head_ref,
+            ..
+        } => Some(public_lineage_head_ref.clone()),
+        _ => None,
+    };
     let occurrence_path_ref = actionable
         .occurrence_path
         .content_ref()
@@ -1120,6 +1201,15 @@ pub(super) fn prepare_authorization(
         state_input_ref: proposal.state_input_ref().clone(),
         access_kind,
         semantic_head,
+        store_scope_id: verified.admission().store_scope_id.clone(),
+        store_epoch: verified.admission().store_epoch,
+        tenant_scope_id: verified.admission().tenant_scope_id.clone(),
+        admitted_routing_policy_ref: verified
+            .admission()
+            .admission_material_refs
+            .routing_policy_ref
+            .clone(),
+        minimum_lineage_head_ref,
         capability_contract_ref: capability_contract_ref.clone(),
         capability_implementation_ref,
         adapter_contract_ref: adapter_dependency.contract_ref.clone(),
@@ -1394,8 +1484,8 @@ pub(super) fn assign_candidate(
     identity: &StructuredStoreIdentity,
     candidate: CommitCandidate,
 ) -> super::Result<CommittedBatch> {
-    if candidate.records.is_empty() || candidate.records.len() > 2 {
-        return Err(invalid("candidate record count is outside one or two"));
+    if candidate.records.is_empty() || candidate.records.len() > MAX_BATCH_RECORDS {
+        return Err(invalid("candidate record count exceeds its named bound"));
     }
     let run_sequence = match candidate.expected_head.as_ref() {
         Some(head) => head
@@ -1492,14 +1582,14 @@ struct BorrowedCommitCandidate<'a> {
     objects: Vec<&'a HistoryObject>,
 }
 
-fn verify_batch_envelope(
+pub(super) fn verify_batch_envelope(
     run_id: &RunId,
     batch: &CommittedBatch,
     previous_head: Option<&JournalHead>,
     store_identity: Option<&(mfm_ids::StoreScopeId, mfm_ids::StoreEpoch)>,
 ) -> super::Result<()> {
-    if batch.records.is_empty() || batch.records.len() > 2 {
-        return Err(invalid("atomic batch record count is outside one or two"));
+    if batch.records.is_empty() || batch.records.len() > MAX_BATCH_RECORDS {
+        return Err(invalid("atomic batch record count exceeds its bound"));
     }
     if batch.predecessor.as_ref() != previous_head {
         return Err(invalid(
@@ -3999,6 +4089,17 @@ fn validate_authorization(
         } => Some(public_lineage_head_ref),
         _ => None,
     };
+    if record.store_scope_id != admission.store_scope_id
+        || record.store_epoch != admission.store_epoch
+        || record.tenant_scope_id != admission.tenant_scope_id
+        || record.admitted_routing_policy_ref
+            != admission.admission_material_refs.routing_policy_ref
+        || record.minimum_lineage_head_ref.as_ref() != minimum_lineage_head_ref
+    {
+        return Err(invalid(
+            "authorization lineage scope differs from admission",
+        ));
+    }
     let previous_physical_binding_ref = match &state.leaf {
         StateLeaf::Refreshable { .. } => {
             let previous_attempt = occurrence_attempts

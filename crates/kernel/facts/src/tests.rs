@@ -390,6 +390,50 @@ fn scan_bounds_and_read_values_reject_every_out_of_contract_shape() {
             FactSelectionScanBounds::new(values.0, values.1, values.2, values.3, values.4).is_err()
         );
     }
+    let exact_work = FactSelectionScanBounds::new_with_work_bounds(
+        MAX_FACT_SCAN_PUBLICATIONS,
+        MAX_FACT_SCAN_FACTS,
+        MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+        MAX_FACT_SCAN_SELECTED_RESULTS,
+        MAX_FACT_SCAN_RESPONSE_BYTES,
+        MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+        MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+        MAX_FACT_SCAN_PAGES,
+    )
+    .expect("exact producer/page budgets");
+    assert_eq!(
+        exact_work.maximum_distinct_producers(),
+        MAX_FACT_SCAN_DISTINCT_PRODUCERS
+    );
+    for (producers, folds, pages) in [
+        (
+            MAX_FACT_SCAN_DISTINCT_PRODUCERS + 1,
+            MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+            MAX_FACT_SCAN_PAGES,
+        ),
+        (
+            MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+            MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES + 1,
+            MAX_FACT_SCAN_PAGES,
+        ),
+        (
+            MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+            MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+            MAX_FACT_SCAN_PAGES + 1,
+        ),
+    ] {
+        assert!(FactSelectionScanBounds::new_with_work_bounds(
+            MAX_FACT_SCAN_PUBLICATIONS,
+            MAX_FACT_SCAN_FACTS,
+            MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+            MAX_FACT_SCAN_SELECTED_RESULTS,
+            MAX_FACT_SCAN_RESPONSE_BYTES,
+            producers,
+            folds,
+            pages,
+        )
+        .is_err());
+    }
     assert!(serde_json::from_str::<FactSelectionScanBounds>(
         r#"{"maximum_publications":1,"maximum_facts":1,"maximum_retained_source_bytes":1,"maximum_selected_results":1,"maximum_response_bytes":1,"extra":false}"#
     )

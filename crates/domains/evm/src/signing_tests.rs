@@ -438,6 +438,13 @@ fn signing_failure_classifier_separates_integrity_from_unavailability() {
             reason: mfm_signing::SigningProviderError::BindingMismatch,
         }
     )));
+    assert!(signing_failure_is_integrity(&EvmSigningError::ZeroChainId));
+    assert!(signing_failure_is_integrity(
+        &EvmSigningError::PriorityFeeExceedsMaxFee
+    ));
+    assert!(signing_failure_is_integrity(
+        &EvmSigningError::SignedTransactionTooLarge
+    ));
     assert!(!signing_failure_is_integrity(&EvmSigningError::Signing(
         SigningError::Provider {
             reason: mfm_signing::SigningProviderError::Failed,

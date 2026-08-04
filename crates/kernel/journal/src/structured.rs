@@ -4,6 +4,11 @@
 //! Successor legality, cursor derivation, object closure, and atomic append
 //! authority belong to `mfm-store`.
 
+use mfm_canonical::limits::{
+    MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE, MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES,
+    MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE, MAX_PRIOR_RUN_SOURCE_REFERENCES,
+    MAX_PRIOR_RUN_SOURCE_RULES,
+};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
     AccessAttemptId, AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm,
@@ -31,11 +36,6 @@ const PRIOR_RUN_FACT_SCANNER_BINDING_OBJECT_TYPE: &str =
     "structured.prior_run_fact_scanner_binding";
 const PRIOR_RUN_FACT_SCANNER_BINDING_SCHEMA_SEED: &[u8] =
     b"mfm.prior-run-fact-scanner-binding.schema.v1";
-const MAX_PRIOR_RUN_SOURCE_RULES: usize = 1_024;
-const MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE: usize = 4_096;
-const MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE: usize = 4_096;
-const MAX_PRIOR_RUN_SOURCE_REFERENCES: usize = 65_536;
-const MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES: usize = 16_777_216;
 
 /// Result type for structured journal contract construction.
 pub type Result<T> = std::result::Result<T, StructuredJournalError>;
@@ -916,6 +916,16 @@ pub struct ExternalAccessAuthorized {
     pub access_kind: AccessKind,
     /// Semantic anchor unchanged by intervening audit records.
     pub semantic_head: SemanticHead,
+    /// Immutable store lineage containing the authorization.
+    pub store_scope_id: StoreScopeId,
+    /// Authoritative writer epoch containing the authorization.
+    pub store_epoch: StoreEpoch,
+    /// Authenticated tenant admitted for the run.
+    pub tenant_scope_id: TenantScopeId,
+    /// Immutable routing policy admitted for the run.
+    pub admitted_routing_policy_ref: ContentRef,
+    /// Minimum non-rollback lineage head required by a refreshed access.
+    pub minimum_lineage_head_ref: Option<ContentRef>,
     /// Exact semantic capability contract.
     pub capability_contract_ref: ContentRef,
     /// Exact secret-free capability implementation contract.

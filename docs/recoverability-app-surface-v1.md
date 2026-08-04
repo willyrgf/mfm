@@ -118,7 +118,7 @@ signature, or signed bytes.
 ## Replay
 
 Replay verification loads and folds recorded history only. It has no caller-supplied artifact or
-live comparison mode and calls no state callback, transport, provider, signer, scanner, or wallet
+live-state comparison and calls no state callback, transport, provider, signer, scanner, or wallet
 authority.
 
 ## Portable export
@@ -130,18 +130,13 @@ serializes only after that closure succeeds. Missing, denied, wrong-target, wron
 cyclic, and otherwise inaccessible dependencies collapse to one redacted `SourceRunExportDenied`
 error and emit zero bytes.
 
-The one current export is a canonical JSON object owned by `mfm-replay`, not a framed sequence:
+The one current export is a bounded canonical frame stream owned by `mfm-replay`:
 
 ```text
-version = "mfm.structured-portable-run-export.v1"
-kind = "semantic" | "audit"
-store_scope_id
-tenant_scope_id
-run_id
-fixation = { semantic_head, journal_head, store_scope_id, store_epoch }
-source_run_ids
-batches = exact committed-batch envelopes through the fixed head
-digest = raw SHA-256 over every required member except digest
+version = "mfm.structured-portable-run-export-stream.v2" (terminal seal)
+frame = { ordinal, kind = "batch" | "seal", previous_frame_digest, payload }
+batch payload = one exact committed-batch envelope
+seal payload = root run, export kind, source closure reference, fixation, counts, bytes, chain
 ```
 
 Semantic selection includes every full atomic batch through the semantic cutoff, so an adjacent
@@ -152,11 +147,12 @@ binding verifier) and invokes the store's sole read-only fold entry; it performs
 Media type:
 
 ```text
-application/vnd.mfm.structured-run-export.v1+json
+application/vnd.mfm.structured-run-export-stream.v2
 ```
 
-The external `ContentRef` uses raw SHA-256 of the exact object bytes. Replay input checks size,
-top-level digest, strict annex shape, and exact store/tenant/run equality before use.
+The external `ContentRef` uses raw SHA-256 of the exact stream bytes. Replay input checks the total
+and per-frame bounds, canonical frame schema, chain/seal digests, exact selection cutoff, and
+store/tenant/run equality before use. Former monolithic object bytes are rejected.
 
 ## Access policy
 

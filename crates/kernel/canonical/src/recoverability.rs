@@ -14,7 +14,22 @@ use crate::{
 };
 
 const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/annex.json");
-const MAX_ANNEX_BYTES: usize = 16_777_216;
+use crate::limits::{
+    MAX_ARRAY_ITEMS, MAX_BASE64URL_CHARACTERS, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS,
+    MAX_CANONICAL_JSON_BYTES, MAX_CANONICAL_JSON_DEPTH, MAX_COMPLETION_RECOVERY_BYTES,
+    MAX_CONFIGURATION_REVISION_BYTES, MAX_FACT_EMISSIONS, MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+    MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES, MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+    MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES, MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+    MAX_FACT_SCAN_SELECTED_RESULTS, MAX_FACT_SELECTION_LIMIT, MAX_FACT_SELECTION_QUERIES,
+    MAX_OBJECT_ENTRIES, MAX_PORTABLE_BATCHES, MAX_PORTABLE_EXPORT_BYTES, MAX_PORTABLE_FACT_ROUTES,
+    MAX_PORTABLE_FRAMES, MAX_PORTABLE_FRAME_BYTES, MAX_PORTABLE_OBJECTS, MAX_PORTABLE_SOURCE_RUNS,
+    MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE, MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES,
+    MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE, MAX_PRIOR_RUN_SOURCE_REFERENCES,
+    MAX_PRIOR_RUN_SOURCE_RULES, MAX_PROVIDER_DEPLOYMENT_ROUTES,
+    MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES, MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
+    MAX_STORED_FRAME_BYTES, MAX_STRING_UTF8_BYTES,
+};
+const MAX_ANNEX_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
 const MAX_SCHEMA_DEPTH: usize = 256;
 
 static EMBEDDED_CONTRACT: OnceLock<
@@ -2357,7 +2372,40 @@ fn validate_annex_metadata(
             "max_array_items",
             "max_base64url_characters",
             "max_canonical_json_bytes",
+            "max_canonical_json_depth",
+            "max_batch_objects",
+            "max_batch_records",
+            "max_completion_recovery_bytes",
+            "max_configuration_revision_bytes",
+            "max_fact_emissions",
+            "max_fact_scan_distinct_producers",
+            "max_fact_scan_facts",
+            "max_fact_scan_pages",
+            "max_fact_scan_producer_fold_batches",
+            "max_fact_scan_publications",
+            "max_fact_scan_response_bytes",
+            "max_fact_scan_retained_source_bytes",
+            "max_fact_scan_selected_results",
+            "max_fact_selection_limit",
+            "max_fact_selection_queries",
             "max_object_entries",
+            "max_portable_batches",
+            "max_portable_export_bytes",
+            "max_portable_fact_routes",
+            "max_portable_frame_bytes",
+            "max_portable_frames",
+            "max_portable_objects",
+            "max_portable_source_runs",
+            "max_prior_run_source_descriptors_per_rule",
+            "max_prior_run_source_manifest_bytes",
+            "max_prior_run_source_programs_per_rule",
+            "max_prior_run_source_references",
+            "max_prior_run_source_rules",
+            "max_provider_deployment_routes",
+            "max_provider_finish_authorization_bytes",
+            "max_provider_message_bytes",
+            "max_provider_proof_bytes",
+            "max_stored_frame_bytes",
             "max_string_utf8_bytes",
         ],
         "annex limits",
@@ -2366,7 +2414,40 @@ fn validate_annex_metadata(
         "max_array_items",
         "max_base64url_characters",
         "max_canonical_json_bytes",
+        "max_canonical_json_depth",
+        "max_batch_objects",
+        "max_batch_records",
+        "max_completion_recovery_bytes",
+        "max_configuration_revision_bytes",
+        "max_fact_emissions",
+        "max_fact_scan_distinct_producers",
+        "max_fact_scan_facts",
+        "max_fact_scan_pages",
+        "max_fact_scan_producer_fold_batches",
+        "max_fact_scan_publications",
+        "max_fact_scan_response_bytes",
+        "max_fact_scan_retained_source_bytes",
+        "max_fact_scan_selected_results",
+        "max_fact_selection_limit",
+        "max_fact_selection_queries",
         "max_object_entries",
+        "max_portable_batches",
+        "max_portable_export_bytes",
+        "max_portable_fact_routes",
+        "max_portable_frame_bytes",
+        "max_portable_frames",
+        "max_portable_objects",
+        "max_portable_source_runs",
+        "max_prior_run_source_descriptors_per_rule",
+        "max_prior_run_source_manifest_bytes",
+        "max_prior_run_source_programs_per_rule",
+        "max_prior_run_source_references",
+        "max_prior_run_source_rules",
+        "max_provider_deployment_routes",
+        "max_provider_finish_authorization_bytes",
+        "max_provider_message_bytes",
+        "max_provider_proof_bytes",
+        "max_stored_frame_bytes",
         "max_string_utf8_bytes",
     ] {
         let value = required_string(limits, field, RecoverabilityErrorCode::InvalidAnnex)?;
@@ -2374,6 +2455,99 @@ fn validate_annex_metadata(
             return Err(RecoverabilityError::new(
                 RecoverabilityErrorCode::InvalidAnnex,
                 "annex limit is not a positive canonical u64 string",
+            ));
+        }
+    }
+    for (field, expected) in [
+        ("max_array_items", MAX_ARRAY_ITEMS as u64),
+        ("max_base64url_characters", MAX_BASE64URL_CHARACTERS as u64),
+        ("max_canonical_json_bytes", MAX_CANONICAL_JSON_BYTES as u64),
+        ("max_canonical_json_depth", MAX_CANONICAL_JSON_DEPTH as u64),
+        ("max_batch_objects", MAX_BATCH_OBJECTS as u64),
+        ("max_batch_records", MAX_BATCH_RECORDS as u64),
+        (
+            "max_completion_recovery_bytes",
+            MAX_COMPLETION_RECOVERY_BYTES as u64,
+        ),
+        (
+            "max_configuration_revision_bytes",
+            MAX_CONFIGURATION_REVISION_BYTES as u64,
+        ),
+        ("max_fact_emissions", MAX_FACT_EMISSIONS as u64),
+        (
+            "max_fact_scan_distinct_producers",
+            MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+        ),
+        ("max_fact_scan_facts", MAX_FACT_SCAN_FACTS),
+        ("max_fact_scan_pages", MAX_FACT_SCAN_PAGES),
+        (
+            "max_fact_scan_producer_fold_batches",
+            MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+        ),
+        ("max_fact_scan_publications", MAX_FACT_SCAN_PUBLICATIONS),
+        ("max_fact_scan_response_bytes", MAX_FACT_SCAN_RESPONSE_BYTES),
+        (
+            "max_fact_scan_retained_source_bytes",
+            MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
+        ),
+        (
+            "max_fact_scan_selected_results",
+            MAX_FACT_SCAN_SELECTED_RESULTS,
+        ),
+        ("max_fact_selection_limit", MAX_FACT_SELECTION_LIMIT as u64),
+        (
+            "max_fact_selection_queries",
+            MAX_FACT_SELECTION_QUERIES as u64,
+        ),
+        ("max_object_entries", MAX_OBJECT_ENTRIES as u64),
+        ("max_portable_batches", MAX_PORTABLE_BATCHES as u64),
+        ("max_portable_export_bytes", MAX_PORTABLE_EXPORT_BYTES),
+        ("max_portable_fact_routes", MAX_PORTABLE_FACT_ROUTES as u64),
+        ("max_portable_frame_bytes", MAX_PORTABLE_FRAME_BYTES as u64),
+        ("max_portable_frames", MAX_PORTABLE_FRAMES as u64),
+        ("max_portable_objects", MAX_PORTABLE_OBJECTS as u64),
+        ("max_portable_source_runs", MAX_PORTABLE_SOURCE_RUNS as u64),
+        (
+            "max_prior_run_source_descriptors_per_rule",
+            MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE as u64,
+        ),
+        (
+            "max_prior_run_source_manifest_bytes",
+            MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES as u64,
+        ),
+        (
+            "max_prior_run_source_programs_per_rule",
+            MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE as u64,
+        ),
+        (
+            "max_prior_run_source_references",
+            MAX_PRIOR_RUN_SOURCE_REFERENCES as u64,
+        ),
+        (
+            "max_prior_run_source_rules",
+            MAX_PRIOR_RUN_SOURCE_RULES as u64,
+        ),
+        (
+            "max_provider_deployment_routes",
+            MAX_PROVIDER_DEPLOYMENT_ROUTES as u64,
+        ),
+        (
+            "max_provider_finish_authorization_bytes",
+            MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES as u64,
+        ),
+        (
+            "max_provider_message_bytes",
+            MAX_PROVIDER_MESSAGE_BYTES as u64,
+        ),
+        ("max_provider_proof_bytes", MAX_PROVIDER_PROOF_BYTES as u64),
+        ("max_stored_frame_bytes", MAX_STORED_FRAME_BYTES as u64),
+        ("max_string_utf8_bytes", MAX_STRING_UTF8_BYTES as u64),
+    ] {
+        let value = required_string(limits, field, RecoverabilityErrorCode::InvalidAnnex)?;
+        if value != expected.to_string() {
+            return Err(RecoverabilityError::new(
+                RecoverabilityErrorCode::InvalidAnnex,
+                "annex limit differs from the generated codec budget",
             ));
         }
     }
@@ -2463,7 +2637,7 @@ fn validate_annex_metadata(
         "CandidateActivationPermit",
         "CommittedObservation",
         "ConfigurationHistoryWriter",
-        "NewlyAppendedAuthorization",
+        "CommittedAccessAuthorization",
         "OperationBuilder",
         "PendingObservation",
         "PhysicalBindingAuthorization",

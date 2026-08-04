@@ -1,6 +1,6 @@
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    CertifiedAccessAuthorization, PhysicalBindingSelection, ProgramRegistryBuilder,
+    QualifiedReadPhysicalBinding, QualifiedReadPhysicalBindingSource,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -279,9 +279,18 @@ impl RuntimeReadAdapter<FixtureReadCapability> for FixtureReadAdapter {
     }
 }
 
-impl RuntimeReadPhysicalBinding<FixtureReadCapability> for FixtureReadAdapter {
+impl QualifiedReadPhysicalBinding<FixtureReadCapability> for FixtureReadAdapter {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<Response, StateFailure>> {
+        drop(authorization);
+        self.invoke(request)
     }
 }
 
@@ -289,7 +298,7 @@ struct FixtureReadBindingSource {
     binding: Arc<FixtureReadAdapter>,
 }
 
-impl RuntimeReadPhysicalBindingSource<FixtureReadCapability> for FixtureReadBindingSource {
+impl QualifiedReadPhysicalBindingSource<FixtureReadCapability> for FixtureReadBindingSource {
     type Binding = FixtureReadAdapter;
 
     fn current_binding<'a>(

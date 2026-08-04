@@ -24,9 +24,9 @@ use mfm_ids::{
     RequestDigest, RunId, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
-    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordRef, SemanticHead,
-    TypedValueRef,
+    derive_record_hash, AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
+    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordRef, RunRecord,
+    SemanticHead, TypedValueRef,
 };
 use mfm_program::structured::{
     closed_sum_contract, runtime_effect_capability_contract, runtime_read_capability_contract,
@@ -136,27 +136,28 @@ type FactScanFuture = std::pin::Pin<
 /// external-access authorization.
 ///
 /// Production construction is limited to the store adapter via
-/// [`NewlyAppendedAuthorization::from_store_mint`].
-pub struct NewlyAppendedAuthorization {
+/// [`CertifiedAccessAuthorization::from_committed_successor`].
+pub struct CertifiedAccessAuthorization {
     authorization_ref: RecordRef,
     authorization: ExternalAccessAuthorized,
     fact_scan: Option<Box<dyn FnOnce(FactSelectionRequest) -> FactScanFuture + Send>>,
 }
 
-impl std::fmt::Debug for NewlyAppendedAuthorization {
+impl std::fmt::Debug for CertifiedAccessAuthorization {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("NewlyAppendedAuthorization")
+            .debug_struct("CertifiedAccessAuthorization")
             .field("authorization_ref", &self.authorization_ref)
             .field("access_attempt_id", &self.authorization.access_attempt_id)
             .finish_non_exhaustive()
     }
 }
 
-impl NewlyAppendedAuthorization {
+impl CertifiedAccessAuthorization {
     /// Store-adapter mint after a newly committed authorization append.
     #[doc(hidden)]
-    pub fn from_store_mint(
+    #[cfg(any(test, feature = "runtime-authority"))]
+    pub fn from_committed_successor(
         authorization_ref: RecordRef,
         authorization: ExternalAccessAuthorized,
         fact_scan: Option<Box<dyn FnOnce(FactSelectionRequest) -> FactScanFuture + Send>>,
@@ -178,9 +179,24 @@ impl NewlyAppendedAuthorization {
         &self.authorization.access_attempt_id
     }
 
+    /// Access protocol kind recorded by the committed authorization.
+    pub const fn access_kind(&self) -> AccessKind {
+        self.authorization.access_kind
+    }
+
     /// Returns the complete immutable committed authorization.
     pub const fn authorization(&self) -> &ExternalAccessAuthorized {
         &self.authorization
+    }
+
+    /// Exact producer-bound state input reference.
+    pub const fn state_input_ref(&self) -> &LexicalValueRef {
+        &self.authorization.state_input_ref
+    }
+
+    /// Exact persisted request value reference.
+    pub const fn request_value_ref(&self) -> &ContentRef {
+        &self.authorization.request.value_ref
     }
 
     /// Consumes the store-minted authority for the exact committed prior-run fact Read.
@@ -1064,60 +1080,90 @@ pub struct AccessTargetSelection<'a> {
 #[derive(Debug, Clone, Copy)]
 pub struct PhysicalBindingSelection<'a> {
     /// Target run.
-    pub run_id: &'a RunId,
+    run_id: &'a RunId,
     /// Exact executable occurrence.
-    pub occurrence_id: &'a OccurrenceId,
+    occurrence_id: &'a OccurrenceId,
     /// Exact normalized occurrence path reference.
-    pub occurrence_path_ref: &'a ContentRef,
+    occurrence_path_ref: &'a ContentRef,
     /// Stable semantic call selected by certification.
-    pub semantic_call_id: &'a SemanticCallId,
+    semantic_call_id: &'a SemanticCallId,
     /// Semantic head against which this access is authorized.
-    pub semantic_head: &'a SemanticHead,
+    semantic_head: &'a SemanticHead,
     /// Fold-derived attempt ordinal expected for this access.
-    pub attempt_ordinal: u64,
+    attempt_ordinal: u64,
     /// Exact current producer-bound input for the access state.
-    pub state_input_ref: &'a LexicalValueRef,
+    state_input_ref: &'a LexicalValueRef,
     /// Qualified store lineage containing the run and tenant fact frontier.
-    pub store_scope_id: &'a StoreScopeId,
+    store_scope_id: &'a StoreScopeId,
     /// Qualified writer epoch containing the run and tenant fact frontier.
-    pub store_epoch: StoreEpoch,
+    store_epoch: StoreEpoch,
     /// Exact admitted tenant.
-    pub tenant_scope_id: &'a TenantScopeId,
+    tenant_scope_id: &'a TenantScopeId,
     /// Exact admitted prior-run source allowlist.
-    pub admitted_prior_run_source_manifest_ref: &'a ContentRef,
+    admitted_prior_run_source_manifest_ref: &'a ContentRef,
     /// Exact semantic capability contract.
-    pub capability_contract_ref: &'a ContentRef,
+    capability_contract_ref: &'a ContentRef,
     /// Exact process-qualified capability implementation.
-    pub capability_implementation_ref: &'a ContentRef,
+    capability_implementation_ref: &'a ContentRef,
     /// Exact semantic adapter contract.
-    pub adapter_contract_ref: &'a ContentRef,
+    adapter_contract_ref: &'a ContentRef,
     /// Exact process-qualified adapter implementation.
-    pub adapter_implementation_ref: &'a ContentRef,
+    adapter_implementation_ref: &'a ContentRef,
     /// Immutable routing policy admitted for this run.
-    pub admitted_routing_policy_ref: &'a ContentRef,
+    admitted_routing_policy_ref: &'a ContentRef,
     /// Exact admitted stable Resource lineage for this access, when any.
-    pub stable_resource_lineage_contract_ref: Option<&'a ContentRef>,
+    stable_resource_lineage_contract_ref: Option<&'a ContentRef>,
     /// Folded minimum non-rollback public head for a refreshed Effect.
-    pub minimum_lineage_head_ref: Option<&'a ContentRef>,
+    minimum_lineage_head_ref: Option<&'a ContentRef>,
+}
+
+impl PhysicalBindingSelection<'_> {
+    /// Exact state input selected by the fold.
+    pub const fn state_input_ref(&self) -> &LexicalValueRef {
+        self.state_input_ref
+    }
+    /// Immutable admitted routing policy.
+    pub const fn admitted_routing_policy_ref(&self) -> &ContentRef {
+        self.admitted_routing_policy_ref
+    }
+    /// Stable resource lineage, when this access refreshes one.
+    pub const fn stable_resource_lineage_contract_ref(&self) -> Option<&ContentRef> {
+        self.stable_resource_lineage_contract_ref
+    }
+    /// Minimum non-rollback lineage head for a refreshed access.
+    pub const fn minimum_lineage_head_ref(&self) -> Option<&ContentRef> {
+        self.minimum_lineage_head_ref
+    }
 }
 
 /// One concrete Read target owning its public certificate and private live
 /// invoker, session, and credential handle.
-pub trait RuntimeReadPhysicalBinding<C>: RuntimeReadAdapter<C> + Send + Sync + 'static
+pub trait QualifiedReadPhysicalBinding<C>: RuntimeReadAdapter<C> + Send + Sync + 'static
 where
     C: RuntimeReadCapability,
 {
     /// Returns the immutable secret-free certificate for this exact target.
     fn public_certificate(&self) -> &HistoryObject;
+
+    /// Performs one Read with the exact committed authorization origin.
+    ///
+    /// Read adapters must bind the consumed proof to their retained public
+    /// certificate before entering the protected target. There is no
+    /// production fallback from this method to an unqualified invocation.
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::ReadAdapterCompletion<C::Returned, C::SafeFailure>>;
 }
 
 /// Process-assembly source of current concrete Read targets.
-pub trait RuntimeReadPhysicalBindingSource<C>: Send + Sync + 'static
+pub trait QualifiedReadPhysicalBindingSource<C>: Send + Sync + 'static
 where
     C: RuntimeReadCapability,
 {
     /// Exact target-bound adapter type returned by this source.
-    type Binding: RuntimeReadPhysicalBinding<C>;
+    type Binding: QualifiedReadPhysicalBinding<C>;
 
     /// Selects one current target-bound Read binding before authorization.
     /// This is a process-local qualification lookup and must not enter the
@@ -1131,7 +1177,8 @@ where
 
 /// One concrete Effect target owning its public certificate and private live
 /// invoker, session, and credential handle.
-pub trait RuntimeEffectPhysicalBinding<C>: RuntimeEffectAdapter<C> + Send + Sync + 'static
+pub trait QualifiedEffectPhysicalBinding<C>:
+    RuntimeEffectAdapter<C> + Send + Sync + 'static
 where
     C: RuntimeEffectCapability,
 {
@@ -1147,25 +1194,23 @@ where
 
     /// Performs one invocation with the exact committed authorization origin.
     ///
-    /// Bindings that do not consume origin evidence inherit the ordinary
-    /// invocation. Origin-sensitive adapters override this method.
+    /// Every binding must consume the committed origin before entering its
+    /// protected target. There is intentionally no fallback to the ordinary
+    /// unqualified invocation path.
     fn invoke_authorized<'a>(
         &'a self,
         request: &'a C::Request,
-        _authorization_ref: &'a RecordRef,
-        _authorization: &'a ExternalAccessAuthorized,
-    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
-        self.invoke(request)
-    }
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>>;
 }
 
 /// Process-assembly source of current concrete Effect targets.
-pub trait RuntimeEffectPhysicalBindingSource<C>: Send + Sync + 'static
+pub trait QualifiedEffectPhysicalBindingSource<C>: Send + Sync + 'static
 where
     C: RuntimeEffectCapability,
 {
     /// Exact target-bound adapter type returned by this source.
-    type Binding: RuntimeEffectPhysicalBinding<C>;
+    type Binding: QualifiedEffectPhysicalBinding<C>;
 
     /// Selects one current target-bound Effect binding before authorization.
     /// This is a process-local qualification lookup and must not enter the
@@ -1639,6 +1684,11 @@ struct ExpectedAuthorization {
     semantic_call_id: SemanticCallId,
     state_input_ref: LexicalValueRef,
     semantic_head: SemanticHead,
+    store_scope_id: StoreScopeId,
+    store_epoch: StoreEpoch,
+    tenant_scope_id: TenantScopeId,
+    admitted_routing_policy_ref: ContentRef,
+    minimum_lineage_head_ref: Option<ContentRef>,
     attempt_ordinal: u64,
     access_kind: AccessKind,
     capability_contract_ref: ContentRef,
@@ -1681,6 +1731,11 @@ impl ExpectedAuthorization {
             semantic_call_id: selection.semantic_call_id.clone(),
             state_input_ref: selection.state_input_ref.clone(),
             semantic_head: selection.semantic_head.clone(),
+            store_scope_id: selection.store_scope_id.clone(),
+            store_epoch: selection.store_epoch,
+            tenant_scope_id: selection.tenant_scope_id.clone(),
+            admitted_routing_policy_ref: selection.admitted_routing_policy_ref.clone(),
+            minimum_lineage_head_ref: selection.minimum_lineage_head_ref.cloned(),
             attempt_ordinal: selection.attempt_ordinal,
             access_kind,
             capability_contract_ref: selection.capability_contract_ref.clone(),
@@ -1701,24 +1756,18 @@ impl ExpectedAuthorization {
         authorization_ref: &RecordRef,
         authorization: &ExternalAccessAuthorized,
     ) -> bool {
-        authorization_ref.run_id == self.run_id
-            && authorization.occurrence_id == self.occurrence_id
-            && authorization.occurrence_path_ref == self.occurrence_path_ref
-            && authorization.semantic_call_id == self.semantic_call_id
-            && authorization.state_input_ref == self.state_input_ref
-            && authorization.semantic_head == self.semantic_head
-            && authorization.attempt_ordinal == self.attempt_ordinal
-            && authorization.access_kind == self.access_kind
-            && authorization.capability_contract_ref == self.capability_contract_ref
-            && authorization.capability_implementation_ref == self.capability_implementation_ref
-            && authorization.adapter_contract_ref == self.adapter_contract_ref
-            && authorization.adapter_implementation_ref == self.adapter_implementation_ref
-            && authorization.request_digest == self.request_digest
-            && authorization.request == self.request
-            && authorization.physical_binding_ref == self.physical_binding_ref
-            && authorization.stable_resource_lineage_contract_ref
-                == self.stable_resource_lineage_contract_ref
-            && mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
+        let record = RunRecord::ExternalAccessAuthorized(authorization.clone());
+        let record_hash_matches = authorization_ref.run_sequence > 0
+            && derive_record_hash(&ExpectedRecordHashPreimage {
+                run_id: &authorization_ref.run_id,
+                run_sequence: authorization_ref.run_sequence,
+                ordinal: authorization_ref.ordinal,
+                record: &record,
+            })
+            .ok()
+            .is_some_and(|expected| expected == authorization_ref.record_hash);
+        let access_attempt_matches =
+            mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
                 run_id: &self.run_id,
                 occurrence_id: &authorization.occurrence_id,
                 occurrence_path_ref: &authorization.occurrence_path_ref,
@@ -1738,8 +1787,45 @@ impl ExpectedAuthorization {
                     .stable_resource_lineage_contract_ref,
             })
             .ok()
-            .is_some_and(|expected| expected == authorization.access_attempt_id)
+            .is_some_and(|expected| expected == authorization.access_attempt_id);
+        authorization_ref.run_id == self.run_id
+            // The record reference is part of the append proof, not merely a
+            // run label. Recompute the assigned-record hash from the exact
+            // sequence/ordinal and authorization payload before admitting a
+            // binding. This rejects a caller-supplied reference that happens
+            // to name the right run but was never assigned to this record.
+            && record_hash_matches
+            && authorization.occurrence_id == self.occurrence_id
+            && authorization.occurrence_path_ref == self.occurrence_path_ref
+            && authorization.semantic_call_id == self.semantic_call_id
+            && authorization.state_input_ref == self.state_input_ref
+            && authorization.semantic_head == self.semantic_head
+            && authorization.store_scope_id == self.store_scope_id
+            && authorization.store_epoch == self.store_epoch
+            && authorization.tenant_scope_id == self.tenant_scope_id
+            && authorization.admitted_routing_policy_ref == self.admitted_routing_policy_ref
+            && authorization.minimum_lineage_head_ref == self.minimum_lineage_head_ref
+            && authorization.attempt_ordinal == self.attempt_ordinal
+            && authorization.access_kind == self.access_kind
+            && authorization.capability_contract_ref == self.capability_contract_ref
+            && authorization.capability_implementation_ref == self.capability_implementation_ref
+            && authorization.adapter_contract_ref == self.adapter_contract_ref
+            && authorization.adapter_implementation_ref == self.adapter_implementation_ref
+            && authorization.request_digest == self.request_digest
+            && authorization.request == self.request
+            && authorization.physical_binding_ref == self.physical_binding_ref
+            && authorization.stable_resource_lineage_contract_ref
+                == self.stable_resource_lineage_contract_ref
+            && access_attempt_matches
     }
+}
+
+#[derive(Serialize)]
+struct ExpectedRecordHashPreimage<'a> {
+    run_id: &'a RunId,
+    run_sequence: u64,
+    ordinal: u32,
+    record: &'a RunRecord,
 }
 
 #[derive(Serialize)]
@@ -1765,7 +1851,7 @@ struct ExpectedAccessAttemptPreimage<'a> {
 trait ErasedBoundAccessInvocation: Send {
     fn invoke(
         self: Box<Self>,
-        authorization: Option<NewlyAppendedAuthorization>,
+        authorization: Option<CertifiedAccessAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion>;
 }
@@ -1773,7 +1859,7 @@ trait ErasedBoundAccessInvocation: Send {
 struct BoundReadInvocation<C, B>
 where
     C: RuntimeReadCapability,
-    B: RuntimeReadPhysicalBinding<C>,
+    B: QualifiedReadPhysicalBinding<C>,
 {
     request: C::Request,
     binding: Arc<B>,
@@ -1783,23 +1869,27 @@ where
 impl<C, B> ErasedBoundAccessInvocation for BoundReadInvocation<C, B>
 where
     C: RuntimeReadCapability,
-    B: RuntimeReadPhysicalBinding<C>,
+    B: QualifiedReadPhysicalBinding<C>,
 {
     fn invoke(
         self: Box<Self>,
-        authorization: Option<NewlyAppendedAuthorization>,
+        authorization: Option<CertifiedAccessAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion> {
-        let authorization = authorization.map(|authorization| {
-            (
-                authorization.authorization_ref().clone(),
-                authorization.authorization().clone(),
-            )
-        });
         Box::pin(async move {
             let invocation = AssertUnwindSafe(async {
-                drop(authorization);
-                match self.binding.invoke(&self.request).await {
+                let completion = match authorization {
+                    Some(authorization) => {
+                        self.binding
+                            .invoke_authorized(&self.request, authorization)
+                            .await
+                    }
+                    // This branch is used only by the in-crate smoke helper;
+                    // production `invoke_certified_binding` always supplies
+                    // the store-minted proof.
+                    None => self.binding.invoke(&self.request).await,
+                };
+                match completion {
                     ReadAdapterCompletion::Returned(value) => {
                         let value = encode_process_value(&value)?;
                         self.implementation.validate_returned(&value)?;
@@ -1832,7 +1922,7 @@ where
 struct BoundEffectInvocation<C, B>
 where
     C: RuntimeEffectCapability,
-    B: RuntimeEffectPhysicalBinding<C>,
+    B: QualifiedEffectPhysicalBinding<C>,
 {
     request: C::Request,
     binding: Arc<B>,
@@ -1842,25 +1932,19 @@ where
 impl<C, B> ErasedBoundAccessInvocation for BoundEffectInvocation<C, B>
 where
     C: RuntimeEffectCapability,
-    B: RuntimeEffectPhysicalBinding<C>,
+    B: QualifiedEffectPhysicalBinding<C>,
 {
     fn invoke(
         self: Box<Self>,
-        authorization: Option<NewlyAppendedAuthorization>,
+        authorization: Option<CertifiedAccessAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion> {
-        let authorization = authorization.map(|authorization| {
-            (
-                authorization.authorization_ref().clone(),
-                authorization.authorization().clone(),
-            )
-        });
         Box::pin(async move {
             let invocation = AssertUnwindSafe(async {
-                let completion = match authorization.as_ref() {
-                    Some((authorization_ref, authorization)) => {
+                let completion = match authorization {
+                    Some(authorization) => {
                         self.binding
-                            .invoke_authorized(&self.request, authorization_ref, authorization)
+                            .invoke_authorized(&self.request, authorization)
                             .await
                     }
                     None => self.binding.invoke(&self.request).await,
@@ -1935,7 +2019,7 @@ struct PriorRunFactScanInvocation {
 impl ErasedBoundAccessInvocation for PriorRunFactScanInvocation {
     fn invoke(
         self: Box<Self>,
-        authorization: Option<NewlyAppendedAuthorization>,
+        authorization: Option<CertifiedAccessAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion> {
         Box::pin(async move {
@@ -1992,7 +2076,7 @@ trait ErasedReadPhysicalBindingSource: Send + Sync {
 struct TypedReadPhysicalBindingSource<C, S>
 where
     C: RuntimeReadCapability,
-    S: RuntimeReadPhysicalBindingSource<C>,
+    S: QualifiedReadPhysicalBindingSource<C>,
 {
     source: Arc<S>,
     _contract: PhantomData<fn() -> C>,
@@ -2001,7 +2085,7 @@ where
 impl<C, S> ErasedReadPhysicalBindingSource for TypedReadPhysicalBindingSource<C, S>
 where
     C: RuntimeReadCapability,
-    S: RuntimeReadPhysicalBindingSource<C>,
+    S: QualifiedReadPhysicalBindingSource<C>,
 {
     fn capability_type_id(&self) -> TypeId {
         TypeId::of::<C>()
@@ -2037,7 +2121,7 @@ where
                 &request,
                 &mfm_spec::structured::structured_value_contract_ref::<C::Request>()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?,
-                &structured_value_contract::<C::Request>()
+                structured_value_contract::<C::Request>()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?
                     .schema_id(),
                 binding.public_certificate(),
@@ -2075,7 +2159,7 @@ trait ErasedEffectPhysicalBindingSource: Send + Sync {
 struct TypedEffectPhysicalBindingSource<C, S>
 where
     C: RuntimeEffectCapability,
-    S: RuntimeEffectPhysicalBindingSource<C>,
+    S: QualifiedEffectPhysicalBindingSource<C>,
 {
     source: Arc<S>,
     _contract: PhantomData<fn() -> C>,
@@ -2084,7 +2168,7 @@ where
 impl<C, S> ErasedEffectPhysicalBindingSource for TypedEffectPhysicalBindingSource<C, S>
 where
     C: RuntimeEffectCapability,
-    S: RuntimeEffectPhysicalBindingSource<C>,
+    S: QualifiedEffectPhysicalBindingSource<C>,
 {
     fn capability_type_id(&self) -> TypeId {
         TypeId::of::<C>()
@@ -2124,7 +2208,7 @@ where
                 &request,
                 &mfm_spec::structured::structured_value_contract_ref::<C::Request>()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?,
-                &structured_value_contract::<C::Request>()
+                structured_value_contract::<C::Request>()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?
                     .schema_id(),
                 binding.public_certificate(),
@@ -3262,7 +3346,7 @@ impl ProgramRegistryBuilder {
     ) -> Result<ContentRef>
     where
         C: RuntimeReadCapability,
-        S: RuntimeReadPhysicalBindingSource<C>,
+        S: QualifiedReadPhysicalBindingSource<C>,
     {
         let contract = S::Binding::contract()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
@@ -3326,7 +3410,7 @@ impl ProgramRegistryBuilder {
     ) -> Result<ContentRef>
     where
         C: RuntimeEffectCapability,
-        S: RuntimeEffectPhysicalBindingSource<C>,
+        S: QualifiedEffectPhysicalBindingSource<C>,
     {
         let contract = S::Binding::contract()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
@@ -3930,6 +4014,22 @@ pub struct QualifiedProgramRegistry {
     process_components: BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
 }
 
+/// Affine proof that a complete qualified registry has been consumed for
+/// runtime assembly. The only value is minted by
+/// [`QualifiedProgramRegistry::into_runtime_parts`]; its private field keeps
+/// callers from manufacturing a split-assembly token.
+pub struct RuntimeAssemblyToken {
+    process_identity: Arc<()>,
+}
+
+impl RuntimeAssemblyToken {
+    /// Returns whether this opaque seal belongs to the supplied process registry.
+    #[doc(hidden)]
+    pub fn matches_registry(&self, registry: &CertifiedProcessRegistry) -> bool {
+        Arc::ptr_eq(&self.process_identity, &registry.process_identity)
+    }
+}
+
 /// Cloneable pure admission-time certifier over fixed qualified entry definitions.
 ///
 /// This snapshot owns no callback, adapter, signer, resource, store, or writer
@@ -4003,18 +4103,30 @@ impl QualifiedProgramRegistry {
     /// Production consumers must pass the complete registry into store assembly
     /// rather than splitting and reassembling halves independently.
     #[doc(hidden)]
-    pub fn into_runtime_parts(self) -> (AdmissionVerificationRegistry, RuntimeProcessRegistry) {
+    #[cfg(any(test, feature = "runtime-authority"))]
+    pub fn into_runtime_parts(
+        self,
+    ) -> (
+        AdmissionVerificationRegistry,
+        CertifiedProcessRegistry,
+        RuntimeAssemblyToken,
+    ) {
         let registry = self.registry;
         let admission = AdmissionVerificationRegistry {
             registry: Arc::clone(&registry),
             entry_points: self.entry_points,
         };
-        let runtime = RuntimeProcessRegistry {
+        let process_identity = Arc::new(());
+        let runtime = CertifiedProcessRegistry {
             registry,
             process_components: self.process_components,
-            process_identity: Arc::new(()),
+            process_identity: Arc::clone(&process_identity),
         };
-        (admission, runtime)
+        (
+            admission,
+            runtime,
+            RuntimeAssemblyToken { process_identity },
+        )
     }
 }
 
@@ -4025,22 +4137,28 @@ impl QualifiedProgramRegistry {
 /// writer, or admission mutation authority. Its private target handles can be
 /// entered only by consuming an opaque binding after Runtime has obtained one
 /// newly committed affine authorization.
-pub struct RuntimeProcessRegistry {
+pub struct CertifiedProcessRegistry {
     registry: Arc<StructuredCertificationRegistry>,
     process_components: BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
     process_identity: Arc<()>,
 }
 
-impl std::fmt::Debug for RuntimeProcessRegistry {
+impl std::fmt::Debug for CertifiedProcessRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("RuntimeProcessRegistry")
+            .debug_struct("CertifiedProcessRegistry")
             .field("process_components", &self.process_components.len())
             .finish_non_exhaustive()
     }
 }
 
-impl RuntimeProcessRegistry {
+impl CertifiedProcessRegistry {
+    /// Returns whether this registry was minted by the supplied assembly seal.
+    #[doc(hidden)]
+    pub fn matches_assembly_token(&self, token: &RuntimeAssemblyToken) -> bool {
+        token.matches_registry(self)
+    }
+
     /// Resolves one exact registry-issued component identity.
     ///
     /// A missing result means the verified candidate selected a component that
@@ -4156,14 +4274,14 @@ impl RuntimeProcessRegistry {
     /// The result owns the frozen request, public certificate, and private
     /// target handle. Returning `None` means no current qualified target was
     /// available before authorization.
-    pub async fn prepare_access<K: PhysicalBindingKind>(
+    pub async fn qualify_access<K: PhysicalBindingKind>(
         &self,
         capability_identity: &QualifiedComponentIdentity,
         target: AccessTargetSelection<'_>,
         request: CanonicalJsonValue,
     ) -> std::result::Result<Option<QualifiedPhysicalBinding<K>>, QualifiedProcessFault> {
         let adapter_identity = self.access_adapter_identity(capability_identity)?;
-        match AssertUnwindSafe(self.prepare_access_inner::<K>(
+        match AssertUnwindSafe(self.qualify_access_inner::<K>(
             capability_identity,
             &adapter_identity,
             target,
@@ -4184,7 +4302,7 @@ impl RuntimeProcessRegistry {
         }
     }
 
-    async fn prepare_access_inner<K: PhysicalBindingKind>(
+    async fn qualify_access_inner<K: PhysicalBindingKind>(
         &self,
         capability_identity: &QualifiedComponentIdentity,
         adapter_identity: &QualifiedComponentIdentity,
@@ -4302,7 +4420,7 @@ impl RuntimeProcessRegistry {
                         mfm_facts::FactSelectionRequest,
                     >()
                     .map_err(|error| CertifyError::Certification(error.to_string()))?,
-                    &structured_value_contract::<mfm_facts::FactSelectionRequest>()
+                    structured_value_contract::<mfm_facts::FactSelectionRequest>()
                         .map_err(|error| CertifyError::Certification(error.to_string()))?
                         .schema_id(),
                     &public_certificate,
@@ -4371,18 +4489,18 @@ impl RuntimeProcessRegistry {
     /// newly committed authorization, then enters only the retained
     /// target-specific handle. No capability, request, certificate, or
     /// alternate invoker can be supplied at this stage.
-    pub async fn invoke_qualified_physical_binding<K>(
+    pub async fn invoke_certified_binding<K>(
         &self,
         binding: QualifiedPhysicalBinding<K>,
-        authorization: NewlyAppendedAuthorization,
+        authorization: CertifiedAccessAuthorization,
     ) -> QualifiedAccessCompletion {
         let QualifiedPhysicalBinding { core, .. } = binding;
-        if !Arc::ptr_eq(&self.process_identity, &core.process_identity)
-            || !core.expected_authorization.matches(
-                authorization.authorization_ref(),
-                authorization.authorization(),
-            )
-        {
+        let process_matches = Arc::ptr_eq(&self.process_identity, &core.process_identity);
+        let authorization_matches = core.expected_authorization.matches(
+            authorization.authorization_ref(),
+            authorization.authorization(),
+        );
+        if !process_matches || !authorization_matches {
             return QualifiedAccessCompletion::IntegrityFault(core.integrity_fault_code);
         }
         core.invocation
@@ -4391,7 +4509,7 @@ impl RuntimeProcessRegistry {
     }
 
     #[cfg(test)]
-    async fn invoke_qualified_physical_binding_for_test<K>(
+    async fn invoke_certified_binding_for_test<K>(
         &self,
         binding: QualifiedPhysicalBinding<K>,
     ) -> QualifiedAccessCompletion {

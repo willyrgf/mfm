@@ -108,13 +108,14 @@ authorizes its exact purpose and tenant/run target.
 The current media type is:
 
 ```text
-application/vnd.mfm.structured-run-export.v1+json
+application/vnd.mfm.structured-run-export-stream.v2
 ```
 
-The canonical object binds version, requested semantic/audit kind, store, tenant, run, physical and
-semantic heads, assigned records, and the verified object closure. Replay input checks the supplied
-content digest, exact current recoverability schema, store/tenant/run identity, and size bound.
-Old framed or pre-structured bytes are rejected; no compatibility decoder exists.
+Each newline-delimited canonical frame binds an ordinal, kind, predecessor digest, and payload. The
+terminal seal binds version, requested semantic/audit kind, every run fixation, source closure,
+assigned prefixes, chain digest, and exact byte/frame counts. Replay input checks the supplied
+content digest, exact current recoverability schemas, store/tenant/run identity, and per-frame and
+total bounds. Former monolithic object bytes are rejected; no compatibility decoder exists.
 
 ## Error and logging contract
 

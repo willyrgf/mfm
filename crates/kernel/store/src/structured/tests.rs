@@ -132,10 +132,30 @@ impl StructuredHistoryBackend for PositiveReplyBackend {
         Box::pin(async { Ok(None) })
     }
 
+    fn load_snapshot<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
+        Box::pin(async {
+            Ok(StructuredRunSnapshot {
+                history: None,
+                head: None,
+            })
+        })
+    }
+
     fn current_head<'a>(
         &'a self,
         _run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn load_prefix<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+        _through_sequence: u64,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async { Ok(None) })
     }
 
@@ -217,11 +237,26 @@ impl StructuredHistoryBackend for CorruptResolutionBackend {
         self.inner.load(run_id)
     }
 
+    fn load_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
+        self.inner.load_snapshot(run_id)
+    }
+
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
         self.inner.current_head(run_id)
+    }
+
+    fn load_prefix<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        through_sequence: u64,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
+        self.inner.load_prefix(run_id, through_sequence)
     }
 
     fn tenant_fact_frontier<'a>(
@@ -599,7 +634,7 @@ async fn never_occurrences_reject_proposed_and_forged_failures_for_every_executi
                 .await
                 .expect("valid access authorization");
             let (authorization, authorized) = authorization
-                .into_newly_appended_authorization()
+                .into_committed_access_authorization()
                 .expect("new authorization permit");
             let raw_after_authorization = backend
                 .load(&run_id)
@@ -1202,7 +1237,7 @@ async fn persisted_observations_reject_variant_schema_and_contract_substitution(
         .await
         .expect("distinct Read authorization");
     let (authorization, authorized) = authorization
-        .into_newly_appended_authorization()
+        .into_committed_access_authorization()
         .expect("new Read authorization");
     writer
         .commit_observation(
@@ -1852,7 +1887,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         .await
         .expect("Read authorization");
     let (authorization, authorized) = authorization
-        .into_newly_appended_authorization()
+        .into_committed_access_authorization()
         .expect("new Read authorization");
     assert_eq!(
         fresh_frontier(&read_backend, &read, &read_run).await,
@@ -2065,7 +2100,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
             .await
             .expect("lane authorization");
         let (authorization, _) = attempt
-            .into_newly_appended_authorization()
+            .into_committed_access_authorization()
             .expect("new lane authorization");
         authorization_refs.push(authorization.authorization_ref().clone());
     }

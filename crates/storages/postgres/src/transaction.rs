@@ -5,36 +5,10 @@
 //! [`LockedWriteTx`] or [`LockedConfigurationWriteTx`].
 
 use mfm_store::structured::{StructuredStoreError, StructuredStoreIdentity};
-use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
+use sqlx::{Postgres, Row, Transaction};
 
 use crate::schema::SCHEMA_CONTRACT_VERSION;
 use crate::session::{RoleSession, SessionKind, TargetBinding};
-
-/// Fresh per-transaction lease bound to one admitted physical target.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct TargetLease {
-    fence_generation: u64,
-    release_epoch: u64,
-    target_key: String,
-    schema_name: String,
-    database_oid: u32,
-    store_scope_id: String,
-    store_epoch: String,
-}
-
-impl TargetLease {
-    pub(crate) fn issue(binding: &TargetBinding) -> Self {
-        Self {
-            fence_generation: binding.fence_generation(),
-            release_epoch: binding.release_epoch(),
-            target_key: binding.target_key().as_str().to_owned(),
-            schema_name: binding.schema_name().to_owned(),
-            database_oid: binding.database_oid(),
-            store_scope_id: binding.store_scope_id().as_str().to_owned(),
-            store_epoch: binding.store_epoch().get().to_string(),
-        }
-    }
-}
 
 /// Read-only transaction under an exact-target reader role.
 pub(crate) struct ReadTx<'a> {
@@ -46,11 +20,24 @@ impl<'a> ReadTx<'a> {
         &mut self.transaction
     }
 
-    pub(crate) async fn commit(self) -> Result<(), StructuredStoreError> {
+    pub(crate) async fn commit_checked(
+        mut self,
+        binding: &TargetBinding,
+    ) -> Result<(), StructuredStoreError> {
+        validate_target(&mut self.transaction, binding, true).await?;
         self.transaction
             .commit()
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)
+    }
+
+    /// Validates the bound deployment target after the caller's indexed-head
+    /// query has established the repeatable-read snapshot.
+    pub(crate) async fn validate_target(
+        &mut self,
+        binding: &TargetBinding,
+    ) -> Result<(), StructuredStoreError> {
+        validate_target(&mut self.transaction, binding, true).await
     }
 }
 
@@ -71,14 +58,21 @@ impl<'a> LockedWriteTx<'a> {
         &mut self.transaction
     }
 
-    pub(crate) async fn commit(self) -> Result<(), StructuredStoreError> {
-        self.transaction
-            .commit()
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)
+    pub(crate) async fn validate_target(
+        &mut self,
+        binding: &TargetBinding,
+    ) -> Result<(), StructuredStoreError> {
+        validate_target(&mut self.transaction, binding, false).await
     }
 
-    pub(crate) async fn commit_outcome(self) -> Result<CommitOutcome, StructuredStoreError> {
+    pub(crate) async fn commit_outcome(
+        mut self,
+        binding: &TargetBinding,
+    ) -> Result<CommitOutcome, StructuredStoreError> {
+        // Revalidate after all advisory locks and DML.  A deployment promotion
+        // can happen while this transaction is open; an admission that was valid
+        // at begin/prepare must not commit under a newer fence or release.
+        validate_target(&mut self.transaction, binding, false).await?;
         match self.transaction.commit().await {
             Ok(()) => Ok(CommitOutcome::Committed),
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
@@ -103,7 +97,18 @@ impl<'a> LockedConfigurationWriteTx<'a> {
         &mut self.transaction
     }
 
-    pub(crate) async fn commit_outcome(self) -> Result<CommitOutcome, StructuredStoreError> {
+    pub(crate) async fn validate_target(
+        &mut self,
+        binding: &TargetBinding,
+    ) -> Result<(), StructuredStoreError> {
+        validate_target(&mut self.transaction, binding, false).await
+    }
+
+    pub(crate) async fn commit_outcome(
+        mut self,
+        binding: &TargetBinding,
+    ) -> Result<CommitOutcome, StructuredStoreError> {
+        validate_target(&mut self.transaction, binding, false).await?;
         match self.transaction.commit().await {
             Ok(()) => Ok(CommitOutcome::Committed),
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
@@ -113,13 +118,6 @@ impl<'a> LockedConfigurationWriteTx<'a> {
     pub(crate) async fn rollback(self) -> Result<(), StructuredStoreError> {
         self.transaction
             .rollback()
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)
-    }
-
-    pub(crate) async fn commit(self) -> Result<(), StructuredStoreError> {
-        self.transaction
-            .commit()
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)
     }
@@ -143,9 +141,7 @@ pub(crate) async fn begin_read<'a>(
     ) {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetLease::issue(binding);
-    let mut transaction = begin_base(session, binding, true).await?;
-    validate_target_permit(&mut transaction, &permit, true).await?;
+    let transaction = begin_base(session, binding, true).await?;
     Ok(ReadTx { transaction })
 }
 
@@ -157,37 +153,32 @@ pub(crate) async fn begin_run_write<'a>(
     if session.kind() != SessionKind::RunWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetLease::issue(binding);
     let mut transaction = begin_base(session, binding, false).await?;
-    validate_target_permit(&mut transaction, &permit, false).await?;
+    validate_target(&mut transaction, binding, false).await?;
     Ok(WriteTx { transaction })
 }
 
-/// Acquires the canonical run advisory lock and upgrades to [`LockedWriteTx`].
-pub(crate) async fn lock_run<'a>(
+/// Acquires the complete stream lock set in canonical key order.
+pub(crate) async fn lock_run_and_tenant<'a>(
     tx: WriteTx<'a>,
     run_id: &str,
+    tenant_key: Option<&str>,
 ) -> Result<LockedWriteTx<'a>, StructuredStoreError> {
     let mut transaction = tx.transaction;
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))")
-        .bind(run_id)
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let mut keys = vec![(0_u8, run_id), (1_u8, tenant_key.unwrap_or(""))];
+    if tenant_key.is_none() {
+        keys.pop();
+    }
+    keys.sort_unstable();
+    for (namespace, key) in keys {
+        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, $2))")
+            .bind(key)
+            .bind(i32::from(namespace))
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    }
     Ok(LockedWriteTx { transaction })
-}
-
-/// Acquires the tenant fact lock under an already locked run write transaction.
-pub(crate) async fn lock_tenant_fact(
-    tx: &mut LockedWriteTx<'_>,
-    lock_key: &str,
-) -> Result<(), StructuredStoreError> {
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 1))")
-        .bind(lock_key)
-        .execute(&mut **tx.conn())
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    Ok(())
 }
 
 /// Begins a configuration write transaction and acquires the stream lock.
@@ -199,9 +190,8 @@ pub(crate) async fn begin_configuration_write_locked<'a>(
     if session.kind() != SessionKind::ConfigurationWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetLease::issue(binding);
     let mut transaction = begin_base(session, binding, false).await?;
-    validate_target_permit(&mut transaction, &permit, false).await?;
+    validate_target(&mut transaction, binding, false).await?;
     sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))")
         .bind(stream_lock_key)
         .execute(&mut *transaction)
@@ -234,11 +224,11 @@ async fn begin_base<'a>(
     // Every run/configuration read is fixed to one snapshot. Writes retain their
     // read-committed lock protocol below; readers never observe a mixed prefix.
     let isolation = if read_only {
-        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+        crate::sql_catalog::TransactionIsolation::RepeatableRead
     } else {
-        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+        crate::sql_catalog::TransactionIsolation::ReadCommitted
     };
-    sqlx::query(isolation)
+    sqlx::query(crate::sql_catalog::transaction_isolation(isolation))
         .execute(&mut *transaction)
         .await
         .map_err(|_| StructuredStoreError::BackendUnavailable)?;
@@ -254,12 +244,13 @@ async fn begin_base<'a>(
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
     }
     // Role names are generated from the closed 16-hex target key and validated at
-    // session issuance; quote_ident still double-quotes them before SET LOCAL ROLE.
-    let set_role = format!("SET LOCAL ROLE {}", quote_ident(session.managed_role()));
-    sqlx::query(AssertSqlSafe(set_role))
-        .execute(&mut *transaction)
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    // session issuance by the private catalog bridge.
+    sqlx::query(crate::sql_catalog::transaction_set_role(
+        session.managed_role(),
+    ))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
     sqlx::query(
         "SELECT pg_catalog.set_config( \
              'search_path', pg_catalog.format('%I, pg_catalog', $1), TRUE \
@@ -272,21 +263,23 @@ async fn begin_base<'a>(
     Ok(transaction)
 }
 
-async fn validate_target_permit(
+async fn validate_target(
     transaction: &mut Transaction<'_, Postgres>,
-    permit: &TargetLease,
+    binding: &TargetBinding,
     read_only: bool,
 ) -> Result<(), StructuredStoreError> {
-    if !read_only {
-        // Serialize fence-generation observation for writers without requiring UPDATE
-        // privilege on the authority row itself.
-        sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 2))")
-            .bind(format!("mfm.target-fence:{}", permit.schema_name))
-            .execute(&mut **transaction)
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    }
-
+    binding
+        .checkpoint()
+        .validate_target(
+            binding.store_scope_id(),
+            binding.store_epoch(),
+            binding.target_key().as_str(),
+            binding.database_oid(),
+            binding.schema_name(),
+            binding.fence_generation(),
+            binding.release_epoch(),
+        )
+        .map_err(|_| StructuredStoreError::InvalidHistory)?;
     let row = sqlx::query(
         "SELECT pg_catalog.current_database()::text AS database_name, \
                 pg_catalog.current_schema()::text AS schema_name, \
@@ -316,6 +309,7 @@ async fn validate_target_permit(
         .and_then(|value| u32::try_from(value).ok())
         .ok_or(StructuredStoreError::InvalidHistory)?;
     let expected_read_only = if read_only { "on" } else { "off" };
+    let expected_store_epoch = binding.store_epoch().get().to_string();
     let fence_generation = row
         .try_get::<String, _>("fence_generation")
         .ok()
@@ -326,8 +320,8 @@ async fn validate_target_permit(
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or(StructuredStoreError::InvalidHistory)?;
-    if row.try_get::<String, _>("schema_name").ok().as_deref() != Some(permit.schema_name.as_str())
-        || database_oid != permit.database_oid
+    if row.try_get::<String, _>("schema_name").ok().as_deref() != Some(binding.schema_name())
+        || database_oid != binding.database_oid()
         || row.try_get::<bool, _>("in_recovery").ok() != Some(false)
         || row
             .try_get::<String, _>("transaction_read_only")
@@ -335,18 +329,18 @@ async fn validate_target_permit(
             .as_deref()
             != Some(expected_read_only)
         || row.try_get::<String, _>("store_scope_id").ok().as_deref()
-            != Some(permit.store_scope_id.as_str())
+            != Some(binding.store_scope_id().as_str())
         || row.try_get::<String, _>("store_epoch").ok().as_deref()
-            != Some(permit.store_epoch.as_str())
+            != Some(expected_store_epoch.as_str())
         || row
             .try_get::<String, _>("schema_contract_version")
             .ok()
             .as_deref()
             != Some(SCHEMA_CONTRACT_VERSION)
-        || fence_generation != permit.fence_generation
-        || release_epoch != permit.release_epoch
+        || fence_generation != binding.fence_generation()
+        || release_epoch != binding.release_epoch()
         || row.try_get::<String, _>("target_key").ok().as_deref()
-            != Some(permit.target_key.as_str())
+            != Some(binding.target_key().as_str())
     {
         return Err(StructuredStoreError::InvalidHistory);
     }
@@ -358,8 +352,4 @@ pub(crate) fn store_identity_from_binding(binding: &TargetBinding) -> Structured
         store_scope_id: binding.store_scope_id().clone(),
         store_epoch: binding.store_epoch(),
     }
-}
-
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }

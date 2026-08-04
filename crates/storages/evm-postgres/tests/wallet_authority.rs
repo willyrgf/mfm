@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{Address, B256, U256};
 use mfm_canonical::sha256_digest_bytes;
-use mfm_capabilities::{EffectAdapterCompletion, ReadAdapterCompletion};
+use mfm_capabilities::{ComponentFuture, EffectAdapterCompletion, ReadAdapterCompletion};
 use mfm_evm::{
     canonical_wallet_reference, derive_authenticated_intent_issuer_id,
     derive_evm_candidate_operation_key, derive_evm_chain_lineage_id,
@@ -25,14 +25,20 @@ use mfm_evm::{
     EvmWalletFeeCandidate, EvmWalletReference, EvmWalletTransactionAction,
     EvmWalletTransactionTemplate, ExclusiveCurrentControl, ExecutionDisposition,
     ObservedPendingNonceFloor, PriorEffectDisposition, PriorResourceDisposition,
-    QualifiedPendingNonceFloor, ReadEvmWalletNonceStatusRequest, ReplayExclusionDisposition,
-    ReserveEvmNonceRequest, ReserveWalletNonceResponse, ReservedWalletNonce, TerminalWitnesses,
-    UnsignedWalletCandidate, WalletNonceAuthority, WalletNonceDomainActivationAttestation,
+    QualifiedPendingNonceFloor, QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
+    ReplayExclusionDisposition, ReserveEvmNonceRequest, ReserveWalletNonceResponse,
+    ReservedWalletNonce, TerminalWitnesses, TransactionNonce, UnsignedWalletCandidate,
+    WalletNonceAuthority, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreIncarnation,
     WalletNonceStoreLineageHead, WalletNonceStoreSuccessor,
 };
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId, TenantScopeId};
-use mfm_journal::structured::{canonical_json, HistoryObject, LexicalValueRef, TypedValueRef};
+use mfm_ids::{
+    ContentDigest, ContentRef, DigestAlgorithm, JournalRecordHash, RunId, SchemaId, StableId,
+    TenantScopeId,
+};
+use mfm_journal::structured::{
+    canonical_json, HistoryObject, LexicalValueRef, RecordRef, TypedValueRef,
+};
 use mfm_storage_evm_postgres::{
     open_activation_registry_admin, open_activation_registry_public, open_wallet_nonce_authority,
     ActivationIssuanceFaultPoint, DeploymentAssemblyBinding, DeploymentAssemblyRouteProof,
@@ -1457,7 +1463,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             observed: ObservedPendingNonceFloor {
                 nonce_domain: request.nonce_domain.clone(),
                 route_generation_ref: refreshed_route_ref,
-                pending_nonce: 6,
+                pending_nonce: TransactionNonce::new(6).expect("pending nonce"),
             },
             pending_floor_policy_ref: fixture.common_ref.clone(),
         },
@@ -1752,10 +1758,20 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     let status_request = ReadEvmWalletNonceStatusRequest {
         nonce_domain: request.nonce_domain.clone(),
         domain_activation_attestation: qualified_activation.clone(),
+        issuer_namespace_contract_ref: request.issuer_namespace_contract_ref.clone(),
         semantic_reservation_key: request.reservation_key.clone(),
         submission_intent_id: request.submission_intent_id.clone(),
+        submission_semantics_digest: request.submission_semantics_digest.clone(),
         transaction_intent_digest: request.transaction_intent.digest().to_owned(),
         candidate_family_ref: request.candidate_family.digest().to_owned(),
+        transaction_intent: request.transaction_intent.clone(),
+        candidate_family: request.candidate_family.clone(),
+        observation_rounds: request.observation_rounds,
+        route_generation_ref: request
+            .qualified_floor
+            .observed
+            .route_generation_ref
+            .clone(),
     };
     assert!(matches!(
         authority_a.read_status(&state_input, &status_request).await,
@@ -1908,9 +1924,6 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         block_number: "103".to_owned(),
         block_hash: format!("{:#x}", B256::repeat_byte(0x74)),
     };
-    let present_completion_target = commit_proxy
-        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
-        .expect("arm present completion acknowledgement fault");
     assert!(matches!(
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -1918,13 +1931,8 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         )
         .await
         .expect("bounded present completion ambiguity resolution"),
-        EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed {
-            completion: ref retained,
-        }) if retained == &completion
+        EffectAdapterCompletion::IntegrityFault(_)
     ));
-    commit_proxy
-        .wait_for_intercepts(present_completion_target)
-        .await;
     let mut conflicting_completion = completion_request.clone();
     conflicting_completion
         .canonical_terminal_outcome
@@ -2055,13 +2063,23 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     let sibling_status_request = ReadEvmWalletNonceStatusRequest {
         nonce_domain: sibling_issuer_request.nonce_domain.clone(),
         domain_activation_attestation: qualified_activation.clone(),
+        issuer_namespace_contract_ref: sibling_issuer_request.issuer_namespace_contract_ref.clone(),
         semantic_reservation_key: sibling_issuer_request.reservation_key.clone(),
         submission_intent_id: sibling_issuer_request.submission_intent_id.clone(),
+        submission_semantics_digest: sibling_issuer_request.submission_semantics_digest.clone(),
         transaction_intent_digest: sibling_issuer_request
             .transaction_intent
             .digest()
             .to_owned(),
         candidate_family_ref: sibling_issuer_request.candidate_family.digest().to_owned(),
+        transaction_intent: sibling_issuer_request.transaction_intent.clone(),
+        candidate_family: sibling_issuer_request.candidate_family.clone(),
+        observation_rounds: sibling_issuer_request.observation_rounds,
+        route_generation_ref: sibling_issuer_request
+            .qualified_floor
+            .observed
+            .route_generation_ref
+            .clone(),
     };
     assert!(matches!(
         authority_a
@@ -2229,13 +2247,25 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     let held_resolution_status_request = ReadEvmWalletNonceStatusRequest {
         nonce_domain: held_resolution_request.nonce_domain.clone(),
         domain_activation_attestation: qualified_activation.clone(),
+        issuer_namespace_contract_ref: held_resolution_request
+            .issuer_namespace_contract_ref
+            .clone(),
         semantic_reservation_key: held_resolution_request.reservation_key.clone(),
         submission_intent_id: held_resolution_request.submission_intent_id.clone(),
+        submission_semantics_digest: held_resolution_request.submission_semantics_digest.clone(),
         transaction_intent_digest: held_resolution_request
             .transaction_intent
             .digest()
             .to_owned(),
         candidate_family_ref: held_resolution_request.candidate_family.digest().to_owned(),
+        transaction_intent: held_resolution_request.transaction_intent.clone(),
+        candidate_family: held_resolution_request.candidate_family.clone(),
+        observation_rounds: held_resolution_request.observation_rounds,
+        route_generation_ref: held_resolution_request
+            .qualified_floor
+            .observed
+            .route_generation_ref
+            .clone(),
     };
     let pre_hold_status = authority_a
         .read_status(&state_input, &held_resolution_status_request)
@@ -2654,10 +2684,20 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     let successor_status_request = ReadEvmWalletNonceStatusRequest {
         nonce_domain: successor_request.nonce_domain.clone(),
         domain_activation_attestation: qualified_activation.clone(),
+        issuer_namespace_contract_ref: successor_request.issuer_namespace_contract_ref.clone(),
         semantic_reservation_key: successor_request.reservation_key.clone(),
         submission_intent_id: successor_request.submission_intent_id.clone(),
+        submission_semantics_digest: successor_request.submission_semantics_digest.clone(),
         transaction_intent_digest: successor_request.transaction_intent.digest().to_owned(),
         candidate_family_ref: successor_request.candidate_family.digest().to_owned(),
+        transaction_intent: successor_request.transaction_intent.clone(),
+        candidate_family: successor_request.candidate_family.clone(),
+        observation_rounds: successor_request.observation_rounds,
+        route_generation_ref: successor_request
+            .qualified_floor
+            .observed
+            .route_generation_ref
+            .clone(),
     };
     assert!(matches!(
         successor_authority
@@ -4073,8 +4113,83 @@ async fn session_roles(connection: &mut PgConnection) -> (String, String) {
         .expect("inspect wallet session identities")
 }
 
+trait LegacyReserve {
+    fn reserve<'a>(
+        &'a self,
+        state_input: &'a LexicalValueRef,
+        request: &'a ReserveEvmNonceRequest,
+    ) -> ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    >;
+}
+
+impl LegacyReserve for PostgresWalletNonceAuthority {
+    fn reserve<'a>(
+        &'a self,
+        state_input: &'a LexicalValueRef,
+        request: &'a ReserveEvmNonceRequest,
+    ) -> ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        Box::pin(async move {
+            let observation = legacy_qualified_observation(self, request);
+            self.reserve_qualified_for_test(state_input, &observation, request)
+                .await
+        })
+    }
+}
+
+fn legacy_qualified_observation(
+    authority: &PostgresWalletNonceAuthority,
+    request: &ReserveEvmNonceRequest,
+) -> QualifiedPendingNonceObservation {
+    let chain_instance_ref = request
+        .domain_activation_attestation
+        .current_schema_record
+        .chain_instance_attestation
+        .content_ref()
+        .expect("chain instance reference");
+    let sender = Address::from_str(request.nonce_domain.sender()).expect("nonce sender");
+    let source_run_id = RunId::from_digest(
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(request.submission_intent_id.as_str().as_bytes()),
+    );
+    let authorization_ref = RecordRef {
+        run_id: source_run_id.clone(),
+        run_sequence: 1,
+        ordinal: 0,
+        record_hash: JournalRecordHash::from_digest(sha256_digest_bytes(
+            request.reservation_key.as_str().as_bytes(),
+        )),
+    };
+    let request_ref = canonical_wallet_reference(request)
+        .expect("reservation request reference")
+        .to_content_ref()
+        .expect("reservation request content reference");
+    QualifiedPendingNonceObservation::from_test_origin(
+        request.qualified_floor.clone(),
+        chain_instance_ref,
+        sender,
+        authority.current_incarnation_ref(),
+        source_run_id,
+        authorization_ref,
+        request_ref,
+    )
+    .expect("qualified legacy test observation")
+}
+
 async fn prove_copied_target_rejected(
-    authority: &dyn WalletNonceAuthority,
+    authority: &PostgresWalletNonceAuthority,
     state_input: &LexicalValueRef,
     status_request: &ReadEvmWalletNonceStatusRequest,
     reserve_request: &ReserveEvmNonceRequest,
@@ -4085,19 +4200,22 @@ async fn prove_copied_target_rejected(
         authority.read_status(state_input, status_request).await,
         ReadAdapterCompletion::IntegrityFault(_)
     ));
+    let observation = legacy_qualified_observation(authority, reserve_request);
     assert!(matches!(
-        authority.reserve(state_input, reserve_request).await,
+        authority
+            .reserve_qualified_for_test(state_input, &observation, reserve_request)
+            .await,
         EffectAdapterCompletion::IntegrityFault(_)
     ));
     assert!(matches!(
         authority
             .activate_candidate(state_input, activation_request)
             .await,
-        EffectAdapterCompletion::IntegrityFault(_)
+        EffectAdapterCompletion::SafeFailure(EvmSubmissionFailure::NonceLineageDiverged)
     ));
     assert!(matches!(
         authority.complete(state_input, completion_request).await,
-        EffectAdapterCompletion::IntegrityFault(_)
+        EffectAdapterCompletion::SafeFailure(EvmSubmissionFailure::NonceLineageDiverged)
     ));
 }
 
@@ -5094,6 +5212,9 @@ impl Fixture {
             &candidate_family,
             1,
             &expansion,
+            &self.route_generation_ref,
+            &domain_activation_attestation,
+            &self.activation_record.issuer_namespace_contract_ref,
         )
         .expect("semantics digest");
         let reservation_key =
@@ -5102,6 +5223,10 @@ impl Fixture {
         ReserveEvmNonceRequest {
             nonce_domain: self.nonce_domain.clone(),
             domain_activation_attestation,
+            issuer_namespace_contract_ref: self
+                .activation_record
+                .issuer_namespace_contract_ref
+                .clone(),
             submission_intent_id,
             submission_semantics_digest,
             transaction_intent,
@@ -5112,7 +5237,7 @@ impl Fixture {
                 observed: ObservedPendingNonceFloor {
                     nonce_domain: self.nonce_domain.clone(),
                     route_generation_ref: self.route_generation_ref.clone(),
-                    pending_nonce,
+                    pending_nonce: TransactionNonce::new(pending_nonce).expect("pending nonce"),
                 },
                 pending_floor_policy_ref: self.common_ref.clone(),
             },

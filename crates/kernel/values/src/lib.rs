@@ -23,6 +23,7 @@ use std::collections::BTreeMap;
 
 use mfm_canonical::{
     CanonicalBytes, CanonicalJsonBytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes,
+    MAX_CANONICAL_JSON_DEPTH,
 };
 use mfm_ids::{DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId};
 use serde::de::DeserializeOwned;
@@ -65,7 +66,11 @@ const SECRET_MARKERS: &[&str] = &[
 ];
 const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
 /// Maximum recursive depth admitted by current schema identities and values.
-pub const MAX_SCHEMA_DEPTH: usize = 64;
+///
+/// Schema identities add two object levels around their shape, so reserve those
+/// levels from the canonical JSON budget. This keeps the advertised schema
+/// limit round-trippable through strict canonical decoding.
+pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 2;
 
 /// Result type for descriptor and value-contract operations.
 pub type Result<T> = std::result::Result<T, ValueError>;

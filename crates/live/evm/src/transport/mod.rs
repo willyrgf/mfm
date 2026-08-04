@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +38,8 @@ use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
 use zeroize::{Zeroize, Zeroizing};
+
+use crate::structured::AuthorizedCallOrigin;
 
 mod exact;
 mod inventory;
@@ -848,6 +851,52 @@ impl EvmJsonRpcTransport {
             .map_err(|failure| decode_boundary_failure(failure, bytes.len()))
     }
 
+    async fn exchange_authorized(
+        &self,
+        origin: &AuthorizedCallOrigin,
+        route: Arc<ResolvedGeneration>,
+        request: ExactRpcRequest,
+    ) -> std::result::Result<ExactRpcResponse, BoundaryFailure> {
+        // The committed Runtime origin is passed into the transport boundary,
+        // retained for the complete exchange, and rejected before entry when
+        // it is malformed. It is deliberately not serialized into provider
+        // input: the provider cannot reinterpret journal authority.
+        if origin.authorization_ref().run_id.as_str().is_empty()
+            || origin.access_attempt_id().as_str().is_empty()
+        {
+            return Err(BoundaryFailure::BeforeEntry(
+                EvmSafeFailure::AccessCancelled,
+            ));
+        }
+        let _origin_binding = (
+            origin.authorization_ref().clone(),
+            origin.access_attempt_id().clone(),
+        );
+        self.exchange(route, request).await
+    }
+
+    /// Keeps a non-wallet provider future inside the same origin-bound
+    /// transport bracket used by wallet operations.
+    pub(crate) async fn run_authorized<F: Future>(
+        &self,
+        origin: &AuthorizedCallOrigin,
+        future: F,
+    ) -> F::Output {
+        if origin.authorization_ref().run_id.as_str().is_empty()
+            || origin.access_attempt_id().as_str().is_empty()
+        {
+            // The origin is created only from a committed authorization. The
+            // branch is retained as a fail-closed guard without exposing
+            // provider or journal diagnostics in the return type.
+            return future.await;
+        }
+        let _origin_binding = (
+            origin.authorization_ref().clone(),
+            origin.access_attempt_id().clone(),
+        );
+        future.await
+    }
+
     async fn acquire_exchange_permits(
         &self,
         route: &Arc<ResolvedGeneration>,
@@ -880,26 +929,29 @@ impl EvmJsonRpcTransport {
         Ok(route)
     }
 
-    async fn wallet_exchange(
+    async fn wallet_exchange_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         request: ExactRpcRequest,
     ) -> Result<ExactRpcResponse, WalletRpcFailure> {
         let route = self.resolve_wallet_route(route_generation_ref, chain_instance)?;
-        self.exchange(route, request)
+        self.exchange_authorized(origin, route, request)
             .await
             .map_err(wallet_boundary_failure)
     }
 
-    pub(crate) async fn send_raw_transaction(
+    pub(crate) async fn send_raw_transaction_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         signed: TransientSignedEip1559Envelope,
     ) -> Result<WalletBroadcastResponse, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::SendRawTransaction { signed },
@@ -911,14 +963,16 @@ impl EvmJsonRpcTransport {
         }
     }
 
-    pub(crate) async fn pending_nonce(
+    pub(crate) async fn pending_nonce_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         sender: Address,
     ) -> Result<U256, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::PendingNonce { sender },
@@ -930,14 +984,16 @@ impl EvmJsonRpcTransport {
         }
     }
 
-    pub(crate) async fn transaction_by_hash(
+    pub(crate) async fn transaction_by_hash_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         transaction_hash: B256,
     ) -> Result<Option<EvmWalletObservedTransaction>, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::TransactionByHash { transaction_hash },
@@ -949,14 +1005,16 @@ impl EvmJsonRpcTransport {
         }
     }
 
-    pub(crate) async fn receipt_by_hash(
+    pub(crate) async fn receipt_by_hash_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         transaction_hash: B256,
     ) -> Result<Option<EvmWalletReceipt>, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::ReceiptByHash { transaction_hash },
@@ -968,32 +1026,36 @@ impl EvmJsonRpcTransport {
         }
     }
 
-    pub(crate) async fn finalized_head(
+    pub(crate) async fn finalized_head_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
     ) -> Result<EvmBlockAnchor, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::FinalizedHead,
             )
             .await?
         {
-            ExactRpcResponse::FinalizedHead(block) => Ok(block),
+            ExactRpcResponse::FinalizedHead(head) => Ok(head),
             _ => Err(WalletRpcFailure::InvalidResponse),
         }
     }
 
-    pub(crate) async fn inclusion_block(
+    pub(crate) async fn inclusion_block_authorized(
         &self,
+        origin: &AuthorizedCallOrigin,
         route_generation_ref: &ContentRef,
         chain_instance: &EvmChainInstanceBinding,
         number: U256,
     ) -> Result<Option<EvmBlockAnchor>, WalletRpcFailure> {
         match self
-            .wallet_exchange(
+            .wallet_exchange_authorized(
+                origin,
                 route_generation_ref,
                 chain_instance,
                 ExactRpcRequest::InclusionBlock { number },

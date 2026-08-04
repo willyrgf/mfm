@@ -19,17 +19,18 @@ use crate::submission::{
     DeriveEvmCandidateOperationKeyState, DeriveEvmNonceReservationKeyState,
     DeriveSubmissionIntentIdState, DeriveTransactionIntentState, EvmSubmissionRequest,
     ExtractSubmissionWorkState, FailureReconciliationRequest, MarkActivationReconcileState,
-    MarkCandidateCompletedState, MarkObservationReconcileState, ObserveActivatedTransactionState,
-    ObserveCandidateReceiptState, ObserveCanonicalInclusionState, ObserveFinalizedHeadState,
-    ObservePendingNonceState, PendingEvmSubmissionFailure, PrepareExhaustionReconciliationState,
+    MarkCandidateCompletedState, ObserveActivatedTransactionState, ObserveCandidateReceiptState,
+    ObserveCanonicalInclusionState, ObserveFinalizedHeadState, ObservePendingNonceState,
+    PendingEvmSubmissionFailure, PrepareExhaustionReconciliationState,
     PrepareRetainedCandidateObservationState, PreparedWalletSubmission,
     ProjectCompletedWalletDispositionState, QualifyPendingNonceFloorState,
     ReadCandidateStatusAfterFailureState, ReadCandidateWalletNonceStatusState,
-    ReadExhaustionStatusState, ReadPostReserveWalletNonceStatusState,
-    ReadReservationStatusAfterFailureState, ReadWalletNonceStatusState, ReserveWalletNonceState,
-    SelectCandidateAttemptRouteState, SelectCandidateSlotState, SelectObservationRoundState,
-    SelectSubmissionTerminalState, SelectTerminalEvidenceState, SubmissionProgress, SubmissionWork,
-    VerifyCanonicalInclusionState, WalletStatusDecision,
+    ReadExhaustionStatusState, ReadObservedCandidateStatusState,
+    ReadPostReserveWalletNonceStatusState, ReadReservationStatusAfterFailureState,
+    ReadWalletNonceStatusState, ReserveWalletNonceState, SelectCandidateAttemptRouteState,
+    SelectCandidateSlotState, SelectObservationRoundState, SelectSubmissionTerminalState,
+    SelectTerminalEvidenceState, SubmissionProgress, SubmissionWork, VerifyCanonicalInclusionState,
+    WalletStatusDecision,
 };
 use crate::{EvmSubmissionFailure, EvmSubmissionOutput, EVM_WALLET_REPLACEMENT_LIMIT};
 
@@ -540,6 +541,12 @@ fn author_candidate_attempt_recipe(
                                 &work,
                             )?
                             .or_default()?;
+                        // Retained candidates always traverse the same fresh
+                        // transaction/receipt observation rounds before any
+                        // reconciliation or replacement decision. Construction
+                        // of the observation work alone is never evidence.
+                        let observed = author_observation_round(arm, &observed, 0)?;
+                        let observed = author_observation_round(arm, &observed, 1)?;
                         let resolution = author_terminal_decision(arm, &observed)?;
                         let progress = arm
                             .state::<CollapseCandidateResolutionState>(
@@ -648,14 +655,12 @@ fn author_terminal_decision(
             arm.normal(&resolution)
         })?;
         arms.arm("reconcile", stable("terminal-reconcile")?, |arm, _| {
-            // Advance the certified recovery walk past the just-observed
-            // ordinal; do not re-read status and jump to activated_len.
             let resolution = arm
-                .state::<MarkObservationReconcileState>(
-                    stable("mark-observation-reconcile")?,
+                .state::<ReadObservedCandidateStatusState>(
+                    stable("read-observed-candidate-status")?,
                     observed,
                 )?
-                .infallible()?;
+                .or_default()?;
             arm.normal(&resolution)
         })
     })

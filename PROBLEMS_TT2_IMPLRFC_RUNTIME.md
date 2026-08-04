@@ -335,8 +335,8 @@ at [lines 1161-1167](RFC_RUNTIME_HISTORY_CHOKE_POINT.md#L1161), and prepared-acc
 
 Current implementation:
 
-- [`NewlyAppendedAuthorization`](crates/kernel/certify/src/structured.rs#L138) has private fields,
-  but its alleged store mint, [`from_store_mint`](crates/kernel/certify/src/structured.rs#L157), is
+- [`CommittedAccessAuthorization`](crates/kernel/certify/src/structured.rs#L138) has private fields,
+  but its alleged store mint, [`from_committed_successor`](crates/kernel/certify/src/structured.rs#L157), is
   public and requires no private store capability.
 - [`ExternalAccessAuthorized`](crates/kernel/journal/src/structured.rs#L902) is publicly
   constructible because all fields are public.
@@ -344,7 +344,7 @@ Current implementation:
   publicly gives a caller the live `RuntimeProcessRegistry` half.
 - That registry publicly exposes
   [`prepare_access`](crates/kernel/certify/src/structured.rs#L4030) and
-  [`invoke_qualified_physical_binding`](crates/kernel/certify/src/structured.rs#L4234).
+  [`invoke_authorized_physical_binding`](crates/kernel/certify/src/structured.rs#L4234).
 - The opaque binding publicly reveals its frozen request and certificate at
   [lines 1197-1206](crates/kernel/certify/src/structured.rs#L1197).
 - [`ExpectedAuthorization::matches`](crates/kernel/certify/src/structured.rs#L1645) compares
@@ -352,8 +352,8 @@ Current implementation:
   attempt ordinal, occurrence path, semantic call ID, semantic head, and exact persisted request
   reference.
 - The compile-fail fixture's expected compiler output actually suggests calling
-  `NewlyAppendedAuthorization::from_store_mint` in
-  [construct_newly_appended_authorization.stderr](crates/kernel/certify/tests/ui/structured/fail/construct_newly_appended_authorization.stderr).
+  `CommittedAccessAuthorization::from_committed_successor` in
+  [construct_committed_access_authorization.stderr](crates/kernel/certify/tests/ui/structured/fail/construct_committed_access_authorization.stderr).
 
 Minimal failure scenario:
 
@@ -361,7 +361,7 @@ Minimal failure scenario:
 2. It asks the process registry to prepare a binding for values it supplied and can recompute.
 3. It constructs a matching `ExternalAccessAuthorized` and arbitrary `RecordRef` with the expected
    run ID.
-4. It calls the public `from_store_mint(..., None)` without appending any history.
+4. It calls the public `from_committed_successor(..., None)` without appending any history.
 5. It consumes that value in the public invocation method and enters the effect.
 
 Consequence:

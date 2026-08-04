@@ -6,13 +6,20 @@
 //! Cross-purpose substitution is a type error: `PublicRunEvidence` cannot be
 //! passed where `ExportRunEvidence` is required.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_facts::FactSelectionReadResponse;
-use mfm_ids::{ContentRef, RunId};
+pub use mfm_canonical::limits::MAX_PORTABLE_SOURCE_RUNS;
+use mfm_ids::{
+    AccessAttemptId, ContentRef, InvocationIdentity, OccurrenceId, RequestDigest, RunId,
+    RunSemanticStateDigest, SemanticCallId, TenantScopeId,
+};
+#[cfg(any(test, feature = "test-support"))]
+use mfm_journal::structured::HistoryObject;
 use mfm_journal::structured::{
-    AssignedRecord, HistoryObject, JournalHead, LexicalValueRef, ObservationOutcome,
-    PriorRunFactSelectionResponse, RunAdmitted, RunRecord, SemanticHead,
+    canonical_json, AccessKind, AssignedRecord, CommittedBatch, CommittedFactRef,
+    ExternalAccessAuthorized, JournalHead, LexicalValueRef, ObservationOutcome,
+    PriorRunFactSelectionResponse, RecordRef, RunAdmitted, RunRecord, SemanticHead,
+    StateOutcomeRef, TenantFactCoordinate, TenantFactFrontier, TypedValueRef,
 };
 use mfm_spec::structured::OperationOutcome;
 
@@ -20,8 +27,54 @@ use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
 use super::fold::{StructuredFrontier, VerifiedStructuredRun};
 use super::Result;
 
-/// Maximum distinct prior-run sources one portable export may traverse.
-pub const MAX_EXPORT_SOURCE_RUNS: usize = 4_096;
+/// Minimum identity header retained by every purpose projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEvidenceHeader {
+    run_id: RunId,
+    store_scope_id: mfm_ids::StoreScopeId,
+    store_epoch: mfm_ids::StoreEpoch,
+    tenant_scope_id: mfm_ids::TenantScopeId,
+    invocation_identity: InvocationIdentity,
+    entry_point_operation_id: mfm_ids::StableId,
+}
+
+impl RunEvidenceHeader {
+    fn from_admission(admission: &RunAdmitted) -> Self {
+        Self {
+            run_id: admission.run_id.clone(),
+            store_scope_id: admission.store_scope_id.clone(),
+            store_epoch: admission.store_epoch,
+            tenant_scope_id: admission.tenant_scope_id.clone(),
+            invocation_identity: admission.invocation_identity.clone(),
+            entry_point_operation_id: admission.entry_point_operation_id.clone(),
+        }
+    }
+
+    /// Exact run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+    /// Immutable store lineage.
+    pub const fn store_scope_id(&self) -> &mfm_ids::StoreScopeId {
+        &self.store_scope_id
+    }
+    /// Authoritative writer epoch.
+    pub const fn store_epoch(&self) -> mfm_ids::StoreEpoch {
+        self.store_epoch
+    }
+    /// Authorized tenant scope.
+    pub const fn tenant_scope_id(&self) -> &mfm_ids::TenantScopeId {
+        &self.tenant_scope_id
+    }
+    /// Caller invocation identity.
+    pub const fn invocation_identity(&self) -> &InvocationIdentity {
+        &self.invocation_identity
+    }
+    /// Qualified entry-point operation.
+    pub const fn entry_point_operation_id(&self) -> &mfm_ids::StableId {
+        &self.entry_point_operation_id
+    }
+}
 
 macro_rules! purpose_reader_shell {
     ($(#[$meta:meta])* $name:ident) => {
@@ -75,7 +128,7 @@ impl<B: StructuredHistoryBackend> PublicRunReader<B> {
         self.reader
             .load_verified(run_id)
             .await
-            .and_then(|verified| PublicRunEvidence::from_verified(verified))
+            .and_then(PublicRunEvidence::from_verified)
     }
 }
 
@@ -115,7 +168,7 @@ impl<B: StructuredHistoryBackend> ExportRunReader<B> {
         self.reader
             .load_verified(run_id)
             .await
-            .map(ExportRunEvidence::from_verified)
+            .and_then(ExportRunEvidence::from_verified)
     }
 }
 
@@ -130,7 +183,7 @@ pub struct PublicTerminalOutcome {
 impl PublicTerminalOutcome {
     /// Returns the public success/failure tag.
     pub const fn kind(&self) -> &'static str {
-        &self.kind
+        self.kind
     }
 
     /// Returns the selected terminal value reference.
@@ -148,7 +201,7 @@ impl PublicTerminalOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicRunEvidence {
     run_id: RunId,
-    admission: RunAdmitted,
+    header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
     frontier: StructuredFrontier,
@@ -161,7 +214,7 @@ impl PublicRunEvidence {
         let terminal_outcome = terminal_public_outcome(&verified)?;
         Ok(Self {
             run_id: verified.run_id().clone(),
-            admission: verified.admission().clone(),
+            header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
             frontier: verified.frontier().clone(),
@@ -175,9 +228,9 @@ impl PublicRunEvidence {
         &self.run_id
     }
 
-    /// Returns the exact verified admission root.
-    pub const fn admission(&self) -> &RunAdmitted {
-        &self.admission
+    /// Returns the minimum purpose header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
     /// Returns the exact physical journal head.
@@ -206,14 +259,96 @@ impl PublicRunEvidence {
     }
 }
 
+/// One data-only transition retained by the trace projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceTransitionEntry {
+    record_ref: RecordRef,
+    occurrence_id: OccurrenceId,
+    occurrence_path_ref: ContentRef,
+    semantic_call_id: SemanticCallId,
+    input: LexicalValueRef,
+    consumed_observation_ref: Option<RecordRef>,
+    outcome_ref: ContentRef,
+    outcome: StateOutcomeRef,
+    facts: Vec<CommittedFactRef>,
+    before_semantic_state_digest: RunSemanticStateDigest,
+    after_semantic_state_digest: RunSemanticStateDigest,
+}
+
+impl TraceTransitionEntry {
+    fn from_assigned(assigned: &AssignedRecord) -> Option<Self> {
+        let RunRecord::StateTransitionCommitted(transition) = &assigned.record else {
+            return None;
+        };
+        Some(Self {
+            record_ref: assigned.record_ref.clone(),
+            occurrence_id: transition.occurrence_id.clone(),
+            occurrence_path_ref: transition.occurrence_path_ref.clone(),
+            semantic_call_id: transition.semantic_call_id.clone(),
+            input: transition.input.clone(),
+            consumed_observation_ref: transition.consumed_observation_ref.clone(),
+            outcome_ref: transition.outcome_ref.clone(),
+            outcome: transition.outcome.clone(),
+            facts: transition.facts.clone(),
+            before_semantic_state_digest: transition.before_semantic_state_digest.clone(),
+            after_semantic_state_digest: transition.after_semantic_state_digest.clone(),
+        })
+    }
+
+    /// Exact assigned record reference.
+    pub const fn record_ref(&self) -> &RecordRef {
+        &self.record_ref
+    }
+    /// Exact executable occurrence.
+    pub const fn occurrence_id(&self) -> &OccurrenceId {
+        &self.occurrence_id
+    }
+    /// Canonical normalized occurrence path reference.
+    pub const fn occurrence_path_ref(&self) -> &ContentRef {
+        &self.occurrence_path_ref
+    }
+    /// Stable semantic call identity.
+    pub const fn semantic_call_id(&self) -> &SemanticCallId {
+        &self.semantic_call_id
+    }
+    /// Exact fold-derived state input.
+    pub const fn input(&self) -> &LexicalValueRef {
+        &self.input
+    }
+    /// Exact normal observation consumed by the transition, when present.
+    pub const fn consumed_observation_ref(&self) -> Option<&RecordRef> {
+        self.consumed_observation_ref.as_ref()
+    }
+    /// Nominal state-outcome object reference.
+    pub const fn outcome_ref(&self) -> &ContentRef {
+        &self.outcome_ref
+    }
+    /// Selected nominal state outcome.
+    pub const fn outcome(&self) -> &StateOutcomeRef {
+        &self.outcome
+    }
+    /// Declaration-ordered produced facts.
+    pub fn facts(&self) -> &[CommittedFactRef] {
+        &self.facts
+    }
+    /// Semantic state before the transition.
+    pub const fn before_semantic_state_digest(&self) -> &RunSemanticStateDigest {
+        &self.before_semantic_state_digest
+    }
+    /// Semantic state after the transition.
+    pub const fn after_semantic_state_digest(&self) -> &RunSemanticStateDigest {
+        &self.after_semantic_state_digest
+    }
+}
+
 /// Sealed transition-trace evidence. Cannot be used as public, export, audit, or replay evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceRunEvidence {
     run_id: RunId,
-    admission: RunAdmitted,
+    header: RunEvidenceHeader,
     journal_head: JournalHead,
     journal_heads: Vec<JournalHead>,
-    records: Vec<AssignedRecord>,
+    records: Vec<TraceTransitionEntry>,
 }
 
 impl TraceRunEvidence {
@@ -221,12 +356,11 @@ impl TraceRunEvidence {
         let records = verified
             .records()
             .iter()
-            .filter(|assigned| matches!(assigned.record, RunRecord::StateTransitionCommitted(_)))
-            .cloned()
+            .filter_map(TraceTransitionEntry::from_assigned)
             .collect();
         Self {
             run_id: verified.run_id().clone(),
-            admission: verified.admission().clone(),
+            header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             journal_heads: verified.journal_heads().to_vec(),
             records,
@@ -238,9 +372,9 @@ impl TraceRunEvidence {
         &self.run_id
     }
 
-    /// Returns the exact verified admission root.
-    pub const fn admission(&self) -> &RunAdmitted {
-        &self.admission
+    /// Returns the minimum purpose header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
     /// Returns the exact physical journal head.
@@ -253,9 +387,142 @@ impl TraceRunEvidence {
         &self.journal_heads
     }
 
-    /// Returns every verified assigned record in physical append order.
-    pub fn records(&self) -> &[AssignedRecord] {
+    /// Returns every data-only transition in physical append order.
+    pub fn records(&self) -> &[TraceTransitionEntry] {
         &self.records
+    }
+}
+
+/// One closed observation retained by the access-audit projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditObservation {
+    record_ref: RecordRef,
+    outcome: ObservationOutcome,
+}
+
+impl AuditObservation {
+    /// Exact assigned observation record reference.
+    pub const fn record_ref(&self) -> &RecordRef {
+        &self.record_ref
+    }
+    /// Exact closed observation outcome.
+    pub const fn outcome(&self) -> &ObservationOutcome {
+        &self.outcome
+    }
+}
+
+/// One data-only authorization and its optional closed observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditAccessEntry {
+    authorization_ref: RecordRef,
+    access_attempt_id: AccessAttemptId,
+    attempt_ordinal: u64,
+    occurrence_id: OccurrenceId,
+    occurrence_path_ref: ContentRef,
+    semantic_call_id: SemanticCallId,
+    access_kind: AccessKind,
+    capability_contract_ref: ContentRef,
+    capability_implementation_ref: ContentRef,
+    adapter_contract_ref: ContentRef,
+    adapter_implementation_ref: ContentRef,
+    request: TypedValueRef,
+    request_digest: RequestDigest,
+    physical_binding_ref: ContentRef,
+    stable_resource_lineage_contract_ref: Option<ContentRef>,
+    observation: Option<AuditObservation>,
+}
+
+impl AuditAccessEntry {
+    fn from_records(
+        assigned: &AssignedRecord,
+        authorization: &ExternalAccessAuthorized,
+        observation: Option<AuditObservation>,
+    ) -> Self {
+        Self {
+            authorization_ref: assigned.record_ref.clone(),
+            access_attempt_id: authorization.access_attempt_id.clone(),
+            attempt_ordinal: authorization.attempt_ordinal,
+            occurrence_id: authorization.occurrence_id.clone(),
+            occurrence_path_ref: authorization.occurrence_path_ref.clone(),
+            semantic_call_id: authorization.semantic_call_id.clone(),
+            access_kind: authorization.access_kind,
+            capability_contract_ref: authorization.capability_contract_ref.clone(),
+            capability_implementation_ref: authorization.capability_implementation_ref.clone(),
+            adapter_contract_ref: authorization.adapter_contract_ref.clone(),
+            adapter_implementation_ref: authorization.adapter_implementation_ref.clone(),
+            request: authorization.request.clone(),
+            request_digest: authorization.request_digest.clone(),
+            physical_binding_ref: authorization.physical_binding_ref.clone(),
+            stable_resource_lineage_contract_ref: authorization
+                .stable_resource_lineage_contract_ref
+                .clone(),
+            observation,
+        }
+    }
+
+    /// Exact authorization record reference.
+    pub const fn authorization_ref(&self) -> &RecordRef {
+        &self.authorization_ref
+    }
+    /// Exact access attempt identity.
+    pub const fn access_attempt_id(&self) -> &AccessAttemptId {
+        &self.access_attempt_id
+    }
+    /// Fold-derived access ordinal.
+    pub const fn attempt_ordinal(&self) -> u64 {
+        self.attempt_ordinal
+    }
+    /// Exact executable occurrence.
+    pub const fn occurrence_id(&self) -> &OccurrenceId {
+        &self.occurrence_id
+    }
+    /// Canonical normalized occurrence path reference.
+    pub const fn occurrence_path_ref(&self) -> &ContentRef {
+        &self.occurrence_path_ref
+    }
+    /// Stable semantic call identity.
+    pub const fn semantic_call_id(&self) -> &SemanticCallId {
+        &self.semantic_call_id
+    }
+    /// Read or effect protocol kind.
+    pub const fn access_kind(&self) -> AccessKind {
+        self.access_kind
+    }
+    /// Semantic capability contract reference.
+    pub const fn capability_contract_ref(&self) -> &ContentRef {
+        &self.capability_contract_ref
+    }
+    /// Secret-free capability implementation reference.
+    pub const fn capability_implementation_ref(&self) -> &ContentRef {
+        &self.capability_implementation_ref
+    }
+    /// Semantic adapter contract reference.
+    pub const fn adapter_contract_ref(&self) -> &ContentRef {
+        &self.adapter_contract_ref
+    }
+    /// Secret-free adapter implementation reference.
+    pub const fn adapter_implementation_ref(&self) -> &ContentRef {
+        &self.adapter_implementation_ref
+    }
+    /// Immutable typed request.
+    pub const fn request(&self) -> &TypedValueRef {
+        &self.request
+    }
+    /// Canonical request digest.
+    pub const fn request_digest(&self) -> &RequestDigest {
+        &self.request_digest
+    }
+    /// Secret-free physical binding reference.
+    pub const fn physical_binding_ref(&self) -> &ContentRef {
+        &self.physical_binding_ref
+    }
+    /// Stable resource-lineage contract for refreshable effects.
+    pub const fn stable_resource_lineage_contract_ref(&self) -> Option<&ContentRef> {
+        self.stable_resource_lineage_contract_ref.as_ref()
+    }
+    /// Closed observation, when one has been committed.
+    pub const fn observation(&self) -> Option<&AuditObservation> {
+        self.observation.as_ref()
     }
 }
 
@@ -263,28 +530,42 @@ impl TraceRunEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRunEvidence {
     run_id: RunId,
-    admission: RunAdmitted,
+    header: RunEvidenceHeader,
     journal_head: JournalHead,
     journal_heads: Vec<JournalHead>,
-    records: Vec<AssignedRecord>,
+    records: Vec<AuditAccessEntry>,
 }
 
 impl AuditRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        let records = verified
-            .records()
+        let all_records = verified.records();
+        let records = all_records
             .iter()
-            .filter(|assigned| {
-                matches!(
-                    assigned.record,
-                    RunRecord::ExternalAccessAuthorized(_) | RunRecord::ExternalAccessObserved(_)
-                )
+            .filter_map(|assigned| {
+                let RunRecord::ExternalAccessAuthorized(authorization) = &assigned.record else {
+                    return None;
+                };
+                let observation = all_records.iter().find_map(|candidate| {
+                    let RunRecord::ExternalAccessObserved(observed) = &candidate.record else {
+                        return None;
+                    };
+                    (observed.access_attempt_id == authorization.access_attempt_id).then(|| {
+                        AuditObservation {
+                            record_ref: candidate.record_ref.clone(),
+                            outcome: observed.outcome.clone(),
+                        }
+                    })
+                });
+                Some(AuditAccessEntry::from_records(
+                    assigned,
+                    authorization,
+                    observation,
+                ))
             })
-            .cloned()
             .collect();
         Self {
             run_id: verified.run_id().clone(),
-            admission: verified.admission().clone(),
+            header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             journal_heads: verified.journal_heads().to_vec(),
             records,
@@ -296,9 +577,9 @@ impl AuditRunEvidence {
         &self.run_id
     }
 
-    /// Returns the exact verified admission root.
-    pub const fn admission(&self) -> &RunAdmitted {
-        &self.admission
+    /// Returns the minimum purpose header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
     /// Returns the exact physical journal head.
@@ -311,8 +592,8 @@ impl AuditRunEvidence {
         &self.journal_heads
     }
 
-    /// Returns every verified assigned record in physical append order.
-    pub fn records(&self) -> &[AssignedRecord] {
+    /// Returns every data-only authorization in physical append order.
+    pub fn records(&self) -> &[AuditAccessEntry] {
         &self.records
     }
 }
@@ -321,7 +602,7 @@ impl AuditRunEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedRunEvidence {
     run_id: RunId,
-    admission: RunAdmitted,
+    header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
     frontier: StructuredFrontier,
@@ -332,7 +613,7 @@ impl RecordedRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
         Self {
             run_id: verified.run_id().clone(),
-            admission: verified.admission().clone(),
+            header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
             frontier: verified.frontier().clone(),
@@ -350,9 +631,9 @@ impl RecordedRunEvidence {
         &self.run_id
     }
 
-    /// Returns the exact verified admission root.
-    pub const fn admission(&self) -> &RunAdmitted {
-        &self.admission
+    /// Returns the minimum purpose header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
     /// Returns the exact physical journal head.
@@ -376,78 +657,361 @@ impl RecordedRunEvidence {
     }
 }
 
+/// Data-only fragment retained for the portable encoder after the sole fold.
+///
+/// This deliberately contains no verified-run authority or callback.  The fold is
+/// consumed before this product is constructed; only the bounded append envelopes
+/// and identifier-level dependency metadata survive.
+struct ExportFragment {
+    run_id: RunId,
+    header: RunEvidenceHeader,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
+    #[cfg(any(test, feature = "test-support"))]
+    journal_heads: Vec<JournalHead>,
+    batches: Vec<CommittedBatch>,
+    batch_frames: Vec<Vec<u8>>,
+    records: Vec<AssignedRecord>,
+    #[cfg(any(test, feature = "test-support"))]
+    objects: Vec<(u64, HistoryObject)>,
+    #[cfg(any(test, feature = "test-support"))]
+    cursor: super::fold::ProgramCursor,
+    #[cfg(any(test, feature = "test-support"))]
+    closed_outcome_ref: Option<ContentRef>,
+    direct_source_run_ids: BTreeSet<RunId>,
+    fact_frontiers: Vec<TenantFactFrontier>,
+    fact_routes: Vec<ExportFactRoute>,
+}
+
+/// One verified selected-fact route retained for recursive export planning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportFactRoute {
+    consumer_record: RecordRef,
+    producer_transition: RecordRef,
+    publication_frontier: TenantFactFrontier,
+}
+
+impl ExportFactRoute {
+    /// Consumer record containing the selected-fact response.
+    pub const fn consumer_record(&self) -> &RecordRef {
+        &self.consumer_record
+    }
+    /// Producer transition routed by the dense publication.
+    pub const fn producer_transition(&self) -> &RecordRef {
+        &self.producer_transition
+    }
+    /// Dense tenant frontier containing the publication.
+    pub const fn publication_frontier(&self) -> &TenantFactFrontier {
+        &self.publication_frontier
+    }
+}
+
 /// Sealed portable-export evidence. Cannot be used as public, trace, audit, or replay evidence.
-#[derive(Debug)]
-pub struct ExportRunEvidence(VerifiedStructuredRun);
+pub struct ExportRunEvidence {
+    fragment: ExportFragment,
+    header: RunEvidenceHeader,
+    authorized_sources: Vec<ExportFragment>,
+}
+
+impl std::fmt::Debug for ExportRunEvidence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExportRunEvidence")
+            .field("run_id", &self.fragment.run_id)
+            .field("source_run_count", &self.authorized_sources.len())
+            .field("batch_count", &self.fragment.batches.len())
+            .field("record_count", &self.fragment.records.len())
+            .finish()
+    }
+}
+
+/// Encoder-only view of opaque export fragments. The view is borrowed for the
+/// duration of one callback and cannot be stored or converted into another
+/// purpose projection.
+pub struct ExportEncoderView<'a> {
+    fragment: &'a ExportFragment,
+    authorized_sources: &'a [ExportFragment],
+}
+
+impl<'a> ExportEncoderView<'a> {
+    /// Exact root run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.fragment.run_id
+    }
+    /// Minimum export header.
+    pub fn header(&self) -> RunEvidenceHeader {
+        self.fragment.header.clone()
+    }
+    /// Exact physical head.
+    pub const fn journal_head(&self) -> &JournalHead {
+        &self.fragment.journal_head
+    }
+    /// Exact semantic head.
+    pub const fn semantic_head(&self) -> &SemanticHead {
+        &self.fragment.semantic_head
+    }
+    /// Canonical committed-batch frames in append order.
+    pub fn batch_frames(&self) -> impl Iterator<Item = &[u8]> {
+        self.fragment.batch_frames.iter().map(Vec::as_slice)
+    }
+    /// Verified source prefixes in deterministic order.
+    pub fn authorized_source_prefixes(&self) -> impl Iterator<Item = ExportEncoderSource<'_>> {
+        self.authorized_sources.iter().map(ExportEncoderSource::new)
+    }
+    /// Exact identifier-level direct source dependencies.
+    pub fn direct_source_run_ids(&self) -> &BTreeSet<RunId> {
+        &self.fragment.direct_source_run_ids
+    }
+    /// Exact fact frontiers captured by this folded fragment.
+    pub fn fact_frontiers(&self) -> &[TenantFactFrontier] {
+        &self.fragment.fact_frontiers
+    }
+    /// Verified selected-fact routes in folded record order.
+    pub fn fact_routes(&self) -> &[ExportFactRoute] {
+        &self.fragment.fact_routes
+    }
+}
+
+/// One encoder-only source fragment. It exposes data needed to encode a frame
+/// stream but never exposes the store fold, callbacks, or verified-run type.
+pub struct ExportEncoderSource<'a> {
+    fragment: &'a ExportFragment,
+}
+
+impl<'a> ExportEncoderSource<'a> {
+    fn new(fragment: &'a ExportFragment) -> Self {
+        Self { fragment }
+    }
+    /// Exact source run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.fragment.run_id
+    }
+    /// Minimum source header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.fragment.header
+    }
+    /// Exact source physical head.
+    pub const fn journal_head(&self) -> &JournalHead {
+        &self.fragment.journal_head
+    }
+    /// Exact source semantic head.
+    pub const fn semantic_head(&self) -> &SemanticHead {
+        &self.fragment.semantic_head
+    }
+    /// Canonical source batch frames in deterministic order.
+    pub fn batch_frames(&self) -> impl Iterator<Item = &[u8]> {
+        self.fragment.batch_frames.iter().map(Vec::as_slice)
+    }
+    /// Fact frontiers captured in source append coordinates.
+    pub fn fact_frontiers(&self) -> &[TenantFactFrontier] {
+        &self.fragment.fact_frontiers
+    }
+    /// Identifier-level source dependencies.
+    pub fn direct_source_run_ids(&self) -> &BTreeSet<RunId> {
+        &self.fragment.direct_source_run_ids
+    }
+    /// Verified selected-fact routes in this source prefix.
+    pub fn fact_routes(&self) -> &[ExportFactRoute] {
+        &self.fragment.fact_routes
+    }
+}
 
 impl ExportRunEvidence {
-    fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        Self(verified)
+    fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+        let fragment = ExportFragment::from_verified(verified)?;
+        Ok(Self {
+            header: fragment.header.clone(),
+            fragment,
+            authorized_sources: Vec::new(),
+        })
+    }
+
+    /// Seals the already-authorized recursive source prefixes into this export
+    /// evidence. The source values remain inaccessible outside the encoder
+    /// accessors below and are never interchangeable with other purpose data.
+    pub fn with_authorized_sources(mut self, sources: Vec<ExportRunEvidence>) -> Result<Self> {
+        if !self.authorized_sources.is_empty() {
+            return Err(super::fold::StructuredStoreError::InvalidHistory);
+        }
+        let mut seen = BTreeSet::new();
+        let expected_direct = self.fragment.direct_source_run_ids.clone();
+        let mut direct = BTreeSet::new();
+        for source in sources {
+            if source.run_id() == self.run_id()
+                || source.header().tenant_scope_id() != self.header.tenant_scope_id()
+                || source.header().store_scope_id() != self.header.store_scope_id()
+                || source.header().store_epoch() != self.header.store_epoch()
+                || !seen.insert(source.run_id().clone())
+            {
+                return Err(super::fold::StructuredStoreError::InvalidHistory);
+            }
+            direct.insert(source.run_id().clone());
+            self.authorized_sources.push(source.fragment);
+            self.authorized_sources.extend(source.authorized_sources);
+        }
+        if direct != expected_direct {
+            return Err(super::fold::StructuredStoreError::InvalidHistory);
+        }
+        self.authorized_sources
+            .sort_by(|left, right| left.run_id.cmp(&right.run_id));
+        if self.authorized_sources.windows(2).any(|pair| {
+            pair[0].run_id == pair[1].run_id
+                || pair[0].header.tenant_scope_id != *self.header.tenant_scope_id()
+                || pair[1].header.tenant_scope_id != *self.header.tenant_scope_id()
+                || pair[0].header.store_scope_id != *self.header.store_scope_id()
+                || pair[1].header.store_scope_id != *self.header.store_scope_id()
+                || pair[0].header.store_epoch != self.header.store_epoch
+                || pair[1].header.store_epoch != self.header.store_epoch
+        }) {
+            return Err(super::fold::StructuredStoreError::InvalidHistory);
+        }
+        let fragments = self
+            .authorized_sources
+            .iter()
+            .map(|fragment| (fragment.run_id.clone(), fragment))
+            .collect::<BTreeMap<_, _>>();
+        let mut graph = BTreeMap::<RunId, BTreeSet<RunId>>::new();
+        graph.insert(self.fragment.run_id.clone(), expected_direct.clone());
+        for fragment in &self.authorized_sources {
+            graph.insert(
+                fragment.run_id.clone(),
+                fragment.direct_source_run_ids.clone(),
+            );
+        }
+        // Validate the complete supplied graph, not only the root's immediate
+        // closure. This prevents a caller from bypassing the pure expander by
+        // preloading an A↔B cycle into nested evidence.
+        let mut colors = BTreeMap::<RunId, u8>::new();
+        for start in graph.keys().cloned().collect::<Vec<_>>() {
+            if colors.get(&start).copied().unwrap_or_default() != 0 {
+                continue;
+            }
+            let mut stack = vec![(start, false)];
+            while let Some((run_id, exiting)) = stack.pop() {
+                if exiting {
+                    colors.insert(run_id, 2);
+                    continue;
+                }
+                match colors.get(&run_id).copied().unwrap_or_default() {
+                    1 => return Err(super::fold::StructuredStoreError::InvalidHistory),
+                    2 => continue,
+                    _ => {}
+                }
+                colors.insert(run_id.clone(), 1);
+                stack.push((run_id.clone(), true));
+                let children = graph
+                    .get(&run_id)
+                    .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
+                for child in children.iter().rev() {
+                    if child == &self.fragment.run_id || !graph.contains_key(child) {
+                        return Err(super::fold::StructuredStoreError::InvalidHistory);
+                    }
+                    stack.push((child.clone(), false));
+                }
+            }
+        }
+        let mut reachable = BTreeSet::new();
+        let mut pending = expected_direct;
+        while let Some(run_id) = pending.pop_first() {
+            if !reachable.insert(run_id.clone()) {
+                continue;
+            }
+            let fragment = fragments
+                .get(&run_id)
+                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
+            for nested in &fragment.direct_source_run_ids {
+                if nested == &self.fragment.run_id {
+                    return Err(super::fold::StructuredStoreError::InvalidHistory);
+                }
+                pending.insert(nested.clone());
+            }
+        }
+        if reachable != fragments.keys().cloned().collect() {
+            return Err(super::fold::StructuredStoreError::InvalidHistory);
+        }
+        Ok(self)
+    }
+
+    /// Gives the portable encoder one borrowed view of the sealed fragments.
+    pub fn with_encoder_view<T>(&self, f: impl FnOnce(ExportEncoderView<'_>) -> T) -> T {
+        f(ExportEncoderView {
+            fragment: &self.fragment,
+            authorized_sources: &self.authorized_sources,
+        })
     }
 
     /// Returns the exact run identity.
-    pub const fn run_id(&self) -> &RunId {
-        self.0.run_id()
+    pub(crate) const fn run_id(&self) -> &RunId {
+        &self.fragment.run_id
     }
 
-    /// Returns the exact verified admission root.
-    pub const fn admission(&self) -> &RunAdmitted {
-        self.0.admission()
-    }
-
-    /// Returns the exact physical journal head.
-    pub const fn journal_head(&self) -> &JournalHead {
-        self.0.journal_head()
-    }
-
-    /// Returns the exact semantic head.
-    pub const fn semantic_head(&self) -> &SemanticHead {
-        self.0.semantic_head()
-    }
-
-    /// Returns the closed action frontier.
-    pub const fn frontier(&self) -> &StructuredFrontier {
-        self.0.frontier()
+    /// Returns the minimum export header.
+    pub(crate) const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
     /// Returns every verified physical append head in sequence order.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn journal_heads(&self) -> &[JournalHead] {
-        self.0.journal_heads()
+        &self.fragment.journal_heads
     }
 
     /// Returns every exact committed-batch envelope in append order.
-    pub fn batches(&self) -> &[mfm_journal::structured::CommittedBatch] {
-        self.0.batches()
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn batches(&self) -> &[CommittedBatch] {
+        &self.fragment.batches
     }
 
     /// Returns every verified assigned record in physical append order.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn records(&self) -> &[AssignedRecord] {
-        self.0.records()
+        &self.fragment.records
     }
 
     /// Returns the verified record prefix through the exact semantic head record.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn semantic_records(&self) -> impl Iterator<Item = &AssignedRecord> {
-        self.0.semantic_records()
+        let cutoff = match &self.fragment.semantic_head {
+            SemanticHead::Genesis { admission_ref, .. } => admission_ref,
+            SemanticHead::Transition { transition_ref, .. } => transition_ref,
+        };
+        self.fragment.records.iter().take_while(move |record| {
+            record.record_ref.run_sequence < cutoff.run_sequence
+                || (record.record_ref.run_sequence == cutoff.run_sequence
+                    && record.record_ref.ordinal <= cutoff.ordinal)
+        })
     }
 
     /// Returns verified objects first admitted no later than one physical append sequence.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn objects_through(&self, run_sequence: u64) -> impl Iterator<Item = &HistoryObject> {
-        self.0.objects_through(run_sequence)
+        self.fragment
+            .objects
+            .iter()
+            .filter(move |(sequence, _)| *sequence <= run_sequence)
+            .map(|(_, object)| object)
     }
 
     /// Resolves one exact verified content-addressed history object.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn object(&self, content_ref: &ContentRef) -> Option<&HistoryObject> {
-        self.0.object(content_ref)
+        self.fragment
+            .objects
+            .iter()
+            .find(|(_, object)| &object.content_ref == content_ref)
+            .map(|(_, object)| object)
     }
 
     /// Returns the terminal nominal operation-outcome reference, when closed.
-    pub const fn closed_outcome_ref(&self) -> Option<&ContentRef> {
-        self.0.closed_outcome_ref()
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn closed_outcome_ref(&self) -> Option<&ContentRef> {
+        self.fragment.closed_outcome_ref.as_ref()
     }
 
     /// Returns the sole callback-free cursor.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn cursor(&self) -> &super::fold::ProgramCursor {
-        self.0.cursor()
+        &self.fragment.cursor
     }
 
     /// Returns every distinct prior-run producer referenced by retained fact selections.
@@ -457,40 +1021,121 @@ impl ExportRunEvidence {
     /// serialization. Callers must authorize each returned identity before any
     /// export byte is emitted.
     pub fn direct_source_run_ids(&self) -> Result<BTreeSet<RunId>> {
-        let mut sources = BTreeSet::new();
-        let consumer = self.run_id();
-        for assigned in self.records() {
-            let RunRecord::ExternalAccessObserved(observation) = &assigned.record else {
-                continue;
-            };
-            let ObservationOutcome::Returned { value } = &observation.outcome else {
-                continue;
-            };
-            let Some(object) = self.object(&value.value_ref) else {
-                continue;
-            };
-            let Ok(returned) = object.decode::<FactSelectionReadResponse>() else {
-                continue;
-            };
-            let Ok(response) = serde_json::from_str::<PriorRunFactSelectionResponse>(
-                returned.canonical_response_json(),
-            ) else {
-                continue;
-            };
-            for query in &response.query_results {
-                for selected in &query.selected {
-                    let producer = &selected.producer_transition_ref.run_id;
-                    if producer != consumer {
-                        sources.insert(producer.clone());
-                    }
-                }
+        Ok(self.fragment.direct_source_run_ids.clone())
+    }
+
+    /// Returns whether this opaque evidence belongs to the caller's authorized
+    /// tenant without exposing its persisted header.
+    pub fn is_for_tenant(&self, tenant_scope_id: &TenantScopeId) -> bool {
+        self.fragment.header.tenant_scope_id() == tenant_scope_id
+    }
+
+    /// Returns whether this opaque evidence is the requested run.
+    pub fn is_for_run(&self, run_id: &RunId) -> bool {
+        &self.fragment.run_id == run_id
+    }
+
+    /// Returns source prefixes in deterministic run-id order for the portable encoder.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn authorized_source_prefixes(&self) -> impl Iterator<Item = ExportEncoderSource<'_>> {
+        self.authorized_sources.iter().map(ExportEncoderSource::new)
+    }
+}
+
+impl ExportFragment {
+    fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+        let batches = verified.batches().to_vec();
+        let batch_frames = batches
+            .iter()
+            .map(|batch| {
+                canonical_json(batch)
+                    .map(|json| json.as_bytes().to_vec())
+                    .map_err(|_| super::fold::StructuredStoreError::InvalidHistory)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(any(test, feature = "test-support"))]
+        let mut objects = Vec::new();
+        #[cfg(any(test, feature = "test-support"))]
+        for batch in &batches {
+            for object in &batch.objects {
+                objects.push((batch.head.run_sequence, object.clone()));
             }
         }
-        if sources.len() > MAX_EXPORT_SOURCE_RUNS {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
-        }
-        Ok(sources)
+        let fact_frontiers = batches
+            .iter()
+            .filter_map(|batch| match &batch.tenant_fact_coordinate {
+                TenantFactCoordinate::FactPublication { frontier }
+                | TenantFactCoordinate::FactSelectionBarrier { frontier } => Some(frontier.clone()),
+                TenantFactCoordinate::None => None,
+            })
+            .collect::<Vec<_>>();
+        let fact_routes = export_fact_routes(&verified)?;
+        let direct_source_run_ids = fact_routes
+            .iter()
+            .map(|route| route.producer_transition.run_id.clone())
+            .filter(|run_id| run_id != verified.run_id())
+            .collect();
+        Ok(Self {
+            run_id: verified.run_id().clone(),
+            header: RunEvidenceHeader::from_admission(verified.admission()),
+            journal_head: verified.journal_head().clone(),
+            semantic_head: verified.semantic_head().clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            journal_heads: verified.journal_heads().to_vec(),
+            records: verified.records().to_vec(),
+            #[cfg(any(test, feature = "test-support"))]
+            cursor: verified.cursor().clone(),
+            #[cfg(any(test, feature = "test-support"))]
+            closed_outcome_ref: verified.closed_outcome_ref().cloned(),
+            batches,
+            batch_frames,
+            #[cfg(any(test, feature = "test-support"))]
+            objects,
+            direct_source_run_ids,
+            fact_frontiers,
+            fact_routes,
+        })
     }
+}
+
+/// Extracts the exact selected-fact routes from one offline-folded run.
+pub fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<ExportFactRoute>> {
+    let fact_response_contract = mfm_spec::structured::structured_value_contract_ref::<
+        mfm_facts::FactSelectionReadResponse,
+    >()
+    .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+    let mut routes = Vec::new();
+    for assigned in verified.records() {
+        let RunRecord::ExternalAccessObserved(observation) = &assigned.record else {
+            continue;
+        };
+        let ObservationOutcome::Returned { value } = &observation.outcome else {
+            continue;
+        };
+        if value.contract_ref != fact_response_contract {
+            continue;
+        }
+        let object = verified
+            .object(&value.value_ref)
+            .ok_or(super::StructuredStoreError::InvalidHistory)?;
+        let returned: mfm_facts::FactSelectionReadResponse = object
+            .decode()
+            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+        let response = serde_json::from_str::<PriorRunFactSelectionResponse>(
+            returned.canonical_response_json(),
+        )
+        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+        for query in response.query_results {
+            for selected in query.selected {
+                routes.push(ExportFactRoute {
+                    consumer_record: assigned.record_ref.clone(),
+                    producer_transition: selected.producer_transition_ref,
+                    publication_frontier: selected.publication_frontier,
+                });
+            }
+        }
+    }
+    Ok(routes)
 }
 
 fn terminal_public_outcome(
@@ -547,11 +1192,11 @@ where
         if run_id == *root_run_id || !authorized.insert(run_id.clone()) {
             continue;
         }
-        if authorized.len() > MAX_EXPORT_SOURCE_RUNS {
+        if authorized.len() > MAX_PORTABLE_SOURCE_RUNS {
             return Err(ExportSourceClosureError::OverBudget.into());
         }
         let sources = load_sources(&run_id)?;
-        if sources.len() > MAX_EXPORT_SOURCE_RUNS {
+        if sources.len() > MAX_PORTABLE_SOURCE_RUNS {
             return Err(ExportSourceClosureError::OverBudget.into());
         }
         edges.insert(run_id.clone(), sources.clone());
@@ -622,7 +1267,7 @@ fn reject_export_source_cycles(
 
 #[cfg(test)]
 mod export_source_closure_tests {
-    use super::{expand_export_source_closure, ExportSourceClosureError, MAX_EXPORT_SOURCE_RUNS};
+    use super::{expand_export_source_closure, ExportSourceClosureError, MAX_PORTABLE_SOURCE_RUNS};
     use mfm_ids::{DigestAlgorithm, RunId};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -679,7 +1324,7 @@ mod export_source_closure_tests {
         let mut pending = BTreeSet::new();
         let mut graph = BTreeMap::new();
         // root fans out past the fixed budget.
-        for index in 1..=(MAX_EXPORT_SOURCE_RUNS + 1) {
+        for index in 1..=(MAX_PORTABLE_SOURCE_RUNS + 1) {
             let digit = (index % 15) as u8;
             // Distinct run ids via algorithm domain not available; use digest hex.
             let hex = format!("{index:064x}");

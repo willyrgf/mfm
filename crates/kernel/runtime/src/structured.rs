@@ -5,24 +5,127 @@ use std::panic::AssertUnwindSafe;
 
 use futures_util::FutureExt;
 use mfm_canonical::sha256_digest_bytes;
+#[cfg(feature = "store-authority")]
+use mfm_certify::structured::RuntimeAssemblyToken;
 use mfm_certify::structured::{
-    AccessTargetSelection, EffectPhysicalBindingKind, NewlyAppendedAuthorization,
-    PhysicalBindingKind, QualifiedAccessCompletion, QualifiedComponentIdentity,
-    QualifiedPhysicalBinding, QualifiedProcessFault, QualifiedProcessFaultCode,
-    QualifiedStateProposal, QualifiedStateProposalValue, QualifiedStateSettlement,
-    ReadPhysicalBindingKind, RuntimeProcessRegistry,
+    AccessTargetSelection, CertifiedAccessAuthorization, CertifiedProcessRegistry,
+    EffectPhysicalBindingKind, PhysicalBindingKind, QualifiedAccessCompletion,
+    QualifiedComponentIdentity, QualifiedPhysicalBinding, QualifiedProcessFault,
+    QualifiedProcessFaultCode, QualifiedStateProposal, QualifiedStateProposalValue,
+    QualifiedStateSettlement, ReadPhysicalBindingKind,
 };
 use mfm_ids::{AccessAttemptId, AppendRequestId, ContentRef, OccurrenceId, RunId};
 use mfm_journal::structured::{JournalHead, ObservationOutcome, RecordRef};
 use mfm_spec::structured::{StructuredComponentKind, StructuredExecutionKind};
 use mfm_spec::CanonicalJsonValue;
 
+/// Runtime-owned holder for the complete qualified callback registry.
+/// Certification only supplies the deterministic qualified component set;
+/// Runtime is the sole owner that can prepare and consume live bindings.
+pub struct RuntimeProcessRegistry {
+    inner: CertifiedProcessRegistry,
+}
+
+/// Assembly failed because process and seal identities did not match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("runtime assembly seal does not match the qualified process registry")]
+pub struct RuntimeAssemblyError;
+
+impl std::fmt::Debug for RuntimeProcessRegistry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeProcessRegistry")
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeProcessRegistry {
+    /// Moves the complete certified registry into Runtime ownership.
+    #[doc(hidden)]
+    #[cfg(feature = "store-authority")]
+    pub fn from_certified(
+        inner: CertifiedProcessRegistry,
+        token: &RuntimeAssemblyToken,
+    ) -> std::result::Result<Self, RuntimeAssemblyError> {
+        if !inner.matches_assembly_token(token) {
+            return Err(RuntimeAssemblyError);
+        }
+        Ok(Self { inner })
+    }
+
+    #[cfg(feature = "store-authority")]
+    fn matches_assembly_token(&self, token: &RuntimeAssemblyToken) -> bool {
+        self.inner.matches_assembly_token(token)
+    }
+
+    fn component_identity(
+        &self,
+        kind: StructuredComponentKind,
+        semantic_contract_ref: &ContentRef,
+    ) -> Option<QualifiedComponentIdentity> {
+        self.inner.component_identity(kind, semantic_contract_ref)
+    }
+
+    fn invoke_pure(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+    ) -> std::result::Result<QualifiedStateProposal, QualifiedProcessFault> {
+        self.inner.invoke_pure(state, input)
+    }
+
+    fn author_request(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+    ) -> std::result::Result<CanonicalJsonValue, QualifiedProcessFault> {
+        self.inner.author_request(state, input)
+    }
+
+    fn settle_observation(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+        observation: &CanonicalJsonValue,
+    ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
+        self.inner.settle_observation(state, input, observation)
+    }
+
+    fn access_adapter_identity(
+        &self,
+        capability: &QualifiedComponentIdentity,
+    ) -> std::result::Result<QualifiedComponentIdentity, QualifiedProcessFault> {
+        self.inner.access_adapter_identity(capability)
+    }
+
+    async fn qualify_access<K: PhysicalBindingKind>(
+        &self,
+        capability_identity: &QualifiedComponentIdentity,
+        target: AccessTargetSelection<'_>,
+        request: CanonicalJsonValue,
+    ) -> std::result::Result<Option<QualifiedPhysicalBinding<K>>, QualifiedProcessFault> {
+        self.inner
+            .qualify_access::<K>(capability_identity, target, request)
+            .await
+    }
+
+    async fn invoke_certified_binding<K>(
+        &self,
+        binding: QualifiedPhysicalBinding<K>,
+        authorization: CertifiedAccessAuthorization,
+    ) -> QualifiedAccessCompletion {
+        self.inner
+            .invoke_certified_binding(binding, authorization)
+            .await
+    }
+}
+
 use crate::history::{
-    AccessAuthorizationProposal, AccessObservationProposal, ActionableState, HistoryAppendOutcome,
-    HistoryError, ObservationCommit, ObservationQualification, ProposedCanonicalValue,
-    ProposedObservationOutcome, RuntimeHistoryPort, StateLeaf, StateTransitionProposal,
-    StructuredAdmissionCommand, StructuredAppendAttempt, StructuredFrontier,
-    StructuredStoreIdentity, VerifiedRunView,
+    AccessAuthorizationProposal, AccessObservationProposal, ActionableState,
+    CommittedAccessAuthorization, HistoryAppendOutcome, HistoryError, ObservationCommit,
+    ObservationQualification, ProposedCanonicalValue, ProposedObservationOutcome,
+    RuntimeHistoryPort, StateLeaf, StateTransitionProposal, StructuredAdmissionCommand,
+    StructuredAppendAttempt, StructuredFrontier, StructuredStoreIdentity, VerifiedRunView,
 };
 
 /// Result returned by structured Runtime preparation and drive operations.
@@ -192,8 +295,21 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
     ///
     /// Production assembly constructs both halves from one complete qualified
     /// registry and a private store adapter. Callers cannot extract the port.
-    pub fn new(history: P, processes: RuntimeProcessRegistry) -> Self {
-        Self { history, processes }
+    /// Constructs a Runtime from the one paired production assembly bundle.
+    ///
+    /// Callers should obtain the history and registry only from store assembly;
+    /// the constructor intentionally does not accept independently split ports.
+    #[doc(hidden)]
+    #[cfg(feature = "store-authority")]
+    pub fn from_assembled(
+        history: P,
+        processes: RuntimeProcessRegistry,
+        token: RuntimeAssemblyToken,
+    ) -> std::result::Result<Self, RuntimeAssemblyError> {
+        if !processes.matches_assembly_token(&token) {
+            return Err(RuntimeAssemblyError);
+        }
+        Ok(Self { history, processes })
     }
 
     /// Verifies and atomically admits one exact structured run.
@@ -706,7 +822,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                 .as_ref(),
             minimum_lineage_head_ref,
         };
-        let binding = match AssertUnwindSafe(self.processes.prepare_access::<K>(
+        let binding = match AssertUnwindSafe(self.processes.qualify_access::<K>(
             &capability_identity,
             target,
             request,
@@ -826,14 +942,16 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             match attempt.outcome() {
                 HistoryAppendOutcome::NewlyCommitted(_) => {
                     let authorization =
-                        attempt.into_newly_appended_authorization().ok_or_else(|| {
-                            self.candidate_fault(
-                                RuntimeFaultPhase::QualifyCandidate,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            )
-                        })?;
+                        attempt
+                            .into_committed_access_authorization()
+                            .ok_or_else(|| {
+                                self.candidate_fault(
+                                    RuntimeFaultPhase::QualifyCandidate,
+                                    run_id.clone(),
+                                    Some(pre_fault_head.clone()),
+                                    Some(occurrence_id.clone()),
+                                )
+                            })?;
                     let verified = self.history.load_verified(&run_id).await.map_err(|error| {
                         self.store_fault(
                             error,
@@ -846,6 +964,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                     return Ok(Some(Authorized {
                         binding,
                         authorization,
+                        predecessor_head: pre_fault_head,
                         verified,
                         adapter_origin,
                     }));
@@ -898,6 +1017,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         let Authorized {
             binding,
             authorization,
+            predecessor_head,
             verified,
             adapter_origin,
         } = authorized;
@@ -905,10 +1025,38 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         let access_attempt_id = authorization.access_attempt_id().clone();
         let occurrence_id = authorization.authorization().occurrence_id.clone();
         let run_id = verified.run_id().clone();
-        let pre_fault_head = verified.journal_head().clone();
+        let pre_fault_head = predecessor_head;
+        let Some((committed_ref, committed_authorization)) =
+            VerifiedRunView::authorization(&verified, &access_attempt_id)
+        else {
+            return Err(self.store_fault(
+                HistoryError::InvalidHistory,
+                RuntimeFaultPhase::QualifyAccess,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+            ));
+        };
+        let expected_successor_sequence = pre_fault_head.run_sequence.checked_add(1);
+        if committed_ref != authorization.authorization_ref()
+            || committed_authorization != authorization.authorization()
+            || committed_ref.run_id != run_id
+            || authorization.predecessor_head() != Some(&pre_fault_head)
+            || authorization.successor_head() != verified.journal_head()
+            || expected_successor_sequence != Some(committed_ref.run_sequence)
+            || verified.journal_head().run_sequence != committed_ref.run_sequence
+        {
+            return Err(self.store_fault(
+                HistoryError::InvalidHistory,
+                RuntimeFaultPhase::QualifyAccess,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+            ));
+        }
         let completion = AssertUnwindSafe(
             self.processes
-                .invoke_qualified_physical_binding(binding, authorization),
+                .invoke_certified_binding(binding, authorization.into_certified()),
         )
         .catch_unwind()
         .await
@@ -1207,7 +1355,8 @@ struct Prepared<K: AccessMarker, V> {
 
 struct Authorized<K: AccessMarker, V> {
     binding: QualifiedPhysicalBinding<K>,
-    authorization: NewlyAppendedAuthorization,
+    authorization: CommittedAccessAuthorization,
+    predecessor_head: JournalHead,
     verified: V,
     adapter_origin: QualifiedComponentIdentity,
 }

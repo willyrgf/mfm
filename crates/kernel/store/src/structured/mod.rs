@@ -24,8 +24,9 @@ pub use backend::{
     StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication,
 };
 pub use canonical_append::{
-    validate_append_objects, validate_envelope_frame, CanonicalConfigurationAppend,
-    CanonicalRunAppend, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES,
+    validate_append_objects, validate_envelope_frame, validate_record_object_closure,
+    CanonicalConfigurationAppend, CanonicalRunAppend, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS,
+    MAX_STORED_FRAME_BYTES,
 };
 pub use configuration::{
     verify_configuration_history, ConfigurationAppendRequest, ConfigurationBackendAppendOutcome,
@@ -52,11 +53,13 @@ pub use mfm_runtime::history::{
 // Store-local append attempt and observation commit used by internal writer tests.
 pub use mutation::{ObservationCommit, StructuredAdmissionRequest, StructuredAppendAttempt};
 // Runtime-facing authorization proof type.
-pub use mfm_certify::structured::NewlyAppendedAuthorization;
+pub use mfm_runtime::history::CommittedAccessAuthorization;
 pub use purpose::{
-    expand_export_source_closure, AuditRunEvidence, AuditRunReader, ExportRunEvidence,
-    ExportRunReader, ExportSourceClosureError, PublicRunEvidence, PublicRunReader,
-    RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader, MAX_EXPORT_SOURCE_RUNS,
+    expand_export_source_closure, export_fact_routes, AuditAccessEntry, AuditObservation,
+    AuditRunEvidence, AuditRunReader, ExportEncoderSource, ExportEncoderView, ExportFactRoute,
+    ExportRunEvidence, ExportRunReader, ExportSourceClosureError, PublicRunEvidence,
+    PublicRunReader, RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader,
+    TraceTransitionEntry, MAX_PORTABLE_SOURCE_RUNS,
 };
 
 /// Converts an offline-verified fold result into sealed recorded-replay evidence.

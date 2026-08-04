@@ -13,7 +13,7 @@ use k256::ecdsa::SigningKey;
 use k256::SecretKey;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::crypto::{EthereumKeyError, EthereumPrivateKey};
+use crate::crypto::EthereumKeyError;
 
 use super::KeystoreError;
 
@@ -85,6 +85,7 @@ impl ProtectedKeyMaterial {
         decrypted: ProtectedBytes,
         ownership_witness: KeyMaterialWitness,
     ) -> Result<Self, KeystoreError> {
+        ownership_witness.record_source(decrypted.as_ref().as_ref().as_ptr() as usize);
         let mut material = Self::from_decrypted_exact(decrypted)?;
         material.ownership_witness = Some(ownership_witness);
         Ok(material)
@@ -109,6 +110,7 @@ impl ProtectedKeyMaterial {
         let key_bytes = std::mem::replace(&mut self.bytes, Zeroizing::new(HeapKeyBytes::zeroed()));
         #[cfg(test)]
         if let Some(ownership_witness) = self.ownership_witness.take() {
+            ownership_witness.record_handoff(key_bytes.as_ref().as_ref().as_ptr() as usize);
             return SecureKey::from_protected_with_witness(key_bytes, ownership_witness);
         }
         SecureKey::from_protected(key_bytes)
@@ -155,6 +157,7 @@ impl SecureKey {
         key_bytes: ProtectedBytes,
         ownership_witness: KeyMaterialWitness,
     ) -> Self {
+        ownership_witness.record_handoff(key_bytes.as_ref().as_ref().as_ptr() as usize);
         Self {
             key_bytes,
             ownership_witness: Some(ownership_witness),
@@ -189,10 +192,13 @@ impl SecureKey {
         &self,
         hash: &[u8; 32],
     ) -> Result<PrimitiveSignature, KeystoreError> {
-        let key = EthereumPrivateKey::from_secret_bytes(&self.key_bytes)
-            .map_err(keystore_error_from_ethereum_key)?;
-        key.sign_hash_recoverable(hash)
-            .map_err(keystore_error_from_ethereum_key)
+        let result = crate::crypto::sign_hash_recoverable(self.key_bytes.as_ref(), hash)
+            .map_err(keystore_error_from_ethereum_key);
+        #[cfg(test)]
+        if let Some(witness) = &self.ownership_witness {
+            witness.record_signing(self.key_bytes.as_ref().as_ref().as_ptr() as usize);
+        }
+        result
     }
 
     /// Get Ethereum address for this key.
@@ -229,12 +235,7 @@ impl Drop for SecureKey {
 impl ZeroizeOnDrop for SecureKey {}
 
 pub(super) fn ethereum_address_from_key_bytes(key_bytes: &[u8]) -> Result<Address, KeystoreError> {
-    let key_bytes: &[u8; 32] = key_bytes
-        .try_into()
-        .map_err(|_| KeystoreError::InvalidPrivateKey)?;
-    let key = EthereumPrivateKey::from_secret_bytes(key_bytes)
-        .map_err(keystore_error_from_ethereum_key)?;
-    key.address().map_err(keystore_error_from_ethereum_key)
+    crate::crypto::address(key_bytes).map_err(keystore_error_from_ethereum_key)
 }
 
 fn keystore_error_from_ethereum_key(err: EthereumKeyError) -> KeystoreError {
@@ -252,6 +253,9 @@ fn keystore_error_from_ethereum_key(err: EthereumKeyError) -> KeystoreError {
 pub(super) struct KeyMaterialWitness {
     transferred: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cleaned: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    source_address: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    handoff_address: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    signing_address: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -270,12 +274,40 @@ impl KeyMaterialWitness {
             .store(zeroized, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub(super) fn record_source(&self, address: usize) {
+        self.source_address
+            .store(address, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn record_handoff(&self, address: usize) {
+        self.handoff_address
+            .store(address, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(super) fn record_signing(&self, address: usize) {
+        self.signing_address
+            .store(address, std::sync::atomic::Ordering::SeqCst);
+    }
+
     pub(super) fn observed_transfer(&self) -> bool {
         self.transferred.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(super) fn observed_cleanup(&self) -> bool {
         self.cleaned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn observed_same_allocation(&self) -> bool {
+        let source = self
+            .source_address
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let handoff = self
+            .handoff_address
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let signing = self
+            .signing_address
+            .load(std::sync::atomic::Ordering::SeqCst);
+        source != 0 && source == handoff && handoff == signing
     }
 }
 
@@ -313,6 +345,10 @@ mod secure_key_construction_tests {
         let secure = material.into_secure_key();
         assert!(secure.has_ownership_witness());
         assert!(witness.observed_transfer());
+        secure
+            .sign_hash_recoverable(&[0_u8; 32])
+            .expect("sign protected allocation");
+        assert!(witness.observed_same_allocation());
         // Cleanup has not yet run: SecureKey still owns the material.
         assert!(!witness.observed_cleanup());
         drop(secure);

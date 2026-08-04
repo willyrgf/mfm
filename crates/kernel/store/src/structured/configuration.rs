@@ -5,6 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId, StoreScopeId,
@@ -125,6 +126,9 @@ impl ConfigurationRevision {
     fn validate(&self) -> Result<(), StructuredStoreError> {
         if self.sequence == 0 {
             return Err(invalid("configuration revision sequence is zero"));
+        }
+        if self.canonical_value.len() > MAX_CONFIGURATION_REVISION_BYTES {
+            return Err(invalid("configuration revision exceeds its byte bound"));
         }
         let canonical =
             PlainCanonicalJsonBytes::from_canonical_json_slice(self.canonical_value.as_bytes())
@@ -354,7 +358,9 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
         )?;
         match self
             .backend
-            .append(CanonicalConfigurationAppend::new(revision.clone())?)
+            .append(CanonicalConfigurationAppend::from_store_verified(
+                revision.clone(),
+            )?)
             .await?
         {
             ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
@@ -369,7 +375,17 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
             }
             ConfigurationBackendAppendOutcome::StaleHead => Err(StructuredStoreError::StaleHead),
             ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {
-                Err(StructuredStoreError::AcknowledgementUnknown)
+                // Reconnect through the backend's read path and classify the
+                // exact append identity before allowing a retry. This is the
+                // configuration equivalent of run acknowledgement recovery.
+                let resolved = self.backend.load(revision.key()).await?;
+                match resolved.as_ref().and_then(|history| {
+                    history_append_identity(history.revisions.iter(), revision.append_request_id())
+                }) {
+                    Some(existing) if existing == &revision => Ok(revision),
+                    Some(_) => Err(StructuredStoreError::AppendConflict),
+                    None => Err(StructuredStoreError::AcknowledgementUnknown),
+                }
             }
         }
     }
@@ -484,6 +500,9 @@ impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
         revision: CanonicalConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
         Box::pin(async move {
+            if !revision.is_store_verified() {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
             let revision = revision.into_revision();
             let mut state = self
                 .state
@@ -678,6 +697,46 @@ mod tests {
 
     fn contract() -> ContentRef {
         content_ref("mfm.fixture-configured-contract", b"contract").expect("contract")
+    }
+
+    #[test]
+    fn configuration_revision_accepts_exact_budget_and_rejects_one_over() {
+        let exact_json = format!(
+            "\"{}\"",
+            "x".repeat(MAX_CONFIGURATION_REVISION_BYTES.saturating_sub(2))
+        );
+        let exact_value = ProposedCanonicalValue::from_json(&exact_json).expect("exact value");
+        let exact = ConfigurationRevision::new(
+            key('7'),
+            1,
+            None,
+            AppendRequestId::new("configured/exact-budget").expect("append id"),
+            contract(),
+            &exact_value,
+        )
+        .expect("exact configuration budget is accepted");
+        assert_eq!(
+            exact.canonical_value.len(),
+            MAX_CONFIGURATION_REVISION_BYTES
+        );
+
+        let over_json = format!(
+            "\"{}\"",
+            "x".repeat(MAX_CONFIGURATION_REVISION_BYTES.saturating_sub(1))
+        );
+        let over_value = ProposedCanonicalValue::from_json(&over_json).expect("over value parses");
+        assert!(
+            ConfigurationRevision::new(
+                key('8'),
+                1,
+                None,
+                AppendRequestId::new("configured/over-budget").expect("append id"),
+                contract(),
+                &over_value,
+            )
+            .is_err(),
+            "one byte over the generated configuration budget is rejected"
+        );
     }
 
     #[tokio::test]

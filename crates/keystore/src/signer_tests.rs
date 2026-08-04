@@ -163,10 +163,7 @@ fn test_public_key() -> PublicKeyBytes {
 fn test_address() -> Address {
     let mut key_bytes = [0_u8; 32];
     key_bytes[31] = 1;
-    crate::crypto::EthereumPrivateKey::from_secret_bytes(&key_bytes)
-        .expect("test private key")
-        .address()
-        .expect("test address")
+    crate::crypto::address(&key_bytes).expect("test address")
 }
 
 #[derive(Clone, Copy)]

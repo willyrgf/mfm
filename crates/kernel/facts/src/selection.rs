@@ -386,6 +386,18 @@ impl FactSelectionRequest {
                         "maximum_selected_results",
                         CanonicalValue::Unsigned(scan_bounds.maximum_selected_results()),
                     ),
+                    (
+                        "maximum_distinct_producers",
+                        CanonicalValue::Unsigned(scan_bounds.maximum_distinct_producers()),
+                    ),
+                    (
+                        "maximum_producer_fold_batches",
+                        CanonicalValue::Unsigned(scan_bounds.maximum_producer_fold_batches()),
+                    ),
+                    (
+                        "maximum_pages",
+                        CanonicalValue::Unsigned(scan_bounds.maximum_pages()),
+                    ),
                 ])?,
             ),
             (
@@ -437,7 +449,7 @@ impl FactSelectionRequest {
             ));
         }
         let bounds = codec::required_object(codec::required_field(object, "scan_bounds")?)?;
-        FactSelectionScanBounds::new(
+        FactSelectionScanBounds::new_with_work_bounds(
             codec::unsigned(codec::required_field(bounds, "maximum_publications")?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_facts")?)?,
             codec::unsigned(codec::required_field(
@@ -446,6 +458,12 @@ impl FactSelectionRequest {
             )?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_selected_results")?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_response_bytes")?)?,
+            codec::unsigned(codec::required_field(bounds, "maximum_distinct_producers")?)?,
+            codec::unsigned(codec::required_field(
+                bounds,
+                "maximum_producer_fold_batches",
+            )?)?,
+            codec::unsigned(codec::required_field(bounds, "maximum_pages")?)?,
         )?;
         let query_values = match codec::required_field(object, "queries")? {
             CanonicalValue::Array(values) => values,
@@ -542,7 +560,7 @@ impl FactSelectionRequest {
             codec::required_object(&value)?,
             "scan_bounds",
         )?)?;
-        FactSelectionScanBounds::new(
+        FactSelectionScanBounds::new_with_work_bounds(
             codec::unsigned(codec::required_field(bounds, "maximum_publications")?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_facts")?)?,
             codec::unsigned(codec::required_field(
@@ -551,6 +569,12 @@ impl FactSelectionRequest {
             )?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_selected_results")?)?,
             codec::unsigned(codec::required_field(bounds, "maximum_response_bytes")?)?,
+            codec::unsigned(codec::required_field(bounds, "maximum_distinct_producers")?)?,
+            codec::unsigned(codec::required_field(
+                bounds,
+                "maximum_producer_fold_batches",
+            )?)?,
+            codec::unsigned(codec::required_field(bounds, "maximum_pages")?)?,
         )
     }
 

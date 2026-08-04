@@ -31,9 +31,13 @@ mod value;
 
 pub use descriptor::{FactDescriptor, FactKind};
 pub use emission::{FactProposal, FactSet, ProposedFactValue};
+pub use mfm_canonical::limits::{
+    MAX_FACT_EMISSIONS, MAX_FACT_SELECTION_LIMIT, MAX_FACT_SELECTION_QUERIES,
+};
 pub use read::{
     FactSelectionCompletenessMode, FactSelectionReadFailure, FactSelectionReadFailureCode,
-    FactSelectionReadResponse, FactSelectionScanBounds, MAX_FACT_SCAN_FACTS,
+    FactSelectionReadResponse, FactSelectionScanBounds, MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+    MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES, MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
     MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES, MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
     MAX_FACT_SCAN_SELECTED_RESULTS,
 };
@@ -68,15 +72,6 @@ pub enum FactError {
     #[error("fact emission is invalid: {0}")]
     Emission(&'static str),
 }
-
-/// Maximum number of queries in one fact-selection request.
-pub const MAX_FACT_SELECTION_QUERIES: usize = 128;
-
-/// Maximum selected facts returned for one query.
-pub const MAX_FACT_SELECTION_LIMIT: u32 = 128;
-
-/// Maximum facts emitted by one successful transition settlement.
-pub const MAX_FACT_EMISSIONS: usize = 4096;
 
 #[cfg(test)]
 mod tests;

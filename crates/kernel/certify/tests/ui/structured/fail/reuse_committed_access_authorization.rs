@@ -1,8 +1,8 @@
 use mfm_facts::FactSelectionRequest;
-use mfm_certify::structured::NewlyAppendedAuthorization;
+use mfm_certify::structured::CertifiedAccessAuthorization;
 
 fn reuse(
-    authorization: NewlyAppendedAuthorization,
+    authorization: CertifiedAccessAuthorization,
     first_request: FactSelectionRequest,
     second_request: FactSelectionRequest,
 ) {

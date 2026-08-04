@@ -63,7 +63,7 @@ pub trait AppendAttemptApi: Send {
     fn closed(&self) -> bool;
 
     /// Consumes a newly committed authorization into its one-use proof.
-    fn into_newly_appended_authorization(self) -> Option<super::NewlyAppendedAuthorization>
+    fn into_committed_access_authorization(self) -> Option<super::CommittedAccessAuthorization>
     where
         Self: Sized;
 
@@ -157,8 +157,8 @@ impl AppendAttemptApi for StructuredAppendAttempt {
         self.closed()
     }
 
-    fn into_newly_appended_authorization(self) -> Option<super::NewlyAppendedAuthorization> {
-        StructuredAppendAttempt::into_newly_appended_authorization(self)
+    fn into_committed_access_authorization(self) -> Option<super::CommittedAccessAuthorization> {
+        StructuredAppendAttempt::into_committed_access_authorization(self)
     }
 
     fn confirm_existing_same(&mut self) {
@@ -166,7 +166,7 @@ impl AppendAttemptApi for StructuredAppendAttempt {
     }
 }
 
-impl AuthorizationApi for super::NewlyAppendedAuthorization {
+impl AuthorizationApi for super::CommittedAccessAuthorization {
     fn authorization_ref(&self) -> &RecordRef {
         self.authorization_ref()
     }

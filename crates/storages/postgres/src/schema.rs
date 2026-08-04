@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{StoreEpoch, StoreScopeId};
-use sqlx::{AssertSqlSafe, PgConnection, PgPool, Row};
+use sqlx::{PgConnection, PgPool, Row};
 
 use crate::error::{PostgresStoreError, Result};
 use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
@@ -10,6 +10,18 @@ use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v5";
+
+/// Applies the current destructive baseline for integration fixtures.
+#[cfg(feature = "test-support")]
+pub async fn migrate_test_database(database_url: &str) -> Result<()> {
+    let pool = PgPool::connect(database_url)
+        .await
+        .map_err(|_| PostgresStoreError::Connection)?;
+    MIGRATOR
+        .run(&pool)
+        .await
+        .map_err(|_| PostgresStoreError::Database("apply structured history baseline"))
+}
 
 // These SHA-256 values bind canonical, schema-name-independent catalog rows. They are
 // regenerated only with the destructive baseline and deliberately fail closed across
@@ -26,30 +38,10 @@ const EXECUTABLE_MANIFEST_SHA256: &str =
 const ACL_MANIFEST_SHA256: &str =
     "69446804600c06508b741bdce8f681b1182c8174088b7072352ab90e90be2de6";
 
-/// Administrative schema management for the sole destructive structured-history baseline.
-pub struct PostgresSchema;
-
-impl PostgresSchema {
-    /// Applies the compiled baseline through a migration-owner connection.
-    pub async fn migrate(database_url: &str) -> Result<()> {
-        let pool = PgPool::connect(database_url)
-            .await
-            .map_err(|_| PostgresStoreError::Connection)?;
-        migrate_pool(&pool).await
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ValidatedStoreIdentity {
     pub(crate) store_scope_id: StoreScopeId,
     pub(crate) store_epoch: StoreEpoch,
-}
-
-pub(crate) async fn migrate_pool(pool: &PgPool) -> Result<()> {
-    MIGRATOR
-        .run(pool)
-        .await
-        .map_err(|_| PostgresStoreError::Database("apply structured history baseline"))
 }
 
 #[cfg(all(test, feature = "parity-tests"))]
@@ -123,17 +115,13 @@ async fn assume_qualification_role(
         return Err(PostgresStoreError::SchemaAuthorityMismatch);
     }
     let qualification = TargetKey::from_schema(&schema).role_name(TargetRoleKind::Qualification);
-    // Role names are derived from the schema's closed target key and quoted.
-    let set_role = format!("SET LOCAL ROLE {}", quote_ident(&qualification));
-    sqlx::query(AssertSqlSafe(set_role))
+    // Role names are derived from the schema's closed target key and validated by
+    // the private catalog bridge before they become SQL.
+    sqlx::query(crate::sql_catalog::schema_set_role(&qualification))
         .execute(&mut *connection)
         .await
         .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
     Ok(())
-}
-
-fn quote_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 async fn pin_schema(connection: &mut PgConnection, expected_schema: &str) -> Result<()> {
@@ -224,16 +212,31 @@ async fn validate_catalog_shape(connection: &mut PgConnection) -> Result<()> {
 
 async fn catalog_manifest_hashes(connection: &mut PgConnection) -> Result<CatalogManifestHashes> {
     Ok(CatalogManifestHashes {
-        relation: manifest_hash(connection, RELATION_MANIFEST_SQL).await?,
-        constraint: manifest_hash(connection, CONSTRAINT_MANIFEST_SQL).await?,
-        index: manifest_hash(connection, INDEX_MANIFEST_SQL).await?,
-        executable: manifest_hash(connection, EXECUTABLE_MANIFEST_SQL).await?,
-        acl: manifest_hash(connection, ACL_MANIFEST_SQL).await?,
+        relation: manifest_hash(
+            connection,
+            crate::sql_catalog::SchemaManifestQuery::Relation,
+        )
+        .await?,
+        constraint: manifest_hash(
+            connection,
+            crate::sql_catalog::SchemaManifestQuery::Constraint,
+        )
+        .await?,
+        index: manifest_hash(connection, crate::sql_catalog::SchemaManifestQuery::Index).await?,
+        executable: manifest_hash(
+            connection,
+            crate::sql_catalog::SchemaManifestQuery::Executable,
+        )
+        .await?,
+        acl: manifest_hash(connection, crate::sql_catalog::SchemaManifestQuery::Acl).await?,
     })
 }
 
-async fn manifest_hash(connection: &mut PgConnection, query: &'static str) -> Result<String> {
-    let rows = sqlx::query_scalar::<_, String>(query)
+async fn manifest_hash(
+    connection: &mut PgConnection,
+    query: crate::sql_catalog::SchemaManifestQuery,
+) -> Result<String> {
+    let rows = sqlx::query_scalar::<_, String>(crate::sql_catalog::schema_role_grants(query))
         .fetch_all(&mut *connection)
         .await
         .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
@@ -245,7 +248,7 @@ async fn manifest_hash(connection: &mut PgConnection, query: &'static str) -> Re
     Ok(sha256_digest_bytes(&canonical).to_string())
 }
 
-const RELATION_MANIFEST_SQL: &str = r#"
+pub(crate) const RELATION_MANIFEST_SQL: &str = r#"
 WITH target_namespace AS (
     SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = pg_catalog.current_schema()
 ), manifest AS (
@@ -325,7 +328,7 @@ FROM manifest
 ORDER BY row_kind, object_name, object_position
 "#;
 
-const CONSTRAINT_MANIFEST_SQL: &str = r#"
+pub(crate) const CONSTRAINT_MANIFEST_SQL: &str = r#"
 WITH target_namespace AS (
     SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = pg_catalog.current_schema()
 )
@@ -360,7 +363,7 @@ LEFT JOIN pg_catalog.pg_class AS referenced_relation
 ORDER BY relation.relname, constraint_row.conname
 "#;
 
-const INDEX_MANIFEST_SQL: &str = r#"
+pub(crate) const INDEX_MANIFEST_SQL: &str = r#"
 WITH target_namespace AS (
     SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = pg_catalog.current_schema()
 )
@@ -397,7 +400,7 @@ JOIN pg_catalog.pg_am AS access_method ON access_method.oid = index_relation.rel
 ORDER BY table_relation.relname, index_relation.relname
 "#;
 
-const EXECUTABLE_MANIFEST_SQL: &str = r#"
+pub(crate) const EXECUTABLE_MANIFEST_SQL: &str = r#"
 WITH target_namespace AS (
     SELECT oid FROM pg_catalog.pg_namespace WHERE nspname = pg_catalog.current_schema()
 ), manifest AS (
@@ -529,7 +532,7 @@ FROM manifest
 ORDER BY object_kind, object_name, manifest_row::text
 "#;
 
-const ACL_MANIFEST_SQL: &str = r#"
+pub(crate) const ACL_MANIFEST_SQL: &str = r#"
 WITH target_namespace AS (
     SELECT oid, nspname, nspowner, nspacl
     FROM pg_catalog.pg_namespace

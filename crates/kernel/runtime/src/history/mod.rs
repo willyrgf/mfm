@@ -26,8 +26,8 @@ pub use port::{
     AppendAttemptApi, AuthorizationApi, HistoryFuture, RuntimeHistoryPort, VerifiedRunView,
 };
 pub use proofs::{
-    HistoryAppendOutcome, NewlyAppendedAuthorization, ObservationCommit,
-    PriorRunFactScanCompletion, StructuredAppendAttempt,
+    CertifiedAccessAuthorization, CommittedAccessAuthorization, HistoryAppendOutcome,
+    ObservationCommit, PriorRunFactScanCompletion, StructuredAppendAttempt,
 };
 
 /// Result type for history-port operations.
