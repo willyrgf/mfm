@@ -1,16 +1,21 @@
 # Implementation Plan: TT1 Runtime-History Remediation
 
-Status: ready for implementation
+Status: superseded by the [TT2 runtime-history remediation
+plan](IMPL_PLAN_PROBLEMS_TT2_IMPLRFC_RUNTIME.md)
 
-This plan replaces the implementation direction that produced
-`PROBLEMS_TT1_IMPLRFC_RUNTIME.md`. It fixes every problem in that ledger against the current
-contracts in `docs/design.md` and `docs/architecture.md`, and applies the
-correct-by-construction policy in `docs/code-quality.md`. The RFC remains the historical source of
-the runtime-history objective; the current design documents own the target contract.
+This document is retained as the historical TT1 remediation plan. Do not implement it. Its
+implementation and review exposed the TT2 findings; the linked TT2 plan owns the one current
+remediation direction.
 
-The implementation starts from the revision containing this plan. It is a complete cutover: no
-compatibility API, old persisted-format reader, dual authority path, fallback writer, or
-best-effort PostgreSQL mode is retained.
+This plan defined the implementation direction that followed
+`PROBLEMS_TT1_IMPLRFC_RUNTIME.md`. It targeted every problem in that ledger against the contracts
+then current in `docs/design.md` and `docs/architecture.md`, and applied the correct-by-construction
+policy in `docs/code-quality.md`. The RFC remains the historical source of the runtime-history
+objective; the current design documents own the target contract.
+
+That implementation started from the revision containing this plan and targeted a complete cutover:
+no compatibility API, old persisted-format reader, dual authority path, fallback writer, or
+best-effort PostgreSQL mode was to be retained.
 
 ## Material uncertainties
 
@@ -197,8 +202,10 @@ submission may have crossed the external entry boundary, loss of acknowledgement
 
 Every retained activated candidate is examined in certified order on every recovery run before a
 replacement is admitted. Candidate eligibility comes from provider-produced observations and
-wallet status, never from the state that wants to replace the candidate. The intent identity binds
-all behavior-affecting policy, including observation rounds and candidate-expansion rules.
+wallet status, never from the state that wants to replace the candidate. `SubmissionIntentId` binds
+only nonce domain, authenticated issuer, and bounded caller token. A separate
+`SubmissionSemanticsDigest` binds all behavior-affecting policy, including observation rounds and
+candidate-expansion rules.
 
 ### Read authority, export, and replay
 
@@ -811,9 +818,10 @@ Construction:
 - Make replacement admission require complete evidence for every earlier candidate: completed,
   proved rejected, or still ambiguous according to the certified policy. Preserve ambiguous
   candidates rather than silently replacing them.
-- Put every behavior-affecting value into the canonical intent/operation identity: observation
-  rounds, backoff/refresh policy where semantic, candidate-expansion rules, ordering, provider and
-  release contracts, and algorithm version.
+- Keep `SubmissionIntentId` stable over nonce domain, authenticated issuer, and bounded caller
+  token. Put every behavior-affecting value into a separate canonical
+  `SubmissionSemanticsDigest`: observation rounds, backoff/refresh policy where semantic,
+  candidate-expansion rules, ordering, provider and release contracts, and algorithm version.
 - Make completion retain a content-addressed public closure containing every candidate, request,
   public signing identity, observation/status item, route, release, predecessor, decision, and
   final result needed for later recovery and offline verification. The output references this
@@ -828,7 +836,8 @@ Required proofs:
   boundary;
 - a missing, ambiguous, or contradictory earlier candidate blocks unsafe replacement;
 - a state-authored replacement claim without producer evidence is rejected;
-- changing observation rounds or any branching/expansion policy changes the intent identity;
+- with the same `SubmissionIntentId`, changing observation rounds or any branching/expansion policy
+  changes `SubmissionSemanticsDigest` and produces a permanent conflict;
 - the full completion closure rehashes to its reference and contains every public preimage;
 - a fresh process can recover from the closure without invoking a completed effect or relying on
   ambient memory;
@@ -1050,7 +1059,7 @@ This checkpoint is evidence, not a substitute for the final executable gate.
 | EVM-05 | 11 | Post-entry faults remain EntryUnknown absent rejection proof |
 | EVM-06 | 12 | Valid nonce newtype rejects `u64::MAX` without mutation |
 | EVM-07 | 10 | Signer-integrity faults are not backend unavailability |
-| EVM-08 | 13 | Intent identity binds all behavior-affecting policy |
+| EVM-08 | 13 | `SubmissionSemanticsDigest` binds all behavior-affecting policy |
 | EVM-09 | 13, 17 | Complete public recovery closure retained and exported |
 | EVM-10 | 12 | Bounded current status projection and query-count proof |
 | EVM-11 | 11 | Exact physical release permit checked per access |
