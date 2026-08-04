@@ -3486,7 +3486,7 @@ impl ProgramRegistryBuilder {
             &required_process_components,
         )?;
         let qualified = QualifiedProgramRegistry {
-            registry: self.registry,
+            registry: Arc::new(self.registry),
             entry_points: self.entry_points,
             process_components: self.process_components,
         };
@@ -3795,7 +3795,7 @@ fn qualify_live_state_settlement_contracts(
 /// Immutable process-qualified structured-program registry.
 #[derive(Debug)]
 pub struct QualifiedProgramRegistry {
-    registry: StructuredCertificationRegistry,
+    registry: Arc<StructuredCertificationRegistry>,
     entry_points: BTreeMap<StableId, EntryPointDefinition>,
     #[allow(dead_code)]
     process_components: BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
@@ -3808,7 +3808,7 @@ pub struct QualifiedProgramRegistry {
 /// within an entry's frozen signature and support envelope.
 #[derive(Debug, Clone)]
 pub struct AdmissionCertificationRegistry {
-    registry: StructuredCertificationRegistry,
+    registry: Arc<StructuredCertificationRegistry>,
     entry_points: BTreeMap<StableId, EntryPointDefinition>,
 }
 
@@ -3855,7 +3855,7 @@ impl QualifiedProgramRegistry {
     /// verification by the RunHistory store and replay.
     pub fn admission_verification_registry(&self) -> AdmissionVerificationRegistry {
         AdmissionVerificationRegistry {
-            registry: self.registry.clone(),
+            registry: Arc::clone(&self.registry),
             entry_points: self.entry_points.clone(),
         }
     }
@@ -3863,7 +3863,7 @@ impl QualifiedProgramRegistry {
     /// Returns a cloneable pure snapshot for dynamic admission certification.
     pub fn admission_certification_registry(&self) -> AdmissionCertificationRegistry {
         AdmissionCertificationRegistry {
-            registry: self.registry.clone(),
+            registry: Arc::clone(&self.registry),
             entry_points: self.entry_points.clone(),
         }
     }
@@ -3875,12 +3875,13 @@ impl QualifiedProgramRegistry {
     /// rather than splitting and reassembling halves independently.
     #[doc(hidden)]
     pub fn into_runtime_parts(self) -> (AdmissionVerificationRegistry, RuntimeProcessRegistry) {
+        let registry = self.registry;
         let admission = AdmissionVerificationRegistry {
-            registry: self.registry.clone(),
+            registry: Arc::clone(&registry),
             entry_points: self.entry_points,
         };
         let runtime = RuntimeProcessRegistry {
-            registry: self.registry,
+            registry,
             process_components: self.process_components,
             process_identity: Arc::new(()),
         };
@@ -3896,7 +3897,7 @@ impl QualifiedProgramRegistry {
 /// entered only by consuming an opaque binding after Runtime has obtained one
 /// newly committed affine authorization.
 pub struct RuntimeProcessRegistry {
-    registry: StructuredCertificationRegistry,
+    registry: Arc<StructuredCertificationRegistry>,
     process_components: BTreeMap<ProcessComponentKey, RegisteredProcessComponent>,
     process_identity: Arc<()>,
 }
@@ -4340,7 +4341,7 @@ impl RuntimeProcessRegistry {
 /// adapter invoker, signer, resource, store, or writer handle.
 #[derive(Debug, Clone)]
 pub struct AdmissionVerificationRegistry {
-    registry: StructuredCertificationRegistry,
+    registry: Arc<StructuredCertificationRegistry>,
     entry_points: BTreeMap<StableId, EntryPointDefinition>,
 }
 

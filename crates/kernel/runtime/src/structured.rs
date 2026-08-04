@@ -350,10 +350,22 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             )
         })?;
         let state = match verified.frontier() {
-            StructuredFrontier::Complete => return Ok(DriveOutcome::Closed),
-            StructuredFrontier::WaitingReads => return Ok(DriveOutcome::WaitingReads),
-            StructuredFrontier::PossibleEntry => return Ok(DriveOutcome::PossibleEntry),
-            StructuredFrontier::BlockedIntegrity => return Ok(DriveOutcome::BlockedIntegrity),
+            StructuredFrontier::Complete => {
+                self.retain_verified(verified).await?;
+                return Ok(DriveOutcome::Closed);
+            }
+            StructuredFrontier::WaitingReads => {
+                self.retain_verified(verified).await?;
+                return Ok(DriveOutcome::WaitingReads);
+            }
+            StructuredFrontier::PossibleEntry => {
+                self.retain_verified(verified).await?;
+                return Ok(DriveOutcome::PossibleEntry);
+            }
+            StructuredFrontier::BlockedIntegrity => {
+                self.retain_verified(verified).await?;
+                return Ok(DriveOutcome::BlockedIntegrity);
+            }
             StructuredFrontier::Actions(actions) => actions
                 .iter()
                 .min_by(|left, right| left.occurrence_path.cmp(&right.occurrence_path))
@@ -465,6 +477,23 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                 Some(occurrence_id),
             )),
         }
+    }
+
+    async fn retain_verified(&self, verified: P::VerifiedRun) -> Result<()> {
+        let run_id = verified.run_id().clone();
+        let pre_fault_head = Some(verified.journal_head().clone());
+        self.history
+            .retain_verified(verified)
+            .await
+            .map_err(|error| {
+                self.store_fault(
+                    error,
+                    RuntimeFaultPhase::LoadHistory,
+                    run_id,
+                    pre_fault_head,
+                    None,
+                )
+            })
     }
 
     async fn commit_state_proposal(

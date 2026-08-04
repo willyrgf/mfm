@@ -147,6 +147,11 @@ The fold derives:
 
 Incremental mutation returns a successor produced by the same fold state. Refolding every complete
 prefix from raw persisted batches must produce an equivalent verified run.
+The private production adapter may retain that verified successor, including a non-mutating
+frontier result, for the next Runtime drive. Before reuse it compares the cached journal head with
+the backend's indexed current-head projection; any mismatch or a fresh process discards the cache
+and performs the authoritative full fold. The cache is therefore only a bounded replay-cost
+optimization and never a source of store authority.
 
 Production physical qualification binds an exact purpose tuple: access kind, semantic capability,
 semantic adapter, qualified adapter implementation, stable resource lineage when applicable, and

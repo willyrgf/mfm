@@ -12,6 +12,7 @@ use mfm_journal::structured::{
     TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
+use mfm_runtime::history::{RuntimeHistoryPort, StructuredAdmissionCommand};
 use mfm_spec::structured::{
     fan_out_join_contract_canonical_json, fan_out_join_contract_ref,
     lane_outcome_contract_canonical_json, lane_outcome_contract_ref, never_failure_contract_ref,
@@ -3510,6 +3511,54 @@ async fn incremental_successors_match_fresh_full_folds_after_every_prefix() {
         incremental = successor;
     }
     assert_eq!(incremental.frontier(), &StructuredFrontier::Complete);
+}
+
+#[tokio::test]
+async fn runtime_adapter_reuses_verified_successors_without_reloading_history() {
+    let fixture = one_state_fixture(111);
+    let backend = StructuredMemoryBackend::new(store_identity(111));
+    let store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(NoPhysicalBindings),
+    );
+    let (writer, _reader) = store.split();
+    let adapter = StoreHistoryAdapter::from_writer(writer);
+    let (run_id, _) = adapter
+        .admit_run(StructuredAdmissionCommand::new(
+            TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32)))
+                .expect("tenant"),
+            InvocationIdentity::new("00000000-0000-4000-8000-000000000111").expect("invocation"),
+            fixture.entry_point.clone(),
+            fixture.document.clone(),
+            admission_material(9),
+            vec![ProposedCanonicalValue::from_json("7").expect("input")],
+            AppendRequestId::new("adapter-cache-admit").expect("append id"),
+        ))
+        .await
+        .expect("admit through Runtime history port");
+
+    let verified = adapter
+        .load_verified(&run_id)
+        .await
+        .expect("load admitted successor");
+    adapter
+        .commit_state_transition(
+            verified,
+            &StateTransitionProposal::success(
+                AppendRequestId::new("adapter-cache-transition").expect("append id"),
+                ProposedCanonicalValue::from_json("8").expect("output"),
+                mfm_facts::FactSet::empty(),
+            ),
+        )
+        .await
+        .expect("commit through Runtime history port");
+    let closed = adapter
+        .load_verified(&run_id)
+        .await
+        .expect("load committed successor");
+    assert_eq!(closed.frontier(), &StructuredFrontier::Complete);
+    assert_eq!(backend.full_loads().expect("load count"), 0);
 }
 
 #[tokio::test]

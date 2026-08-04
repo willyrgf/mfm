@@ -156,11 +156,47 @@ impl VerifiedRunView for VerifiedStructuredRun {
 #[doc(hidden)]
 pub struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
     writer: StructuredRunHistoryWriter<B>,
+    verified_runs: Mutex<BTreeMap<RunId, VerifiedStructuredRun>>,
 }
 
 impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
     pub(super) fn from_writer(writer: StructuredRunHistoryWriter<B>) -> Self {
-        Self { writer }
+        Self {
+            writer,
+            verified_runs: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn take_verified_run(&self, run_id: &RunId) -> Option<VerifiedStructuredRun> {
+        match self.verified_runs.lock() {
+            Ok(mut runs) => runs.remove(run_id),
+            Err(poisoned) => poisoned.into_inner().remove(run_id),
+        }
+    }
+
+    fn cache_verified_run(&self, verified: Option<VerifiedStructuredRun>) {
+        let Some(verified) = verified else {
+            return;
+        };
+        let run_id = verified.run_id().clone();
+        match self.verified_runs.lock() {
+            Ok(mut runs) => {
+                runs.insert(run_id, verified);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(run_id, verified);
+            }
+        }
+    }
+
+    async fn load_cached_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
+        let current_head = self.writer.current_head(run_id).await?;
+        if let Some(verified) = self.take_verified_run(run_id) {
+            if current_head.as_ref() == Some(verified.journal_head()) {
+                return Ok(verified);
+            }
+        }
+        self.writer.load_verified(run_id).await
     }
 }
 
@@ -255,12 +291,21 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
                 append_request_id,
             );
             let attempt = self.writer.admit_run(request).await?;
-            Ok((run_id, attempt.into_runtime_attempt()))
+            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
+            self.cache_verified_run(successor);
+            Ok((run_id, attempt))
         })
     }
 
     fn load_verified<'a>(&'a self, run_id: &'a RunId) -> HistoryFuture<'a, Self::VerifiedRun> {
-        Box::pin(async move { self.writer.load_verified(run_id).await })
+        Box::pin(async move { self.load_cached_verified(run_id).await })
+    }
+
+    fn retain_verified<'a>(&'a self, verified: Self::VerifiedRun) -> HistoryFuture<'a, ()> {
+        Box::pin(async move {
+            self.cache_verified_run(Some(verified));
+            Ok(())
+        })
     }
 
     fn commit_state_transition<'a>(
@@ -270,10 +315,13 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
     ) -> HistoryFuture<'a, StructuredAppendAttempt> {
         Box::pin(async move {
             let store_proposal = to_store_transition(proposal);
-            self.writer
+            let attempt = self
+                .writer
                 .commit_state_transition(verified, &store_proposal)
-                .await
-                .map(|attempt| attempt.into_runtime_attempt())
+                .await?;
+            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
+            self.cache_verified_run(successor);
+            Ok(attempt)
         })
     }
 
@@ -284,10 +332,13 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
     ) -> HistoryFuture<'a, StructuredAppendAttempt> {
         Box::pin(async move {
             let store_proposal = to_store_authorization(proposal);
-            self.writer
+            let attempt = self
+                .writer
                 .authorize_access(verified, &store_proposal)
-                .await
-                .map(|attempt| attempt.into_runtime_attempt())
+                .await?;
+            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
+            self.cache_verified_run(successor);
+            Ok(attempt)
         })
     }
 
@@ -347,12 +398,15 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
                 .commit_observation(verified, &store_proposal)
                 .await?
             {
-                super::mutation::ObservationCommit::ExistingSame(_) => {
+                super::mutation::ObservationCommit::ExistingSame(verified) => {
+                    self.cache_verified_run(Some(*verified));
                     Ok(ObservationCommit::ExistingSame)
                 }
-                super::mutation::ObservationCommit::Attempt(attempt) => Ok(
-                    ObservationCommit::Attempt(Box::new(attempt.into_runtime_attempt())),
-                ),
+                super::mutation::ObservationCommit::Attempt(attempt) => {
+                    let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
+                    self.cache_verified_run(successor);
+                    Ok(ObservationCommit::Attempt(Box::new(attempt)))
+                }
             }
         })
     }

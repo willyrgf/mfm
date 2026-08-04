@@ -18,6 +18,7 @@ type AppendKey = (RunId, AppendRequestId);
 struct MemoryState {
     histories: BTreeMap<RunId, Vec<CommittedBatch>>,
     appends: BTreeMap<AppendKey, CommittedBatch>,
+    full_loads: usize,
     tenant_fact_heads: BTreeMap<TenantScopeId, u64>,
     tenant_fact_publications: BTreeMap<(TenantScopeId, u64), TenantFactPublication>,
     acknowledge_next_commit_as_unknown: bool,
@@ -74,6 +75,12 @@ impl StructuredMemoryBackend {
             .map(|batch| batch.head.clone()))
     }
 
+    /// Returns the number of complete-prefix loads performed by this backend.
+    #[doc(hidden)]
+    pub fn full_loads(&self) -> super::Result<usize> {
+        Ok(self.lock()?.full_loads)
+    }
+
     fn lock(&self) -> super::Result<std::sync::MutexGuard<'_, MemoryState>> {
         self.state
             .lock()
@@ -88,14 +95,31 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
 
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
-            let state = self.lock()?;
+            let mut state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
+            state.full_loads = state.full_loads.saturating_add(1);
             Ok(state.histories.get(run_id).map(|batches| RawRunHistory {
                 run_id: run_id.clone(),
                 batches: batches.clone(),
             }))
+        })
+    }
+
+    fn current_head<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            Ok(state
+                .histories
+                .get(run_id)
+                .and_then(|batches| batches.last().map(|batch| batch.head.clone())))
         })
     }
 

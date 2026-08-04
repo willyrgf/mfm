@@ -117,6 +117,22 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
     /// Loads the complete immutable prefix and objects for one run.
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
 
+    /// Returns the exact current physical head without loading the retained prefix.
+    ///
+    /// Production backends must serve this from their indexed head projection. The default is
+    /// only for small custom backends that have no separate head projection.
+    fn current_head<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async move {
+            Ok(self
+                .load(run_id)
+                .await?
+                .and_then(|history| history.batches.last().map(|batch| batch.head.clone())))
+        })
+    }
+
     /// Loads the immutable run prefix ending at one exact retained sequence.
     fn load_prefix<'a>(
         &'a self,
@@ -250,6 +266,11 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
     /// Returns the immutable qualified store identity owned by this writer.
     pub fn store_identity(&self) -> &StructuredStoreIdentity {
         self.backend.identity()
+    }
+
+    /// Returns the exact current physical head without loading retained history.
+    pub async fn current_head(&self, run_id: &RunId) -> super::Result<Option<JournalHead>> {
+        self.backend.current_head(run_id).await
     }
 
     /// Loads and callback-free verifies one exact run for a Runtime action.

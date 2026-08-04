@@ -291,6 +291,23 @@ impl StructuredAppendAttempt {
             closed,
         )
     }
+
+    pub(super) fn into_runtime_attempt_with_successor(
+        mut self,
+    ) -> (
+        mfm_runtime::history::StructuredAppendAttempt,
+        Option<VerifiedStructuredRun>,
+    ) {
+        let successor = if matches!(
+            self.outcome,
+            BackendAppendOutcome::NewlyCommitted(_) | BackendAppendOutcome::ExistingSame(_)
+        ) {
+            self.successor.take()
+        } else {
+            None
+        };
+        (self.into_runtime_attempt(), successor)
+    }
 }
 
 impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
@@ -299,14 +316,15 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
         &self,
         request: StructuredAdmissionRequest,
     ) -> super::Result<StructuredAppendAttempt> {
-        let committed = prepare_admission(
+        let prepared = prepare_admission(
             self.backend.identity(),
             request,
             self.program_verifier.as_ref(),
             self.physical_binding_verifier.as_ref(),
         )
         .map_err(candidate_rejected)?;
-        self.commit_prepared(committed, None).await
+        self.commit_prepared(prepared.batch, Some(prepared.verified))
+            .await
     }
 
     /// Verifies and atomically commits one exact current callback result.
