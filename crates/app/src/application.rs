@@ -755,10 +755,6 @@ impl Application {
         let call = self
             .authorize_run::<run_grant::Replay>(credential, RunAccessGrant::Replay, run_id)
             .await?;
-        if request.requires_export_authorization() {
-            call.authorize_same_run_grant(RunAccessGrant::Export)
-                .await?;
-        }
         self.backend.replay_run(&call, request).await
     }
 
@@ -937,27 +933,6 @@ impl<G: run_grant::RunGrantMarker> AuthorizedRunCall<'_, G> {
     /// Returns the exact approved grant retained by this call.
     pub(crate) const fn grant(&self) -> RunAccessGrant {
         self.grant
-    }
-
-    /// Reauthorizes one additional grant for the same exact root, tenant, and principal.
-    pub(crate) async fn authorize_same_run_grant(
-        &self,
-        grant: RunAccessGrant,
-    ) -> Result<(), PublicError> {
-        let target = AccessTarget::RunTarget {
-            store_scope_id: self.store_scope_id.clone(),
-            run_id: self.run_id.clone(),
-        };
-        let authorized = self
-            .policy
-            .authorize(&self.credential, grant, &target)
-            .await?;
-        if authorized.tenant_scope_id() != &self.tenant_scope_id
-            || authorized.authenticated_principal_id() != &self.authenticated_principal_id
-        {
-            return Err(PublicError::grant_denied());
-        }
-        Ok(())
     }
 }
 
@@ -1230,9 +1205,6 @@ impl ApplicationBackend for TestApplicationBackend {
 }
 
 /// Connects a production application using opaque exact-target sessions and wallet authorities.
-///
-/// Production exact reproduction is deliberately unavailable in this cutover. `reproduce`
-/// returns the frozen `unavailable` result and never falls back to live runtime capabilities.
 /// Deployment infrastructure issues the session bundle; ordinary assembly never receives a pool,
 /// URL, connection option, or raw fence.
 pub async fn connect_production_application(
@@ -1253,28 +1225,23 @@ fn wallet_deployment_invalid() -> PublicError {
 
 #[cfg(test)]
 mod tests {
-    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use std::task::{Context, Poll};
 
     use super::{
         application_for_test, run_grant, AuthorizedRunCall, EvmWalletDeployment,
         EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial, TestApplicationMode,
     };
     use crate::{
-        AccessPolicyError, AccessTarget, AuthorizedTenant, ExportStreamInput, ReplayRequest,
-        RunAccessGrant, RunAccessPolicy, SecretCredential,
+        AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant, RunAccessPolicy,
+        SecretCredential,
     };
     use async_trait::async_trait;
-    use mfm_canonical::RecoverabilityContract;
     use mfm_ids::{
-        ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId, StoreScopeId,
-        TenantScopeId,
+        EntryPointId, InvocationIdentity, RunId, SchemaId, StableId, StoreScopeId, TenantScopeId,
     };
     use mfm_spec::{CanonicalJsonValue, EntryPointContract, PlanningProfile};
     use mfm_values::MfmValue as _;
-    use tokio::io::{AsyncRead, ReadBuf};
 
     #[test]
     fn wallet_deployment_assembly_authorities_are_affine_and_nonserializable() {
@@ -1300,12 +1267,6 @@ mod tests {
             assert_eq!(grant, self.expected_grant);
             self.result.clone()
         }
-    }
-
-    struct ReplayPolicy {
-        replay: Result<AuthorizedTenant, AccessPolicyError>,
-        export: Result<AuthorizedTenant, AccessPolicyError>,
-        calls: AtomicUsize,
     }
 
     struct ExactAdmissionTargetPolicy {
@@ -1338,38 +1299,6 @@ mod tests {
                 AccessTarget::AdmitTarget { .. } => Err(AccessPolicyError::GrantDenied),
                 AccessTarget::RunTarget { .. } => panic!("unexpected run target"),
             }
-        }
-    }
-
-    #[async_trait]
-    impl RunAccessPolicy for ReplayPolicy {
-        async fn authorize(
-            &self,
-            _credential: &SecretCredential,
-            grant: RunAccessGrant,
-            _target: &AccessTarget,
-        ) -> Result<AuthorizedTenant, AccessPolicyError> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            match grant {
-                RunAccessGrant::Replay => self.replay.clone(),
-                RunAccessGrant::Export => self.export.clone(),
-                _ => panic!("unexpected replay policy grant"),
-            }
-        }
-    }
-
-    struct PollProbe {
-        polls: Arc<AtomicUsize>,
-    }
-
-    impl AsyncRead for PollProbe {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            _context: &mut Context<'_>,
-            _buffer: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            self.polls.fetch_add(1, Ordering::SeqCst);
-            Poll::Ready(Ok(()))
         }
     }
 
@@ -1443,120 +1372,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_verify_replay_requires_a_separate_same_identity_export_grant() {
-        let root_tenant = tenant('1');
-        let run_id = run_id();
-        let store_scope_id = store_scope();
-
-        let granted = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
-            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('1'))),
-        };
-        let call = authorized_call(
-            &granted,
-            &store_scope_id,
-            root_tenant.clone(),
-            run_id.clone(),
-            RunAccessGrant::Replay,
-        );
-        call.authorize_same_run_grant(RunAccessGrant::Export)
-            .await
-            .expect("same-run semantic export");
-
-        for result in [
-            Err(AccessPolicyError::GrantDenied),
-            Ok(AuthorizedTenant::new(tenant('2'), principal('1'))),
-            Ok(AuthorizedTenant::new(root_tenant.clone(), principal('2'))),
-        ] {
-            let policy = FixedPolicy {
-                expected_grant: RunAccessGrant::Export,
-                result,
-            };
-            let call = authorized_call(
-                &policy,
-                &store_scope_id,
-                root_tenant.clone(),
-                run_id.clone(),
-                RunAccessGrant::Replay,
-            );
-            let error = call
-                .authorize_same_run_grant(RunAccessGrant::Export)
-                .await
-                .expect_err("separate export grant");
-            assert_eq!(error.code(), "GrantDenied");
-        }
-
-        let unauthenticated = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
-            result: Err(AccessPolicyError::AuthenticationRequired),
-        };
-        let call = authorized_call(
-            &unauthenticated,
-            &store_scope_id,
-            root_tenant,
-            run_id,
-            RunAccessGrant::Replay,
-        );
-        let error = call
-            .authorize_same_run_grant(RunAccessGrant::Export)
-            .await
-            .expect_err("revoked replay credential");
-        assert_eq!(error.code(), "AuthenticationRequired");
-    }
-
-    #[tokio::test]
-    async fn replay_and_export_denials_leave_the_input_unpolled() {
-        let tenant = AuthorizedTenant::new(tenant('1'), principal('1'));
-        for (replay, export, expected_calls) in [
-            (Err(AccessPolicyError::GrantDenied), Ok(tenant.clone()), 1),
-            (Ok(tenant.clone()), Err(AccessPolicyError::GrantDenied), 2),
-        ] {
-            let policy = Arc::new(ReplayPolicy {
-                replay,
-                export,
-                calls: AtomicUsize::new(0),
-            });
-            let application =
-                application_for_test(policy.clone(), Vec::new(), TestApplicationMode::Sentinel);
-            let polls = Arc::new(AtomicUsize::new(0));
-            let result = application
-                .replay_run(
-                    SecretCredential::new(b"opaque".to_vec()).expect("credential"),
-                    run_id(),
-                    ReplayRequest::Reproduce(stream_input(Arc::clone(&polls))),
-                )
-                .await;
-            assert!(result.is_err());
-            assert_eq!(policy.calls.load(Ordering::SeqCst), expected_calls);
-            assert_eq!(polls.load(Ordering::SeqCst), 0);
-        }
-    }
-
-    #[tokio::test]
-    async fn backend_history_failure_after_both_grants_leaves_input_unpolled() {
-        let tenant = AuthorizedTenant::new(tenant('1'), principal('1'));
-        let policy = Arc::new(ReplayPolicy {
-            replay: Ok(tenant.clone()),
-            export: Ok(tenant),
-            calls: AtomicUsize::new(0),
-        });
-        let application =
-            application_for_test(policy.clone(), Vec::new(), TestApplicationMode::Sentinel);
-        let polls = Arc::new(AtomicUsize::new(0));
-        let error = application
-            .replay_run(
-                SecretCredential::new(b"opaque".to_vec()).expect("credential"),
-                run_id(),
-                ReplayRequest::Reproduce(stream_input(Arc::clone(&polls))),
-            )
-            .await
-            .expect_err("backend sentinel");
-        assert_eq!(error.code(), "TestApplicationBackendReached");
-        assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
-        assert_eq!(polls.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
     async fn admission_authorization_rejects_configured_target_substitution() {
         let expected_target = StableId::new("mfm.evm.test.expected-target").expect("target");
         let policy = Arc::new(ExactAdmissionTargetPolicy {
@@ -1587,20 +1402,6 @@ mod tests {
             .expect_err("substituted target must be denied");
         assert_eq!(substituted.code(), "GrantDenied");
         assert_eq!(policy.calls.load(Ordering::SeqCst), 2);
-    }
-
-    fn stream_input(polls: Arc<AtomicUsize>) -> ExportStreamInput {
-        let contract = RecoverabilityContract::embedded().expect("recoverability contract");
-        let content_ref = ContentRef::new(
-            contract
-                .schema_id("mfm.portable-run-export-stream.v1")
-                .expect("stream schema")
-                .clone(),
-            contract.raw_content_digest(b"stream"),
-        )
-        .expect("content ref");
-        ExportStreamInput::from_reader(content_ref, Box::pin(PollProbe { polls }))
-            .expect("stream input")
     }
 
     fn evm_admission_request(target: &str, invocation_digit: char) -> crate::AdmitRunRequest {
@@ -1635,25 +1436,6 @@ mod tests {
                 .expect("output schema"),
         )
         .expect("entry point contract")
-    }
-
-    fn authorized_call<'policy>(
-        policy: &'policy dyn RunAccessPolicy,
-        store_scope_id: &'policy StoreScopeId,
-        tenant_scope_id: TenantScopeId,
-        run_id: RunId,
-        grant: RunAccessGrant,
-    ) -> AuthorizedRunCall<'policy, run_grant::Replay> {
-        AuthorizedRunCall {
-            credential: SecretCredential::new(b"opaque".to_vec()).expect("credential"),
-            policy,
-            store_scope_id,
-            tenant_scope_id,
-            authenticated_principal_id: principal('1'),
-            run_id,
-            grant,
-            _marker: std::marker::PhantomData,
-        }
     }
 
     fn authorized_export_call<'policy>(

@@ -13,9 +13,9 @@ The crate verifies recorded history through a reader and projects:
 
 It owns the only portable export document, top-level digest rules, and offline validator. It owns
 no writer, callback, scheduler, process registry, provider, transport, signer, wallet authority, or
-alternate reducer. Exact reproduction returns a frozen unavailable result when no candidate is
-supplied; it never uses live fallback behavior. Offline verification uses only bundle bytes and an
-explicit trust snapshot against the store's read-only fold entry.
+alternate reducer. Recorded replay is verification-only and never compares against live state.
+Offline verification uses only bundle bytes and an explicit trust snapshot against the store's
+read-only fold entry.
 
 The current export media type is
 `application/vnd.mfm.structured-run-export.v1+json`. Old framed/pre-structured bytes are rejected.

@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
-use mfm_canonical::RecoverabilityContract;
 use mfm_certify::structured::{AdmissionCertificationRegistry, ProgramRegistryBuilder};
 use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
@@ -37,13 +36,13 @@ use mfm_store::structured::{
     VerifiedConfiguredValue,
 };
 use mfm_values::{MfmConfig, MfmValue};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use crate::application::{
     run_grant, ApplicationBackend, AuthorizedAdmissionCall, AuthorizedRunCall, EvmWalletDeployment,
     EvmWalletDeploymentParts,
 };
-use crate::stream_spool::{snapshot_input, WritableSpool};
+use crate::stream_spool::WritableSpool;
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
     decode_transition_trace_page_request, AccessAuditPage, AdmissionStatus, AdmitRunRequest,
@@ -59,7 +58,6 @@ const PORTFOLIO_SCOPE_ID: &str = "mfm.portfolio/structured-snapshot-scope";
 const BALANCE_SCOPE_ID: &str = "mfm.evm/structured-balance-scope";
 const SUBMISSION_SCOPE_ID: &str = "mfm.evm/structured-submission-scope";
 const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revision";
-const MAX_REPLAY_EXPORT_BYTES: u64 = mfm_replay::portable::MAX_PORTABLE_EXPORT_BYTES;
 
 type HistoryBackend = PostgresStructuredHistoryBackend;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
@@ -470,14 +468,6 @@ impl ApplicationBackend for ProductionBackend {
                     .load_replay_authorized(call.tenant_scope_id(), call.run_id())
                     .await?;
                 mfm_replay::structured::project_replay_result(&evidence)
-                    .map_err(|_| PublicError::replay_verification_failed())
-            }
-            ReplayRequest::Reproduce(input) => {
-                let evidence = self
-                    .load_export_authorized(call.tenant_scope_id(), call.run_id())
-                    .await?;
-                validate_replay_export(&evidence, input).await?;
-                mfm_replay::structured::project_unavailable_reproduction(call.run_id())
                     .map_err(|_| PublicError::replay_verification_failed())
             }
         }
@@ -1082,46 +1072,6 @@ async fn write_structured_export(
         .map_err(|_| export_stream_io_error())?;
     let spool = spool.finish().await.map_err(|_| export_stream_io_error())?;
     Ok(ExportedRun::from_content_ref(content_ref, Box::pin(spool)))
-}
-
-async fn validate_replay_export(
-    evidence: &ExportRunEvidence,
-    input: crate::ExportStreamInput,
-) -> Result<(), PublicError> {
-    let (content_ref, spool) = snapshot_input(input)
-        .await
-        .map_err(|_| export_stream_io_error())?;
-    let mut bytes = Vec::new();
-    let mut bounded = spool.take(MAX_REPLAY_EXPORT_BYTES + 1);
-    bounded
-        .read_to_end(&mut bytes)
-        .await
-        .map_err(|_| export_stream_io_error())?;
-    if bytes.len() as u64 > MAX_REPLAY_EXPORT_BYTES {
-        return Err(PublicError::replay_artifact_too_large());
-    }
-    let contract =
-        RecoverabilityContract::embedded().map_err(|_| PublicError::replay_artifact_invalid())?;
-    if contract.raw_content_digest(&bytes) != *content_ref.content_digest() {
-        return Err(PublicError::replay_artifact_invalid());
-    }
-    let supplied = mfm_replay::portable::PortableRunExport::strict_decode(&bytes)
-        .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected = mfm_replay::portable::PortableRunExport::from_export_evidence(
-        evidence,
-        mfm_replay::portable::ExportKind::Semantic,
-    )
-    .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected_bytes = expected
-        .to_canonical_bytes()
-        .map_err(|_| PublicError::replay_artifact_invalid())?;
-    let expected_ref = expected
-        .content_ref()
-        .map_err(|_| PublicError::replay_artifact_invalid())?;
-    if supplied != expected || bytes != expected_bytes || content_ref != expected_ref {
-        return Err(PublicError::replay_artifact_invalid());
-    }
-    Ok(())
 }
 
 fn admission_append_request_id(

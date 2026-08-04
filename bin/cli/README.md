@@ -11,7 +11,6 @@ mfm run admit <entry-point-id> --invocation-identity <uuid> --target <target> [-
 mfm run drive <run-id>
 mfm run show <run-id>
 mfm run replay <run-id> --mode verify
-mfm run replay <run-id> --mode reproduce --portable-export <export> --portable-export-ref-file <sidecar>
 mfm run trace <run-id> [--cursor <cursor>] [--limit <n>]
 mfm run audit <run-id> [--cursor <cursor>] [--limit <n>]
 mfm run export <run-id> --kind semantic|audit --output <new-path> --ref-output <new-sidecar-path>
@@ -43,10 +42,8 @@ invocation identity is a separate caller-generated canonical UUIDv4, so retries 
 submission token in distinct runs while converging on the same permanent EVM intent. The returned
 run id is the deterministic typed run identity for store, tenant, operation, and invocation.
 
-Replay/export use the current single-object media contract
-`application/vnd.mfm.structured-run-export.v1+json`. Export writes only a safely created new regular
-file and a content-reference sidecar. Replay verifies the sidecar digest, strict schema, and exact
-store/tenant/run binding before use. Old framed exports are rejected.
+Replay is recorded-history verification only. Export writes the current bounded frame stream only to
+a safely created new regular file and a content-reference sidecar; old export bytes are rejected.
 
 ## Credentials
 

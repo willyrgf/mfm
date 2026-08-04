@@ -205,24 +205,6 @@ impl PublicError {
         )
     }
 
-    /// Returns the fixed caller-supplied replay-artifact validation error.
-    pub fn replay_artifact_invalid() -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            "ReplayArtifactInvalid",
-            "The replay artifact is invalid.",
-        )
-    }
-
-    /// Returns the fixed replay-artifact size-limit error.
-    pub fn replay_artifact_too_large() -> Self {
-        Self::new(
-            ErrorClass::BadRequest,
-            "ReplayArtifactTooLarge",
-            "The replay artifact exceeds the allowed size.",
-        )
-    }
-
     pub(crate) fn replay_verification_failed() -> Self {
         Self::backend(
             ErrorClass::Internal,
@@ -347,22 +329,6 @@ mod tests {
             process.runtime_fault().map(|fault| &fault.subject),
             Some(PublicRuntimeFaultSubject::Process { .. })
         ));
-    }
-
-    #[test]
-    fn caller_replay_artifact_errors_have_the_frozen_wire_text() {
-        let invalid = PublicError::replay_artifact_invalid();
-        assert_eq!(invalid.class(), ErrorClass::BadRequest);
-        assert_eq!(invalid.code(), "ReplayArtifactInvalid");
-        assert_eq!(invalid.message(), "The replay artifact is invalid.");
-
-        let too_large = PublicError::replay_artifact_too_large();
-        assert_eq!(too_large.class(), ErrorClass::BadRequest);
-        assert_eq!(too_large.code(), "ReplayArtifactTooLarge");
-        assert_eq!(
-            too_large.message(),
-            "The replay artifact exceeds the allowed size."
-        );
     }
 
     #[test]

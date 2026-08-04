@@ -8,7 +8,6 @@ use crate::presentation::output::{handle_public_result, print_error};
 use crate::support::access::read_access_credential;
 use crate::support::application::{connect_application, parse_run_id, ApplicationConnectionArgs};
 use crate::support::output_file::{self, CreateNewFileError};
-use crate::support::portable_export::read_portable_export_input;
 
 /// Subcommands under `mfm run`.
 #[derive(Subcommand)]
@@ -57,12 +56,6 @@ pub(crate) enum RunCommand {
         /// Replay mode.
         #[arg(long, value_enum)]
         mode: ReplayModeArg,
-        /// Caller-held canonical semantic export required by non-verify modes.
-        #[arg(long, value_name = "PATH")]
-        portable_export: Option<PathBuf>,
-        /// Strict canonical JSON ContentRef sidecar required by non-verify modes.
-        #[arg(long, value_name = "PATH")]
-        portable_export_ref_file: Option<PathBuf>,
         /// Non-semantic process connection options.
         #[command(flatten)]
         connection: ApplicationConnectionArgs,
@@ -122,8 +115,6 @@ pub(crate) enum RunCommand {
 pub(crate) enum ReplayModeArg {
     /// Callback-free verification.
     Verify,
-    /// Qualified exact reproduction.
-    Reproduce,
 }
 
 /// CLI portable-export kinds.
@@ -177,19 +168,9 @@ impl RunCommand {
             Self::Replay {
                 run_id,
                 mode,
-                portable_export,
-                portable_export_ref_file,
                 connection,
             } => {
-                let result = replay(
-                    ctx,
-                    connection,
-                    run_id,
-                    *mode,
-                    portable_export.as_deref(),
-                    portable_export_ref_file.as_deref(),
-                )
-                .await;
+                let result = replay(ctx, connection, run_id, *mode).await;
                 handle_public_result(result, &ctx.output_format, public_text)
             }
             Self::Trace {
@@ -317,28 +298,11 @@ async fn replay(
     connection: &ApplicationConnectionArgs,
     run_id: &str,
     mode: ReplayModeArg,
-    portable_export: Option<&std::path::Path>,
-    portable_export_ref_file: Option<&std::path::Path>,
 ) -> Result<mfm_app::ReplayResponse, PublicError> {
     let credential = credential(ctx).await?;
     let run_id = parse_run_id(run_id)?;
     let request = match mode {
-        ReplayModeArg::Verify => {
-            if portable_export.is_some() || portable_export_ref_file.is_some() {
-                return Err(PublicError::replay_artifact_invalid());
-            }
-            ReplayRequest::Verify
-        }
-        ReplayModeArg::Reproduce => {
-            let (Some(portable_export), Some(portable_export_ref_file)) =
-                (portable_export, portable_export_ref_file)
-            else {
-                return Err(PublicError::replay_artifact_invalid());
-            };
-            let input =
-                read_portable_export_input(portable_export, portable_export_ref_file).await?;
-            ReplayRequest::Reproduce(input)
-        }
+        ReplayModeArg::Verify => ReplayRequest::Verify,
     };
     application(connection)
         .await?
@@ -453,10 +417,7 @@ fn finish_export(result: Result<(), PublicError>, format: &super::OutputFormat) 
 
 #[cfg(test)]
 mod tests {
-    use mfm_app::{
-        AdmitRunResponse, DriveResponse, ErrorClass, PublicJsonResponse, PublicRunView,
-        ReplayResponse,
-    };
+    use mfm_app::{AdmitRunResponse, DriveResponse, ErrorClass, PublicJsonResponse, PublicRunView};
     use serde::Deserialize;
 
     use super::{map_export_write_error, public_text, CreateNewFileError};
@@ -513,15 +474,6 @@ mod tests {
             &PublicRunView::strict_decode(&public).expect("strict public run view"),
             &public,
         );
-
-        const RUN_ID: &str =
-            "run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000";
-        let canonical = format!(
-            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{RUN_ID}\"}}"
-        );
-        let response =
-            ReplayResponse::strict_decode(canonical.as_bytes()).expect("strict replay response");
-        assert_cli_rendering(&response, canonical.as_bytes());
     }
 
     fn assert_cli_rendering<T>(response: &T, canonical: &[u8])

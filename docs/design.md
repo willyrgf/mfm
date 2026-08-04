@@ -266,9 +266,8 @@ snapshot against the store's read-only fold entry. Current portable exports use
 `application/vnd.mfm.structured-run-export.v1+json` and the one current recoverability schema;
 retired bytes are rejected.
 
-Exact reproduction deliberately returns its frozen unavailable result when no admitted executable
-candidate is supplied. It never falls back to live callbacks. Current-candidate comparison is not
-part of the public contract.
+Recorded replay is verification-only: it folds the committed prefix and returns its bounded
+summary. It never falls back to live callbacks or compares current history.
 
 ## Configuration history
 

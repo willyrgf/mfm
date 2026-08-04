@@ -165,7 +165,7 @@ fn removed_commands_and_raw_authority_arguments_are_absent() {
 }
 
 #[test]
-fn compare_current_cli_syntax_is_rejected_by_current_parser() {
+fn removed_replay_modes_are_rejected_by_current_parser() {
     Command::cargo_bin("mfm_cli")
         .expect("CLI")
         .args(["run", "replay", RUN_ID, "--mode", "compare_current"])
@@ -176,42 +176,6 @@ fn compare_current_cli_syntax_is_rejected_by_current_parser() {
         .args(["run", "replay", RUN_ID, "--mode", "compare-current"])
         .assert()
         .code(2);
-}
-
-#[test]
-fn replay_portable_export_flags_are_required_only_for_non_verify_modes() {
-    let directory = TempDir::new().expect("temporary replay directory");
-    let credential = directory.path().join("access-token");
-    std::fs::write(&credential, b"opaque\n").expect("credential file");
-    let credential = credential.to_str().expect("credential path");
-
-    let required = json_error(vec![
-        "--access-token-file",
-        credential,
-        "run",
-        "replay",
-        RUN_ID,
-        "--mode",
-        "reproduce",
-    ]);
-    assert_eq!(required.error.code(), "ReplayArtifactInvalid");
-    assert_eq!(required.error.message(), "The replay artifact is invalid.");
-
-    let forbidden = json_error(vec![
-        "--access-token-file",
-        credential,
-        "run",
-        "replay",
-        RUN_ID,
-        "--mode",
-        "verify",
-        "--portable-export",
-        "unused.stream",
-        "--portable-export-ref-file",
-        "unused.stream.ref",
-    ]);
-    assert_eq!(forbidden.error.code(), "ReplayArtifactInvalid");
-    assert_eq!(forbidden.error.message(), "The replay artifact is invalid.");
 }
 
 fn json_error(args: Vec<&str>) -> ErrorResponse {

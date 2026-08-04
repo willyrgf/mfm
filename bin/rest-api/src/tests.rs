@@ -10,7 +10,7 @@ use mfm_app::{
     application_for_test, application_with_export_for_test, AccessPolicyError, AccessTarget,
     AuthorizedTenant, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
 };
-use mfm_ids::{StableId, TenantScopeId};
+use mfm_ids::{ContentRef, StableId, TenantScopeId};
 use tokio::io::{AsyncRead, ReadBuf};
 use tower::ServiceExt as _;
 
@@ -132,17 +132,14 @@ fn replay_query_requires_one_exact_mode() {
         decode_replay_query(Some("mode=verify")).expect("verify mode"),
         ReplayMode::Verify
     );
-    assert_eq!(
-        decode_replay_query(Some("mode=reproduce")).expect("reproduce mode"),
-        ReplayMode::Reproduce
-    );
     for query in [
         None,
         Some(""),
         Some("tenant=forbidden"),
-        Some("mode=verify&mode=reproduce"),
+        Some("mode=verify&mode=verify"),
         Some("mode=unknown"),
         Some("mode=compare_current"),
+        Some("mode=reproduce"),
     ] {
         assert!(decode_replay_query(query).is_err(), "{query:?}");
     }
@@ -152,60 +149,6 @@ fn replay_query_requires_one_exact_mode() {
 fn json_request_bodies_reject_unknown_and_duplicate_fields() {
     assert!(decode_body::<ExportBody>(br#"{"kind":"audit","token":"forbidden"}"#).is_err());
     assert!(decode_body::<ExportBody>(br#"{"kind":"audit","kind":"semantic"}"#).is_err());
-}
-
-#[tokio::test]
-async fn replay_stream_request_requires_exact_headers_and_preserves_raw_bytes() {
-    let bytes = b"\x1e{\"kind\":\"end\"}\n";
-    let mut headers = replay_stream_headers(bytes);
-    let reproduce = replay_stream_request(
-        ReplayMode::Reproduce,
-        &headers,
-        Body::from(bytes.as_slice()),
-    )
-    .expect("reproduce stream");
-    let ReplayRequest::Reproduce(input) = reproduce else {
-        panic!("reproduce variant");
-    };
-    assert_eq!(input.content_ref(), &replay_export_ref(bytes));
-
-    headers.remove(CONTENT_TYPE);
-    assert_eq!(
-        replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty())
-            .expect_err("missing content type")
-            .public_error()
-            .code(),
-        "ReplayArtifactInvalid"
-    );
-
-    let mut headers = replay_stream_headers(bytes);
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
-
-    let mut headers = replay_stream_headers(bytes);
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(
-            "application/vnd.mfm.run-export-stream.v1+json-seq; charset=utf-8",
-        ),
-    );
-    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
-
-    let mut headers = replay_stream_headers(bytes);
-    headers.append(
-        CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
-    );
-    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
-
-    let mut headers = replay_stream_headers(bytes);
-    headers.append(
-        MFM_CONTENT_DIGEST,
-        HeaderValue::from_static(
-            "content:sha256-v1:0000000000000000000000000000000000000000000000000000000000000000",
-        ),
-    );
-    assert!(replay_stream_request(ReplayMode::Reproduce, &headers, Body::empty()).is_err());
 }
 
 #[test]
@@ -467,7 +410,7 @@ async fn bearer_authentication_precedes_replay_body_reads() {
         .clone()
         .oneshot(request(
             Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=verify"),
             panic_body(),
             None,
         ))
@@ -484,7 +427,7 @@ async fn bearer_authentication_precedes_replay_body_reads() {
     let response = router
         .oneshot(request(
             Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
+            &format!("/v1/runs/{RUN_ID}/replay?mode=verify"),
             panic_body(),
             Some("Basic opaque"),
         ))
@@ -527,13 +470,13 @@ async fn exact_grant_denial_is_forbidden_before_backend_access() {
 }
 
 #[tokio::test]
-async fn replay_grant_denial_does_not_poll_a_valid_raw_stream() {
+async fn replay_grant_denial_does_not_reach_the_backend() {
     let policy = RecordingPolicy::denying();
     let response = test_router(policy.clone(), TestApplicationMode::Sentinel)
-        .oneshot(replay_stream_http_request(
-            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
-            panic_body(),
-            b"unpolled",
+        .oneshot(request(
+            Method::POST,
+            &format!("/v1/runs/{RUN_ID}/replay?mode=verify"),
+            Body::empty(),
             Some("Bearer opaque"),
         ))
         .await
@@ -584,7 +527,7 @@ async fn missing_and_cross_tenant_runs_have_one_indistinguishable_response() {
 }
 
 #[tokio::test]
-async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
+async fn replay_authorizes_only_the_replay_grant() {
     let verify_policy = RecordingPolicy::allowing('1');
     let response = test_router(
         verify_policy.clone(),
@@ -607,47 +550,6 @@ async fn replay_reauthorizes_export_only_for_non_verify_artifacts() {
             .collect::<Vec<_>>(),
         vec![RunAccessGrant::Replay]
     );
-
-    let artifact = b"\x1e{\"kind\":\"end\"}\n";
-    let non_verify_policy = RecordingPolicy::allowing('1');
-    let response = test_router(
-        non_verify_policy.clone(),
-        TestApplicationMode::Replay(replay_response()),
-    )
-    .oneshot(replay_stream_http_request(
-        &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
-        Body::from(artifact.as_slice()),
-        artifact,
-        Some("Bearer opaque"),
-    ))
-    .await
-    .expect("non-verify response");
-    assert_eq!(response.status(), StatusCode::OK);
-    let calls = non_verify_policy.calls();
-    assert_eq!(
-        calls.iter().map(|(grant, _)| *grant).collect::<Vec<_>>(),
-        vec![RunAccessGrant::Replay, RunAccessGrant::Export]
-    );
-    assert_eq!(
-        calls[0].1, calls[1].1,
-        "the export reauthorization must target the same run"
-    );
-}
-
-#[tokio::test]
-async fn replay_raw_stream_has_no_old_rest_total_body_cap() {
-    let bytes = vec![b'x'; 16_777_216 + 1];
-    let policy = RecordingPolicy::allowing('1');
-    let response = test_router(policy, TestApplicationMode::Replay(replay_response()))
-        .oneshot(replay_stream_http_request(
-            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
-            Body::from(bytes.clone()),
-            &bytes,
-            Some("Bearer opaque"),
-        ))
-        .await
-        .expect("large raw replay response");
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -735,60 +637,6 @@ async fn export_body_reader_errors_hide_private_diagnostics() {
 }
 
 #[tokio::test]
-async fn invalid_replay_artifacts_fail_before_policy_or_backend_replay() {
-    let policy = RecordingPolicy::allowing('1');
-    let router = test_router(
-        policy.clone(),
-        TestApplicationMode::Replay(replay_response()),
-    );
-    let response = router
-        .clone()
-        .oneshot(request(
-            Method::POST,
-            &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
-            panic_body(),
-            Some("Bearer opaque"),
-        ))
-        .await
-        .expect("invalid artifact response");
-    assert_public_error(
-        response,
-        StatusCode::BAD_REQUEST,
-        "ReplayArtifactInvalid",
-        "The replay artifact is invalid.",
-    )
-    .await;
-    assert!(policy.calls().is_empty());
-
-    let mut invalid_digest = request(
-        Method::POST,
-        &format!("/v1/runs/{RUN_ID}/replay?mode=reproduce"),
-        panic_body(),
-        Some("Bearer opaque"),
-    );
-    invalid_digest.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
-    );
-    invalid_digest.headers_mut().insert(
-        MFM_CONTENT_DIGEST,
-        HeaderValue::from_static("not-a-content-digest"),
-    );
-    let response = router
-        .oneshot(invalid_digest)
-        .await
-        .expect("invalid digest response");
-    assert_public_error(
-        response,
-        StatusCode::BAD_REQUEST,
-        "ReplayArtifactInvalid",
-        "The replay artifact is invalid.",
-    )
-    .await;
-    assert!(policy.calls().is_empty());
-}
-
-#[tokio::test]
 async fn real_router_rejects_removed_routes_and_wrong_methods_without_app_work() {
     let policy = RecordingPolicy::allowing('1');
     let router = test_router(policy.clone(), TestApplicationMode::Sentinel);
@@ -838,37 +686,6 @@ fn request(method: Method, uri: &str, body: Body, authorization: Option<&str>) -
         builder = builder.header(AUTHORIZATION, authorization);
     }
     builder.body(body).expect("request")
-}
-
-fn replay_stream_http_request(
-    uri: &str,
-    body: Body,
-    digest_bytes: &[u8],
-    authorization: Option<&str>,
-) -> Request<Body> {
-    let mut request = request(Method::POST, uri, body, authorization);
-    *request.headers_mut() = replay_stream_headers(digest_bytes);
-    if let Some(authorization) = authorization {
-        request.headers_mut().insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(authorization).expect("authorization header"),
-        );
-    }
-    request
-}
-
-fn replay_stream_headers(bytes: &[u8]) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static(mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE),
-    );
-    headers.insert(
-        MFM_CONTENT_DIGEST,
-        HeaderValue::from_str(replay_export_ref(bytes).content_digest().as_str())
-            .expect("content digest header"),
-    );
-    headers
 }
 
 fn panic_body() -> Body {
@@ -930,13 +747,16 @@ fn hex_nibble(byte: u8) -> u8 {
 }
 
 fn replay_response() -> mfm_app::ReplayResponse {
-    mfm_app::ReplayResponse::strict_decode(
-        format!(
-            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{RUN_ID}\"}}"
-        )
-        .as_bytes(),
-    )
-    .expect("replay response")
+    let value: serde_json::Value = serde_json::from_str(&format!(
+            "{{\"kind\":\"verified\",\"journal_head\":{{\"commit_digest\":\"sha256-jcs-v1:{}\",\"run_sequence\":1}},\"record_count\":1,\"run_id\":\"{RUN_ID}\",\"semantic_head\":{{\"admission_ref\":{{\"ordinal\":0,\"record_hash\":\"sha256-jcs-v1:{}\",\"run_id\":\"{RUN_ID}\",\"run_sequence\":1}},\"kind\":\"genesis\",\"semantic_state_digest\":\"sha256-jcs-v1:{}\"}},\"status\":\"closed\",\"version\":\"mfm.structured-replay-result.v1\"}}",
+            "0".repeat(64),
+            "0".repeat(64),
+            "0".repeat(64),
+        ))
+        .expect("replay response JSON");
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&value.to_string())
+        .expect("canonical replay response");
+    mfm_app::ReplayResponse::strict_decode(canonical.as_bytes()).expect("replay response")
 }
 
 fn replay_export_ref(bytes: &[u8]) -> ContentRef {

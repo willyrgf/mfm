@@ -22,10 +22,10 @@ use mfm_app::{
     AdmissionStatus, Application, ErrorClass, ExportKind, ExportRequest, PublicError,
     PublicJsonResponse, ReplayMode, ReplayRequest, SecretCredential,
 };
-use mfm_ids::{ContentDigest, ContentRef, RunId};
+use mfm_ids::RunId;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio_util::io::{ReaderStream, StreamReader};
+use tokio_util::io::ReaderStream;
 use tower_http::trace::TraceLayer;
 use tracing::instrument;
 
@@ -262,7 +262,6 @@ async fn replay_run(
             require_empty_body(&body)?;
             ReplayRequest::Verify
         }
-        ReplayMode::Reproduce => replay_stream_request(mode, &headers, body)?,
     };
     let response = state
         .application
@@ -508,50 +507,6 @@ fn decode_replay_query(query: Option<&str>) -> Result<ReplayMode, ApiError> {
         )
         .into()
     })
-}
-
-fn replay_stream_request(
-    mode: ReplayMode,
-    headers: &HeaderMap,
-    body: Body,
-) -> Result<ReplayRequest, ApiError> {
-    if exactly_one_header(headers, CONTENT_TYPE)
-        .filter(|value| value.as_bytes() == mfm_replay_media_type().as_bytes())
-        .is_none()
-    {
-        return Err(PublicError::replay_artifact_invalid().into());
-    }
-    let digest = exactly_one_header(headers, MFM_CONTENT_DIGEST)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| ContentDigest::parse(value).ok())
-        .ok_or_else(PublicError::replay_artifact_invalid)?;
-    let schema_id = mfm_canonical::RecoverabilityContract::embedded()
-        .and_then(|contract| contract.schema_id("mfm.portable-run-export-stream.v1"))
-        .map_err(|_| {
-            PublicError::internal(
-                "RecoverabilityContractUnavailable",
-                "The recoverability contract is unavailable",
-            )
-        })?
-        .clone();
-    let content_ref =
-        ContentRef::new(schema_id, digest).map_err(|_| PublicError::replay_artifact_invalid())?;
-    let stream = body.into_data_stream().map_err(std::io::Error::other);
-    let input =
-        mfm_app::ExportStreamInput::from_reader(content_ref, Box::pin(StreamReader::new(stream)))?;
-    match mode {
-        ReplayMode::Reproduce => Ok(ReplayRequest::Reproduce(input)),
-        ReplayMode::Verify => Err(PublicError::replay_artifact_invalid().into()),
-    }
-}
-
-fn exactly_one_header(headers: &HeaderMap, name: HeaderName) -> Option<&HeaderValue> {
-    let mut values = headers.get_all(name).iter();
-    values.next().filter(|_| values.next().is_none())
-}
-
-fn mfm_replay_media_type() -> &'static str {
-    mfm_app::PORTABLE_RUN_EXPORT_MEDIA_TYPE
 }
 
 fn decode_page_query(query: Option<&str>) -> Result<PageQuery, ApiError> {

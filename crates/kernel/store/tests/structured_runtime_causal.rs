@@ -1326,7 +1326,7 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
         }),
     );
     let runtime = assembled.runtime;
-    let reader = assembled.public_reader;
+    let reader = assembled.export_reader;
     let (run_id, _attempt) = runtime
         .admit_run(admission(operation_id, document, 7, "fact-admit"))
         .await
@@ -1355,7 +1355,10 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
     let fact = &transition.facts[0];
     assert_eq!(fact.emission_ordinal, 0);
     assert_eq!(fact.fact_slot_ordinal, 0);
-    let verified = reader.load_public(&run_id).await.expect("verified facts");
+    let verified = reader
+        .load_for_export(&run_id)
+        .await
+        .expect("verified facts");
     let subject: Value = verified
         .object(&fact.subject.value_ref)
         .expect("fact subject")
@@ -1455,7 +1458,7 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         }),
     );
     let runtime = assembled.runtime;
-    let reader = assembled.public_reader;
+    let reader = assembled.export_reader;
     let (failed_run_id, _attempt) = runtime
         .admit_run(admission_with_invocation(
             operation_id.clone(),
@@ -1492,7 +1495,7 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let failed = reader
-        .load_public(&failed_run_id)
+        .load_for_export(&failed_run_id)
         .await
         .expect("failed run");
     let outcome_ref = failed
@@ -1513,7 +1516,7 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let succeeded = reader
-        .load_public(&successful_run_id)
+        .load_for_export(&successful_run_id)
         .await
         .expect("successful run");
     let outcome_ref = succeeded
@@ -1651,7 +1654,7 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         }),
     );
     let runtime = assembled.runtime;
-    let reader = assembled.public_reader;
+    let reader = assembled.export_reader;
     let (failed_run_id, _attempt) = runtime
         .admit_run(admission_with_invocation(
             operation_id.clone(),
@@ -1714,7 +1717,7 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
     );
 
     let failed = reader
-        .load_public(&failed_run_id)
+        .load_for_export(&failed_run_id)
         .await
         .expect("failed run");
     let outcome_ref = failed
@@ -1737,7 +1740,7 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         FailureValue { code: 91 }
     );
     let succeeded = reader
-        .load_public(&successful_run_id)
+        .load_for_export(&successful_run_id)
         .await
         .expect("successful run");
     let outcome_ref = succeeded
