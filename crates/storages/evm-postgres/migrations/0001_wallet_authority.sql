@@ -164,6 +164,9 @@ CREATE TABLE wallet_nonce_domains (
     activation_record_json TEXT NOT NULL,
     activation_attestation_json TEXT NOT NULL,
     local_high_water_nonce NUMERIC(20, 0),
+    active_reservation_key TEXT,
+    current_resource_frontier_ref TEXT,
+    current_incarnation_ref TEXT,
     CONSTRAINT wallet_nonce_domains_domain_v1 CHECK (
         length(wallet_nonce_domain_id) BETWEEN 1 AND 512
     ),
@@ -182,6 +185,11 @@ CREATE TABLE wallet_nonce_domains (
             AND local_high_water_nonce <= 18446744073709551614::numeric
             AND trunc(local_high_water_nonce) = local_high_water_nonce
         )
+    ),
+    CONSTRAINT wallet_nonce_domains_projection_v1 CHECK (
+        (active_reservation_key IS NULL OR length(active_reservation_key) BETWEEN 1 AND 512)
+        AND (current_resource_frontier_ref IS NULL OR length(current_resource_frontier_ref) BETWEEN 1 AND 1024)
+        AND (current_incarnation_ref IS NULL OR length(current_incarnation_ref) BETWEEN 1 AND 1024)
     )
 );
 
@@ -192,6 +200,7 @@ CREATE TABLE wallet_nonce_reservations (
     nonce NUMERIC(20, 0) NOT NULL,
     transaction_intent_digest TEXT NOT NULL,
     candidate_family_ref TEXT NOT NULL,
+    submission_semantics_digest TEXT NOT NULL,
     request_json TEXT NOT NULL,
     transaction_intent_json TEXT NOT NULL,
     candidate_family_json TEXT NOT NULL,
@@ -219,6 +228,7 @@ CREATE TABLE wallet_nonce_reservations (
         AND length(submission_intent_id) BETWEEN 1 AND 512
         AND length(transaction_intent_digest) BETWEEN 1 AND 512
         AND length(candidate_family_ref) BETWEEN 1 AND 512
+        AND length(submission_semantics_digest) BETWEEN 1 AND 512
     ),
     CONSTRAINT wallet_nonce_reservations_json_v1 CHECK (
         length(request_json) BETWEEN 2 AND 8388608

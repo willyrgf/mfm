@@ -5087,15 +5087,15 @@ impl Fixture {
         )
         .expect("issuer");
         let expansion = mfm_evm::evm_submission_expansion_policy_ref().expect("expansion");
-        let submission_intent_id = derive_submission_intent_id(
-            &self.nonce_domain,
-            &issuer,
-            token,
+        let submission_intent_id =
+            derive_submission_intent_id(&self.nonce_domain, &issuer, token).expect("intent id");
+        let submission_semantics_digest = mfm_evm::derive_submission_semantics_digest(
+            &transaction_intent,
+            &candidate_family,
             1,
-            candidate_family.digest(),
             &expansion,
         )
-        .expect("intent id");
+        .expect("semantics digest");
         let reservation_key =
             derive_evm_nonce_reservation_key(&self.nonce_domain, &submission_intent_id)
                 .expect("reservation key");
@@ -5103,8 +5103,10 @@ impl Fixture {
             nonce_domain: self.nonce_domain.clone(),
             domain_activation_attestation,
             submission_intent_id,
+            submission_semantics_digest,
             transaction_intent,
             candidate_family,
+            observation_rounds: 1,
             reservation_key,
             qualified_floor: QualifiedPendingNonceFloor {
                 observed: ObservedPendingNonceFloor {

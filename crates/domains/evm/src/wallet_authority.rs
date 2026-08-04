@@ -34,7 +34,8 @@ const QUALIFIED_CHAIN_INSTANCE_DOMAIN: &str = "mfm.evm.qualified-chain-instance.
 const CHAIN_LINEAGE_DOMAIN: &str = "mfm.evm.chain-lineage.v1";
 const WALLET_NONCE_DOMAIN: &str = "mfm.evm.wallet-nonce-domain.v1";
 const INTENT_ISSUER_DOMAIN: &str = "mfm.evm.intent-issuer.v1";
-const SUBMISSION_INTENT_DOMAIN: &str = "mfm.evm.submission-intent.v2";
+const SUBMISSION_INTENT_DOMAIN: &str = "mfm.evm.submission-intent.v3";
+const SUBMISSION_SEMANTICS_DOMAIN: &str = "mfm.evm.submission-semantics.v1";
 const RESERVATION_KEY_DOMAIN: &str = "mfm.evm.nonce-reservation.v1";
 const CANDIDATE_KEY_DOMAIN: &str = "mfm.evm.nonce-candidate.v1";
 const COMPLETION_KEY_DOMAIN: &str = "mfm.evm.nonce-completion.v1";
@@ -286,6 +287,11 @@ digest_identity!(
     "mfm.evm.submission_intent_id"
 );
 digest_identity!(
+    SubmissionSemanticsDigest,
+    "submission-semantics-digest",
+    "mfm.evm.submission_semantics_digest"
+);
+digest_identity!(
     EvmNonceReservationKey,
     "nonce-reservation-key",
     "mfm.evm.nonce_reservation_key"
@@ -403,36 +409,45 @@ pub fn derive_authenticated_intent_issuer_id(
     )?))
 }
 
-/// Derives the stable submission intent from its authenticated namespace and
-/// every behavior-affecting policy identity.
+/// Derives the stable submission intent from its authenticated namespace only.
 ///
-/// Observation-round bound, candidate-family digest, and expansion contract
-/// are frozen so resume under changed branching/expansion behavior is rejected
-/// before wallet mutation (EVM-08).
+/// Behavior-changing submission material belongs to [`SubmissionSemanticsDigest`]
+/// so the same caller token remains the permanent idempotency identity while a
+/// changed request is rejected as a semantic conflict.
 pub fn derive_submission_intent_id(
     domain: &WalletNonceDomain,
     issuer: &AuthenticatedIntentIssuerId,
     caller_submission_token: &str,
-    observation_rounds: u8,
-    candidate_family_digest: &str,
-    expansion_contract_ref: &EvmWalletReference,
 ) -> Result<SubmissionIntentId, WalletAuthorityContractError> {
     domain.validate()?;
     issuer.validate()?;
     validate_caller_submission_token(caller_submission_token)
         .map_err(|_| WalletAuthorityContractError::Invalid("submission_token"))?;
+    Ok(SubmissionIntentId::from_digest(hash(
+        SUBMISSION_INTENT_DOMAIN,
+        &(domain, issuer, caller_submission_token),
+    )?))
+}
+
+/// Derives the complete behavior identity retained alongside an intent.
+pub fn derive_submission_semantics_digest(
+    transaction_intent: &EvmTransactionIntent,
+    candidate_family: &EvmCandidateFamily,
+    observation_rounds: u8,
+    expansion_contract_ref: &EvmWalletReference,
+) -> Result<SubmissionSemanticsDigest, WalletAuthorityContractError> {
+    transaction_intent.validate()?;
+    candidate_family.validate(transaction_intent)?;
     if observation_rounds == 0 || observation_rounds > EVM_WALLET_OBSERVATION_ROUND_LIMIT {
         return Err(WalletAuthorityContractError::Invalid("observation_rounds"));
     }
     validate_reference(expansion_contract_ref)?;
-    Ok(SubmissionIntentId::from_digest(hash(
-        SUBMISSION_INTENT_DOMAIN,
+    Ok(SubmissionSemanticsDigest::from_digest(hash(
+        SUBMISSION_SEMANTICS_DOMAIN,
         &(
-            domain,
-            issuer,
-            caller_submission_token,
+            transaction_intent,
+            candidate_family,
             observation_rounds,
-            candidate_family_digest,
             expansion_contract_ref,
         ),
     )?))
@@ -1815,6 +1830,8 @@ pub struct ReadEvmWalletNonceStatusRequest {
     pub semantic_reservation_key: EvmNonceReservationKey,
     /// Stable authenticated intent.
     pub submission_intent_id: SubmissionIntentId,
+    /// Complete behavior identity for this intent.
+    pub submission_semantics_digest: SubmissionSemanticsDigest,
     /// Exact transaction intent digest.
     pub transaction_intent_digest: String,
     /// Exact candidate family digest.
@@ -1837,10 +1854,14 @@ pub struct ReserveEvmNonceRequest {
     pub domain_activation_attestation: WalletNonceDomainActivationAttestation,
     /// Stable authenticated intent.
     pub submission_intent_id: SubmissionIntentId,
+    /// Complete behavior identity for this intent.
+    pub submission_semantics_digest: SubmissionSemanticsDigest,
     /// Complete nonce-free transaction intent.
     pub transaction_intent: EvmTransactionIntent,
     /// Complete bounded candidate family.
     pub candidate_family: EvmCandidateFamily,
+    /// Exact observation-round policy included in the semantics digest.
+    pub observation_rounds: u8,
     /// Stable reservation key.
     pub reservation_key: EvmNonceReservationKey,
     /// Fresh qualified pending floor.
