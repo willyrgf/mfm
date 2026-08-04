@@ -23,9 +23,9 @@ use crate::submission::{
     ActivateWalletCandidateState, ActiveCandidateWork, AttestCandidateIdentityCapability,
     AttestCandidateIdentityState, BroadcastExactCandidateCapability, BroadcastExactCandidateState,
     BroadcastLineageHead, BuildUnsignedCandidateState, CandidateActivationDecision,
-    CandidateObservationWork, CandidateResolution, CandidateSlotDecision,
-    CandidateTransactionObservation, CandidateWork, CollapseWalletStatusState,
-    CompleteWalletNonceState, CompletedProjection, CompletionWork,
+    CandidateObservationWork, CandidateResolution, CandidateSlotDecision, CandidateSlotRoute,
+    CandidateTransactionObservation, CandidateWork, CollapseCandidateResolutionState,
+    CollapseWalletStatusState, CompleteWalletNonceState, CompletedProjection, CompletionWork,
     DeriveCandidateActivationPermitState, DeriveEvmCandidateOperationKeyState,
     DeriveEvmNonceReservationKeyState, DeriveSubmissionIntentIdState, DeriveTransactionIntentState,
     DerivedSubmissionDomain, EvmFinalizedHeadCapability, EvmFinalizedHeadObservation,
@@ -34,18 +34,20 @@ use crate::submission::{
     EvmReceiptLookupCapability, EvmReceiptLookupObservation, EvmReceiptLookupRequest,
     EvmSubmissionConfiguration, EvmSubmissionExpansion, EvmSubmissionOutput, EvmSubmissionRequest,
     EvmTransactionLookupCapability, EvmTransactionLookupObservation, EvmTransactionLookupRequest,
-    FailureReconciliationRequest, IntentBoundSubmission, MarkActivationReconcileState,
-    MarkCandidateCompletedState, MarkCandidateFamilyExhaustedState, MarkObservationReconcileState,
+    ExtractSubmissionWorkState, FailureReconciliationRequest, IntentBoundSubmission,
+    MarkActivationReconcileState, MarkCandidateCompletedState, MarkObservationReconcileState,
     MarkSubmissionCompletedState, MarkSubmissionResumedState, ObservationRoundDecision,
     ObserveActivatedTransactionState, ObserveCandidateReceiptState, ObserveCanonicalInclusionState,
     ObserveFinalizedHeadState, ObservePendingNonceState, ObservedPendingSubmission,
     PendingEvmSubmissionFailure, PermittedCandidateWork, PostReservePreparedSubmission,
+    PrepareExhaustionReconciliationState, PrepareRetainedCandidateObservationState,
     PreparedCandidateActivation, PreparedWalletSubmission, ProjectCompletedWalletDispositionState,
     QualifiedPendingSubmission, QualifyPendingNonceFloorState,
     ReadCandidateStatusAfterFailureState, ReadCandidateWalletNonceStatusState,
-    ReadPostReserveWalletNonceStatusState, ReadReservationStatusAfterFailureState,
-    ReadWalletNonceStatusState, ReserveWalletNonceState, SelectCandidateSlotState,
-    SelectObservationRoundState, SelectSubmissionTerminalState, SelectTerminalEvidenceState,
+    ReadExhaustionStatusState, ReadPostReserveWalletNonceStatusState,
+    ReadReservationStatusAfterFailureState, ReadWalletNonceStatusState, ReserveWalletNonceState,
+    SelectCandidateAttemptRouteState, SelectCandidateSlotState, SelectObservationRoundState,
+    SelectSubmissionTerminalState, SelectTerminalEvidenceState,
     StructuredSubmitEvmTransactionState, SubmissionProgress, SubmissionTerminalDecision,
     SubmissionWork, TerminalEvidenceDecision, TerminalEvidenceWork, UnsignedWalletCandidate,
     VerifyCanonicalInclusionState, WalletStatusBaseline, WalletStatusDecision,
@@ -299,12 +301,28 @@ pure_process!(
     submission_process::select_candidate_slot
 );
 pure_process!(
-    MarkCandidateFamilyExhaustedState,
-    submission_process::mark_candidate_family_exhausted
+    SelectCandidateAttemptRouteState,
+    submission_process::select_candidate_attempt_route
+);
+pure_process!(
+    CollapseCandidateResolutionState,
+    submission_process::collapse_candidate_resolution
+);
+pure_process!(
+    ExtractSubmissionWorkState,
+    submission_process::extract_submission_work
 );
 pure_process!(
     BuildUnsignedCandidateState,
     submission_process::build_unsigned_candidate
+);
+pure_process!(
+    PrepareRetainedCandidateObservationState,
+    submission_process::prepare_retained_candidate_observation
+);
+pure_process!(
+    PrepareExhaustionReconciliationState,
+    submission_process::prepare_exhaustion_reconciliation
 );
 pure_process!(
     DeriveCandidateActivationPermitState,
@@ -380,7 +398,7 @@ read_process!(
     ReadCandidateStatusAfterFailureState,
     candidate_reconciliation,
     submission_process::failure_reconciliation_status_request,
-    submission_process::settle_candidate_failure_status,
+    submission_process::settle_candidate_progress_failure_status,
     [EvmSubmissionFailure::NonceAuthorityUnavailable]
 );
 reconciling_read_process!(
@@ -388,6 +406,13 @@ reconciling_read_process!(
     prepared,
     submission_process::read_status_request,
     submission_process::settle_candidate_wallet_status,
+    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+);
+reconciling_read_process!(
+    ReadExhaustionStatusState,
+    exhaustion,
+    submission_process::failure_reconciliation_status_request,
+    submission_process::settle_exhaustion_status,
     [EvmSubmissionFailure::NonceAuthorityUnavailable]
 );
 reconciling_read_process!(
@@ -504,12 +529,17 @@ pub fn register_evm_submission_process(
     register_state::<ReadReservationStatusAfterFailureState>(registry, qualification, &fixture)?;
     register_state::<ReadCandidateStatusAfterFailureState>(registry, qualification, &fixture)?;
     register_state::<ReadCandidateWalletNonceStatusState>(registry, qualification, &fixture)?;
+    register_state::<ReadExhaustionStatusState>(registry, qualification, &fixture)?;
     register_state::<ObservePendingNonceState>(registry, qualification, &fixture)?;
     register_state::<QualifyPendingNonceFloorState>(registry, qualification, &fixture)?;
     register_state::<ReserveWalletNonceState>(registry, qualification, &fixture)?;
     register_state::<CollapseWalletStatusState>(registry, qualification, &fixture)?;
     register_state::<SelectCandidateSlotState>(registry, qualification, &fixture)?;
-    register_state::<MarkCandidateFamilyExhaustedState>(registry, qualification, &fixture)?;
+    register_state::<SelectCandidateAttemptRouteState>(registry, qualification, &fixture)?;
+    register_state::<CollapseCandidateResolutionState>(registry, qualification, &fixture)?;
+    register_state::<ExtractSubmissionWorkState>(registry, qualification, &fixture)?;
+    register_state::<PrepareExhaustionReconciliationState>(registry, qualification, &fixture)?;
+    register_state::<PrepareRetainedCandidateObservationState>(registry, qualification, &fixture)?;
     register_state::<BuildUnsignedCandidateState>(registry, qualification, &fixture)?;
     register_state::<AttestCandidateIdentityState>(registry, qualification, &fixture)?;
     register_state::<DeriveCandidateActivationPermitState>(registry, qualification, &fixture)?;
@@ -728,6 +758,7 @@ fn register_values(registry: &mut ProgramRegistryBuilder) -> mfm_certify::Result
         SubmissionWork,
         SubmissionProgress,
         CandidateSlotDecision,
+        CandidateSlotRoute,
         SubmissionTerminalDecision,
         CandidateWork,
         PermittedCandidateWork,
@@ -777,6 +808,7 @@ fn register_closed_sums(registry: &mut ProgramRegistryBuilder) -> mfm_certify::R
     registry.register_closed_sum::<PendingEvmSubmissionFailure>()?;
     registry.register_closed_sum::<WalletStatusDecision>()?;
     registry.register_closed_sum::<CandidateSlotDecision>()?;
+    registry.register_closed_sum::<CandidateSlotRoute>()?;
     registry.register_closed_sum::<SubmissionTerminalDecision>()?;
     registry.register_closed_sum::<CandidateActivationDecision>()?;
     registry.register_closed_sum::<CandidateResolution>()?;
@@ -1251,10 +1283,6 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
         CandidateActivationPermit::Initial { exact_next_ordinal } => {
             ordinal == 0 && *exact_next_ordinal == 0
         }
-        CandidateActivationPermit::Reobservation {
-            exact_ordinal,
-            retained_activation_ref,
-        } => *exact_ordinal == ordinal && valid_reference(retained_activation_ref),
         CandidateActivationPermit::Replacement {
             predecessor_activation_ref,
             predecessor_ordinal,

@@ -13,11 +13,11 @@ use mfm_evm::{
     canonical_wallet_reference, derive_evm_candidate_operation_key,
     derive_evm_nonce_completion_key, derive_exact_candidate_activation_permit,
     ActivateCandidateResponse, ActivateEvmCandidateRequest, ActivateWalletCandidateCapability,
-    ActiveWalletCandidate, CandidateActivationPermit, CanonicalTerminalOutcome,
-    CompleteEvmNonceRequest, CompleteWalletNonceCapability, CompleteWalletNonceResponse,
-    CompletedWalletNonce, EvmCandidateFamily, EvmReceiptLookupObservation,
-    EvmSubmissionCapabilityImplementation, EvmSubmissionFailure, EvmTransactionIntent,
-    EvmTransactionLookupObservation, EvmWalletReference, ExecutionDisposition,
+    ActiveWalletCandidate, CanonicalTerminalOutcome, CompleteEvmNonceRequest,
+    CompleteWalletNonceCapability, CompleteWalletNonceResponse, CompletedWalletNonce,
+    EvmCandidateFamily, EvmReceiptLookupObservation, EvmSubmissionCapabilityImplementation,
+    EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionLookupObservation,
+    EvmWalletReference, ExecutionDisposition, QualifiedPendingNonceObservation,
     ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability, ReserveEvmNonceRequest,
     ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
     TerminalWitnesses, UnsignedWalletCandidate, WalletNonceAuthority,
@@ -937,28 +937,13 @@ impl PostgresWalletNonceAuthority {
         {
             return Ok(false);
         }
-        // First-activation replay uses the original Initial/Replacement permit
-        // against the prior prefix. Recovery reobservation uses the Reobservation
-        // permit against the full retained prefix (EVM-03).
-        match &request.activation_permit {
-            CandidateActivationPermit::Reobservation {
-                exact_ordinal,
-                retained_activation_ref,
-            } => Ok(*exact_ordinal == request.next_candidate.candidate_ordinal
-                && retained_activation_ref == &existing.activation_evidence_ref
-                && derive_exact_candidate_activation_permit(
-                    &reservation.reservation,
-                    &candidates,
-                    request.next_candidate.candidate_ordinal,
-                    request.next_candidate.candidate_ordinal,
-                )
-                .is_ok_and(|expected| expected == request.activation_permit)),
-            _ => Ok(candidate_progression_matches(
-                request,
-                &reservation,
-                &candidates[..ordinal],
-            )),
-        }
+        // Idempotent activation replay is checked against the original
+        // Initial/Replacement permit and the prefix that precedes this ordinal.
+        Ok(candidate_progression_matches(
+            request,
+            &reservation,
+            &candidates[..ordinal],
+        ))
     }
 
     async fn resolve_reservation_after_commit(
@@ -1300,6 +1285,42 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                     EvmSubmissionFailure::NonceAuthorityUnavailable,
                 ),
             }
+        })
+    }
+
+    fn reserve_qualified<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        observation: &'a QualifiedPendingNonceObservation,
+        request: &'a ReserveEvmNonceRequest,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        Box::pin(async move {
+            let expected_chain = request
+                .domain_activation_attestation
+                .current_schema_record
+                .chain_instance_attestation
+                .content_ref()
+                .ok();
+            let valid = observation.validate().is_ok()
+                && observation.floor() == &request.qualified_floor
+                && expected_chain.as_ref() == Some(observation.chain_instance_ref())
+                && observation
+                    .sender()
+                    .is_ok_and(|sender| format!("{sender:#x}") == request.nonce_domain.sender())
+                && self
+                    .validate_activation(&request.domain_activation_attestation)
+                    .is_ok();
+            if !valid {
+                return EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+            }
+            self.reserve(state_input_ref, request).await
         })
     }
 

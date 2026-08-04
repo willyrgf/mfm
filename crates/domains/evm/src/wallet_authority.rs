@@ -1201,6 +1201,22 @@ impl QualifiedPendingNonceObservation {
         &self.source_run_id
     }
 
+    /// Returns the exact chain binding carried by the committed origin.
+    pub const fn chain_instance_ref(&self) -> &EvmWalletReference {
+        &self.chain_instance_ref
+    }
+
+    /// Returns the exact physical release used for the pending read.
+    pub const fn physical_release_ref(&self) -> &EvmWalletReference {
+        &self.physical_release_ref
+    }
+
+    /// Returns the authenticated sender bound to the pending read.
+    pub fn sender(&self) -> Result<Address, WalletAuthorityContractError> {
+        Address::from_str(&self.sender)
+            .map_err(|_| WalletAuthorityContractError::Invalid("pending_sender"))
+    }
+
     /// Revalidates the complete producer-bound origin.
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.floor.observed.pending_nonce.validate()?;
@@ -1308,16 +1324,6 @@ pub enum CandidateActivationPermit {
         /// Exact expected next ordinal, necessarily zero.
         exact_next_ordinal: u16,
     },
-    /// Re-entry of an already retained activated candidate for recovery observation.
-    ///
-    /// Affine and consumptive: binds the reservation, ordinal, and retained
-    /// activation evidence identity. Cannot certify replacement eligibility.
-    Reobservation {
-        /// Exact retained ordinal being re-entered.
-        exact_ordinal: u16,
-        /// Retained activation evidence for that ordinal.
-        retained_activation_ref: EvmWalletReference,
-    },
     /// Statically next replacement candidate.
     Replacement {
         /// Exact predecessor activation proof.
@@ -1334,12 +1340,12 @@ pub enum CandidateActivationPermit {
 }
 
 /// Derives the one exact activation permit for the next member of a retained
-/// candidate prefix, or reobservation of an already activated ordinal.
+/// candidate prefix. Retained candidates use the observation-only recovery path.
 ///
 /// `observed_prefix_len` is the exclusive upper bound of activated ordinals that
 /// have independent producer observation evidence in the current recovery walk.
 /// Certified order requires `observed_prefix_len == next_candidate_ordinal`
-/// before any activation (reobservation, initial, or replacement). Replacement
+/// before any activation (initial or replacement). Replacement
 /// therefore cannot admit until every retained activated candidate has been
 /// observed (EVM-03/EVM-04).
 pub fn derive_exact_candidate_activation_permit(
@@ -1370,17 +1376,17 @@ pub fn derive_exact_candidate_activation_permit(
         ));
     }
 
-    // Recovery reobservation of an already-activated ordinal.
+    // Retained candidates are handled by the observation-only state path.
     if let Some(retained) = activated_candidates
         .get(usize::from(next_candidate_ordinal))
         .filter(|candidate| {
             candidate.attested_candidate.candidate_ordinal == next_candidate_ordinal
         })
     {
-        return Ok(CandidateActivationPermit::Reobservation {
-            exact_ordinal: next_candidate_ordinal,
-            retained_activation_ref: retained.activation_evidence_ref.clone(),
-        });
+        let _ = retained;
+        return Err(WalletAuthorityContractError::Invalid(
+            "retained_candidate_requires_observation",
+        ));
     }
 
     if usize::from(next_candidate_ordinal) != activated_candidates.len()
@@ -2081,6 +2087,25 @@ pub trait WalletNonceAuthority: Send + Sync + 'static {
             WalletNonceStoreLineageHead,
         >,
     >;
+
+    /// Applies a reservation only after the live adapter has paired the
+    /// request with the committed producer-bound pending observation.
+    fn reserve_qualified<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        observation: &'a QualifiedPendingNonceObservation,
+        request: &'a ReserveEvmNonceRequest,
+    ) -> ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        let _ = observation;
+        self.reserve(state_input_ref, request)
+    }
 
     /// Applies or exactly resolves one candidate activation.
     fn activate_candidate<'a>(

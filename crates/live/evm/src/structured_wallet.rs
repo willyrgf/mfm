@@ -1,11 +1,13 @@
 //! Target-bound structured adapters for the narrow wallet nonce authority.
 
 use std::marker::PhantomData;
+use std::str::FromStr;
 use std::sync::Arc;
 
+use alloy_primitives::Address;
 use mfm_capabilities::{
-    BoundedComponentInvoker, ComponentFuture, EffectAdapterInvoker, EffectRefreshMode,
-    ReadAdapterCompletion, ReadAdapterInvoker,
+    AccessFaultCode, BoundedComponentInvoker, ComponentFuture, EffectAdapterCompletion,
+    EffectAdapterInvoker, EffectRefreshMode, ReadAdapterCompletion, ReadAdapterInvoker,
 };
 use mfm_certify::structured::{
     PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeEffectPhysicalBinding,
@@ -17,12 +19,15 @@ use mfm_evm::{
     read_wallet_nonce_status_adapter_contract, reserve_wallet_nonce_adapter_contract,
     ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, CompleteEvmNonceRequest,
     CompleteWalletNonceCapability, EvmSubmissionFailure, EvmSubmissionProcessQualification,
-    ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability, ReserveEvmNonceRequest,
-    ReserveWalletNonceCapability, WalletNonceAuthority, WalletNonceAuthorityResource,
-    WalletNonceDomainActivationAttestation, WalletNonceStatus,
+    QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
+    ReadWalletNonceStatusCapability, ReserveEvmNonceRequest, ReserveWalletNonceCapability,
+    WalletNonceAuthority, WalletNonceAuthorityResource, WalletNonceDomainActivationAttestation,
+    WalletNonceStatus,
 };
 use mfm_ids::{ContentRef, StableId};
-use mfm_journal::structured::{AccessKind, HistoryObject, LexicalValueRef};
+use mfm_journal::structured::{
+    AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
+};
 use mfm_program::structured::{
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
     RuntimeResourceAuthority,
@@ -44,6 +49,7 @@ pub struct EvmStructuredWalletBindings {
     resource_contract_ref: ContentRef,
     read_release_history: EvmPhysicalBindingReleaseHistory,
     effect_release_history: EvmPhysicalBindingReleaseHistory,
+    integrity_fault: AccessFaultCode,
 }
 
 impl EvmStructuredWalletBindings {
@@ -97,6 +103,10 @@ impl EvmStructuredWalletBindings {
             resource_contract_ref,
             read_release_history,
             effect_release_history,
+            integrity_fault: AccessFaultCode::new(
+                StableId::new("mfm.evm-live/structured-wallet-integrity-fault")
+                    .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)?,
+            ),
         })
     }
 
@@ -276,6 +286,17 @@ trait WalletEffectSpec: RuntimeEffectCapability {
         state_input_ref: &'a LexicalValueRef,
         request: &'a Self::Request,
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<Self>>;
+
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a Self::Request,
+        _authorization_ref: &'a mfm_journal::structured::RecordRef,
+        _authorization: &'a ExternalAccessAuthorized,
+        _integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<Self>> {
+        Self::invoke(authority, state_input_ref, request)
+    }
 }
 
 impl WalletEffectSpec for ReserveWalletNonceCapability {
@@ -290,6 +311,61 @@ impl WalletEffectSpec for ReserveWalletNonceCapability {
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<ReserveWalletNonceCapability>>
     {
         authority.reserve(state_input_ref, request)
+    }
+
+    fn invoke_authorized<'a>(
+        authority: &'a dyn WalletNonceAuthority,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReserveEvmNonceRequest,
+        authorization_ref: &'a mfm_journal::structured::RecordRef,
+        authorization: &'a ExternalAccessAuthorized,
+        integrity_fault: &'a AccessFaultCode,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<ReserveWalletNonceCapability>>
+    {
+        let chain_instance_ref = match request
+            .domain_activation_attestation
+            .current_schema_record
+            .chain_instance_attestation
+            .content_ref()
+        {
+            Ok(reference) => reference,
+            Err(_) => {
+                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                    integrity_fault.clone(),
+                )))
+            }
+        };
+        let sender = match Address::from_str(request.nonce_domain.sender()) {
+            Ok(sender) => sender,
+            Err(_) => {
+                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                    integrity_fault.clone(),
+                )))
+            }
+        };
+        let observation = QualifiedPendingNonceObservation::from_committed_origin(
+            request.qualified_floor.clone(),
+            chain_instance_ref,
+            sender,
+            request
+                .qualified_floor
+                .observed
+                .route_generation_ref
+                .clone(),
+            authorization_ref.run_id.clone(),
+            authorization_ref.clone(),
+            authorization.request.value_ref.clone(),
+        );
+        let Ok(observation) = observation else {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                integrity_fault.clone(),
+            )));
+        };
+        Box::pin(async move {
+            authority
+                .reserve_qualified(state_input_ref, &observation, request)
+                .await
+        })
     }
 }
 
@@ -367,6 +443,22 @@ where
 {
     fn public_certificate(&self) -> &HistoryObject {
         self.source.effect_release_history.current().certificate()
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization_ref: &'a mfm_journal::structured::RecordRef,
+        authorization: &'a ExternalAccessAuthorized,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
+        C::invoke_authorized(
+            self.source.authority.as_ref(),
+            &self.state_input_ref,
+            request,
+            authorization_ref,
+            authorization,
+            &self.source.integrity_fault,
+        )
     }
 
     fn supersession_head<'a>(
