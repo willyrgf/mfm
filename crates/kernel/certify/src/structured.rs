@@ -1144,6 +1144,19 @@ where
         &'a self,
         evidence: &'a <C::Refresh as EffectRefreshMode>::Evidence,
     ) -> ComponentFuture<'a, Option<HistoryObject>>;
+
+    /// Performs one invocation with the exact committed authorization origin.
+    ///
+    /// Bindings that do not consume origin evidence inherit the ordinary
+    /// invocation. Origin-sensitive adapters override this method.
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        _authorization_ref: &'a RecordRef,
+        _authorization: &'a ExternalAccessAuthorized,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
+        self.invoke(request)
+    }
 }
 
 /// Process-assembly source of current concrete Effect targets.
@@ -1777,9 +1790,15 @@ where
         authorization: Option<NewlyAppendedAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion> {
+        let authorization = authorization.map(|authorization| {
+            (
+                authorization.authorization_ref().clone(),
+                authorization.authorization().clone(),
+            )
+        });
         Box::pin(async move {
-            drop(authorization);
             let invocation = AssertUnwindSafe(async {
+                drop(authorization);
                 match self.binding.invoke(&self.request).await {
                     ReadAdapterCompletion::Returned(value) => {
                         let value = encode_process_value(&value)?;
@@ -1830,10 +1849,23 @@ where
         authorization: Option<NewlyAppendedAuthorization>,
         integrity_fault_code: StableId,
     ) -> ComponentFuture<'static, QualifiedAccessCompletion> {
+        let authorization = authorization.map(|authorization| {
+            (
+                authorization.authorization_ref().clone(),
+                authorization.authorization().clone(),
+            )
+        });
         Box::pin(async move {
-            drop(authorization);
             let invocation = AssertUnwindSafe(async {
-                match self.binding.invoke(&self.request).await {
+                let completion = match authorization.as_ref() {
+                    Some((authorization_ref, authorization)) => {
+                        self.binding
+                            .invoke_authorized(&self.request, authorization_ref, authorization)
+                            .await
+                    }
+                    None => self.binding.invoke(&self.request).await,
+                };
+                match completion {
                     EffectAdapterCompletion::Returned(value) => {
                         let value = encode_process_value(&value)?;
                         self.implementation.validate_returned(&value)?;

@@ -5,7 +5,7 @@ use std::str::FromStr;
 use alloy_primitives::U256;
 use mfm_ids::{StableId, TenantScopeId};
 use mfm_program::structured::{CommittedObservation, StateSettlement};
-use mfm_spec::structured::ProposedStateOutcome;
+use mfm_spec::structured::{ProposedStateOutcome, ProposedStateValue};
 
 use crate::submission::{
     ActiveCandidateWork, CandidateActivationDecision, CandidateObservationWork,
@@ -272,6 +272,51 @@ pub(crate) fn settle_candidate_failure_status(
         WalletStatusDecision::Absent | WalletStatusDecision::Busy { .. } => {
             StateSettlement::InvalidEvidence
         }
+    }
+}
+
+pub(crate) fn settle_candidate_progress_failure_status(
+    request: &FailureReconciliationRequest,
+    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+) -> StateSettlement<SubmissionProgress, EvmSubmissionFailure> {
+    match settle_candidate_failure_status(request, observation) {
+        StateSettlement::Proposed(outcome) => match outcome.into_parts().0 {
+            ProposedStateValue::Success(CandidateResolution::Completed { completion }) => {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(SubmissionProgress {
+                    work: None,
+                    completion: Some(completion),
+                    failure: None,
+                }))
+            }
+            ProposedStateValue::Success(CandidateResolution::Resume { work }) => {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(SubmissionProgress {
+                    work: Some(work),
+                    completion: None,
+                    failure: None,
+                }))
+            }
+            ProposedStateValue::Failure(failure) => {
+                StateSettlement::Proposed(ProposedStateOutcome::Failure(failure))
+            }
+        },
+        StateSettlement::InvalidEvidence => StateSettlement::InvalidEvidence,
+    }
+}
+
+pub(crate) fn settle_exhaustion_status(
+    request: &FailureReconciliationRequest,
+    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+) -> StateSettlement<CandidateResolution, PendingEvmSubmissionFailure> {
+    match settle_candidate_failure_status(request, observation) {
+        StateSettlement::Proposed(outcome) => match outcome.into_parts().0 {
+            ProposedStateValue::Success(resolution) => {
+                StateSettlement::Proposed(ProposedStateOutcome::Success(resolution))
+            }
+            ProposedStateValue::Failure(failure) => StateSettlement::Proposed(
+                ProposedStateOutcome::Failure(PendingEvmSubmissionFailure::Direct { failure }),
+            ),
+        },
+        StateSettlement::InvalidEvidence => StateSettlement::InvalidEvidence,
     }
 }
 
@@ -628,36 +673,139 @@ pub(crate) fn select_candidate_slot(
     progress: &SubmissionProgress,
 ) -> ProposedStateOutcome<CandidateSlotDecision, mfm_program::structured::Never> {
     let decision = match (&progress.work, &progress.completion, &progress.failure) {
-        (Some(work), None, None)
-            if usize::from(work.next_candidate_ordinal)
-                < work
-                    .prepared
-                    .intent
-                    .derived
-                    .request
-                    .candidate_family()
-                    .candidates()
-                    .len() =>
-        {
-            // Recovery and first-use share one walk: ordinals are visited in
-            // certified order. Already-activated ordinals reobserve; the first
-            // unactivated ordinal may replace only after the full prefix was
-            // observed (see derive_candidate_activation_permit).
-            CandidateSlotDecision::Execute { work: work.clone() }
-        }
-        (Some(_), None, None) => CandidateSlotDecision::Exhausted,
+        (Some(_), None, None) => CandidateSlotDecision::Execute,
         _ => CandidateSlotDecision::Skip,
     };
     ProposedStateOutcome::Success(decision)
 }
 
-pub(crate) fn mark_candidate_family_exhausted(
-    progress: &SubmissionProgress,
+pub(crate) fn select_candidate_attempt_route(
+    work: &SubmissionWork,
+) -> ProposedStateOutcome<crate::submission::CandidateSlotRoute, mfm_program::structured::Never> {
+    let family_len = work
+        .prepared
+        .intent
+        .derived
+        .request
+        .candidate_family()
+        .candidates()
+        .len();
+    let route = if usize::from(work.next_candidate_ordinal) >= family_len {
+        crate::submission::CandidateSlotRoute::Exhausted
+    } else if work
+        .activated_candidates
+        .get(usize::from(work.next_candidate_ordinal))
+        .is_some()
+    {
+        crate::submission::CandidateSlotRoute::ObserveRetained
+    } else {
+        crate::submission::CandidateSlotRoute::Activate
+    };
+    ProposedStateOutcome::Success(route)
+}
+
+pub(crate) fn collapse_candidate_resolution(
+    resolution: &CandidateResolution,
 ) -> ProposedStateOutcome<SubmissionProgress, mfm_program::structured::Never> {
-    ProposedStateOutcome::Success(SubmissionProgress {
-        work: None,
-        completion: progress.completion.clone(),
-        failure: Some(EvmSubmissionFailure::ReplacementPolicyExhausted),
+    let progress = match resolution {
+        CandidateResolution::Completed { completion } => SubmissionProgress {
+            work: None,
+            completion: Some(completion.clone()),
+            failure: None,
+        },
+        CandidateResolution::Resume { work } => SubmissionProgress {
+            work: Some(work.clone()),
+            completion: None,
+            failure: None,
+        },
+    };
+    ProposedStateOutcome::Success(progress)
+}
+
+pub(crate) fn extract_submission_work(
+    progress: &SubmissionProgress,
+) -> ProposedStateOutcome<SubmissionWork, EvmSubmissionFailure> {
+    match (&progress.work, &progress.completion, &progress.failure) {
+        (Some(work), None, None) => ProposedStateOutcome::Success(work.clone()),
+        _ => ProposedStateOutcome::Failure(EvmSubmissionFailure::NonceLineageDiverged),
+    }
+}
+
+pub(crate) fn prepare_exhaustion_reconciliation(
+    work: &SubmissionWork,
+) -> ProposedStateOutcome<FailureReconciliationRequest, mfm_program::structured::Never> {
+    ProposedStateOutcome::Success(FailureReconciliationRequest {
+        prepared: work.prepared.clone(),
+        baseline: work.status_baseline.clone(),
+        original_failure: EvmSubmissionFailure::ReplacementPolicyExhausted,
+    })
+}
+
+/// Builds the observation-only context for one retained activated candidate.
+///
+/// Retained work never passes through candidate activation or broadcast again;
+/// the activation evidence is carried only as a producer-bound signer/release
+/// witness while fresh transaction and receipt reads establish chain truth.
+pub(crate) fn prepare_retained_candidate_observation(
+    work: &SubmissionWork,
+) -> ProposedStateOutcome<CandidateObservationWork, PendingEvmSubmissionFailure> {
+    let Some(active_candidate) = work
+        .activated_candidates
+        .get(usize::from(work.next_candidate_ordinal))
+        .cloned()
+    else {
+        return ProposedStateOutcome::Failure(reconcile_reserved(
+            work,
+            EvmSubmissionFailure::NonceLineageDiverged,
+        ));
+    };
+    let candidate = match build_unsigned_candidate(work).into_parts().0 {
+        ProposedStateValue::Success(mut candidate) => {
+            candidate.attested_candidate = Some(active_candidate.attested_candidate.clone());
+            candidate
+        }
+        ProposedStateValue::Failure(failure) => return ProposedStateOutcome::Failure(failure),
+    };
+    let submitted = SubmittedCandidateProof {
+        candidate_ordinal: active_candidate.attested_candidate.candidate_ordinal,
+        unsigned_candidate_digest: active_candidate
+            .attested_candidate
+            .unsigned_candidate_digest
+            .clone(),
+        transaction_hash: active_candidate.attested_candidate.transaction_hash.clone(),
+        semantic_signer_id: active_candidate
+            .attested_candidate
+            .semantic_signer_id
+            .clone(),
+        // A retained candidate carries its original signer attestation; this
+        // observation proof is never passed to the broadcast capability.
+        signer_generation_ref: active_candidate
+            .attested_candidate
+            .signer_attestation_ref
+            .clone(),
+        signing_contract_ref: active_candidate
+            .attested_candidate
+            .signing_profile_contract_ref
+            .clone(),
+        submission_contract_ref: candidate
+            .unsigned_candidate
+            .transaction_intent
+            .submission_contract_ref()
+            .clone(),
+    };
+    ProposedStateOutcome::Success(CandidateObservationWork {
+        active: ActiveCandidateWork {
+            candidate,
+            active_candidate,
+        },
+        submitted,
+        next_round: 0,
+        observation: CandidateTransactionObservation {
+            transaction: None,
+            receipt: None,
+            finalized_head: None,
+            inclusion_block: None,
+        },
     })
 }
 

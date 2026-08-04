@@ -1262,6 +1262,21 @@ pub(crate) struct SubmissionWork {
     pub(crate) status_baseline: WalletStatusBaseline,
 }
 
+/// Route selected for one candidate attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "candidate-slot-route",
+    version = "1",
+    schema = "mfm.evm.candidate_slot_route"
+)]
+pub(crate) enum CandidateSlotRoute {
+    Activate,
+    ObserveRetained,
+    Exhausted,
+}
+
 /// Closed status decision produced from one committed status observation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1320,8 +1335,7 @@ pub(crate) struct ObservedPendingSubmission {
 // This certified closed sum intentionally preserves direct schema payloads.
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum CandidateSlotDecision {
-    Execute { work: SubmissionWork },
-    Exhausted,
+    Execute,
     Skip,
 }
 
@@ -1535,6 +1549,7 @@ pub(crate) enum CompletedProjection {
 
 impl mfm_program::structured::ClosedSum for WalletStatusDecision {}
 impl mfm_program::structured::ClosedSum for PendingEvmSubmissionFailure {}
+impl mfm_program::structured::ClosedSum for CandidateSlotRoute {}
 impl mfm_program::structured::ClosedSum for CandidateSlotDecision {}
 impl mfm_program::structured::ClosedSum for SubmissionTerminalDecision {}
 impl mfm_program::structured::ClosedSum for CandidateActivationDecision {}
@@ -1591,7 +1606,7 @@ read_state!(
 read_state!(
     ReadCandidateStatusAfterFailureState,
     FailureReconciliationRequest,
-    CandidateResolution,
+    SubmissionProgress,
     ReadEvmWalletNonceStatusRequest,
     WalletNonceStatus,
     ReadWalletNonceStatusCapability,
@@ -1605,6 +1620,15 @@ reconciling_read_state!(
     WalletNonceStatus,
     ReadWalletNonceStatusCapability,
     "mfm.evm.state/read-candidate-wallet-nonce-status"
+);
+reconciling_read_state!(
+    ReadExhaustionStatusState,
+    FailureReconciliationRequest,
+    CandidateResolution,
+    ReadEvmWalletNonceStatusRequest,
+    WalletNonceStatus,
+    ReadWalletNonceStatusCapability,
+    "mfm.evm.state/read-exhaustion-status"
 );
 reconciling_read_state!(
     ObservePendingNonceState,
@@ -1637,22 +1661,46 @@ pure_state!(
     "mfm.evm.state/select-candidate-slot"
 );
 pure_state!(
+    SelectCandidateAttemptRouteState,
+    SubmissionWork,
+    CandidateSlotRoute,
+    "mfm.evm.state/select-candidate-attempt-route"
+);
+pure_state!(
+    CollapseCandidateResolutionState,
+    CandidateResolution,
+    SubmissionProgress,
+    "mfm.evm.state/collapse-candidate-resolution"
+);
+fallible_pure_state!(
+    ExtractSubmissionWorkState,
+    SubmissionProgress,
+    SubmissionWork,
+    "mfm.evm.state/extract-submission-work"
+);
+pure_state!(
+    PrepareExhaustionReconciliationState,
+    SubmissionWork,
+    FailureReconciliationRequest,
+    "mfm.evm.state/prepare-exhaustion-reconciliation"
+);
+pure_state!(
     CollapseWalletStatusState,
     WalletStatusDecision,
     SubmissionProgress,
     "mfm.evm.state/collapse-wallet-status"
-);
-pure_state!(
-    MarkCandidateFamilyExhaustedState,
-    SubmissionProgress,
-    SubmissionProgress,
-    "mfm.evm.state/mark-candidate-family-exhausted"
 );
 reconciling_pure_state!(
     BuildUnsignedCandidateState,
     SubmissionWork,
     CandidateWork,
     "mfm.evm.state/build-unsigned-candidate"
+);
+reconciling_pure_state!(
+    PrepareRetainedCandidateObservationState,
+    SubmissionWork,
+    CandidateObservationWork,
+    "mfm.evm.state/prepare-retained-candidate-observation"
 );
 reconciling_read_state!(
     AttestCandidateIdentityState,

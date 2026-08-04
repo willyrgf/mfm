@@ -14,20 +14,22 @@ use serde::{Deserialize, Serialize};
 use crate::submission::{
     ActivateWalletCandidateState, ActiveCandidateWork, AttestCandidateIdentityState,
     BroadcastExactCandidateState, BuildUnsignedCandidateState, CandidateObservationWork,
-    CandidateResolution, CollapseWalletStatusState, CompleteWalletNonceState,
-    DeriveCandidateActivationPermitState, DeriveEvmCandidateOperationKeyState,
-    DeriveEvmNonceReservationKeyState, DeriveSubmissionIntentIdState, DeriveTransactionIntentState,
-    EvmSubmissionRequest, FailureReconciliationRequest, MarkActivationReconcileState,
-    MarkCandidateCompletedState, MarkCandidateFamilyExhaustedState, MarkObservationReconcileState,
-    MarkSubmissionCompletedState, MarkSubmissionResumedState, ObserveActivatedTransactionState,
+    CandidateResolution, CollapseCandidateResolutionState, CollapseWalletStatusState,
+    CompleteWalletNonceState, DeriveCandidateActivationPermitState,
+    DeriveEvmCandidateOperationKeyState, DeriveEvmNonceReservationKeyState,
+    DeriveSubmissionIntentIdState, DeriveTransactionIntentState, EvmSubmissionRequest,
+    ExtractSubmissionWorkState, FailureReconciliationRequest, MarkActivationReconcileState,
+    MarkCandidateCompletedState, MarkObservationReconcileState, ObserveActivatedTransactionState,
     ObserveCandidateReceiptState, ObserveCanonicalInclusionState, ObserveFinalizedHeadState,
-    ObservePendingNonceState, PendingEvmSubmissionFailure, PreparedWalletSubmission,
+    ObservePendingNonceState, PendingEvmSubmissionFailure, PrepareExhaustionReconciliationState,
+    PrepareRetainedCandidateObservationState, PreparedWalletSubmission,
     ProjectCompletedWalletDispositionState, QualifyPendingNonceFloorState,
     ReadCandidateStatusAfterFailureState, ReadCandidateWalletNonceStatusState,
-    ReadPostReserveWalletNonceStatusState, ReadReservationStatusAfterFailureState,
-    ReadWalletNonceStatusState, ReserveWalletNonceState, SelectCandidateSlotState,
-    SelectObservationRoundState, SelectSubmissionTerminalState, SelectTerminalEvidenceState,
-    SubmissionProgress, SubmissionWork, VerifyCanonicalInclusionState, WalletStatusDecision,
+    ReadExhaustionStatusState, ReadPostReserveWalletNonceStatusState,
+    ReadReservationStatusAfterFailureState, ReadWalletNonceStatusState, ReserveWalletNonceState,
+    SelectCandidateAttemptRouteState, SelectCandidateSlotState, SelectObservationRoundState,
+    SelectSubmissionTerminalState, SelectTerminalEvidenceState, SubmissionProgress, SubmissionWork,
+    VerifyCanonicalInclusionState, WalletStatusDecision,
 };
 use crate::{EvmSubmissionFailure, EvmSubmissionOutput, EVM_WALLET_REPLACEMENT_LIMIT};
 
@@ -157,7 +159,7 @@ impl ChildOperation for InitialReservationChild {
 pub(crate) struct CandidateAttemptChild;
 
 impl ChildOperation for CandidateAttemptChild {
-    type Output = CandidateResolution;
+    type Output = SubmissionProgress;
     type Failure = PendingEvmSubmissionFailure;
 
     fn authored_program_ref() -> mfm_program::Result<mfm_ids::ContentRef> {
@@ -206,7 +208,10 @@ impl CustomFailureHandler<PendingEvmSubmissionFailure, WalletStatusDecision, Evm
                         stable("read-reservation-status-after-failure")?,
                         &request,
                     )?
-                    .or_default()?;
+                    .or_default()
+                    .map_err(|error| {
+                        mfm_program::ProgramError::Authoring(format!("activate child: {error}"))
+                    })?;
                 block.normal(&status)
             },
         )
@@ -215,14 +220,14 @@ impl CustomFailureHandler<PendingEvmSubmissionFailure, WalletStatusDecision, Evm
 
 pub(crate) struct CandidateFailureHandler;
 
-impl CustomFailureHandler<PendingEvmSubmissionFailure, CandidateResolution, EvmSubmissionFailure>
+impl CustomFailureHandler<PendingEvmSubmissionFailure, SubmissionProgress, EvmSubmissionFailure>
     for CandidateFailureHandler
 {
     type Route = PendingEvmSubmissionFailure;
     type Handler = HandlePendingEvmSubmissionFailureState;
 
     fn author_routes<Policy>(
-        routes: &mut RecoveryRouteBuilder<CandidateResolution, EvmSubmissionFailure, Policy>,
+        routes: &mut RecoveryRouteBuilder<SubmissionProgress, EvmSubmissionFailure, Policy>,
     ) -> mfm_program::Result<()>
     where
         Policy: AuthoringPolicy,
@@ -232,7 +237,7 @@ impl CustomFailureHandler<PendingEvmSubmissionFailure, CandidateResolution, EvmS
             stable("candidate-failure-direct")?,
             |block, payloads| {
                 let failure = payloads.value::<EvmSubmissionFailure>(&[stable("failure")?])?;
-                block.scope_failure::<CandidateResolution>(&failure)
+                block.scope_failure::<SubmissionProgress>(&failure)
             },
         )?;
         routes.arm(
@@ -255,7 +260,13 @@ impl CustomFailureHandler<PendingEvmSubmissionFailure, CandidateResolution, EvmS
 
 pub(crate) fn evm_submission_recipe(
 ) -> mfm_program::Result<mfm_spec::structured::AuthoredStructuredProgram> {
-    author_evm_submission_recipe(EVM_WALLET_REPLACEMENT_LIMIT as u16)
+    static PROGRAM: OnceLock<mfm_spec::structured::AuthoredStructuredProgram> = OnceLock::new();
+    if let Some(program) = PROGRAM.get() {
+        return Ok(program.clone());
+    }
+    let program = author_evm_submission_recipe(EVM_WALLET_REPLACEMENT_LIMIT as u16)?;
+    let _ = PROGRAM.set(program.clone());
+    Ok(program)
 }
 
 #[cfg(test)]
@@ -390,7 +401,8 @@ fn author_initial_reservation_recipe(
             })
         })?;
     let completion = builder.succeed(&status)?;
-    builder.finish(completion)
+    let program = builder.finish(completion)?;
+    Ok(program)
 }
 
 pub(crate) fn candidate_attempt_recipe(
@@ -406,7 +418,7 @@ pub(crate) fn candidate_attempt_recipe(
 
 fn author_candidate_attempt_recipe(
 ) -> mfm_program::Result<mfm_spec::structured::AuthoredStructuredProgram> {
-    let mut builder = OperationBuilder::<CandidateResolution, PendingEvmSubmissionFailure>::new(
+    let mut builder = OperationBuilder::<SubmissionProgress, PendingEvmSubmissionFailure>::new(
         stable("mfm.evm.child/candidate-attempt")?,
         stable("mfm.evm.scope/candidate-attempt")?,
     )?;
@@ -414,69 +426,132 @@ fn author_candidate_attempt_recipe(
         .root()
         .failure_map::<PendingEvmSubmissionFailure, PendingEvmSubmissionFailureMapper>()?;
     let work = builder.input::<SubmissionWork>(candidate_attempt_input_id()?)?;
-    let candidate = builder
+    let route = builder
         .root()
-        .state::<BuildUnsignedCandidateState>(stable("build-candidate")?, &work)?
-        .or_default()?;
-    let candidate = builder
-        .root()
-        .state::<AttestCandidateIdentityState>(stable("attest-candidate")?, &candidate)?
-        .or_default()?;
-    let permitted = builder
-        .root()
-        .state::<DeriveCandidateActivationPermitState>(
-            stable("derive-activation-permit")?,
-            &candidate,
-        )?
-        .or_default()?;
-    let prepared = builder
-        .root()
-        .state::<DeriveEvmCandidateOperationKeyState>(
-            stable("derive-candidate-operation-key")?,
-            &permitted,
-        )?
-        .or_default()?;
-    let activation = builder
-        .root()
-        .state::<ActivateWalletCandidateState>(stable("activate-candidate")?, &prepared)?
-        .or_default()?;
-    let resolution =
+        .state::<SelectCandidateAttemptRouteState>(stable("select-candidate-route")?, &work)?
+        .infallible()?;
+    let progress =
         builder
             .root()
-            .match_value(stable("match-candidate-activation")?, &activation, |arms| {
+            .match_value(stable("match-candidate-route")?, &route, |arms| {
+                arms.arm("activate", stable("candidate-activate")?, |arm, _| {
+                    let candidate = arm
+                        .state::<BuildUnsignedCandidateState>(stable("build-candidate")?, &work)?
+                        .or_default()?;
+                    let candidate = arm
+                        .state::<AttestCandidateIdentityState>(
+                            stable("attest-candidate")?,
+                            &candidate,
+                        )?
+                        .or_default()?;
+                    let permitted = arm
+                        .state::<DeriveCandidateActivationPermitState>(
+                            stable("derive-activation-permit")?,
+                            &candidate,
+                        )?
+                        .or_default()?;
+                    let prepared = arm
+                        .state::<DeriveEvmCandidateOperationKeyState>(
+                            stable("derive-candidate-operation-key")?,
+                            &permitted,
+                        )?
+                        .or_default()?;
+                    let activation = arm
+                        .state::<ActivateWalletCandidateState>(
+                            stable("activate-candidate")?,
+                            &prepared,
+                        )?
+                        .or_default()?;
+                    let resolution = arm.match_value(
+                        stable("match-candidate-activation")?,
+                        &activation,
+                        |arms| {
+                            arms.arm(
+                                "activated",
+                                stable("candidate-activated")?,
+                                |arm, payloads| {
+                                    let active = payloads
+                                        .value::<ActiveCandidateWork>(&[stable("active")?])?;
+                                    let observed = arm
+                                        .state::<BroadcastExactCandidateState>(
+                                            stable("broadcast-candidate")?,
+                                            &active,
+                                        )?
+                                        .or_default()?;
+                                    let observed = author_observation_round(arm, &observed, 0)?;
+                                    let observed = author_observation_round(arm, &observed, 1)?;
+                                    let resolution = author_terminal_decision(arm, &observed)?;
+                                    arm.normal(&resolution)
+                                },
+                            )?;
+                            arms.arm(
+                                "reconcile",
+                                stable("candidate-activation-reconcile")?,
+                                |arm, _| {
+                                    let prepared = arm
+                                        .state::<MarkActivationReconcileState>(
+                                            stable("mark-activation-reconcile")?,
+                                            &prepared,
+                                        )?
+                                        .infallible()?;
+                                    let resolution =
+                                        read_candidate_status(arm, "activation", &prepared)?;
+                                    arm.normal(&resolution)
+                                },
+                            )
+                        },
+                    )?;
+                    let progress = arm
+                        .state::<CollapseCandidateResolutionState>(
+                            stable("collapse-candidate-resolution")?,
+                            &resolution,
+                        )?
+                        .infallible()?;
+                    arm.normal(&progress)
+                })?;
+                arms.arm("exhausted", stable("candidate-exhausted")?, |arm, _| {
+                    let request = arm
+                        .state::<PrepareExhaustionReconciliationState>(
+                            stable("prepare-exhaustion-reconciliation")?,
+                            &work,
+                        )?
+                        .infallible()?;
+                    let resolution = arm
+                        .state::<ReadExhaustionStatusState>(
+                            stable("read-exhaustion-status")?,
+                            &request,
+                        )?
+                        .or_default()?;
+                    let progress = arm
+                        .state::<CollapseCandidateResolutionState>(
+                            stable("collapse-exhaustion-resolution")?,
+                            &resolution,
+                        )?
+                        .infallible()?;
+                    arm.normal(&progress)
+                })?;
                 arms.arm(
-                    "activated",
-                    stable("candidate-activated")?,
-                    |arm, payloads| {
-                        let active = payloads.value::<ActiveCandidateWork>(&[stable("active")?])?;
+                    "observe_retained",
+                    stable("candidate-observe-retained")?,
+                    |arm, _| {
                         let observed = arm
-                            .state::<BroadcastExactCandidateState>(
-                                stable("broadcast-candidate")?,
-                                &active,
+                            .state::<PrepareRetainedCandidateObservationState>(
+                                stable("prepare-retained-observation")?,
+                                &work,
                             )?
                             .or_default()?;
-                        let observed = author_observation_round(arm, &observed, 0)?;
-                        let observed = author_observation_round(arm, &observed, 1)?;
                         let resolution = author_terminal_decision(arm, &observed)?;
-                        arm.normal(&resolution)
-                    },
-                )?;
-                arms.arm(
-                    "reconcile",
-                    stable("candidate-activation-reconcile")?,
-                    |arm, _| {
-                        let prepared = arm
-                            .state::<MarkActivationReconcileState>(
-                                stable("mark-activation-reconcile")?,
-                                &prepared,
+                        let progress = arm
+                            .state::<CollapseCandidateResolutionState>(
+                                stable("collapse-observation-resolution")?,
+                                &resolution,
                             )?
                             .infallible()?;
-                        let resolution = read_candidate_status(arm, "activation", &prepared)?;
-                        arm.normal(&resolution)
+                        arm.normal(&progress)
                     },
                 )
             })?;
-    let completion = builder.succeed(&resolution)?;
+    let completion = builder.succeed(&progress)?;
     builder.finish(completion)
 }
 
@@ -489,79 +564,25 @@ fn author_candidate_slot(
         .state::<SelectCandidateSlotState>(label("select-candidate", slot)?, progress)?
         .infallible()?;
     block.match_value(label("match-candidate", slot)?, &decision, |arms| {
-        arms.arm(
-            "execute",
-            label("candidate-execute", slot)?,
-            |arm, payloads| {
-                let work = payloads.value::<SubmissionWork>(&[stable("work")?])?;
-                let resolution = arm
-                    .child::<CandidateAttemptChild>(
-                        label("candidate-attempt", slot)?,
-                        vec![work.bind_child(candidate_attempt_input_id()?)],
-                    )?
-                    .on_failure::<CandidateFailureHandler>()?;
-                let progress = author_candidate_resolution(arm, &resolution, slot)?;
-                arm.normal(&progress)
-            },
-        )?;
-        arms.arm(
-            "exhausted",
-            label("candidate-exhausted", slot)?,
-            |arm, _| {
-                let progress = arm
-                    .state::<MarkCandidateFamilyExhaustedState>(
-                        label("mark-candidate-exhausted", slot)?,
-                        progress,
-                    )?
-                    .infallible()?;
-                arm.normal(&progress)
-            },
-        )?;
+        arms.arm("execute", label("candidate-execute", slot)?, |arm, _| {
+            let work = arm
+                .state::<ExtractSubmissionWorkState>(
+                    label("extract-candidate-work", slot)?,
+                    progress,
+                )?
+                .or_default()?;
+            let resolution = arm
+                .child::<CandidateAttemptChild>(
+                    label("candidate-attempt", slot)?,
+                    vec![work.bind_child(candidate_attempt_input_id()?)],
+                )?
+                .on_failure::<CandidateFailureHandler>()?;
+            arm.normal(&resolution)
+        })?;
         arms.arm("skip", label("candidate-skip", slot)?, |arm, _| {
             arm.normal(progress)
         })
     })
-}
-
-fn author_candidate_resolution(
-    block: &mut BlockBuilder<EvmSubmissionFailure>,
-    resolution: &Value<CandidateResolution>,
-    slot: u16,
-) -> mfm_program::Result<Value<SubmissionProgress>> {
-    block.match_value(
-        label("match-candidate-resolution", slot)?,
-        resolution,
-        |arms| {
-            arms.arm(
-                "completed",
-                label("candidate-completed", slot)?,
-                |arm, payloads| {
-                    let completion = payloads.value(&[stable("completion")?])?;
-                    let progress = arm
-                        .state::<MarkSubmissionCompletedState>(
-                            label("mark-submission-completed", slot)?,
-                            &completion,
-                        )?
-                        .infallible()?;
-                    arm.normal(&progress)
-                },
-            )?;
-            arms.arm(
-                "resume",
-                label("candidate-resume", slot)?,
-                |arm, payloads| {
-                    let work = payloads.value(&[stable("work")?])?;
-                    let progress = arm
-                        .state::<MarkSubmissionResumedState>(
-                            label("mark-submission-resumed", slot)?,
-                            &work,
-                        )?
-                        .infallible()?;
-                    arm.normal(&progress)
-                },
-            )
-        },
-    )
 }
 
 fn author_observation_round(

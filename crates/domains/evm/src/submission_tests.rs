@@ -19,12 +19,12 @@ use serde::de::DeserializeOwned;
 
 use crate::submission::{
     ActiveCandidateWork, BroadcastExactCandidateState, CandidateActivationDecision,
-    CandidateObservationWork, CandidateResolution, CandidateSlotDecision, CandidateWork,
-    CompletedProjection, CompletionWork, DerivedSubmissionDomain, FailureReconciliationRequest,
-    IntentBoundSubmission, ObservationRoundDecision, ObserveActivatedTransactionState,
-    ObserveCandidateReceiptState, PendingEvmSubmissionFailure, PermittedCandidateWork,
-    PostReservePreparedSubmission, PreparedCandidateActivation, PreparedWalletSubmission,
-    QualifiedPendingSubmission, ReadCandidateStatusAfterFailureState,
+    CandidateObservationWork, CandidateResolution, CandidateSlotDecision, CandidateSlotRoute,
+    CandidateWork, CompletedProjection, CompletionWork, DerivedSubmissionDomain,
+    FailureReconciliationRequest, IntentBoundSubmission, ObservationRoundDecision,
+    ObserveActivatedTransactionState, ObserveCandidateReceiptState, PendingEvmSubmissionFailure,
+    PermittedCandidateWork, PostReservePreparedSubmission, PreparedCandidateActivation,
+    PreparedWalletSubmission, QualifiedPendingSubmission, ReadCandidateStatusAfterFailureState,
     ReadReservationStatusAfterFailureState, SelectCandidateSlotState, SubmissionProgress,
     SubmissionWork, TerminalEvidenceDecision, TerminalEvidenceWork, WalletStatusBaseline,
     WalletStatusDecision,
@@ -1059,34 +1059,31 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         completion: None,
         failure: None,
     };
-    // Fixture family has one member; with next=0 still Execute for reobservation.
-    let CandidateSlotDecision::Execute { work: slot0 } =
+    // Fixture family has one member; with next=0 the retained candidate is
+    // routed directly to observation without activation or broadcast.
+    let CandidateSlotDecision::Execute =
         successful(submission_process::select_candidate_slot(&progress))
     else {
-        panic!("slot 0 must execute recovery of first activated candidate");
+        panic!("slot 0 must observe the first retained candidate");
     };
-    assert_eq!(slot0.next_candidate_ordinal, 0);
+    assert_eq!(
+        successful(submission_process::select_candidate_attempt_route(&work)),
+        CandidateSlotRoute::ObserveRetained
+    );
 
-    let permit0 = derive_exact_candidate_activation_permit(
-        &slot0.reservation,
-        &slot0.activated_candidates,
+    assert!(derive_exact_candidate_activation_permit(
+        &work.reservation,
+        &work.activated_candidates,
         0,
         0,
     )
-    .expect("reobservation of ordinal 0");
-    assert!(matches!(
-        permit0,
-        CandidateActivationPermit::Reobservation {
-            exact_ordinal: 0,
-            ..
-        }
-    ));
+    .is_err());
 
     // EVM-04: replacement without observing the full activated prefix is rejected.
     assert!(
         derive_exact_candidate_activation_permit(
-            &slot0.reservation,
-            &slot0.activated_candidates,
+            &work.reservation,
+            &work.activated_candidates,
             2,
             0,
         )
@@ -1095,8 +1092,8 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     );
     assert!(
         derive_exact_candidate_activation_permit(
-            &slot0.reservation,
-            &slot0.activated_candidates,
+            &work.reservation,
+            &work.activated_candidates,
             2,
             1,
         )
@@ -1104,8 +1101,8 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         "replacement after partial observation must fail"
     );
     let permit_replace = derive_exact_candidate_activation_permit(
-        &slot0.reservation,
-        &slot0.activated_candidates,
+        &work.reservation,
+        &work.activated_candidates,
         2,
         2,
     )
@@ -1141,21 +1138,14 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     assert_eq!(advanced.observed_prefix_len, 1);
     assert_eq!(advanced.activated_candidates.len(), 2);
 
-    // After observing c0, reobservation of c1 is the next certified step.
-    let permit1 = derive_exact_candidate_activation_permit(
+    // After observing c0, ordinal 1 is likewise observation-only.
+    assert!(derive_exact_candidate_activation_permit(
         &advanced.reservation,
         &advanced.activated_candidates,
         1,
         1,
     )
-    .expect("reobservation of ordinal 1 after observing ordinal 0");
-    assert!(matches!(
-        permit1,
-        CandidateActivationPermit::Reobservation {
-            exact_ordinal: 1,
-            ..
-        }
-    ));
+    .is_err());
 
     // Status resume still starts at 0 even when the retained prefix is non-empty.
     let multi_status = reserved_status(&fixture, true);
