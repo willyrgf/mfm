@@ -279,6 +279,83 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         })
     }
 
+    fn load_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, mfm_store::structured::StructuredRunSnapshot> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            // The indexed head is deliberately the first decision-bearing query. All subsequent
+            // batch/object reads belong to this same repeatable snapshot.
+            let head_row = sqlx::query(
+                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
+                   FROM run_history_heads WHERE run_id = $1",
+            )
+            .bind(run_id.as_str())
+            .fetch_optional(&mut **transaction.conn())
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let head = head_row
+                .map(|row| {
+                    Ok(JournalHead {
+                        run_sequence: required_sequence(&row, "head_sequence")?,
+                        commit_digest: JournalCommitDigest::parse(&required_text(
+                            &row,
+                            "head_commit_digest",
+                        )?)
+                        .map_err(|_| {
+                            invalid("structured PostgreSQL snapshot head digest is invalid")
+                        })?,
+                    })
+                })
+                .transpose()?;
+            let rows = select_batch_rows(
+                transaction.conn(),
+                "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
+                        candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
+                        predecessor_commit_digest, head_commit_digest, batch_envelope_json \
+                   FROM run_history_batches WHERE run_id = $1 \
+                  ORDER BY run_history_batches.run_sequence",
+                run_id,
+                None,
+            )
+            .await?;
+            let history = if rows.is_empty() {
+                None
+            } else {
+                let mut objects = load_object_rows(transaction.conn(), run_id, None).await?;
+                let mut batches = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let sequence = row.run_sequence;
+                    let object_rows = objects.remove(&sequence).unwrap_or_default();
+                    batches.push(row.reconstruct(object_rows)?);
+                }
+                if !objects.is_empty() {
+                    return Err(invalid(
+                        "structured PostgreSQL snapshot objects have no retained batch",
+                    ));
+                }
+                let loaded_head = batches.last().map(|batch| batch.head.clone());
+                if loaded_head != head {
+                    return Err(invalid(
+                        "structured PostgreSQL snapshot head differs from retained prefix",
+                    ));
+                }
+                Some(RawRunHistory {
+                    run_id: run_id.clone(),
+                    batches,
+                })
+            };
+            if history.is_none() && head.is_some() {
+                return Err(invalid(
+                    "structured PostgreSQL snapshot head has no retained prefix",
+                ));
+            }
+            transaction.commit().await?;
+            Ok(mfm_store::structured::StructuredRunSnapshot { history, head })
+        })
+    }
+
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -766,8 +843,12 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .await;
             if let Err(error) = batch_insert {
                 if is_contention_sqlstate(&error) {
-                    // Re-read under the still-held lock and classify the exact outcome.
-                    return classify_existing_under_lock(transaction, &run_id, &committed).await;
+                    // Every failed SQL transaction is rolled back before classification. A
+                    // connection in the aborted state cannot safely issue the deciding query.
+                    transaction.rollback().await?;
+                    return self
+                        .classify_existing_after_contention(&run_id, &committed)
+                        .await;
                 }
                 return Err(StructuredStoreError::BackendUnavailable);
             }
@@ -1201,40 +1282,43 @@ fn is_contention_sqlstate(error: &sqlx::Error) -> bool {
     )
 }
 
-async fn classify_existing_under_lock(
-    mut transaction: crate::transaction::LockedWriteTx<'_>,
-    run_id: &RunId,
-    committed: &CommittedBatch,
-) -> Result<BackendAppendOutcome, StructuredStoreError> {
-    let existing_rows = select_batch_rows(
-        transaction.conn(),
-        "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
+impl PostgresStructuredHistoryBackend {
+    async fn classify_existing_after_contention(
+        &self,
+        run_id: &RunId,
+        committed: &CommittedBatch,
+    ) -> Result<BackendAppendOutcome, StructuredStoreError> {
+        let mut transaction = self.begin_locked_write(run_id.as_str()).await?;
+        let existing_rows = select_batch_rows(
+            transaction.conn(),
+            "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                 candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
                 predecessor_commit_digest, head_commit_digest, batch_envelope_json \
            FROM run_history_batches \
           WHERE run_id = $1 AND append_request_id = $2",
-        run_id,
-        Some(committed.append_request_id.as_str()),
-    )
-    .await?;
-    if let Some(existing_row) = exactly_one_or_none(existing_rows)? {
-        let existing_sequence = existing_row.run_sequence;
-        let mut object_rows =
-            load_object_rows(transaction.conn(), run_id, Some(existing_sequence)).await?;
-        let existing =
-            existing_row.reconstruct(object_rows.remove(&existing_sequence).unwrap_or_default())?;
-        if !object_rows.is_empty() {
-            return Err(invalid(
-                "structured PostgreSQL idempotent objects differ from their batch",
-            ));
+            run_id,
+            Some(committed.append_request_id.as_str()),
+        )
+        .await?;
+        if let Some(existing_row) = exactly_one_or_none(existing_rows)? {
+            let existing_sequence = existing_row.run_sequence;
+            let mut object_rows =
+                load_object_rows(transaction.conn(), run_id, Some(existing_sequence)).await?;
+            let existing = existing_row
+                .reconstruct(object_rows.remove(&existing_sequence).unwrap_or_default())?;
+            if !object_rows.is_empty() {
+                return Err(invalid(
+                    "structured PostgreSQL idempotent objects differ from their batch",
+                ));
+            }
+            transaction.commit().await?;
+            return if existing == *committed {
+                Ok(BackendAppendOutcome::ExistingSame(existing))
+            } else {
+                Err(StructuredStoreError::AppendConflict)
+            };
         }
-        transaction.commit().await?;
-        return if existing == *committed {
-            Ok(BackendAppendOutcome::ExistingSame(existing))
-        } else {
-            Err(StructuredStoreError::AppendConflict)
-        };
+        transaction.rollback().await?;
+        Ok(BackendAppendOutcome::StaleHead)
     }
-    transaction.rollback().await?;
-    Ok(BackendAppendOutcome::StaleHead)
 }

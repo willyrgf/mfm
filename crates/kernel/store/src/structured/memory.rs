@@ -8,7 +8,7 @@ use mfm_journal::structured::{
 
 use super::backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
 };
 use super::fold::StructuredStoreError;
 
@@ -104,6 +104,27 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
                 run_id: run_id.clone(),
                 batches: batches.clone(),
             }))
+        })
+    }
+
+    fn load_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
+        Box::pin(async move {
+            let mut state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            state.full_loads = state.full_loads.saturating_add(1);
+            let history = state.histories.get(run_id).map(|batches| RawRunHistory {
+                run_id: run_id.clone(),
+                batches: batches.clone(),
+            });
+            let head = history
+                .as_ref()
+                .and_then(|raw| raw.batches.last().map(|batch| batch.head.clone()));
+            Ok(StructuredRunSnapshot { history, head })
         })
     }
 

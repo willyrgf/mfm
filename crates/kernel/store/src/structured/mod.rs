@@ -21,7 +21,7 @@ pub use assembly::assemble_with_backend;
 pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 pub use backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
 };
 pub use canonical_append::{
     validate_append_objects, validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
