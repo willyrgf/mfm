@@ -99,13 +99,15 @@ pub use wallet::{
     EVM_WALLET_REPLACEMENT_LIMIT, EVM_WALLET_TRANSACTION_LOOKUP_OPERATION_ID,
     EVM_WALLET_TRANSACTION_TYPE,
 };
+#[cfg(any(test, feature = "authority-integration"))]
+pub use wallet_authority::derive_exact_candidate_activation_permit;
 pub use wallet_authority::{
     activate_wallet_candidate_adapter_contract, canonical_wallet_reference,
     complete_wallet_nonce_adapter_contract, derive_authenticated_intent_issuer_id,
     derive_evm_candidate_operation_key, derive_evm_chain_lineage_id,
     derive_evm_nonce_completion_key, derive_evm_nonce_reservation_key,
-    derive_exact_candidate_activation_permit, derive_qualified_chain_instance_id,
-    derive_submission_intent_id, derive_submission_semantics_digest, derive_wallet_nonce_domain,
+    derive_qualified_chain_instance_id, derive_submission_intent_id,
+    derive_submission_semantics_digest, derive_wallet_nonce_domain,
     read_wallet_nonce_status_adapter_contract, reserve_wallet_nonce_adapter_contract,
     validate_active_wallet_candidate_prefix, ActivateCandidateResponse,
     ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, ActiveWalletCandidate,
@@ -120,11 +122,11 @@ pub use wallet_authority::{
     ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
     ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
     SubmissionIntentId, SubmissionSemanticsDigest, TerminalWitnesses, TransactionNonce,
-    WalletAuthorityContractError, WalletNonceAuthority, WalletNonceAuthorityResource,
-    WalletNonceDomain, WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord,
-    WalletNonceStatus, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
-    WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX,
-    EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    WalletAuthorityContractError, WalletEffectSpec, WalletNonceAuthority,
+    WalletNonceAuthorityResource, WalletNonceDomain, WalletNonceDomainActivationAttestation,
+    WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreIncarnation,
+    WalletNonceStoreLineageHead, WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor,
+    EVM_TRANSACTION_NONCE_MAX, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
 };
 
 #[cfg(test)]

@@ -1,0 +1,21 @@
+warning: unreachable expression
+ --> tests/ui/structured/fail/construct_committed_access_authorization.rs:6:24
+  |
+5 |         authorization_ref: todo!(),
+  |                            ------- any code following this expression is unreachable
+6 |         authorization: todo!(),
+  |                        ^^^^^^^ unreachable expression
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0451]: fields `authorization_ref`, `authorization` and `fact_scan` of struct `CertifiedAccessAuthorization` are private
+ --> tests/ui/structured/fail/construct_committed_access_authorization.rs:5:9
+  |
+4 |     let _authorization = CertifiedAccessAuthorization {
+  |                          ---------------------------- in this type
+5 |         authorization_ref: todo!(),
+  |         ^^^^^^^^^^^^^^^^^ private field
+6 |         authorization: todo!(),
+  |         ^^^^^^^^^^^^^ private field
+7 |         fact_scan: todo!(),
+  |         ^^^^^^^^^ private field

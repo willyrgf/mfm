@@ -38,6 +38,10 @@ use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAcces
 
 mod recoverability;
 
+/// Generated recoverability budgets shared by all bounded codecs.
+#[path = "recoverability_limits.rs"]
+pub mod limits;
+
 pub use recoverability::{
     CanonicalReferencePath, RecoverabilityContract, RecoverabilityError, RecoverabilityErrorCode,
     ReferenceTerminalKind, SchemaReferenceEdge, ValidatedCanonicalValue,
@@ -45,6 +49,9 @@ pub use recoverability::{
 
 /// Result type for canonicalization operations.
 pub type Result<T> = std::result::Result<T, CanonicalError>;
+
+/// Maximum nested array/object depth accepted by canonical JSON ingress.
+pub use limits::MAX_CANONICAL_JSON_DEPTH;
 
 /// Error returned when canonical JSON, decimal, or byte grammar validation
 /// fails.
@@ -173,6 +180,7 @@ impl PlainCanonicalJsonBytes {
         validate_number_tokens(input)?;
         let value: PlainJsonValue = serde_json::from_str(input)
             .map_err(|error| CanonicalError::new(format!("invalid canonical JSON: {error}")))?;
+        value.validate_depth(0)?;
         Ok(Self::from_value(&value))
     }
 
@@ -332,6 +340,24 @@ enum PlainJsonValue {
 }
 
 impl PlainJsonValue {
+    fn validate_depth(&self, depth: usize) -> Result<()> {
+        if depth > MAX_CANONICAL_JSON_DEPTH {
+            return Err(CanonicalError::new("canonical JSON nesting depth exceeded"));
+        }
+        match self {
+            Self::Array(values) => values
+                .iter()
+                .try_for_each(|value| value.validate_depth(depth + 1)),
+            Self::Object(object) => object
+                .entries
+                .iter()
+                .try_for_each(|entry| entry.value.validate_depth(depth + 1)),
+            Self::Null | Self::Bool(_) | Self::String(_) | Self::Signed(_) | Self::Unsigned(_) => {
+                Ok(())
+            }
+        }
+    }
+
     fn write_json(&self, out: &mut String) {
         match self {
             Self::Null => out.push_str("null"),

@@ -77,13 +77,7 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
-        Box::pin(async move {
-            let history = self.load(run_id).await?;
-            let head = self.current_head(run_id).await?;
-            Ok(StructuredRunSnapshot { history, head })
-        })
-    }
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot>;
 
     /// Returns the exact current physical head without loading the retained prefix.
     ///
@@ -99,19 +93,7 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
         &'a self,
         run_id: &'a RunId,
         through_sequence: u64,
-    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(async move {
-            if through_sequence == 0 {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-            let Some(mut raw) = self.load(run_id).await? else {
-                return Ok(None);
-            };
-            raw.batches
-                .retain(|batch| batch.head.run_sequence <= through_sequence);
-            Ok((!raw.batches.is_empty()).then_some(raw))
-        })
-    }
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
 
     /// Returns the current dense tenant fact frontier under this store identity.
     fn tenant_fact_frontier<'a>(

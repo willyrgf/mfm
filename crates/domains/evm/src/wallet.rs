@@ -115,6 +115,18 @@ impl EvmWalletReference {
         ContentRef::new(schema, digest).map_err(|_| EvmWalletError::Invalid("wallet_reference"))
     }
 
+    /// Reuses this reference's reviewed schema identity with a new
+    /// already-derived content digest.
+    pub fn with_content_digest(
+        &self,
+        content_digest: ContentDigest,
+    ) -> Result<Self, EvmWalletError> {
+        let content_ref = self.to_content_ref()?;
+        let content_ref = ContentRef::new(content_ref.schema_id().clone(), content_digest)
+            .map_err(|_| EvmWalletError::Invalid("wallet_reference"))?;
+        Ok(Self::from_content_ref(content_ref))
+    }
+
     /// Returns the exact schema identity.
     pub fn schema_id(&self) -> &str {
         &self.schema_id

@@ -10,6 +10,110 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent / "v1"
 
+# These values are the sole source for the generated Rust budget module and
+# the public recoverability annex. Runtime codecs import the generated module;
+# they must not repeat these numbers in production code.
+LIMITS: dict[str, tuple[str, int, str]] = {
+    "max_array_items": ("MAX_ARRAY_ITEMS", 1_048_576, "usize"),
+    "max_base64url_characters": ("MAX_BASE64URL_CHARACTERS", 22_369_622, "usize"),
+    "max_canonical_json_bytes": ("MAX_CANONICAL_JSON_BYTES", 16_777_216, "usize"),
+    "max_canonical_json_depth": ("MAX_CANONICAL_JSON_DEPTH", 64, "usize"),
+    "max_object_entries": ("MAX_OBJECT_ENTRIES", 1_048_576, "usize"),
+    "max_string_utf8_bytes": ("MAX_STRING_UTF8_BYTES", 16_777_216, "usize"),
+    "max_stored_frame_bytes": ("MAX_STORED_FRAME_BYTES", 16_777_216, "usize"),
+    "max_batch_objects": ("MAX_BATCH_OBJECTS", 65_536, "usize"),
+    "max_batch_records": ("MAX_BATCH_RECORDS", 65_536, "usize"),
+    "max_portable_export_bytes": ("MAX_PORTABLE_EXPORT_BYTES", 16 * 1024 * 1024, "u64"),
+    "max_portable_frame_bytes": ("MAX_PORTABLE_FRAME_BYTES", 1_048_576, "usize"),
+    "max_portable_frames": ("MAX_PORTABLE_FRAMES", 1_048_577, "usize"),
+    "max_portable_batches": ("MAX_PORTABLE_BATCHES", 1_048_576, "usize"),
+    "max_portable_objects": ("MAX_PORTABLE_OBJECTS", 1_048_576, "usize"),
+    "max_portable_source_runs": ("MAX_PORTABLE_SOURCE_RUNS", 4_096, "usize"),
+    "max_portable_fact_routes": ("MAX_PORTABLE_FACT_ROUTES", 1_048_576, "usize"),
+    "max_prior_run_source_rules": ("MAX_PRIOR_RUN_SOURCE_RULES", 1_024, "usize"),
+    "max_prior_run_source_programs_per_rule": (
+        "MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE",
+        4_096,
+        "usize",
+    ),
+    "max_prior_run_source_descriptors_per_rule": (
+        "MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE",
+        4_096,
+        "usize",
+    ),
+    "max_prior_run_source_references": (
+        "MAX_PRIOR_RUN_SOURCE_REFERENCES",
+        65_536,
+        "usize",
+    ),
+    "max_prior_run_source_manifest_bytes": (
+        "MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES",
+        16_777_216,
+        "usize",
+    ),
+    "max_configuration_revision_bytes": (
+        "MAX_CONFIGURATION_REVISION_BYTES",
+        16_777_216,
+        "usize",
+    ),
+    "max_completion_recovery_bytes": (
+        "MAX_COMPLETION_RECOVERY_BYTES",
+        512 * 1024,
+        "usize",
+    ),
+    "max_provider_message_bytes": ("MAX_PROVIDER_MESSAGE_BYTES", 1_048_576, "usize"),
+    "max_provider_deployment_routes": ("MAX_PROVIDER_DEPLOYMENT_ROUTES", 64, "usize"),
+    "max_provider_proof_bytes": ("MAX_PROVIDER_PROOF_BYTES", 4 * 1024, "usize"),
+    "max_provider_finish_authorization_bytes": (
+        "MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES",
+        1_024,
+        "usize",
+    ),
+    "max_fact_scan_publications": ("MAX_FACT_SCAN_PUBLICATIONS", 1_000_000, "u64"),
+    "max_fact_scan_facts": ("MAX_FACT_SCAN_FACTS", 16_000_000, "u64"),
+    "max_fact_scan_retained_source_bytes": (
+        "MAX_FACT_SCAN_RETAINED_SOURCE_BYTES",
+        512 * 1024 * 1024,
+        "u64",
+    ),
+    "max_fact_scan_selected_results": ("MAX_FACT_SCAN_SELECTED_RESULTS", 16_384, "u64"),
+    "max_fact_scan_response_bytes": (
+        "MAX_FACT_SCAN_RESPONSE_BYTES",
+        16 * 1024 * 1024,
+        "u64",
+    ),
+    "max_fact_scan_distinct_producers": (
+        "MAX_FACT_SCAN_DISTINCT_PRODUCERS",
+        4_096,
+        "u64",
+    ),
+    "max_fact_scan_producer_fold_batches": (
+        "MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES",
+        16_000_000,
+        "u64",
+    ),
+    "max_fact_scan_pages": ("MAX_FACT_SCAN_PAGES", 1_000_000, "u64"),
+    "max_fact_selection_queries": ("MAX_FACT_SELECTION_QUERIES", 128, "usize"),
+    "max_fact_selection_limit": ("MAX_FACT_SELECTION_LIMIT", 128, "u32"),
+    "max_fact_emissions": ("MAX_FACT_EMISSIONS", 4_096, "usize"),
+}
+
+
+def generated_limits_source() -> str:
+    lines = [
+        "//! Generated recoverability budgets; edit `contracts/recoverability/generate.py`.",
+        "",
+    ]
+    for annex_name, (rust_name, value, rust_type) in LIMITS.items():
+        lines.extend(
+            [
+                f"/// Generated `{annex_name}` budget.",
+                f"pub const {rust_name}: {rust_type} = {value};",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
 
 def canonical(value: Any) -> bytes:
     return json.dumps(
@@ -351,6 +455,12 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                                     unsigned(512 * 1024 * 1024, 1),
                                 ),
                                 field("maximum_selected_results", unsigned(16_384, 1)),
+                                field("maximum_distinct_producers", unsigned(4_096, 1)),
+                                field(
+                                    "maximum_producer_fold_batches",
+                                    unsigned(16_000_000, 1),
+                                ),
+                                field("maximum_pages", unsigned(1_000_000, 1)),
                             ]
                         ),
                     ),
@@ -472,6 +582,26 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                     field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
                     field("version", literal("mfm.public-run-view.v1")),
                 ]
+            ),
+        ),
+        "mfm.structured-configuration-revision.v1": (
+            ["P-AP-01", "P-RH-01"],
+            object_shape(
+                [
+                    field("append_request_id", string("valid_unicode_scalar_string", 1, 512)),
+                    field(
+                        "canonical_value",
+                        string("valid_unicode_scalar_string", 1, 16_777_216),
+                    ),
+                    field("key", canonical_value),
+                    field("predecessor_ref", nullable(content_ref)),
+                    field("revision_ref", content_ref),
+                    field("sequence", unsigned(18_446_744_073_709_551_615, 1)),
+                    field("value_contract_ref", content_ref),
+                    field("value_ref", content_ref),
+                ],
+                "revision_ref binds the exact stream key, predecessor, append identity, and value",
+                "canonical_value is the exact retained float-free configured value",
             ),
         ),
         "mfm.public-runtime-fault-subject.v1": (
@@ -710,38 +840,63 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                     ),
                     field("store_epoch", reference("mfm.primitive-store_epoch.v1")),
                     field("store_scope_id", reference("mfm.primitive-store_scope_id.v1")),
+                    field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
                 ],
                 "semantic and physical fixation bind one exact export prefix",
+            ),
+        ),
+        "mfm.portable-run-export-frame.v1": (
+            ["P-AP-01", "P-RH-01"],
+            object_shape(
+                [
+                    field("kind", enum("batch", "seal")),
+                    field("ordinal", unsigned(1_048_576)),
+                    field("payload", canonical_value),
+                    field(
+                        "previous_frame_digest",
+                        nullable(reference("mfm.primitive-content_digest.v1")),
+                    ),
+                ],
+                "each frame is one exact float-free canonical JSON line",
+                "ordinal is dense and previous_frame_digest links the frame chain",
+            ),
+        ),
+        "mfm.portable-run-fixation.v1": (
+            ["P-AP-01", "P-RH-01"],
+            object_shape(
+                [
+                    field("fact_frontiers", array(canonical_value)),
+                    field("fact_routes", array(canonical_value)),
+                    field("fixation", reference("mfm.portable-fixation.v1")),
+                    field("run_id", reference("mfm.primitive-run_id.v1")),
+                    field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
+                ],
+                "run fixation binds every selected route and dense frontier to one exact prefix",
             ),
         ),
         "mfm.portable-run-export-stream.v1": (
             ["P-AP-01", "P-RH-01"],
             object_shape(
                 [
-                    field(
-                        "batches",
-                        array(canonical_value, 1),
-                    ),
-                    field(
-                        "digest",
-                        reference("mfm.primitive-content_digest.v1"),
-                    ),
-                    field(
-                        "fixation",
-                        reference("mfm.portable-fixation.v1"),
-                    ),
+                    field("closure_reference", reference("mfm.primitive-content_digest.v1")),
+                    field("final_frame_digest", reference("mfm.primitive-content_digest.v1")),
+                    field("frame_chain_digest", reference("mfm.primitive-content_digest.v1")),
+                    field("fixation", reference("mfm.portable-fixation.v1")),
                     field("kind", enum("semantic", "audit")),
-                    field("run_id", reference("mfm.primitive-run_id.v1")),
+                    field("root_run_id", reference("mfm.primitive-run_id.v1")),
                     field(
-                        "source_run_ids",
-                        array(reference("mfm.primitive-run_id.v1")),
+                        "run_fixations",
+                        array(reference("mfm.portable-run-fixation.v1"), 1, 4_097),
                     ),
+                    field("source_run_ids", array(reference("mfm.primitive-run_id.v1"))),
                     field("store_scope_id", reference("mfm.primitive-store_scope_id.v1")),
                     field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
-                    field("version", literal("mfm.structured-portable-run-export.v1")),
+                    field("total_bytes", unsigned(16_777_216)),
+                    field("total_frames", unsigned(1_048_577)),
+                    field("version", literal("mfm.structured-portable-run-export-stream.v2")),
                 ],
-                "the export is one exact canonical JSON object with committed-batch envelopes",
-                "digest covers every required member except itself",
+                "the wire value is a newline-delimited stream of registered frame values",
+                "the terminal seal binds the complete frame chain and authorized closure",
             ),
         ),
     }
@@ -883,11 +1038,7 @@ def build_annex() -> dict[str, Any]:
             "tenant_scope_id": "mfm.tenant_scope.v1:<32_lowercase_hex>",
         },
         "limits": {
-            "max_array_items": "1048576",
-            "max_base64url_characters": "22369622",
-            "max_canonical_json_bytes": "16777216",
-            "max_object_entries": "1048576",
-            "max_string_utf8_bytes": "16777216",
+            **{name: str(value) for name, (_, value, _) in LIMITS.items()},
         },
         "logical_keys": {
             "closed": True,
@@ -947,7 +1098,7 @@ def build_annex() -> dict[str, Any]:
                 "CandidateActivationPermit",
                 "CommittedObservation",
                 "ConfigurationHistoryWriter",
-                "NewlyAppendedAuthorization",
+                "CommittedAccessAuthorization",
                 "OperationBuilder",
                 "PendingObservation",
                 "PhysicalBindingAuthorization",
@@ -1024,6 +1175,9 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
             "maximum_response_bytes": 16 * 1024 * 1024,
             "maximum_retained_source_bytes": 512 * 1024 * 1024,
             "maximum_selected_results": 16_384,
+            "maximum_distinct_producers": 4_096,
+            "maximum_producer_fold_batches": 16_000_000,
+            "maximum_pages": 1_000_000,
         },
         "selector_contract_ref": {
             "content_digest": "content:sha256-v1:a9ac077123f465977c041695250809a21459c66dcbce4a16d84ca03f9d6a448c",
@@ -1052,6 +1206,16 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
     }
     planning_ref = content
     positives = [
+        schema_vector(
+            annex,
+            "mfm.portable-run-export-frame.v1",
+            {
+                "kind": "batch",
+                "ordinal": 0,
+                "payload": {},
+                "previous_frame_digest": None,
+            },
+        ),
         schema_vector(
             annex,
             "mfm.structured-typed-value-ref.v1",
@@ -1241,6 +1405,21 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
     }
     negative = [
         {
+            "expected_error": "unknown_field",
+            "id": "codec/unknown-field/portable-frame-legacy",
+            "input_hex": canonical(
+                {
+                    "kind": "batch",
+                    "legacy": True,
+                    "ordinal": 0,
+                    "payload": {},
+                    "previous_frame_digest": None,
+                }
+            ).hex(),
+            "kind": "schema_rejection",
+            "schema_contract": "mfm.portable-run-export-frame.v1",
+        },
+        {
             "expected_error": "out_of_bounds",
             "id": "codec/out-of-bounds/fact-query-limit",
             "input_hex": canonical(invalid_query).hex(),
@@ -1282,6 +1461,9 @@ def main() -> None:
     corpus_bytes = canonical(build_corpus(annex, annex_bytes))
     (ROOT / "annex.json").write_bytes(annex_bytes)
     (ROOT / "corpus.json").write_bytes(corpus_bytes)
+    (Path(__file__).resolve().parents[2] / "crates/kernel/canonical/src/recoverability_limits.rs").write_text(
+        generated_limits_source(), encoding="utf-8"
+    )
 
 
 if __name__ == "__main__":

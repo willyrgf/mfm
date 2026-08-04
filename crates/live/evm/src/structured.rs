@@ -1,5 +1,6 @@
 //! Direct structured-Runtime EVM transport and signer bindings.
 
+use std::future::Future;
 use std::marker::PhantomData;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -9,10 +10,11 @@ use mfm_capabilities::{
     AccessFaultCode, BoundedComponentInvoker, ComponentFuture, EffectAdapterCompletion,
     EffectAdapterInvoker, EffectRefreshMode, ReadAdapterCompletion, ReadAdapterInvoker,
 };
+use mfm_certify::structured::CertifiedAccessAuthorization;
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeEffectPhysicalBinding,
-    RuntimeEffectPhysicalBindingSource, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    PhysicalBindingSelection, ProgramRegistryBuilder, QualifiedEffectPhysicalBinding,
+    QualifiedEffectPhysicalBindingSource, QualifiedReadPhysicalBinding,
+    QualifiedReadPhysicalBindingSource,
 };
 use mfm_evm::{
     canonical_wallet_reference, evm_broadcast_adapter_contract,
@@ -33,7 +35,7 @@ use mfm_evm::{
     UnsignedWalletCandidate,
 };
 use mfm_ids::{ContentRef, StableId};
-use mfm_journal::structured::{AccessKind, HistoryObject};
+use mfm_journal::structured::{AccessKind, HistoryObject, RecordRef};
 use mfm_program::structured::{
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
     RuntimeResourceAuthority,
@@ -45,6 +47,57 @@ use mfm_spec::structured::{
 
 use crate::transport::{EvmJsonRpcTransport, WalletBroadcastResponse, WalletRpcFailure};
 use crate::{EvmPhysicalBindingPurpose, EvmPhysicalBindingReleaseHistory};
+
+/// Data-only origin retained by an authorized provider call.  The guard is
+/// created before entering the provider and lives until the future completes;
+/// raw transport methods are never called from the certified adapter without
+/// this origin bracket.
+#[derive(Debug, Clone)]
+pub(crate) struct AuthorizedCallOrigin {
+    authorization_ref: RecordRef,
+    access_attempt_id: mfm_ids::AccessAttemptId,
+}
+
+impl AuthorizedCallOrigin {
+    fn from_authorization(authorization: &CertifiedAccessAuthorization) -> Self {
+        Self {
+            authorization_ref: authorization.authorization_ref().clone(),
+            access_attempt_id: authorization.access_attempt_id().clone(),
+        }
+    }
+
+    pub(crate) const fn authorization_ref(&self) -> &RecordRef {
+        &self.authorization_ref
+    }
+
+    pub(crate) const fn access_attempt_id(&self) -> &mfm_ids::AccessAttemptId {
+        &self.access_attempt_id
+    }
+}
+
+pub(crate) struct AuthorizedProviderCall {
+    origin: AuthorizedCallOrigin,
+}
+
+impl AuthorizedProviderCall {
+    pub(crate) fn new(authorization: &CertifiedAccessAuthorization) -> Self {
+        Self {
+            origin: AuthorizedCallOrigin::from_authorization(authorization),
+        }
+    }
+
+    pub(crate) async fn run<F: Future>(self, future: F) -> F::Output {
+        // Keep both immutable origin identities alive across the protected
+        // await. They are intentionally not serialized into provider input.
+        let _origin = self.origin;
+        let _ = (&_origin.authorization_ref, &_origin.access_attempt_id);
+        future.await
+    }
+
+    pub(crate) fn origin(&self) -> &AuthorizedCallOrigin {
+        &self.origin
+    }
+}
 
 /// Redaction-safe construction failure for direct structured EVM bindings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -222,18 +275,19 @@ impl EvmStructuredLiveBindings {
     }
 
     fn common_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
-        selection.admitted_routing_policy_ref == &self.admitted_routing_policy_ref
+        selection.admitted_routing_policy_ref() == &self.admitted_routing_policy_ref
     }
 
     fn broadcast_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
         self.common_selection(selection)
             && selection
-                .minimum_lineage_head_ref
+                .minimum_lineage_head_ref()
                 .is_none_or(|minimum| minimum == &self.broadcast_lineage_head_object.content_ref)
     }
 
     fn valid_signer_candidate(&self, candidate: &UnsignedWalletCandidate) -> bool {
-        candidate.transaction_intent.chain_instance() == &self.chain_instance
+        TransactionNonce::new(candidate.nonce).is_ok()
+            && candidate.transaction_intent.chain_instance() == &self.chain_instance
             && candidate.transaction_intent.semantic_signer_id() == self.semantic_signer_id.as_str()
             && candidate.transaction_intent.nonce_domain().sender()
                 == format!("{:#x}", self.expected_sender)
@@ -329,6 +383,7 @@ impl EvmStructuredLiveBindings {
     async fn broadcast(
         &self,
         request: &BroadcastExactCandidateRequest,
+        origin: &AuthorizedCallOrigin,
     ) -> mfm_capabilities::EffectContractCompletion<BroadcastExactCandidateCapability> {
         if request.route_generation_ref != self.route_generation_ref
             || request
@@ -370,7 +425,7 @@ impl EvmStructuredLiveBindings {
         };
         match self
             .transport
-            .send_raw_transaction(&route, &self.chain_instance, signed)
+            .send_raw_transaction_authorized(origin, &route, &self.chain_instance, signed)
             .await
         {
             Ok(WalletBroadcastResponse::Accepted(acknowledged))
@@ -449,6 +504,7 @@ trait StructuredReadSpec: RuntimeReadCapability {
     fn invoke<'a>(
         source: &'a EvmStructuredLiveBindings,
         request: &'a Self::Request,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<Self::Returned, Self::SafeFailure>>;
 }
 
@@ -468,7 +524,10 @@ where
         &'a self,
         request: &'a C::Request,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
-        C::invoke(&self.source, request)
+        let _ = request;
+        Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+            self.source.integrity_fault.clone(),
+        )))
     }
 }
 
@@ -481,16 +540,32 @@ where
     }
 }
 
-impl<C> RuntimeReadPhysicalBinding<C> for EvmStructuredReadBinding<C>
+impl<C> QualifiedReadPhysicalBinding<C> for EvmStructuredReadBinding<C>
 where
     C: StructuredReadSpec,
 {
     fn public_certificate(&self) -> &HistoryObject {
         C::release_history(&self.source).current().certificate()
     }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
+        let certificate_ref = self.public_certificate().content_ref.clone();
+        if authorization.authorization().access_kind != AccessKind::Read
+            || authorization.authorization().physical_binding_ref != certificate_ref
+        {
+            return Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+                self.source.integrity_fault.clone(),
+            )));
+        }
+        C::invoke(&self.source, request, authorization)
+    }
 }
 
-impl<C> RuntimeReadPhysicalBindingSource<C> for EvmStructuredLiveBindings
+impl<C> QualifiedReadPhysicalBindingSource<C> for EvmStructuredLiveBindings
 where
     C: StructuredReadSpec,
 {
@@ -533,32 +608,46 @@ impl StructuredReadSpec for EvmPendingNonceCapability {
     fn invoke<'a>(
         source: &'a EvmStructuredLiveBindings,
         request: &'a EvmPendingNonceRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<ObservedPendingNonceFloor, EvmSubmissionFailure>>
     {
+        let provider_call = AuthorizedProviderCall::new(&authorization);
         Box::pin(async move {
             let Some(route) = source.route_ref() else {
                 return ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone());
             };
-            match source
-                .transport
-                .pending_nonce(&route, &source.chain_instance, source.expected_sender)
-                .await
-            {
-                Ok(pending) => match u64::try_from(pending)
-                    .ok()
-                    .and_then(|value| TransactionNonce::new(value).ok())
-                {
-                    Some(pending_nonce) => {
-                        ReadAdapterCompletion::Returned(ObservedPendingNonceFloor {
-                            nonce_domain: request.nonce_domain.clone(),
-                            route_generation_ref: request.route_generation_ref.clone(),
-                            pending_nonce,
-                        })
+            let origin = provider_call.origin().clone();
+            provider_call
+                .run(async move {
+                    match source
+                        .transport
+                        .pending_nonce_authorized(
+                            &origin,
+                            &route,
+                            &source.chain_instance,
+                            source.expected_sender,
+                        )
+                        .await
+                    {
+                        Ok(pending) => match u64::try_from(pending)
+                            .ok()
+                            .and_then(|value| TransactionNonce::new(value).ok())
+                        {
+                            Some(pending_nonce) => {
+                                ReadAdapterCompletion::Returned(ObservedPendingNonceFloor {
+                                    nonce_domain: request.nonce_domain.clone(),
+                                    route_generation_ref: request.route_generation_ref.clone(),
+                                    pending_nonce,
+                                })
+                            }
+                            None => ReadAdapterCompletion::IntegrityFault(
+                                source.integrity_fault.clone(),
+                            ),
+                        },
+                        Err(failure) => source.read_failure(failure),
                     }
-                    None => ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone()),
-                },
-                Err(failure) => source.read_failure(failure),
-            }
+                })
+                .await
         })
     }
 }
@@ -583,18 +672,24 @@ impl StructuredReadSpec for AttestCandidateIdentityCapability {
     fn invoke<'a>(
         source: &'a EvmStructuredLiveBindings,
         request: &'a AttestCandidateIdentityRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<AttestedWalletCandidate, EvmSubmissionFailure>>
     {
+        let provider_call = AuthorizedProviderCall::new(&authorization);
         Box::pin(async move {
-            match source.attest_candidate(request).await {
-                Ok(attested) => ReadAdapterCompletion::Returned(attested),
-                Err(LiveInvocationFailure::Safe(failure)) => {
-                    ReadAdapterCompletion::SafeFailure(failure)
-                }
-                Err(LiveInvocationFailure::Integrity) => {
-                    ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone())
-                }
-            }
+            provider_call
+                .run(async move {
+                    match source.attest_candidate(request).await {
+                        Ok(attested) => ReadAdapterCompletion::Returned(attested),
+                        Err(LiveInvocationFailure::Safe(failure)) => {
+                            ReadAdapterCompletion::SafeFailure(failure)
+                        }
+                        Err(LiveInvocationFailure::Integrity) => {
+                            ReadAdapterCompletion::IntegrityFault(source.integrity_fault.clone())
+                        }
+                    }
+                })
+                .await
         })
     }
 }
@@ -605,7 +700,7 @@ macro_rules! route_read_spec {
         $request:ty,
         $returned:ty,
         contract = $contract:path,
-        invoke = |$source:ident, $request_value:ident, $route:ident| $invoke:block
+        invoke = |$source:ident, $request_value:ident, $route:ident, $origin:ident| $invoke:block
     ) => {
         impl StructuredReadSpec for $capability {
             fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
@@ -630,7 +725,9 @@ macro_rules! route_read_spec {
             fn invoke<'a>(
                 source: &'a EvmStructuredLiveBindings,
                 request: &'a $request,
+                authorization: CertifiedAccessAuthorization,
             ) -> ComponentFuture<'a, ReadAdapterCompletion<$returned, EvmSubmissionFailure>> {
+                let provider_call = AuthorizedProviderCall::new(&authorization);
                 Box::pin(async move {
                     let Some(route) = source.route_ref() else {
                         return ReadAdapterCompletion::IntegrityFault(
@@ -640,7 +737,8 @@ macro_rules! route_read_spec {
                     let $source = source;
                     let $request_value = request;
                     let $route = route;
-                    $invoke
+                    let $origin = provider_call.origin().clone();
+                    provider_call.run(async move { $invoke }).await
                 })
             }
         }
@@ -652,7 +750,7 @@ route_read_spec!(
     EvmTransactionLookupRequest,
     EvmTransactionLookupObservation,
     contract = evm_transaction_lookup_adapter_contract,
-    invoke = |source, request, route| {
+    invoke = |source, request, route, origin| {
         let transaction_hash = match B256::from_str(&request.transaction_hash) {
             Ok(value) => value,
             Err(_) => {
@@ -661,7 +759,12 @@ route_read_spec!(
         };
         match source
             .transport
-            .transaction_by_hash(&route, &source.chain_instance, transaction_hash)
+            .transaction_by_hash_authorized(
+                &origin,
+                &route,
+                &source.chain_instance,
+                transaction_hash,
+            )
             .await
         {
             Ok(None) => ReadAdapterCompletion::Returned(EvmTransactionLookupObservation::Missing),
@@ -692,7 +795,7 @@ route_read_spec!(
     EvmReceiptLookupRequest,
     EvmReceiptLookupObservation,
     contract = evm_receipt_lookup_adapter_contract,
-    invoke = |source, request, route| {
+    invoke = |source, request, route, origin| {
         let transaction_hash = match B256::from_str(&request.transaction_hash) {
             Ok(value) => value,
             Err(_) => {
@@ -701,7 +804,7 @@ route_read_spec!(
         };
         match source
             .transport
-            .receipt_by_hash(&route, &source.chain_instance, transaction_hash)
+            .receipt_by_hash_authorized(&origin, &route, &source.chain_instance, transaction_hash)
             .await
         {
             Ok(None) => ReadAdapterCompletion::Returned(EvmReceiptLookupObservation::Missing),
@@ -727,10 +830,10 @@ route_read_spec!(
     EvmFinalizedHeadRequest,
     EvmFinalizedHeadObservation,
     contract = evm_finalized_head_adapter_contract,
-    invoke = |source, _request, route| {
+    invoke = |source, _request, route, origin| {
         match source
             .transport
-            .finalized_head(&route, &source.chain_instance)
+            .finalized_head_authorized(&origin, &route, &source.chain_instance)
             .await
         {
             Ok(head) => ReadAdapterCompletion::Returned(EvmFinalizedHeadObservation {
@@ -747,7 +850,7 @@ route_read_spec!(
     EvmInclusionBlockRequest,
     EvmInclusionBlockObservation,
     contract = evm_inclusion_block_adapter_contract,
-    invoke = |source, request, route| {
+    invoke = |source, request, route, origin| {
         let number = match U256::from_str(&request.block_number) {
             Ok(value) if value.to_string() == request.block_number => value,
             _ => {
@@ -756,7 +859,7 @@ route_read_spec!(
         };
         match source
             .transport
-            .inclusion_block(&route, &source.chain_instance, number)
+            .inclusion_block_authorized(&origin, &route, &source.chain_instance, number)
             .await
         {
             Ok(Some(block)) if block.number() == request.block_number => {
@@ -804,9 +907,10 @@ trait StructuredEffectSpec: RuntimeEffectCapability {
         request: &Self::Request,
     ) -> bool;
 
-    fn invoke<'a>(
+    fn invoke_authorized<'a>(
         source: &'a EvmStructuredLiveBindings,
         request: &'a Self::Request,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<Self>>;
 }
 
@@ -825,14 +929,30 @@ impl StructuredEffectSpec for BroadcastExactCandidateCapability {
             && source.valid_signer_candidate(&request.unsigned_candidate)
     }
 
-    fn invoke<'a>(
+    fn invoke_authorized<'a>(
         source: &'a EvmStructuredLiveBindings,
         request: &'a BroadcastExactCandidateRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<
         'a,
         mfm_capabilities::EffectContractCompletion<BroadcastExactCandidateCapability>,
     > {
-        Box::pin(async move { source.broadcast(request).await })
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.authorization().access_kind != AccessKind::Effect
+            || authorization.authorization().physical_binding_ref
+                != source
+                    .broadcast_release_history
+                    .current()
+                    .certificate()
+                    .content_ref
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                source.integrity_fault.clone(),
+            )));
+        }
+        let provider_call = AuthorizedProviderCall::new(&authorization);
+        let origin = provider_call.origin().clone();
+        Box::pin(async move { provider_call.run(source.broadcast(request, &origin)).await })
     }
 }
 
@@ -841,6 +961,7 @@ impl StructuredEffectSpec for BroadcastExactCandidateCapability {
 #[doc(hidden)]
 pub struct EvmStructuredEffectBinding<C> {
     source: EvmStructuredLiveBindings,
+    state_input_ref: mfm_journal::structured::LexicalValueRef,
     _capability: PhantomData<fn() -> C>,
 }
 
@@ -852,7 +973,10 @@ where
         &'a self,
         request: &'a C::Request,
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
-        C::invoke(&self.source, request)
+        let _ = (request, &self.source);
+        Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+            self.source.integrity_fault.clone(),
+        )))
     }
 }
 
@@ -865,7 +989,7 @@ where
     }
 }
 
-impl<C> RuntimeEffectPhysicalBinding<C> for EvmStructuredEffectBinding<C>
+impl<C> QualifiedEffectPhysicalBinding<C> for EvmStructuredEffectBinding<C>
 where
     C: StructuredEffectSpec,
 {
@@ -874,6 +998,24 @@ where
             .broadcast_release_history
             .current()
             .certificate()
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.authorization().access_kind != AccessKind::Effect
+            || authorization.authorization().physical_binding_ref
+                != self.public_certificate().content_ref
+            || authorization.authorization().state_input_ref != self.state_input_ref
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                self.source.integrity_fault.clone(),
+            )));
+        }
+        C::invoke_authorized(&self.source, request, authorization)
     }
 
     fn supersession_head<'a>(
@@ -888,7 +1030,7 @@ where
     }
 }
 
-impl<C> RuntimeEffectPhysicalBindingSource<C> for EvmStructuredLiveBindings
+impl<C> QualifiedEffectPhysicalBindingSource<C> for EvmStructuredLiveBindings
 where
     C: StructuredEffectSpec,
 {
@@ -902,6 +1044,7 @@ where
         let binding = C::eligible(self, selection, request).then(|| {
             Arc::new(EvmStructuredEffectBinding {
                 source: self.clone(),
+                state_input_ref: selection.state_input_ref().clone(),
                 _capability: PhantomData,
             })
         });

@@ -1,15 +1,15 @@
 error[E0382]: use of moved value: `authorization`
-  --> tests/ui/structured/fail/reuse_newly_appended_authorization.rs:10:19
+  --> tests/ui/structured/fail/reuse_committed_access_authorization.rs:10:19
    |
- 5 |     authorization: NewlyAppendedAuthorization,
-   |     ------------- move occurs because `authorization` has type `NewlyAppendedAuthorization`, which does not implement the `Copy` trait
+ 5 |     authorization: CertifiedAccessAuthorization,
+   |     ------------- move occurs because `authorization` has type `CertifiedAccessAuthorization`, which does not implement the `Copy` trait
 ...
  9 |     let _first = authorization.invoke_prior_run_fact_scan(first_request);
    |                                ----------------------------------------- `authorization` moved due to this method call
 10 |     let _second = authorization.invoke_prior_run_fact_scan(second_request);
    |                   ^^^^^^^^^^^^^ value used here after move
    |
-note: `NewlyAppendedAuthorization::invoke_prior_run_fact_scan` takes ownership of the receiver `self`, which moves `authorization`
+note: `CertifiedAccessAuthorization::invoke_prior_run_fact_scan` takes ownership of the receiver `self`, which moves `authorization`
   --> src/structured.rs
    |
    |         self,

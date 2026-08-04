@@ -70,6 +70,7 @@ use mfm_portfolio::{
 use mfm_program::structured::{
     RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
 };
+use mfm_replay::portable::PortableRunExport;
 use mfm_runtime::history::StructuredAdmissionCommand;
 use mfm_runtime::structured::DriveOutcome;
 use mfm_signing::{
@@ -91,9 +92,9 @@ use mfm_storage_evm_postgres::{
     QualifiedEvmRoutingCatalog, WalletAuthorityProviderClient, WalletAuthorityProviderTrust,
 };
 use mfm_storage_postgres::{
-    issue_application_sessions, issue_configuration_maintenance_sessions,
-    open_configuration_maintenance, open_structured_authoritative, PostgresSchema,
-    SessionLoginMaterial, TargetSessionMaterials,
+    migrate_test_database, open_configuration_maintenance, open_structured_authoritative,
+    open_test_application_sessions, open_test_configuration_sessions, TestLoginCredential,
+    TestTargetCredentials,
 };
 use mfm_store::structured::{
     ConfigurationAppendRequest, ConfigurationStreamKey, PhysicalBindingAuthorization,
@@ -584,15 +585,15 @@ async fn evm_postgres_submission_worker() {
         mode == PHASE_ADMIT_BROADCAST,
     )
     .await;
-    let sessions = issue_application_sessions(TargetSessionMaterials {
+    let sessions = open_test_application_sessions(TestTargetCredentials {
         schema_name: history_schema.clone(),
-        run_reader: SessionLoginMaterial {
+        run_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("run reader url"),
         },
-        run_writer: SessionLoginMaterial {
+        run_writer: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("run writer url"),
         },
-        configuration_reader: SessionLoginMaterial {
+        configuration_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
         },
         configuration_writer: None,
@@ -783,15 +784,15 @@ async fn run_production_application_worker(
         .await;
     }
 
-    let application_sessions = issue_application_sessions(TargetSessionMaterials {
+    let application_sessions = open_test_application_sessions(TestTargetCredentials {
         schema_name: history_schema.to_owned(),
-        run_reader: SessionLoginMaterial {
+        run_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("run reader url"),
         },
-        run_writer: SessionLoginMaterial {
+        run_writer: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("run writer url"),
         },
-        configuration_reader: SessionLoginMaterial {
+        configuration_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
         },
         configuration_writer: None,
@@ -1166,12 +1167,12 @@ async fn seed_production_configuration(
     material: &ProductionDeploymentMaterial,
 ) {
     let writer = open_configuration_maintenance(
-        issue_configuration_maintenance_sessions(
+        open_test_configuration_sessions(
             history_schema.to_owned(),
-            SessionLoginMaterial {
+            TestLoginCredential {
                 database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader"),
             },
-            SessionLoginMaterial {
+            TestLoginCredential {
                 database_url: std::env::var("MFM_TEST_CONFIG_WRITER_URL").expect("config writer"),
             },
         )
@@ -1511,60 +1512,49 @@ async fn verify_production_projections(
         read_application_export(&application, portfolio_run_id, ExportKind::Semantic).await;
     let (audit_ref, audit_bytes) =
         read_application_export(&application, portfolio_run_id, ExportKind::Audit).await;
-    let semantic: Value =
-        serde_json::from_slice(&semantic_bytes).expect("decode semantic portable export");
-    let audit: Value = serde_json::from_slice(&audit_bytes).expect("decode audit portable export");
-    assert_eq!(semantic["version"], "mfm.structured-portable-run-export.v1");
-    assert_eq!(audit["version"], "mfm.structured-portable-run-export.v1");
-    assert_eq!(semantic["kind"], "semantic");
-    assert_eq!(audit["kind"], "audit");
-    assert!(semantic.get("fixation").is_some());
-    assert!(audit.get("fixation").is_some());
-    assert!(semantic.get("batches").is_some());
-    assert!(audit.get("batches").is_some());
-    assert!(semantic.get("digest").is_some());
-    let semantic_batches = semantic["batches"]
-        .as_array()
-        .expect("semantic committed batches");
-    let audit_batches = audit["batches"]
-        .as_array()
-        .expect("audit committed batches");
-    assert!(!semantic_batches.is_empty());
-    assert!(!audit_batches.is_empty());
+    let semantic_export = PortableRunExport::strict_decode(&semantic_bytes)
+        .expect("decode semantic portable frame stream");
+    let audit_export =
+        PortableRunExport::strict_decode(&audit_bytes).expect("decode audit portable frame stream");
+    assert_eq!(
+        semantic_export
+            .to_canonical_bytes()
+            .expect("re-encode semantic"),
+        semantic_bytes
+    );
+    assert_eq!(
+        audit_export.to_canonical_bytes().expect("re-encode audit"),
+        audit_bytes
+    );
+    assert_eq!(
+        semantic_export.content_ref().expect("semantic content ref"),
+        semantic_ref
+    );
+    assert_eq!(
+        audit_export.content_ref().expect("audit content ref"),
+        audit_ref
+    );
+    let semantic_frames = portable_frames(&semantic_bytes);
+    let audit_frames = portable_frames(&audit_bytes);
+    assert!(semantic_frames.len() > 1);
+    assert!(audit_frames.len() > 1);
     assert!(
-        semantic_batches.len() <= audit_batches.len(),
-        "semantic export must not retain more physical batches than audit"
+        semantic_frames.len() <= audit_frames.len(),
+        "semantic export must not retain more physical frames than audit"
     );
-    let semantic_records = flatten_portable_batch_records(semantic_batches);
-    let audit_records = flatten_portable_batch_records(audit_batches);
-    assert!(
-        semantic_records.len() <= audit_records.len(),
-        "semantic export must not retain more records than audit"
-    );
-    assert!(
-        semantic_records.iter().any(|record| {
-            record["record"]["kind"] == "state_transition_committed"
-                || record["record"]["kind"] == "run_admitted"
-        }),
-        "semantic export must retain a semantic settlement record"
-    );
-    // Atomic batch selection retains an adjacent RunClosed when it shares the
-    // semantic cutoff batch; audit always ends at the physical close.
+    let semantic_seal = portable_seal(semantic_frames.last().expect("semantic seal"));
+    let audit_seal = portable_seal(audit_frames.last().expect("audit seal"));
+    assert_eq!(semantic_seal["kind"], "seal");
+    assert_eq!(audit_seal["kind"], "seal");
+    assert_eq!(semantic_seal["payload"]["kind"], "semantic");
+    assert_eq!(audit_seal["payload"]["kind"], "audit");
     assert_eq!(
-        audit_records.last().expect("audit terminal record")["record"]["kind"],
-        "run_closed"
+        semantic_seal["payload"]["version"],
+        "mfm.structured-portable-run-export-stream.v2"
     );
     assert_eq!(
-        semantic["fixation"]["semantic_head"],
-        audit["fixation"]["semantic_head"]
-    );
-    assert_eq!(
-        semantic["fixation"]["journal_head"],
-        semantic_batches.last().expect("semantic terminal batch")["head"]
-    );
-    assert_eq!(
-        audit["fixation"]["journal_head"],
-        audit_batches.last().expect("audit terminal batch")["head"]
+        audit_seal["payload"]["version"],
+        "mfm.structured-portable-run-export-stream.v2"
     );
     let post_telemetry_application = application.clone();
     let router = mfm_rest_api::make_app(mfm_rest_api::AppState::new(application));
@@ -1870,16 +1860,21 @@ async fn read_application_export(
     (content_ref, bytes)
 }
 
-fn flatten_portable_batch_records(batches: &[Value]) -> Vec<&Value> {
-    batches
-        .iter()
-        .flat_map(|batch| {
-            batch["records"]
-                .as_array()
-                .expect("committed batch records")
-                .iter()
-        })
+fn portable_frames(bytes: &[u8]) -> Vec<&[u8]> {
+    assert!(
+        bytes.ends_with(b"\n"),
+        "portable stream newline termination"
+    );
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
         .collect()
+}
+
+fn portable_seal(frame: &[u8]) -> Value {
+    let value: Value = serde_json::from_slice(frame).expect("portable frame JSON");
+    assert_eq!(value["kind"], "seal");
+    value
 }
 
 struct RuntimeAssembly {
@@ -3363,7 +3358,7 @@ impl TestDatabase {
                 .await
                 .expect("create isolated schema");
         }
-        PostgresSchema::migrate(&scoped_database_url(&database_url, &history_schema))
+        migrate_test_database(&scoped_database_url(&database_url, &history_schema))
             .await
             .expect("migrate structured history");
         PostgresEvmWalletSchema::migrate(&scoped_database_url(&database_url, &wallet_schema))

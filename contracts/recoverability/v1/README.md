@@ -7,26 +7,28 @@ parser, migration reader, dual writer, or fallback are retained.
 Current artifact metadata:
 
 ```text
-annex_bytes: 42809
-annex_sha256: af935d166da964906f4ed97ddd1b7f54c6081bb819d0f05d26e2ab947d60b19c
-annex_schema_count: 48
+annex_bytes: 47308
+annex_sha256: 8cfb3f07c708f02a6c02a25972ba823f304cefb7f0a20fef3fbb3cf5c817868c
+annex_schema_count: 49
 annex_domain_count: 5
 annex_logical_key_count: 5
-corpus_bytes: 43122
-corpus_sha256: 6781dee22cb492ffe7dc3a8e272b5218f06f98c05fc4a59d15d733730ac0cb46
-corpus_positive_count: 17
-corpus_negative_count: 2
+corpus_bytes: 44765
+corpus_sha256: 92285b6367cf78511697c67035968226a8fe5b5acd2ea8588fa689ffeb337dc4
+corpus_positive_count: 18
+corpus_negative_count: 3
 corpus_relational_count: 1
 ```
 
-Portable transfer is one strict canonical object:
+Portable transfer is one bounded newline-delimited canonical frame stream:
 
 ```text
 contract: mfm.portable-run-export-stream.v1
-version: mfm.structured-portable-run-export.v1
-schema_id: schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:6438e6212521f4eb7140bb5a1202ac29afe648f43c6fd49022903ebff60b52d9
-media_type: application/vnd.mfm.structured-run-export.v1+json
-integrity: external ContentRef using raw SHA-256 of the exact object bytes
+frame_contract: mfm.portable-run-export-frame.v1
+stream_schema_id: schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:af2eb5dcab068611d4aafadc860064b5ee8d61adc030ad711b3616907b6c057b
+frame_schema_id: schema:mfm.portable-run-export-frame:1:sha256-jcs-v1:df1ce7d16564af5b0aaa94d02fd51c2602bdd0504cb1a4aaa859eef0c524274d
+version: mfm.structured-portable-run-export-stream.v2
+media_type: application/vnd.mfm.structured-run-export-stream.v2
+integrity: external ContentRef using raw SHA-256 of the exact stream bytes
 ```
 
 Run `python3 contracts/recoverability/generate.py` from the repository root to regenerate both

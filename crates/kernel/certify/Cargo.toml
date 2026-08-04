@@ -17,6 +17,12 @@ binary-facing = false
 name = "mfm_certify"
 path = "src/lib.rs"
 
+[features]
+# Internal bridge used only by the runtime/store cutover.  Keeping the live
+# process handoff out of the default certification API prevents a consumer of
+# this crate from manufacturing the runtime assembly halves.
+runtime-authority = []
+
 [dependencies]
 futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }

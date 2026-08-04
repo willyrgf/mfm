@@ -7,8 +7,8 @@ use alloy_primitives::Address;
 use async_trait::async_trait;
 use mfm_certify::structured::{AdmissionCertificationRegistry, ProgramRegistryBuilder};
 use mfm_ids::{
-    AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
-    SchemaId, StableId, TenantScopeId,
+    AppendRequestId, ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId,
+    TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, AccessKind, HistoryObject, ADMISSION_CONFIGURATION_OBJECT_TYPE,
@@ -57,7 +57,7 @@ const QUALIFICATION_ID: &str = "mfm.application/structured-production-qualificat
 const PORTFOLIO_SCOPE_ID: &str = "mfm.portfolio/structured-snapshot-scope";
 const BALANCE_SCOPE_ID: &str = "mfm.evm/structured-balance-scope";
 const SUBMISSION_SCOPE_ID: &str = "mfm.evm/structured-submission-scope";
-const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revision";
+const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revision.v1";
 
 type HistoryBackend = PostgresStructuredHistoryBackend;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
@@ -743,7 +743,7 @@ impl ProductionBackend {
             .load_public(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+        if evidence.header().tenant_scope_id() != tenant_scope_id {
             return Err(PublicError::run_not_found());
         }
         Ok(evidence)
@@ -759,7 +759,7 @@ impl ProductionBackend {
             .load_transition_trace(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+        if evidence.header().tenant_scope_id() != tenant_scope_id {
             return Err(PublicError::run_not_found());
         }
         Ok(evidence)
@@ -775,7 +775,7 @@ impl ProductionBackend {
             .load_access_audit(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+        if evidence.header().tenant_scope_id() != tenant_scope_id {
             return Err(PublicError::run_not_found());
         }
         Ok(evidence)
@@ -791,7 +791,7 @@ impl ProductionBackend {
             .load_for_recorded_verify(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+        if evidence.header().tenant_scope_id() != tenant_scope_id {
             return Err(PublicError::run_not_found());
         }
         Ok(evidence)
@@ -807,7 +807,7 @@ impl ProductionBackend {
             .load_for_export(run_id)
             .await
             .map_err(classify_store_error)?;
-        if &evidence.admission().tenant_scope_id != tenant_scope_id {
+        if !evidence.is_for_tenant(tenant_scope_id) {
             return Err(PublicError::run_not_found());
         }
         Ok(evidence)
@@ -836,12 +836,13 @@ impl ProductionBackend {
             BTreeMap::from([(root_run_id.clone(), root_sources.clone())]);
         let mut authorized = BTreeSet::new();
         let mut pending = root_sources;
+        let mut source_evidence = Vec::new();
 
         while let Some(source_run_id) = pending.pop_first() {
             if source_run_id == root_run_id || !authorized.insert(source_run_id.clone()) {
                 continue;
             }
-            if authorized.len() > mfm_store::structured::MAX_EXPORT_SOURCE_RUNS {
+            if authorized.len() > mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS {
                 return Err(PublicError::source_run_export_denied());
             }
             call.authorize_required_dependency(source_run_id.clone())
@@ -851,14 +852,15 @@ impl ProductionBackend {
                 .load_for_export(&source_run_id)
                 .await
                 .map_err(classify_export_dependency_store_error)?;
-            if &evidence.admission().tenant_scope_id != call.tenant_scope_id()
-                || evidence.run_id() != &source_run_id
+            if !evidence.is_for_tenant(call.tenant_scope_id())
+                || !evidence.is_for_run(&source_run_id)
             {
                 return Err(PublicError::source_run_export_denied());
             }
             let nested = evidence
                 .direct_source_run_ids()
                 .map_err(|_| PublicError::source_run_export_denied())?;
+            source_evidence.push(evidence);
             discovery.insert(source_run_id.clone(), nested.clone());
             for nested_run in nested {
                 if nested_run != root_run_id && !authorized.contains(&nested_run) {
@@ -877,7 +879,8 @@ impl ProductionBackend {
                 .ok_or(ExportSourceClosureError::OverBudget)
         })
         .map_err(|_| PublicError::source_run_export_denied())?;
-        Ok(root)
+        root.with_authorized_sources(source_evidence)
+            .map_err(|_| PublicError::source_run_export_denied())
     }
 }
 
@@ -1082,13 +1085,11 @@ fn admission_append_request_id(
 }
 
 fn fixed_schema_id(name: &str) -> Result<SchemaId, PublicError> {
-    SchemaId::new(
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(format!("mfm.structured-schema.v1:{name}:1").as_bytes()),
-    )
-    .map_err(|_| registry_invalid())
+    mfm_canonical::RecoverabilityContract::embedded()
+        .map_err(|_| registry_invalid())?
+        .schema_id(name)
+        .cloned()
+        .map_err(|_| registry_invalid())
 }
 
 fn stable(value: impl AsRef<str>) -> Result<StableId, PublicError> {
@@ -1440,7 +1441,7 @@ mod tests {
             SchemaId::new(
                 "mfm.app.test-object",
                 "1",
-                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestAlgorithm::Sha256JcsV1,
                 mfm_canonical::sha256_digest_bytes(b"mfm.app.test-object.v1"),
             )
             .expect("test object schema"),
@@ -1461,7 +1462,7 @@ mod tests {
             SchemaId::new(
                 &schema_name,
                 "1",
-                DigestAlgorithm::Sha256JcsV1,
+                mfm_ids::DigestAlgorithm::Sha256JcsV1,
                 mfm_canonical::sha256_digest_bytes(
                     format!("mfm.app.test-encoded-{discriminator}.v1").as_bytes(),
                 ),

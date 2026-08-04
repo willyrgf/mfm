@@ -15,7 +15,7 @@ use mfm_ids::{
     RunSemanticStateDigest, SchemaId, SemanticCallId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    ExternalAccessAuthorized, HistoryObject, LexicalValueRef, RecordRef, SemanticHead,
+    ExternalAccessAuthorized, HistoryObject, LexicalValueRef, RecordRef, RunRecord, SemanticHead,
     TypedValueRef,
 };
 use mfm_program::structured::{
@@ -654,6 +654,7 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         test_history_object("mfm.test/adapter-implementation", 1).content_ref;
     let routing_policy_ref = test_history_object("mfm.test/routing-policy", 1).content_ref;
     let store_scope_id = test_store_scope_id(1);
+    let store_epoch = test_store_epoch(1);
     let tenant_scope_id = test_tenant_scope_id(1);
     let source_manifest_ref = test_history_object("mfm.test/source-manifest", 1).content_ref;
     let certificate = test_history_object("mfm.test/physical-binding", 1);
@@ -661,7 +662,7 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
     let occurrence_path_ref = test_history_object("mfm.test/occurrence-path", 1).content_ref;
     let semantic_call_id = SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call"));
     let semantic_head = test_semantic_head(1);
-    let authorization_ref = RecordRef {
+    let mut authorization_ref = RecordRef {
         run_id: run_id.clone(),
         run_sequence: 1,
         ordinal: 0,
@@ -695,7 +696,7 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
             attempt_ordinal: 0,
             state_input_ref: &state_input_ref,
             store_scope_id: &store_scope_id,
-            store_epoch: test_store_epoch(1),
+            store_epoch,
             tenant_scope_id: &tenant_scope_id,
             admitted_prior_run_source_manifest_ref: &source_manifest_ref,
             capability_contract_ref: &capability_contract_ref,
@@ -709,7 +710,7 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         AccessKind::Read,
         &request,
         &request_contract_ref,
-        &request_schema,
+        request_schema,
         &certificate,
     )
     .expect("expected authorization");
@@ -722,6 +723,11 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         state_input_ref: state_input_ref.clone(),
         access_kind: AccessKind::Read,
         semantic_head,
+        store_scope_id: store_scope_id.clone(),
+        store_epoch,
+        tenant_scope_id: tenant_scope_id.clone(),
+        admitted_routing_policy_ref: routing_policy_ref.clone(),
+        minimum_lineage_head_ref: None,
         capability_contract_ref,
         capability_implementation_ref,
         adapter_contract_ref,
@@ -752,7 +758,20 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
                 .stable_resource_lineage_contract_ref,
         })
         .expect("access attempt identity");
+    let record = RunRecord::ExternalAccessAuthorized(authorization.clone());
+    authorization_ref.record_hash =
+        mfm_journal::structured::derive_record_hash(&ExpectedRecordHashPreimage {
+            run_id: &authorization_ref.run_id,
+            run_sequence: authorization_ref.run_sequence,
+            ordinal: authorization_ref.ordinal,
+            record: &record,
+        })
+        .expect("record hash");
     assert!(expected.matches(&authorization_ref, &authorization));
+
+    let mut substituted_record_ref = authorization_ref.clone();
+    substituted_record_ref.ordinal = 1;
+    assert!(!expected.matches(&substituted_record_ref, &authorization));
 
     authorization.state_input_ref = test_lexical_value_ref(2);
     assert!(!expected.matches(&authorization_ref, &authorization));
@@ -786,7 +805,7 @@ where
     }
 }
 
-impl<C, I> RuntimeReadPhysicalBinding<C> for TestReadPhysicalBinding<I>
+impl<C, I> QualifiedReadPhysicalBinding<C> for TestReadPhysicalBinding<I>
 where
     C: RuntimeReadCapability,
     I: RuntimeReadAdapter<C>,
@@ -794,13 +813,22 @@ where
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
     }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
+        drop(authorization);
+        self.invoker.invoke(request)
+    }
 }
 
 struct TestReadPhysicalBindingSource<I> {
     binding: Arc<TestReadPhysicalBinding<I>>,
 }
 
-impl<C, I> RuntimeReadPhysicalBindingSource<C> for TestReadPhysicalBindingSource<I>
+impl<C, I> QualifiedReadPhysicalBindingSource<C> for TestReadPhysicalBindingSource<I>
 where
     C: RuntimeReadCapability,
     I: RuntimeReadAdapter<C>,
@@ -858,13 +886,22 @@ where
     }
 }
 
-impl<C, I> RuntimeEffectPhysicalBinding<C> for TestEffectPhysicalBinding<I>
+impl<C, I> QualifiedEffectPhysicalBinding<C> for TestEffectPhysicalBinding<I>
 where
     C: RuntimeEffectCapability,
     I: RuntimeEffectAdapter<C>,
 {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
+        drop(authorization);
+        self.invoker.invoke(request)
     }
 
     fn supersession_head<'a>(
@@ -880,7 +917,7 @@ struct TestEffectPhysicalBindingSource<I> {
     binding: Arc<TestEffectPhysicalBinding<I>>,
 }
 
-impl<C, I> RuntimeEffectPhysicalBindingSource<C> for TestEffectPhysicalBindingSource<I>
+impl<C, I> QualifiedEffectPhysicalBindingSource<C> for TestEffectPhysicalBindingSource<I>
 where
     C: RuntimeEffectCapability,
     I: RuntimeEffectAdapter<C>,
@@ -4173,11 +4210,11 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
         stable_resource_lineage_contract_ref: None,
         minimum_lineage_head_ref: None,
     };
-    let (_, processes) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts();
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified Read capability");
-    let binding = block_on(processes.prepare_access::<ReadPhysicalBindingKind>(
+    let binding = block_on(processes.qualify_access::<ReadPhysicalBindingKind>(
         &capability_identity,
         target,
         input.clone(),
@@ -4185,10 +4222,10 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     .expect("returned binding")
     .expect("available returned binding");
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(binding)),
+        block_on(processes.invoke_certified_binding_for_test(binding)),
         QualifiedAccessCompletion::Returned(_)
     ));
-    let binding = block_on(processes.prepare_access::<ReadPhysicalBindingKind>(
+    let binding = block_on(processes.qualify_access::<ReadPhysicalBindingKind>(
         &capability_identity,
         target,
         input.clone(),
@@ -4196,10 +4233,10 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     .expect("safe-failure binding")
     .expect("available safe-failure binding");
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(binding)),
+        block_on(processes.invoke_certified_binding_for_test(binding)),
         QualifiedAccessCompletion::SafeFailure(_)
     ));
-    let binding = block_on(processes.prepare_access::<ReadPhysicalBindingKind>(
+    let binding = block_on(processes.qualify_access::<ReadPhysicalBindingKind>(
         &capability_identity,
         target,
         input.clone(),
@@ -4207,7 +4244,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     .expect("integrity binding")
     .expect("available integrity binding");
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(binding)),
+        block_on(processes.invoke_certified_binding_for_test(binding)),
         QualifiedAccessCompletion::IntegrityFault(_)
     ));
     assert_eq!(
@@ -4358,18 +4395,18 @@ fn infallible_no_refresh_effect_settles_reviewed_safe_failure_as_success() {
         stable_resource_lineage_contract_ref: None,
         minimum_lineage_head_ref: None,
     };
-    let (_, processes) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts();
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified Effect capability");
-    let binding = block_on(processes.prepare_access::<EffectPhysicalBindingKind>(
+    let binding = block_on(processes.qualify_access::<EffectPhysicalBindingKind>(
         &capability_identity,
         target,
         input,
     ))
     .expect("Effect binding preparation")
     .expect("available Effect binding");
-    let completion = block_on(processes.invoke_qualified_physical_binding_for_test(binding));
+    let completion = block_on(processes.invoke_certified_binding_for_test(binding));
     assert!(matches!(
         completion,
         QualifiedAccessCompletion::SafeFailure(_)
@@ -4729,12 +4766,12 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         stable_resource_lineage_contract_ref: Some(&resource_ref),
         minimum_lineage_head_ref: None,
     };
-    let (_, processes) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts();
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified refreshable Effect capability");
     let prepare = || {
-        block_on(processes.prepare_access::<EffectPhysicalBindingKind>(
+        block_on(processes.qualify_access::<EffectPhysicalBindingKind>(
             &capability_identity,
             target,
             input.clone(),
@@ -4743,23 +4780,23 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         .expect("available Effect binding")
     };
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(prepare())),
+        block_on(processes.invoke_certified_binding_for_test(prepare())),
         QualifiedAccessCompletion::Returned(_)
     ));
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(prepare())),
+        block_on(processes.invoke_certified_binding_for_test(prepare())),
         QualifiedAccessCompletion::SafeFailure(_)
     ));
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(prepare())),
+        block_on(processes.invoke_certified_binding_for_test(prepare())),
         QualifiedAccessCompletion::SupersededBeforeEntry { .. }
     ));
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(prepare())),
+        block_on(processes.invoke_certified_binding_for_test(prepare())),
         QualifiedAccessCompletion::EntryUnknown(_)
     ));
     assert!(matches!(
-        block_on(processes.invoke_qualified_physical_binding_for_test(prepare())),
+        block_on(processes.invoke_certified_binding_for_test(prepare())),
         QualifiedAccessCompletion::IntegrityFault(_)
     ));
     assert_eq!(

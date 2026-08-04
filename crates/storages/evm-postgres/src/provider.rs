@@ -5,6 +5,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use mfm_canonical::limits::{
+    MAX_PROVIDER_DEPLOYMENT_ROUTES, MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES,
+    MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
+};
 use mfm_evm::{
     ActivateEvmCandidateRequest, ActiveWalletCandidate, CompleteEvmNonceRequest,
     CompletedWalletNonce, EvmRoutingCatalogDescriptor, EvmWalletReference, ReserveEvmNonceRequest,
@@ -28,17 +32,17 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::{PostgresEvmWalletError, Result};
 
 const PROTOCOL_VERSION: u16 = 3;
-const MAX_MESSAGE_BYTES: usize = 1_048_576;
+const MAX_MESSAGE_BYTES: usize = MAX_PROVIDER_MESSAGE_BYTES;
 const PROVIDER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTHENTICATION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.authentication.v1\0";
 const ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
-const MAX_DEPLOYMENT_ROUTES: usize = 64;
+const MAX_DEPLOYMENT_ROUTES: usize = MAX_PROVIDER_DEPLOYMENT_ROUTES;
 /// Raw proof budget chosen so the complete FinishDeploymentAssembly JSON
 /// envelope (hex-encoded proofs plus metadata for every admitted route) stays
 /// within [`MAX_MESSAGE_BYTES`]. Hex encoding doubles each proof; the remaining
 /// budget reserves framing for route refs, ordinals, and message keys.
-const MAX_DEPLOYMENT_PROOF_BYTES: usize = 4 * 1024;
-const MAX_FINISH_AUTHORIZATION_BYTES: usize = 1024;
+const MAX_DEPLOYMENT_PROOF_BYTES: usize = MAX_PROVIDER_PROOF_BYTES;
+const MAX_FINISH_AUTHORIZATION_BYTES: usize = MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES;
 
 /// Qualified public trust anchor for one external wallet authority provider.
 ///
@@ -939,6 +943,7 @@ impl OfflineActivationVerifier {
                     channel,
                     marker,
                     operation_key: operation_key.to_owned(),
+                    state_input_ref: state_input_ref.clone(),
                 })
             }
             ProviderReply::Unavailable => Err(PostgresEvmWalletError::Unavailable),
@@ -1095,6 +1100,7 @@ pub(crate) struct PendingWriteLease {
     channel: ProviderChannel,
     marker: String,
     operation_key: String,
+    state_input_ref: LexicalValueRef,
 }
 
 impl PendingWriteLease {
@@ -1131,6 +1137,7 @@ impl PendingWriteLease {
                     channel: Some(self.channel),
                     context,
                     operation_key: self.operation_key,
+                    state_input_ref: self.state_input_ref,
                     revalidated: false,
                     mutation_prepared: false,
                 }))
@@ -1144,6 +1151,7 @@ pub(crate) struct WriteTransactionLease {
     channel: Option<ProviderChannel>,
     context: ProviderTargetContext,
     operation_key: String,
+    state_input_ref: LexicalValueRef,
     revalidated: bool,
     mutation_prepared: bool,
 }
@@ -1275,6 +1283,7 @@ impl WriteTransactionLease {
                     channel,
                     marker,
                     operation_key: self.operation_key,
+                    state_input_ref: self.state_input_ref,
                 }))
             }
             reply => disposition_without_value(reply),
@@ -1292,6 +1301,13 @@ pub(crate) struct PendingResolutionLease {
     channel: ProviderChannel,
     marker: String,
     operation_key: String,
+    state_input_ref: LexicalValueRef,
+}
+
+impl PendingResolutionLease {
+    pub(crate) const fn state_input_ref(&self) -> &LexicalValueRef {
+        &self.state_input_ref
+    }
 }
 
 impl PendingResolutionLease {
@@ -1890,6 +1906,22 @@ fn verify_channel_assertion<T: Serialize>(
 #[cfg(test)]
 mod frame_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn client_frame_reader_accepts_exact_message_budget() {
+        let payload = vec![b'x'; MAX_MESSAGE_BYTES - 1];
+        let (mut peer, client) = tokio::io::duplex(payload.len() + 1);
+        let writer = tokio::spawn(async move {
+            peer.write_all(&payload).await.expect("exact payload");
+            peer.write_all(b"\n").await.expect("frame delimiter");
+        });
+        let mut reader = BufReader::new(client);
+        let frame = read_bounded_frame(&mut reader, MAX_MESSAGE_BYTES)
+            .await
+            .expect("exact message budget is accepted");
+        assert_eq!(frame.len(), MAX_MESSAGE_BYTES - 1);
+        writer.await.expect("hostile writer");
+    }
 
     #[tokio::test]
     async fn client_frame_reader_rejects_oversized_and_unterminated_peers() {

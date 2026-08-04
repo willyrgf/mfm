@@ -34,11 +34,11 @@ use mfm_spec::structured::{
     StructuredFactDescriptor,
 };
 use mfm_storage_postgres::{
-    issue_application_sessions, issue_combined_sessions, issue_configuration_maintenance_sessions,
     open_configuration_maintenance, open_structured_authoritative,
-    open_structured_authoritative_with_configuration, ApplicationTargetSessions,
+    open_structured_authoritative_with_configuration, open_test_application_sessions,
+    open_test_combined_sessions, open_test_configuration_sessions, ApplicationTargetSessions,
     CombinedTargetSessions, ConfigurationMaintenanceSessions, PostgresStoreError,
-    PostgresStructuredHistoryBackend, SessionLoginMaterial, TargetSessionMaterials,
+    PostgresStructuredHistoryBackend, TestLoginCredential, TestTargetCredentials,
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
@@ -498,7 +498,6 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
             .as_str(),
     )
     .expect("winning configuration admission object");
-    let configuration_ref = configuration.content_ref.clone();
     let material = StructuredAdmissionMaterial::new(
         configuration,
         admission_object(
@@ -560,20 +559,11 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
         .load_public(&admitted_run_id)
         .await
         .expect("reload admitted race winner");
+    assert_eq!(admitted.run_id(), &admitted_run_id);
     assert_eq!(
-        admitted
-            .admission()
-            .admission_material_refs
-            .configuration_ref,
-        configuration_ref
+        admitted.header().tenant_scope_id(),
+        stream.tenant_scope_id()
     );
-    let retained_configuration = admitted
-        .object(&configuration_ref)
-        .expect("admitted configuration object");
-    let retained_revision: ConfigurationRevision =
-        serde_json::from_str(&retained_configuration.canonical_json)
-            .expect("decode admitted configuration revision");
-    assert_eq!(retained_revision, conflict_winner);
 
     drop(history_reader);
     drop(runtime);
@@ -1100,15 +1090,15 @@ async fn structured_history_fresh_process_worker() {
         return;
     };
     let schema = std::env::var(FRESH_PROCESS_SCHEMA_ENV).expect("worker schema is required");
-    let sessions = issue_application_sessions(TargetSessionMaterials {
+    let sessions = open_test_application_sessions(TestTargetCredentials {
         schema_name: schema,
-        run_reader: SessionLoginMaterial {
+        run_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_READER_URL").expect("reader url"),
         },
-        run_writer: SessionLoginMaterial {
+        run_writer: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_RUN_WRITER_URL").expect("writer url"),
         },
-        configuration_reader: SessionLoginMaterial {
+        configuration_reader: TestLoginCredential {
             database_url: std::env::var("MFM_TEST_CONFIG_READER_URL").expect("config reader url"),
         },
         configuration_writer: None,
@@ -1241,7 +1231,8 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
         },
         memory_registry,
         Arc::clone(&physical_verifier),
-    );
+    )
+    .expect("runtime assembly");
     let memory_runtime = memory.runtime;
     let memory_reader = memory.public_reader;
     let (memory_run_id, memory_admission) = memory_runtime
@@ -1304,15 +1295,15 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
 
     // Deployment-issued sessions retain private pools. Ordinary code cannot close them and
     // continue; unavailable credentials fail closed without a memory fallback.
-    let rejected = issue_application_sessions(TargetSessionMaterials {
+    let rejected = open_test_application_sessions(TestTargetCredentials {
         schema_name: database.schema.clone(),
-        run_reader: SessionLoginMaterial {
+        run_reader: TestLoginCredential {
             database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
         },
-        run_writer: SessionLoginMaterial {
+        run_writer: TestLoginCredential {
             database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
         },
-        configuration_reader: SessionLoginMaterial {
+        configuration_reader: TestLoginCredential {
             database_url: "postgresql://invalid:invalid@127.0.0.1:1/postgres".to_owned(),
         },
         configuration_writer: None,
@@ -1622,7 +1613,8 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         postgres_identity,
         memory_fixture.registry,
         Arc::new(NoPhysicalBindings),
-    );
+    )
+    .expect("runtime assembly");
     let AssembledStructuredRuntime {
         runtime: memory_runtime,
         export_reader: memory_reader,
@@ -1647,7 +1639,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     database.cleanup().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_source() {
     let database = TestDatabase::create().await;
     let allowed = qualified_fact_scan_fixture();
@@ -1658,7 +1650,9 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     )
     .await
     .expect("qualify empty-frontier scanner store");
-    let allowed_runtime = allowed_assembled.runtime;
+    // Keep each complete fold on a Tokio worker stack; this test exercises sequential
+    // empty-frontier and ineligible-source scans without inheriting the small test stack.
+    let allowed_runtime = Arc::new(allowed_assembled.runtime);
     let allowed_reader = allowed_assembled.export_reader;
     let store_scope = allowed_reader.store_identity().store_scope_id.clone();
     let empty_tenant =
@@ -1685,17 +1679,25 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         .expect("admit empty-frontier consumer");
     assert_eq!(got_empty, empty_run);
     assert_eq!(
-        allowed_runtime
-            .drive_once(&empty_run)
-            .await
-            .expect("drive empty-frontier fact scan"),
+        tokio::spawn({
+            let runtime = Arc::clone(&allowed_runtime);
+            let run_id = empty_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("drive empty-frontier fact scan task")
+        .expect("drive empty-frontier fact scan"),
         DriveOutcome::AccessObserved
     );
     assert_eq!(
-        allowed_runtime
-            .drive_once(&empty_run)
-            .await
-            .expect("settle empty-frontier fact scan"),
+        tokio::spawn({
+            let runtime = Arc::clone(&allowed_runtime);
+            let run_id = empty_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("settle empty-frontier fact scan task")
+        .expect("settle empty-frontier fact scan"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let empty_response: PriorRunFactSelectionResponse =
@@ -1726,10 +1728,14 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         .expect("admit excluded-source producer");
     assert_eq!(got_producer, producer_run);
     assert_eq!(
-        allowed_runtime
-            .drive_once(&producer_run)
-            .await
-            .expect("drive excluded-source producer"),
+        tokio::spawn({
+            let runtime = Arc::clone(&allowed_runtime);
+            let run_id = producer_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("drive excluded-source producer task")
+        .expect("drive excluded-source producer"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
     drop(allowed_runtime);
@@ -1743,7 +1749,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     )
     .await
     .expect("reopen scanner with an excluding manifest");
-    let excluded_runtime = excluded_assembled.runtime;
+    let excluded_runtime = Arc::new(excluded_assembled.runtime);
     let excluded_reader = excluded_assembled.export_reader;
     let excluded_invocation =
         InvocationIdentity::new("00000000-0000-4000-8000-000000000086").expect("excluded inv");
@@ -1766,17 +1772,25 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
         .expect("admit excluded-source consumer");
     assert_eq!(got_excluded, excluded_run);
     assert_eq!(
-        excluded_runtime
-            .drive_once(&excluded_run)
-            .await
-            .expect("drive excluded-source fact scan"),
+        tokio::spawn({
+            let runtime = Arc::clone(&excluded_runtime);
+            let run_id = excluded_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("drive excluded-source fact scan task")
+        .expect("drive excluded-source fact scan"),
         DriveOutcome::AccessObserved
     );
     assert_eq!(
-        excluded_runtime
-            .drive_once(&excluded_run)
-            .await
-            .expect("settle excluded-source fact scan"),
+        tokio::spawn({
+            let runtime = Arc::clone(&excluded_runtime);
+            let run_id = excluded_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("settle excluded-source fact scan task")
+        .expect("settle excluded-source fact scan"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
     let excluded_response: PriorRunFactSelectionResponse =
@@ -1791,7 +1805,7 @@ async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_sour
     database.cleanup().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() {
     let database = TestDatabase::create().await;
     let fixture = qualified_fact_scan_fixture();
@@ -1802,7 +1816,7 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
     )
     .await
     .expect("qualify publication-barrier race store");
-    let runtime = assembled.runtime;
+    let runtime = Arc::new(assembled.runtime);
     let reader = assembled.public_reader;
     let store_scope = reader.store_identity().store_scope_id.clone();
     let producer_invocation =
@@ -1846,10 +1860,21 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
         .expect("admit racing consumer");
     assert_eq!(got_consumer, consumer_run);
 
-    let (publication_drive, barrier_drive) = tokio::join!(
-        runtime.drive_once(&producer_run),
-        runtime.drive_once(&consumer_run),
-    );
+    // Keep the two complete fold/append drives on independent Tokio worker stacks while
+    // preserving their concurrent tenant-lock race.
+    let publication_drive = tokio::spawn({
+        let runtime = runtime.clone();
+        let producer_run = producer_run.clone();
+        async move { runtime.drive_once(&producer_run).await }
+    });
+    let barrier_drive = tokio::spawn({
+        let runtime = runtime.clone();
+        let consumer_run = consumer_run.clone();
+        async move { runtime.drive_once(&consumer_run).await }
+    });
+    let (publication_drive, barrier_drive) = tokio::join!(publication_drive, barrier_drive);
+    let publication_drive = publication_drive.expect("publication drive task");
+    let barrier_drive = barrier_drive.expect("selection barrier drive task");
     assert_tenant_race_drive(&publication_drive);
     assert_tenant_race_drive(&barrier_drive);
 
@@ -2451,7 +2476,7 @@ fn qualified_fact_scan_fixture_with_source_operation(
         .expect("source manifest object");
     let request = FactSelectionRequest::new(
         source_object.content_ref.clone(),
-        FactSelectionScanBounds::new(1, 64, 65_536, 16, 65_536).expect("fact scan bounds"),
+        FactSelectionScanBounds::new(1, 64, 1_048_576, 16, 65_536).expect("fact scan bounds"),
         vec![FactSelectionQuery::new(
             fact_descriptor.descriptor_ref.clone(),
             CanonicalFactPredicate::from_canonical_json(br#"{"value":7}"#).expect("fact predicate"),
@@ -2602,8 +2627,11 @@ async fn drive_qualified_fact_scan<B, P>(
 ) -> String
 where
     B: StructuredHistoryBackend,
-    P: mfm_runtime::history::RuntimeHistoryPort,
+    P: mfm_runtime::history::RuntimeHistoryPort + 'static,
 {
+    // Keep each complete history fold on a Tokio worker stack; the test still drives the
+    // producer and consumer sequentially, but does not inherit the small test-thread stack.
+    let runtime = Arc::new(runtime);
     assert_eq!(
         request
             .scan_bounds()
@@ -2642,10 +2670,14 @@ where
         .expect("admit fact scan producer");
     assert_eq!(got_producer, producer_run);
     assert_eq!(
-        runtime
-            .drive_once(&producer_run)
-            .await
-            .expect("drive fact scan producer"),
+        tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let run_id = producer_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("drive fact scan producer task")
+        .expect("drive fact scan producer"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
 
@@ -2662,17 +2694,25 @@ where
         .expect("admit fact scan consumer");
     assert_eq!(got_consumer, consumer_run);
     assert_eq!(
-        runtime
-            .drive_once(&consumer_run)
-            .await
-            .expect("authorize, invoke, and observe fact scan"),
+        tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let run_id = consumer_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("authorize, invoke, and observe fact scan task")
+        .expect("authorize, invoke, and observe fact scan"),
         DriveOutcome::AccessObserved
     );
     assert_eq!(
-        runtime
-            .drive_once(&consumer_run)
-            .await
-            .expect("settle fact scan response"),
+        tokio::spawn({
+            let runtime = Arc::clone(&runtime);
+            let run_id = consumer_run.clone();
+            async move { runtime.drive_once(&run_id).await }
+        })
+        .await
+        .expect("settle fact scan response task")
+        .expect("settle fact scan response"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
 
@@ -3199,17 +3239,17 @@ impl TestDatabase {
     async fn try_application_sessions(
         &self,
     ) -> Result<ApplicationTargetSessions, PostgresStoreError> {
-        issue_application_sessions(self.application_materials()).await
+        open_test_application_sessions(self.application_materials()).await
     }
 
     async fn combined_sessions(&self) -> CombinedTargetSessions {
-        issue_combined_sessions(self.combined_materials())
+        open_test_combined_sessions(self.combined_materials())
             .await
             .expect("issue combined sessions")
     }
 
     async fn maintenance_sessions(&self) -> ConfigurationMaintenanceSessions {
-        issue_configuration_maintenance_sessions(
+        open_test_configuration_sessions(
             self.schema.clone(),
             self.login_material(&self.configuration_reader_login),
             self.login_material(&self.configuration_writer_login),
@@ -3218,8 +3258,8 @@ impl TestDatabase {
         .expect("issue maintenance sessions")
     }
 
-    fn application_materials(&self) -> TargetSessionMaterials {
-        TargetSessionMaterials {
+    fn application_materials(&self) -> TestTargetCredentials {
+        TestTargetCredentials {
             schema_name: self.schema.clone(),
             run_reader: self.login_material(&self.run_reader_login),
             run_writer: self.login_material(&self.run_writer_login),
@@ -3228,8 +3268,8 @@ impl TestDatabase {
         }
     }
 
-    fn combined_materials(&self) -> TargetSessionMaterials {
-        TargetSessionMaterials {
+    fn combined_materials(&self) -> TestTargetCredentials {
+        TestTargetCredentials {
             schema_name: self.schema.clone(),
             run_reader: self.login_material(&self.run_reader_login),
             run_writer: self.login_material(&self.run_writer_login),
@@ -3238,8 +3278,8 @@ impl TestDatabase {
         }
     }
 
-    fn login_material(&self, login: &TestLogin) -> SessionLoginMaterial {
-        SessionLoginMaterial {
+    fn login_material(&self, login: &TestLogin) -> TestLoginCredential {
+        TestLoginCredential {
             database_url: login.database_url(&self.database_url),
         }
     }

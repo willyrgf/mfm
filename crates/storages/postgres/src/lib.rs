@@ -1,8 +1,7 @@
 #![warn(missing_docs)]
 //! PostgreSQL representation of structured runtime history and configuration.
 //!
-//! Authority-bearing use starts through the opaque target-session openers. Schema
-//! migration uses the separate owner path exposed by [`PostgresSchema`]. Ordinary
+//! Authority-bearing use starts through the opaque target-session openers. Ordinary
 //! application code never receives a pool, URL, connection option, raw fence, or
 //! DML transaction handle.
 
@@ -13,14 +12,17 @@ mod qualification;
 mod roles;
 mod schema;
 mod session;
+mod sql_catalog;
 #[cfg(test)]
 mod sql_inventory;
 mod structured;
 mod transaction;
 
+#[cfg(feature = "test-support")]
+pub use checkpoint::ExternalCheckpointLedger;
 pub use checkpoint::{
-    CheckpointError, CheckpointKey, CheckpointState, CheckpointStream, ExternalCheckpointAuthority,
-    ExternalCheckpointLedger,
+    CheckpointError, CheckpointKey, CheckpointMutation, CheckpointReadFixation, CheckpointState,
+    CheckpointStream, ExternalCheckpointAuthority,
 };
 pub use configuration::PostgresConfigurationHistoryBackend;
 pub use error::{PostgresStoreError, Result};
@@ -28,16 +30,18 @@ pub use qualification::{
     open_configuration_maintenance, open_structured_authoritative,
     open_structured_authoritative_application, open_structured_authoritative_with_configuration,
 };
-pub use schema::PostgresSchema;
 #[cfg(feature = "test-support")]
-pub use session::{
-    issue_application_sessions, issue_combined_sessions, issue_configuration_maintenance_sessions,
-    SessionLoginMaterial, TargetSessionMaterials,
-};
+pub use schema::migrate_test_database;
 pub use session::{
     open_application_sessions, open_combined_sessions, open_configuration_sessions,
-    DeploymentCredentialBroker, PostgresApplicationSessions, PostgresCombinedSessions,
-    PostgresConfigurationSessions, PostgresTargetAdmission, TargetBinding,
+    DeploymentCredentialBroker, DeploymentCredentialSink, PostgresApplicationSessions,
+    PostgresCombinedSessions, PostgresConfigurationSessions, PostgresTargetAdmission,
+    TargetBinding,
+};
+#[cfg(feature = "test-support")]
+pub use session::{
+    open_test_application_sessions, open_test_combined_sessions, open_test_configuration_sessions,
+    TestLoginCredential, TestTargetCredentials,
 };
 #[cfg(feature = "test-support")]
 pub use session::{

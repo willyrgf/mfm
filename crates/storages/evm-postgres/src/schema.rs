@@ -43,9 +43,9 @@ const REQUIRED_TABLES: &[&str] = &[
 // development and verification environment. A same-name weakened constraint, trigger, function,
 // owner, or column therefore cannot pass qualification.
 const COLUMN_MANIFEST_SHA256: &str =
-    "3c98650a03fafdfd43072de71528b8f00f620834caee26812fb7183fd1c97542";
+    "286c163b0d8f126840622e4dd7f9c6d150be988f8e32a10884a068d3b056fee9";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "3a3ca3f07c64bd41d434f997b9b161e87af3191d2e6a52502422f11cc46eabcb";
+    "9bb702b332689c45b771815af94245ab31c945632f87a341e846323dc4e581b2";
 const TRIGGER_MANIFEST_SHA256: &str =
     "e19f09ad27003b64c8aa75c0a0ba0c3450414e9ca5a3f3487a227c4f0c3c1b22";
 const FUNCTION_MANIFEST_SHA256: &str =
@@ -67,6 +67,7 @@ pub struct PostgresEvmWalletSchema;
 
 impl PostgresEvmWalletSchema {
     /// Applies the compiled migration through a migration-owner connection.
+    #[cfg(feature = "parity-tests")]
     pub async fn migrate(database_url: &str) -> Result<()> {
         let pool = PgPool::connect(database_url)
             .await

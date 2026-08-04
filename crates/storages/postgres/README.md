@@ -11,17 +11,8 @@ transition routes live in `tenant_fact_heads` and `tenant_fact_publications`. Ol
 projection, mutable-cursor, support, and single-row configuration tables have no compatibility
 reader or upgrade path.
 
-Apply the baseline with an owner connection:
-
-```rust,no_run
-# async fn migrate() -> Result<(), mfm_storage_postgres::PostgresStoreError> {
-mfm_storage_postgres::PostgresSchema::migrate(
-    "postgresql://migration-owner@localhost/mfm",
-).await?;
-# Ok(())
-```
-
-A holder of deployment root credentials is inside the TCB.
+The deployment-owned migration job applies this baseline with its private owner connection. The
+crate does not expose raw migration URLs or pools to application callers.
 
 ## Target-session TCB
 

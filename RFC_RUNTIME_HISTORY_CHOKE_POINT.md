@@ -2651,7 +2651,7 @@ prepare<K>(QualifiedPhysicalBinding<K>)
 
 authorize(Prepared<K>)
   -> append ExternalAccessAuthorized
-  -> NewlyAppendedAuthorization<K>
+  -> CommittedAccessAuthorization<K>
   -> Authorized<K>
 
 invoke(Authorized<K>)
@@ -2737,7 +2737,7 @@ qualified binding and retains its private invoker handle. It sends only the immu
 public certificate and producer-free request material to the store. The store verifies that
 certificate against the admitted stable lineage and implementation binding and authors the
 attempt's public binding reference itself. A positive append proof lets Runtime combine the
-retained handle with `NewlyAppendedAuthorization<K>` to construct `Authorized<K>`; an ambiguous or
+retained handle with `CommittedAccessAuthorization<K>` to construct `Authorized<K>`; an ambiguous or
 rejected append cannot do so. Replay revalidates the certificate relation without ever obtaining
 the private invoker handle.
 

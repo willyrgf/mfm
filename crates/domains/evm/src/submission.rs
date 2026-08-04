@@ -393,6 +393,9 @@ impl EvmSubmissionRequest {
             &self.candidate_family,
             self.observation_rounds,
             &expansion,
+            &self.route_generation_ref,
+            &self.domain_activation_attestation,
+            &self.issuer_namespace_contract_ref,
         )?;
         Ok(())
     }
@@ -1622,6 +1625,15 @@ reconciling_read_state!(
     "mfm.evm.state/read-candidate-wallet-nonce-status"
 );
 reconciling_read_state!(
+    ReadObservedCandidateStatusState,
+    CandidateObservationWork,
+    CandidateResolution,
+    ReadEvmWalletNonceStatusRequest,
+    WalletNonceStatus,
+    ReadWalletNonceStatusCapability,
+    "mfm.evm.state/read-observed-candidate-status"
+);
+reconciling_read_state!(
     ReadExhaustionStatusState,
     FailureReconciliationRequest,
     CandidateResolution,
@@ -1752,12 +1764,6 @@ pure_state!(
     PreparedCandidateActivation,
     PreparedWalletSubmission,
     "mfm.evm.state/mark-activation-reconcile"
-);
-pure_state!(
-    MarkObservationReconcileState,
-    CandidateObservationWork,
-    CandidateResolution,
-    "mfm.evm.state/mark-observation-reconcile"
 );
 pure_state!(
     MarkCandidateCompletedState,

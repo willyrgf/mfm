@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use alloy_primitives::{Address, B256, U256};
 use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_ids::{InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
+use mfm_journal::structured::{LexicalValueRef, TypedValueRef};
 use mfm_program::structured::{
     CapabilityExpansion, CommittedObservation, RuntimeEffectCapability, RuntimeSigner, State,
     StateSettlement,
@@ -43,7 +44,7 @@ use crate::{
     EvmCandidateSigner, EvmNetworkBinding, EvmRoutingCatalogDescriptor,
     EvmRoutingGenerationDescriptor, EvmSubmissionConfiguration, EvmSubmissionExpansion,
     EvmSubmissionFailure, EvmSubmissionRequest, EvmTransactionIntent, EvmWalletFeeCandidate,
-    EvmWalletReference, TerminalWitnesses, WalletAuthorityContractError,
+    EvmWalletReference, TerminalWitnesses, UnsignedWalletCandidate, WalletAuthorityContractError,
     WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
     EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION, EVM_WALLET_REPLACEMENT_LIMIT,
 };
@@ -951,7 +952,7 @@ fn submission_expansion_freezes_all_candidate_and_observation_occurrences() {
                 .expect("state id")
                 .as_str()
         ),
-        Some(&2)
+        Some(&4)
     );
     assert_eq!(
         candidate_counts.get(
@@ -959,7 +960,7 @@ fn submission_expansion_freezes_all_candidate_and_observation_occurrences() {
                 .expect("state id")
                 .as_str()
         ),
-        Some(&2)
+        Some(&4)
     );
     assert_eq!(count_all_child_calls(&initial_child.root), 0);
     assert_eq!(count_all_child_calls(&candidate_child.root), 0);
@@ -1032,15 +1033,40 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     let mut c1 = c0.clone();
     c1.attested_candidate.candidate_ordinal = 1;
     c1.attested_candidate.transaction_hash = format!("{:#x}", B256::repeat_byte(0x42));
-    c1.attested_candidate.unsigned_candidate_digest = format!("{:#x}", B256::repeat_byte(0x62));
-    // Distinct descriptor identity so prefix validation elsewhere stays strict.
-    c1.attested_candidate.candidate_descriptor_ref = fixture
+    let second_fee = fixture
         .prepared
         .intent
         .derived
         .request
-        .route_generation_ref()
+        .candidate_family()
+        .candidates()[1]
         .clone();
+    let second_envelope = fixture
+        .prepared
+        .intent
+        .derived
+        .request
+        .transaction_intent()
+        .unsigned_candidate(fixture.post_reserve.reservation.nonce, &second_fee)
+        .expect("second candidate envelope");
+    let second_unsigned = UnsignedWalletCandidate {
+        transaction_intent: fixture
+            .prepared
+            .intent
+            .derived
+            .request
+            .transaction_intent()
+            .clone(),
+        semantic_reservation_key: fixture.post_reserve.prepared.reservation_key.clone(),
+        nonce: fixture.post_reserve.reservation.nonce,
+        candidate_ordinal: 1,
+        fee: second_fee,
+        unsigned_candidate_digest: format!("{:#x}", second_envelope.signing_digest()),
+    };
+    c1.attested_candidate.unsigned_candidate_digest =
+        second_unsigned.unsigned_candidate_digest.clone();
+    c1.attested_candidate.candidate_descriptor_ref =
+        canonical_wallet_reference(&second_unsigned).expect("second candidate descriptor");
     c1.activation_evidence_ref = fixture
         .post_reserve
         .reservation
@@ -1059,8 +1085,8 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         completion: None,
         failure: None,
     };
-    // Fixture family has one member; with next=0 the retained candidate is
-    // routed directly to observation without activation or broadcast.
+    // With next=0 the retained candidate is routed directly to observation
+    // without activation or broadcast.
     let CandidateSlotDecision::Execute =
         successful(submission_process::select_candidate_slot(&progress))
     else {
@@ -1129,8 +1155,52 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     observation.active = active0;
     observation.observation.transaction = Some(crate::EvmTransactionLookupObservation::Missing);
     observation.observation.receipt = Some(crate::EvmReceiptLookupObservation::Missing);
-    let CandidateResolution::Resume { work: advanced } =
-        successful(submission_process::mark_observation_reconcile(&observation))
+    let unchanged_status = WalletNonceStatus::Reserved {
+        reservation: work.reservation.clone(),
+        transaction_intent: work
+            .prepared
+            .intent
+            .derived
+            .request
+            .transaction_intent()
+            .clone(),
+        candidate_family: work
+            .prepared
+            .intent
+            .derived
+            .request
+            .candidate_family()
+            .clone(),
+        activated_candidates: work.activated_candidates.clone(),
+        current_candidate: work.current_candidate.clone(),
+        resource_head_ref: canonical_wallet_reference(
+            work.current_candidate
+                .as_ref()
+                .expect("retained current candidate"),
+        )
+        .expect("retained candidate head"),
+    };
+    let unchanged_status_digest = canonical_wallet_reference(&unchanged_status)
+        .expect("unchanged status reference")
+        .content_digest()
+        .to_owned();
+    observation.active.candidate.work.status_baseline = WalletStatusBaseline::Reserved {
+        resource_head_ref: match &unchanged_status {
+            WalletNonceStatus::Reserved {
+                resource_head_ref, ..
+            } => resource_head_ref.clone(),
+            _ => panic!("reserved status"),
+        },
+        canonical_status_digest: unchanged_status_digest,
+    };
+    let StateSettlement::Proposed(outcome) = submission_process::settle_observed_candidate_status(
+        &observation,
+        &CommittedObservation::Returned(unchanged_status),
+    ) else {
+        panic!("non-terminal observation must resume next ordinal");
+    };
+    let ProposedStateValue::Success(CandidateResolution::Resume { work: advanced }) =
+        outcome.value()
     else {
         panic!("non-terminal observation must resume next ordinal");
     };
@@ -1362,30 +1432,116 @@ fn reserved_status(fixture: &QualificationFixture, advanced: bool) -> WalletNonc
 
 fn completed_status(fixture: &QualificationFixture) -> WalletNonceStatus {
     let request = &fixture.prepared.intent.derived.request;
-    let completion_request = &fixture.completion.request;
-    let completion = CompletedWalletNonce {
-        nonce_domain: completion_request.nonce_domain.clone(),
-        nonce: completion_request.current_reservation.nonce,
-        semantic_reservation_key: completion_request
+    let reserve_request = submission_process::reserve_nonce_request(&fixture.qualified_pending);
+    let state_input = LexicalValueRef::new(
+        request
+            .issuer_namespace_contract_ref()
+            .to_content_ref()
+            .expect("fixture state slot"),
+        TypedValueRef {
+            contract_ref: request
+                .issuer_namespace_contract_ref()
+                .to_content_ref()
+                .expect("fixture state contract"),
+            value_ref: request
+                .issuer_namespace_contract_ref()
+                .to_content_ref()
+                .expect("fixture state value"),
+        },
+    );
+    let mut reservation = fixture.post_reserve.reservation.clone();
+    let observed_floor_digest = mfm_journal::structured::domain_content_digest(
+        "mfm.evm.wallet-observed-floor-provenance.v1",
+        &(&reserve_request.qualified_floor, &state_input),
+    )
+    .expect("fixture observed floor digest");
+    reservation.observed_floor_ref = observed_floor_digest.as_str().to_owned();
+    let reservation_evidence_digest = mfm_journal::structured::domain_content_digest(
+        "mfm.evm.wallet-reservation-evidence.v1",
+        &(
+            &reserve_request,
+            &state_input,
+            &reservation.resource_lineage_ref,
+            reservation.nonce,
+        ),
+    )
+    .expect("fixture reservation evidence digest");
+    reservation.reservation_evidence_ref = fixture
+        .post_reserve
+        .reservation
+        .reservation_evidence_ref
+        .with_content_digest(reservation_evidence_digest)
+        .expect("fixture reservation evidence reference");
+    let mut completion_request = fixture.completion.request.clone();
+    completion_request.current_reservation = reservation.clone();
+    let activation_request = fixture.prepared_activation.activation_request.clone();
+    let activation_evidence_digest = mfm_journal::structured::domain_content_digest(
+        "mfm.evm.wallet-candidate-activation-evidence.v1",
+        &(
+            &activation_request,
+            &state_input,
+            &reservation.resource_lineage_ref,
+        ),
+    )
+    .expect("fixture activation evidence digest");
+    let mut active_candidate = fixture.active.active_candidate.clone();
+    active_candidate.activation_evidence_ref = fixture
+        .active
+        .active_candidate
+        .activation_evidence_ref
+        .with_content_digest(activation_evidence_digest.clone())
+        .expect("fixture activation evidence reference");
+    completion_request
+        .canonical_terminal_outcome
+        .winning_activation_evidence_ref = active_candidate.activation_evidence_ref.clone();
+    let completion_evidence_digest = mfm_journal::structured::domain_content_digest(
+        "mfm.evm.wallet-completion-evidence.v1",
+        &(
+            &completion_request,
+            &state_input,
+            &reservation.resource_lineage_ref,
+        ),
+    )
+    .expect("fixture completion evidence digest");
+    let completion_evidence_ref = fixture
+        .post_reserve
+        .reservation
+        .reservation_evidence_ref
+        .with_content_digest(completion_evidence_digest)
+        .expect("fixture completion evidence reference");
+    let completion = CompletedWalletNonce::with_recovery_closure(
+        completion_request.nonce_domain.clone(),
+        completion_request.current_reservation.nonce,
+        completion_request
             .current_reservation
             .semantic_reservation_key
             .clone(),
-        semantic_completion_key: completion_request.completion_key.clone(),
-        canonical_terminal_outcome: completion_request.canonical_terminal_outcome.clone(),
-        terminal_witnesses: completion_request.terminal_witnesses.clone(),
-        sealed_activated_candidates: vec![fixture.active.active_candidate.clone()],
-        original_terminal_witnesses_ref: canonical_wallet_reference(
-            &completion_request.terminal_witnesses,
-        )
-        .expect("terminal witness reference")
-        .content_digest()
-        .to_owned(),
-        completion_evidence_ref: fixture
-            .post_reserve
-            .reservation
-            .reservation_evidence_ref
-            .clone(),
-    };
+        completion_request.completion_key.clone(),
+        completion_request.canonical_terminal_outcome.clone(),
+        completion_request.terminal_witnesses.clone(),
+        vec![active_candidate],
+        canonical_wallet_reference(&completion_request.terminal_witnesses)
+            .expect("terminal witness reference")
+            .content_digest()
+            .to_owned(),
+        completion_evidence_ref,
+        reservation,
+        request.transaction_intent().clone(),
+        request.candidate_family().clone(),
+        request.domain_activation_attestation().clone(),
+        fixture.qualified_pending.floor.clone(),
+        request.route_generation_ref().clone(),
+        request.issuer_namespace_contract_ref().clone(),
+        request.observation_rounds(),
+        fixture.prepared.intent.semantics_digest.clone(),
+        reserve_request,
+        completion_request,
+        vec![activation_request],
+        vec![state_input.clone()],
+        state_input.clone(),
+        state_input,
+    )
+    .expect("completion recovery closure");
     WalletNonceStatus::Completed {
         reservation: fixture.post_reserve.reservation.clone(),
         transaction_intent: request.transaction_intent().clone(),

@@ -2,13 +2,10 @@
 
 use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContract};
 use mfm_ids::{RunId, SchemaId};
-use mfm_journal::structured::{
-    AssignedRecord, ExternalAccessObserved, JournalHead, LexicalValueRef, ObservationOutcome,
-    RunRecord, SemanticHead,
-};
+use mfm_journal::structured::{JournalHead, LexicalValueRef, ObservationOutcome, SemanticHead};
 use mfm_store::structured::{
-    AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
-    StructuredHistoryBackend, StructuredStoreError, TraceRunEvidence,
+    AuditAccessEntry, AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
+    StructuredHistoryBackend, StructuredStoreError, TraceRunEvidence, TraceTransitionEntry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -349,29 +346,24 @@ pub fn project_transition_trace(
     limit: u16,
 ) -> Result<StructuredTransitionTracePage> {
     let at_journal_head = fixed_head(run.journal_head(), run.journal_heads(), at_head)?;
-    let transitions = records_at(run.records(), &at_journal_head)
-        .filter_map(|assigned| match &assigned.record {
-            RunRecord::StateTransitionCommitted(transition) => Some((assigned, transition)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let transitions = trace_records_at(run.records(), &at_journal_head).collect::<Vec<_>>();
     let (range, next_index) = page_range(transitions.len(), start, limit)?;
     let entries = transitions[range]
         .iter()
-        .map(|(assigned, transition)| {
+        .map(|transition| {
             StructuredTransitionTrace::encode(&serde_json::json!({
                 "version": "mfm.structured-transition-trace.v1",
-                "record_ref": assigned.record_ref,
-                "occurrence_id": transition.occurrence_id,
-                "occurrence_path_ref": transition.occurrence_path_ref,
-                "semantic_call_id": transition.semantic_call_id,
-                "input": transition.input,
-                "consumed_observation_ref": transition.consumed_observation_ref,
-                "outcome_ref": transition.outcome_ref,
-                "outcome": transition.outcome,
-                "facts": transition.facts,
-                "before_semantic_state_digest": transition.before_semantic_state_digest,
-                "after_semantic_state_digest": transition.after_semantic_state_digest,
+                "record_ref": transition.record_ref(),
+                "occurrence_id": transition.occurrence_id(),
+                "occurrence_path_ref": transition.occurrence_path_ref(),
+                "semantic_call_id": transition.semantic_call_id(),
+                "input": transition.input(),
+                "consumed_observation_ref": transition.consumed_observation_ref(),
+                "outcome_ref": transition.outcome_ref(),
+                "outcome": transition.outcome(),
+                "facts": transition.facts(),
+                "before_semantic_state_digest": transition.before_semantic_state_digest(),
+                "after_semantic_state_digest": transition.after_semantic_state_digest(),
             }))
         })
         .collect::<Result<Vec<_>>>()?;
@@ -391,30 +383,11 @@ pub fn project_access_audit(
     limit: u16,
 ) -> Result<StructuredAccessAuditPage> {
     let at_journal_head = fixed_head(run.journal_head(), run.journal_heads(), at_head)?;
-    let records = records_at(run.records(), &at_journal_head).collect::<Vec<_>>();
-    let authorizations = records
-        .iter()
-        .filter_map(|assigned| match &assigned.record {
-            RunRecord::ExternalAccessAuthorized(authorization) => Some((*assigned, authorization)),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let authorizations = audit_records_at(run.records(), &at_journal_head).collect::<Vec<_>>();
     let (range, next_index) = page_range(authorizations.len(), start, limit)?;
     let entries = authorizations[range]
         .iter()
-        .map(|(assigned, authorization)| {
-            let observation = records
-                .iter()
-                .find_map(|candidate| match &candidate.record {
-                    RunRecord::ExternalAccessObserved(observation)
-                        if observation.access_attempt_id == authorization.access_attempt_id =>
-                    {
-                        Some((*candidate, observation))
-                    }
-                    _ => None,
-                });
-            access_projection(assigned, authorization, observation)
-        })
+        .map(|authorization| access_projection(authorization))
         .collect::<Result<Vec<_>>>()?;
     Ok(StructuredAccessAuditPage {
         run_id: run.run_id().clone(),
@@ -468,13 +441,22 @@ fn fixed_head(
     Ok(selected.clone())
 }
 
-fn records_at<'a>(
-    records: &'a [AssignedRecord],
+fn trace_records_at<'a>(
+    records: &'a [TraceTransitionEntry],
     head: &'a JournalHead,
-) -> impl Iterator<Item = &'a AssignedRecord> {
+) -> impl Iterator<Item = &'a TraceTransitionEntry> {
     records
         .iter()
-        .filter(move |record| record.record_ref.run_sequence <= head.run_sequence)
+        .filter(move |record| record.record_ref().run_sequence <= head.run_sequence)
+}
+
+fn audit_records_at<'a>(
+    records: &'a [AuditAccessEntry],
+    head: &'a JournalHead,
+) -> impl Iterator<Item = &'a AuditAccessEntry> {
+    records
+        .iter()
+        .filter(move |record| record.authorization_ref().run_sequence <= head.run_sequence)
 }
 
 fn page_range(
@@ -498,39 +480,35 @@ fn page_range(
     Ok((start..end, next_index))
 }
 
-fn access_projection(
-    assigned: &AssignedRecord,
-    authorization: &mfm_journal::structured::ExternalAccessAuthorized,
-    observation: Option<(&AssignedRecord, &ExternalAccessObserved)>,
-) -> Result<StructuredAccessAuditEntry> {
-    let (observation_ref, status, outcome) = match observation {
+fn access_projection(authorization: &AuditAccessEntry) -> Result<StructuredAccessAuditEntry> {
+    let (observation_ref, status, outcome) = match authorization.observation() {
         None => (None, "authorized", serde_json::Value::Null),
-        Some((assigned, observed)) => (
-            Some(&assigned.record_ref),
-            observation_status(&observed.outcome),
-            serde_json::to_value(&observed.outcome)
+        Some(observation) => (
+            Some(observation.record_ref()),
+            observation_status(observation.outcome()),
+            serde_json::to_value(observation.outcome())
                 .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?,
         ),
     };
     StructuredAccessAuditEntry::encode(&serde_json::json!({
         "version": "mfm.structured-access-audit.v1",
-        "authorization_ref": assigned.record_ref,
+        "authorization_ref": authorization.authorization_ref(),
         "observation_ref": observation_ref,
-        "access_attempt_id": authorization.access_attempt_id,
-        "attempt_ordinal": authorization.attempt_ordinal,
-        "occurrence_id": authorization.occurrence_id,
-        "occurrence_path_ref": authorization.occurrence_path_ref,
-        "semantic_call_id": authorization.semantic_call_id,
-        "access_kind": authorization.access_kind,
-        "capability_contract_ref": authorization.capability_contract_ref,
-        "capability_implementation_ref": authorization.capability_implementation_ref,
-        "adapter_contract_ref": authorization.adapter_contract_ref,
-        "adapter_implementation_ref": authorization.adapter_implementation_ref,
-        "request": authorization.request,
-        "request_digest": authorization.request_digest,
-        "physical_binding_ref": authorization.physical_binding_ref,
+        "access_attempt_id": authorization.access_attempt_id(),
+        "attempt_ordinal": authorization.attempt_ordinal(),
+        "occurrence_id": authorization.occurrence_id(),
+        "occurrence_path_ref": authorization.occurrence_path_ref(),
+        "semantic_call_id": authorization.semantic_call_id(),
+        "access_kind": authorization.access_kind(),
+        "capability_contract_ref": authorization.capability_contract_ref(),
+        "capability_implementation_ref": authorization.capability_implementation_ref(),
+        "adapter_contract_ref": authorization.adapter_contract_ref(),
+        "adapter_implementation_ref": authorization.adapter_implementation_ref(),
+        "request": authorization.request(),
+        "request_digest": authorization.request_digest(),
+        "physical_binding_ref": authorization.physical_binding_ref(),
         "stable_resource_lineage_contract_ref":
-            authorization.stable_resource_lineage_contract_ref,
+            authorization.stable_resource_lineage_contract_ref(),
         "status": status,
         "outcome": outcome,
     }))

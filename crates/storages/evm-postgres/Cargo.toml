@@ -24,7 +24,8 @@ zeroize = { version = "1.7", features = ["serde"] }
 
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-evm = { path = "../../domains/evm" }
+mfm-certify = { path = "../../kernel/certify" }
+mfm-evm = { path = "../../domains/evm", features = ["authority-integration"] }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-values = { path = "../../kernel/values" }
@@ -35,7 +36,7 @@ static_assertions = "1"
 tokio = { workspace = true }
 
 [features]
-parity-tests = ["dep:mfm-wallet-authority-provider-test-support"]
+parity-tests = ["dep:mfm-wallet-authority-provider-test-support", "mfm-evm/test-support"]
 
 [[bin]]
 name = "mfm-storage-wallet-authority-provider"

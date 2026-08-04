@@ -231,6 +231,9 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
         batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
+            if !batch.is_store_verified() {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
             let committed = batch.into_committed();
             if committed.store_scope_id != self.identity.store_scope_id
                 || committed.store_epoch != self.identity.store_epoch
@@ -251,8 +254,6 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             {
                 return Err(StructuredStoreError::InvalidHistory);
             }
-            super::canonical_append::validate_append_objects(&committed.objects)?;
-
             let mut state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
@@ -273,7 +274,6 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             if current_head != committed.predecessor.as_ref() {
                 return Ok(BackendAppendOutcome::StaleHead);
             }
-
             let tenant_fact_publication = match &committed.tenant_fact_coordinate {
                 TenantFactCoordinate::None => None,
                 TenantFactCoordinate::FactSelectionBarrier { frontier } => {
@@ -379,7 +379,10 @@ pub fn assemble_in_memory_runtime(
     identity: super::StructuredStoreIdentity,
     registry: mfm_certify::structured::QualifiedProgramRegistry,
     physical_binding_verifier: std::sync::Arc<dyn super::PublicPhysicalBindingVerifier>,
-) -> super::AssembledStructuredRuntime<StructuredMemoryBackend> {
+) -> std::result::Result<
+    super::AssembledStructuredRuntime<StructuredMemoryBackend>,
+    mfm_runtime::history::HistoryError,
+> {
     let backend = StructuredMemoryBackend::new(identity);
     super::assemble_structured_runtime(backend, registry, physical_binding_verifier)
 }

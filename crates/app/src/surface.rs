@@ -663,9 +663,9 @@ impl PublicRunView {
         Self::from_serializable(&serde_json::json!({
             "version": PUBLIC_RUN_VIEW_CONTRACT,
             "run_id": evidence.run_id(),
-            "tenant_scope_id": evidence.admission().tenant_scope_id,
-            "invocation_identity": evidence.admission().invocation_identity,
-            "entry_point_operation_id": evidence.admission().entry_point_operation_id,
+            "tenant_scope_id": evidence.header().tenant_scope_id(),
+            "invocation_identity": evidence.header().invocation_identity(),
+            "entry_point_operation_id": evidence.header().entry_point_operation_id(),
             "journal_head": evidence.journal_head(),
             "semantic_head": evidence.semantic_head(),
             "status": match evidence.frontier() {

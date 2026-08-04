@@ -2,17 +2,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_ids::{AccessAttemptId, AppendRequestId, ContentDigest};
-use mfm_journal::structured::{
-    CommittedBatch, ExternalAccessAuthorized, RecordRef, RunRecord, TenantFactCoordinate,
-};
+use mfm_ids::{AppendRequestId, ContentDigest};
+use mfm_journal::structured::{CommittedBatch, RecordRef, RunRecord, TenantFactCoordinate};
 
 use super::backend::{
     prior_run_fact_source, BackendAppendOutcome, StructuredHistoryBackend,
     StructuredRunHistoryWriter,
 };
 use super::canonical_append::CanonicalRunAppend;
-use super::fact_scan::{fact_scan_permit, FactScanPermit, PriorRunFactScanCompletion};
+use super::fact_scan::{fact_scan_permit, FactScanPermit};
 use super::fold::{
     authorization_requires_fact_selection_barrier, prepare_admission, prepare_authorization,
     prepare_observation, prepare_state_transition,
@@ -99,61 +97,6 @@ pub enum ObservationCommit {
     Attempt(Box<StructuredAppendAttempt>),
 }
 
-/// Non-cloneable proof that this process directly observed one newly committed
-/// external-access authorization.
-///
-/// Existing content, resolved acknowledgement ambiguity, and unrelated append
-/// families cannot construct this proof.
-pub struct NewlyAppendedAuthorization {
-    authorization_ref: RecordRef,
-    authorization: ExternalAccessAuthorized,
-    fact_scan_permit: Option<FactScanPermit>,
-}
-
-impl std::fmt::Debug for NewlyAppendedAuthorization {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NewlyAppendedAuthorization")
-            .field("authorization_ref", &self.authorization_ref)
-            .field("access_attempt_id", &self.authorization.access_attempt_id)
-            .finish_non_exhaustive()
-    }
-}
-
-impl NewlyAppendedAuthorization {
-    /// Returns the exact assigned authorization record reference.
-    pub const fn authorization_ref(&self) -> &RecordRef {
-        &self.authorization_ref
-    }
-
-    /// Returns the kernel-derived access-attempt identity.
-    pub const fn access_attempt_id(&self) -> &AccessAttemptId {
-        &self.authorization.access_attempt_id
-    }
-
-    /// Returns the complete immutable committed authorization.
-    #[doc(hidden)]
-    pub const fn authorization(&self) -> &ExternalAccessAuthorized {
-        &self.authorization
-    }
-
-    /// Consumes the store-minted authority for the exact committed prior-run fact Read.
-    #[doc(hidden)]
-    pub fn invoke_prior_run_fact_scan(
-        self,
-        request: mfm_facts::FactSelectionRequest,
-    ) -> Option<
-        std::pin::Pin<
-            Box<dyn std::future::Future<Output = PriorRunFactScanCompletion> + Send + 'static>,
-        >,
-    > {
-        let Self {
-            fact_scan_permit, ..
-        } = self;
-        fact_scan_permit.map(|permit| permit.invoke(request))
-    }
-}
-
 impl StructuredAppendAttempt {
     /// Returns the stable physical append identity.
     pub const fn append_request_id(&self) -> &AppendRequestId {
@@ -181,9 +124,12 @@ impl StructuredAppendAttempt {
 
     /// Consumes a directly acknowledged new authorization append into its
     /// one-use invocation permit.
-    pub fn into_newly_appended_authorization(
+    pub fn into_committed_access_authorization(
         self,
-    ) -> Option<(NewlyAppendedAuthorization, VerifiedStructuredRun)> {
+    ) -> Option<(
+        mfm_runtime::history::CommittedAccessAuthorization,
+        VerifiedStructuredRun,
+    )> {
         if !matches!(self.outcome, BackendAppendOutcome::NewlyCommitted(_)) {
             return None;
         }
@@ -195,11 +141,37 @@ impl StructuredAppendAttempt {
             return None;
         };
         Some((
-            NewlyAppendedAuthorization {
-                authorization_ref: assigned.record_ref.clone(),
-                authorization: authorization.clone(),
-                fact_scan_permit: self.fact_scan_permit,
-            },
+            mfm_runtime::history::CommittedAccessAuthorization::from_committed_successor(
+                assigned.record_ref.clone(),
+                authorization.clone(),
+                self.fact_scan_permit.map(|permit| {
+                    let port: PriorRunFactScanInvoker = Box::new(move |request| {
+                        let future: Pin<
+                            Box<
+                                dyn Future<
+                                        Output = mfm_certify::structured::PriorRunFactScanCompletion,
+                                    > + Send,
+                            >,
+                        > = Box::pin(async move {
+                            match permit.invoke(request).await {
+                                super::fact_scan::PriorRunFactScanCompletion::Returned(v) => {
+                                    mfm_certify::structured::PriorRunFactScanCompletion::Returned(v)
+                                }
+                                super::fact_scan::PriorRunFactScanCompletion::SafeFailure(v) => {
+                                    mfm_certify::structured::PriorRunFactScanCompletion::SafeFailure(v)
+                                }
+                                super::fact_scan::PriorRunFactScanCompletion::IntegrityFault(code) => {
+                                    mfm_certify::structured::PriorRunFactScanCompletion::IntegrityFault(code)
+                                }
+                            }
+                        });
+                        future
+                    });
+                    port
+                }),
+                batch.predecessor.clone(),
+                batch.head.clone(),
+            ),
             self.successor?,
         ))
     }
@@ -221,7 +193,7 @@ impl StructuredAppendAttempt {
     /// Converts a store attempt into the Runtime-facing sealed attempt.
     pub(super) fn into_runtime_attempt(self) -> mfm_runtime::history::StructuredAppendAttempt {
         use mfm_journal::structured::RunRecord;
-        use mfm_runtime::history::{HistoryAppendOutcome, NewlyAppendedAuthorization};
+        use mfm_runtime::history::{CommittedAccessAuthorization, HistoryAppendOutcome};
 
         let closed = self.committed().is_some_and(|batch| {
             batch
@@ -269,10 +241,12 @@ impl StructuredAppendAttempt {
                         });
                         port
                     });
-                    Some(NewlyAppendedAuthorization::from_store_mint(
+                    Some(CommittedAccessAuthorization::from_committed_successor(
                         assigned.record_ref.clone(),
                         authorization.clone(),
                         fact_scan,
+                        batch.predecessor.clone(),
+                        batch.head.clone(),
                     ))
                 } else {
                     None
@@ -435,6 +409,9 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
         committed: CommittedBatch,
         successor: Option<VerifiedStructuredRun>,
     ) -> super::Result<StructuredAppendAttempt> {
+        if let Some(verified) = successor.as_ref() {
+            verified.validate_append_object_closure(&committed)?;
+        }
         let append_request_id = committed.append_request_id.clone();
         let candidate_digest = committed.candidate_digest.clone();
         let prepared_fact_scan_permit = successor
@@ -452,7 +429,7 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
             .flatten();
         let backend_outcome = self
             .backend
-            .append(CanonicalRunAppend::new(committed.clone())?)
+            .append(CanonicalRunAppend::from_store_verified(committed.clone())?)
             .await?;
         let outcome = match backend_outcome {
             BackendAppendOutcome::NewlyCommitted(returned) => {

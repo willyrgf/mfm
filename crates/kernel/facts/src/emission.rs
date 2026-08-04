@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::{FactError, Result, MAX_FACT_EMISSIONS};
 
-const MAX_CANONICAL_VALUE_BYTES: usize = 16_777_216;
+const MAX_CANONICAL_VALUE_BYTES: usize = mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES;
 
 /// Exact producer-independent retained material proposed for one fact component.
 ///

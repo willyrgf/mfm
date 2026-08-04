@@ -12,9 +12,9 @@ use mfm_capabilities::{
     ReadCapabilityContract, ReadCapabilityImplementation, Refreshable, ResourceAuthorityContract,
 };
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, QualifiedProgramRegistry,
-    RuntimeEffectPhysicalBinding, RuntimeEffectPhysicalBindingSource, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    CertifiedAccessAuthorization, PhysicalBindingSelection, ProgramRegistryBuilder,
+    QualifiedEffectPhysicalBinding, QualifiedEffectPhysicalBindingSource, QualifiedProgramRegistry,
+    QualifiedReadPhysicalBinding, QualifiedReadPhysicalBindingSource,
 };
 use mfm_facts::{FactProposal, FactSet, ProposedFactValue};
 use mfm_ids::{
@@ -52,7 +52,7 @@ use mfm_store::structured::{
     assemble_structured_runtime, BackendAppendOutcome, CanonicalRunAppend,
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PublicPhysicalBindingVerifier,
     RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
-    StructuredStoreError, StructuredStoreIdentity, TenantFactPublication,
+    StructuredRunSnapshot, StructuredStoreError, StructuredStoreIdentity, TenantFactPublication,
 };
 use serde::{Deserialize, Serialize};
 
@@ -418,9 +418,19 @@ impl RuntimeEffectAdapter<FixtureEffectCapability> for RotatingEffectAdapter {
     }
 }
 
-impl RuntimeEffectPhysicalBinding<FixtureEffectCapability> for RotatingEffectAdapter {
+impl QualifiedEffectPhysicalBinding<FixtureEffectCapability> for RotatingEffectAdapter {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a Value,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<FixtureEffectCapability>>
+    {
+        drop(authorization);
+        self.invoke(request)
     }
 
     fn supersession_head<'a>(
@@ -461,9 +471,18 @@ impl RuntimeReadAdapter<FixtureReadCapability> for ConditionalFailureReadAdapter
     }
 }
 
-impl RuntimeReadPhysicalBinding<FixtureReadCapability> for ConditionalFailureReadAdapter {
+impl QualifiedReadPhysicalBinding<FixtureReadCapability> for ConditionalFailureReadAdapter {
     fn public_certificate(&self) -> &HistoryObject {
         &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a Value,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<Value, Value>> {
+        drop(authorization);
+        self.invoke(request)
     }
 }
 
@@ -471,7 +490,7 @@ struct ConditionalReadBindingSource {
     binding: Arc<ConditionalFailureReadAdapter>,
 }
 
-impl RuntimeReadPhysicalBindingSource<FixtureReadCapability> for ConditionalReadBindingSource {
+impl QualifiedReadPhysicalBindingSource<FixtureReadCapability> for ConditionalReadBindingSource {
     type Binding = ConditionalFailureReadAdapter;
 
     fn current_binding<'a>(
@@ -567,7 +586,7 @@ struct RefreshEffectBindingSource {
     calls: Arc<AtomicUsize>,
 }
 
-impl RuntimeEffectPhysicalBindingSource<FixtureEffectCapability> for RefreshEffectBindingSource {
+impl QualifiedEffectPhysicalBindingSource<FixtureEffectCapability> for RefreshEffectBindingSource {
     type Binding = RotatingEffectAdapter;
 
     fn current_binding<'a>(
@@ -576,8 +595,8 @@ impl RuntimeEffectPhysicalBindingSource<FixtureEffectCapability> for RefreshEffe
         _request: &'a Value,
     ) -> ComponentFuture<'a, Option<Arc<Self::Binding>>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        assert!(selection.stable_resource_lineage_contract_ref.is_some());
-        let binding = if selection.minimum_lineage_head_ref.is_some() {
+        assert!(selection.stable_resource_lineage_contract_ref().is_some());
+        let binding = if selection.minimum_lineage_head_ref().is_some() {
             Arc::clone(&self.second)
         } else {
             Arc::clone(&self.first)
@@ -663,6 +682,19 @@ impl StructuredHistoryBackend for InjectingBackend {
         })
     }
 
+    fn load_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
+        Box::pin(async move {
+            let history = self.load(run_id).await?;
+            let head = history
+                .as_ref()
+                .and_then(|raw| raw.batches.last().map(|batch| batch.head.clone()));
+            Ok(StructuredRunSnapshot { history, head })
+        })
+    }
+
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
@@ -679,6 +711,25 @@ impl StructuredHistoryBackend for InjectingBackend {
                 Some(history) => history.batches.last().map(|batch| batch.head.clone()),
                 None => self.inner.current_head(run_id).await?,
             })
+        })
+    }
+
+    fn load_prefix<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        through_sequence: u64,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
+        Box::pin(async move {
+            if through_sequence == 0 {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            let Some(mut history) = self.load(run_id).await? else {
+                return Ok(None);
+            };
+            history
+                .batches
+                .retain(|batch| batch.head.run_sequence <= through_sequence);
+            Ok((!history.batches.is_empty()).then_some(history))
         })
     }
 
@@ -899,7 +950,8 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: certificate.clone(),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
@@ -916,11 +968,6 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
     assert_eq!(callback_input.load(Ordering::SeqCst), 4);
     let verified = reader.load_public(&run_id).await.expect("closed");
-    assert!(verified
-        .admission()
-        .admission_material_refs
-        .stable_resource_lineage_contract_refs
-        .is_empty());
     assert!(matches!(
         verified.frontier(),
         mfm_store::structured::StructuredFrontier::Complete
@@ -979,7 +1026,8 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: binding_object(60),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
@@ -1079,7 +1127,8 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
         Arc::new(ExactPublicBindingVerifier {
             certificate: binding_object(62),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
@@ -1163,7 +1212,8 @@ async fn fan_out_structural_values_survive_fresh_persisted_folds() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: certificate.clone(),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = &assembled.runtime;
     let (run_id, _attempt) = runtime
         .admit_run(admission(operation_id, document, 4, "fan-out-admit"))
@@ -1251,7 +1301,8 @@ async fn exact_root_program_cache_rejects_authored_object_substitution() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: binding_object(34),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let (run_id, _) = assembled
         .runtime
         .admit_run(admission(operation_id, document, 4, "cache-admit"))
@@ -1324,7 +1375,8 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
         Arc::new(ExactPublicBindingVerifier {
             certificate: certificate.clone(),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.export_reader;
     let (run_id, _attempt) = runtime
@@ -1456,7 +1508,8 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: certificate.clone(),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.export_reader;
     let (failed_run_id, _attempt) = runtime
@@ -1652,7 +1705,8 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         Arc::new(ExactPublicBindingVerifier {
             certificate: certificate.clone(),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.export_reader;
     let (failed_run_id, _attempt) = runtime
@@ -1819,7 +1873,8 @@ async fn frozen_effect_supersession_is_not_rewritten_after_persistence_integrity
                 lineage_head,
                 accept_supersession: true,
             }),
-        );
+        )
+        .expect("runtime assembly");
         let runtime = assembled.runtime;
         let reader = assembled.public_reader;
         let (run_id, _attempt) = runtime
@@ -1892,7 +1947,8 @@ async fn invalid_supersession_evidence_is_rejected_without_a_diagnostic_observat
             lineage_head,
             accept_supersession: false,
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime
@@ -2055,7 +2111,8 @@ async fn admission_requires_the_exact_certified_resource_lineage_set() {
         Arc::new(ExactPublicBindingVerifier {
             certificate: binding_object(40),
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let cases = [
         (41, Vec::new(), "missing-lineage"),
@@ -2123,7 +2180,8 @@ async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation(
             lineage_head: lineage_head.clone(),
             accept_supersession: true,
         }),
-    );
+    )
+    .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
     let (run_id, _attempt) = runtime

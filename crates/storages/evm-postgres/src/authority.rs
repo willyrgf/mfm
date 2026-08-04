@@ -9,6 +9,7 @@ use mfm_capabilities::{
     AccessFaultCode, EffectAdapterCompletion, EffectCapabilityImplementation,
     ReadAdapterCompletion, ReadCapabilityImplementation,
 };
+use mfm_certify::structured::CertifiedAccessAuthorization;
 use mfm_evm::{
     canonical_wallet_reference, derive_evm_candidate_operation_key,
     derive_evm_nonce_completion_key, derive_exact_candidate_activation_permit,
@@ -80,6 +81,8 @@ pub async fn open_wallet_nonce_authority(
     current_lineage_head
         .validate()
         .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let current_incarnation_ref = canonical_wallet_reference(&store_incarnation)
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
     let validator = EvmSubmissionCapabilityImplementation::new()
         .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
     let integrity_fault = AccessFaultCode::new(
@@ -95,6 +98,7 @@ pub async fn open_wallet_nonce_authority(
         pool,
         schema_name: expected_schema.to_owned(),
         store_incarnation,
+        current_incarnation_ref,
         current_lineage_head,
         current_public_lineage_head,
         activation_verifier,
@@ -110,6 +114,7 @@ pub struct PostgresWalletNonceAuthority {
     pool: PgPool,
     schema_name: String,
     store_incarnation: WalletNonceStoreIncarnation,
+    current_incarnation_ref: EvmWalletReference,
     current_lineage_head: WalletNonceStoreLineageHead,
     current_public_lineage_head: HistoryObject,
     activation_verifier: OfflineActivationVerifier,
@@ -120,6 +125,42 @@ pub struct PostgresWalletNonceAuthority {
 }
 
 impl PostgresWalletNonceAuthority {
+    /// Test-only legacy seam for exercising the storage mutation classifier.
+    /// Production callers must use the Runtime-authorized methods below.
+    #[cfg(any(test, feature = "parity-tests"))]
+    pub fn activate_candidate<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ActivateEvmCandidateRequest,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ActivateCandidateResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        self.activate_candidate_inner(state_input_ref, request)
+    }
+
+    /// Test-only legacy seam for exercising the storage mutation classifier.
+    /// Production callers must use the Runtime-authorized methods below.
+    #[cfg(any(test, feature = "parity-tests"))]
+    pub fn complete<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a CompleteEvmNonceRequest,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            CompleteWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        self.complete_inner(state_input_ref, request)
+    }
+
     /// Returns the exact physical store incarnation sealed into this authority.
     pub const fn store_incarnation(&self) -> &WalletNonceStoreIncarnation {
         &self.store_incarnation
@@ -951,6 +992,7 @@ impl PostgresWalletNonceAuthority {
         request: &ReserveEvmNonceRequest,
         pending_lease: PendingResolutionLease,
     ) -> Result<Option<ReserveWalletNonceResponse>> {
+        let expected_state_input_ref = pending_lease.state_input_ref().clone();
         self.validate_activation(&request.domain_activation_attestation)?;
         let mut read = self.begin_resolution_snapshot(pending_lease).await?;
         let retained_activation =
@@ -975,7 +1017,9 @@ impl PostgresWalletNonceAuthority {
         }
         let result = closure
             .map(|closure| {
-                if reservation_request_matches(request, &closure) {
+                if reservation_request_matches(request, &closure)
+                    && closure.state_input_ref == expected_state_input_ref
+                {
                     Ok(ReserveWalletNonceResponse::Reserved {
                         reservation: *closure.reservation,
                     })
@@ -993,6 +1037,7 @@ impl PostgresWalletNonceAuthority {
         request: &ActivateEvmCandidateRequest,
         pending_lease: PendingResolutionLease,
     ) -> Result<Option<ActivateCandidateResponse>> {
+        let expected_state_input_ref = pending_lease.state_input_ref().clone();
         let mut read = self.begin_resolution_snapshot(pending_lease).await?;
         self.require_retained_activation(&mut read.transaction, request.nonce_domain.as_str())
             .await?;
@@ -1005,9 +1050,10 @@ impl PostgresWalletNonceAuthority {
             Some(retained)
                 if self
                     .candidate_replay_is_valid(&mut read.transaction, request, &retained)
-                    .await? =>
+                    .await?
+                    && retained.state_input_ref == expected_state_input_ref =>
             {
-                Some(ActivateCandidateResponse::Activated {
+                Some(ActivateCandidateResponse::AlreadyRetained {
                     candidate: retained.candidate,
                 })
             }
@@ -1023,6 +1069,7 @@ impl PostgresWalletNonceAuthority {
         request: &CompleteEvmNonceRequest,
         pending_lease: PendingResolutionLease,
     ) -> Result<Option<CompleteWalletNonceResponse>> {
+        let expected_state_input_ref = pending_lease.state_input_ref().clone();
         let mut read = self.begin_resolution_snapshot(pending_lease).await?;
         self.require_retained_activation(
             &mut read.transaction,
@@ -1046,7 +1093,10 @@ impl PostgresWalletNonceAuthority {
             .load_validated_completion(&mut read.transaction, &reservation, &candidates)
             .await?
         {
-            Some(retained) if completion_request_matches(request, &retained) => {
+            Some(retained)
+                if completion_request_matches(request, &retained)
+                    && retained.state_input_ref == expected_state_input_ref =>
+            {
                 Some(CompleteWalletNonceResponse::Completed {
                     completion: retained.completion,
                 })
@@ -1246,9 +1296,13 @@ impl PostgresWalletNonceAuthority {
     }
 }
 
-impl WalletNonceAuthority for PostgresWalletNonceAuthority {
+impl PostgresWalletNonceAuthority {
     fn domain_activation_attestation(&self) -> &WalletNonceDomainActivationAttestation {
         self.activation_verifier.exact_attestation()
+    }
+
+    fn current_incarnation_ref(&self) -> EvmWalletReference {
+        self.current_incarnation_ref.clone()
     }
 
     fn read_status<'a>(
@@ -1288,7 +1342,37 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
         })
     }
 
-    fn reserve_qualified<'a>(
+    fn read_status_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReadEvmWalletNonceStatusRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>,
+    > {
+        let request_ref = canonical_wallet_reference(request)
+            .ok()
+            .and_then(|reference| reference.to_content_ref().ok());
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.access_kind() != mfm_journal::structured::AccessKind::Read
+            || authorization.state_input_ref() != state_input_ref
+            || request_ref.as_ref() != Some(authorization.request_value_ref())
+        {
+            return Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+                self.integrity_fault.clone(),
+            )));
+        }
+        Box::pin(async move {
+            let completion = self.read_status(state_input_ref, request).await;
+            let _ = authorization.authorization_ref();
+            completion
+        })
+    }
+
+    #[cfg(feature = "parity-tests")]
+    #[doc(hidden)]
+    pub fn reserve_qualified_for_test<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
         observation: &'a QualifiedPendingNonceObservation,
@@ -1308,9 +1392,29 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 .chain_instance_attestation
                 .content_ref()
                 .ok();
+            let expected_request = canonical_wallet_reference(request)
+                .ok()
+                .and_then(|reference| reference.to_content_ref().ok());
+            let expected_policy = mfm_evm::evm_wallet_nonce_policy_ref().ok();
+            let expected_route = request
+                .domain_activation_attestation
+                .current_schema_record
+                .initial_route_generation_ref
+                .to_content_ref()
+                .ok();
+            let observed_route = observation
+                .floor()
+                .observed
+                .route_generation_ref
+                .to_content_ref()
+                .ok();
             let valid = observation.validate().is_ok()
                 && observation.floor() == &request.qualified_floor
                 && expected_chain.as_ref() == Some(observation.chain_instance_ref())
+                && expected_route.as_ref() == observed_route.as_ref()
+                && expected_policy.as_ref() == Some(&observation.floor().pending_floor_policy_ref)
+                && expected_request.as_ref() == Some(observation.request_ref())
+                && observation.physical_release_ref() == &self.current_incarnation_ref
                 && observation
                     .sender()
                     .is_ok_and(|sender| format!("{sender:#x}") == request.nonce_domain.sender())
@@ -1320,13 +1424,63 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
             if !valid {
                 return EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
             }
-            self.reserve(state_input_ref, request).await
+            self.reserve_after_qualification_inner(state_input_ref, observation, request)
+                .await
         })
     }
 
-    fn reserve<'a>(
+    fn reserve_qualified_authorized<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
+        observation: &'a QualifiedPendingNonceObservation,
+        request: &'a ReserveEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        Box::pin(async move {
+            let valid = authorization.authorization_ref().run_id.as_str() != ""
+                && authorization.access_kind() == mfm_journal::structured::AccessKind::Effect
+                && authorization.state_input_ref() == state_input_ref
+                && canonical_wallet_reference(request)
+                    .ok()
+                    .and_then(|reference| reference.to_content_ref().ok())
+                    .as_ref()
+                    == Some(authorization.request_value_ref())
+                && observation.validate().is_ok()
+                && observation.floor() == &request.qualified_floor
+                && request
+                    .domain_activation_attestation
+                    .current_schema_record
+                    .chain_instance_attestation
+                    .content_ref()
+                    .ok()
+                    .as_ref()
+                    == Some(observation.chain_instance_ref())
+                && observation.physical_release_ref() == &self.current_incarnation_ref
+                && self
+                    .validate_activation(&request.domain_activation_attestation)
+                    .is_ok();
+            if !valid {
+                return EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+            }
+            let completion = self
+                .reserve_after_qualification_inner(state_input_ref, observation, request)
+                .await;
+            let _ = authorization.authorization_ref();
+            completion
+        })
+    }
+
+    fn reserve_after_qualification_inner<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        _observation: &'a QualifiedPendingNonceObservation,
         request: &'a ReserveEvmNonceRequest,
     ) -> mfm_capabilities::ComponentFuture<
         'a,
@@ -1710,7 +1864,7 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
         })
     }
 
-    fn activate_candidate<'a>(
+    fn activate_candidate_inner<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
         request: &'a ActivateEvmCandidateRequest,
@@ -1747,7 +1901,9 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 )
                 .await
                 {
-                    Ok(Some(existing)) if candidate_request_matches(request, &existing) => {}
+                    Ok(Some(existing))
+                        if candidate_request_matches(request, &existing)
+                            && existing.state_input_ref == *state_input_ref => {}
                     Ok(Some(_))
                     | Err(
                         PostgresEvmWalletError::InvalidAuthority
@@ -1809,9 +1965,9 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                             .candidate_replay_is_valid(&mut write.transaction, request, &existing)
                             .await
                         {
-                            Ok(true) => {
+                            Ok(true) if existing.state_input_ref == *state_input_ref => {
                                 let completion = self.returned_activation(
-                                    ActivateCandidateResponse::Activated {
+                                    ActivateCandidateResponse::AlreadyRetained {
                                         candidate: existing.candidate,
                                     },
                                 );
@@ -1824,7 +1980,8 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                                     Err(RetryDatabaseAttempt) => continue 'database_attempt,
                                 }
                             }
-                            Ok(false)
+                            Ok(true)
+                            | Ok(false)
                             | Err(
                                 PostgresEvmWalletError::InvalidAuthority
                                 | PostgresEvmWalletError::PermanentConflict
@@ -2019,7 +2176,43 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
         })
     }
 
-    fn complete<'a>(
+    fn activate_candidate_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ActivateEvmCandidateRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ActivateCandidateResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        let request_ref = canonical_wallet_reference(request)
+            .ok()
+            .and_then(|reference| reference.to_content_ref().ok());
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.access_kind() != mfm_journal::structured::AccessKind::Effect
+            || authorization.state_input_ref() != state_input_ref
+            || request_ref.as_ref() != Some(authorization.request_value_ref())
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                self.integrity_fault.clone(),
+            )));
+        }
+        // The authorization remains owned until the idempotent mutation
+        // attempt has completed; it is not merely a preflight marker.
+        Box::pin(async move {
+            let completion = self
+                .activate_candidate_inner(state_input_ref, request)
+                .await;
+            let _ = authorization.authorization_ref();
+            completion
+        })
+    }
+
+    fn complete_inner<'a>(
         &'a self,
         state_input_ref: &'a LexicalValueRef,
         request: &'a CompleteEvmNonceRequest,
@@ -2056,7 +2249,9 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                 )
                 .await
                 {
-                    Ok(Some(existing)) if completion_request_matches(request, &existing) => {}
+                    Ok(Some(existing))
+                        if completion_request_matches(request, &existing)
+                            && existing.state_input_ref == *state_input_ref => {}
                     Ok(Some(_))
                     | Err(
                         PostgresEvmWalletError::InvalidAuthority
@@ -2161,6 +2356,33 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                         return self.abort_write(write, completion).await;
                     }
                 };
+                let (activation_requests, activation_state_inputs) = match load_candidate_preimages(
+                    &mut write.transaction,
+                    reservation.reservation.semantic_reservation_key.as_str(),
+                )
+                .await
+                {
+                    Ok(value) if value.0.len() == candidates.len() => value,
+                    Ok(_) | Err(PostgresEvmWalletError::InvalidAuthority) => {
+                        let completion =
+                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+                        return self.abort_write(write, completion).await;
+                    }
+                    Err(PostgresEvmWalletError::Unavailable) => {
+                        let completion = EffectAdapterCompletion::SafeFailure(
+                            EvmSubmissionFailure::NonceAuthorityUnavailable,
+                        );
+                        return self.abort_write(write, completion).await;
+                    }
+                    Err(
+                        PostgresEvmWalletError::PermanentConflict
+                        | PostgresEvmWalletError::FenceRejected,
+                    ) => {
+                        let completion =
+                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+                        return self.abort_write(write, completion).await;
+                    }
+                };
                 if !completion_closure_matches(request, &reservation, &candidates) {
                     let completion =
                         EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
@@ -2170,7 +2392,10 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                     .load_validated_completion(&mut write.transaction, &reservation, &candidates)
                     .await
                 {
-                    Ok(Some(existing)) if completion_request_matches(request, &existing) => {
+                    Ok(Some(existing))
+                        if completion_request_matches(request, &existing)
+                            && existing.state_input_ref == *state_input_ref =>
+                    {
                         let completion =
                             self.returned_completion(CompleteWalletNonceResponse::Completed {
                                 completion: existing.completion,
@@ -2227,19 +2452,43 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                         return self.abort_write(write, completion).await;
                     }
                 };
-                let completed = CompletedWalletNonce {
-                    nonce_domain: request.nonce_domain.clone(),
-                    nonce: reservation.reservation.nonce,
-                    semantic_reservation_key: reservation
-                        .reservation
-                        .semantic_reservation_key
-                        .clone(),
-                    semantic_completion_key: request.completion_key.clone(),
-                    canonical_terminal_outcome: request.canonical_terminal_outcome.clone(),
-                    terminal_witnesses: request.terminal_witnesses.clone(),
-                    sealed_activated_candidates: candidates.clone(),
+                let completed = match CompletedWalletNonce::with_recovery_closure(
+                    request.nonce_domain.clone(),
+                    reservation.reservation.nonce,
+                    reservation.reservation.semantic_reservation_key.clone(),
+                    request.completion_key.clone(),
+                    request.canonical_terminal_outcome.clone(),
+                    request.terminal_witnesses.clone(),
+                    candidates.clone(),
                     original_terminal_witnesses_ref,
                     completion_evidence_ref,
+                    (*reservation.reservation).clone(),
+                    (*reservation.transaction_intent).clone(),
+                    (*reservation.candidate_family).clone(),
+                    reservation.request.domain_activation_attestation.clone(),
+                    reservation.request.qualified_floor.clone(),
+                    reservation
+                        .request
+                        .qualified_floor
+                        .observed
+                        .route_generation_ref
+                        .clone(),
+                    reservation.request.issuer_namespace_contract_ref.clone(),
+                    reservation.request.observation_rounds,
+                    reservation.request.submission_semantics_digest.clone(),
+                    (*reservation.request).clone(),
+                    request.clone(),
+                    activation_requests,
+                    activation_state_inputs,
+                    reservation.state_input_ref.clone(),
+                    state_input_ref.clone(),
+                ) {
+                    Ok(completed) => completed,
+                    Err(_) => {
+                        let failure =
+                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+                        return self.abort_write(write, failure).await;
+                    }
                 };
                 if completed.validate().is_err() {
                     let failure =
@@ -2291,6 +2540,38 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
         })
     }
 
+    fn complete_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a CompleteEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            CompleteWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        let request_ref = canonical_wallet_reference(request)
+            .ok()
+            .and_then(|reference| reference.to_content_ref().ok());
+        if authorization.authorization_ref().run_id.as_str().is_empty()
+            || authorization.access_kind() != mfm_journal::structured::AccessKind::Effect
+            || authorization.state_input_ref() != state_input_ref
+            || request_ref.as_ref() != Some(authorization.request_value_ref())
+        {
+            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
+                self.integrity_fault.clone(),
+            )));
+        }
+        Box::pin(async move {
+            let completion = self.complete_inner(state_input_ref, request).await;
+            let _ = authorization.authorization_ref();
+            completion
+        })
+    }
+
     fn supersession_head<'a>(
         &'a self,
         evidence: &'a WalletNonceStoreLineageHead,
@@ -2305,6 +2586,117 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                     .cloned()
             })
         })
+    }
+}
+
+impl WalletNonceAuthority for PostgresWalletNonceAuthority {
+    fn domain_activation_attestation(&self) -> &WalletNonceDomainActivationAttestation {
+        PostgresWalletNonceAuthority::domain_activation_attestation(self)
+    }
+
+    fn current_incarnation_ref(&self) -> EvmWalletReference {
+        PostgresWalletNonceAuthority::current_incarnation_ref(self)
+    }
+
+    #[cfg(feature = "parity-tests")]
+    fn read_status<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReadEvmWalletNonceStatusRequest,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>,
+    > {
+        PostgresWalletNonceAuthority::read_status(self, state_input_ref, request)
+    }
+
+    fn read_status_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ReadEvmWalletNonceStatusRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>,
+    > {
+        PostgresWalletNonceAuthority::read_status_authorized(
+            self,
+            state_input_ref,
+            request,
+            authorization,
+        )
+    }
+
+    fn reserve_qualified<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        observation: &'a QualifiedPendingNonceObservation,
+        request: &'a ReserveEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ReserveWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        PostgresWalletNonceAuthority::reserve_qualified_authorized(
+            self,
+            state_input_ref,
+            observation,
+            request,
+            authorization,
+        )
+    }
+
+    fn activate_candidate_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a ActivateEvmCandidateRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            ActivateCandidateResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        PostgresWalletNonceAuthority::activate_candidate_authorized(
+            self,
+            state_input_ref,
+            request,
+            authorization,
+        )
+    }
+
+    fn complete_authorized<'a>(
+        &'a self,
+        state_input_ref: &'a LexicalValueRef,
+        request: &'a CompleteEvmNonceRequest,
+        authorization: CertifiedAccessAuthorization,
+    ) -> mfm_capabilities::ComponentFuture<
+        'a,
+        EffectAdapterCompletion<
+            CompleteWalletNonceResponse,
+            EvmSubmissionFailure,
+            WalletNonceStoreLineageHead,
+        >,
+    > {
+        PostgresWalletNonceAuthority::complete_authorized(
+            self,
+            state_input_ref,
+            request,
+            authorization,
+        )
+    }
+
+    fn supersession_head<'a>(
+        &'a self,
+        evidence: &'a WalletNonceStoreLineageHead,
+    ) -> mfm_capabilities::ComponentFuture<'a, Option<HistoryObject>> {
+        PostgresWalletNonceAuthority::supersession_head(self, evidence)
     }
 }
 
@@ -2365,6 +2757,7 @@ struct ValidatedDomainAggregate {
 struct RetainedCandidate {
     request: ActivateEvmCandidateRequest,
     candidate: ActiveWalletCandidate,
+    state_input_ref: LexicalValueRef,
 }
 
 struct RetainedCompletion {
@@ -2518,7 +2911,7 @@ async fn load_candidate_by_key(
     row.map(|row| {
         let request: ActivateEvmCandidateRequest = decode_row_json(&row, "request_json")?;
         let candidate: ActiveWalletCandidate = decode_row_json(&row, "active_candidate_json")?;
-        let _state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
+        let state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
         let retained_key = required_row_text(&row, "semantic_candidate_operation_key")?;
         let retained_reservation_key = required_row_text(&row, "semantic_reservation_key")?;
         let retained_ordinal: i32 = row
@@ -2536,7 +2929,11 @@ async fn load_candidate_by_key(
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
-        Ok(RetainedCandidate { request, candidate })
+        Ok(RetainedCandidate {
+            request,
+            candidate,
+            state_input_ref,
+        })
     })
     .transpose()
 }
@@ -2546,16 +2943,24 @@ async fn load_candidates(
     reservation: &ReservationClosure,
     validator: &EvmSubmissionCapabilityImplementation,
 ) -> Result<Vec<ActiveWalletCandidate>> {
+    let maximum = mfm_evm::EVM_WALLET_REPLACEMENT_LIMIT;
     let rows = sqlx::query(
         "SELECT semantic_candidate_operation_key, semantic_reservation_key, candidate_ordinal, \
                 request_json, active_candidate_json, state_input_json \
          FROM wallet_nonce_candidates WHERE semantic_reservation_key = $1 \
-         ORDER BY candidate_ordinal",
+         ORDER BY candidate_ordinal LIMIT $2",
     )
     .bind(reservation.reservation.semantic_reservation_key.as_str())
+    .bind(
+        i64::try_from(maximum.saturating_add(1))
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?,
+    )
     .fetch_all(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+    if rows.len() > maximum {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
     let mut candidates = Vec::with_capacity(rows.len());
     for (ordinal, row) in rows.into_iter().enumerate() {
         let retained_ordinal: i32 = row
@@ -2606,6 +3011,29 @@ async fn load_candidates(
         candidates.push(candidate);
     }
     Ok(candidates)
+}
+
+async fn load_candidate_preimages(
+    connection: &mut PgConnection,
+    reservation_key: &str,
+) -> Result<(Vec<ActivateEvmCandidateRequest>, Vec<LexicalValueRef>)> {
+    let rows = sqlx::query(
+        "SELECT request_json, state_input_json \
+         FROM wallet_nonce_candidates \
+         WHERE semantic_reservation_key = $1 \
+         ORDER BY candidate_ordinal",
+    )
+    .bind(reservation_key)
+    .fetch_all(&mut *connection)
+    .await
+    .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+    let mut requests = Vec::with_capacity(rows.len());
+    let mut state_inputs = Vec::with_capacity(rows.len());
+    for row in rows {
+        requests.push(decode_row_json(&row, "request_json")?);
+        state_inputs.push(decode_row_json(&row, "state_input_json")?);
+    }
+    Ok((requests, state_inputs))
 }
 
 async fn load_completion(
@@ -2701,6 +3129,17 @@ fn status_request_matches(
         && request.submission_semantics_digest == closure.request.submission_semantics_digest
         && request.transaction_intent_digest == closure.reservation.transaction_intent_digest
         && request.candidate_family_ref == closure.reservation.candidate_family_ref
+        && request.transaction_intent == closure.request.transaction_intent
+        && request.candidate_family == closure.request.candidate_family
+        && request.observation_rounds == closure.request.observation_rounds
+        && request.route_generation_ref
+            == closure
+                .request
+                .qualified_floor
+                .observed
+                .route_generation_ref
+        && request.issuer_namespace_contract_ref == closure.request.issuer_namespace_contract_ref
+        && request.domain_activation_attestation == closure.request.domain_activation_attestation
         && request.domain_activation_attestation.activation_record_ref
             == closure.reservation.domain_activation_record_ref
 }
@@ -2717,6 +3156,7 @@ fn reservation_request_matches(
         && request.candidate_family == closure.request.candidate_family
         && request.observation_rounds == closure.request.observation_rounds
         && request.reservation_key == closure.request.reservation_key
+        && request.qualified_floor == closure.request.qualified_floor
 }
 
 fn candidate_progression_matches(
@@ -2784,6 +3224,12 @@ fn attested_candidate_semantics_match(
             == *reservation
                 .transaction_intent
                 .signing_profile_contract_ref()
+        && valid_evm_hash(&request.next_candidate.transaction_hash)
+        && request
+            .next_candidate
+            .signer_attestation_ref
+            .to_content_ref()
+            .is_ok()
 }
 
 fn attested_candidate_matches(
@@ -2814,6 +3260,14 @@ fn attested_candidate_matches(
     descriptors.len() == candidates.len()
         && unsigned_digests.len() == candidates.len()
         && transaction_hashes.len() == candidates.len()
+        && candidates.iter().all(|candidate| {
+            valid_evm_hash(&candidate.attested_candidate.transaction_hash)
+                && candidate
+                    .attested_candidate
+                    .signer_attestation_ref
+                    .to_content_ref()
+                    .is_ok()
+        })
         && !descriptors.contains(&request.next_candidate.candidate_descriptor_ref)
         && !unsigned_digests.contains(request.next_candidate.unsigned_candidate_digest.as_str())
         && !transaction_hashes.contains(request.next_candidate.transaction_hash.as_str())
@@ -2951,10 +3405,7 @@ fn completion_request_matches(
     request: &CompleteEvmNonceRequest,
     retained: &RetainedCompletion,
 ) -> bool {
-    request.nonce_domain == retained.request.nonce_domain
-        && request.completion_key == retained.request.completion_key
-        && request.current_reservation == retained.request.current_reservation
-        && request.canonical_terminal_outcome == retained.request.canonical_terminal_outcome
+    request == &retained.request
 }
 
 async fn insert_domain_activation(

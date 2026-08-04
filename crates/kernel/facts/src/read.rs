@@ -1,19 +1,13 @@
+pub use mfm_canonical::limits::{
+    MAX_FACT_SCAN_DISTINCT_PRODUCERS, MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES,
+    MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES, MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES,
+    MAX_FACT_SCAN_RETAINED_SOURCE_BYTES, MAX_FACT_SCAN_SELECTED_RESULTS,
+};
 use mfm_canonical::CanonicalBytes;
 use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{FactError, Result};
-
-/// Maximum tenant publications one authorized fact read may examine.
-pub const MAX_FACT_SCAN_PUBLICATIONS: u64 = 1_000_000;
-/// Maximum individual facts one authorized fact read may examine.
-pub const MAX_FACT_SCAN_FACTS: u64 = 16_000_000;
-/// Maximum eligible canonical source bytes one authorized fact read may examine while scanning.
-pub const MAX_FACT_SCAN_RETAINED_SOURCE_BYTES: u64 = 512 * 1024 * 1024;
-/// Maximum selected facts across all authored queries.
-pub const MAX_FACT_SCAN_SELECTED_RESULTS: u64 = 16_384;
-/// Maximum canonical bytes in one returned fact-selection value.
-pub const MAX_FACT_SCAN_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Sole completeness mode supported by the prior-run fact scanner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -44,6 +38,9 @@ pub struct FactSelectionScanBounds {
     maximum_retained_source_bytes: u64,
     maximum_selected_results: u64,
     maximum_response_bytes: u64,
+    maximum_distinct_producers: u64,
+    maximum_producer_fold_batches: u64,
+    maximum_pages: u64,
 }
 
 impl<'de> Deserialize<'de> for FactSelectionScanBounds {
@@ -59,15 +56,21 @@ impl<'de> Deserialize<'de> for FactSelectionScanBounds {
             maximum_retained_source_bytes: u64,
             maximum_selected_results: u64,
             maximum_response_bytes: u64,
+            maximum_distinct_producers: u64,
+            maximum_producer_fold_batches: u64,
+            maximum_pages: u64,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(
+        Self::new_with_work_bounds(
             wire.maximum_publications,
             wire.maximum_facts,
             wire.maximum_retained_source_bytes,
             wire.maximum_selected_results,
             wire.maximum_response_bytes,
+            wire.maximum_distinct_producers,
+            wire.maximum_producer_fold_batches,
+            wire.maximum_pages,
         )
         .map_err(serde::de::Error::custom)
     }
@@ -82,12 +85,39 @@ impl FactSelectionScanBounds {
         maximum_selected_results: u64,
         maximum_response_bytes: u64,
     ) -> Result<Self> {
+        Self::new_with_work_bounds(
+            maximum_publications,
+            maximum_facts,
+            maximum_retained_source_bytes,
+            maximum_selected_results,
+            maximum_response_bytes,
+            MAX_FACT_SCAN_DISTINCT_PRODUCERS,
+            MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
+            MAX_FACT_SCAN_PAGES,
+        )
+    }
+
+    /// Constructs scan limits with explicit producer and page work budgets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_work_bounds(
+        maximum_publications: u64,
+        maximum_facts: u64,
+        maximum_retained_source_bytes: u64,
+        maximum_selected_results: u64,
+        maximum_response_bytes: u64,
+        maximum_distinct_producers: u64,
+        maximum_producer_fold_batches: u64,
+        maximum_pages: u64,
+    ) -> Result<Self> {
         let bounds = Self {
             maximum_publications,
             maximum_facts,
             maximum_retained_source_bytes,
             maximum_selected_results,
             maximum_response_bytes,
+            maximum_distinct_producers,
+            maximum_producer_fold_batches,
+            maximum_pages,
         };
         bounds.validate()?;
         Ok(bounds)
@@ -118,6 +148,21 @@ impl FactSelectionScanBounds {
         self.maximum_response_bytes
     }
 
+    /// Returns the maximum distinct producer runs visited.
+    pub const fn maximum_distinct_producers(&self) -> u64 {
+        self.maximum_distinct_producers
+    }
+
+    /// Returns the maximum producer-prefix fold batches.
+    pub const fn maximum_producer_fold_batches(&self) -> u64 {
+        self.maximum_producer_fold_batches
+    }
+
+    /// Returns the maximum paged publication queries.
+    pub const fn maximum_pages(&self) -> u64 {
+        self.maximum_pages
+    }
+
     pub(crate) fn validate(&self) -> Result<()> {
         if self.maximum_publications == 0
             || self.maximum_publications > MAX_FACT_SCAN_PUBLICATIONS
@@ -129,6 +174,12 @@ impl FactSelectionScanBounds {
             || self.maximum_selected_results > MAX_FACT_SCAN_SELECTED_RESULTS
             || self.maximum_response_bytes == 0
             || self.maximum_response_bytes > MAX_FACT_SCAN_RESPONSE_BYTES
+            || self.maximum_distinct_producers == 0
+            || self.maximum_distinct_producers > MAX_FACT_SCAN_DISTINCT_PRODUCERS
+            || self.maximum_producer_fold_batches == 0
+            || self.maximum_producer_fold_batches > MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES
+            || self.maximum_pages == 0
+            || self.maximum_pages > MAX_FACT_SCAN_PAGES
         {
             return Err(FactError::Selection(
                 "fact selection scan bounds are outside the frozen limits",

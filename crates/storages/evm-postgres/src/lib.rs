@@ -18,7 +18,9 @@ mod registry;
 mod schema;
 mod support;
 
-pub use authority::{open_wallet_nonce_authority, PostgresWalletNonceAuthority};
+#[cfg(feature = "parity-tests")]
+pub use authority::open_wallet_nonce_authority;
+pub use authority::PostgresWalletNonceAuthority;
 pub use error::{PostgresEvmWalletError, Result};
 pub use provider::{
     DeploymentAssemblyBinding, DeploymentAssemblyRouteChallenge, DeploymentAssemblyRouteProof,
@@ -27,6 +29,7 @@ pub use provider::{
 };
 #[cfg(feature = "parity-tests")]
 pub use registry::ActivationIssuanceFaultPoint;
+#[cfg(feature = "parity-tests")]
 pub use registry::{
     open_activation_registry_admin, open_activation_registry_public,
     PostgresWalletActivationRegistryAdmin, PostgresWalletActivationRegistryPublic,

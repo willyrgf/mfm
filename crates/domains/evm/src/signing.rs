@@ -524,7 +524,7 @@ pub fn signing_failure_is_integrity(error: &EvmSigningError) -> bool {
         EvmSigningError::QuantityOutOfRange { .. }
         | EvmSigningError::ZeroChainId
         | EvmSigningError::PriorityFeeExceedsMaxFee
-        | EvmSigningError::SignedTransactionTooLarge => false,
+        | EvmSigningError::SignedTransactionTooLarge => true,
     }
 }
 

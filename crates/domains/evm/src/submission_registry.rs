@@ -35,16 +35,16 @@ use crate::submission::{
     EvmSubmissionConfiguration, EvmSubmissionExpansion, EvmSubmissionOutput, EvmSubmissionRequest,
     EvmTransactionLookupCapability, EvmTransactionLookupObservation, EvmTransactionLookupRequest,
     ExtractSubmissionWorkState, FailureReconciliationRequest, IntentBoundSubmission,
-    MarkActivationReconcileState, MarkCandidateCompletedState, MarkObservationReconcileState,
-    MarkSubmissionCompletedState, MarkSubmissionResumedState, ObservationRoundDecision,
-    ObserveActivatedTransactionState, ObserveCandidateReceiptState, ObserveCanonicalInclusionState,
-    ObserveFinalizedHeadState, ObservePendingNonceState, ObservedPendingSubmission,
-    PendingEvmSubmissionFailure, PermittedCandidateWork, PostReservePreparedSubmission,
-    PrepareExhaustionReconciliationState, PrepareRetainedCandidateObservationState,
-    PreparedCandidateActivation, PreparedWalletSubmission, ProjectCompletedWalletDispositionState,
-    QualifiedPendingSubmission, QualifyPendingNonceFloorState,
-    ReadCandidateStatusAfterFailureState, ReadCandidateWalletNonceStatusState,
-    ReadExhaustionStatusState, ReadPostReserveWalletNonceStatusState,
+    MarkActivationReconcileState, MarkCandidateCompletedState, MarkSubmissionCompletedState,
+    MarkSubmissionResumedState, ObservationRoundDecision, ObserveActivatedTransactionState,
+    ObserveCandidateReceiptState, ObserveCanonicalInclusionState, ObserveFinalizedHeadState,
+    ObservePendingNonceState, ObservedPendingSubmission, PendingEvmSubmissionFailure,
+    PermittedCandidateWork, PostReservePreparedSubmission, PrepareExhaustionReconciliationState,
+    PrepareRetainedCandidateObservationState, PreparedCandidateActivation,
+    PreparedWalletSubmission, ProjectCompletedWalletDispositionState, QualifiedPendingSubmission,
+    QualifyPendingNonceFloorState, ReadCandidateStatusAfterFailureState,
+    ReadCandidateWalletNonceStatusState, ReadExhaustionStatusState,
+    ReadObservedCandidateStatusState, ReadPostReserveWalletNonceStatusState,
     ReadReservationStatusAfterFailureState, ReadWalletNonceStatusState, ReserveWalletNonceState,
     SelectCandidateAttemptRouteState, SelectCandidateSlotState, SelectObservationRoundState,
     SelectSubmissionTerminalState, SelectTerminalEvidenceState,
@@ -341,10 +341,6 @@ pure_process!(
     submission_process::mark_activation_reconcile
 );
 pure_process!(
-    MarkObservationReconcileState,
-    submission_process::mark_observation_reconcile
-);
-pure_process!(
     MarkCandidateCompletedState,
     submission_process::mark_candidate_completed
 );
@@ -406,6 +402,13 @@ reconciling_read_process!(
     prepared,
     submission_process::read_status_request,
     submission_process::settle_candidate_wallet_status,
+    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+);
+reconciling_read_process!(
+    ReadObservedCandidateStatusState,
+    observed_candidate,
+    submission_process::read_observed_candidate_status_request,
+    submission_process::settle_observed_candidate_status,
     [EvmSubmissionFailure::NonceAuthorityUnavailable]
 );
 reconciling_read_process!(
@@ -529,6 +532,7 @@ pub fn register_evm_submission_process(
     register_state::<ReadReservationStatusAfterFailureState>(registry, qualification, &fixture)?;
     register_state::<ReadCandidateStatusAfterFailureState>(registry, qualification, &fixture)?;
     register_state::<ReadCandidateWalletNonceStatusState>(registry, qualification, &fixture)?;
+    register_state::<ReadObservedCandidateStatusState>(registry, qualification, &fixture)?;
     register_state::<ReadExhaustionStatusState>(registry, qualification, &fixture)?;
     register_state::<ObservePendingNonceState>(registry, qualification, &fixture)?;
     register_state::<QualifyPendingNonceFloorState>(registry, qualification, &fixture)?;
@@ -551,7 +555,6 @@ pub fn register_evm_submission_process(
     register_state::<ObserveCandidateReceiptState>(registry, qualification, &fixture)?;
     register_state::<SelectTerminalEvidenceState>(registry, qualification, &fixture)?;
     register_state::<MarkActivationReconcileState>(registry, qualification, &fixture)?;
-    register_state::<MarkObservationReconcileState>(registry, qualification, &fixture)?;
     register_state::<ObserveFinalizedHeadState>(registry, qualification, &fixture)?;
     register_state::<ObserveCanonicalInclusionState>(registry, qualification, &fixture)?;
     register_state::<VerifyCanonicalInclusionState>(registry, qualification, &fixture)?;
@@ -1017,10 +1020,38 @@ fn valid_quantity(value: &str) -> bool {
 }
 
 fn valid_status_request(request: &ReadEvmWalletNonceStatusRequest) -> bool {
+    let semantics_match = crate::evm_submission_expansion_policy_ref()
+        .ok()
+        .and_then(|expansion| {
+            crate::derive_submission_semantics_digest(
+                &request.transaction_intent,
+                &request.candidate_family,
+                request.observation_rounds,
+                &expansion,
+                &request.route_generation_ref,
+                &request.domain_activation_attestation,
+                &request.issuer_namespace_contract_ref,
+            )
+            .ok()
+        })
+        .is_some_and(|digest| digest == request.submission_semantics_digest);
     request.nonce_domain.validate().is_ok()
         && request.domain_activation_attestation.validate().is_ok()
+        && valid_reference(&request.issuer_namespace_contract_ref)
         && request.semantic_reservation_key.validate().is_ok()
         && request.submission_intent_id.validate().is_ok()
+        && request.submission_semantics_digest.validate().is_ok()
+        && request.transaction_intent.validate().is_ok()
+        && request
+            .candidate_family
+            .validate(&request.transaction_intent)
+            .is_ok()
+        && request.transaction_intent.nonce_domain() == &request.nonce_domain
+        && request.transaction_intent.digest() == request.transaction_intent_digest
+        && request.candidate_family.digest() == request.candidate_family_ref
+        && request.observation_rounds > 0
+        && request.observation_rounds <= crate::EVM_WALLET_OBSERVATION_ROUND_LIMIT
+        && valid_reference(&request.route_generation_ref)
         && valid_digest(&request.transaction_intent_digest)
         && valid_digest(&request.candidate_family_ref)
         && request
@@ -1028,6 +1059,7 @@ fn valid_status_request(request: &ReadEvmWalletNonceStatusRequest) -> bool {
             .current_schema_record
             .wallet_nonce_domain
             == request.nonce_domain
+        && semantics_match
 }
 
 fn valid_pending_nonce_request(request: &EvmPendingNonceRequest) -> bool {
@@ -1102,7 +1134,8 @@ fn valid_inclusion_block_observation(observation: &EvmInclusionBlockObservation)
 }
 
 fn valid_unsigned_candidate(candidate: &UnsignedWalletCandidate) -> bool {
-    if candidate.transaction_intent.validate().is_err()
+    if crate::TransactionNonce::new(candidate.nonce).is_err()
+        || candidate.transaction_intent.validate().is_err()
         || candidate.semantic_reservation_key.validate().is_err()
         || usize::from(candidate.candidate_ordinal) >= crate::EVM_WALLET_REPLACEMENT_LIMIT
     {
@@ -1137,15 +1170,7 @@ fn valid_active_candidate(candidate: &ActiveWalletCandidate) -> bool {
 }
 
 fn valid_reservation(reservation: &crate::ReservedWalletNonce) -> bool {
-    reservation.nonce_domain.validate().is_ok()
-        && valid_reference(&reservation.domain_activation_record_ref)
-        && reservation.semantic_reservation_key.validate().is_ok()
-        && reservation.submission_intent_id.validate().is_ok()
-        && valid_digest(&reservation.transaction_intent_digest)
-        && valid_digest(&reservation.candidate_family_ref)
-        && valid_digest(&reservation.observed_floor_ref)
-        && valid_reference(&reservation.resource_lineage_ref)
-        && valid_reference(&reservation.reservation_evidence_ref)
+    reservation.validate().is_ok()
 }
 
 fn valid_active_prefix(
@@ -1241,6 +1266,9 @@ fn valid_reserve_request(request: &ReserveEvmNonceRequest) -> bool {
                 &request.candidate_family,
                 request.observation_rounds,
                 &expansion,
+                &request.qualified_floor.observed.route_generation_ref,
+                &request.domain_activation_attestation,
+                &request.issuer_namespace_contract_ref,
             )
             .ok()
         })
@@ -1318,7 +1346,10 @@ fn valid_activation_request(request: &ActivateEvmCandidateRequest) -> bool {
 
 fn valid_activation_response(response: &ActivateCandidateResponse) -> bool {
     match response {
-        ActivateCandidateResponse::Activated { candidate } => valid_active_candidate(candidate),
+        ActivateCandidateResponse::Activated { candidate }
+        | ActivateCandidateResponse::AlreadyRetained { candidate } => {
+            valid_active_candidate(candidate)
+        }
         ActivateCandidateResponse::CandidateProgressionConflict => true,
     }
 }
@@ -1501,6 +1532,8 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
         &intent,
         vec![
             EvmWalletFeeCandidate::new(U256::from(100_u64), U256::from(2_u64))
+                .map_err(fixture_contract_error)?,
+            EvmWalletFeeCandidate::new(U256::from(120_u64), U256::from(3_u64))
                 .map_err(fixture_contract_error)?,
         ],
     )

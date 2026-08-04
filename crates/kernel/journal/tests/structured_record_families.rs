@@ -123,6 +123,13 @@ fn authorized() -> RunRecord {
         state_input_ref: lexical(34),
         access_kind: AccessKind::Read,
         semantic_head: semantic_head(),
+        store_scope_id: StoreScopeId::new("mfm.store_scope.v1:00000000000000000000000000000000")
+            .expect("store scope"),
+        store_epoch: StoreEpoch::new(1),
+        tenant_scope_id: TenantScopeId::new("mfm.tenant_scope.v1:11111111111111111111111111111111")
+            .expect("tenant scope"),
+        admitted_routing_policy_ref: content_ref(11),
+        minimum_lineage_head_ref: None,
         capability_contract_ref: content_ref(35),
         capability_implementation_ref: content_ref(36),
         adapter_contract_ref: content_ref(37),

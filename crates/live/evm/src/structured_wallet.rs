@@ -1,33 +1,26 @@
 //! Target-bound structured adapters for the narrow wallet nonce authority.
 
 use std::marker::PhantomData;
-use std::str::FromStr;
 use std::sync::Arc;
 
-use alloy_primitives::Address;
 use mfm_capabilities::{
-    AccessFaultCode, BoundedComponentInvoker, ComponentFuture, EffectAdapterCompletion,
-    EffectAdapterInvoker, EffectRefreshMode, ReadAdapterCompletion, ReadAdapterInvoker,
+    AccessFaultCode, BoundedComponentInvoker, ComponentFuture, EffectAdapterInvoker,
+    EffectRefreshMode, ReadAdapterCompletion, ReadAdapterInvoker,
 };
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeEffectPhysicalBinding,
-    RuntimeEffectPhysicalBindingSource, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    CertifiedAccessAuthorization, PhysicalBindingSelection, ProgramRegistryBuilder,
+    QualifiedEffectPhysicalBinding, QualifiedEffectPhysicalBindingSource,
+    QualifiedReadPhysicalBinding, QualifiedReadPhysicalBindingSource,
 };
 use mfm_evm::{
-    activate_wallet_candidate_adapter_contract, complete_wallet_nonce_adapter_contract,
-    read_wallet_nonce_status_adapter_contract, reserve_wallet_nonce_adapter_contract,
-    ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, CompleteEvmNonceRequest,
+    read_wallet_nonce_status_adapter_contract, ActivateWalletCandidateCapability,
     CompleteWalletNonceCapability, EvmSubmissionFailure, EvmSubmissionProcessQualification,
-    QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
-    ReadWalletNonceStatusCapability, ReserveEvmNonceRequest, ReserveWalletNonceCapability,
-    WalletNonceAuthority, WalletNonceAuthorityResource, WalletNonceDomainActivationAttestation,
-    WalletNonceStatus,
+    ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability, ReserveWalletNonceCapability,
+    WalletEffectSpec, WalletNonceAuthority, WalletNonceAuthorityResource,
+    WalletNonceDomainActivationAttestation, WalletNonceStatus,
 };
 use mfm_ids::{ContentRef, StableId};
-use mfm_journal::structured::{
-    AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
-};
+use mfm_journal::structured::{AccessKind, HistoryObject, LexicalValueRef};
 use mfm_program::structured::{
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
     RuntimeResourceAuthority,
@@ -62,10 +55,6 @@ impl EvmStructuredWalletBindings {
         effect_release_history: EvmPhysicalBindingReleaseHistory,
     ) -> Result<Self, EvmStructuredLiveBindingError> {
         let domain_activation_attestation = authority.domain_activation_attestation().clone();
-        let initial_target_ref = domain_activation_attestation
-            .initial_store_incarnation_ref
-            .to_content_ref()
-            .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)?;
         let resource_contract_ref = WalletNonceAuthorityResource::contract()
             .and_then(|contract| contract.content_ref().map_err(Into::into))
             .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)?;
@@ -73,18 +62,19 @@ impl EvmStructuredWalletBindings {
         // actual current physical incarnation. A successor that claims a rotated
         // target while the concrete authority still represents another
         // incarnation is rejected at construction and rechecked per access.
-        let releases_match_authority = read_release_history
-            .releases()
-            .chain(effect_release_history.releases())
-            .all(|release| release.physical_target_ref() == &initial_target_ref);
         if domain_activation_attestation.validate().is_err()
+            || read_release_history.releases().any(|release| {
+                release.admitted_routing_policy_ref() != &admitted_routing_policy_ref
+            })
+            || effect_release_history.releases().any(|release| {
+                release.admitted_routing_policy_ref() != &admitted_routing_policy_ref
+            })
             || read_release_history.current().admitted_routing_policy_ref()
                 != &admitted_routing_policy_ref
             || effect_release_history
                 .current()
                 .admitted_routing_policy_ref()
                 != &admitted_routing_policy_ref
-            || !releases_match_authority
             || !authority_release_is_current(
                 authority.as_ref(),
                 read_release_history.current().physical_target_ref(),
@@ -124,19 +114,16 @@ impl EvmStructuredWalletBindings {
         let current = history.current();
         current.admitted_routing_policy_ref() == &self.admitted_routing_policy_ref
             && authority_release_is_current(self.authority.as_ref(), current.physical_target_ref())
-            && history
-                .releases()
-                .all(|release| release.physical_target_ref() == current.physical_target_ref())
     }
 
     fn read_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
-        selection.admitted_routing_policy_ref == &self.admitted_routing_policy_ref
+        selection.admitted_routing_policy_ref() == &self.admitted_routing_policy_ref
             && self.consume_physical_release_permit(false)
     }
 
     fn effect_selection(&self, selection: PhysicalBindingSelection<'_>) -> bool {
         self.read_selection(selection)
-            && selection.stable_resource_lineage_contract_ref == Some(&self.resource_contract_ref)
+            && selection.stable_resource_lineage_contract_ref() == Some(&self.resource_contract_ref)
             && self.consume_physical_release_permit(true)
     }
 
@@ -182,20 +169,21 @@ fn authority_release_is_current(
     release_target: &ContentRef,
 ) -> bool {
     authority
-        .domain_activation_attestation()
-        .initial_store_incarnation_ref
+        .current_incarnation_ref()
         .to_content_ref()
         .ok()
-        .is_some_and(|current| &current == release_target)
+        .as_ref()
+        == Some(release_target)
 }
 
 trait WalletReadSpec: RuntimeReadCapability {
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract>;
 
-    fn invoke<'a>(
+    fn invoke_authorized<'a>(
         authority: &'a dyn WalletNonceAuthority,
         state_input_ref: &'a LexicalValueRef,
         request: &'a Self::Request,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<Self::Returned, Self::SafeFailure>>;
 }
 
@@ -204,12 +192,13 @@ impl WalletReadSpec for ReadWalletNonceStatusCapability {
         read_wallet_nonce_status_adapter_contract()
     }
 
-    fn invoke<'a>(
+    fn invoke_authorized<'a>(
         authority: &'a dyn WalletNonceAuthority,
         state_input_ref: &'a LexicalValueRef,
         request: &'a ReadEvmWalletNonceStatusRequest,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<WalletNonceStatus, EvmSubmissionFailure>> {
-        authority.read_status(state_input_ref, request)
+        authority.read_status_authorized(state_input_ref, request, authorization)
     }
 }
 
@@ -230,11 +219,10 @@ where
         &'a self,
         request: &'a C::Request,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
-        C::invoke(
-            self.source.authority.as_ref(),
-            &self.state_input_ref,
-            request,
-        )
+        let _ = request;
+        Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+            self.source.integrity_fault.clone(),
+        )))
     }
 }
 
@@ -247,16 +235,38 @@ where
     }
 }
 
-impl<C> RuntimeReadPhysicalBinding<C> for EvmStructuredWalletReadBinding<C>
+impl<C> QualifiedReadPhysicalBinding<C> for EvmStructuredWalletReadBinding<C>
 where
     C: WalletReadSpec,
 {
     fn public_certificate(&self) -> &HistoryObject {
         self.source.read_release_history.current().certificate()
     }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
+        if authorization.authorization().access_kind != AccessKind::Read
+            || authorization.authorization().physical_binding_ref
+                != self.public_certificate().content_ref
+            || authorization.authorization().state_input_ref != self.state_input_ref
+        {
+            return Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+                self.source.integrity_fault.clone(),
+            )));
+        }
+        C::invoke_authorized(
+            self.source.authority.as_ref(),
+            &self.state_input_ref,
+            request,
+            authorization,
+        )
+    }
 }
 
-impl<C> RuntimeReadPhysicalBindingSource<C> for EvmStructuredWalletBindings
+impl<C> QualifiedReadPhysicalBindingSource<C> for EvmStructuredWalletBindings
 where
     C: WalletReadSpec,
 {
@@ -270,136 +280,11 @@ where
         let binding = self.read_selection(selection).then(|| {
             Arc::new(EvmStructuredWalletReadBinding {
                 source: self.clone(),
-                state_input_ref: selection.state_input_ref.clone(),
+                state_input_ref: selection.state_input_ref().clone(),
                 _capability: PhantomData,
             })
         });
         Box::pin(async move { binding })
-    }
-}
-
-trait WalletEffectSpec: RuntimeEffectCapability {
-    fn contract() -> mfm_program::Result<StructuredLiveComponentContract>;
-
-    fn invoke<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a Self::Request,
-    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<Self>>;
-
-    fn invoke_authorized<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a Self::Request,
-        _authorization_ref: &'a mfm_journal::structured::RecordRef,
-        _authorization: &'a ExternalAccessAuthorized,
-        _integrity_fault: &'a AccessFaultCode,
-    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<Self>> {
-        Self::invoke(authority, state_input_ref, request)
-    }
-}
-
-impl WalletEffectSpec for ReserveWalletNonceCapability {
-    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
-        reserve_wallet_nonce_adapter_contract()
-    }
-
-    fn invoke<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a ReserveEvmNonceRequest,
-    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<ReserveWalletNonceCapability>>
-    {
-        authority.reserve(state_input_ref, request)
-    }
-
-    fn invoke_authorized<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a ReserveEvmNonceRequest,
-        authorization_ref: &'a mfm_journal::structured::RecordRef,
-        authorization: &'a ExternalAccessAuthorized,
-        integrity_fault: &'a AccessFaultCode,
-    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<ReserveWalletNonceCapability>>
-    {
-        let chain_instance_ref = match request
-            .domain_activation_attestation
-            .current_schema_record
-            .chain_instance_attestation
-            .content_ref()
-        {
-            Ok(reference) => reference,
-            Err(_) => {
-                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
-                    integrity_fault.clone(),
-                )))
-            }
-        };
-        let sender = match Address::from_str(request.nonce_domain.sender()) {
-            Ok(sender) => sender,
-            Err(_) => {
-                return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
-                    integrity_fault.clone(),
-                )))
-            }
-        };
-        let observation = QualifiedPendingNonceObservation::from_committed_origin(
-            request.qualified_floor.clone(),
-            chain_instance_ref,
-            sender,
-            request
-                .qualified_floor
-                .observed
-                .route_generation_ref
-                .clone(),
-            authorization_ref.run_id.clone(),
-            authorization_ref.clone(),
-            authorization.request.value_ref.clone(),
-        );
-        let Ok(observation) = observation else {
-            return Box::pin(std::future::ready(EffectAdapterCompletion::IntegrityFault(
-                integrity_fault.clone(),
-            )));
-        };
-        Box::pin(async move {
-            authority
-                .reserve_qualified(state_input_ref, &observation, request)
-                .await
-        })
-    }
-}
-
-impl WalletEffectSpec for ActivateWalletCandidateCapability {
-    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
-        activate_wallet_candidate_adapter_contract()
-    }
-
-    fn invoke<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a ActivateEvmCandidateRequest,
-    ) -> ComponentFuture<
-        'a,
-        mfm_capabilities::EffectContractCompletion<ActivateWalletCandidateCapability>,
-    > {
-        authority.activate_candidate(state_input_ref, request)
-    }
-}
-
-impl WalletEffectSpec for CompleteWalletNonceCapability {
-    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
-        complete_wallet_nonce_adapter_contract()
-    }
-
-    fn invoke<'a>(
-        authority: &'a dyn WalletNonceAuthority,
-        state_input_ref: &'a LexicalValueRef,
-        request: &'a CompleteEvmNonceRequest,
-    ) -> ComponentFuture<
-        'a,
-        mfm_capabilities::EffectContractCompletion<CompleteWalletNonceCapability>,
-    > {
-        authority.complete(state_input_ref, request)
     }
 }
 
@@ -420,11 +305,15 @@ where
         &'a self,
         request: &'a C::Request,
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
-        C::invoke(
-            self.source.authority.as_ref(),
-            &self.state_input_ref,
-            request,
-        )
+        let _ = (request, &self.state_input_ref);
+        // Physical effects are affine Runtime operations. A binding obtained
+        // through the public adapter trait cannot enter the authority without
+        // the consumed certified authorization path below.
+        Box::pin(std::future::ready(
+            mfm_capabilities::EffectAdapterCompletion::IntegrityFault(
+                self.source.integrity_fault.clone(),
+            ),
+        ))
     }
 }
 
@@ -437,7 +326,7 @@ where
     }
 }
 
-impl<C> RuntimeEffectPhysicalBinding<C> for EvmStructuredWalletEffectBinding<C>
+impl<C> QualifiedEffectPhysicalBinding<C> for EvmStructuredWalletEffectBinding<C>
 where
     C: WalletEffectSpec,
 {
@@ -448,14 +337,22 @@ where
     fn invoke_authorized<'a>(
         &'a self,
         request: &'a C::Request,
-        authorization_ref: &'a mfm_journal::structured::RecordRef,
-        authorization: &'a ExternalAccessAuthorized,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<C>> {
+        if authorization.authorization().access_kind != AccessKind::Effect
+            || authorization.authorization().physical_binding_ref
+                != self.public_certificate().content_ref
+        {
+            return Box::pin(std::future::ready(
+                mfm_capabilities::EffectAdapterCompletion::IntegrityFault(
+                    self.source.integrity_fault.clone(),
+                ),
+            ));
+        }
         C::invoke_authorized(
             self.source.authority.as_ref(),
             &self.state_input_ref,
             request,
-            authorization_ref,
             authorization,
             &self.source.integrity_fault,
         )
@@ -477,7 +374,7 @@ where
     }
 }
 
-impl<C> RuntimeEffectPhysicalBindingSource<C> for EvmStructuredWalletBindings
+impl<C> QualifiedEffectPhysicalBindingSource<C> for EvmStructuredWalletBindings
 where
     C: WalletEffectSpec,
 {
@@ -491,7 +388,7 @@ where
         let binding = self.effect_selection(selection).then(|| {
             Arc::new(EvmStructuredWalletEffectBinding {
                 source: self.clone(),
-                state_input_ref: selection.state_input_ref.clone(),
+                state_input_ref: selection.state_input_ref().clone(),
                 _capability: PhantomData,
             })
         });

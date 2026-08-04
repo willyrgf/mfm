@@ -6,9 +6,10 @@ use std::sync::Arc;
 use mfm_capabilities::{
     AccessFaultCode, ComponentFuture, ReadAdapterCompletion, ReadAdapterInvoker,
 };
+use mfm_certify::structured::CertifiedAccessAuthorization;
 use mfm_certify::structured::{
-    PhysicalBindingSelection, ProgramRegistryBuilder, RuntimeReadPhysicalBinding,
-    RuntimeReadPhysicalBindingSource,
+    PhysicalBindingSelection, ProgramRegistryBuilder, QualifiedReadPhysicalBinding,
+    QualifiedReadPhysicalBindingSource,
 };
 use mfm_evm::{
     balance_adapter_contract, EvmAnchorConfirmationRequest, EvmBlockResponse,
@@ -24,6 +25,7 @@ use mfm_journal::structured::{AccessKind, HistoryObject};
 use mfm_program::structured::{RuntimeReadAdapter, RuntimeReadCapability};
 use mfm_spec::structured::{SecretFreeImplementationDescriptor, StructuredComponentKind};
 
+use crate::structured::AuthorizedProviderCall;
 use crate::transport::{EvmJsonRpcTransport, EvmTransportOutcome};
 use crate::{
     EvmPhysicalBindingPurpose, EvmPhysicalBindingReleaseHistory, EvmStructuredLiveBindingError,
@@ -66,7 +68,7 @@ impl EvmStructuredBalanceBindings {
     }
 
     fn selected(&self, selection: PhysicalBindingSelection<'_>) -> bool {
-        selection.admitted_routing_policy_ref == &self.admitted_routing_policy_ref
+        selection.admitted_routing_policy_ref() == &self.admitted_routing_policy_ref
     }
 
     /// Returns the immutable admitted routing policy selected by this binding.
@@ -96,6 +98,7 @@ trait BalanceReadSpec: RuntimeReadCapability<SafeFailure = EvmReadFailure> {
     fn invoke<'a>(
         transport: &'a EvmJsonRpcTransport,
         request: &'a Self::Request,
+        authorization: CertifiedAccessAuthorization,
     ) -> ComponentFuture<'a, EvmTransportOutcome<Self::Returned>>;
 }
 
@@ -109,8 +112,15 @@ macro_rules! read_spec {
             fn invoke<'a>(
                 transport: &'a EvmJsonRpcTransport,
                 request: &'a $request,
+                authorization: CertifiedAccessAuthorization,
             ) -> ComponentFuture<'a, EvmTransportOutcome<$returned>> {
-                Box::pin(async move { transport.$method(request).await })
+                let provider_call = AuthorizedProviderCall::new(&authorization);
+                let origin = provider_call.origin().clone();
+                Box::pin(async move {
+                    provider_call
+                        .run(transport.run_authorized(&origin, transport.$method(request)))
+                        .await
+                })
             }
         }
     };
@@ -174,16 +184,10 @@ where
         &'a self,
         request: &'a C::Request,
     ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
-        Box::pin(async move {
-            match C::invoke(self.source.transport.as_ref(), request).await {
-                EvmTransportOutcome::Returned(returned) => {
-                    ReadAdapterCompletion::Returned(returned)
-                }
-                EvmTransportOutcome::SafeFailure(failure) => {
-                    classify_failure(failure, &self.source.integrity_fault)
-                }
-            }
-        })
+        let _ = request;
+        Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+            self.source.integrity_fault.clone(),
+        )))
     }
 }
 
@@ -196,16 +200,49 @@ where
     }
 }
 
-impl<C> RuntimeReadPhysicalBinding<C> for EvmStructuredBalanceReadBinding<C>
+impl<C> QualifiedReadPhysicalBinding<C> for EvmStructuredBalanceReadBinding<C>
 where
     C: BalanceReadSpec,
 {
     fn public_certificate(&self) -> &HistoryObject {
         self.source.release_history.current().certificate()
     }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a C::Request,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, ReadAdapterCompletion<C::Returned, C::SafeFailure>> {
+        if authorization.authorization().access_kind != AccessKind::Read
+            || authorization.authorization().physical_binding_ref
+                != self.public_certificate().content_ref
+        {
+            return Box::pin(std::future::ready(ReadAdapterCompletion::IntegrityFault(
+                self.source.integrity_fault.clone(),
+            )));
+        }
+        let provider_call = AuthorizedProviderCall::new(&authorization);
+        let origin = provider_call.origin().clone();
+        Box::pin(async move {
+            let outcome = provider_call
+                .run(self.source.transport.run_authorized(
+                    &origin,
+                    C::invoke(self.source.transport.as_ref(), request, authorization),
+                ))
+                .await;
+            match outcome {
+                EvmTransportOutcome::Returned(returned) => {
+                    ReadAdapterCompletion::Returned(returned)
+                }
+                EvmTransportOutcome::SafeFailure(failure) => {
+                    classify_failure(failure, &self.source.integrity_fault)
+                }
+            }
+        })
+    }
 }
 
-impl<C> RuntimeReadPhysicalBindingSource<C> for EvmStructuredBalanceBindings
+impl<C> QualifiedReadPhysicalBindingSource<C> for EvmStructuredBalanceBindings
 where
     C: BalanceReadSpec,
 {
