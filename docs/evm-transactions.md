@@ -29,6 +29,11 @@ EvmSubmissionRequest
 Every step has a certified occurrence and exact failure handling. Polling, replacement,
 reconciliation, and exhaustion are bounded by the admitted expansion.
 
+The managed qualification pins the content-addressed certification identity of this production
+entry program and certifies it again after reversing component registration order. Any authored,
+expanded, or normalized representation change therefore requires deliberate identity regeneration
+and review; the old root is not a compatibility input.
+
 ## Public failure contract
 
 The sole typed operation failure is:

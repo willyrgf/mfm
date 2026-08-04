@@ -82,8 +82,8 @@ manifests, entry policy coverage, and one total root outcome.
 
 Structured normalization and denormalization use explicit bounded work stacks. They enforce the
 same path-depth, provenance-depth, component-definition, and JSON-node limits at construction,
-certification, decoding, and replay; the JSON-node limit is four times the component-definition
-limit because a normalized definition has several JSON nodes of its own. Exceeding any bound is a
+certification, decoding, and replay; the JSON-node limit is an eightfold envelope over the
+component-definition bound for structured protocol and schema nodes. Exceeding any bound is a
 typed rejection and never a process-stack operation.
 
 Only the canonical `CertifiedProgramDocument` is execution authority. Its content-addressed root

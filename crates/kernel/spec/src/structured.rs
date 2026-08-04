@@ -34,9 +34,10 @@ pub const MAX_CERTIFIED_COMPONENT_OBJECTS: usize = 65_536;
 pub const MAX_PROVENANCE_RESOLUTION_DEPTH: usize = MAX_STRUCTURAL_PATH_DEPTH.saturating_mul(4);
 /// Maximum JSON nodes visited while normalizing or denormalizing one structured
 /// program payload. The JSON budget is separate from the component-definition
-/// budget because one persisted definition contains multiple JSON nodes. Bound
-/// is independent of process stack size.
-pub const MAX_STRUCTURED_JSON_NODES: usize = MAX_CERTIFIED_COMPONENT_OBJECTS * 4;
+/// budget because the structured JSON envelope carries bounded declaration
+/// metadata in addition to the component definitions.
+/// Bound is independent of process stack size.
+pub const MAX_STRUCTURED_JSON_NODES: usize = MAX_CERTIFIED_COMPONENT_OBJECTS * 8;
 
 const NEVER_CONTRACT_SCHEMA_NAME: &str = "mfm.kernel.never-failure-contract";
 const NEVER_CONTRACT_BYTES: &[u8] =
