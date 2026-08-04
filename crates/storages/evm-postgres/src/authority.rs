@@ -1508,21 +1508,8 @@ impl WalletNonceAuthority for PostgresWalletNonceAuthority {
                     }
                 }
 
-                let pending = request.qualified_floor.observed.pending_nonce;
-                // EIP-2681: u64::MAX is never a valid transaction nonce. Reject
-                // before any reservation mutation.
-                let Ok(pending_nonce) = mfm_evm::TransactionNonce::new(pending) else {
-                    let completion = self
-                        .returned_reservation(ReserveWalletNonceResponse::NonceCapacityExhausted);
-                    match self.bound_database_attempt(
-                        self.commit_reservation_attempt(write, request, completion)
-                            .await,
-                        database_attempt,
-                    ) {
-                        Ok(completion) => return completion,
-                        Err(RetryDatabaseAttempt) => continue 'database_attempt,
-                    }
-                };
+                let pending_nonce = request.qualified_floor.observed.pending_nonce;
+                let pending = pending_nonce.get();
                 let nonce = match aggregate.high_water {
                     None if pending
                         == request
