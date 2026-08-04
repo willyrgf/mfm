@@ -7,7 +7,7 @@ use mfm_ids::{
     SchemaId, SchemaVersion, SemanticTypeId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    CommitCandidate, HistoryObject, LexicalValueRef, ObservationOutcome,
+    CommitCandidate, HistoryObject, JournalHead, LexicalValueRef, ObservationOutcome,
     PriorRunFactSourceManifest, RunClosed, RunRecord, StateOutcomeRef, StateTransitionCommitted,
     TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
@@ -132,6 +132,13 @@ impl StructuredHistoryBackend for PositiveReplyBackend {
         Box::pin(async { Ok(None) })
     }
 
+    fn current_head<'a>(
+        &'a self,
+        _run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn tenant_fact_frontier<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
@@ -208,6 +215,13 @@ impl StructuredHistoryBackend for CorruptResolutionBackend {
 
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         self.inner.load(run_id)
+    }
+
+    fn current_head<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        self.inner.current_head(run_id)
     }
 
     fn tenant_fact_frontier<'a>(
@@ -3559,6 +3573,61 @@ async fn runtime_adapter_reuses_verified_successors_without_reloading_history() 
         .expect("load committed successor");
     assert_eq!(closed.frontier(), &StructuredFrontier::Complete);
     assert_eq!(backend.full_loads().expect("load count"), 0);
+}
+
+#[tokio::test]
+async fn runtime_adapter_refolds_after_external_append_invalidates_retained_successor() {
+    let fixture = one_state_fixture(112);
+    let backend = StructuredMemoryBackend::new(store_identity(112));
+    let store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(NoPhysicalBindings),
+    );
+    let (writer, _reader) = store.split();
+    let adapter = StoreHistoryAdapter::from_writer(writer);
+    let (run_id, _) = adapter
+        .admit_run(StructuredAdmissionCommand::new(
+            TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "3".repeat(32)))
+                .expect("tenant"),
+            InvocationIdentity::new("00000000-0000-4000-8000-000000000112").expect("invocation"),
+            fixture.entry_point.clone(),
+            fixture.document.clone(),
+            admission_material(10),
+            vec![ProposedCanonicalValue::from_json("7").expect("input")],
+            AppendRequestId::new("adapter-stale-admit").expect("append id"),
+        ))
+        .await
+        .expect("admit through Runtime history port");
+
+    let external_store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(NoPhysicalBindings),
+    );
+    let (external_writer, _external_reader) = external_store.split();
+    let external_verified = external_writer
+        .load_verified(&run_id)
+        .await
+        .expect("load for external append");
+    external_writer
+        .commit_state_transition(
+            external_verified,
+            &StateTransitionProposal::success(
+                AppendRequestId::new("external-transition").expect("append id"),
+                ProposedCanonicalValue::from_json("8").expect("output"),
+                mfm_facts::FactSet::empty(),
+            ),
+        )
+        .await
+        .expect("commit external append");
+
+    let refreshed = adapter
+        .load_verified(&run_id)
+        .await
+        .expect("refold after external append");
+    assert_eq!(refreshed.frontier(), &StructuredFrontier::Complete);
+    assert_eq!(backend.full_loads().expect("load count"), 2);
 }
 
 #[tokio::test]

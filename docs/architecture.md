@@ -155,9 +155,11 @@ loads one verified prefix, selects the minimum actionable occurrence path, and p
 action. The scanner travels through the same ordinary Read
 authorization/invocation/observation/settlement protocol. Runtime passes the newly committed
 authorization proof into the sealed invoker, while ordinary adapters discard that proof. No normal
-live return can escape recording. The private store adapter retains the same-fold verified
+live return can escape recording. The private store adapter retains at most one same-fold verified
 successor between drives and validates its journal head against the indexed backend head before
-reuse; a stale or fresh-process cache falls back to the sole full fold.
+reuse; a stale or absent entry uses the sole full fold. The indexed-head query is the snapshot point
+for a non-mutating load, while exact-head compare-and-append protects every mutation from a later
+external append.
 
 `mfm-certify` issues opaque process identities containing semantic kind, semantic contract, and
 qualified implementation contract. Runtime retains that identity on callback proposals and emits

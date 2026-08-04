@@ -119,19 +119,12 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
 
     /// Returns the exact current physical head without loading the retained prefix.
     ///
-    /// Production backends must serve this from their indexed head projection. The default is
-    /// only for small custom backends that have no separate head projection.
+    /// Every backend supplies this projection directly. Production PostgreSQL reads its indexed
+    /// head row; conformance backends read their equivalent exact-head state.
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
-        Box::pin(async move {
-            Ok(self
-                .load(run_id)
-                .await?
-                .and_then(|history| history.batches.last().map(|batch| batch.head.clone())))
-        })
-    }
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>>;
 
     /// Loads the immutable run prefix ending at one exact retained sequence.
     fn load_prefix<'a>(

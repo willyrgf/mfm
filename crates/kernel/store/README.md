@@ -9,10 +9,12 @@ keys/cursor legality/access linkage/lexical provenance, validates exact object a
 and derives one `VerifiedStructuredRun`. That view contains chronology, semantic/journal heads,
 lexical bindings, fan-out cursors, waiting or blocked state, and terminal outcome.
 
-The private Runtime adapter retains a same-fold verified successor after admission, mutation, or a
-non-mutating frontier. Each reuse first compares its journal head with the backend's indexed
-current head; a stale or fresh-process cache performs the complete fold, so this optimization
-cannot become a second authority or hide an external append.
+The private Runtime adapter retains at most one same-fold verified successor after admission,
+mutation, or a non-mutating frontier. Each reuse first compares its journal head with the backend's
+indexed current head; a stale or absent entry performs the complete fold, so this bounded
+optimization cannot become a second authority or hide an external append. The indexed-head read
+defines the snapshot point for a non-mutating load; exact-head compare-and-append still rejects a
+mutation based on a later external append.
 
 Production assembly consumes one complete `QualifiedProgramRegistry` and a backend, then returns
 only `Runtime` plus sealed purpose readers (public-read, trace, audit, replay, export). Each

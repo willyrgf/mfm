@@ -156,21 +156,30 @@ impl VerifiedRunView for VerifiedStructuredRun {
 #[doc(hidden)]
 pub struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
     writer: StructuredRunHistoryWriter<B>,
-    verified_runs: Mutex<BTreeMap<RunId, VerifiedStructuredRun>>,
+    /// One best-effort successor keeps replay memory bounded independently of run count.
+    verified_run: Mutex<Option<VerifiedStructuredRun>>,
 }
 
 impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
     pub(super) fn from_writer(writer: StructuredRunHistoryWriter<B>) -> Self {
         Self {
             writer,
-            verified_runs: Mutex::new(BTreeMap::new()),
+            verified_run: Mutex::new(None),
         }
     }
 
     fn take_verified_run(&self, run_id: &RunId) -> Option<VerifiedStructuredRun> {
-        match self.verified_runs.lock() {
-            Ok(mut runs) => runs.remove(run_id),
-            Err(poisoned) => poisoned.into_inner().remove(run_id),
+        let mut retained = match self.verified_run.lock() {
+            Ok(retained) => retained,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if retained
+            .as_ref()
+            .is_some_and(|verified| verified.run_id() == run_id)
+        {
+            retained.take()
+        } else {
+            None
         }
     }
 
@@ -178,20 +187,21 @@ impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
         let Some(verified) = verified else {
             return;
         };
-        let run_id = verified.run_id().clone();
-        match self.verified_runs.lock() {
-            Ok(mut runs) => {
-                runs.insert(run_id, verified);
+        match self.verified_run.lock() {
+            Ok(mut retained) => {
+                *retained = Some(verified);
             }
             Err(poisoned) => {
-                poisoned.into_inner().insert(run_id, verified);
+                *poisoned.into_inner() = Some(verified);
             }
         }
     }
 
     async fn load_cached_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let current_head = self.writer.current_head(run_id).await?;
+        // The indexed-head read is the snapshot point for a retained successor. A later
+        // external append is handled by the next exact-head mutation check.
         if let Some(verified) = self.take_verified_run(run_id) {
+            let current_head = self.writer.current_head(run_id).await?;
             if current_head.as_ref() == Some(verified.journal_head()) {
                 return Ok(verified);
             }

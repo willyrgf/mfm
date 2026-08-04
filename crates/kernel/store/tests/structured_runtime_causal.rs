@@ -23,10 +23,10 @@ use mfm_ids::{
 };
 use mfm_journal::structured::{
     derive_commit_digest, derive_record_hash, domain_content_digest, AssignedRecord,
-    CommitCandidate, CommittedBatch, HistoryObject, LexicalValueRef, ObservationOutcome,
-    PriorRunFactSourceManifest, RecordRef, RunRecord, TenantFactCoordinate, TenantFactFrontier,
-    ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
-    ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
+    CommitCandidate, CommittedBatch, HistoryObject, JournalHead, LexicalValueRef,
+    ObservationOutcome, PriorRunFactSourceManifest, RecordRef, RunRecord, TenantFactCoordinate,
+    TenantFactFrontier, ADMISSION_CONFIGURATION_OBJECT_TYPE,
+    ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
     state_contract, AllowsExecution, ClosedSum, DefaultFailureMapper, Direct, Effect,
@@ -663,6 +663,25 @@ impl StructuredHistoryBackend for InjectingBackend {
         })
     }
 
+    fn current_head<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async move {
+            let history = self
+                .override_history
+                .lock()
+                .map_err(|_| StructuredStoreError::BackendUnavailable)?
+                .as_ref()
+                .filter(|raw| &raw.run_id == run_id)
+                .cloned();
+            Ok(match history {
+                Some(history) => history.batches.last().map(|batch| batch.head.clone()),
+                None => self.inner.current_head(run_id).await?,
+            })
+        })
+    }
+
     fn tenant_fact_frontier<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
@@ -893,7 +912,7 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
         runtime.drive_once(&run_id).await.expect("drive"),
         DriveOutcome::TransitionCommitted { closed: true }
     );
-    assert_eq!(history_loads.load(Ordering::SeqCst), 1);
+    assert_eq!(history_loads.load(Ordering::SeqCst), 0);
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
     assert_eq!(callback_input.load(Ordering::SeqCst), 4);
     let verified = reader.load_public(&run_id).await.expect("closed");
@@ -910,7 +929,7 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
         runtime.drive_once(&run_id).await.expect("closed drive"),
         DriveOutcome::Closed
     );
-    assert_eq!(history_loads.load(Ordering::SeqCst), 3);
+    assert_eq!(history_loads.load(Ordering::SeqCst), 1);
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
 }
 
