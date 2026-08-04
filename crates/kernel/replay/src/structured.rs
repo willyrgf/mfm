@@ -6,7 +6,6 @@ use mfm_journal::structured::{
     AssignedRecord, ExternalAccessObserved, JournalHead, LexicalValueRef, ObservationOutcome,
     RunRecord, SemanticHead,
 };
-use mfm_spec::structured::OperationOutcome;
 use mfm_store::structured::{
     AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
     StructuredHistoryBackend, StructuredStoreError, TraceRunEvidence,
@@ -264,7 +263,7 @@ pub fn project_replay_result(run: &RecordedRunEvidence) -> Result<StructuredRepl
             "run_id": run.run_id(),
             "journal_head": run.journal_head(),
             "semantic_head": run.semantic_head(),
-            "record_count": run.records().len(),
+            "record_count": run.record_count(),
             "status": frontier_status(run.frontier()),
         }),
     )
@@ -373,32 +372,16 @@ pub fn project_access_audit(
 pub fn project_operation_outcome(
     run: &PublicRunEvidence,
 ) -> Result<Option<StructuredOperationOutcomeView>> {
-    let Some(outcome_ref) = run.closed_outcome_ref() else {
+    let Some(outcome) = run.terminal_outcome() else {
         return Ok(None);
     };
-    let outcome = run
-        .object(outcome_ref)
-        .ok_or(StructuredReplayError::InvalidRecordedHistory)?;
-    let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = outcome
-        .decode()
-        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-    let (kind, lexical) = match outcome {
-        OperationOutcome::Success(value) => ("success", value),
-        OperationOutcome::Failure(value) => ("failure", value),
-    };
-    let selected = run
-        .object(&lexical.value.value_ref)
-        .ok_or(StructuredReplayError::InvalidRecordedHistory)?;
-    selected
-        .validate()
-        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-    let canonical_value =
-        PlainCanonicalJsonBytes::from_canonical_json_slice(selected.canonical_json.as_bytes())
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
     Ok(Some(StructuredOperationOutcomeView {
-        kind,
-        value: lexical,
-        canonical_value,
+        kind: outcome.kind(),
+        value: outcome.value().clone(),
+        canonical_value: PlainCanonicalJsonBytes::from_canonical_json_slice(
+            outcome.canonical_value().as_bytes(),
+        )
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?,
     }))
 }
 
