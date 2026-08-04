@@ -7,13 +7,13 @@ parser, migration reader, dual writer, or fallback are retained.
 Current artifact metadata:
 
 ```text
-annex_bytes: 36781
-annex_sha256: 4370fcccde60d8b0a688ecab39d8121ec3526527432870dbe88e1f98ea1c3338
-annex_schema_count: 45
+annex_bytes: 42809
+annex_sha256: af935d166da964906f4ed97ddd1b7f54c6081bb819d0f05d26e2ab947d60b19c
+annex_schema_count: 48
 annex_domain_count: 5
 annex_logical_key_count: 5
 corpus_bytes: 43122
-corpus_sha256: a819a292fd564403e14fe259b9fab338dae1a13f2aaece090fadfcef4f5fc95c
+corpus_sha256: 6781dee22cb492ffe7dc3a8e272b5218f06f98c05fc4a59d15d733730ac0cb46
 corpus_positive_count: 17
 corpus_negative_count: 2
 corpus_relational_count: 1

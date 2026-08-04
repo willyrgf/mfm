@@ -8,5 +8,3 @@ pub(crate) mod keystore;
 pub(crate) mod keystore_selection;
 /// Atomic local output publication helpers.
 pub(crate) mod output_file;
-/// Bounded caller-held portable-export input helpers.
-pub(crate) mod portable_export;

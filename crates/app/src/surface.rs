@@ -201,7 +201,7 @@ impl TransitionTracePage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_transition_trace_page(
-    page: mfm_replay::structured::StructuredProjectionPage<CanonicalTransitionTrace>,
+    page: mfm_replay::structured::StructuredTransitionTracePage,
 ) -> Result<TransitionTracePage, PublicError> {
     let (run_id, at_journal_head, transitions, next_index) = page.into_parts();
     let next_cursor = match next_index {
@@ -254,7 +254,7 @@ impl AccessAuditPage {
 
 /// Wraps a replay-owned scalar continuation in the app-owned opaque public cursor.
 pub(crate) fn complete_access_audit_page(
-    page: mfm_replay::structured::StructuredProjectionPage<AccessAuditEntry>,
+    page: mfm_replay::structured::StructuredAccessAuditPage,
 ) -> Result<AccessAuditPage, PublicError> {
     let (run_id, complete_as_of_journal_head, entries, next_index) = page.into_parts();
     let next_cursor = match next_index {
@@ -773,13 +773,11 @@ impl DriveResponse {
     }
 }
 
-/// Public replay mode.
+/// Public recorded-history replay mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplayMode {
     /// Verify recorded history without callbacks.
     Verify,
-    /// Reproduce under the exact admitted executable when available.
-    Reproduce,
 }
 
 impl ReplayMode {
@@ -787,11 +785,10 @@ impl ReplayMode {
     pub fn parse(value: &str) -> Result<Self, PublicError> {
         let mode = match value {
             "verify" => Self::Verify,
-            "reproduce" => Self::Reproduce,
             _ => {
                 return Err(invalid_request(
                     "ReplayModeInvalid",
-                    "Replay mode must be verify or reproduce",
+                    "Replay mode must be verify",
                 ))
             }
         };
@@ -813,7 +810,6 @@ impl ReplayMode {
     pub const fn as_annex_str(self) -> &'static str {
         match self {
             Self::Verify => "verify",
-            Self::Reproduce => "reproduce",
         }
     }
 }
@@ -821,64 +817,11 @@ impl ReplayMode {
 /// Affine asynchronous reader used for portable export streams.
 pub type ExportAsyncReader = Pin<Box<dyn AsyncRead + Send + Unpin + 'static>>;
 
-/// Caller-held semantic portable export stream used by non-verify replay modes.
-///
-/// Construction does not poll the reader. Full framing, digest, store, tenant, run, head, and
-/// closure validation happens only after separate replay and same-run export authorization.
-pub struct ExportStreamInput {
-    content_ref: ContentRef,
-    reader: ExportAsyncReader,
-}
-
-impl ExportStreamInput {
-    /// Binds one exact content reference to an unpolled caller-held stream.
-    pub fn from_reader(
-        content_ref: ContentRef,
-        reader: ExportAsyncReader,
-    ) -> Result<Self, PublicError> {
-        let expected_schema = recoverability_contract()?
-            .schema_id("mfm.portable-run-export-stream.v1")
-            .map_err(|_| {
-                PublicError::internal(
-                    "RecoverabilityContractUnavailable",
-                    "The recoverability contract is unavailable",
-                )
-            })?;
-        if content_ref.schema_id() != expected_schema {
-            return Err(PublicError::replay_artifact_invalid());
-        }
-        Ok(Self {
-            content_ref,
-            reader,
-        })
-    }
-
-    /// Returns the caller-supplied exact export identity.
-    pub const fn content_ref(&self) -> &ContentRef {
-        &self.content_ref
-    }
-
-    pub(crate) fn into_parts(self) -> (ContentRef, ExportAsyncReader) {
-        (self.content_ref, self.reader)
-    }
-}
-
-impl std::fmt::Debug for ExportStreamInput {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ExportStreamInput")
-            .field("content_ref", &self.content_ref)
-            .finish_non_exhaustive()
-    }
-}
-
 /// Checked replay request.
 #[derive(Debug)]
 pub enum ReplayRequest {
     /// Verify recorded history without any supplied export.
     Verify,
-    /// Validate caller-held semantic export evidence before exact reproduction.
-    Reproduce(ExportStreamInput),
 }
 
 impl ReplayRequest {
@@ -886,12 +829,7 @@ impl ReplayRequest {
     pub const fn mode(&self) -> ReplayMode {
         match self {
             Self::Verify => ReplayMode::Verify,
-            Self::Reproduce(_) => ReplayMode::Reproduce,
         }
-    }
-
-    pub(crate) const fn requires_export_authorization(&self) -> bool {
-        !matches!(self, Self::Verify)
     }
 }
 
@@ -986,13 +924,12 @@ mod tests {
 
     use super::{
         decode_access_audit_page_request, decode_transition_trace_page_request,
-        encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse, ContentRef,
-        DriveResponse, ExportStreamInput, ExportedRun, InspectionPurpose, PageRequest,
-        PublicRunView, RecoverabilityContract, ReplayMode, ReplayRequest, RunId,
-        DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX, MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
+        encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse,
+        DriveResponse, ExportedRun, InspectionPurpose, PageRequest, PublicRunView, ReplayMode,
+        ReplayRequest, RunId, DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX,
+        MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
     };
 
-    assert_not_impl_any!(ExportStreamInput: Clone, Copy);
     assert_not_impl_any!(ExportedRun: Clone, Copy);
     assert_not_impl_any!(ReplayRequest: Clone, Copy);
 
@@ -1063,10 +1000,7 @@ mod tests {
             ReplayMode::parse("verify").expect("annex mode"),
             ReplayMode::Verify
         );
-        assert_eq!(
-            ReplayMode::parse("reproduce").expect("annex mode"),
-            ReplayMode::Reproduce
-        );
+        assert!(ReplayMode::parse("reproduce").is_err());
         assert!(ReplayMode::parse("compare_current").is_err());
         assert!(ReplayMode::parse("compare-current").is_err());
     }
@@ -1167,52 +1101,6 @@ mod tests {
         );
         assert!(PageRequest::new(None, Some(0)).is_err());
         assert!(PageRequest::new(None, Some(MAX_PAGE_LIMIT + 1)).is_err());
-    }
-
-    #[test]
-    fn portable_replay_input_binds_an_unpolled_affine_reader() {
-        let contract = RecoverabilityContract::embedded().expect("annex");
-        let content_ref = ContentRef::new(
-            contract
-                .schema_id("mfm.portable-run-export-stream.v1")
-                .expect("portable schema")
-                .clone(),
-            contract.raw_content_digest(b"stream"),
-        )
-        .expect("content ref");
-        let input =
-            ExportStreamInput::from_reader(content_ref.clone(), Box::pin(tokio::io::empty()))
-                .expect("stream input");
-        assert_eq!(input.content_ref(), &content_ref);
-        assert_eq!(
-            ReplayRequest::Reproduce(input).mode(),
-            ReplayMode::Reproduce
-        );
-
-        let wrong_ref = ContentRef::new(
-            contract
-                .schema_id("mfm.content-ref.v1")
-                .expect("other schema")
-                .clone(),
-            contract.raw_content_digest(b"stream"),
-        )
-        .expect("wrong content ref");
-        let error = ExportStreamInput::from_reader(wrong_ref, Box::pin(tokio::io::empty()))
-            .expect_err("wrong stream schema");
-        assert_eq!(error.code(), "ReplayArtifactInvalid");
-
-        let input =
-            ExportStreamInput::from_reader(content_ref.clone(), Box::pin(tokio::io::empty()))
-                .expect("debug input");
-        let debug = format!("{input:?}");
-        assert!(debug.contains(content_ref.content_digest().as_str()));
-        assert!(!debug.contains("reader"));
-        assert!(!debug.contains("path"));
-
-        let export = ExportedRun::for_test(content_ref, Box::pin(tokio::io::empty()));
-        let debug = format!("{export:?}");
-        assert!(!debug.contains("reader"));
-        assert!(!debug.contains("path"));
     }
 
     #[test]

@@ -17,9 +17,9 @@ use axum::{Json, Router};
 use k256::ecdsa::SigningKey;
 use mfm_app::{
     connect_production_application, AccessPolicyError, AccessTarget, AdmitRunRequest,
-    AuthorizedTenant, ErrorClass, EvmWalletDeployment, EvmWalletDeploymentAssemblyInput,
-    EvmWalletDeploymentReleaseMaterial, ExportKind, ExportRequest, ExportStreamInput, PageRequest,
-    PublicJsonResponse, ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
+    AuthorizedTenant, EvmWalletDeployment, EvmWalletDeploymentAssemblyInput,
+    EvmWalletDeploymentReleaseMaterial, ExportKind, ExportRequest, PageRequest, PublicJsonResponse,
+    ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
 };
 use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContract};
 use mfm_certify::structured::ProgramRegistryBuilder;
@@ -1566,66 +1566,6 @@ async fn verify_production_projections(
         audit["fixation"]["journal_head"],
         audit_batches.last().expect("audit terminal batch")["head"]
     );
-    let replay_input = ExportStreamInput::from_reader(
-        semantic_ref.clone(),
-        Box::pin(std::io::Cursor::new(semantic_bytes.clone())),
-    )
-    .expect("bind semantic replay export");
-    let unavailable = application
-        .replay_run(
-            credential(),
-            portfolio_run_id.clone(),
-            ReplayRequest::Reproduce(replay_input),
-        )
-        .await
-        .expect("validate exact semantic replay export");
-    let unavailable_json = unavailable
-        .public_json()
-        .expect("render unavailable reproduction");
-    assert_eq!(unavailable_json["kind"], "reproduction_unavailable");
-    assert_eq!(unavailable_json["result"], "unavailable");
-
-    assert_replay_artifact_invalid(
-        &application,
-        portfolio_run_id,
-        audit_ref,
-        audit_bytes.clone(),
-        "an exact audit export is not a semantic reproduction artifact",
-    )
-    .await;
-
-    let mut stale_semantic = semantic.clone();
-    stale_semantic["batches"]
-        .as_array_mut()
-        .expect("stale semantic batches")
-        .pop()
-        .expect("remove semantic terminal batch");
-    let (stale_ref, stale_bytes) = readdress_portable_value(&semantic_ref, &stale_semantic);
-    assert_replay_artifact_invalid(
-        &application,
-        portfolio_run_id,
-        stale_ref,
-        stale_bytes,
-        "a canonical stale semantic export is rejected after digest validation",
-    )
-    .await;
-
-    let mut unknown_field_semantic = semantic;
-    unknown_field_semantic
-        .as_object_mut()
-        .expect("semantic export object")
-        .insert("unexpected".to_owned(), json!(true));
-    let (unknown_field_ref, unknown_field_bytes) =
-        readdress_portable_value(&semantic_ref, &unknown_field_semantic);
-    assert_replay_artifact_invalid(
-        &application,
-        portfolio_run_id,
-        unknown_field_ref,
-        unknown_field_bytes,
-        "a rehashed unknown field is rejected by strict annex decoding",
-    )
-    .await;
-
     let post_telemetry_application = application.clone();
     let router = mfm_rest_api::make_app(mfm_rest_api::AppState::new(application));
     let response = router
@@ -1930,18 +1870,6 @@ async fn read_application_export(
     (content_ref, bytes)
 }
 
-fn readdress_portable_value(original_ref: &ContentRef, value: &Value) -> (ContentRef, Vec<u8>) {
-    let canonical = canonical_json(value).expect("canonical hostile portable export");
-    let bytes = canonical.as_bytes().to_vec();
-    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
-    let content_ref = ContentRef::new(
-        original_ref.schema_id().clone(),
-        contract.raw_content_digest(&bytes),
-    )
-    .expect("readdress hostile portable export");
-    (content_ref, bytes)
-}
-
 fn flatten_portable_batch_records(batches: &[Value]) -> Vec<&Value> {
     batches
         .iter()
@@ -1952,34 +1880,6 @@ fn flatten_portable_batch_records(batches: &[Value]) -> Vec<&Value> {
                 .iter()
         })
         .collect()
-}
-
-async fn assert_replay_artifact_invalid(
-    application: &mfm_app::Application,
-    run_id: &RunId,
-    content_ref: ContentRef,
-    bytes: Vec<u8>,
-    context: &'static str,
-) {
-    let input = ExportStreamInput::from_reader(content_ref, Box::pin(std::io::Cursor::new(bytes)))
-        .expect("bind hostile portable export");
-    let error = application
-        .replay_run(
-            credential(),
-            run_id.clone(),
-            ReplayRequest::Reproduce(input),
-        )
-        .await
-        .expect_err(context);
-    assert_eq!(error.class(), ErrorClass::BadRequest);
-    assert_eq!(error.code(), "ReplayArtifactInvalid");
-    assert_eq!(error.message(), "The replay artifact is invalid.");
-    assert_canaries_absent(
-        "replay public error",
-        canonical_json(&error)
-            .expect("canonical replay public error")
-            .as_bytes(),
-    );
 }
 
 struct RuntimeAssembly {

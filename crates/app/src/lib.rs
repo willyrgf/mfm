@@ -4,7 +4,7 @@
 //! The run-facing surface admits one selected published entry point per request, advances at most
 //! one action per call, renders reviewed public evidence, performs callback-free replay, and
 //! exports portable evidence. Authentication policy, store authority issuance, live execution,
-//! and reproduction policy remain private composition concerns.
+//! and export policy remain private composition concerns.
 
 mod access;
 mod application;

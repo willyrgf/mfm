@@ -38,23 +38,6 @@ fn authentication_grant_and_tenant_hidden_absence_have_distinct_status_classes()
         "RunNotFound",
         "The requested run was not found",
     );
-
-    let invalid = PublicError::replay_artifact_invalid();
-    assert_public_error(
-        &invalid,
-        ErrorClass::BadRequest,
-        axum::http::StatusCode::BAD_REQUEST,
-        "ReplayArtifactInvalid",
-        "The replay artifact is invalid.",
-    );
-    let too_large = PublicError::replay_artifact_too_large();
-    assert_public_error(
-        &too_large,
-        ErrorClass::BadRequest,
-        axum::http::StatusCode::BAD_REQUEST,
-        "ReplayArtifactTooLarge",
-        "The replay artifact exceeds the allowed size.",
-    );
 }
 
 fn assert_public_error(

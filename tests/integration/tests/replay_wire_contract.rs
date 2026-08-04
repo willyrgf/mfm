@@ -1,40 +1,24 @@
 use mfm_app::{PageRequest, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 use mfm_ids::{DigestAlgorithm, DigestBytes, RunId};
-use mfm_replay::structured::{project_unavailable_reproduction, StructuredReplayResult};
+use mfm_replay::structured::StructuredReplayResult;
 
 #[test]
-fn unavailable_replay_results_have_the_current_structured_shape() {
-    let run_id = run_id();
-    let projection = project_unavailable_reproduction(&run_id).expect("reproduction projection");
-    assert_eq!(
-        projection.as_bytes(),
-        format!(
-            "{{\"kind\":\"reproduction_unavailable\",\"result\":\"unavailable\",\"run_id\":\"{run_id}\"}}"
-        )
-        .as_bytes()
-    );
+fn recorded_replay_results_have_the_current_structured_shape() {
+    let projection = StructuredReplayResult::strict_decode(&replay_bytes())
+        .expect("strict structured replay decode");
     assert_eq!(
         StructuredReplayResult::strict_decode(projection.as_bytes())
-            .expect("strict structured replay decode")
+            .expect("round-trip structured replay decode")
             .as_bytes(),
         projection.as_bytes(),
     );
 }
 
 #[test]
-fn comparison_unavailable_shapes_are_rejected() {
-    let run_id = run_id();
-    let bytes = format!(
-        r#"{{"kind":"comparison_unavailable","result":"unavailable","run_id":"{run_id}"}}"#
-    );
-    assert!(StructuredReplayResult::strict_decode(bytes.as_bytes()).is_err());
-}
-
-#[test]
 fn structured_replay_decode_rejects_noncanonical_or_float_bytes() {
     for bytes in [
-        br#"{ "kind":"reproduction_unavailable","result":"unavailable","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#.as_slice(),
-        br#"{"kind":"reproduction_unavailable","ratio":1.5,"result":"unavailable","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#.as_slice(),
+        br#"{ "kind":"verified" }"#.as_slice(),
+        br#"{"kind":"verified","ratio":1.5}"#.as_slice(),
     ] {
         assert!(StructuredReplayResult::strict_decode(bytes).is_err());
     }
@@ -48,11 +32,9 @@ fn structured_replay_decode_rejects_canonical_wrong_and_retired_shapes() {
         "{}".to_owned(),
         "[]".to_owned(),
         format!(r#"{{"kind":"verified","run_id":"{run_id}"}}"#),
-        format!(
-            r#"{{"extra":true,"kind":"reproduction_unavailable","result":"unavailable","run_id":"{run_id}"}}"#
-        ),
-        format!(r#"{{"kind":"reproduction_unavailable","result":"unknown","run_id":"{run_id}"}}"#),
-        format!(r#"{{"kind":"legacy_replay_result","result":"unavailable","run_id":"{run_id}"}}"#),
+        format!(r#"{{"extra":true,"kind":"verified","run_id":"{run_id}"}}"#),
+        format!(r#"{{"kind":"verified","status":"unknown","run_id":"{run_id}"}}"#),
+        format!(r#"{{"kind":"legacy_replay_result","run_id":"{run_id}"}}"#),
     ];
 
     for bytes in cases {
@@ -61,6 +43,21 @@ fn structured_replay_decode_rejects_canonical_wrong_and_retired_shapes() {
             "canonical hostile shape passed: {bytes}"
         );
     }
+}
+
+fn replay_bytes() -> Vec<u8> {
+    let run_id = run_id();
+    let value: serde_json::Value = serde_json::from_str(&format!(
+        "{{\"kind\":\"verified\",\"journal_head\":{{\"commit_digest\":\"sha256-jcs-v1:{}\",\"run_sequence\":1}},\"record_count\":1,\"run_id\":\"{run_id}\",\"semantic_head\":{{\"admission_ref\":{{\"ordinal\":0,\"record_hash\":\"sha256-jcs-v1:{}\",\"run_id\":\"{run_id}\",\"run_sequence\":1}},\"kind\":\"genesis\",\"semantic_state_digest\":\"sha256-jcs-v1:{}\"}},\"status\":\"closed\",\"version\":\"mfm.structured-replay-result.v1\"}}",
+        "0".repeat(64),
+        "0".repeat(64),
+        "0".repeat(64),
+    ))
+    .expect("replay JSON");
+    mfm_journal::structured::canonical_json(&value)
+        .expect("canonical replay JSON")
+        .as_bytes()
+        .to_vec()
 }
 
 #[test]
