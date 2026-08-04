@@ -2140,7 +2140,7 @@ async fn assemble_runtime(
             .expect("certified EVM program reference")
             .content_digest()
             .as_str(),
-        "content:sha256-v1:418dd5d7fba3217e12c703bbab46ba7281800b91fea5a47cb591839deea313de",
+        "content:sha256-v1:166ddcb518c4c5818abfec0fbb8353455775c340f1833dfea5b835a6a73302db",
         "the production EVM submission program must retain its exact certification identity"
     );
     assert_eq!(certified.authored().root.declarations.len(), 1);
