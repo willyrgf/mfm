@@ -17,13 +17,50 @@ use crate::crypto::{EthereumKeyError, EthereumPrivateKey};
 
 use super::KeystoreError;
 
+/// Stable heap allocation whose contents are explicitly zeroized on drop.
+pub(super) struct HeapKeyBytes(Box<[u8; 32]>);
+
+impl HeapKeyBytes {
+    pub(super) fn zeroed() -> Self {
+        Self(Box::new([0_u8; 32]))
+    }
+}
+
+impl AsRef<[u8; 32]> for HeapKeyBytes {
+    fn as_ref(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl AsMut<[u8; 32]> for HeapKeyBytes {
+    fn as_mut(&mut self) -> &mut [u8; 32] {
+        &mut self.0
+    }
+}
+
+impl std::ops::Deref for HeapKeyBytes {
+    type Target = [u8; 32];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Zeroize for HeapKeyBytes {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+pub(super) type ProtectedBytes = Zeroizing<HeapKeyBytes>;
+
 /// Owned zeroizing 32-byte private-key material prior to [`SecureKey`] wrap.
 ///
 /// Produced only by decryption (or tightly controlled test fixtures). Moving
 /// this value into [`SecureKey`] transfers the same protected allocation; the
 /// source is not left as a live plaintext array.
 pub(super) struct ProtectedKeyMaterial {
-    bytes: Zeroizing<[u8; 32]>,
+    bytes: ProtectedBytes,
     #[cfg(test)]
     ownership_witness: Option<KeyMaterialWitness>,
 }
@@ -34,18 +71,9 @@ impl ProtectedKeyMaterial {
     ///
     /// Both source and destination are zeroizing containers; no ordinary
     /// `[u8; 32]` temporary is constructed.
-    pub(super) fn from_decrypted_exact(
-        decrypted: Zeroizing<Vec<u8>>,
-    ) -> Result<Self, KeystoreError> {
-        if decrypted.len() != 32 {
-            // `decrypted` zeroizes on drop for wrong-length material.
-            return Err(KeystoreError::InvalidPrivateKey);
-        }
-        let mut protected = Zeroizing::new([0_u8; 32]);
-        protected.copy_from_slice(decrypted.as_ref());
-        drop(decrypted);
+    pub(super) fn from_decrypted_exact(decrypted: ProtectedBytes) -> Result<Self, KeystoreError> {
         Ok(Self {
-            bytes: protected,
+            bytes: decrypted,
             #[cfg(test)]
             ownership_witness: None,
         })
@@ -54,12 +82,22 @@ impl ProtectedKeyMaterial {
     /// Test-only construction with an ownership/cleanup witness.
     #[cfg(test)]
     pub(super) fn from_decrypted_exact_with_witness(
-        decrypted: Zeroizing<Vec<u8>>,
+        decrypted: ProtectedBytes,
         ownership_witness: KeyMaterialWitness,
     ) -> Result<Self, KeystoreError> {
         let mut material = Self::from_decrypted_exact(decrypted)?;
         material.ownership_witness = Some(ownership_witness);
         Ok(material)
+    }
+
+    #[cfg(test)]
+    fn from_decrypted_vec_for_test(decrypted: Zeroizing<Vec<u8>>) -> Result<Self, KeystoreError> {
+        if decrypted.len() != 32 {
+            return Err(KeystoreError::InvalidPrivateKey);
+        }
+        let mut bytes = Box::new([0_u8; 32]);
+        bytes.copy_from_slice(&decrypted);
+        Self::from_decrypted_exact(Zeroizing::new(HeapKeyBytes(bytes)))
     }
 
     /// Moves the protected allocation into [`SecureKey`] without a plaintext copy.
@@ -68,7 +106,7 @@ impl ProtectedKeyMaterial {
     /// source buffer with zeros before `self` drops so the Drop impl never
     /// zeroizes the live key material still owned by the returned [`SecureKey`].
     pub(super) fn into_secure_key(mut self) -> SecureKey {
-        let key_bytes = std::mem::replace(&mut self.bytes, Zeroizing::new([0_u8; 32]));
+        let key_bytes = std::mem::replace(&mut self.bytes, Zeroizing::new(HeapKeyBytes::zeroed()));
         #[cfg(test)]
         if let Some(ownership_witness) = self.ownership_witness.take() {
             return SecureKey::from_protected_with_witness(key_bytes, ownership_witness);
@@ -93,7 +131,7 @@ impl Drop for ProtectedKeyMaterial {
 /// equivalent ownership-transfer constructor). There is no public or
 /// crate-private constructor that accepts a plaintext `[u8; 32]` by value.
 pub(crate) struct SecureKey {
-    key_bytes: Zeroizing<[u8; 32]>,
+    key_bytes: ProtectedBytes,
     #[cfg(test)]
     ownership_witness: Option<KeyMaterialWitness>,
 }
@@ -103,7 +141,7 @@ impl SecureKey {
     ///
     /// This is the only constructor. Callers must supply a [`Zeroizing`]
     /// allocation; a plaintext array API is intentionally absent.
-    pub(super) fn from_protected(key_bytes: Zeroizing<[u8; 32]>) -> Self {
+    pub(super) fn from_protected(key_bytes: ProtectedBytes) -> Self {
         Self {
             key_bytes,
             #[cfg(test)]
@@ -114,7 +152,7 @@ impl SecureKey {
     /// Test-only construction that attaches an ownership/cleanup witness.
     #[cfg(test)]
     pub(super) fn from_protected_with_witness(
-        key_bytes: Zeroizing<[u8; 32]>,
+        key_bytes: ProtectedBytes,
         ownership_witness: KeyMaterialWitness,
     ) -> Self {
         Self {
@@ -245,13 +283,13 @@ impl KeyMaterialWitness {
 mod secure_key_construction_tests {
     use super::*;
 
-    /// API contract: the only constructors take `Zeroizing<[u8; 32]>` or
+    /// API contract: the only constructors take `Zeroizing<Box<[u8; 32]>>` or
     /// `ProtectedKeyMaterial`. A plaintext `[u8; 32]` constructor must not
     /// reappear (`SecureKey::new` is deleted).
     #[test]
     fn secure_key_from_protected_moves_zeroizing_allocation() {
-        let mut raw = Zeroizing::new([0_u8; 32]);
-        raw[31] = 1;
+        let mut raw = Zeroizing::new(HeapKeyBytes::zeroed());
+        raw.as_mut()[31] = 1;
         let witness = KeyMaterialWitness::new();
         let secure = SecureKey::from_protected_with_witness(raw, witness.clone());
         assert_eq!(
@@ -265,9 +303,9 @@ mod secure_key_construction_tests {
     #[test]
     fn protected_key_material_into_secure_key_transfers_without_plaintext_ctor() {
         let witness = KeyMaterialWitness::new();
-        let mut plaintext = vec![0_u8; 32];
+        let mut plaintext = Box::new([0_u8; 32]);
         plaintext[31] = 1;
-        let decrypted = Zeroizing::new(plaintext);
+        let decrypted = Zeroizing::new(HeapKeyBytes(plaintext));
         let material =
             ProtectedKeyMaterial::from_decrypted_exact_with_witness(decrypted, witness.clone())
                 .expect("length");
@@ -284,7 +322,7 @@ mod secure_key_construction_tests {
     #[test]
     fn wrong_length_decrypted_material_fails_closed() {
         let decrypted = Zeroizing::new(vec![0xab_u8; 31]);
-        match ProtectedKeyMaterial::from_decrypted_exact(decrypted) {
+        match ProtectedKeyMaterial::from_decrypted_vec_for_test(decrypted) {
             Err(KeystoreError::InvalidPrivateKey) => {}
             Ok(_) => panic!("wrong length must fail closed"),
             Err(other) => panic!("unexpected error: {other:?}"),
@@ -294,7 +332,7 @@ mod secure_key_construction_tests {
     #[test]
     fn oversized_decrypted_material_fails_closed() {
         let decrypted = Zeroizing::new(vec![0xcd_u8; 33]);
-        match ProtectedKeyMaterial::from_decrypted_exact(decrypted) {
+        match ProtectedKeyMaterial::from_decrypted_vec_for_test(decrypted) {
             Err(KeystoreError::InvalidPrivateKey) => {}
             Ok(_) => panic!("oversized must fail closed"),
             Err(other) => panic!("unexpected error: {other:?}"),
@@ -304,7 +342,7 @@ mod secure_key_construction_tests {
     #[test]
     fn dropped_protected_material_without_transfer_cleans_up() {
         let witness = KeyMaterialWitness::new();
-        let decrypted = Zeroizing::new(vec![0_u8; 32]);
+        let decrypted = Zeroizing::new(HeapKeyBytes::zeroed());
         let material =
             ProtectedKeyMaterial::from_decrypted_exact_with_witness(decrypted, witness.clone())
                 .expect("length");

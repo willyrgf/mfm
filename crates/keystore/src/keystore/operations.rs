@@ -189,7 +189,10 @@ impl Keystore {
         )
     }
 
-    fn decrypt_entry_bytes(&self, id: Uuid) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
+    fn decrypt_entry_bytes(
+        &self,
+        id: Uuid,
+    ) -> Result<super::secure_key::ProtectedBytes, KeystoreError> {
         let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
         let entry = self
             .entries

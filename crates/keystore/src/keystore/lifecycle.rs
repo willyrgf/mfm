@@ -1,3 +1,4 @@
+use super::secure_key::{HeapKeyBytes, ProtectedBytes};
 use super::*;
 use crate::signer::ReadAttestationKeyAccess;
 
@@ -295,18 +296,23 @@ impl Keystore {
         nonce: &[u8; 12],
         encrypted_data: &[u8],
         additional_data: &[u8],
-    ) -> Result<Zeroizing<Vec<u8>>, KeystoreError> {
+    ) -> Result<ProtectedBytes, KeystoreError> {
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce);
-
-        use aes_gcm::aead::Payload;
-        let payload = Payload {
-            msg: encrypted_data,
-            aad: additional_data,
-        };
-
-        Ok(Zeroizing::new(cipher.decrypt(nonce, payload)?))
+        // AES-GCM appends a 16-byte detached tag. Allocate the final protected
+        // plaintext buffer before authentication and decrypt in place into it.
+        if encrypted_data.len() != 32 + 16 {
+            return Err(KeystoreError::InvalidPrivateKey);
+        }
+        let (ciphertext, tag_bytes) = encrypted_data.split_at(32);
+        let mut plaintext = Zeroizing::new(HeapKeyBytes::zeroed());
+        plaintext.as_mut().as_mut().copy_from_slice(ciphertext);
+        let tag = Tag::from_slice(tag_bytes);
+        cipher
+            .decrypt_in_place_detached(nonce, additional_data, plaintext.as_mut().as_mut(), tag)
+            .map_err(|_| KeystoreError::InvalidPrivateKey)?;
+        Ok(plaintext)
     }
 
     pub(super) fn ensure_unlocked_for_read(&self) -> Result<(), KeystoreError> {

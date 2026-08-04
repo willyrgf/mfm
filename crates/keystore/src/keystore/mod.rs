@@ -23,8 +23,8 @@ mod lifecycle;
 mod operations;
 mod persistence;
 
-use aes_gcm::aead::{Aead, KeyInit};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
+use aes_gcm::aead::{Aead, AeadInPlace, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce, Tag};
 use argon2::{Argon2, Params};
 use bip32::{DerivationPath, XPrv};
 use bip39::Mnemonic;
