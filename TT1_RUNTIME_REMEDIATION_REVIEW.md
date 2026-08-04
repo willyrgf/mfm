@@ -1207,3 +1207,127 @@ Final executable gates are re-run at `686796f8…`. Application checkpoint struc
 unchanged; this note re-pins the merge-verification tip after the format-only cutover required by
 `fmt`.
 
+## Final runtime/store continuation and merge verification
+
+### Identity
+
+| Field | Value |
+| --- | --- |
+| Implementation revision (full hash) | `a4dada89a5b01cf2bf97f9e16c398fda0a5c1e42` |
+| Implementation subject | `bound retained runtime verification and require indexed heads` |
+| Branch | `refact-runtime` |
+| Scope | final runtime/store cache contract, indexed current-head authority, EVM qualification, final executable gates |
+| Material uncertainties | none |
+
+The implementation continuation after the previously recorded format tip is revision-pinned and
+ordered as follows:
+
+| Order | Full hash | Subject |
+| --- | --- | --- |
+| continuation 1 | `7d6ed207c46222445b9766806c28c1e470046ebc` | `record final merge-gate format tip` |
+| continuation 2 | `f38b6bd68e94439b8aac90a47745fec098d26849` | `fix keystore secure key clippy dead code and autoderef` |
+| continuation 3 | `40b92984a9a67458935a87722974eb582034225c` | `fix clippy large enum variants for merge gate` |
+| continuation 4 | `d9eff394defcf18970e687c661bc6ebbf84362c7` | `remove unused runtime history conversion surfaces` |
+| continuation 5 | `b2c5c1136e98fe325dcde5844a6cceb74bae4fcd` | `fix final merge gate lint and value encoding` |
+| continuation 6 | `cc3ead991022ff570165598ce9ab4f9dde07c7e7` | `remove stale postgres verification surfaces` |
+| continuation 7 | `9226a247ac97f8c146b601500226cd48a7f33c3d` | `remove stale application composition surfaces` |
+| continuation 8 | `9889d6338827fd98f01d85ca5a613d146831f322` | `remove unused evm integration database surfaces` |
+| continuation 9 | `781dff87cbfb414e0de272b8ecd3ecf66910aef1` | `bound portfolio topology test matrix` |
+| continuation 10 | `f9efd833836c99b9bdb49db213df927502285b8b` | `align wallet schema baseline with managed postgres 18` |
+| continuation 11 | `9879379c60a2a1dba22d05ca2c91fedf22f4119d` | `validate wallet frontier before status and reserve` |
+| continuation 12 | `ac0244390d082de47042981c02219a387c572b6c` | `fix structured qualification login identities` |
+| continuation 13 | `fbf10697a6fae188a674c2427b3a618c16c1102d` | `separate structured json and component budgets` |
+| continuation 14 | `f3178a8c5f8d79769688dd7d870b2860abd657ce` | `raise structured json budget for production contract` |
+| continuation 15 | `68a433c9326c61f1e4e3e71e4e2f7d4220c40fcd` | `align structured test signer with guarded identity contract` |
+| continuation 16 | `b15cd358871777dfc167b6c8a1d0e2123200cd20` | `cache verified runtime successors in private store adapter` |
+| continuation 17 | `a4dada89a5b01cf2bf97f9e16c398fda0a5c1e42` | `bound retained runtime verification and require indexed heads` |
+
+### Corrective exact-tip review
+
+An independent reviewer inspected exact implementation revision
+`a4dada89a5b01cf2bf97f9e16c398fda0a5c1e42` after the corrective commit. The reviewer confirmed:
+
+- the private adapter retains exactly one `VerifiedStructuredRun`, bounding replay memory
+  independently of run count;
+- `StructuredHistoryBackend::current_head` is required, with no full-history default, and
+  PostgreSQL reads the indexed `run_history_heads` projection;
+- the external-append regression proves a retained successor is discarded and the authoritative
+  full fold reconstructs the new head; and
+- the snapshot/linearization rule is documented in the design, architecture, and store README.
+
+The reviewer found no remaining code or contract blocker. The initial exact-tip response was
+conditionally **FAIL** only because this durable record had not yet been refreshed; that evidence
+condition is closed by this section and the final gate below.
+
+### Focused corrective verification
+
+All direct Rust commands ran in the default Nix development shell from the exact implementation
+revision above.
+
+| Command | Result |
+| --- | --- |
+| `nix develop -c cargo test -p mfm-store --lib runtime_adapter_ -- --nocapture` | pass, 2 tests; cache reuse and external-append refold |
+| `nix develop -c cargo test -p mfm-store --features test-support --test structured-runtime-causal -- --nocapture` | pass, 12/12 causal tests |
+| `nix develop -c cargo check -p mfm-certify -p mfm-runtime -p mfm-store -p mfm-storage-postgres` | pass |
+| `nix develop -c cargo fmt --all` | pass |
+| `git diff --check` | pass |
+
+The focused production qualification also passed after the signer-identity, role-qualification,
+JSON-budget, and frontier fixes:
+
+| Run | Result |
+| --- | --- |
+| `run-4135052-1785809182870181507` — `evm-postgres-submission-qualification` | pass, 4/4 tests, 871.61s |
+
+### Final model and composed CI evidence
+
+`nix run .#model-check` passed on implementation revision `a4dada89…`:
+
+```text
+computedModelHash d8ede66783609ea34ccd14dd7de6e7f1dae6f596c620edf39ec8abc571c1d153
+runtimeAbi nixfied-runtime-abi:1-306491a1fa2d
+toolchainId nixfied-toolchain:1
+targetSystem aarch64-linux
+environment dev
+slot 0
+```
+
+The final composed `nix run .#ci` ran on the unchanged implementation revision and passed:
+
+| Field | Value |
+| --- | --- |
+| Run id | `run-4173889-1785811818454958910` |
+| Result | **ok — 12 passed, 0 failed** |
+| Duration | 1410.82s |
+| Run summary | `/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-4173889-1785811818454958910/artifacts/run-summary.json` |
+| Logs | `/home/willyrgf.linux/.local/state/nixfied/mfm/dev/0/runs/run-4173889-1785811818454958910/logs` |
+
+The passing leaves included `fmt`, `clippy`, `cargo-metadata-contract`, PostgreSQL offline schema
+checking, workspace nextest, doc tests, managed `postgres-sqlx-check`, recoverability PostgreSQL
+v1, wallet nonce PostgreSQL storage qualification, EVM PostgreSQL structured submission
+qualification, Bitcoin parity, and the closing-source revision check. The qualification task
+passed with its restricted history roles issued uniquely, so `R-EVM-QUAL-ENV` is closed.
+Its production admit/resume phases use the qualified keystore signer and assert exactly one real
+`eth_sendRawTransaction`, closing `R-EVM-01-FRESH-E2E` as well.
+
+### Final dispositions
+
+| Residual or gate | Final disposition |
+| --- | --- |
+| Runtime successor cache authority | **PASS** — one-entry retention, indexed-head validation, external-append refold regression |
+| Backend current-head contract | **PASS** — required direct projection; no full-load default/fallback |
+| EVM qualification environment | **CLOSED** — final composed qualification green |
+| Fresh qualified-keystore E2E | **CLOSED** — production admit/resume phase green with one broadcast |
+| Prior non-blocking proof-coverage residuals | **Carried** — no new blocker; their earlier dispositions remain explicit in the preceding checkpoint records |
+
+### Explicit final gate decision
+
+```text
+GATE: PASS
+```
+
+The final implementation revision is `a4dada89a5b01cf2bf97f9e16c398fda0a5c1e42`; the final
+composed Nixfied gate passed with no code or contract changes after that revision. The review
+record, model admission, narrow corrective proofs, generated-contract checks, managed PostgreSQL
+verification, EVM/keystore qualification, and deletion-preserving final tree all agree on one
+current design. No material uncertainty remains.
