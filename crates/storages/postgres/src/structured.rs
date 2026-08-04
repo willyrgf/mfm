@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 
-use crate::session::{ApplicationTargetSessions, RoleSession, TargetBinding};
+use crate::session::{PostgresApplicationSessions, RoleSession, TargetBinding};
 use crate::transaction::{
     begin_read, begin_run_write, lock_run, lock_tenant_fact, store_identity_from_binding,
     LockedWriteTx, ReadTx,
@@ -198,7 +198,7 @@ impl std::fmt::Debug for PostgresStructuredHistoryBackend {
 }
 
 impl PostgresStructuredHistoryBackend {
-    pub(crate) fn from_application_sessions(sessions: ApplicationTargetSessions) -> Self {
+    pub(crate) fn from_application_sessions(sessions: PostgresApplicationSessions) -> Self {
         let (run_reader, run_writer, target) = sessions.into_run_parts();
         let identity = store_identity_from_binding(&target);
         Self {

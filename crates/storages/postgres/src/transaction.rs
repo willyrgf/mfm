@@ -10,22 +10,24 @@ use sqlx::{AssertSqlSafe, Postgres, Row, Transaction};
 use crate::schema::SCHEMA_CONTRACT_VERSION;
 use crate::session::{RoleSession, SessionKind, TargetBinding};
 
-/// Fresh per-transaction permit bound to the current target fence generation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TargetPermit {
+/// Fresh per-transaction lease bound to one admitted physical target.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TargetLease {
     fence_generation: u64,
     release_epoch: u64,
+    target_key: String,
     schema_name: String,
     database_oid: u32,
     store_scope_id: String,
     store_epoch: String,
 }
 
-impl TargetPermit {
-    pub(crate) fn from_binding(binding: &TargetBinding) -> Self {
+impl TargetLease {
+    pub(crate) fn issue(binding: &TargetBinding) -> Self {
         Self {
             fence_generation: binding.fence_generation(),
             release_epoch: binding.release_epoch(),
+            target_key: binding.target_key().as_str().to_owned(),
             schema_name: binding.schema_name().to_owned(),
             database_oid: binding.database_oid(),
             store_scope_id: binding.store_scope_id().as_str().to_owned(),
@@ -141,7 +143,7 @@ pub(crate) async fn begin_read<'a>(
     ) {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetPermit::from_binding(binding);
+    let permit = TargetLease::issue(binding);
     let mut transaction = begin_base(session, binding, true).await?;
     validate_target_permit(&mut transaction, &permit, true).await?;
     Ok(ReadTx { transaction })
@@ -155,7 +157,7 @@ pub(crate) async fn begin_run_write<'a>(
     if session.kind() != SessionKind::RunWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetPermit::from_binding(binding);
+    let permit = TargetLease::issue(binding);
     let mut transaction = begin_base(session, binding, false).await?;
     validate_target_permit(&mut transaction, &permit, false).await?;
     Ok(WriteTx { transaction })
@@ -197,7 +199,7 @@ pub(crate) async fn begin_configuration_write_locked<'a>(
     if session.kind() != SessionKind::ConfigurationWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
-    let permit = TargetPermit::from_binding(binding);
+    let permit = TargetLease::issue(binding);
     let mut transaction = begin_base(session, binding, false).await?;
     validate_target_permit(&mut transaction, &permit, false).await?;
     sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 0))")
@@ -268,17 +270,14 @@ async fn begin_base<'a>(
 
 async fn validate_target_permit(
     transaction: &mut Transaction<'_, Postgres>,
-    permit: &TargetPermit,
+    permit: &TargetLease,
     read_only: bool,
 ) -> Result<(), StructuredStoreError> {
     if !read_only {
         // Serialize fence-generation observation for writers without requiring UPDATE
         // privilege on the authority row itself.
         sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended($1, 2))")
-            .bind(format!(
-                "mfm.target-fence:{}:{}",
-                permit.schema_name, permit.fence_generation
-            ))
+            .bind(format!("mfm.target-fence:{}", permit.schema_name))
             .execute(&mut **transaction)
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
@@ -293,7 +292,8 @@ async fn validate_target_permit(
                 identity.store_scope_id, identity.store_epoch::text AS store_epoch, \
                 metadata.schema_contract_version, \
                 authority.fence_generation::text AS fence_generation, \
-                authority.release_epoch::text AS release_epoch \
+                authority.release_epoch::text AS release_epoch, \
+                authority.target_key \
            FROM pg_catalog.pg_database AS database \
            CROSS JOIN store_identity AS identity \
            CROSS JOIN store_schema_metadata AS metadata \
@@ -341,6 +341,8 @@ async fn validate_target_permit(
             != Some(SCHEMA_CONTRACT_VERSION)
         || fence_generation != permit.fence_generation
         || release_epoch != permit.release_epoch
+        || row.try_get::<String, _>("target_key").ok().as_deref()
+            != Some(permit.target_key.as_str())
     {
         return Err(StructuredStoreError::InvalidHistory);
     }

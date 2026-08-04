@@ -25,7 +25,7 @@ use mfm_spec::structured::{
 };
 use mfm_spec::{EntryPointContract, PlanningProfile};
 use mfm_storage_postgres::{
-    open_structured_authoritative_application, ApplicationTargetSessions,
+    open_structured_authoritative_application, PostgresApplicationSessions,
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
 };
 use mfm_store::structured::{
@@ -92,7 +92,7 @@ struct ProductionBackend {
 }
 
 pub(super) async fn connect(
-    sessions: ApplicationTargetSessions,
+    sessions: PostgresApplicationSessions,
     policy: Arc<dyn RunAccessPolicy>,
     wallet: EvmWalletDeployment,
 ) -> Result<Application, PublicError> {
