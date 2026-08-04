@@ -83,6 +83,10 @@ impl TargetBinding {
         self.fence_generation
     }
 
+    pub(crate) fn target_key(&self) -> &TargetKey {
+        &self.target_key
+    }
+
     pub(crate) const fn release_epoch(&self) -> u64 {
         self.release_epoch
     }
@@ -130,14 +134,14 @@ impl RoleSession {
 ///
 /// Holds physically distinct run-read, run-write, and configuration-read capabilities.
 /// No writer-capable pool backs a reader.
-pub struct ApplicationTargetSessions {
+pub struct PostgresApplicationSessions {
     target: TargetBinding,
     run_reader: RoleSession,
     run_writer: RoleSession,
     configuration_reader: RoleSession,
 }
 
-impl ApplicationTargetSessions {
+impl PostgresApplicationSessions {
     pub(crate) fn into_run_parts(self) -> (RoleSession, RoleSession, TargetBinding) {
         (self.run_reader, self.run_writer, self.target)
     }
@@ -154,23 +158,23 @@ impl ApplicationTargetSessions {
     }
 }
 
-impl std::fmt::Debug for ApplicationTargetSessions {
+impl std::fmt::Debug for PostgresApplicationSessions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ApplicationTargetSessions")
+            .debug_struct("PostgresApplicationSessions")
             .field("target", &self.target)
             .finish_non_exhaustive()
     }
 }
 
 /// Opaque deployment-maintenance sessions for append-only configuration.
-pub struct ConfigurationMaintenanceSessions {
+pub struct PostgresConfigurationSessions {
     target: TargetBinding,
     configuration_reader: RoleSession,
     configuration_writer: RoleSession,
 }
 
-impl ConfigurationMaintenanceSessions {
+impl PostgresConfigurationSessions {
     pub(crate) fn into_parts(self) -> (RoleSession, RoleSession, TargetBinding) {
         (
             self.configuration_reader,
@@ -180,17 +184,17 @@ impl ConfigurationMaintenanceSessions {
     }
 }
 
-impl std::fmt::Debug for ConfigurationMaintenanceSessions {
+impl std::fmt::Debug for PostgresConfigurationSessions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ConfigurationMaintenanceSessions")
+            .debug_struct("PostgresConfigurationSessions")
             .field("target", &self.target)
             .finish_non_exhaustive()
     }
 }
 
 /// Combined run and configuration sessions used by joint assembly.
-pub struct CombinedTargetSessions {
+pub struct PostgresCombinedSessions {
     target: TargetBinding,
     run_reader: RoleSession,
     run_writer: RoleSession,
@@ -198,10 +202,10 @@ pub struct CombinedTargetSessions {
     configuration_writer: RoleSession,
 }
 
-impl CombinedTargetSessions {
+impl PostgresCombinedSessions {
     /// Drops the configuration writer, leaving application sessions only.
-    pub fn into_application(self) -> ApplicationTargetSessions {
-        ApplicationTargetSessions {
+    pub fn into_application(self) -> PostgresApplicationSessions {
+        PostgresApplicationSessions {
             target: self.target,
             run_reader: self.run_reader,
             run_writer: self.run_writer,
@@ -228,93 +232,173 @@ impl CombinedTargetSessions {
     }
 }
 
-impl std::fmt::Debug for CombinedTargetSessions {
+impl std::fmt::Debug for PostgresCombinedSessions {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("CombinedTargetSessions")
+            .debug_struct("PostgresCombinedSessions")
             .field("target", &self.target)
             .finish_non_exhaustive()
     }
 }
 
-/// Deployment-private login material for one physical session.
+/// Deployment-issued target admission consumed exactly once by the PostgreSQL opener.
 ///
-/// Holders of these credentials are inside the deployment TCB. Ordinary MFM
-/// assembly never receives this type.
-#[derive(Clone)]
-pub struct SessionLoginMaterial {
-    /// PostgreSQL connection URL authenticating the exact restricted login.
-    pub database_url: String,
+/// The deployment authority creates this value and retains all credential material inside its
+/// own boundary. Application code can only move the admission into an opener; it cannot inspect,
+/// clone, or use the underlying logins.
+pub struct PostgresTargetAdmission {
+    schema_name: String,
+    run_reader: String,
+    run_writer: String,
+    configuration_reader: String,
+    configuration_writer: Option<String>,
 }
 
-impl std::fmt::Debug for SessionLoginMaterial {
+impl std::fmt::Debug for PostgresTargetAdmission {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("SessionLoginMaterial")
-            .finish_non_exhaustive()
-    }
-}
-
-/// Deployment-private materials used only while issuing an opaque session bundle.
-pub struct TargetSessionMaterials {
-    /// Target schema name that owns the closed authority catalog.
-    pub schema_name: String,
-    /// Run-reader login.
-    pub run_reader: SessionLoginMaterial,
-    /// Run-writer login.
-    pub run_writer: SessionLoginMaterial,
-    /// Configuration-reader login.
-    pub configuration_reader: SessionLoginMaterial,
-    /// Configuration-writer login when combined issuance is required.
-    pub configuration_writer: Option<SessionLoginMaterial>,
-}
-
-impl std::fmt::Debug for TargetSessionMaterials {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("TargetSessionMaterials")
+            .debug_struct("PostgresTargetAdmission")
             .field("schema_name", &self.schema_name)
             .finish_non_exhaustive()
     }
 }
 
-/// Issues an opaque application session bundle after exact-target verification.
-///
-/// Deployment infrastructure is the trusted credential boundary. A holder of the
-/// login materials is inside the TCB.
+/// Deployment-side credential broker for one-shot target admission.
+pub trait DeploymentCredentialBroker: Send + 'static {
+    /// Consumes the broker and returns one deployment-issued admission.
+    fn issue(self: Box<Self>) -> Result<PostgresTargetAdmission>;
+}
+
+impl PostgresTargetAdmission {
+    /// Creates an admission from a deployment broker.
+    pub fn from_broker<B: DeploymentCredentialBroker>(broker: B) -> Result<Self> {
+        Box::new(broker).issue()
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn for_test(
+        schema_name: String,
+        run_reader: String,
+        run_writer: String,
+        configuration_reader: String,
+        configuration_writer: Option<String>,
+    ) -> Self {
+        Self {
+            schema_name,
+            run_reader,
+            run_writer,
+            configuration_reader,
+            configuration_writer,
+        }
+    }
+}
+
+/// Test-only deployment material adapter. It is intentionally unavailable in production builds.
+#[cfg(feature = "test-support")]
+#[derive(Clone)]
+pub struct SessionLoginMaterial {
+    /// Test connection URL.
+    pub database_url: String,
+}
+
+/// Test-only raw material bundle used by the managed PostgreSQL fixture.
+#[cfg(feature = "test-support")]
+pub struct TargetSessionMaterials {
+    /// Test target schema.
+    pub schema_name: String,
+    /// Test run reader login.
+    pub run_reader: SessionLoginMaterial,
+    /// Test run writer login.
+    pub run_writer: SessionLoginMaterial,
+    /// Test configuration reader login.
+    pub configuration_reader: SessionLoginMaterial,
+    /// Test configuration writer login.
+    pub configuration_writer: Option<SessionLoginMaterial>,
+}
+
+#[cfg(feature = "test-support")]
+impl From<TargetSessionMaterials> for PostgresTargetAdmission {
+    fn from(materials: TargetSessionMaterials) -> Self {
+        Self::for_test(
+            materials.schema_name,
+            materials.run_reader.database_url,
+            materials.run_writer.database_url,
+            materials.configuration_reader.database_url,
+            materials
+                .configuration_writer
+                .map(|material| material.database_url),
+        )
+    }
+}
+
+#[cfg(feature = "test-support")]
 pub async fn issue_application_sessions(
     materials: TargetSessionMaterials,
-) -> Result<ApplicationTargetSessions> {
-    if materials.configuration_writer.is_some() {
+) -> Result<PostgresApplicationSessions> {
+    open_application_sessions(materials.into()).await
+}
+
+#[cfg(feature = "test-support")]
+pub async fn issue_configuration_maintenance_sessions(
+    schema_name: String,
+    configuration_reader_material: SessionLoginMaterial,
+    configuration_writer_material: SessionLoginMaterial,
+) -> Result<PostgresConfigurationSessions> {
+    open_configuration_sessions(PostgresTargetAdmission::for_test(
+        schema_name,
+        String::new(),
+        String::new(),
+        configuration_reader_material.database_url,
+        Some(configuration_writer_material.database_url),
+    ))
+    .await
+}
+
+#[cfg(feature = "test-support")]
+pub async fn issue_combined_sessions(
+    materials: TargetSessionMaterials,
+) -> Result<PostgresCombinedSessions> {
+    open_combined_sessions(materials.into()).await
+}
+
+/// Issues an opaque application session bundle after consuming exact-target admission.
+pub async fn open_application_sessions(
+    admission: PostgresTargetAdmission,
+) -> Result<PostgresApplicationSessions> {
+    if admission.configuration_writer.is_some() {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
-    let target = load_target_from_login(&materials.run_reader, &materials.schema_name).await?;
+    let schema_name = admission.schema_name;
+    let run_reader_url = admission.run_reader;
+    let run_writer_url = admission.run_writer;
+    let configuration_reader_url = admission.configuration_reader;
+    let target = load_target_from_login(&run_reader_url, &schema_name).await?;
     let run_reader = open_role_session(
-        &materials.run_reader,
-        &materials.schema_name,
+        &run_reader_url,
+        &schema_name,
         &target,
         SessionKind::RunReader,
     )
     .await?;
     let run_writer = open_role_session(
-        &materials.run_writer,
-        &materials.schema_name,
+        &run_writer_url,
+        &schema_name,
         &target,
         SessionKind::RunWriter,
     )
     .await?;
     let configuration_reader = open_role_session(
-        &materials.configuration_reader,
-        &materials.schema_name,
+        &configuration_reader_url,
+        &schema_name,
         &target,
         SessionKind::ConfigurationReader,
     )
     .await?;
-    let after = load_target_from_login(&materials.run_writer, &materials.schema_name).await?;
+    let after = load_target_from_login(&run_writer_url, &schema_name).await?;
     if after != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
-    Ok(ApplicationTargetSessions {
+    Ok(PostgresApplicationSessions {
         target,
         run_reader,
         run_writer,
@@ -322,13 +406,74 @@ pub async fn issue_application_sessions(
     })
 }
 
-/// Issues opaque configuration-maintenance sessions.
-pub async fn issue_configuration_maintenance_sessions(
-    schema_name: String,
-    configuration_reader_material: SessionLoginMaterial,
-    configuration_writer_material: SessionLoginMaterial,
-) -> Result<ConfigurationMaintenanceSessions> {
-    let target = load_target_from_login(&configuration_reader_material, &schema_name).await?;
+/// Issues opaque configuration-maintenance sessions after consuming exact-target admission.
+pub async fn open_configuration_sessions(
+    admission: PostgresTargetAdmission,
+) -> Result<PostgresConfigurationSessions> {
+    let PostgresTargetAdmission {
+        schema_name,
+        configuration_reader: configuration_reader_url,
+        configuration_writer: Some(configuration_writer_url),
+        ..
+    } = admission
+    else {
+        return Err(PostgresStoreError::TargetSessionRejected);
+    };
+    let target = load_target_from_login(&configuration_reader_url, &schema_name).await?;
+    let configuration_reader = open_role_session(
+        &configuration_reader_url,
+        &schema_name,
+        &target,
+        SessionKind::ConfigurationReader,
+    )
+    .await?;
+    let configuration_writer = open_role_session(
+        &configuration_writer_url,
+        &schema_name,
+        &target,
+        SessionKind::ConfigurationWriter,
+    )
+    .await?;
+    let after = load_target_from_login(&configuration_writer_url, &schema_name).await?;
+    if after != target {
+        return Err(PostgresStoreError::TargetSessionRejected);
+    }
+    Ok(PostgresConfigurationSessions {
+        target,
+        configuration_reader,
+        configuration_writer,
+    })
+}
+
+/// Issues combined run and configuration sessions after consuming exact-target admission.
+pub async fn open_combined_sessions(
+    admission: PostgresTargetAdmission,
+) -> Result<PostgresCombinedSessions> {
+    let PostgresTargetAdmission {
+        schema_name,
+        run_reader: run_reader_material,
+        run_writer: run_writer_material,
+        configuration_reader: configuration_reader_material,
+        configuration_writer: Some(configuration_writer_material),
+    } = admission
+    else {
+        return Err(PostgresStoreError::TargetSessionRejected);
+    };
+    let target = load_target_from_login(&run_reader_material, &schema_name).await?;
+    let run_reader = open_role_session(
+        &run_reader_material,
+        &schema_name,
+        &target,
+        SessionKind::RunReader,
+    )
+    .await?;
+    let run_writer = open_role_session(
+        &run_writer_material,
+        &schema_name,
+        &target,
+        SessionKind::RunWriter,
+    )
+    .await?;
     let configuration_reader = open_role_session(
         &configuration_reader_material,
         &schema_name,
@@ -343,58 +488,11 @@ pub async fn issue_configuration_maintenance_sessions(
         SessionKind::ConfigurationWriter,
     )
     .await?;
-    let after = load_target_from_login(&configuration_writer_material, &schema_name).await?;
+    let after = load_target_from_login(&run_writer_material, &schema_name).await?;
     if after != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
-    Ok(ConfigurationMaintenanceSessions {
-        target,
-        configuration_reader,
-        configuration_writer,
-    })
-}
-
-/// Issues combined run and configuration sessions for joint assembly.
-pub async fn issue_combined_sessions(
-    materials: TargetSessionMaterials,
-) -> Result<CombinedTargetSessions> {
-    let Some(configuration_writer_material) = materials.configuration_writer else {
-        return Err(PostgresStoreError::TargetSessionRejected);
-    };
-    let target = load_target_from_login(&materials.run_reader, &materials.schema_name).await?;
-    let run_reader = open_role_session(
-        &materials.run_reader,
-        &materials.schema_name,
-        &target,
-        SessionKind::RunReader,
-    )
-    .await?;
-    let run_writer = open_role_session(
-        &materials.run_writer,
-        &materials.schema_name,
-        &target,
-        SessionKind::RunWriter,
-    )
-    .await?;
-    let configuration_reader = open_role_session(
-        &materials.configuration_reader,
-        &materials.schema_name,
-        &target,
-        SessionKind::ConfigurationReader,
-    )
-    .await?;
-    let configuration_writer = open_role_session(
-        &configuration_writer_material,
-        &materials.schema_name,
-        &target,
-        SessionKind::ConfigurationWriter,
-    )
-    .await?;
-    let after = load_target_from_login(&materials.run_writer, &materials.schema_name).await?;
-    if after != target {
-        return Err(PostgresStoreError::TargetSessionRejected);
-    }
-    Ok(CombinedTargetSessions {
+    Ok(PostgresCombinedSessions {
         target,
         run_reader,
         run_writer,
@@ -404,10 +502,10 @@ pub async fn issue_combined_sessions(
 }
 
 async fn load_target_from_login(
-    login: &SessionLoginMaterial,
+    database_url: &str,
     expected_schema: &str,
 ) -> Result<TargetBinding> {
-    let pool = connect_login(login, expected_schema).await?;
+    let pool = connect_login(database_url, expected_schema).await?;
     let identity = validate_authoritative_schema_at(&pool, expected_schema).await?;
     let binding = load_target_binding(&pool, expected_schema, identity).await?;
     pool.close().await;
@@ -415,12 +513,12 @@ async fn load_target_from_login(
 }
 
 async fn open_role_session(
-    login: &SessionLoginMaterial,
+    database_url: &str,
     expected_schema: &str,
     target: &TargetBinding,
     kind: SessionKind,
 ) -> Result<RoleSession> {
-    let pool = connect_login(login, expected_schema).await?;
+    let pool = connect_login(database_url, expected_schema).await?;
     let managed_role = probe_login_shape(&pool, target, kind).await?;
     Ok(RoleSession {
         pool,
@@ -429,9 +527,8 @@ async fn open_role_session(
     })
 }
 
-async fn connect_login(login: &SessionLoginMaterial, schema: &str) -> Result<PgPool> {
-    let options = login
-        .database_url
+async fn connect_login(database_url: &str, schema: &str) -> Result<PgPool> {
+    let options = database_url
         .parse::<PgConnectOptions>()
         .map_err(|_| PostgresStoreError::Connection)?
         .options([("search_path", schema)]);

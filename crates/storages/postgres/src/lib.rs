@@ -6,6 +6,7 @@
 //! application code never receives a pool, URL, connection option, raw fence, or
 //! DML transaction handle.
 
+mod checkpoint;
 mod configuration;
 mod error;
 mod qualification;
@@ -17,6 +18,10 @@ mod sql_inventory;
 mod structured;
 mod transaction;
 
+pub use checkpoint::{
+    CheckpointError, CheckpointKey, CheckpointState, CheckpointStream, ExternalCheckpointAuthority,
+    ExternalCheckpointLedger,
+};
 pub use configuration::PostgresConfigurationHistoryBackend;
 pub use error::{PostgresStoreError, Result};
 pub use qualification::{
@@ -24,10 +29,21 @@ pub use qualification::{
     open_structured_authoritative_application, open_structured_authoritative_with_configuration,
 };
 pub use schema::PostgresSchema;
+#[cfg(feature = "test-support")]
 pub use session::{
     issue_application_sessions, issue_combined_sessions, issue_configuration_maintenance_sessions,
-    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
-    SessionLoginMaterial, TargetBinding, TargetSessionMaterials,
+    SessionLoginMaterial, TargetSessionMaterials,
+};
+pub use session::{
+    open_application_sessions, open_combined_sessions, open_configuration_sessions,
+    DeploymentCredentialBroker, PostgresApplicationSessions, PostgresCombinedSessions,
+    PostgresConfigurationSessions, PostgresTargetAdmission, TargetBinding,
+};
+#[cfg(feature = "test-support")]
+pub use session::{
+    PostgresApplicationSessions as ApplicationTargetSessions,
+    PostgresCombinedSessions as CombinedTargetSessions,
+    PostgresConfigurationSessions as ConfigurationMaintenanceSessions,
 };
 pub use structured::PostgresStructuredHistoryBackend;
 

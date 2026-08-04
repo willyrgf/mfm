@@ -1236,7 +1236,7 @@ impl ApplicationBackend for TestApplicationBackend {
 /// Deployment infrastructure issues the session bundle; ordinary assembly never receives a pool,
 /// URL, connection option, or raw fence.
 pub async fn connect_production_application(
-    sessions: mfm_storage_postgres::ApplicationTargetSessions,
+    sessions: mfm_storage_postgres::PostgresApplicationSessions,
     policy: Arc<dyn RunAccessPolicy>,
     wallet: EvmWalletDeployment,
 ) -> Result<Application, PublicError> {

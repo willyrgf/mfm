@@ -11,7 +11,7 @@ use mfm_store::structured::{
 use crate::configuration::PostgresConfigurationHistoryBackend;
 use crate::error::Result;
 use crate::session::{
-    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
+    PostgresApplicationSessions, PostgresCombinedSessions, PostgresConfigurationSessions,
 };
 use crate::structured::PostgresStructuredHistoryBackend;
 
@@ -21,7 +21,7 @@ use crate::structured::PostgresStructuredHistoryBackend;
 /// release epoch, and fence generation. Missing deployment authority fails closed; there is
 /// no memory fallback and no raw pool, URL, or fence input.
 pub async fn open_structured_authoritative(
-    sessions: ApplicationTargetSessions,
+    sessions: PostgresApplicationSessions,
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
@@ -39,7 +39,7 @@ pub async fn open_structured_authoritative(
 /// Assembly splits configuration once: deployment retention keeps the non-cloneable writer,
 /// while application admission receives only resolve capability.
 pub async fn open_structured_authoritative_with_configuration(
-    sessions: CombinedTargetSessions,
+    sessions: PostgresCombinedSessions,
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
@@ -64,7 +64,7 @@ pub async fn open_structured_authoritative_with_configuration(
 
 /// Opens the application boundary with structured RunHistory and resolve-only configuration.
 pub async fn open_structured_authoritative_application(
-    sessions: ApplicationTargetSessions,
+    sessions: PostgresApplicationSessions,
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
@@ -89,7 +89,7 @@ pub async fn open_structured_authoritative_application(
 
 /// Opens the separately held deployment-maintenance authority for append-only configuration.
 pub async fn open_configuration_maintenance(
-    sessions: ConfigurationMaintenanceSessions,
+    sessions: PostgresConfigurationSessions,
 ) -> Result<mfm_store::structured::ConfigurationHistoryWriter<PostgresConfigurationHistoryBackend>>
 {
     let (configuration_reader, configuration_writer, target) = sessions.into_parts();

@@ -32,7 +32,8 @@ mfm-store = { path = "../../kernel/store", features = ["backend-conformance"] }
 mfm-values = { path = "../../kernel/values" }
 
 [features]
-parity-tests = ["mfm-store/backend-conformance"]
+test-support = []
+parity-tests = ["mfm-store/backend-conformance", "test-support"]
 
 [[test]]
 name = "structured-history"

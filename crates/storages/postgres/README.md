@@ -26,13 +26,13 @@ A holder of deployment root credentials is inside the TCB.
 ## Target-session TCB
 
 Production openers consume only opaque deployment-issued session bundles
-([`ApplicationTargetSessions`](crate::ApplicationTargetSessions),
-[`CombinedTargetSessions`](crate::CombinedTargetSessions),
-[`ConfigurationMaintenanceSessions`](crate::ConfigurationMaintenanceSessions)). Ordinary application
+([`PostgresApplicationSessions`](crate::PostgresApplicationSessions),
+[`PostgresCombinedSessions`](crate::PostgresCombinedSessions),
+[`PostgresConfigurationSessions`](crate::PostgresConfigurationSessions)). Ordinary application
 code never receives a `PgPool`, URL, connection options, raw fence, writer session, or DML
-transaction. Embedding deployment code issues the bundle through
-[`issue_application_sessions`](crate::issue_application_sessions) (or the combined/maintenance
-variants) after verifying database identity, schema identity, store scope, exact role
+transaction. Embedding deployment code consumes a one-shot
+[`PostgresTargetAdmission`](crate::PostgresTargetAdmission) from its
+[`DeploymentCredentialBroker`](crate::DeploymentCredentialBroker) after verifying database identity, schema identity, store scope, exact role
 OID/membership, release epoch, fence generation, non-superuser status, no `BYPASSRLS`, no unintended
 inheritance, and exact grants.
 
@@ -55,7 +55,11 @@ private transaction module owns acquisition, role selection, locks, and commit c
 run and configuration DML requires the `LockedWriteTx` (or configuration) typestate.
 
 There is no always-successful production fence and no production constructor that accepts a raw
-pool. Test issuance uses deployment-private login materials only inside integration tests.
+pool. Test issuance uses deployment-private login materials only behind the `test-support` feature.
+
+Append acknowledgement is paired with an [`ExternalCheckpointAuthority`](crate::ExternalCheckpointAuthority)
+owned by deployment infrastructure. Prepared and acknowledged successor state is not read from
+the database itself, so a copied database cannot make an unacknowledged append current.
 
 ## Qualification openers
 
