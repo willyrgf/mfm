@@ -165,7 +165,7 @@ impl StructuredHistoryBackend for PositiveReplyBackend {
 
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
             let mut returned = batch.into_committed();
@@ -248,7 +248,7 @@ impl StructuredHistoryBackend for CorruptResolutionBackend {
 
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         self.inner.append(batch)
     }

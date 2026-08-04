@@ -12,6 +12,7 @@ use mfm_ids::{
 };
 use serde::{Deserialize, Serialize};
 
+use super::canonical_append::CanonicalConfigurationAppend;
 use super::{ProposedCanonicalValue, StructuredStoreError};
 
 /// Immutable routing key for one tenant-scoped configured-value stream.
@@ -143,6 +144,10 @@ impl ConfigurationRevision {
         Ok(())
     }
 
+    pub(crate) fn validate_for_ingress(&self) -> Result<(), StructuredStoreError> {
+        self.validate()
+    }
+
     /// Returns the stream key.
     pub const fn key(&self) -> &ConfigurationStreamKey {
         &self.key
@@ -241,25 +246,6 @@ impl ConfigurationHistoryHead {
     }
 }
 
-/// Store-validated revision accepted by the raw persistence seam.
-pub struct ValidatedConfigurationRevision {
-    revision: ConfigurationRevision,
-}
-
-impl ValidatedConfigurationRevision {
-    /// Returns the exact validated revision for persistence.
-    #[doc(hidden)]
-    pub const fn revision(&self) -> &ConfigurationRevision {
-        &self.revision
-    }
-
-    /// Consumes the validation proof.
-    #[doc(hidden)]
-    pub fn into_revision(self) -> ConfigurationRevision {
-        self.revision
-    }
-}
-
 /// Result of one exact-predecessor configured-value transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigurationBackendAppendOutcome {
@@ -291,7 +277,7 @@ pub trait ConfigurationHistoryBackend: Send + Sync + 'static {
     /// Atomically appends at the exact predecessor.
     fn append<'a>(
         &'a self,
-        revision: ValidatedConfigurationRevision,
+        revision: CanonicalConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome>;
 }
 
@@ -368,9 +354,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
         )?;
         match self
             .backend
-            .append(ValidatedConfigurationRevision {
-                revision: revision.clone(),
-            })
+            .append(CanonicalConfigurationAppend::new(revision.clone())?)
             .await?
         {
             ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
@@ -497,7 +481,7 @@ impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
 
     fn append<'a>(
         &'a self,
-        revision: ValidatedConfigurationRevision,
+        revision: CanonicalConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
         Box::pin(async move {
             let revision = revision.into_revision();
