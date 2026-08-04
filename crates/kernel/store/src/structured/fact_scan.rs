@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -232,6 +233,7 @@ impl BackendFactScanPort {
         let mut fact_count = 0_u64;
         let mut retained_source_bytes = 0_u64;
         let mut next_order = 1_u64;
+        let mut publications_by_order = Vec::new();
         while next_order <= self.frontier.fact_order {
             let publications = self
                 .source
@@ -258,17 +260,94 @@ impl BackendFactScanPort {
                 {
                     return Err(ScanError::Integrity);
                 }
-                self.scan_publication(
-                    &publication,
-                    &mut accumulators,
-                    &mut fact_count,
-                    &mut retained_source_bytes,
-                    bounds.maximum_facts(),
-                    bounds.maximum_retained_source_bytes(),
-                )
-                .await?;
+                publications_by_order.push(publication);
                 next_order = next_order.checked_add(1).ok_or(ScanError::Integrity)?;
             }
+        }
+
+        if u64::try_from(publications_by_order.len()).map_err(|_| ScanError::Integrity)?
+            > bounds.maximum_publications()
+        {
+            return Err(ScanError::Safe(
+                FactSelectionReadFailureCode::PublicationBoundExceeded,
+            ));
+        }
+        // Determine one maximum required prefix per producer before any producer load. This
+        // keeps recursive/shared routes linear in distinct producers instead of repeatedly
+        // folding a growing prefix for every publication.
+        let mut producer_heads = BTreeMap::<RunId, u64>::new();
+        for publication in &publications_by_order {
+            producer_heads
+                .entry(publication.transition_ref.run_id.clone())
+                .and_modify(|sequence| {
+                    *sequence = (*sequence).max(publication.transition_ref.run_sequence)
+                })
+                .or_insert(publication.transition_ref.run_sequence);
+        }
+        if u64::try_from(producer_heads.len()).map_err(|_| ScanError::Integrity)?
+            > bounds.maximum_publications()
+        {
+            return Err(ScanError::Safe(
+                FactSelectionReadFailureCode::PublicationBoundExceeded,
+            ));
+        }
+        let mut producer_cache = BTreeMap::<RunId, VerifiedStructuredRun>::new();
+        let mut producer_history_bytes = 0_u64;
+        let mut fold_work = 0_u64;
+        for (producer, through_sequence) in producer_heads {
+            let raw = self
+                .source
+                .load_producer_prefix(&producer, through_sequence)
+                .await
+                .map_err(classify_backend_scan_error)?
+                .ok_or(ScanError::Integrity)?;
+            producer_history_bytes = producer_history_bytes
+                .checked_add(raw.batches.iter().try_fold(0_u64, |total, batch| {
+                    let batch_bytes = u64::try_from(
+                        canonical_json(batch)
+                            .map_err(|_| ScanError::Integrity)?
+                            .as_bytes()
+                            .len(),
+                    )
+                    .map_err(|_| ScanError::Integrity)?;
+                    total.checked_add(batch_bytes).ok_or(ScanError::Integrity)
+                })?)
+                .ok_or(ScanError::Integrity)?;
+            if producer_history_bytes > bounds.maximum_retained_source_bytes() {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::RetainedSourceBoundExceeded,
+                ));
+            }
+            fold_work = fold_work
+                .checked_add(u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?)
+                .ok_or(ScanError::Integrity)?;
+            if fold_work > bounds.maximum_publications() {
+                return Err(ScanError::Safe(
+                    FactSelectionReadFailureCode::PublicationBoundExceeded,
+                ));
+            }
+            let verified = verify_recorded_history(
+                raw,
+                self.program_verifier.as_ref(),
+                self.physical_binding_verifier.as_ref(),
+            )
+            .map_err(|_| ScanError::Integrity)?;
+            producer_cache.insert(producer, verified);
+        }
+        for publication in &publications_by_order {
+            let producer = producer_cache
+                .get(&publication.transition_ref.run_id)
+                .ok_or(ScanError::Integrity)?;
+            self.scan_publication(
+                publication,
+                producer,
+                &mut accumulators,
+                &mut fact_count,
+                &mut retained_source_bytes,
+                bounds.maximum_facts(),
+                bounds.maximum_retained_source_bytes(),
+            )
+            .await?;
         }
 
         let mut selected_count = 0_u64;
@@ -361,25 +440,17 @@ impl BackendFactScanPort {
     async fn scan_publication(
         &self,
         publication: &TenantFactPublication,
+        producer: &VerifiedStructuredRun,
         accumulators: &mut [(mfm_ids::ContentRef, FactTopK<Arc<SelectedPriorRunFact>>)],
         fact_count: &mut u64,
         retained_source_bytes: &mut u64,
         maximum_facts: u64,
         maximum_retained_source_bytes: u64,
     ) -> ScanResult<()> {
-        let raw = self
-            .source
-            .load_producer_prefix(
-                &publication.transition_ref.run_id,
-                publication.transition_ref.run_sequence,
-            )
-            .await
-            .map_err(classify_backend_scan_error)?
-            .ok_or(ScanError::Integrity)?;
-        let batch = raw
-            .batches
-            .last()
-            .filter(|batch| batch.head.run_sequence == publication.transition_ref.run_sequence)
+        let batch = producer
+            .batches()
+            .iter()
+            .find(|batch| batch.head.run_sequence == publication.transition_ref.run_sequence)
             .ok_or(ScanError::Integrity)?;
         if batch.tenant_fact_coordinate
             != (TenantFactCoordinate::FactPublication {
@@ -403,12 +474,6 @@ impl BackendFactScanPort {
             return Err(ScanError::Integrity);
         }
         let transition = transition.clone();
-        let producer = verify_recorded_history(
-            raw,
-            self.program_verifier.as_ref(),
-            self.physical_binding_verifier.as_ref(),
-        )
-        .map_err(|_| ScanError::Integrity)?;
         if producer.admission().store_scope_id != self.frontier.store_scope_id
             || producer.admission().store_epoch != self.frontier.store_epoch
             || producer.admission().tenant_scope_id != self.frontier.tenant_scope_id
