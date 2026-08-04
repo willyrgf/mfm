@@ -214,6 +214,21 @@ fn test_occurrence_id(discriminator: u8) -> OccurrenceId {
     OccurrenceId::from_digest(sha256_digest_bytes(&[discriminator, 202]))
 }
 
+fn test_semantic_head(discriminator: u8) -> SemanticHead {
+    SemanticHead::Genesis {
+        admission_ref: RecordRef {
+            run_id: test_run_id(discriminator),
+            run_sequence: 1,
+            ordinal: 0,
+            record_hash: JournalRecordHash::from_digest(sha256_digest_bytes(&[discriminator, 203])),
+        },
+        semantic_state_digest: RunSemanticStateDigest::from_digest(sha256_digest_bytes(&[
+            discriminator,
+            204,
+        ])),
+    }
+}
+
 fn test_store_scope_id(discriminator: u8) -> StoreScopeId {
     StoreScopeId::new(format!("mfm.store_scope.v1:{discriminator:032x}")).expect("test store scope")
 }
@@ -643,10 +658,41 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
     let source_manifest_ref = test_history_object("mfm.test/source-manifest", 1).content_ref;
     let certificate = test_history_object("mfm.test/physical-binding", 1);
     let request = encode_process_value(&ProcessValue { value: 7 }).expect("request");
+    let occurrence_path_ref = test_history_object("mfm.test/occurrence-path", 1).content_ref;
+    let semantic_call_id = SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call"));
+    let semantic_head = test_semantic_head(1);
+    let authorization_ref = RecordRef {
+        run_id: run_id.clone(),
+        run_sequence: 1,
+        ordinal: 0,
+        record_hash: JournalRecordHash::from_digest(sha256_digest_bytes(b"authorization")),
+    };
+    let request_contract_ref =
+        mfm_spec::structured::structured_value_contract_ref::<ProcessValue>()
+            .expect("request contract");
+    let request_value_contract = mfm_spec::structured::structured_value_contract::<ProcessValue>()
+        .expect("request value contract");
+    let request_schema = request_value_contract.schema_id();
+    let request_canonical = request.canonical_json().expect("request canonical");
+    let request_ref = TypedValueRef {
+        contract_ref: request_contract_ref.clone(),
+        value_ref: mfm_ids::ContentRef::new(
+            request_schema.clone(),
+            mfm_ids::ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(request_canonical.as_bytes()),
+            ),
+        )
+        .expect("request value reference"),
+    };
     let expected = ExpectedAuthorization::new(
         PhysicalBindingSelection {
             run_id: &run_id,
             occurrence_id: &occurrence_id,
+            occurrence_path_ref: &occurrence_path_ref,
+            semantic_call_id: &semantic_call_id,
+            semantic_head: &semantic_head,
+            attempt_ordinal: 0,
             state_input_ref: &state_input_ref,
             store_scope_id: &store_scope_id,
             store_epoch: test_store_epoch(1),
@@ -662,38 +708,50 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         },
         AccessKind::Read,
         &request,
+        &request_contract_ref,
+        &request_schema,
         &certificate,
     )
     .expect("expected authorization");
-    let authorization_ref = RecordRef {
-        run_id: run_id.clone(),
-        run_sequence: 1,
-        ordinal: 0,
-        record_hash: JournalRecordHash::from_digest(sha256_digest_bytes(b"authorization")),
-    };
     let mut authorization = ExternalAccessAuthorized {
         access_attempt_id: AccessAttemptId::from_digest(sha256_digest_bytes(b"attempt")),
         attempt_ordinal: 0,
         occurrence_id,
-        occurrence_path_ref: test_history_object("mfm.test/occurrence-path", 1).content_ref,
-        semantic_call_id: SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call")),
+        occurrence_path_ref,
+        semantic_call_id,
         state_input_ref: state_input_ref.clone(),
         access_kind: AccessKind::Read,
-        semantic_head: SemanticHead::Genesis {
-            admission_ref: authorization_ref.clone(),
-            semantic_state_digest: RunSemanticStateDigest::from_digest(sha256_digest_bytes(
-                b"semantic-state",
-            )),
-        },
+        semantic_head,
         capability_contract_ref,
         capability_implementation_ref,
         adapter_contract_ref,
         adapter_implementation_ref,
-        request: state_input_ref.value,
+        request: request_ref,
         request_digest: expected.request_digest.clone(),
         physical_binding_ref: certificate.content_ref,
         stable_resource_lineage_contract_ref: None,
     };
+    authorization.access_attempt_id =
+        mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
+            run_id: &run_id,
+            occurrence_id: &authorization.occurrence_id,
+            occurrence_path_ref: &authorization.occurrence_path_ref,
+            semantic_call_id: &authorization.semantic_call_id,
+            state_input_ref: &authorization.state_input_ref,
+            attempt_ordinal: authorization.attempt_ordinal,
+            access_kind: authorization.access_kind,
+            semantic_head: &authorization.semantic_head,
+            capability_contract_ref: &authorization.capability_contract_ref,
+            capability_implementation_ref: &authorization.capability_implementation_ref,
+            adapter_contract_ref: &authorization.adapter_contract_ref,
+            adapter_implementation_ref: &authorization.adapter_implementation_ref,
+            request: &authorization.request,
+            request_digest: &authorization.request_digest,
+            physical_binding_ref: &authorization.physical_binding_ref,
+            stable_resource_lineage_contract_ref: &authorization
+                .stable_resource_lineage_contract_ref,
+        })
+        .expect("access attempt identity");
     assert!(expected.matches(&authorization_ref, &authorization));
 
     authorization.state_input_ref = test_lexical_value_ref(2);
@@ -4096,9 +4154,16 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     let tenant_scope_id = test_tenant_scope_id(11);
     let source_manifest_ref = test_history_object("mfm.test/source-manifest", 11).content_ref;
     let state_input_ref = test_lexical_value_ref(11);
+    let occurrence_path_ref = test_history_object("mfm.test/occurrence-path", 11).content_ref;
+    let semantic_call_id = SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call-11"));
+    let semantic_head = test_semantic_head(11);
     let target = AccessTargetSelection {
         run_id: &run_id,
         occurrence_id: &occurrence_id,
+        occurrence_path_ref: &occurrence_path_ref,
+        semantic_call_id: &semantic_call_id,
+        semantic_head: &semantic_head,
+        attempt_ordinal: 0,
         state_input_ref: &state_input_ref,
         store_scope_id: &store_scope_id,
         store_epoch: test_store_epoch(11),
@@ -4274,9 +4339,16 @@ fn infallible_no_refresh_effect_settles_reviewed_safe_failure_as_success() {
     let tenant_scope_id = test_tenant_scope_id(12);
     let source_manifest_ref = test_history_object("mfm.test/source-manifest", 12).content_ref;
     let state_input_ref = test_lexical_value_ref(12);
+    let occurrence_path_ref = test_history_object("mfm.test/occurrence-path", 12).content_ref;
+    let semantic_call_id = SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call-12"));
+    let semantic_head = test_semantic_head(12);
     let target = AccessTargetSelection {
         run_id: &run_id,
         occurrence_id: &occurrence_id,
+        occurrence_path_ref: &occurrence_path_ref,
+        semantic_call_id: &semantic_call_id,
+        semantic_head: &semantic_head,
+        attempt_ordinal: 0,
         state_input_ref: &state_input_ref,
         store_scope_id: &store_scope_id,
         store_epoch: test_store_epoch(12),
@@ -4638,9 +4710,16 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
     let tenant_scope_id = test_tenant_scope_id(13);
     let source_manifest_ref = test_history_object("mfm.test/source-manifest", 13).content_ref;
     let state_input_ref = test_lexical_value_ref(13);
+    let occurrence_path_ref = test_history_object("mfm.test/occurrence-path", 13).content_ref;
+    let semantic_call_id = SemanticCallId::from_digest(sha256_digest_bytes(b"semantic-call-13"));
+    let semantic_head = test_semantic_head(13);
     let target = AccessTargetSelection {
         run_id: &run_id,
         occurrence_id: &occurrence_id,
+        occurrence_path_ref: &occurrence_path_ref,
+        semantic_call_id: &semantic_call_id,
+        semantic_head: &semantic_head,
+        attempt_ordinal: 0,
         state_input_ref: &state_input_ref,
         store_scope_id: &store_scope_id,
         store_epoch: test_store_epoch(13),

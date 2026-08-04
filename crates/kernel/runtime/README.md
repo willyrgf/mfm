@@ -27,3 +27,9 @@ consumes the store-minted newly committed authorization permit.
 Runtime commits the exact registered callback proposal. It owns no EVM/nonce knowledge, raw
 backend, replay service, or public DTO rendering. Callers may implement `RuntimeHistoryPort` for
 isolated tests; such ports cannot attach to MFM production backends.
+
+Before an invoker is entered, Runtime verifies the complete committed authorization lineage:
+record reference, predecessor/successor heads, attempt identity and ordinal, occurrence path,
+semantic call/head, state input, access kind, capability/adapter identities, typed request
+reference and digest, physical certificate, stable resource lineage, store scope, and writer
+epoch. A matching request digest alone is never sufficient authority.
