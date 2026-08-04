@@ -659,9 +659,36 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             } => Some(public_lineage_head_ref),
             _ => None,
         };
+        let occurrence_path_ref = state.occurrence_path.content_ref().map_err(|_| {
+            self.candidate_fault(
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+            )
+        })?;
+        let attempt_ordinal = match &state.leaf {
+            StateLeaf::Ready => 0,
+            StateLeaf::Refreshable {
+                next_attempt_ordinal,
+                ..
+            } => *next_attempt_ordinal,
+            _ => {
+                return Err(self.candidate_fault(
+                    RuntimeFaultPhase::QualifyCandidate,
+                    run_id.clone(),
+                    Some(pre_fault_head.clone()),
+                    Some(occurrence_id.clone()),
+                ));
+            }
+        };
         let target = AccessTargetSelection {
             run_id: verified.run_id(),
             occurrence_id: &state.occurrence_id,
+            occurrence_path_ref: &occurrence_path_ref,
+            semantic_call_id: &state.semantic_call_id,
+            semantic_head: verified.semantic_head(),
+            attempt_ordinal,
             state_input_ref: &state.input,
             store_scope_id: &verified.admission().store_scope_id,
             store_epoch: verified.admission().store_epoch,

@@ -25,7 +25,8 @@ use mfm_ids::{
 };
 use mfm_journal::structured::{
     AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
-    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordRef,
+    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordRef, SemanticHead,
+    TypedValueRef,
 };
 use mfm_program::structured::{
     closed_sum_contract, runtime_effect_capability_contract, runtime_read_capability_contract,
@@ -41,21 +42,22 @@ use mfm_spec::structured::{
     fan_out_join_contract_ref, lane_outcome_contract_canonical_json, lane_outcome_contract_ref,
     never_failure_contract_canonical_json, never_failure_contract_ref, policy_proceed_program_ref,
     prior_run_fact_scanner_adapter_contract, prior_run_fact_selection_capability_contract,
-    retained_value_contract_ref, AuthoredBlock, AuthoredDeclaration, AuthoredFailureDirective,
-    AuthoredFanOut, AuthoredMatch, AuthoredOperationCall, AuthoredStateCall,
-    AuthoredStructuredProgram, BlockTail, CertifiedComponentObject, CertifiedFailureBoundary,
-    CertifiedProgramComponents, CertifiedProgramDocument, CertifiedProgramRoot,
-    CertifiedStructuralBounds, ClosedSumContract, ComponentObjectReference, ExpandedBlock,
-    ExpandedDeclaration, ExpandedFanOut, ExpandedFanOutLane, ExpandedFragment, ExpandedMatch,
-    ExpandedMatchArm, ExpandedStateBinding, ExpandedStructuredProgram, ExpansionBoundaryId,
-    ExpansionPolicyContract, ExpansionStage, ExpansionTraceEntry, FailureMapperRegistration,
-    FailureMappingLink, FailurePlan, FailurePlanIdentity, FailureScopeBinding,
-    FragmentInputBinding, HandlerContinuation, LexicalProducer, LexicalSlot, NoFailureBoundary,
-    PolicyCoverageEntry, ProposedStateValue, ResultRole, SecretFreeExecutableIdentity,
-    SecretFreeImplementationDescriptor, SecretFreeImplementationManifest,
-    SecretFreeImplementationManifestEntry, SecretFreeQualificationArtifact, SemanticCallPath,
-    SemanticPathSegment, StateCapabilityAdapterSignerResourceManifest, StructuralPath,
-    StructuralPathSegment, StructuredCapabilityProtocolContract, StructuredComponentKind,
+    retained_value_contract_ref, structured_value_contract, AuthoredBlock, AuthoredDeclaration,
+    AuthoredFailureDirective, AuthoredFanOut, AuthoredMatch, AuthoredOperationCall,
+    AuthoredStateCall, AuthoredStructuredProgram, BlockTail, CertifiedComponentObject,
+    CertifiedFailureBoundary, CertifiedProgramComponents, CertifiedProgramDocument,
+    CertifiedProgramRoot, CertifiedStructuralBounds, ClosedSumContract, ComponentObjectReference,
+    ExpandedBlock, ExpandedDeclaration, ExpandedFanOut, ExpandedFanOutLane, ExpandedFragment,
+    ExpandedMatch, ExpandedMatchArm, ExpandedStateBinding, ExpandedStructuredProgram,
+    ExpansionBoundaryId, ExpansionPolicyContract, ExpansionStage, ExpansionTraceEntry,
+    FailureMapperRegistration, FailureMappingLink, FailurePlan, FailurePlanIdentity,
+    FailureScopeBinding, FragmentInputBinding, HandlerContinuation, LexicalProducer, LexicalSlot,
+    NoFailureBoundary, PolicyCoverageEntry, ProposedStateValue, ResultRole,
+    SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
+    SecretFreeImplementationManifest, SecretFreeImplementationManifestEntry,
+    SecretFreeQualificationArtifact, SemanticCallPath, SemanticPathSegment,
+    StateCapabilityAdapterSignerResourceManifest, StructuralPath, StructuralPathSegment,
+    StructuredCapabilityProtocolContract, StructuredComponentKind,
     StructuredComponentManifestEntry, StructuredEffectRefreshContract, StructuredExecutionKind,
     StructuredExpansionProfile, StructuredExpansionProof, StructuredFactDescriptor,
     StructuredFailureContract, StructuredLiveComponentContract, StructuredPolicyCoverageProof,
@@ -1029,6 +1031,14 @@ pub struct AccessTargetSelection<'a> {
     pub run_id: &'a RunId,
     /// Exact executable occurrence.
     pub occurrence_id: &'a OccurrenceId,
+    /// Exact normalized occurrence path reference.
+    pub occurrence_path_ref: &'a ContentRef,
+    /// Stable semantic call selected by certification.
+    pub semantic_call_id: &'a SemanticCallId,
+    /// Semantic head against which this access is authorized.
+    pub semantic_head: &'a SemanticHead,
+    /// Fold-derived attempt ordinal expected for this access.
+    pub attempt_ordinal: u64,
     /// Exact current producer-bound input for the access state.
     pub state_input_ref: &'a LexicalValueRef,
     /// Qualified store lineage containing the run and tenant fact frontier.
@@ -1057,6 +1067,14 @@ pub struct PhysicalBindingSelection<'a> {
     pub run_id: &'a RunId,
     /// Exact executable occurrence.
     pub occurrence_id: &'a OccurrenceId,
+    /// Exact normalized occurrence path reference.
+    pub occurrence_path_ref: &'a ContentRef,
+    /// Stable semantic call selected by certification.
+    pub semantic_call_id: &'a SemanticCallId,
+    /// Semantic head against which this access is authorized.
+    pub semantic_head: &'a SemanticHead,
+    /// Fold-derived attempt ordinal expected for this access.
+    pub attempt_ordinal: u64,
     /// Exact current producer-bound input for the access state.
     pub state_input_ref: &'a LexicalValueRef,
     /// Qualified store lineage containing the run and tenant fact frontier.
@@ -1604,13 +1622,18 @@ struct QualifiedPhysicalBindingCore {
 struct ExpectedAuthorization {
     run_id: RunId,
     occurrence_id: OccurrenceId,
+    occurrence_path_ref: ContentRef,
+    semantic_call_id: SemanticCallId,
     state_input_ref: LexicalValueRef,
+    semantic_head: SemanticHead,
+    attempt_ordinal: u64,
     access_kind: AccessKind,
     capability_contract_ref: ContentRef,
     capability_implementation_ref: ContentRef,
     adapter_contract_ref: ContentRef,
     adapter_implementation_ref: ContentRef,
     request_digest: RequestDigest,
+    request: TypedValueRef,
     physical_binding_ref: ContentRef,
     stable_resource_lineage_contract_ref: Option<ContentRef>,
 }
@@ -1620,21 +1643,39 @@ impl ExpectedAuthorization {
         selection: PhysicalBindingSelection<'_>,
         access_kind: AccessKind,
         request: &CanonicalJsonValue,
+        request_contract_ref: &ContentRef,
+        request_schema: &mfm_ids::SchemaId,
         public_certificate: &HistoryObject,
     ) -> Result<Self> {
         let canonical = request
             .canonical_json()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
+        let request = TypedValueRef {
+            contract_ref: request_contract_ref.clone(),
+            value_ref: ContentRef::new(
+                request_schema.clone(),
+                mfm_ids::ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(canonical.as_bytes()),
+                ),
+            )
+            .map_err(|error| CertifyError::Certification(error.to_string()))?,
+        };
         Ok(Self {
             run_id: selection.run_id.clone(),
             occurrence_id: selection.occurrence_id.clone(),
+            occurrence_path_ref: selection.occurrence_path_ref.clone(),
+            semantic_call_id: selection.semantic_call_id.clone(),
             state_input_ref: selection.state_input_ref.clone(),
+            semantic_head: selection.semantic_head.clone(),
+            attempt_ordinal: selection.attempt_ordinal,
             access_kind,
             capability_contract_ref: selection.capability_contract_ref.clone(),
             capability_implementation_ref: selection.capability_implementation_ref.clone(),
             adapter_contract_ref: selection.adapter_contract_ref.clone(),
             adapter_implementation_ref: selection.adapter_implementation_ref.clone(),
             request_digest: RequestDigest::from_digest(sha256_digest_bytes(canonical.as_bytes())),
+            request,
             physical_binding_ref: public_certificate.content_ref.clone(),
             stable_resource_lineage_contract_ref: selection
                 .stable_resource_lineage_contract_ref
@@ -1649,17 +1690,63 @@ impl ExpectedAuthorization {
     ) -> bool {
         authorization_ref.run_id == self.run_id
             && authorization.occurrence_id == self.occurrence_id
+            && authorization.occurrence_path_ref == self.occurrence_path_ref
+            && authorization.semantic_call_id == self.semantic_call_id
             && authorization.state_input_ref == self.state_input_ref
+            && authorization.semantic_head == self.semantic_head
+            && authorization.attempt_ordinal == self.attempt_ordinal
             && authorization.access_kind == self.access_kind
             && authorization.capability_contract_ref == self.capability_contract_ref
             && authorization.capability_implementation_ref == self.capability_implementation_ref
             && authorization.adapter_contract_ref == self.adapter_contract_ref
             && authorization.adapter_implementation_ref == self.adapter_implementation_ref
             && authorization.request_digest == self.request_digest
+            && authorization.request == self.request
             && authorization.physical_binding_ref == self.physical_binding_ref
             && authorization.stable_resource_lineage_contract_ref
                 == self.stable_resource_lineage_contract_ref
+            && mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
+                run_id: &self.run_id,
+                occurrence_id: &authorization.occurrence_id,
+                occurrence_path_ref: &authorization.occurrence_path_ref,
+                semantic_call_id: &authorization.semantic_call_id,
+                state_input_ref: &authorization.state_input_ref,
+                attempt_ordinal: authorization.attempt_ordinal,
+                access_kind: authorization.access_kind,
+                semantic_head: &authorization.semantic_head,
+                capability_contract_ref: &authorization.capability_contract_ref,
+                capability_implementation_ref: &authorization.capability_implementation_ref,
+                adapter_contract_ref: &authorization.adapter_contract_ref,
+                adapter_implementation_ref: &authorization.adapter_implementation_ref,
+                request: &authorization.request,
+                request_digest: &authorization.request_digest,
+                physical_binding_ref: &authorization.physical_binding_ref,
+                stable_resource_lineage_contract_ref: &authorization
+                    .stable_resource_lineage_contract_ref,
+            })
+            .ok()
+            .is_some_and(|expected| expected == authorization.access_attempt_id)
     }
+}
+
+#[derive(Serialize)]
+struct ExpectedAccessAttemptPreimage<'a> {
+    run_id: &'a RunId,
+    occurrence_id: &'a OccurrenceId,
+    occurrence_path_ref: &'a ContentRef,
+    semantic_call_id: &'a SemanticCallId,
+    state_input_ref: &'a LexicalValueRef,
+    attempt_ordinal: u64,
+    access_kind: AccessKind,
+    semantic_head: &'a SemanticHead,
+    capability_contract_ref: &'a ContentRef,
+    capability_implementation_ref: &'a ContentRef,
+    adapter_contract_ref: &'a ContentRef,
+    adapter_implementation_ref: &'a ContentRef,
+    request: &'a TypedValueRef,
+    request_digest: &'a RequestDigest,
+    physical_binding_ref: &'a ContentRef,
+    stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
 }
 
 trait ErasedBoundAccessInvocation: Send {
@@ -1916,6 +2003,11 @@ where
                 selection,
                 AccessKind::Read,
                 &request,
+                &mfm_spec::structured::structured_value_contract_ref::<C::Request>()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?,
+                &structured_value_contract::<C::Request>()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?
+                    .schema_id(),
                 binding.public_certificate(),
             )?;
             Ok(Some(QualifiedPhysicalBindingCore {
@@ -1998,6 +2090,11 @@ where
                 selection,
                 AccessKind::Effect,
                 &request,
+                &mfm_spec::structured::structured_value_contract_ref::<C::Request>()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?,
+                &structured_value_contract::<C::Request>()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?
+                    .schema_id(),
                 binding.public_certificate(),
             )?;
             Ok(Some(QualifiedPhysicalBindingCore {
@@ -4098,6 +4195,10 @@ impl RuntimeProcessRegistry {
         let selection = PhysicalBindingSelection {
             run_id: target.run_id,
             occurrence_id: target.occurrence_id,
+            occurrence_path_ref: target.occurrence_path_ref,
+            semantic_call_id: target.semantic_call_id,
+            semantic_head: target.semantic_head,
+            attempt_ordinal: target.attempt_ordinal,
             state_input_ref: target.state_input_ref,
             store_scope_id: target.store_scope_id,
             store_epoch: target.store_epoch,
@@ -4165,6 +4266,13 @@ impl RuntimeProcessRegistry {
                     selection,
                     AccessKind::Read,
                     &request,
+                    &mfm_spec::structured::structured_value_contract_ref::<
+                        mfm_facts::FactSelectionRequest,
+                    >()
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?,
+                    &structured_value_contract::<mfm_facts::FactSelectionRequest>()
+                        .map_err(|error| CertifyError::Certification(error.to_string()))?
+                        .schema_id(),
                     &public_certificate,
                 )?;
                 Some(QualifiedPhysicalBindingCore {
