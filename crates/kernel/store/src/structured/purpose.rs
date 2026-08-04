@@ -11,9 +11,10 @@ use std::collections::BTreeSet;
 use mfm_facts::FactSelectionReadResponse;
 use mfm_ids::{ContentRef, RunId};
 use mfm_journal::structured::{
-    AssignedRecord, HistoryObject, JournalHead, ObservationOutcome, PriorRunFactSelectionResponse,
-    RunAdmitted, RunRecord, SemanticHead,
+    AssignedRecord, HistoryObject, JournalHead, LexicalValueRef, ObservationOutcome,
+    PriorRunFactSelectionResponse, RunAdmitted, RunRecord, SemanticHead,
 };
+use mfm_spec::structured::OperationOutcome;
 
 use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
 use super::fold::{StructuredFrontier, VerifiedStructuredRun};
@@ -74,7 +75,7 @@ impl<B: StructuredHistoryBackend> PublicRunReader<B> {
         self.reader
             .load_verified(run_id)
             .await
-            .map(PublicRunEvidence::from_verified)
+            .and_then(|verified| PublicRunEvidence::from_verified(verified))
     }
 }
 
@@ -119,127 +120,224 @@ impl<B: StructuredHistoryBackend> ExportRunReader<B> {
 }
 
 /// Sealed public-read evidence. Cannot be used as export, trace, audit, or replay evidence.
-#[derive(Debug)]
-pub struct PublicRunEvidence(VerifiedStructuredRun);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicTerminalOutcome {
+    kind: &'static str,
+    value: LexicalValueRef,
+    canonical_value: String,
+}
+
+impl PublicTerminalOutcome {
+    /// Returns the public success/failure tag.
+    pub const fn kind(&self) -> &'static str {
+        &self.kind
+    }
+
+    /// Returns the selected terminal value reference.
+    pub const fn value(&self) -> &LexicalValueRef {
+        &self.value
+    }
+
+    /// Returns the exact canonical terminal value bytes.
+    pub fn canonical_value(&self) -> &str {
+        &self.canonical_value
+    }
+}
+
+/// Minimum public run projection produced after the sole callback-free fold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicRunEvidence {
+    run_id: RunId,
+    admission: RunAdmitted,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
+    frontier: StructuredFrontier,
+    closed_outcome_ref: Option<ContentRef>,
+    terminal_outcome: Option<PublicTerminalOutcome>,
+}
 
 impl PublicRunEvidence {
-    fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        Self(verified)
+    fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+        let terminal_outcome = terminal_public_outcome(&verified)?;
+        Ok(Self {
+            run_id: verified.run_id().clone(),
+            admission: verified.admission().clone(),
+            journal_head: verified.journal_head().clone(),
+            semantic_head: verified.semantic_head().clone(),
+            frontier: verified.frontier().clone(),
+            closed_outcome_ref: verified.closed_outcome_ref().cloned(),
+            terminal_outcome,
+        })
     }
 
     /// Returns the exact run identity.
     pub const fn run_id(&self) -> &RunId {
-        self.0.run_id()
+        &self.run_id
     }
 
     /// Returns the exact verified admission root.
     pub const fn admission(&self) -> &RunAdmitted {
-        self.0.admission()
+        &self.admission
     }
 
     /// Returns the exact physical journal head.
     pub const fn journal_head(&self) -> &JournalHead {
-        self.0.journal_head()
+        &self.journal_head
     }
 
     /// Returns the exact semantic head.
     pub const fn semantic_head(&self) -> &SemanticHead {
-        self.0.semantic_head()
+        &self.semantic_head
     }
 
     /// Returns the closed action frontier.
     pub const fn frontier(&self) -> &StructuredFrontier {
-        self.0.frontier()
+        &self.frontier
     }
 
     /// Returns the terminal nominal operation-outcome reference, when closed.
     pub const fn closed_outcome_ref(&self) -> Option<&ContentRef> {
-        self.0.closed_outcome_ref()
+        self.closed_outcome_ref.as_ref()
     }
 
-    /// Resolves one exact verified content-addressed history object.
-    pub fn object(&self, content_ref: &ContentRef) -> Option<&HistoryObject> {
-        self.0.object(content_ref)
+    /// Returns the fold-derived terminal public outcome, when present.
+    pub const fn terminal_outcome(&self) -> Option<&PublicTerminalOutcome> {
+        self.terminal_outcome.as_ref()
     }
 }
 
 /// Sealed transition-trace evidence. Cannot be used as public, export, audit, or replay evidence.
-#[derive(Debug)]
-pub struct TraceRunEvidence(VerifiedStructuredRun);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceRunEvidence {
+    run_id: RunId,
+    admission: RunAdmitted,
+    journal_head: JournalHead,
+    journal_heads: Vec<JournalHead>,
+    records: Vec<AssignedRecord>,
+}
 
 impl TraceRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        Self(verified)
+        let records = verified
+            .records()
+            .iter()
+            .filter(|assigned| matches!(assigned.record, RunRecord::StateTransitionCommitted(_)))
+            .cloned()
+            .collect();
+        Self {
+            run_id: verified.run_id().clone(),
+            admission: verified.admission().clone(),
+            journal_head: verified.journal_head().clone(),
+            journal_heads: verified.journal_heads().to_vec(),
+            records,
+        }
     }
 
     /// Returns the exact run identity.
     pub const fn run_id(&self) -> &RunId {
-        self.0.run_id()
+        &self.run_id
     }
 
     /// Returns the exact verified admission root.
     pub const fn admission(&self) -> &RunAdmitted {
-        self.0.admission()
+        &self.admission
     }
 
     /// Returns the exact physical journal head.
     pub const fn journal_head(&self) -> &JournalHead {
-        self.0.journal_head()
+        &self.journal_head
     }
 
     /// Returns every verified physical append head in sequence order.
     pub fn journal_heads(&self) -> &[JournalHead] {
-        self.0.journal_heads()
+        &self.journal_heads
     }
 
     /// Returns every verified assigned record in physical append order.
     pub fn records(&self) -> &[AssignedRecord] {
-        self.0.records()
+        &self.records
     }
 }
 
 /// Sealed access-audit evidence. Cannot be used as public, export, trace, or replay evidence.
-#[derive(Debug)]
-pub struct AuditRunEvidence(VerifiedStructuredRun);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRunEvidence {
+    run_id: RunId,
+    admission: RunAdmitted,
+    journal_head: JournalHead,
+    journal_heads: Vec<JournalHead>,
+    records: Vec<AssignedRecord>,
+}
 
 impl AuditRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        Self(verified)
+        let records = verified
+            .records()
+            .iter()
+            .filter(|assigned| {
+                matches!(
+                    assigned.record,
+                    RunRecord::ExternalAccessAuthorized(_) | RunRecord::ExternalAccessObserved(_)
+                )
+            })
+            .cloned()
+            .collect();
+        Self {
+            run_id: verified.run_id().clone(),
+            admission: verified.admission().clone(),
+            journal_head: verified.journal_head().clone(),
+            journal_heads: verified.journal_heads().to_vec(),
+            records,
+        }
     }
 
     /// Returns the exact run identity.
     pub const fn run_id(&self) -> &RunId {
-        self.0.run_id()
+        &self.run_id
     }
 
     /// Returns the exact verified admission root.
     pub const fn admission(&self) -> &RunAdmitted {
-        self.0.admission()
+        &self.admission
     }
 
     /// Returns the exact physical journal head.
     pub const fn journal_head(&self) -> &JournalHead {
-        self.0.journal_head()
+        &self.journal_head
     }
 
     /// Returns every verified physical append head in sequence order.
     pub fn journal_heads(&self) -> &[JournalHead] {
-        self.0.journal_heads()
+        &self.journal_heads
     }
 
     /// Returns every verified assigned record in physical append order.
     pub fn records(&self) -> &[AssignedRecord] {
-        self.0.records()
+        &self.records
     }
 }
 
 /// Sealed recorded-replay evidence. Cannot be used as public, export, trace, or audit evidence.
-#[derive(Debug)]
-pub struct RecordedRunEvidence(VerifiedStructuredRun);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedRunEvidence {
+    run_id: RunId,
+    admission: RunAdmitted,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
+    frontier: StructuredFrontier,
+    record_count: usize,
+}
 
 impl RecordedRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        Self(verified)
+        Self {
+            run_id: verified.run_id().clone(),
+            admission: verified.admission().clone(),
+            journal_head: verified.journal_head().clone(),
+            semantic_head: verified.semantic_head().clone(),
+            frontier: verified.frontier().clone(),
+            record_count: verified.records().len(),
+        }
     }
 
     /// Wraps one offline-folded verified run as recorded-replay evidence.
@@ -249,37 +347,32 @@ impl RecordedRunEvidence {
 
     /// Returns the exact run identity.
     pub const fn run_id(&self) -> &RunId {
-        self.0.run_id()
+        &self.run_id
     }
 
     /// Returns the exact verified admission root.
     pub const fn admission(&self) -> &RunAdmitted {
-        self.0.admission()
+        &self.admission
     }
 
     /// Returns the exact physical journal head.
     pub const fn journal_head(&self) -> &JournalHead {
-        self.0.journal_head()
+        &self.journal_head
     }
 
     /// Returns the exact semantic head.
     pub const fn semantic_head(&self) -> &SemanticHead {
-        self.0.semantic_head()
+        &self.semantic_head
     }
 
     /// Returns the closed action frontier.
     pub const fn frontier(&self) -> &StructuredFrontier {
-        self.0.frontier()
+        &self.frontier
     }
 
-    /// Returns every verified assigned record in physical append order.
-    pub fn records(&self) -> &[AssignedRecord] {
-        self.0.records()
-    }
-
-    /// Returns every exact committed-batch envelope in append order.
-    pub fn batches(&self) -> &[mfm_journal::structured::CommittedBatch] {
-        self.0.batches()
+    /// Returns the number of verified records in the recorded prefix.
+    pub const fn record_count(&self) -> usize {
+        self.record_count
     }
 }
 
@@ -398,6 +491,35 @@ impl ExportRunEvidence {
         }
         Ok(sources)
     }
+}
+
+fn terminal_public_outcome(
+    verified: &VerifiedStructuredRun,
+) -> Result<Option<PublicTerminalOutcome>> {
+    let Some(outcome_ref) = verified.closed_outcome_ref() else {
+        return Ok(None);
+    };
+    let outcome_object = verified
+        .object(outcome_ref)
+        .ok_or(super::StructuredStoreError::InvalidHistory)?;
+    let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = outcome_object
+        .decode()
+        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+    let (kind, value) = match outcome {
+        OperationOutcome::Success(value) => ("success", value),
+        OperationOutcome::Failure(value) => ("failure", value),
+    };
+    let selected = verified
+        .object(&value.value.value_ref)
+        .ok_or(super::StructuredStoreError::InvalidHistory)?;
+    selected
+        .validate()
+        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+    Ok(Some(PublicTerminalOutcome {
+        kind,
+        value,
+        canonical_value: selected.canonical_json.clone(),
+    }))
 }
 
 /// Expands the bounded recursive export source graph from one already-loaded root.
