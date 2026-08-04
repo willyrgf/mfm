@@ -5,6 +5,7 @@ use std::sync::Arc;
 use mfm_ids::{AppendRequestId, ContentDigest, RunId, TenantScopeId};
 use mfm_journal::structured::{CommittedBatch, JournalHead, RecordRef, TenantFactFrontier};
 
+use super::canonical_append::CanonicalRunAppend;
 use super::fact_scan::{verify_actionable_history, PriorRunFactSource};
 use super::fold::{
     validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
@@ -33,63 +34,6 @@ pub struct TenantFactPublication {
     pub frontier: TenantFactFrontier,
     /// Exact non-empty state transition that published the facts.
     pub transition_ref: RecordRef,
-}
-
-/// Store-validated batch accepted by the narrow backend seam.
-///
-/// Fields are private so callers cannot bypass the shared fold. Concrete
-/// backends may inspect the exact committed envelope only through the
-/// purpose-limited accessor.
-pub struct ValidatedBatch {
-    committed: CommittedBatch,
-}
-
-impl std::fmt::Debug for ValidatedBatch {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ValidatedBatch")
-            .field("run_id", &self.run_id())
-            .field("head", &self.committed.head)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ValidatedBatch {
-    pub(super) const fn new(committed: CommittedBatch) -> Self {
-        Self { committed }
-    }
-
-    /// Returns the target run.
-    pub fn run_id(&self) -> &RunId {
-        &self.committed.records[0].record_ref.run_id
-    }
-
-    /// Returns the exact expected predecessor.
-    pub const fn predecessor(&self) -> Option<&JournalHead> {
-        self.committed.predecessor.as_ref()
-    }
-
-    /// Returns the stable append acknowledgement identity.
-    pub const fn append_request_id(&self) -> &AppendRequestId {
-        &self.committed.append_request_id
-    }
-
-    /// Returns the complete candidate digest used for idempotency.
-    pub const fn candidate_digest(&self) -> &ContentDigest {
-        &self.committed.candidate_digest
-    }
-
-    /// Returns the exact store-validated assigned envelope.
-    #[doc(hidden)]
-    pub const fn committed(&self) -> &CommittedBatch {
-        &self.committed
-    }
-
-    /// Consumes the validation proof into the exact assigned envelope.
-    #[doc(hidden)]
-    pub fn into_committed(self) -> CommittedBatch {
-        self.committed
-    }
 }
 
 /// Result of one backend exact-head transaction.
@@ -187,7 +131,7 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
     /// Atomically compare-and-appends one shared-fold-validated batch.
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome>;
 
     /// Resolves one unchanged physical append identity after ambiguity.

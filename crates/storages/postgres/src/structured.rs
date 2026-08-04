@@ -9,10 +9,9 @@ use mfm_journal::structured::{
     RunRecord, TenantFactCoordinate, TenantFactFrontier,
 };
 use mfm_store::structured::{
-    validate_append_objects, validate_envelope_frame, BackendAppendOutcome, RawRunHistory,
-    StructuredBackendFuture, StructuredHistoryBackend, StructuredStoreError,
-    StructuredStoreIdentity, TenantFactPublication, ValidatedBatch, MAX_BATCH_OBJECTS,
-    MAX_STORED_FRAME_BYTES,
+    validate_append_objects, validate_envelope_frame, BackendAppendOutcome, CanonicalRunAppend,
+    RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredStoreError,
+    StructuredStoreIdentity, TenantFactPublication, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -589,7 +588,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
 
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
             let committed = batch.into_committed();

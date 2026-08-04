@@ -1,10 +1,9 @@
 use mfm_ids::{ContentRef, StoreScopeId};
 use mfm_journal::structured::canonical_json;
 use mfm_store::structured::{
-    verify_configuration_history, ConfigurationBackendAppendOutcome, ConfigurationBackendFuture,
-    ConfigurationHistoryBackend, ConfigurationHistoryHead, ConfigurationRevision,
-    ConfigurationStreamKey, RawConfigurationHistory, StructuredStoreError,
-    ValidatedConfigurationRevision,
+    verify_configuration_history, CanonicalConfigurationAppend, ConfigurationBackendAppendOutcome,
+    ConfigurationBackendFuture, ConfigurationHistoryBackend, ConfigurationHistoryHead,
+    ConfigurationRevision, ConfigurationStreamKey, RawConfigurationHistory, StructuredStoreError,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
@@ -211,7 +210,7 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
 
     fn append<'a>(
         &'a self,
-        revision: ValidatedConfigurationRevision,
+        revision: CanonicalConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
         Box::pin(async move {
             let revision = revision.into_revision();

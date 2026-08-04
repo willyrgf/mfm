@@ -21,17 +21,18 @@ pub use assembly::assemble_with_backend;
 pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 pub use backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication,
 };
 pub use canonical_append::{
-    validate_append_objects, validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
+    validate_append_objects, validate_envelope_frame, CanonicalConfigurationAppend,
+    CanonicalRunAppend, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES,
 };
 pub use configuration::{
     verify_configuration_history, ConfigurationAppendRequest, ConfigurationBackendAppendOutcome,
     ConfigurationBackendFuture, ConfigurationHistoryBackend, ConfigurationHistoryHead,
     ConfigurationHistoryReader, ConfigurationHistoryStore, ConfigurationHistoryWriter,
     ConfigurationRevision, ConfigurationStreamKey, MemoryConfigurationHistoryBackend,
-    RawConfigurationHistory, ValidatedConfigurationRevision, VerifiedConfiguredValue,
+    RawConfigurationHistory, VerifiedConfiguredValue,
 };
 #[doc(hidden)]
 pub use fact_scan::PriorRunFactScanCompletion;

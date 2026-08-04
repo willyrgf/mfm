@@ -49,10 +49,10 @@ use mfm_spec::structured::{
     StructuredFactDescriptor, StructuredLiveComponentContract,
 };
 use mfm_store::structured::{
-    assemble_structured_runtime, BackendAppendOutcome, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, PublicPhysicalBindingVerifier, RawRunHistory,
-    StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
-    StructuredStoreError, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    assemble_structured_runtime, BackendAppendOutcome, CanonicalRunAppend,
+    PhysicalBindingAuthorization, PhysicalBindingSupersession, PublicPhysicalBindingVerifier,
+    RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
+    StructuredStoreError, StructuredStoreIdentity, TenantFactPublication,
 };
 use serde::{Deserialize, Serialize};
 
@@ -706,7 +706,7 @@ impl StructuredHistoryBackend for InjectingBackend {
 
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
             let is_observation = batch

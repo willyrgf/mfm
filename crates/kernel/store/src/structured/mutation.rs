@@ -9,8 +9,9 @@ use mfm_journal::structured::{
 
 use super::backend::{
     prior_run_fact_source, BackendAppendOutcome, StructuredHistoryBackend,
-    StructuredRunHistoryWriter, ValidatedBatch,
+    StructuredRunHistoryWriter,
 };
+use super::canonical_append::CanonicalRunAppend;
 use super::fact_scan::{fact_scan_permit, FactScanPermit, PriorRunFactScanCompletion};
 use super::fold::{
     authorization_requires_fact_selection_barrier, prepare_admission, prepare_authorization,
@@ -451,7 +452,7 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
             .flatten();
         let backend_outcome = self
             .backend
-            .append(ValidatedBatch::new(committed.clone()))
+            .append(CanonicalRunAppend::new(committed.clone())?)
             .await?;
         let outcome = match backend_outcome {
             BackendAppendOutcome::NewlyCommitted(returned) => {

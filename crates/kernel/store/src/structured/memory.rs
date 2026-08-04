@@ -8,8 +8,9 @@ use mfm_journal::structured::{
 
 use super::backend::{
     BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication, ValidatedBatch,
+    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication,
 };
+use super::canonical_append::CanonicalRunAppend;
 use super::fold::StructuredStoreError;
 
 type AppendKey = (RunId, AppendRequestId);
@@ -227,7 +228,7 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
 
     fn append<'a>(
         &'a self,
-        batch: ValidatedBatch,
+        batch: CanonicalRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
             let committed = batch.into_committed();
