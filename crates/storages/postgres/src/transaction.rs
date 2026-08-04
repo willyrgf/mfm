@@ -231,10 +231,14 @@ async fn begin_base<'a>(
         .begin()
         .await
         .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    // Commit 5 introduces the shared transaction owner. Commit 6 switches decision
-    // reads to READ COMMITTED under the lock; use READ COMMITTED for all writes now
-    // so configuration and run share one isolation choice.
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL READ COMMITTED")
+    // Every run/configuration read is fixed to one snapshot. Writes retain their
+    // read-committed lock protocol below; readers never observe a mixed prefix.
+    let isolation = if read_only {
+        "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+    } else {
+        "SET TRANSACTION ISOLATION LEVEL READ COMMITTED"
+    };
+    sqlx::query(isolation)
         .execute(&mut *transaction)
         .await
         .map_err(|_| StructuredStoreError::BackendUnavailable)?;

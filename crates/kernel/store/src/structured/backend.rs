@@ -105,6 +105,18 @@ pub enum BackendAppendOutcome {
     AcknowledgementUnknown,
 }
 
+/// One immutable backend snapshot containing the retained prefix and its indexed head.
+///
+/// PostgreSQL implementations return both projections from one `REPEATABLE READ` transaction;
+/// callers must never combine a prefix from one snapshot with a head from another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredRunSnapshot {
+    /// Complete or bounded retained prefix, when the run exists.
+    pub history: Option<RawRunHistory>,
+    /// Indexed head observed in the same snapshot.
+    pub head: Option<JournalHead>,
+}
+
 /// Raw atomic persistence seam behind the one shared structured fold.
 ///
 /// Implementations perform only exact-head locking/CAS, immutable object and
@@ -116,6 +128,18 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
 
     /// Loads the complete immutable prefix and objects for one run.
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
+
+    /// Loads retained history and its indexed head from one backend snapshot.
+    fn load_snapshot<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
+        Box::pin(async move {
+            let history = self.load(run_id).await?;
+            let head = self.current_head(run_id).await?;
+            Ok(StructuredRunSnapshot { history, head })
+        })
+    }
 
     /// Returns the exact current physical head without loading the retained prefix.
     ///
@@ -268,11 +292,8 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
 
     /// Loads and callback-free verifies one exact run for a Runtime action.
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let raw = self
-            .backend
-            .load(run_id)
-            .await?
-            .ok_or(StructuredStoreError::RunNotFound)?;
+        let snapshot = self.backend.load_snapshot(run_id).await?;
+        let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
         verify_actionable_history(
             prior_run_fact_source(&self.backend),
             raw,
@@ -280,6 +301,13 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
             Arc::clone(&self.physical_binding_verifier),
         )
         .await
+        .and_then(|verified| {
+            if snapshot.head.as_ref() == Some(verified.journal_head()) {
+                Ok(verified)
+            } else {
+                Err(StructuredStoreError::InvalidHistory)
+            }
+        })
     }
 
     /// Resolves an unchanged append identity after acknowledgement ambiguity.
@@ -341,11 +369,8 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryReader<B> {
 
     /// Loads and callback-free verifies one recorded run without live IO.
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let raw = self
-            .backend
-            .load(run_id)
-            .await?
-            .ok_or(StructuredStoreError::RunNotFound)?;
+        let snapshot = self.backend.load_snapshot(run_id).await?;
+        let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
         verify_actionable_history(
             prior_run_fact_source(&self.backend),
             raw,
@@ -353,5 +378,12 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryReader<B> {
             Arc::clone(&self.physical_binding_verifier),
         )
         .await
+        .and_then(|verified| {
+            if snapshot.head.as_ref() == Some(verified.journal_head()) {
+                Ok(verified)
+            } else {
+                Err(StructuredStoreError::InvalidHistory)
+            }
+        })
     }
 }
