@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, JournalRecordHash, RunId, SchemaId, StableId,
-    StoreEpoch, StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId,
+    SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, AssignedRecord, CommittedBatch, HistoryObject, JournalHead, RecordRef,
@@ -276,6 +276,37 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id: run_id.clone(),
                 batches,
             }))
+        })
+    }
+
+    fn current_head<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            let row = sqlx::query(
+                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
+                   FROM run_history_heads WHERE run_id = $1",
+            )
+            .bind(run_id.as_str())
+            .fetch_optional(&mut **transaction.conn())
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let head = row
+                .map(|row| {
+                    Ok(JournalHead {
+                        run_sequence: required_sequence(&row, "head_sequence")?,
+                        commit_digest: JournalCommitDigest::parse(&required_text(
+                            &row,
+                            "head_commit_digest",
+                        )?)
+                        .map_err(|_| invalid("structured PostgreSQL head digest is invalid"))?,
+                    })
+                })
+                .transpose()?;
+            transaction.commit().await?;
+            Ok(head)
         })
     }
 

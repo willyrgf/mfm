@@ -108,6 +108,9 @@ pub trait RuntimeHistoryPort: Send + Sync {
     /// Loads and callback-free verifies one exact run for a Runtime action.
     fn load_verified<'a>(&'a self, run_id: &'a RunId) -> HistoryFuture<'a, Self::VerifiedRun>;
 
+    /// Returns a verified run that performed no append to its owning store cache.
+    fn retain_verified<'a>(&'a self, verified: Self::VerifiedRun) -> HistoryFuture<'a, ()>;
+
     /// Verifies and atomically commits one exact current callback result.
     fn commit_state_transition<'a>(
         &'a self,

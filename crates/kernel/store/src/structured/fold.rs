@@ -542,7 +542,7 @@ fn prepare_validated_genesis(
     candidate: CommitCandidate,
     program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
-) -> super::Result<CommittedBatch> {
+) -> super::Result<PreparedSuccessor> {
     if candidate.expected_head.is_some() {
         return Err(StructuredStoreError::StaleHead);
     }
@@ -551,8 +551,11 @@ fn prepare_validated_genesis(
         run_id: committed.records[0].record_ref.run_id.clone(),
         batches: vec![committed.clone()],
     };
-    verify_recorded_history(preview, program_verifier, physical_binding_verifier)?;
-    Ok(committed)
+    let verified = verify_recorded_history(preview, program_verifier, physical_binding_verifier)?;
+    Ok(PreparedSuccessor {
+        batch: committed,
+        verified,
+    })
 }
 
 fn extend_verified_candidate(
@@ -627,7 +630,7 @@ pub(super) fn prepare_admission(
     request: StructuredAdmissionRequest,
     program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
-) -> super::Result<CommittedBatch> {
+) -> super::Result<PreparedSuccessor> {
     let authored = request
         .certified_program
         .component_closure

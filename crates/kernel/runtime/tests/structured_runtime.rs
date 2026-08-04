@@ -73,6 +73,10 @@ impl RuntimeHistoryPort for RejectPort {
         Box::pin(async { Err(HistoryError::RunNotFound) })
     }
 
+    fn retain_verified<'a>(&'a self, _: Self::VerifiedRun) -> HistoryFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn commit_state_transition<'a>(
         &'a self,
         _: Self::VerifiedRun,
