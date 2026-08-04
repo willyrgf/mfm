@@ -24,11 +24,11 @@ use crate::{
     canonical_wallet_reference, derive_authenticated_intent_issuer_id,
     derive_evm_candidate_operation_key, derive_evm_nonce_completion_key,
     derive_evm_nonce_reservation_key, derive_exact_candidate_activation_permit,
-    derive_submission_intent_id, ActivateCandidateResponse, ActivateEvmCandidateRequest,
-    ActiveWalletCandidate, AttestedWalletCandidate, CanonicalTerminalOutcome,
-    CompleteEvmNonceRequest, CompleteWalletNonceResponse, CompletedWalletNonce,
-    EvmPendingNonceRequest, EvmReceiptLookupRequest, EvmSubmissionFailure, EvmSubmissionRequest,
-    EvmTransactionLookupRequest, EvmWalletReference, ExecutionDisposition,
+    derive_submission_intent_id, derive_submission_semantics_digest, ActivateCandidateResponse,
+    ActivateEvmCandidateRequest, ActiveWalletCandidate, AttestedWalletCandidate,
+    CanonicalTerminalOutcome, CompleteEvmNonceRequest, CompleteWalletNonceResponse,
+    CompletedWalletNonce, EvmPendingNonceRequest, EvmReceiptLookupRequest, EvmSubmissionFailure,
+    EvmSubmissionRequest, EvmTransactionLookupRequest, EvmWalletReference, ExecutionDisposition,
     ObservedPendingNonceFloor, QualifiedPendingNonceFloor, ReadEvmWalletNonceStatusRequest,
     ReserveEvmNonceRequest, ReserveWalletNonceResponse, ReservedWalletNonce,
     SubmittedCandidateProof, TerminalWitnesses, WalletNonceStatus,
@@ -105,8 +105,14 @@ pub(crate) fn derive_submission_intent(
         &derived.nonce_domain,
         &issuer_id,
         request.caller_submission_token(),
+    ) {
+        Ok(value) => value,
+        Err(_) => return ProposedStateOutcome::Failure(EvmSubmissionFailure::DestinationRejected),
+    };
+    let semantics_digest = match derive_submission_semantics_digest(
+        request.transaction_intent(),
+        request.candidate_family(),
         request.observation_rounds(),
-        request.candidate_family().digest(),
         &expansion_contract_ref,
     ) {
         Ok(value) => value,
@@ -116,6 +122,7 @@ pub(crate) fn derive_submission_intent(
         derived: derived.clone(),
         issuer_id,
         submission_intent_id,
+        semantics_digest,
     })
 }
 
@@ -143,6 +150,7 @@ pub(crate) fn read_status_request(
         domain_activation_attestation: request.domain_activation_attestation().clone(),
         semantic_reservation_key: prepared.reservation_key.clone(),
         submission_intent_id: prepared.intent.submission_intent_id.clone(),
+        submission_semantics_digest: prepared.intent.semantics_digest.clone(),
         transaction_intent_digest: request.transaction_intent().digest().to_owned(),
         candidate_family_ref: request.candidate_family().digest().to_owned(),
     }
@@ -529,7 +537,9 @@ pub(crate) fn reserve_nonce_request(
         submission_intent_id: prepared.intent.submission_intent_id.clone(),
         transaction_intent: request.transaction_intent().clone(),
         candidate_family: request.candidate_family().clone(),
+        observation_rounds: request.observation_rounds(),
         reservation_key: prepared.reservation_key.clone(),
+        submission_semantics_digest: prepared.intent.semantics_digest.clone(),
         qualified_floor: qualified.floor.clone(),
     }
 }

@@ -105,7 +105,7 @@ pub use wallet_authority::{
     derive_evm_candidate_operation_key, derive_evm_chain_lineage_id,
     derive_evm_nonce_completion_key, derive_evm_nonce_reservation_key,
     derive_exact_candidate_activation_permit, derive_qualified_chain_instance_id,
-    derive_submission_intent_id, derive_wallet_nonce_domain,
+    derive_submission_intent_id, derive_submission_semantics_digest, derive_wallet_nonce_domain,
     read_wallet_nonce_status_adapter_contract, reserve_wallet_nonce_adapter_contract,
     validate_active_wallet_candidate_prefix, ActivateCandidateResponse,
     ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, ActiveWalletCandidate,
@@ -119,11 +119,12 @@ pub use wallet_authority::{
     QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
     ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
     ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
-    SubmissionIntentId, TerminalWitnesses, TransactionNonce, WalletAuthorityContractError,
-    WalletNonceAuthority, WalletNonceAuthorityResource, WalletNonceDomain,
-    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
-    WalletNonceStoreIncarnation, WalletNonceStoreLineageHead, WalletNonceStorePromotionAttestation,
-    WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    SubmissionIntentId, SubmissionSemanticsDigest, TerminalWitnesses, TransactionNonce,
+    WalletAuthorityContractError, WalletNonceAuthority, WalletNonceAuthorityResource,
+    WalletNonceDomain, WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord,
+    WalletNonceStatus, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
+    WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor, EVM_TRANSACTION_NONCE_MAX,
+    EVM_WALLET_OBSERVATION_ROUND_LIMIT,
 };
 
 #[cfg(test)]

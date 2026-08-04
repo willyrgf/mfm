@@ -22,16 +22,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     derive_authenticated_intent_issuer_id, derive_evm_chain_lineage_id,
-    derive_submission_intent_id, derive_wallet_nonce_domain, ActivateCandidateResponse,
-    ActivateEvmCandidateRequest, ActivateWalletCandidateCapability, ActiveWalletCandidate,
-    AttestedWalletCandidate, AuthenticatedIntentIssuerId, CompleteEvmNonceRequest,
-    CompleteWalletNonceCapability, CompletedWalletNonce, EvmCallerSubmissionToken,
-    EvmCandidateFamily, EvmNonceReservationKey, EvmSubmissionFailure, EvmTransactionIntent,
-    EvmWalletFeeCandidate, EvmWalletReference, ObservedPendingNonceFloor, QualifiedChainInstanceId,
-    QualifiedPendingNonceFloor, ReadEvmWalletNonceStatusRequest, ReadWalletNonceStatusCapability,
-    ReserveEvmNonceRequest, ReserveWalletNonceCapability, ReservedWalletNonce, SubmissionIntentId,
-    WalletNonceDomain, WalletNonceDomainActivationAttestation, WalletNonceStatus,
-    EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    derive_submission_intent_id, derive_submission_semantics_digest, derive_wallet_nonce_domain,
+    ActivateCandidateResponse, ActivateEvmCandidateRequest, ActivateWalletCandidateCapability,
+    ActiveWalletCandidate, AttestedWalletCandidate, AuthenticatedIntentIssuerId,
+    CompleteEvmNonceRequest, CompleteWalletNonceCapability, CompletedWalletNonce,
+    EvmCallerSubmissionToken, EvmCandidateFamily, EvmNonceReservationKey, EvmSubmissionFailure,
+    EvmTransactionIntent, EvmWalletFeeCandidate, EvmWalletReference, ObservedPendingNonceFloor,
+    QualifiedChainInstanceId, QualifiedPendingNonceFloor, ReadEvmWalletNonceStatusRequest,
+    ReadWalletNonceStatusCapability, ReserveEvmNonceRequest, ReserveWalletNonceCapability,
+    ReservedWalletNonce, SubmissionIntentId, SubmissionSemanticsDigest, WalletNonceDomain,
+    WalletNonceDomainActivationAttestation, WalletNonceStatus, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
 };
 
 /// Immutable deployment-configured semantics for one EVM submission.
@@ -387,12 +387,11 @@ impl EvmSubmissionRequest {
         )?;
         let expansion = crate::evm_submission_expansion_policy_ref()
             .map_err(|_| crate::WalletAuthorityContractError::Invalid("expansion_contract"))?;
-        derive_submission_intent_id(
-            &domain,
-            &issuer,
-            &self.caller_submission_token,
+        derive_submission_intent_id(&domain, &issuer, &self.caller_submission_token)?;
+        derive_submission_semantics_digest(
+            &self.transaction_intent,
+            &self.candidate_family,
             self.observation_rounds,
-            self.candidate_family.digest(),
             &expansion,
         )?;
         Ok(())
@@ -1154,6 +1153,7 @@ pub(crate) struct IntentBoundSubmission {
     pub(crate) derived: DerivedSubmissionDomain,
     pub(crate) issuer_id: AuthenticatedIntentIssuerId,
     pub(crate) submission_intent_id: SubmissionIntentId,
+    pub(crate) semantics_digest: SubmissionSemanticsDigest,
 }
 
 /// Complete stable request material before a wallet status read.

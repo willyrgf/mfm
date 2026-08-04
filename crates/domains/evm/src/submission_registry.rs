@@ -1201,9 +1201,22 @@ fn valid_wallet_status(status: &WalletNonceStatus) -> bool {
 }
 
 fn valid_reserve_request(request: &ReserveEvmNonceRequest) -> bool {
+    let semantics_match = crate::evm_submission_expansion_policy_ref()
+        .ok()
+        .and_then(|expansion| {
+            crate::derive_submission_semantics_digest(
+                &request.transaction_intent,
+                &request.candidate_family,
+                request.observation_rounds,
+                &expansion,
+            )
+            .ok()
+        })
+        .is_some_and(|digest| digest == request.submission_semantics_digest);
     request.nonce_domain.validate().is_ok()
         && request.domain_activation_attestation.validate().is_ok()
         && request.submission_intent_id.validate().is_ok()
+        && request.submission_semantics_digest.validate().is_ok()
         && request.transaction_intent.validate().is_ok()
         && request
             .candidate_family
@@ -1221,6 +1234,7 @@ fn valid_reserve_request(request: &ReserveEvmNonceRequest) -> bool {
             == request.nonce_domain
         && derive_evm_nonce_reservation_key(&request.nonce_domain, &request.submission_intent_id)
             .is_ok_and(|key| key == request.reservation_key)
+        && semantics_match
 }
 
 fn valid_reserve_response(response: &ReserveWalletNonceResponse) -> bool {
