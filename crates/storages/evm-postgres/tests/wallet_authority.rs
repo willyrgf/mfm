@@ -1458,7 +1458,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             .to_content_ref()
             .expect("redundant route generation reference"),
     );
-    let retry = ReserveEvmNonceRequest {
+    let changed_retry = ReserveEvmNonceRequest {
         qualified_floor: QualifiedPendingNonceFloor {
             observed: ObservedPendingNonceFloor {
                 nonce_domain: request.nonce_domain.clone(),
@@ -1470,15 +1470,21 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         ..request.clone()
     };
     assert!(matches!(
-        authority_a
-            .reserve(&fixture.refreshed_state_input(), &retry)
-            .await,
+        authority_a.reserve(&state_input, &changed_retry).await,
+        EffectAdapterCompletion::IntegrityFault(_)
+    ));
+    let retry = request.clone();
+    assert!(matches!(
+        authority_a.reserve(&state_input, &retry).await,
         EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved {
             reservation: ref retained
         }) if retained == &reservation
     ));
-    assert_eq!(retry.submission_intent_id, request.submission_intent_id);
-    assert_eq!(retry.reservation_key, request.reservation_key);
+    assert_eq!(
+        changed_retry.submission_intent_id,
+        request.submission_intent_id
+    );
+    assert_eq!(changed_retry.reservation_key, request.reservation_key);
 
     let (activation_request, expected_unsigned_digest) =
         fixture.activation_request(&request, &reservation);
@@ -1531,19 +1537,27 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         authority_a.activate_candidate(&state_input, &activation_request),
         authority_b.activate_candidate(&state_input, &activation_request),
     );
-    let active_candidate = match (left_activation, right_activation) {
-        (
+    let active_candidate = {
+        let left = match left_activation {
             EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                candidate: left,
-            }),
+                candidate,
+            })
+            | EffectAdapterCompletion::Returned(ActivateCandidateResponse::AlreadyRetained {
+                candidate,
+            }) => candidate,
+            other => panic!("unexpected left concurrent activation result: {other:?}"),
+        };
+        let right = match right_activation {
             EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                candidate: right,
-            }),
-        ) => {
-            assert_eq!(left, right);
-            left
-        }
-        other => panic!("unexpected concurrent activation results: {other:?}"),
+                candidate,
+            })
+            | EffectAdapterCompletion::Returned(ActivateCandidateResponse::AlreadyRetained {
+                candidate,
+            }) => candidate,
+            other => panic!("unexpected right concurrent activation result: {other:?}"),
+        };
+        assert_eq!(left, right);
+        left
     };
     assert_eq!(
         active_candidate
@@ -1578,6 +1592,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         .await
         .expect("bounded present candidate ambiguity resolution"),
         EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+            candidate: ref retained,
+        })
+        | EffectAdapterCompletion::Returned(ActivateCandidateResponse::AlreadyRetained {
             candidate: ref retained,
         }) if retained == &active_candidate
     ));
@@ -1716,24 +1733,31 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
                 .await;
             assert_candidate_absent(&probe_pool, &skipped_replacement).await;
             assert_candidate_absent(&probe_pool, &replacement_request).await;
-            let replacement_state_input = fixture.refreshed_state_input();
             let (replacement_a, replacement_b) = tokio::join!(
                 authority_a.activate_candidate(&state_input, &replacement_request),
-                authority_b.activate_candidate(&replacement_state_input, &replacement_request),
+                authority_b.activate_candidate(&state_input, &replacement_request),
             );
-            let candidate = match (replacement_a, replacement_b) {
-                (
+            let candidate = {
+                let left = match replacement_a {
                     EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                        candidate: left,
-                    }),
+                        candidate,
+                    })
+                    | EffectAdapterCompletion::Returned(
+                        ActivateCandidateResponse::AlreadyRetained { candidate },
+                    ) => candidate,
+                    other => panic!("unexpected left concurrent replacement result: {other:?}"),
+                };
+                let right = match replacement_b {
                     EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                        candidate: right,
-                    }),
-                ) => {
-                    assert_eq!(left, right);
-                    left
-                }
-                other => panic!("unexpected concurrent replacement results: {other:?}"),
+                        candidate,
+                    })
+                    | EffectAdapterCompletion::Returned(
+                        ActivateCandidateResponse::AlreadyRetained { candidate },
+                    ) => candidate,
+                    other => panic!("unexpected right concurrent replacement result: {other:?}"),
+                };
+                assert_eq!(left, right);
+                left
             };
             commit_proxy.release_held_transactions();
             candidate
@@ -2590,6 +2614,10 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         successor_authority
             .reserve(&fixture.refreshed_state_input(), &retry)
             .await,
+        EffectAdapterCompletion::IntegrityFault(_)
+    ));
+    assert!(matches!(
+        successor_authority.reserve(&state_input, &retry).await,
         EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved {
             reservation: ref retained,
         }) if retained == &reservation
@@ -4211,11 +4239,11 @@ async fn prove_copied_target_rejected(
         authority
             .activate_candidate(state_input, activation_request)
             .await,
-        EffectAdapterCompletion::SafeFailure(EvmSubmissionFailure::NonceLineageDiverged)
+        EffectAdapterCompletion::IntegrityFault(_)
     ));
     assert!(matches!(
         authority.complete(state_input, completion_request).await,
-        EffectAdapterCompletion::SafeFailure(EvmSubmissionFailure::NonceLineageDiverged)
+        EffectAdapterCompletion::IntegrityFault(_)
     ));
 }
 

@@ -164,6 +164,8 @@ CREATE TABLE wallet_nonce_domains (
     activation_record_json TEXT NOT NULL,
     activation_attestation_json TEXT NOT NULL,
     local_high_water_nonce NUMERIC(20, 0),
+    retained_reservation_count NUMERIC(20, 0) NOT NULL DEFAULT 0,
+    retained_reservation_chain_head_ref TEXT,
     active_reservation_key TEXT,
     current_resource_frontier_ref TEXT,
     current_incarnation_ref TEXT,
@@ -184,6 +186,17 @@ CREATE TABLE wallet_nonce_domains (
             local_high_water_nonce >= 0
             AND local_high_water_nonce <= 18446744073709551614::numeric
             AND trunc(local_high_water_nonce) = local_high_water_nonce
+        )
+    ),
+    CONSTRAINT wallet_nonce_domains_retained_count_v1 CHECK (
+        retained_reservation_count >= 0
+        AND retained_reservation_count <= 18446744073709551614::numeric
+        AND trunc(retained_reservation_count) = retained_reservation_count
+        AND (
+            (retained_reservation_count = 0 AND retained_reservation_chain_head_ref IS NULL)
+            OR (retained_reservation_count > 0
+                AND retained_reservation_chain_head_ref IS NOT NULL
+                AND length(retained_reservation_chain_head_ref) BETWEEN 1 AND 512)
         )
     ),
     CONSTRAINT wallet_nonce_domains_projection_v1 CHECK (
@@ -324,7 +337,14 @@ BEGIN
        OR NEW.activation_attestation_json <> OLD.activation_attestation_json
        OR NEW.local_high_water_nonce IS NULL
        OR (OLD.local_high_water_nonce IS NOT NULL
-           AND NEW.local_high_water_nonce <= OLD.local_high_water_nonce) THEN
+           AND NEW.local_high_water_nonce < OLD.local_high_water_nonce)
+       OR (NEW.local_high_water_nonce = OLD.local_high_water_nonce
+           AND NEW.retained_reservation_count = OLD.retained_reservation_count
+           AND NEW.retained_reservation_chain_head_ref
+               IS NOT DISTINCT FROM OLD.retained_reservation_chain_head_ref
+           AND NEW.active_reservation_key IS NOT DISTINCT FROM OLD.active_reservation_key
+           AND NEW.current_resource_frontier_ref IS NOT DISTINCT FROM OLD.current_resource_frontier_ref
+           AND NEW.current_incarnation_ref IS NOT DISTINCT FROM OLD.current_incarnation_ref) THEN
         RAISE EXCEPTION 'invalid wallet nonce-domain transition';
     END IF;
     RETURN NEW;

@@ -94,6 +94,13 @@ pub async fn open_wallet_nonce_authority(
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?,
     );
     let pool = open_role_pool(database_url, expected_schema, NONCE_APPLICATION_ROLE).await?;
+    refresh_current_domain_projections(
+        &pool,
+        &store_incarnation.wallet_nonce_store_lineage_id,
+        &current_lineage_head.public_lineage_head_ref,
+        &current_incarnation_ref,
+    )
+    .await?;
     Ok(PostgresWalletNonceAuthority {
         pool,
         schema_name: expected_schema.to_owned(),
@@ -223,6 +230,8 @@ impl PostgresWalletNonceAuthority {
         // the current state.
         let projection = sqlx::query(
             "SELECT local_high_water_nonce::text AS local_high_water_nonce, \
+                    retained_reservation_count::text AS retained_reservation_count, \
+                    retained_reservation_chain_head_ref, \
                     active_reservation_key, current_resource_frontier_ref, \
                     current_incarnation_ref \
              FROM wallet_nonce_domains WHERE wallet_nonce_domain_id = $1",
@@ -234,6 +243,8 @@ impl PostgresWalletNonceAuthority {
         let Some(projection) = projection else {
             return Ok(ValidatedDomainAggregate {
                 high_water: None,
+                retained_reservation_count: 0,
+                retained_reservation_chain_head_ref: None,
                 incomplete_reservation_key: None,
                 current_resource_frontier_ref: None,
                 current_incarnation_ref: None,
@@ -241,6 +252,14 @@ impl PostgresWalletNonceAuthority {
         };
         let retained_high_water = projection
             .try_get::<Option<String>, _>("local_high_water_nonce")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+        let retained_reservation_count = projection
+            .try_get::<String, _>("retained_reservation_count")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?
+            .parse::<u64>()
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let retained_reservation_chain_head_ref = projection
+            .try_get::<Option<String>, _>("retained_reservation_chain_head_ref")
             .map_err(|_| PostgresEvmWalletError::Unavailable)?;
         let incomplete_reservation_key = projection
             .try_get::<Option<String>, _>("active_reservation_key")
@@ -254,6 +273,8 @@ impl PostgresWalletNonceAuthority {
 
         let Some(activation) = retained_activation else {
             if retained_high_water.is_some()
+                || retained_reservation_count != 0
+                || retained_reservation_chain_head_ref.is_some()
                 || incomplete_reservation_key.is_some()
                 || current_resource_frontier_ref.is_some()
                 || current_incarnation_ref.is_some()
@@ -262,6 +283,8 @@ impl PostgresWalletNonceAuthority {
             }
             return Ok(ValidatedDomainAggregate {
                 high_water: None,
+                retained_reservation_count: 0,
+                retained_reservation_chain_head_ref: None,
                 incomplete_reservation_key: None,
                 current_resource_frontier_ref: None,
                 current_incarnation_ref: None,
@@ -286,11 +309,50 @@ impl PostgresWalletNonceAuthority {
         let high_water = mfm_evm::TransactionNonce::from_str(&retained_high_water)
             .map(mfm_evm::TransactionNonce::get)
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let expected_reservation_count = high_water
+            .checked_sub(
+                activation
+                    .current_schema_record
+                    .finalized_sender_nonce_floor,
+            )
+            .and_then(|distance| distance.checked_add(1))
+            .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+        if retained_reservation_count != expected_reservation_count
+            || retained_reservation_chain_head_ref.is_none()
+        {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
+        let retained_rows = sqlx::query(
+            "SELECT count(*)::text AS retained_count, max(nonce)::text AS maximum_nonce \
+             FROM wallet_nonce_reservations WHERE wallet_nonce_domain_id = $1",
+        )
+        .bind(domain_id)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+        let actual_reservation_count = retained_rows
+            .try_get::<String, _>("retained_count")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?
+            .parse::<u64>()
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let actual_high_water = retained_rows
+            .try_get::<Option<String>, _>("maximum_nonce")
+            .map_err(|_| PostgresEvmWalletError::Unavailable)?
+            .map(|value| value.parse::<u64>())
+            .transpose()
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        if actual_reservation_count != retained_reservation_count
+            || actual_high_water != Some(high_water)
+        {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
         if current_resource_frontier_ref.is_none() || current_incarnation_ref.is_none() {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
         Ok(ValidatedDomainAggregate {
             high_water: Some(high_water),
+            retained_reservation_count,
+            retained_reservation_chain_head_ref,
             incomplete_reservation_key,
             current_resource_frontier_ref,
             current_incarnation_ref,
@@ -309,6 +371,9 @@ impl PostgresWalletNonceAuthority {
         let Some(high_water) = aggregate.high_water else {
             return Ok(aggregate);
         };
+        if aggregate.retained_reservation_count == 0 {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
         let expected_frontier = reference_text(&self.current_lineage_head.public_lineage_head_ref)?;
         let expected_incarnation = reference_text(
             &canonical_wallet_reference(&self.store_incarnation)
@@ -335,6 +400,8 @@ impl PostgresWalletNonceAuthority {
             .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
         if frontier.reservation.nonce != high_water
             || frontier.reservation.nonce_domain.as_str() != domain_id
+            || aggregate.retained_reservation_chain_head_ref.as_deref()
+                != Some(frontier.reservation.semantic_reservation_key.as_str())
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
@@ -760,7 +827,14 @@ impl PostgresWalletNonceAuthority {
             .await?
         {
             Some(closure) => {
-                if retained_activation.is_none() || !status_request_matches(request, &closure) {
+                let requested_nonce_is_below_current_frontier = match aggregate.high_water {
+                    Some(high_water) => closure.reservation.nonce <= high_water,
+                    None => false,
+                };
+                if retained_activation.is_none()
+                    || !requested_nonce_is_below_current_frontier
+                    || !status_request_matches(request, &closure)
+                {
                     return Err(PostgresEvmWalletError::InvalidAuthority);
                 }
                 let candidates = self
@@ -1519,7 +1593,9 @@ impl PostgresWalletNonceAuthority {
                     )
                     .await
                 {
-                    Ok(Some(existing)) if reservation_request_matches(request, &existing) => {}
+                    Ok(Some(existing))
+                        if reservation_request_matches(request, &existing)
+                            && existing.state_input_ref == *state_input_ref => {}
                     Ok(Some(_))
                     | Err(
                         PostgresEvmWalletError::InvalidAuthority
@@ -1557,7 +1633,10 @@ impl PostgresWalletNonceAuthority {
                     )
                     .await
                 {
-                    Ok(Some(existing)) if reservation_request_matches(request, &existing) => {
+                    Ok(Some(existing))
+                        if reservation_request_matches(request, &existing)
+                            && existing.state_input_ref == *state_input_ref =>
+                    {
                         Some(existing)
                     }
                     Ok(Some(_))
@@ -1808,6 +1887,7 @@ impl PostgresWalletNonceAuthority {
                             &mut write.transaction,
                             request.nonce_domain.as_str(),
                             nonce,
+                            request.reservation_key.as_str(),
                         )
                         .await?;
                     }
@@ -2749,6 +2829,8 @@ struct ReservationClosure {
 
 struct ValidatedDomainAggregate {
     high_water: Option<u64>,
+    retained_reservation_count: u64,
+    retained_reservation_chain_head_ref: Option<String>,
     incomplete_reservation_key: Option<String>,
     current_resource_frontier_ref: Option<String>,
     current_incarnation_ref: Option<String>,
@@ -3416,8 +3498,9 @@ async fn insert_domain_activation(
     sqlx::query(
         "INSERT INTO wallet_nonce_domains ( \
              wallet_nonce_domain_id, activation_record_ref, wallet_nonce_store_lineage_id, \
-             activation_record_json, activation_attestation_json, local_high_water_nonce \
-         ) VALUES ($1, $2, $3, $4, $5, $6::numeric)",
+             activation_record_json, activation_attestation_json, local_high_water_nonce, \
+             retained_reservation_count, retained_reservation_chain_head_ref \
+         ) VALUES ($1, $2, $3, $4, $5, $6::numeric, 1, $7)",
     )
     .bind(request.nonce_domain.as_str())
     .bind(reference_text(
@@ -3434,6 +3517,7 @@ async fn insert_domain_activation(
     )?)
     .bind(canonical_json(&request.domain_activation_attestation)?)
     .bind(high_water.to_string())
+    .bind(request.reservation_key.as_str())
     .execute(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
@@ -3465,6 +3549,37 @@ async fn update_domain_projection(
     Ok(())
 }
 
+async fn refresh_current_domain_projections(
+    pool: &PgPool,
+    wallet_nonce_store_lineage_id: &str,
+    current_resource_frontier_ref: &EvmWalletReference,
+    current_incarnation_ref: &EvmWalletReference,
+) -> Result<()> {
+    let current_resource_frontier_ref = reference_text(current_resource_frontier_ref)?;
+    let current_incarnation_ref = reference_text(current_incarnation_ref)?;
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+    sqlx::query(
+        "UPDATE wallet_nonce_domains SET current_resource_frontier_ref = $2, \
+                current_incarnation_ref = $3 \
+         WHERE wallet_nonce_store_lineage_id = $1 \
+           AND (current_resource_frontier_ref IS DISTINCT FROM $2 \
+                OR current_incarnation_ref IS DISTINCT FROM $3)",
+    )
+    .bind(wallet_nonce_store_lineage_id)
+    .bind(current_resource_frontier_ref)
+    .bind(current_incarnation_ref)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| PostgresEvmWalletError::Unavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| PostgresEvmWalletError::Unavailable)
+}
+
 async fn clear_active_reservation(connection: &mut PgConnection, domain_id: &str) -> Result<()> {
     let result = sqlx::query(
         "UPDATE wallet_nonce_domains SET active_reservation_key = NULL \
@@ -3484,13 +3599,17 @@ async fn update_high_water(
     connection: &mut PgConnection,
     domain_id: &str,
     high_water: u64,
+    reservation_key: &str,
 ) -> Result<()> {
     let result = sqlx::query(
-        "UPDATE wallet_nonce_domains SET local_high_water_nonce = $2::numeric \
+        "UPDATE wallet_nonce_domains SET local_high_water_nonce = $2::numeric, \
+                retained_reservation_count = retained_reservation_count + 1, \
+                retained_reservation_chain_head_ref = $3 \
          WHERE wallet_nonce_domain_id = $1",
     )
     .bind(domain_id)
     .bind(high_water.to_string())
+    .bind(reservation_key)
     .execute(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
