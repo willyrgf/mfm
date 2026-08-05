@@ -73,13 +73,17 @@ Post-step-12 implementation and proof revisions:
 | `a7ef6b636` | bound portable source and fact route discovery |
 | `d67a3bc3a` | add portable source bound regressions |
 | `b3dfd8377` | retain kind-aware export authorization closure |
+| `e68aca910` | classify configuration idempotent checkpoint predecessors |
+| `fcd56ab09` | retry transient checkpoint read races |
+| `f99e3a84c` | inventory checkpoint retry query ownership |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
 later `42c80525` whitespace cleanup, `a027640c` review refresh, `d0459d4d`
-bounded-source review refresh, and `8803a585` evidence pin are all
-documentation-only commits. The corrected-source gate below starts after all
-five and is pinned to `d67a3bc3a`.
+bounded-source review refresh, `8803a585` evidence pin, `ebc4f8a81`,
+`7530a4479`, and `f8568ff26` are documentation-only commits. The corrected
+source gate below starts after the implementation revisions through
+`f99e3a84c`; the final evidence refresh is documentation-only after that gate.
 
 ## Independent review checkpoints
 
@@ -90,15 +94,15 @@ five and is pinned to `d67a3bc3a`.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `b3dfd83777b4b1f54b349c5ac07d105dbd757cab` | independent review requested on this exact revision; final evidence follows | CONDITIONAL; residuals below |
+| Current implementation candidate | `f99e3a84ced87246d19a93a4a19a1ab300d5e398` | independent review requested on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
 All direct Rust tooling was run in the default Nix development shell. The
-previous exact source gate below was run once on its pinned implementation
-candidate, without preceding it with separate composed check/test/test-db
-gates. The current candidate has focused checks recorded below and still
-requires its own exact composed gate.
+composed source gate was run once on the current implementation candidate,
+without preceding it with separate composed check/test/test-db gates. The
+focused checks and exact run are recorded below; the later evidence-only
+commit does not alter the gated source tree.
 
 | Check | Evidence |
 | --- | --- |
@@ -114,7 +118,22 @@ requires its own exact composed gate.
 | Bitcoin parity | pass |
 | closing source revision | pass |
 
-Previous exact composed gate (historical; the new candidate still requires the exact gate):
+Current exact composed gate:
+
+```text
+nix run .#ci
+source: f99e3a84ced87246d19a93a4a19a1ab300d5e398
+run id: run-1733167-1785954807662948771
+result: ok — 13 passed, 0 failed in 1933.45s
+structured EVM submission: ok in 1416.48s
+```
+
+The run also observed the PostgreSQL recoverability leaf and wallet-nonce
+qualification as passing, plus Bitcoin parity and closing-source-revision.
+The exact run was clean at the pinned source; the evidence refresh after it is
+documentation-only.
+
+Previous exact composed gate (historical):
 
 ```text
 nix run .#ci
@@ -124,10 +143,13 @@ result: ok — 13 passed, 0 failed in 1738.58s
 structured EVM submission: ok in 1229.82s
 ```
 
-The exact `.#ci` gate for `b3dfd83777b4b1f54b349c5ac07d105dbd757cab` is
-pending; it is the next verification action on this candidate. The focused
-checks below are current-candidate evidence and must not be read as a
-substitute for that composed gate.
+The earlier candidate diagnostics included a same-stream configuration race
+and a transient commit-before-checkpoint-ack read race. `e68aca910` aligns the
+idempotent predecessor digest with the checkpoint's canonical-revision head,
+and `fcd56ab09` adds bounded retries only for the resulting transient
+`InvalidHistory` reads. `f99e3a84c` updates the reviewed SQL inventory
+ownership predicate for those wrappers; it does not change SQL text or query
+semantics. The final run above exercises these changes.
 
 Additional focused evidence on the current implementation sequence includes
 six bounded recursive source-closure tests, eight portable replay tests, two
@@ -136,10 +158,11 @@ limit/one-over checks, root target/tenant trust tamper denials, serialized
 recursive-prefix tamper cases, the generated five-vector portable artifact
 corpus, application root/dependency zero-byte denials, and online/offline
 projection byte parity. The managed PostgreSQL recursive parity fixture passed
-17/17 on the corresponding current storage sequence. The historical composed
-gate includes the source-bound fix in `d67a3bc3`; its closing-source-revision
-leaf observed the post-cleanup tree. The current candidate still needs its own
-closing-source-revision observation in `.#ci`.
+17/17 on the corresponding current storage sequence, and the composed gate
+passed the configured-value same-stream append race after the checkpoint
+predecessor and retry fixes. The historical composed gate includes the
+source-bound fix in `d67a3bc3`; the current run's closing-source-revision leaf
+observed `f99e3a84c`.
 
 ## TT2 disposition at the current candidate
 
