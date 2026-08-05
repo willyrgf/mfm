@@ -259,9 +259,11 @@ provider child. It retains one acknowledged prefix and at most one exact prepare
 Children prepare before SQL, acknowledge only the observed exact successor prefix, and reconcile
 before readiness: predecessor retains `Prepared` for identical-only retry, successor finalizes it,
 and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. PostgreSQL
-read paths retry only the bounded commit-before-acknowledgement observation; a persistent mismatch
-still rejects the operation. No child-local file, copied database, or public attestation can reset
-that checkpoint.
+run and configuration read paths retry only the bounded commit-before-acknowledgement observation;
+configuration append ambiguity reconnects through the append authority and retries the identical
+canonical revision before returning an unresolved ambiguity. A persistent mismatch still rejects
+the operation. No child-local file, copied database, or public attestation can reset that
+checkpoint.
 
 ## Portfolio placement
 
