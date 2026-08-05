@@ -25,6 +25,10 @@ use serde_json::Value;
 
 use crate::structured::{project_replay_result, StructuredReplayError, StructuredReplayResult};
 
+struct ReplayEncoderConsumer;
+
+impl mfm_authority_seal::ExportEncoderConsumerSeal for ReplayEncoderConsumer {}
+
 /// Exact media type of the current bounded structured portable frame stream.
 pub const PORTABLE_RUN_EXPORT_MEDIA_TYPE: &str =
     "application/vnd.mfm.structured-run-export-stream.v2";
@@ -204,7 +208,9 @@ impl PortableRunExport {
         evidence: &ExportRunEvidence,
         kind: ExportKind,
     ) -> Result<Self, PortableExportError> {
-        evidence.with_encoder_view(|view| Self::from_encoder_view(view, kind))
+        evidence.with_encoder_view(ReplayEncoderConsumer, |view| {
+            Self::from_encoder_view(view, kind)
+        })
     }
 
     fn from_encoder_view(
@@ -755,13 +761,15 @@ fn validate_required_source_heads(export: &PortableRunExport) -> Result<(), Port
 }
 
 /// Explicit trust material for offline portable verification.
-pub trait RetainedPhysicalReleaseTrust {
+pub trait RetainedPhysicalReleaseTrust:
+    mfm_authority_seal::RetainedPhysicalReleaseTrustSeal + Send + Sync
+{
     /// Verifies the retained public release history for one fixation.
     fn verify(&self, fixation: &PortableFixation, kind: ExportKind) -> bool;
 }
 
 /// Explicit external store/checkpoint trust for one portable closure.
-pub trait StoreCheckpointTrust {
+pub trait StoreCheckpointTrust: mfm_authority_seal::StoreCheckpointTrustSeal + Send + Sync {
     /// Verifies target lineage, writer epoch, and exact authorized closure.
     fn verify(
         &self,

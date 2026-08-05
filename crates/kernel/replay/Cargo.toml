@@ -18,6 +18,7 @@ name = "mfm_replay"
 path = "src/lib.rs"
 
 [dependencies]
+mfm-authority-seal = { path = "../authority-seal" }
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }

@@ -272,7 +272,9 @@ source under the sealed export purpose and only then serializes exact committed-
 source relationships, and semantic/physical fixation with the exact target key, database identity,
 fence generation, release epoch, and current-incarnation reference with a closure reference; denied or incomplete
 source closures emit zero bytes. Offline verification uses only bundle bytes and an explicit trust
-snapshot against the store's read-only fold entry. Current portable exports use a bounded
+snapshot against the store's read-only fold entry. The program, retained-release, and external
+checkpoint verifiers used by that snapshot are workspace-sealed deployment authorities; an
+ordinary consumer cannot substitute callbacks that accept forged fixations. Current portable exports use a bounded
 newline-delimited frame stream with media type
 `application/vnd.mfm.structured-run-export-stream.v2`; each canonical frame carries an ordinal,
 kind, payload, and predecessor digest, and a terminal seal binds the exact closure, fixation,
@@ -417,7 +419,8 @@ PostgreSQL backends invoke this same validator.
 The portable encoder receives sealed canonical batch frames and purpose-specific fact routes. It
 cannot enumerate raw `CommittedBatch` values through export evidence. Source prefixes are folded
 once at the maximum required producer head, with recursive graph, tenant, and route checks before
-bytes are emitted.
+bytes are emitted. The encoder callback itself requires the workspace export-consumer seal, so a
+caller cannot turn an opaque export fragment into a second purpose product.
 
 Every qualified Read and Effect adapter receives the one-use committed authorization proof. It
 must bind the access kind and retained physical certificate (and the exact state input for
