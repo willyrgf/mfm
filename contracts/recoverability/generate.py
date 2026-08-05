@@ -285,6 +285,50 @@ def portable_suffix_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]
     ]
 
 
+def portable_real_suffix_vectors(portable_artifact: bytes) -> list[dict[str, Any]]:
+    """Build suffix vectors from the real zero-state production-shaped export."""
+
+    parsed = [json.loads(frame) for frame in portable_artifact.splitlines()]
+    if len(parsed) != 2 or parsed[0]["kind"] != "batch" or parsed[1]["kind"] != "seal":
+        raise ValueError("real portable fixture must contain one batch and one seal")
+    root = parsed[0]
+    later = json.loads(json.dumps(root))
+    later["ordinal"] = 1
+    later["previous_frame_digest"] = portable_raw_digest(portable_frame_bytes(root)[:-1])
+    later_batch = later["payload"]["batch"]
+    later_batch["append_request_id"] = "portable-fixture-later-audit"
+    later_batch["candidate_digest"] = portable_raw_digest(b"portable-fixture-later-candidate")
+    later_batch["head"] = {
+        "commit_digest": portable_jcs_digest(b"portable-fixture-later-commit"),
+        "run_sequence": 2,
+    }
+    later_batch["predecessor"] = root["payload"]["batch"]["head"]
+    suffix_frames = [root, later, parsed[1]]
+    suffix_frames[-1]["payload"]["fixation"]["journal_head"] = later_batch["head"]
+    suffix_frames[-1]["payload"]["run_fixations"][0]["fixation"][
+        "journal_head"
+    ] = later_batch["head"]
+    suffix_semantic = reseal_portable_frames(
+        json.loads(json.dumps(suffix_frames)), "semantic"
+    )
+    suffix_audit = reseal_portable_frames(json.loads(json.dumps(suffix_frames)), "audit")
+    return [
+        {
+            "bytes_hex": suffix_semantic.hex(),
+            "expected_error": "invalid",
+            "id": "portable/production-suffix/reject-semantic-later-audit",
+            "kind": "strict_decode_rejection",
+            "source_fixture": "zero_state_export(201)",
+        },
+        {
+            "bytes_hex": suffix_audit.hex(),
+            "id": "portable/production-suffix/accept-audit-later",
+            "kind": "strict_decode_acceptance",
+            "source_fixture": "zero_state_export(201)",
+        },
+    ]
+
+
 def portable_graph_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]]:
     """Build bounded graph-shape rejection vectors from the recursive fixture."""
 
@@ -331,6 +375,48 @@ def portable_graph_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]]
             "expected_error": "invalid",
             "id": "portable/graph/reject-source-count-over-budget",
             "kind": "strict_decode_rejection",
+        },
+    ]
+
+
+def portable_source_graph_vectors() -> list[dict[str, Any]]:
+    """Build generated vectors for nested shared and cyclic source traversal."""
+
+    def run(index: int) -> str:
+        return f"run:sha256-jcs-v1:{index:064x}"
+
+    root = run(1)
+    middle = run(2)
+    other = run(3)
+    shared = run(4)
+    shared_graph = {
+        root: [middle, other],
+        middle: [shared],
+        other: [shared],
+        shared: [],
+    }
+    cycle_root = run(11)
+    cycle_a = run(12)
+    cycle_b = run(13)
+    cycle_graph = {
+        cycle_root: [cycle_a],
+        cycle_a: [cycle_b],
+        cycle_b: [cycle_a],
+    }
+    return [
+        {
+            "edges": shared_graph,
+            "expected_sources": sorted([middle, other, shared]),
+            "id": "portable/source-graph/accept-nested-shared",
+            "kind": "source_graph_acceptance",
+            "root_run_id": root,
+        },
+        {
+            "edges": cycle_graph,
+            "expected_error": "cycle",
+            "id": "portable/source-graph/reject-nested-cycle",
+            "kind": "source_graph_rejection",
+            "root_run_id": cycle_root,
         },
     ]
 
@@ -1758,6 +1844,7 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
             "kind": "strict_decode_rejection",
         },
     ]
+    portable_artifact_vectors.extend(portable_real_suffix_vectors(bytes.fromhex(PORTABLE_OFFLINE_ACCEPTANCE_HEX)))
     portable_artifact_vectors.extend(portable_suffix_vectors(portable_frames))
     portable_artifact_vectors.extend(portable_graph_vectors(portable_frames))
     return {
@@ -1768,6 +1855,7 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
         "contract": "mfm.recoverability-corpus.v1",
         "negative_vectors": negative,
         "portable_artifact_vectors": portable_artifact_vectors,
+        "portable_source_graph_vectors": portable_source_graph_vectors(),
         "positive_vectors": positives,
         "relational_vectors": relational,
     }
