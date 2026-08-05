@@ -27,3 +27,7 @@ mfm-store = { path = "../store" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+mfm-store = { path = "../store", features = ["test-support"] }
+tokio = { workspace = true }

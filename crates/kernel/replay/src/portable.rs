@@ -1629,6 +1629,31 @@ mod tests {
         assert!(PortableRunExport::strict_decode(&audit_suffix_bytes).is_ok());
     }
 
+    #[tokio::test]
+    async fn production_store_export_folds_offline_and_preserves_projection_bytes() {
+        let fixture = mfm_store::structured::test_support::zero_state_export(201)
+            .await
+            .expect("build verified store export fixture");
+        let export = PortableRunExport::from_export_evidence(&fixture.export, ExportKind::Semantic)
+            .expect("encode verified export evidence");
+        let bytes = export
+            .to_canonical_bytes()
+            .expect("encode canonical portable frames");
+        let release = AcceptRelease;
+        let checkpoint = AcceptCheckpoint;
+        let trust = ReplayTrustSnapshot::new(
+            &fixture.program_verifier,
+            &fixture.physical_binding_verifier,
+        )
+        .with_authorized_closure(export.closure_reference(), &release, &checkpoint);
+
+        let online = super::project_replay_result(&fixture.recorded).expect("online projection");
+        let offline =
+            PortableRunExport::verify_offline(&bytes, &trust).expect("offline projection");
+        assert_eq!(offline.as_bytes(), online.as_bytes());
+        assert_eq!(offline.schema_id(), online.schema_id());
+    }
+
     fn golden_export() -> PortableRunExport {
         let store_scope_id =
             StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "1".repeat(32)))

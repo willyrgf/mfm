@@ -3177,7 +3177,11 @@ async fn broadcast_observation_exists(
     let batches = load_batches(pool, run_id).await;
     let audit = HistoryAudit::from_batches(&batches);
     audit.authorizations.iter().any(|(attempt, capability)| {
-        capability == broadcast_capability_ref && audit.observations.contains_key(attempt)
+        capability == broadcast_capability_ref
+            && matches!(
+                audit.observations.get(attempt),
+                Some(ObservationOutcome::Returned { .. })
+            )
     })
 }
 
