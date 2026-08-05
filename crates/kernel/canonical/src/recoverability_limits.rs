@@ -7,7 +7,7 @@ pub const MAX_ARRAY_ITEMS: usize = 1048576;
 pub const MAX_BASE64URL_CHARACTERS: usize = 22369622;
 
 /// Generated `max_canonical_json_bytes` budget.
-pub const MAX_CANONICAL_JSON_BYTES: usize = 16777216;
+pub const MAX_CANONICAL_JSON_BYTES: usize = 33554432;
 
 /// Generated `max_canonical_json_depth` budget.
 pub const MAX_CANONICAL_JSON_DEPTH: usize = 64;

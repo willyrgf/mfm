@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent / "v1"
 LIMITS: dict[str, tuple[str, int, str]] = {
     "max_array_items": ("MAX_ARRAY_ITEMS", 1_048_576, "usize"),
     "max_base64url_characters": ("MAX_BASE64URL_CHARACTERS", 22_369_622, "usize"),
-    "max_canonical_json_bytes": ("MAX_CANONICAL_JSON_BYTES", 16_777_216, "usize"),
+    "max_canonical_json_bytes": ("MAX_CANONICAL_JSON_BYTES", 32 * 1024 * 1024, "usize"),
     "max_canonical_json_depth": ("MAX_CANONICAL_JSON_DEPTH", 64, "usize"),
     "max_object_entries": ("MAX_OBJECT_ENTRIES", 1_048_576, "usize"),
     "max_string_utf8_bytes": ("MAX_STRING_UTF8_BYTES", 16_777_216, "usize"),
@@ -950,7 +950,7 @@ def build_annex() -> dict[str, Any]:
             "duplicate_keys": "reject",
             "floats": "forbidden",
             "integer_numbers": "unsigned_json_integers_only_where_schema_bounded",
-            "max_canonical_json_bytes": "16777216",
+            "max_canonical_json_bytes": str(LIMITS["max_canonical_json_bytes"][1]),
             "object_key_order": "utf16_code_units",
             "string_normalization": "none",
         },
