@@ -373,7 +373,21 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
             | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
                 Err(invalid("configuration backend substituted committed bytes"))
             }
-            ConfigurationBackendAppendOutcome::StaleHead => Err(StructuredStoreError::StaleHead),
+            ConfigurationBackendAppendOutcome::StaleHead => {
+                // A concurrent append with the same logical identity can win
+                // after this writer's initial read but before the backend lock.
+                // Reclassify the unchanged identity from a fresh read so a
+                // race cannot turn an append conflict into an unrelated stale
+                // predecessor result.
+                let resolved = self.backend.load(revision.key()).await?;
+                match resolved.as_ref().and_then(|history| {
+                    history_append_identity(history.revisions.iter(), revision.append_request_id())
+                }) {
+                    Some(existing) if existing == &revision => Ok(revision),
+                    Some(_) => Err(StructuredStoreError::AppendConflict),
+                    None => Err(StructuredStoreError::StaleHead),
+                }
+            }
             ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {
                 // Reconnect through the backend's read path and classify the
                 // exact append identity before allowing a retry. This is the
