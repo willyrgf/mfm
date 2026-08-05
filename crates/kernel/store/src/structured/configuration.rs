@@ -379,14 +379,43 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // Reclassify the unchanged identity from a fresh read so a
                 // race cannot turn an append conflict into an unrelated stale
                 // predecessor result.
-                let resolved = self.backend.load(revision.key()).await?;
-                match resolved.as_ref().and_then(|history| {
-                    history_append_identity(history.revisions.iter(), revision.append_request_id())
-                }) {
-                    Some(existing) if existing == &revision => Ok(revision),
-                    Some(_) => Err(StructuredStoreError::AppendConflict),
-                    None => Err(StructuredStoreError::StaleHead),
+                for _ in 0..3 {
+                    let resolved = self.backend.load(revision.key()).await?;
+                    match resolved.as_ref().and_then(|history| {
+                        history_append_identity(
+                            history.revisions.iter(),
+                            revision.append_request_id(),
+                        )
+                    }) {
+                        Some(existing) if existing == &revision => return Ok(revision),
+                        Some(_) => return Err(StructuredStoreError::AppendConflict),
+                        None => {
+                            match self
+                                .backend
+                                .append(CanonicalConfigurationAppend::from_store_verified(
+                                    revision.clone(),
+                                )?)
+                                .await?
+                            {
+                                ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
+                                | ConfigurationBackendAppendOutcome::ExistingSame(returned)
+                                    if returned == revision =>
+                                {
+                                    return Ok(revision)
+                                }
+                                ConfigurationBackendAppendOutcome::NewlyCommitted(_)
+                                | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
+                                    return Err(invalid(
+                                        "configuration backend substituted committed bytes",
+                                    ));
+                                }
+                                ConfigurationBackendAppendOutcome::StaleHead => {}
+                                ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {}
+                            }
+                        }
+                    }
                 }
+                Err(StructuredStoreError::StaleHead)
             }
             ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {
                 // Reconnect through the backend's read path and classify the
