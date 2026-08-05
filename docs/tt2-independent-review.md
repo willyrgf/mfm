@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d`. The composed source gate for that
+`d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2`. The composed source gate for that
 candidate passed, but the plan requires a PASS only when every Blocker/High
 requirement has its focused proof. The review therefore records both the
 closed implementation work and the remaining proof/deployment gaps.
@@ -27,9 +27,9 @@ closed implementation work and the remaining proof/deployment gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d`
+- Implementation candidate: `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2`
 - Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
-- Final evidence refresh: `d0459d4d3cf552e389c1bebce11b96fe0930c9cc`.
+- Final evidence refresh follows this candidate update.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), and `a027640c` (evidence
   refresh). None changes Rust, SQL, generated contracts, or test behavior.
@@ -48,24 +48,25 @@ environment:
 
 ```text
 nix run .#ci
-source: a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d
-run id: run-1564803-1785945104353521495
-result: ok — 13 passed, 0 failed in 1937.35s
-structured EVM submission: ok in 1377.19s
+source: d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2
+run id: run-1587720-1785947457045693112
+result: ok — 13 passed, 0 failed in 1738.58s
+structured EVM submission: ok in 1229.82s
 ```
 
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
 replay corpus, workspace nextest, doctests, PostgreSQL SQLx checks,
 recoverability, wallet-nonce storage qualification, structured EVM submission,
 Bitcoin parity, and closing-source-revision. Focused evidence additionally
-records five portable replay tests, four flattened recursive closure tests,
+records five portable replay tests, four flattened recursive closure tests, two
+portable source/fact-route bound regressions,
 exact frame/total byte limits and one-over denials, root target/tenant trust
 tamper denials, and online/offline projection byte equality. The managed
 PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
-This final run started after `a7ef6b636` and no commits were made during it, so
+This final run started after `d67a3bc3` and no commits were made during it, so
 the source hash and closing-source-revision observation agree. The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the final gate.
@@ -84,12 +85,14 @@ baseline negative behavior.
 | `portable::tests::exact_total_limit_succeeds_and_one_byte_over_fails` | pass | N/A; introduced after baseline |
 | `portable::tests::golden_frame_stream_rejects_omission_extra_substitution_reordering_and_stale_head` | pass | N/A; introduced after baseline |
 | `portable::tests::production_store_export_folds_offline_and_preserves_projection_bytes` | pass | N/A; introduced after baseline |
+| `structured::fold::source_bound_tests::distinct_source_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::fact_route_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::multi_hop_shared_and_deterministic` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::cyclic_source_graph_is_rejected` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::over_budget_source_graph_is_rejected` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::flattened_multi_hop_source_closure_is_accepted` | pass | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
-| configuration same-token conflict/race regressions | pass in composed gate | N/A; added after baseline |
+| `configured_value_history_linearizes_same_stream_append_races` | pass in composed gate | N/A; added after baseline |
 
 The matrix records the focused names rather than collapsing them into category
 counts; the baseline had no equivalent source-level tests to run.
