@@ -79,6 +79,8 @@ Post-step-12 implementation and proof revisions:
 | `6d4f48933` | complete configuration ambiguity recovery |
 | `4e11e3550` | strengthen configuration ambiguity regression |
 | `5711097b` | expand generated portable replay corpus |
+| `74bfa335` | add generated offline replay acceptance vector |
+| `6284e8d9` | expand generated portable graph corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -87,9 +89,13 @@ bounded-source review refresh, `8803a585` evidence pin, `ebc4f8a81`,
 `7530a447`, and `f8568ff26` are documentation-only commits. `5711097b` is a
 post-step-12 corpus/test-only revision: it adds deterministic generator
 resealing helpers, generated portable vectors, the replay corpus assertion, and
-evidence prose, without changing production replay/runtime behavior. The
-corrected source gate below starts after the revisions through `5711097b`; this
-evidence refresh is documentation-only after that gate.
+evidence prose, without changing production replay/runtime behavior. `74bfa335`
+adds a generated offline-fold acceptance vector derived from the production
+zero-state export, and `6284e8d9` adds production-shaped semantic/audit cutoff
+vectors plus shared-DAG and cycle graph vectors that exercise the real source
+closure expander. These revisions remain corpus/test-only and do not change
+production replay/runtime behavior. The corrected source gate below starts
+after `6284e8d9`; this evidence refresh is documentation-only after that gate.
 
 ## Independent review checkpoints
 
@@ -100,7 +106,7 @@ evidence refresh is documentation-only after that gate.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `5711097baaac0d2f879f0f700828e19e501ff771` | independent review completed on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
+| Current implementation candidate | `6284e8d926e2ff866eae94c714420050cfe29643` | independent implementation and post-gate evidence review completed on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -115,7 +121,7 @@ commit does not alter the gated source tree.
 | formatting | pass (`nix develop -c cargo fmt --all -- --check`) |
 | workspace Clippy | pass (`-D warnings`) |
 | metadata and SQLx offline | pass |
-| portable replay leaf | pass; `mfm-replay` unit corpus 8/8, including generated artifact vectors |
+| portable replay leaf | pass; `mfm-replay` unit corpus 9/9, including generated artifact and nested source-graph vectors |
 | workspace nextest and doctests | pass |
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
@@ -128,16 +134,27 @@ Current exact composed gate:
 
 ```text
 nix run .#ci
-source: 5711097baaac0d2f879f0f700828e19e501ff771
-run id: run-1818387-1785962312532176668
-result: ok — 13 passed, 0 failed in 2092.41s
-structured EVM submission: ok in 1377.44s
+source: 6284e8d926e2ff866eae94c714420050cfe29643
+run id: run-1862293-1785966011921687322
+result: ok — 13 passed, 0 failed in 1938.53s
+structured EVM submission: ok in 1259.57s
 ```
 
 The run also observed the PostgreSQL recoverability leaf and wallet-nonce
 qualification as passing, plus Bitcoin parity and closing-source-revision.
-The closing-source-revision leaf observed the pinned `5711097b` source; the
+The closing-source-revision leaf observed the pinned `6284e8d9` source; the
 evidence refresh after the run is documentation-only.
+The portable leaf consumed the tracked generated corpus and passed 9/9 replay
+tests; deterministic regeneration was checked separately with
+`python3 contracts/recoverability/generate.py`, retaining corpus metadata of
+1,115,887 bytes, SHA-256
+`aaed5cbea0feb3650d8e3d912f6b8f3f688230427619185defe77adb12ac9b80`, 15
+artifact vectors, and two source-graph vectors.
+The final independent checkpoint reviewed the exact run summary and closing
+source leaf: all 13 nodes succeeded, workspace nextest reported 590 passed and
+1 skipped, and the closing leaf printed the full candidate hash above. It also
+confirmed that generator determinism is separate evidence rather than a
+hidden step inside the portable corpus leaf.
 
 Earlier exact composed gate (historical; d67 implementation):
 
@@ -169,16 +186,18 @@ ownership predicate for those wrappers; it does not change SQL text or query
 semantics. `6d4f48933` extends the bounded read classification to application
 configuration resolution and reconnects ambiguous appends through an identical
 canonical retry. `4e11e3550` strengthens the durable-row/unknown-acknowledgement
-regression and asserts one retained row. `5711097b` adds the generated
-portable corpus and replay assertion; the final run above exercises that
-reviewed source.
+regression and asserts one retained row. `5711097b`, `74bfa335`, and
+`6284e8d9` add the generated portable corpus, an offline-fold acceptance
+vector, production-shaped cutoff vectors, and nested source-graph vectors; the
+final run above exercises that reviewed source.
 
 Additional focused evidence on the current implementation sequence includes
-six bounded recursive source-closure tests, eight portable replay tests, two
+six bounded recursive source-closure tests, nine portable replay tests, two
 portable source/fact-route bound regressions, exact frame and total-byte
 limit/one-over checks, root target/tenant trust tamper denials, serialized
-recursive-prefix tamper cases, the generated twelve-vector portable artifact
-corpus, application root/dependency zero-byte denials, and online/offline
+recursive-prefix tamper cases, the generated 15-vector portable artifact
+corpus and two nested source-graph vectors, application root/dependency
+zero-byte denials, and online/offline
 projection byte parity. The managed PostgreSQL recursive parity fixture passed
 17/17 on the corresponding current storage sequence, and the composed gate
 passed the configured-value same-stream append race after the checkpoint
@@ -186,7 +205,7 @@ predecessor and retry fixes. The focused store suite now passes 33/33,
 including bounded configuration-reader retry and identical-append ambiguity
 recovery regressions. The historical composed gate includes the source-bound
 fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
-`5711097b`.
+`6284e8d9`.
 
 ## TT2 disposition at the current candidate
 
@@ -218,9 +237,9 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
 | REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
-| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; generated semantic/audit suffix vectors pass, but no real production later-audit artifact fixture exists yet. |
+| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; synthesized semantic/audit suffix vectors pass strict reject/accept behavior, but no genuinely valid production later-audit artifact fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
-| REPLAY-05 | Conditional | Generated schema vectors plus a generated twelve-vector portable artifact corpus and no-service replay/fold leaves pass; a real later-suffix artifact remains. |
+| REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | Protected key movement and zeroization checks exist; same-allocation lifetime is not established by Rust move semantics. |
@@ -252,10 +271,12 @@ keystore lanes remain part of the composed gate.
 
 The following are the concrete blockers to an unconditional §13 PASS:
 
-1. add a real semantic export with a later audit suffix, true cyclic/shared
-   dependency traversal vectors over nested source edges, a generated
-   offline-fold acceptance vector, and a live application multi-hop export
-   integration;
+1. add a genuinely valid production semantic export with a later audit suffix
+   that can be folded offline, and a live application multi-hop export
+   integration. The current generated suffix vectors prove strict semantic/audit
+   cutoff behavior on synthesized envelopes; the generated shared-DAG and cycle
+   vectors prove the source-closure algorithm, but neither substitutes for that
+   real later-history artifact or live application fixture;
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;
