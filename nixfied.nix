@@ -355,6 +355,17 @@ in
         "--doc"
       ];
     };
+    portable-replay-corpus = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-replay"
+        "--lib"
+        "--"
+        "--nocapture"
+      ];
+    };
     postgres-sqlx-check = cargoLeaf {
       tools = sqlxTools;
       run = [
@@ -535,6 +546,7 @@ in
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
+        "portable-replay-corpus"
         "nextest-run"
         "doc-tests"
       ];
