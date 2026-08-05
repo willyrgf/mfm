@@ -74,9 +74,10 @@ Post-step-12 implementation and proof revisions:
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
-later `42c80525` whitespace cleanup and `a027640c` evidence refresh are
+later `42c80525` whitespace cleanup, `a027640c` review refresh, `d0459d4d`
+bounded-source review refresh, and `8803a585` evidence pin are all
 documentation-only commits. The corrected-source gate below starts after all
-three and is pinned to `d67a3bc3a`.
+five and is pinned to `d67a3bc3a`.
 
 ## Independent review checkpoints
 

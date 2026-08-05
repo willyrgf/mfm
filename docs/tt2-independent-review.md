@@ -31,8 +31,9 @@ closed implementation work and the remaining proof/deployment gaps.
 - Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
 - Final evidence refresh: `ebc4f8a81bf3178b8928a14655bed0412a269934`.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
-  (wording), `42c80525` (whitespace cleanup), and `a027640c` (evidence
-  refresh). None changes Rust, SQL, generated contracts, or test behavior.
+  (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
+  `d0459d4d` (bounded-source review refresh), and `8803a585` (evidence pin).
+  None changes Rust, SQL, generated contracts, or test behavior.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
