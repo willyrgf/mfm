@@ -1606,6 +1606,7 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
 async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let database = TestDatabase::create().await;
     let postgres_fixture = qualified_fact_scan_fixture();
+    let producer_operation = postgres_fixture.producer_operation.clone();
     let consumer_operation = postgres_fixture.consumer_operation.clone();
     let offline_program_verifier = Arc::new(RegistryProgramVerifier::new(
         postgres_fixture.registry.admission_verification_registry(),
@@ -1643,10 +1644,22 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         &consumer_operation,
         &InvocationIdentity::new("00000000-0000-4000-8000-000000000081").expect("consumer inv"),
     );
+    let producer_run = derive_run_id(
+        &postgres_identity.store_scope_id,
+        &default_tenant(),
+        &producer_operation,
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000080").expect("producer inv"),
+    );
+    let producer_export = postgres_reader
+        .load_for_export(&producer_run)
+        .await
+        .expect("load recursively authorized producer export");
     let consumer_export = postgres_reader
         .load_for_export(&portable_consumer_run)
         .await
-        .expect("load recursively authorized consumer export");
+        .expect("load recursively authorized consumer export")
+        .with_authorized_sources(vec![producer_export])
+        .expect("seal recursively authorized consumer sources");
     let portable = PortableRunExport::from_export_evidence(&consumer_export, ExportKind::Semantic)
         .expect("encode recursively authorized portable export");
     assert_eq!(portable.source_run_count(), 1);
