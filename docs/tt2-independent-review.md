@@ -3,11 +3,10 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`b3dfd83777b4b1f54b349c5ac07d105dbd757cab`. Focused checks for that candidate
-pass; its exact composed source gate is pending. The plan requires a PASS only
-when every Blocker/High requirement has its focused proof. The review therefore
-records both the closed implementation work and the remaining proof/deployment
-gaps.
+`f99e3a84ced87246d19a93a4a19a1ab300d5e398`. Focused checks and its exact
+composed source gate pass. The plan requires a PASS only when every
+Blocker/High requirement has its focused proof. The review therefore records
+both the closed implementation work and the remaining proof/deployment gaps.
 
 ## Material uncertainties
 
@@ -32,14 +31,19 @@ gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `b3dfd83777b4b1f54b349c5ac07d105dbd757cab`
-- Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
+- Implementation candidate: `f99e3a84ced87246d19a93a4a19a1ab300d5e398`
+- Prior implementation/evidence tip: `b3dfd83777b4b1f54b349c5ac07d105dbd757cab`.
 - Final evidence refresh: this document's next evidence commit; the candidate
   review was performed against the exact hash above.
+- Implementation revisions after the prior candidate: `e68aca910` (idempotent
+  configuration checkpoint predecessor classification), `fcd56ab09` (bounded
+  transient checkpoint-read retries), and `f99e3a84c` (SQL inventory ownership
+  for the retry wrappers).
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
-  `d0459d4d` (bounded-source review refresh), and `8803a585` (evidence pin).
-  None changes Rust, SQL, generated contracts, or test behavior.
+  `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
+  `ebc4f8a81`, `7530a4479`, and `f8568ff26`. None changes Rust, SQL, generated
+  contracts, or test behavior.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -61,6 +65,21 @@ result: ok — 13 passed, 0 failed in 1738.58s
 structured EVM submission: ok in 1229.82s
 ```
 
+The current exact composed gate ran on the reviewed implementation candidate:
+
+```text
+nix run .#ci
+source: f99e3a84ced87246d19a93a4a19a1ab300d5e398
+run id: run-1733167-1785954807662948771
+result: ok — 13 passed, 0 failed in 1933.45s
+structured EVM submission: ok in 1416.48s
+```
+
+The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
+parity, and closing-source-revision leaves. It was run without separate
+composed check/test/test-db gates immediately beforehand. The evidence-only
+refresh after the run does not alter this source tree.
+
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
 replay corpus, workspace nextest, doctests, PostgreSQL SQLx checks,
 recoverability, wallet-nonce storage qualification, structured EVM submission,
@@ -75,9 +94,18 @@ check/test/test-db runs.
 
 That historical run started after `d67a3bc3` and no commits were made during
 it, so its source hash and closing-source-revision observation agree. The
-current candidate's exact `.#ci` gate is still pending. The earlier
+current run above is the source gate for `f99e3a84c`. The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the current gate.
+
+The diagnostic gate sequence is retained for provenance: a same-stream
+configuration race exposed a mismatch between a canonical-revision checkpoint
+head and a domain content-reference digest; `e68aca910` classifies the
+predecessor with the checkpoint's canonical digest. A follow-on transient
+commit-before-external-ack read window exposed `InvalidHistory`; `fcd56ab09`
+adds bounded retries only for that read classification and preserves the final
+error for persistent mismatches. `f99e3a84c` updates the static SQL ownership
+predicate for the wrapper without changing SQL text or query behavior.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
@@ -169,6 +197,13 @@ first distinct producer beyond `MAX_PORTABLE_SOURCE_RUNS`, and route collection
 rejects the first fact route beyond `MAX_PORTABLE_FACT_ROUTES`, so neither
 source discovery nor route materialization grows past its named bound.
 
+The PostgreSQL append path now compares idempotent configuration predecessors
+using the same canonical-revision digest as the external checkpoint, while
+checkpoint reads retry only the bounded, classified commit-before-ack
+`InvalidHistory` window. Persistent mismatches and all other errors remain
+fail-closed. The SQL inventory review covers the wrapper's direct queries
+without changing their text or ownership semantics.
+
 ## PostgreSQL and EVM matrix status
 
 - PostgreSQL role, snapshot, checkpoint, configured-value race, retry, and
@@ -226,9 +261,10 @@ as a quality residual rather than hidden as a simplification win.
 ## Final verdict
 
 The current implementation is materially stronger and all focused checks are
-green. The prior exact source gate is green, but the exact gate for this
-candidate is still pending and the strict plan acceptance condition is not
-met. The review remains **CONDITIONAL / INCOMPLETE** until the residual proof
-matrices, expanded portable artifact corpus and live app integration,
-production trust deployment, and allocation/ownership evidence are supplied or
-the normative plan is deliberately amended.
+The current implementation is materially stronger, all focused checks are
+green, and the exact composed gate for `f99e3a84c` is green. The strict plan
+acceptance condition is not met. The review remains **CONDITIONAL /
+INCOMPLETE** until the residual proof matrices, expanded portable artifact
+corpus and live app integration, production trust deployment, and
+allocation/ownership evidence are supplied or the normative plan is deliberately
+amended.
