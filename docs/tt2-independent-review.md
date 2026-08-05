@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`5711097baaac0d2f879f0f700828e19e501ff771`. Focused checks and its exact
+`6284e8d926e2ff866eae94c714420050cfe29643`. Focused checks and its exact
 composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -25,13 +25,16 @@ both the closed implementation work and the remaining proof/deployment gaps.
   retains an authenticated principal/fixed export grant/decision reference per
   selected prefix, and fails before reader access on denied root/dependency
   decisions; the production integration proof is still absent.
+- The generated suffix vectors prove strict semantic-cutoff rejection and
+  audit-cutoff acceptance, but their later envelope is synthesized from cloned
+  root records and is not a valid foldable later production history.
 - The decision references are intentionally opaque content-addressed policy
   evidence. Offline replay binds the exact closure digest through its explicit
   trust snapshot and does not resolve policy live.
 
 ## Candidate and review scope
 
-- Implementation candidate: `5711097baaac0d2f879f0f700828e19e501ff771`
+- Implementation candidate: `6284e8d926e2ff866eae94c714420050cfe29643`
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this document's next evidence commit; the candidate
   review was performed against the exact hash above.
@@ -43,15 +46,17 @@ both the closed implementation work and the remaining proof/deployment gaps.
   reader retry and identical append ambiguity recovery, with focused tests and
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
-- Current post-gate corpus/test-only revision: `5711097b` (deterministic
-  portable-vector generation, generated corpus/README, replay corpus assertion,
-  and evidence prose; no production replay/runtime behavior).
+- Current post-gate corpus/test-only revisions: `5711097b` (deterministic
+  portable-vector generation, generated corpus/README, replay corpus assertion),
+  `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
+  (production-shaped suffix and nested source-graph vectors); none changes
+  production replay/runtime behavior.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
   `ebc4f8a81`, `7530a4479`, and `f8568ff26`. None changes Rust, SQL, generated
   contracts, or test behavior. The current evidence refresh follows the
-  `5711097b` gate and is documentation-only.
+  `6284e8d9` gate and is documentation-only.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -97,23 +102,35 @@ The current exact composed gate ran on the reviewed implementation candidate:
 
 ```text
 nix run .#ci
-source: 5711097baaac0d2f879f0f700828e19e501ff771
-run id: run-1818387-1785962312532176668
-result: ok — 13 passed, 0 failed in 2092.41s
-structured EVM submission: ok in 1377.44s
+source: 6284e8d926e2ff866eae94c714420050cfe29643
+run id: run-1862293-1785966011921687322
+result: ok — 13 passed, 0 failed in 1938.53s
+structured EVM submission: ok in 1259.57s
 ```
 
 The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
 parity, and closing-source-revision leaves. It was run without separate
 composed check/test/test-db gates immediately beforehand. The closing-source-
-revision leaf observed the pinned `5711097b` source; the evidence-only refresh
+revision leaf observed the pinned `6284e8d9` source; the evidence-only refresh
 after the run does not alter that implementation source.
+The portable leaf consumed the tracked generated corpus and passed 9/9 replay
+tests; deterministic regeneration was checked separately with
+`python3 contracts/recoverability/generate.py`. The corpus metadata is
+1,115,887 bytes, SHA-256
+`aaed5cbea0feb3650d8e3d912f6b8f3f688230427619185defe77adb12ac9b80`, 15
+artifact vectors, and two source-graph vectors.
+
+The final independent checkpoint reviewed the exact run summary and closing
+source leaf: all 13 nodes succeeded, workspace nextest reported 590 passed and
+1 skipped, and the closing leaf printed the full candidate hash above. The
+review also confirms that the gate consumes tracked corpus bytes; generator
+determinism is separate evidence, not a hidden gate step.
 
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
 replay corpus, workspace nextest, doctests, PostgreSQL SQLx checks,
 recoverability, wallet-nonce storage qualification, structured EVM submission,
 Bitcoin parity, and closing-source-revision. Focused evidence additionally
-records eight portable replay tests, four flattened recursive closure tests, two
+records nine portable replay tests, four flattened recursive closure tests, two
 portable source/fact-route bound regressions,
 exact frame/total byte limits and one-over denials, root target/tenant trust
 tamper denials, and online/offline projection byte equality. The managed
@@ -121,10 +138,10 @@ PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
-That historical run started after `d67a3bc3` and no commits were made during
+That current run started after `6284e8d9` and no commits were made during
 it, so its source hash and closing-source-revision observation agree. The
-current run above is the source gate for `5711097b`; the post-gate revision
-only adds corpus/test evidence and does not alter production runtime behavior.
+current run above is the source gate for `6284e8d9`; the post-gate revision
+only adds evidence prose and does not alter production runtime behavior.
 The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the current gate.
@@ -141,8 +158,9 @@ predicate for the wrapper without changing SQL text or query behavior.
 configuration resolution and retries an ambiguous append only with identical
 canonical bytes through the qualified backend. `4e11e3550` strengthens the
 durable-row/unknown-acknowledgement fake and verifies that recovery retains one
-row. `5711097b` adds the generated portable corpus and replay assertion; the
-current exact gate exercises that reviewed source.
+row. `5711097b`, `74bfa335`, and `6284e8d9` add the generated portable corpus,
+offline-fold acceptance, production-shaped suffix, and nested source-graph
+vectors; the current exact gate exercises that reviewed source.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
@@ -164,6 +182,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `portable::tests::serialized_authorization_decision_tampering_is_rejected` | pass | N/A; introduced after baseline |
 | `portable::tests::serialized_recursive_prefix_tampering_is_rejected` | pass | N/A; introduced after baseline |
 | `portable::tests::generated_portable_artifact_corpus_round_trips` | pass | N/A; introduced after baseline |
+| `portable::tests::generated_nested_source_graph_vectors_exercise_expander` | pass | N/A; introduced after baseline |
 | `portable::tests::production_store_export_folds_offline_and_preserves_projection_bytes` | pass | N/A; introduced after baseline |
 | `structured::fold::source_bound_tests::distinct_source_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::fact_route_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
@@ -208,9 +227,9 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
-| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; generated semantic/audit suffix vectors pass, but no real later-audit-suffix artifact fixture is retained. |
+| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
-| TT2-REPLAY-05 | Conditional | Generated schema vectors and a twelve-vector portable artifact corpus plus no-service replay/fold leaves pass; a real later-suffix artifact remains. |
+| TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | Protected key handoff/zeroization paths are present; Rust moves do not prove one stable allocation. |
@@ -275,18 +294,20 @@ Implemented and passing:
   and graph-validation layers;
 - principal/grant/decision retention and strict authorization-decision tamper
   rejection; and
-- a generated twelve-vector portable artifact corpus (recursive accept,
-  omitted/extra/reordered/substituted source negatives, semantic/audit suffix
-  handling, false frontier/publication negatives, source identity/fixation
-  collisions, and an over-budget source-count negative) with no-service replay.
+- a generated 15-vector portable artifact corpus (recursive accept,
+  offline-fold acceptance, omitted/extra/reordered/substituted source negatives,
+  semantic/audit suffix handling, false frontier/publication negatives, source
+  identity/fixation collisions, and an over-budget source-count negative) with
+  no-service replay; and
+- generated shared-DAG acceptance and nested-cycle rejection vectors that
+  exercise the actual source-closure expander.
 
 Still required by the plan:
 
-- a generated offline-fold acceptance vector (the current corpus carries a
-  rejection vector, while the production fixture covers acceptance);
-- true cyclic/shared dependency traversal vectors over nested source edges
-  (the current identity-collision vectors do not contain nested edges);
-- a real semantic artifact with a later audit suffix and its audit counterpart;
+- a genuinely valid semantic artifact with a later audit suffix and its audit
+  counterpart that can be folded offline. The current suffix vectors prove
+  strict semantic/audit cutoff behavior on synthesized envelopes, not a valid
+  later production history;
 - live production application multi-hop export and zero-byte denied-dependency
   integration assertion; and
 - concrete production retained-release/checkpoint trust implementations.
@@ -310,9 +331,9 @@ as a quality residual rather than hidden as a simplification win.
 ## Final verdict
 
 The current implementation is materially stronger, all focused checks are
-green, and the exact composed gate for `5711097b` is green. The strict plan
+green, and the exact composed gate for `6284e8d9` is green. The strict plan
 acceptance condition is not met. The review remains **CONDITIONAL /
-INCOMPLETE** until the residual proof matrices, expanded portable artifact
-corpus and live app integration, production trust deployment, and
+INCOMPLETE** until the residual proof matrices, a valid later-history portable
+artifact and live app integration, production trust deployment, and
 allocation/ownership evidence are supplied or the normative plan is deliberately
 amended.
