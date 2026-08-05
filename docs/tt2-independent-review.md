@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`3c7525a61da4ba3238398c1a5a1cc2a940dd99ff`. The composed source gate for that
+`a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d`. The composed source gate for that
 candidate passed, but the plan requires a PASS only when every Blocker/High
 requirement has its focused proof. The review therefore records both the
 closed implementation work and the remaining proof/deployment gaps.
@@ -27,10 +27,11 @@ closed implementation work and the remaining proof/deployment gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `3c7525a61da4ba3238398c1a5a1cc2a940dd99ff`
-- Current worktree additionally contains `ef3e412d5111c88c43c4ce59a2c80cd172550bb1`,
-  a prose-only `docs/code-quality.md` wording change committed while the gate
-  was running; it changes no Rust, SQL, generated contract, or test behavior.
+- Implementation candidate: `a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d`
+- Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
+- Documentation-only provenance after the earlier candidate: `ef3e412d5`
+  (wording), `42c80525` (whitespace cleanup), and `a027640c` (evidence
+  refresh). None changes Rust, SQL, generated contracts, or test behavior.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -46,9 +47,10 @@ environment:
 
 ```text
 nix run .#ci
-run id: run-1538729-1785942335027178292
-result: ok — 13 passed, 0 failed in 2072.95s
-structured EVM submission: ok in 1495.20s
+source: a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d
+run id: run-1564803-1785945104353521495
+result: ok — 13 passed, 0 failed in 1937.35s
+structured EVM submission: ok in 1377.19s
 ```
 
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
@@ -62,10 +64,34 @@ PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
+This final run started after `a7ef6b636` and no commits were made during it, so
+the source hash and closing-source-revision observation agree. The earlier
+`run-1538729` began before the unrelated `ef3e412d5` documentation commit and
+is retained only as historical evidence, not as the final gate.
+
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
 applicable* rather than inferred. Existing API rejection tests preserve the
 baseline negative behavior.
+
+### Named focused regression matrix
+
+| Regression | Current result | Against `a4dada89` |
+| --- | --- | --- |
+| `portable::tests::oversized_and_monolithic_documents_fail_before_full_decode` | pass | N/A; introduced after baseline |
+| `portable::tests::exact_frame_limit_succeeds_and_one_byte_over_fails` | pass | N/A; introduced after baseline |
+| `portable::tests::exact_total_limit_succeeds_and_one_byte_over_fails` | pass | N/A; introduced after baseline |
+| `portable::tests::golden_frame_stream_rejects_omission_extra_substitution_reordering_and_stale_head` | pass | N/A; introduced after baseline |
+| `portable::tests::production_store_export_folds_offline_and_preserves_projection_bytes` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::multi_hop_shared_and_deterministic` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::cyclic_source_graph_is_rejected` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::over_budget_source_graph_is_rejected` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::flattened_multi_hop_source_closure_is_accepted` | pass | N/A; introduced after baseline |
+| `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
+| configuration same-token conflict/race regressions | pass in composed gate | N/A; added after baseline |
+
+The matrix records the focused names rather than collapsing them into category
+counts; the baseline had no equivalent source-level tests to run.
 
 ## TT2 item-by-item disposition
 
@@ -119,8 +145,11 @@ The recent flattened-source change is intentionally subset-based: a complete
 flattened recursive list may contain the root's direct sources, while graph
 validation still rejects omissions, substitutions, disconnected extras, cycles,
 root edges, and metadata mismatches. `ExportFragment::from_verified` now calls
-the bounded `direct_source_run_ids` path before materializing source IDs, closing
-the uncapped discovery allocation.
+the bounded `direct_source_run_ids` path before materializing source IDs. The
+fold rejects the first distinct producer beyond `MAX_PORTABLE_SOURCE_RUNS`, and
+route collection rejects the first fact route beyond `MAX_PORTABLE_FACT_ROUTES`,
+so neither source discovery nor route materialization grows past its named
+bound.
 
 ## PostgreSQL and EVM matrix status
 
