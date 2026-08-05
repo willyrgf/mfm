@@ -70,12 +70,13 @@ Post-step-12 implementation and proof revisions:
 | `076a50c1d` | complete portable replay bound and trust proofs |
 | `3c7525a61` | bound export source discovery |
 | `a7ef6b636` | bound portable source and fact route discovery |
+| `d67a3bc3a` | add portable source bound regressions |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
 later `42c80525` whitespace cleanup and `a027640c` evidence refresh are
 documentation-only commits. The corrected-source gate below starts after all
-three and is pinned to `a7ef6b636`.
+three and is pinned to `d67a3bc3a`.
 
 ## Independent review checkpoints
 
@@ -86,7 +87,7 @@ three and is pinned to `a7ef6b636`.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4`; final evidence `d0459d4d3cf552e389c1bebce11b96fe0930c9cc` | CONDITIONAL; residuals below |
+| Current implementation candidate | `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4`; final evidence refresh follows | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -112,21 +113,22 @@ Exact composed gate:
 
 ```text
 nix run .#ci
-source: a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d
-run id: run-1564803-1785945104353521495
-result: ok — 13 passed, 0 failed in 1937.35s
-structured EVM submission: ok in 1377.19s
+source: d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2
+run id: run-1587720-1785947457045693112
+result: ok — 13 passed, 0 failed in 1738.58s
+structured EVM submission: ok in 1229.82s
 ```
 
 Additional focused evidence on the current implementation sequence includes
-four flattened recursive source-closure tests, five portable replay tests,
+four flattened recursive source-closure tests, five portable replay tests, two
+portable source/fact-route bound regressions,
 exact frame and total-byte limit/one-over checks, root target/tenant trust
 tamper denials, and online/offline projection byte parity. The managed
 PostgreSQL recursive parity fixture passed 17/17 on the corresponding current
 storage sequence. The final composed gate includes the source-bound fix in
-`a7ef6b636`; its closing-source-revision leaf observed the post-cleanup tree,
+`d67a3bc3`; its closing-source-revision leaf observed the post-cleanup tree,
 while the run's source implementation pin is the exact hash above. The run
-started after `a7ef6b636` and no commits were made during it, so the source pin
+started after `d67a3bc3` and no commits were made during it, so the source pin
 and closing leaf agree for this final gate.
 
 ## TT2 disposition at the current candidate
