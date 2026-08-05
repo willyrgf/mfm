@@ -2118,6 +2118,21 @@ impl CompletedWalletNonce {
         Ok(self)
     }
 
+    /// Returns the exact completion value that was sent to the provider before
+    /// its returned attestation was attached to the durable closure.
+    ///
+    /// The result is a transient verification preimage. It is intentionally
+    /// incomplete and must not be persisted or returned as a completion.
+    #[doc(hidden)]
+    pub fn provider_mutation_preimage(&self) -> Result<Self, WalletAuthorityContractError> {
+        let mut preimage = self.clone();
+        let mut closure = decode_completed_recovery(&self.recovery_closure)?;
+        closure.provider_completion_attestation.clear();
+        preimage.recovery_closure = encode_completed_recovery(&closure)?;
+        preimage.provider_completion_attestation.clear();
+        Ok(preimage)
+    }
+
     /// Revalidates the complete public recovery closure against itself.
     pub fn validate(&self) -> Result<(), WalletAuthorityContractError> {
         self.nonce_domain.validate()?;

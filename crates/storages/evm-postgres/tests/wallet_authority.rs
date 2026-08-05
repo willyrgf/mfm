@@ -2890,6 +2890,34 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             ..
         }) if retained_completion == &successor_completion
     ));
+    let original_completion_provider_attestation = corrupt_completion_provider_attestation(
+        &mut admin_connection,
+        &schema,
+        successor_completion.semantic_completion_key.as_str(),
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &successor_status_request)
+            .await,
+        ReadAdapterCompletion::IntegrityFault(_)
+    ));
+    restore_completion_provider_attestation(
+        &mut admin_connection,
+        &schema,
+        successor_completion.semantic_completion_key.as_str(),
+        original_completion_provider_attestation,
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &successor_status_request)
+            .await,
+        ReadAdapterCompletion::Returned(WalletNonceStatus::Completed {
+            completion: ref retained_completion,
+            ..
+        }) if retained_completion == &successor_completion
+    ));
     let original_candidate_json = corrupt_candidate_prefix_semantically(
         &mut admin_connection,
         &schema,
@@ -2907,6 +2935,34 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         &schema,
         replacement_request.candidate_operation_key.as_str(),
         original_candidate_json,
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &status_request)
+            .await,
+        ReadAdapterCompletion::Returned(WalletNonceStatus::Completed {
+            completion: ref retained_completion,
+            ..
+        }) if retained_completion == &completion
+    ));
+    let original_candidate_provider_attestation = corrupt_candidate_provider_attestation(
+        &mut admin_connection,
+        &schema,
+        replacement_request.candidate_operation_key.as_str(),
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &status_request)
+            .await,
+        ReadAdapterCompletion::IntegrityFault(_)
+    ));
+    restore_candidate_provider_attestation(
+        &mut admin_connection,
+        &schema,
+        replacement_request.candidate_operation_key.as_str(),
+        original_candidate_provider_attestation,
     )
     .await;
     assert!(matches!(
@@ -4625,6 +4681,96 @@ async fn corrupt_candidate_prefix_semantically(
     (original_request_json, original_candidate_json)
 }
 
+async fn corrupt_candidate_provider_attestation(
+    connection: &mut PgConnection,
+    schema: &str,
+    candidate_operation_key: &str,
+) -> String {
+    let original_candidate_json = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "SELECT active_candidate_json FROM {schema}.wallet_nonce_candidates \
+         WHERE semantic_candidate_operation_key = $1"
+    )))
+    .bind(candidate_operation_key)
+    .fetch_one(&mut *connection)
+    .await
+    .expect("load candidate provider proof for corruption probe");
+    let mut candidate: serde_json::Value =
+        serde_json::from_str(&original_candidate_json).expect("active candidate JSON");
+    let mut proof: serde_json::Value = serde_json::from_str(
+        candidate["provider_activation_attestation"]
+            .as_str()
+            .expect("provider activation proof string"),
+    )
+    .expect("provider activation proof envelope");
+    proof["signature"] = "00".repeat(64).into();
+    candidate["provider_activation_attestation"] = serde_json::to_string(&proof)
+        .expect("canonical forged provider activation proof")
+        .into();
+    let forged_candidate_json =
+        serde_json::to_string(&candidate).expect("canonical forged active candidate JSON");
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates DISABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await
+    .expect("disable candidate trigger for provider proof probe");
+    let update = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_nonce_candidates \
+         SET active_candidate_json = $2 WHERE semantic_candidate_operation_key = $1"
+    )))
+    .bind(candidate_operation_key)
+    .bind(forged_candidate_json)
+    .execute(&mut *connection)
+    .await;
+    let reenable = sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates ENABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await;
+    reenable.expect("restore candidate trigger after provider proof probe");
+    assert_eq!(
+        update
+            .expect("inject forged provider activation proof")
+            .rows_affected(),
+        1
+    );
+    original_candidate_json
+}
+
+async fn restore_candidate_provider_attestation(
+    connection: &mut PgConnection,
+    schema: &str,
+    candidate_operation_key: &str,
+    original_candidate_json: String,
+) {
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates DISABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await
+    .expect("disable candidate trigger for provider proof restoration");
+    let update = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_nonce_candidates SET active_candidate_json = $2 \
+         WHERE semantic_candidate_operation_key = $1"
+    )))
+    .bind(candidate_operation_key)
+    .bind(original_candidate_json)
+    .execute(&mut *connection)
+    .await;
+    let reenable = sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates ENABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await;
+    reenable.expect("re-enable candidate trigger after provider proof restoration");
+    assert_eq!(
+        update
+            .expect("restore provider activation proof")
+            .rows_affected(),
+        1
+    );
+}
+
 async fn corrupt_completion_semantically(
     connection: &mut PgConnection,
     schema: &str,
@@ -4686,6 +4832,108 @@ async fn corrupt_completion_semantically(
         1
     );
     (original_request_json, original_completion_json)
+}
+
+async fn corrupt_completion_provider_attestation(
+    connection: &mut PgConnection,
+    schema: &str,
+    completion_key: &str,
+) -> String {
+    let original_completion_json = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "SELECT completion_json FROM {schema}.wallet_nonce_completions \
+         WHERE semantic_completion_key = $1"
+    )))
+    .bind(completion_key)
+    .fetch_one(&mut *connection)
+    .await
+    .expect("load completion provider proof for corruption probe");
+    let mut completion: serde_json::Value =
+        serde_json::from_str(&original_completion_json).expect("completion JSON");
+    let forged_proof = forge_provider_proof(
+        completion["provider_completion_attestation"]
+            .as_str()
+            .expect("provider completion proof string"),
+    );
+    completion["provider_completion_attestation"] = forged_proof.clone().into();
+    let mut closure: serde_json::Value = serde_json::from_str(
+        completion["recovery_closure"]
+            .as_str()
+            .expect("completion recovery closure"),
+    )
+    .expect("completion recovery closure JSON");
+    closure["provider_completion_attestation"] = forged_proof.into();
+    completion["recovery_closure"] = serde_json::to_string(&closure)
+        .expect("canonical forged completion recovery closure")
+        .into();
+    let forged_completion_json =
+        serde_json::to_string(&completion).expect("canonical forged completion JSON");
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_completions DISABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await
+    .expect("disable completion trigger for provider proof probe");
+    let update = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_nonce_completions SET completion_json = $2 \
+         WHERE semantic_completion_key = $1"
+    )))
+    .bind(completion_key)
+    .bind(forged_completion_json)
+    .execute(&mut *connection)
+    .await;
+    let reenable = sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_completions ENABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await;
+    reenable.expect("restore completion trigger after provider proof probe");
+    assert_eq!(
+        update
+            .expect("inject forged provider completion proof")
+            .rows_affected(),
+        1
+    );
+    original_completion_json
+}
+
+fn forge_provider_proof(value: &str) -> String {
+    let mut proof: serde_json::Value = serde_json::from_str(value).expect("provider proof JSON");
+    proof["signature"] = "00".repeat(64).into();
+    serde_json::to_string(&proof).expect("canonical forged provider proof")
+}
+
+async fn restore_completion_provider_attestation(
+    connection: &mut PgConnection,
+    schema: &str,
+    completion_key: &str,
+    original_completion_json: String,
+) {
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_completions DISABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await
+    .expect("disable completion trigger for provider proof restoration");
+    let update = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_nonce_completions SET completion_json = $2 \
+         WHERE semantic_completion_key = $1"
+    )))
+    .bind(completion_key)
+    .bind(original_completion_json)
+    .execute(&mut *connection)
+    .await;
+    let reenable = sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_completions ENABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await;
+    reenable.expect("re-enable completion trigger after provider proof restoration");
+    assert_eq!(
+        update
+            .expect("restore provider completion proof")
+            .rows_affected(),
+        1
+    );
 }
 
 async fn restore_candidate_prefix_semantically(

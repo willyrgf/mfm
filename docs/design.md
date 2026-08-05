@@ -427,9 +427,11 @@ must bind the access kind and retained physical certificate (and the exact state
 stateful adapters) before entering its provider. An ordinary public Effect adapter call returns an
 integrity fault. Wallet completion records retain a bounded canonical recovery closure so schema
 validation remains within the generated frame budget while preserving rehashable public evidence.
-Wallet activation and completion closures also retain the verified provider-issued mutation
-attestation returned for the exact prepared mutation; reload rejects any candidate or terminal
-closure whose provider evidence is absent, substituted, or inconsistent with its recovery preimage.
+Wallet activation and completion closures also retain the provider-issued mutation attestation
+returned for the exact prepared mutation. The retained envelope carries the signed provider
+challenge, target context, operation key, canonical payload digest, and signature; reload verifies
+that envelope against the exact recovery preimage and accepts historical writer epochs only within
+the current store lineage, so promotion does not invalidate already committed closures.
 
 ## Application and transport surface
 

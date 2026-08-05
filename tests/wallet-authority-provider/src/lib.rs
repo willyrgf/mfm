@@ -2309,6 +2309,17 @@ struct ProviderTargetContext {
     store_incarnation: WalletNonceStoreIncarnation,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedMutationProof {
+    provider_id: String,
+    challenge: String,
+    context: ProviderTargetContext,
+    operation_key: String,
+    payload_digest: String,
+    signature: String,
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ProviderRequest {
@@ -3236,9 +3247,16 @@ async fn handle_write(
                         "prepare-mutation",
                         &(&context, &operation_key, &mutation),
                     )?;
-                    let checkpoint_mutation = checkpoint_mutation_with_provider_attestation(
+                    let provider_attestation = channel.persisted_mutation_attestation(
+                        &state.provider_id,
+                        &context,
+                        &operation_key,
                         mutation.as_ref(),
                         &signature,
+                    )?;
+                    let checkpoint_mutation = checkpoint_mutation_with_provider_attestation(
+                        mutation.as_ref(),
+                        &provider_attestation,
                     )?;
                     let prepared = match state.prepare_checkpoint(&checkpoint_mutation, None).await
                     {
@@ -3250,7 +3268,7 @@ async fn handle_write(
                     };
                     if channel
                         .send(&ProviderReply::MutationPrepared {
-                            provider_attestation: signature,
+                            provider_attestation,
                         })
                         .await
                         .is_err()
@@ -4525,6 +4543,34 @@ impl ServerChannel {
         signed.extend_from_slice(kind.as_bytes());
         signed.extend_from_slice(digest.as_str().as_bytes());
         Ok(hex::encode(self.key_pair.sign(&signed).as_ref()))
+    }
+
+    fn persisted_mutation_attestation(
+        &self,
+        provider_id: &str,
+        context: &ProviderTargetContext,
+        operation_key: &str,
+        mutation: &ProviderMutation,
+        signature: &str,
+    ) -> Result<String, ProviderTestError> {
+        let payload_digest = mfm_journal::structured::domain_content_digest(
+            "mfm.wallet-authority-provider.assertion-payload.v1",
+            &(context, operation_key, mutation),
+        )
+        .map_err(|_| ProviderTestError::Invalid)?;
+        let proof = PersistedMutationProof {
+            provider_id: provider_id.to_owned(),
+            challenge: hex::encode(self.authentication_challenge),
+            context: context.clone(),
+            operation_key: operation_key.to_owned(),
+            payload_digest: payload_digest.as_str().to_owned(),
+            signature: signature.to_owned(),
+        };
+        let encoded = serde_json::to_string(&proof).map_err(|_| ProviderTestError::Invalid)?;
+        if encoded.len() > 4_096 || !encoded.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(ProviderTestError::Invalid);
+        }
+        Ok(encoded)
     }
 }
 
