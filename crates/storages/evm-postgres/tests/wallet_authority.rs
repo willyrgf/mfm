@@ -81,6 +81,11 @@ fn deployment_assembly_protocol_rejects_every_hostile_affine_cutover() {
     );
 }
 
+#[test]
+fn current_wallet_projection_uses_bounded_primary_key_lookup() {
+    run_managed_wallet_test(current_wallet_projection_uses_bounded_primary_key_lookup_inner);
+}
+
 fn run_managed_wallet_test<F, Fut>(test: F)
 where
     F: FnOnce() -> Fut + Send + 'static,
@@ -102,6 +107,46 @@ where
         .expect("spawn managed wallet test thread")
         .join()
         .expect("join managed wallet test thread");
+}
+
+async fn current_wallet_projection_uses_bounded_primary_key_lookup_inner() {
+    let base_url =
+        std::env::var("DATABASE_URL").expect("DATABASE_URL is required for parity tests");
+    let schema = unique_schema();
+    let admin_options = PgConnectOptions::from_str(&base_url).expect("parse DATABASE_URL");
+    let mut admin_connection = PgConnection::connect_with(&admin_options)
+        .await
+        .expect("connect PostgreSQL administrator");
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+        .execute(&mut admin_connection)
+        .await
+        .expect("create isolated wallet schema");
+    let database_url = scoped_database_url(&base_url, &schema);
+    PostgresEvmWalletSchema::migrate(&database_url)
+        .await
+        .expect("migrate wallet authority projection");
+
+    let plan_rows = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (COSTS false) SELECT local_high_water_nonce::text, \
+                retained_reservation_count::text, retained_reservation_chain_head_ref, \
+                active_reservation_key, current_resource_frontier_ref, current_incarnation_ref \
+           FROM {schema}.wallet_nonce_domains \
+          WHERE wallet_nonce_domain_id = 'mfm.evm.test/projection'"
+    )))
+    .fetch_all(&mut admin_connection)
+    .await
+    .expect("explain current wallet projection lookup")
+    .join("\n");
+    assert!(
+        plan_rows.contains("Index Scan using wallet_nonce_domains_pkey")
+            || plan_rows.contains("Index Only Scan using wallet_nonce_domains_pkey"),
+        "current projection must use its bounded primary-key lookup: {plan_rows}"
+    );
+
+    sqlx::query(AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+        .execute(&mut admin_connection)
+        .await
+        .expect("drop isolated wallet schema");
 }
 
 #[derive(Clone)]
@@ -2751,10 +2796,14 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         )
         .await;
     }
-    assert_omitted_reservation_rejected(
+    // Normal status validation is deliberately bounded: it checks the exact
+    // current frontier and candidate prefix, while full historical-prefix
+    // integrity is owned by schema qualification. Removing the frontier must
+    // therefore fail without scanning the completed reservation history.
+    assert_omitted_frontier_reservation_rejected(
         &mut admin_connection,
         &schema,
-        reservation.semantic_reservation_key.as_str(),
+        successor_reservation.semantic_reservation_key.as_str(),
         &successor_authority,
         &state_input,
         &successor_status_request,
@@ -4454,7 +4503,7 @@ async fn assert_high_water_rewrite_rejected(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn assert_omitted_reservation_rejected(
+async fn assert_omitted_frontier_reservation_rejected(
     connection: &mut PgConnection,
     schema: &str,
     reservation_key: &str,
@@ -4480,7 +4529,7 @@ async fn assert_omitted_reservation_rejected(
     .bind(reservation_key)
     .execute(&mut *connection)
     .await
-    .expect("omit one middle reservation from the retained prefix");
+    .expect("omit the current frontier reservation from the retained prefix");
     assert_eq!(deleted.rows_affected(), 1);
     set_replication_role(connection, "origin").await;
 
@@ -4493,12 +4542,12 @@ async fn assert_omitted_reservation_rejected(
     )))
     .execute(&mut *connection)
     .await
-    .expect("restore omitted reservation after hostile probe");
+    .expect("restore omitted frontier reservation after hostile probe");
     set_replication_role(connection, "origin").await;
     sqlx::query(AssertSqlSafe(format!("DROP TABLE {snapshot_table}")))
         .execute(&mut *connection)
         .await
-        .expect("drop reservation omission snapshot");
+        .expect("drop frontier reservation omission snapshot");
 
     assert!(matches!(result, ReadAdapterCompletion::IntegrityFault(_)));
 }

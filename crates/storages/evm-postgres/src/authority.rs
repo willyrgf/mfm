@@ -333,30 +333,6 @@ impl PostgresWalletNonceAuthority {
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
-        let retained_rows = sqlx::query(
-            "SELECT count(*)::text AS retained_count, max(nonce)::text AS maximum_nonce \
-             FROM wallet_nonce_reservations WHERE wallet_nonce_domain_id = $1",
-        )
-        .bind(domain_id)
-        .fetch_one(&mut *connection)
-        .await
-        .map_err(|_| PostgresEvmWalletError::Unavailable)?;
-        let actual_reservation_count = retained_rows
-            .try_get::<String, _>("retained_count")
-            .map_err(|_| PostgresEvmWalletError::Unavailable)?
-            .parse::<u64>()
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        let actual_high_water = retained_rows
-            .try_get::<Option<String>, _>("maximum_nonce")
-            .map_err(|_| PostgresEvmWalletError::Unavailable)?
-            .map(|value| value.parse::<u64>())
-            .transpose()
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        if actual_reservation_count != retained_reservation_count
-            || actual_high_water != Some(high_water)
-        {
-            return Err(PostgresEvmWalletError::InvalidAuthority);
-        }
         if current_resource_frontier_ref.is_none() || current_incarnation_ref.is_none() {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
