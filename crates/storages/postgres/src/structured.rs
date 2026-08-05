@@ -368,6 +368,56 @@ impl PostgresStructuredHistoryBackend {
         let write = begin_run_write(&self.run_writer, &self.target).await?;
         lock_run_and_tenant(write, run_id, tenant_key).await
     }
+
+    async fn indexed_run_checkpoint_digest(
+        &self,
+        run_id: &RunId,
+    ) -> Result<Option<ContentDigest>, StructuredStoreError> {
+        let fixation = self
+            .target
+            .checkpoint()
+            .fixate_read(&CheckpointKey {
+                store_scope_id: self.identity.store_scope_id.clone(),
+                store_epoch: self.identity.store_epoch,
+                target_key: self.target.target_key().as_str().to_owned(),
+                stream: CheckpointStream::Run,
+                stream_id: run_id.as_str().to_owned(),
+                predecessor: None,
+            })
+            .map_err(|_| StructuredStoreError::StaleHead)?;
+        let fixation_guard = ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        let mut transaction = self.begin_read().await?;
+        let row = sqlx::query(
+            "SELECT head_sequence::text AS head_sequence, head_commit_digest \
+               FROM run_history_heads WHERE run_id = $1",
+        )
+        .bind(run_id.as_str())
+        .fetch_optional(&mut **transaction.conn())
+        .await
+        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+        let head = row
+            .map(|row| {
+                Ok(JournalHead {
+                    run_sequence: required_sequence(&row, "head_sequence")?,
+                    commit_digest: JournalCommitDigest::parse(&required_text(
+                        &row,
+                        "head_commit_digest",
+                    )?)
+                    .map_err(|_| invalid("structured PostgreSQL checkpoint head is invalid"))?,
+                })
+            })
+            .transpose()?;
+        transaction.validate_target(&self.target).await?;
+        let indexed_digest = head.as_ref().map(canonical_checkpoint_digest).transpose()?;
+        if indexed_digest != fixation.successor().cloned() {
+            return Err(StructuredStoreError::StaleHead);
+        }
+        fixation_guard
+            .release()
+            .map_err(|_| StructuredStoreError::StaleHead)?;
+        transaction.commit_checked(&self.target).await?;
+        Ok(indexed_digest)
+    }
 }
 
 impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
@@ -1930,12 +1980,18 @@ impl PostgresStructuredHistoryBackend {
             .map(canonical_checkpoint_digest)
             .transpose()?;
         let current_run_head = checkpoint.current_head(&run_base);
+        let mut run_checkpoint_already_advanced = false;
         if current_run_head.as_ref() != Some(&run_digest)
             && current_run_head != expected_run_predecessor
         {
-            return Err(StructuredStoreError::StaleHead);
+            let run_id = RunId::parse(&run_base.stream_id)
+                .map_err(|_| invalid("structured PostgreSQL checkpoint run id is invalid"))?;
+            if current_run_head != self.indexed_run_checkpoint_digest(&run_id).await? {
+                return Err(StructuredStoreError::StaleHead);
+            }
+            run_checkpoint_already_advanced = true;
         }
-        if current_run_head.as_ref() != Some(&run_digest) {
+        if current_run_head.as_ref() != Some(&run_digest) && !run_checkpoint_already_advanced {
             mutations.push(checkpoint_mutation(
                 &self.target,
                 CheckpointKey {
@@ -1983,14 +2039,49 @@ impl PostgresStructuredHistoryBackend {
                 predecessor_order,
             )
             .await?;
+            let current_order = sqlx::query(
+                "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
+                        fact_order::text AS fact_order \
+                   FROM tenant_fact_heads WHERE tenant_scope_id = $1",
+            )
+            .bind(frontier.tenant_scope_id.as_str())
+            .fetch_optional(&mut **predecessor_transaction.conn())
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?
+            .map(|row| {
+                if required_text(&row, "store_scope_id")? != self.identity.store_scope_id.as_str()
+                    || required_text(&row, "store_epoch")?
+                        != self.identity.store_epoch.get().to_string()
+                    || required_text(&row, "tenant_scope_id")? != frontier.tenant_scope_id.as_str()
+                {
+                    return Err(invalid(
+                        "structured PostgreSQL tenant fact head changed identity",
+                    ));
+                }
+                parse_fact_order(&required_text(&row, "fact_order")?, true)
+            })
+            .transpose()?
+            .unwrap_or(0);
+            let indexed_current = load_tenant_publication_checkpoint_digest(
+                predecessor_transaction.conn(),
+                &self.identity.store_scope_id,
+                self.identity.store_epoch,
+                &frontier.tenant_scope_id,
+                current_order,
+            )
+            .await?;
             predecessor_transaction
                 .validate_target(&self.target)
                 .await?;
             predecessor_transaction.commit_checked(&self.target).await?;
-            if external_predecessor != indexed_predecessor {
+            let tenant_checkpoint_already_advanced = external_predecessor != indexed_predecessor
+                && external_predecessor == indexed_current;
+            if external_predecessor != indexed_predecessor && !tenant_checkpoint_already_advanced {
                 return Err(StructuredStoreError::StaleHead);
             }
-            if external_predecessor.as_ref() != Some(&tenant_digest) {
+            if !tenant_checkpoint_already_advanced
+                && external_predecessor.as_ref() != Some(&tenant_digest)
+            {
                 mutations.push(checkpoint_mutation(
                     &self.target,
                     CheckpointKey {
