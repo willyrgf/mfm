@@ -111,6 +111,18 @@ impl PostgresCommitFaultProxy {
         self.state.executed_statements.load(Ordering::Acquire)
     }
 
+    /// Returns SQL texts observed in simple-query and extended-protocol parse messages.
+    ///
+    /// Tests use this only to assert that a bounded operation did not issue a
+    /// lifetime aggregate over immutable history.
+    pub fn statement_texts(&self) -> Vec<String> {
+        self.state
+            .statement_texts
+            .lock()
+            .map(|texts| texts.clone())
+            .unwrap_or_default()
+    }
+
     /// Arms a fault for the next `attempts` commit messages and returns the intercept target.
     pub fn arm(&self, fault: CommitFault, attempts: usize) -> Result<u64, ProviderTestError> {
         if attempts == 0 {
@@ -198,6 +210,7 @@ struct ProxyState {
     plan: Mutex<Option<FaultPlan>>,
     intercepted: AtomicU64,
     executed_statements: AtomicU64,
+    statement_texts: Mutex<Vec<String>>,
     intercepted_changed: Notify,
     held_lost_acknowledgements: AtomicU64,
     held_lost_acknowledgements_changed: Notify,
@@ -266,6 +279,11 @@ async fn proxy_connection(
                 startup_forwarded = true;
                 if frontend.typed && matches!(frontend.kind(), b'Q' | b'E') {
                     state.executed_statements.fetch_add(1, Ordering::AcqRel);
+                }
+                if let Some(statement) = frontend.statement_text() {
+                    if let Ok(mut texts) = state.statement_texts.lock() {
+                        texts.push(statement.to_owned());
+                    }
                 }
                 if frontend.is_commit() {
                     match state.take_fault()? {
@@ -348,6 +366,24 @@ impl PostgresFrame {
 
     fn is_successful_commit_completion(&self) -> bool {
         self.typed && self.kind() == b'C' && self.bytes.get(5..) == Some(b"COMMIT\0")
+    }
+
+    fn statement_text(&self) -> Option<&str> {
+        if !self.typed {
+            return None;
+        }
+        let body = self.bytes.get(5..)?;
+        let query = match self.kind() {
+            b'Q' => body.split(|byte| *byte == 0).next()?,
+            b'P' => {
+                let name_end = body.iter().position(|byte| *byte == 0)?;
+                body.get(name_end.saturating_add(1)..)?
+                    .split(|byte| *byte == 0)
+                    .next()?
+            }
+            _ => return None,
+        };
+        std::str::from_utf8(query).ok()
     }
 }
 
