@@ -3057,17 +3057,20 @@ async fn load_candidate_by_key(
         }
         let mut preimage_candidate = candidate.clone();
         preimage_candidate.provider_activation_attestation.clear();
-        activation_verifier.verify_retained_mutation(
-            &candidate.provider_activation_attestation,
-            schema_name,
-            database_oid,
-            retained_key,
-            &ProviderMutation::CandidateActivation {
-                request: request.clone(),
-                candidate: preimage_candidate,
-                state_input_ref: state_input_ref.clone(),
-            },
-        )?;
+        activation_verifier
+            .verify_retained_mutation(
+                connection,
+                &candidate.provider_activation_attestation,
+                schema_name,
+                database_oid,
+                retained_key,
+                &ProviderMutation::CandidateActivation {
+                    request: request.clone(),
+                    candidate: preimage_candidate,
+                    state_input_ref: state_input_ref.clone(),
+                },
+            )
+            .await?;
         RetainedCandidate {
             request,
             candidate,
@@ -3151,17 +3154,20 @@ async fn load_candidates(
         }
         let mut preimage_candidate = candidate.clone();
         preimage_candidate.provider_activation_attestation.clear();
-        activation_verifier.verify_retained_mutation(
-            &candidate.provider_activation_attestation,
-            schema_name,
-            database_oid,
-            expected_key.as_str(),
-            &ProviderMutation::CandidateActivation {
-                request: request.clone(),
-                candidate: preimage_candidate,
-                state_input_ref: state_input_ref.clone(),
-            },
-        )?;
+        activation_verifier
+            .verify_retained_mutation(
+                connection,
+                &candidate.provider_activation_attestation,
+                schema_name,
+                database_oid,
+                expected_key.as_str(),
+                &ProviderMutation::CandidateActivation {
+                    request: request.clone(),
+                    candidate: preimage_candidate,
+                    state_input_ref: state_input_ref.clone(),
+                },
+            )
+            .await?;
         candidates.push(candidate);
     }
     Ok(candidates)
@@ -3211,7 +3217,14 @@ async fn load_completion(
     } else {
         None
     };
-    decode_completion_row(row, activation_verifier, schema_name, database_oid)
+    decode_completion_row(
+        connection,
+        row,
+        activation_verifier,
+        schema_name,
+        database_oid,
+    )
+    .await
 }
 
 async fn load_completion_by_key(
@@ -3235,43 +3248,55 @@ async fn load_completion_by_key(
     } else {
         None
     };
-    decode_completion_row(row, activation_verifier, schema_name, database_oid)
+    decode_completion_row(
+        connection,
+        row,
+        activation_verifier,
+        schema_name,
+        database_oid,
+    )
+    .await
 }
 
-fn decode_completion_row(
+async fn decode_completion_row(
+    connection: &mut PgConnection,
     row: Option<sqlx::postgres::PgRow>,
     activation_verifier: &OfflineActivationVerifier,
     schema_name: &str,
     database_oid: Option<u32>,
 ) -> Result<Option<RetainedCompletion>> {
-    row.map(|row| {
-        let database_oid = database_oid.ok_or(PostgresEvmWalletError::InvalidAuthority)?;
-        let request: CompleteEvmNonceRequest = decode_row_json(&row, "request_json")?;
-        let terminal_outcome: CanonicalTerminalOutcome =
-            decode_row_json(&row, "canonical_terminal_outcome_json")?;
-        let completion: CompletedWalletNonce = decode_row_json(&row, "completion_json")?;
-        let state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
-        let retained_completion_key = required_row_text(&row, "semantic_completion_key")?;
-        let retained_reservation_key = required_row_text(&row, "semantic_reservation_key")?;
-        let terminal_witnesses_ref = canonical_wallet_reference(&request.terminal_witnesses)
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        if retained_completion_key != completion.semantic_completion_key.as_str()
-            || retained_reservation_key != completion.semantic_reservation_key.as_str()
-            || request.completion_key != completion.semantic_completion_key
-            || request.current_reservation.semantic_reservation_key
-                != completion.semantic_reservation_key
-            || request.canonical_terminal_outcome != terminal_outcome
-            || request.canonical_terminal_outcome != completion.canonical_terminal_outcome
-            || request.terminal_witnesses != completion.terminal_witnesses
-            || completion.original_terminal_witnesses_ref != terminal_witnesses_ref.content_digest()
-            || completion.validate().is_err()
-        {
-            return Err(PostgresEvmWalletError::InvalidAuthority);
-        }
-        let completion_preimage = completion
-            .provider_mutation_preimage()
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        activation_verifier.verify_retained_mutation(
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let database_oid = database_oid.ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+    let request: CompleteEvmNonceRequest = decode_row_json(&row, "request_json")?;
+    let terminal_outcome: CanonicalTerminalOutcome =
+        decode_row_json(&row, "canonical_terminal_outcome_json")?;
+    let completion: CompletedWalletNonce = decode_row_json(&row, "completion_json")?;
+    let state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
+    let retained_completion_key = required_row_text(&row, "semantic_completion_key")?;
+    let retained_reservation_key = required_row_text(&row, "semantic_reservation_key")?;
+    let terminal_witnesses_ref = canonical_wallet_reference(&request.terminal_witnesses)
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    if retained_completion_key != completion.semantic_completion_key.as_str()
+        || retained_reservation_key != completion.semantic_reservation_key.as_str()
+        || request.completion_key != completion.semantic_completion_key
+        || request.current_reservation.semantic_reservation_key
+            != completion.semantic_reservation_key
+        || request.canonical_terminal_outcome != terminal_outcome
+        || request.canonical_terminal_outcome != completion.canonical_terminal_outcome
+        || request.terminal_witnesses != completion.terminal_witnesses
+        || completion.original_terminal_witnesses_ref != terminal_witnesses_ref.content_digest()
+        || completion.validate().is_err()
+    {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    let completion_preimage = completion
+        .provider_mutation_preimage()
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    activation_verifier
+        .verify_retained_mutation(
+            connection,
             &completion.provider_completion_attestation,
             schema_name,
             database_oid,
@@ -3281,15 +3306,14 @@ fn decode_completion_row(
                 completion: completion_preimage,
                 state_input_ref: state_input_ref.clone(),
             },
-        )?;
-        Ok(RetainedCompletion {
-            request,
-            terminal_outcome,
-            completion,
-            state_input_ref,
-        })
-    })
-    .transpose()
+        )
+        .await?;
+    Ok(Some(RetainedCompletion {
+        request,
+        terminal_outcome,
+        completion,
+        state_input_ref,
+    }))
 }
 
 fn decode_row_json<T: serde::de::DeserializeOwned>(

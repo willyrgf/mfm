@@ -377,8 +377,9 @@ reclassification or alternate constructor.
 `WalletNonceDomain` is a qualified physical chain instance plus sender. Permanent activation
 binds the full registry attestation, initial route generation and membership issuance, sender,
 issuer namespace, store lineage, writer epoch, external target proof, and complete prior-ingress
-fencing. Normal status and mutation use the immutable activation proof with offline verification
-and make no registry query.
+fencing. Normal status and mutation use the immutable activation proof with offline verification;
+retained candidate/completion reloads additionally resolve each signed historical store incarnation
+against the local append-only registry, without a live provider or external registry call.
 
 Every reservation attempt consumes a fresh committed pending-nonce observation. First use requires
 equality with the qualified finalized floor. Later use allocates `local_high_water + 1` only when
@@ -430,8 +431,10 @@ validation remains within the generated frame budget while preserving rehashable
 Wallet activation and completion closures also retain the provider-issued mutation attestation
 returned for the exact prepared mutation. The retained envelope carries the signed provider
 challenge, target context, operation key, canonical payload digest, and signature; reload verifies
-that envelope against the exact recovery preimage and accepts historical writer epochs only within
-the current store lineage, so promotion does not invalidate already committed closures.
+that envelope against the exact recovery preimage and resolves its full signed physical incarnation
+against the append-only registry before accepting it. Historical writer epochs are accepted only
+within the current store lineage, so promotion does not invalidate already committed closures while
+same-lineage target, key, or attestation substitutions fail closed.
 
 ## Application and transport surface
 

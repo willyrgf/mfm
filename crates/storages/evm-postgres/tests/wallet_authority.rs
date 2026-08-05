@@ -5171,6 +5171,7 @@ fn expected_table_privilege(role: &str, table: &str, privilege: &str) -> bool {
         ) | (
             "mfm_evm_wallet_nonce_application",
             "wallet_store_schema_metadata"
+                | "wallet_store_incarnations"
                 | "wallet_nonce_domains"
                 | "wallet_nonce_reservations"
                 | "wallet_nonce_candidates"

@@ -53,7 +53,7 @@ const FUNCTION_MANIFEST_SHA256: &str =
 const TABLE_MANIFEST_SHA256: &str =
     "3061b01017092161b7f967f5a5a0938c9539411931036ab26b6817694ac84a4b";
 const ACL_MANIFEST_SHA256: &str =
-    "ad9916df4a5ab866bc30f3a39d66d9498bf9f5d0a0d99b121a7296d33d88b35e";
+    "4f93630f1a02c80d1f7eeba33394ccedd78be89234a2a0c0629e5e2fa5cea7d8";
 const MIGRATION_LEDGER_SHAPE_SHA256: &str =
     "9ebcbe4772ee5d894dcf92eff3f53aa6a7027d418c80e35c4486cd0540aae8eb";
 
@@ -704,7 +704,7 @@ fn expected_table_privilege(role: &str, table: &str, privilege: &str) -> bool {
             ) && privilege == "SELECT"
         }
         NONCE_APPLICATION_ROLE => match table {
-            "wallet_store_schema_metadata" => privilege == "SELECT",
+            "wallet_store_schema_metadata" | "wallet_store_incarnations" => privilege == "SELECT",
             "wallet_nonce_domains" => matches!(privilege, "SELECT" | "INSERT" | "UPDATE"),
             "wallet_nonce_reservations"
             | "wallet_nonce_candidates"
