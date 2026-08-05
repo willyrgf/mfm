@@ -107,6 +107,24 @@ impl OfflineExportFixture {
     pub fn physical_binding_verifier(&self) -> &dyn PublicPhysicalBindingVerifier {
         &self.physical_binding_verifier
     }
+
+    /// Moves the fixture pieces into an isolated replay test without borrowing the fixture after
+    /// its export evidence has been sealed into an authorization closure.
+    pub fn into_replay_parts(
+        self,
+    ) -> (
+        ExportRunEvidence,
+        RecordedRunEvidence,
+        FixtureProgramVerifier,
+        Box<dyn PublicPhysicalBindingVerifier>,
+    ) {
+        (
+            self.export,
+            self.recorded,
+            self.program_verifier,
+            Box::new(self.physical_binding_verifier),
+        )
+    }
 }
 
 /// Builds one bounded, zero-state run through the store's real admission and export readers.

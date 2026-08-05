@@ -113,9 +113,15 @@ application/vnd.mfm.structured-run-export-stream.v2
 
 Each newline-delimited canonical frame binds an ordinal, kind, predecessor digest, and payload. The
 terminal seal binds version, requested semantic/audit kind, every run fixation, source closure,
-assigned prefixes, chain digest, and exact byte/frame counts. Replay input checks the supplied
+per-run authenticated principal, fixed `export` grant, content-addressed policy-decision
+references, assigned prefixes, chain digest, and exact byte/frame counts. Replay input checks the supplied
 content digest, exact current recoverability schemas, store/tenant/run identity, and per-frame and
 total bounds. Former monolithic object bytes are rejected; no compatibility decoder exists.
+
+Semantic exports authorize only the exact selected cutoff and recursively required producer heads;
+later audit-only suffixes are not semantic dependencies. The retained decision references are
+opaque content-addressed policy evidence, and offline verification accepts them only when its
+explicit trust snapshot binds the exact closure digest.
 
 ## Error and logging contract
 

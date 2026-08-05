@@ -691,7 +691,8 @@ impl Application {
             .policy
             .authorize(&credential, RunAccessGrant::Admit, &target)
             .await?;
-        let (tenant_scope_id, authenticated_principal_id) = authorized.into_parts();
+        let (tenant_scope_id, authenticated_principal_id, _authorization_decision_ref) =
+            authorized.into_parts();
         let call = AuthorizedAdmissionCall {
             tenant_scope_id,
             authenticated_principal_id,
@@ -783,6 +784,9 @@ impl Application {
         let call = self
             .authorize_run::<run_grant::Export>(credential, RunAccessGrant::Export, run_id)
             .await?;
+        if call.authorization_decision_ref().is_none() {
+            return Err(PublicError::source_run_export_denied());
+        }
         self.backend.export_run(&call, request).await
     }
 
@@ -798,13 +802,15 @@ impl Application {
             run_id: run_id.clone(),
         };
         let authorized = self.policy.authorize(&credential, grant, &target).await?;
-        let (tenant_scope_id, authenticated_principal_id) = authorized.into_parts();
+        let (tenant_scope_id, authenticated_principal_id, authorization_decision_ref) =
+            authorized.into_parts();
         Ok(AuthorizedRunCall {
             credential,
             policy: self.policy.as_ref(),
             store_scope_id: &self.store_scope_id,
             tenant_scope_id,
             authenticated_principal_id,
+            authorization_decision_ref,
             run_id,
             grant,
             _marker: std::marker::PhantomData,
@@ -897,6 +903,7 @@ pub(crate) struct AuthorizedRunCall<'policy, G: run_grant::RunGrantMarker> {
     store_scope_id: &'policy StoreScopeId,
     tenant_scope_id: TenantScopeId,
     authenticated_principal_id: StableId,
+    authorization_decision_ref: Option<mfm_ids::ContentDigest>,
     run_id: RunId,
     grant: RunAccessGrant,
     _marker: std::marker::PhantomData<G>,
@@ -915,6 +922,21 @@ impl<G: run_grant::RunGrantMarker> AuthorizedRunCall<'_, G> {
     pub(crate) const fn grant(&self) -> RunAccessGrant {
         self.grant
     }
+
+    pub(crate) const fn authenticated_principal_id(&self) -> &StableId {
+        &self.authenticated_principal_id
+    }
+
+    pub(crate) const fn authorization_decision_ref(&self) -> Option<&mfm_ids::ContentDigest> {
+        self.authorization_decision_ref.as_ref()
+    }
+}
+
+/// One exact dependency authorization retained for the portable export closure.
+#[derive(Debug)]
+pub(crate) struct AuthorizedExportDecision {
+    pub(crate) run_id: RunId,
+    pub(crate) decision_ref: mfm_ids::ContentDigest,
 }
 
 impl AuthorizedRunCall<'_, run_grant::Export> {
@@ -926,28 +948,30 @@ impl AuthorizedRunCall<'_, run_grant::Export> {
     pub(crate) async fn authorize_required_dependency(
         &self,
         run_id: RunId,
-    ) -> Result<(), PublicError> {
+    ) -> Result<AuthorizedExportDecision, PublicError> {
         debug_assert_eq!(self.grant, RunAccessGrant::Export);
         let target = AccessTarget::RunTarget {
             store_scope_id: self.store_scope_id.clone(),
-            run_id,
+            run_id: run_id.clone(),
         };
         let authorized = self
             .policy
             .authorize(&self.credential, RunAccessGrant::Export, &target)
             .await
-            .map_err(|error| match error {
-                crate::AccessPolicyError::AuthenticationRequired => {
-                    PublicError::authentication_required()
-                }
-                crate::AccessPolicyError::GrantDenied => PublicError::source_run_export_denied(),
-            })?;
+            .map_err(|_| PublicError::source_run_export_denied())?;
         if authorized.tenant_scope_id() != &self.tenant_scope_id
             || authorized.authenticated_principal_id() != &self.authenticated_principal_id
         {
             return Err(PublicError::source_run_export_denied());
         }
-        Ok(())
+        let decision_ref = authorized
+            .authorization_decision_ref()
+            .cloned()
+            .ok_or_else(PublicError::source_run_export_denied)?;
+        Ok(AuthorizedExportDecision {
+            run_id,
+            decision_ref,
+        })
     }
 }
 
@@ -1055,7 +1079,11 @@ pub fn application_for_test(
         store_scope_id,
         policy,
         entry_points,
-        TestApplicationBackend { mode, export: None },
+        TestApplicationBackend {
+            mode,
+            export: None,
+            dependency_run_id: None,
+        },
     )
 }
 
@@ -1078,6 +1106,33 @@ pub fn application_with_export_for_test(
                 content_ref,
                 reader,
             }))),
+            dependency_run_id: None,
+        },
+    )
+}
+
+/// Builds a one-use streaming-export fixture that reauthorizes one dependency
+/// before exposing its reader to the caller.
+#[cfg(test)]
+pub fn application_with_dependency_export_for_test(
+    policy: Arc<dyn RunAccessPolicy>,
+    dependency_run_id: RunId,
+    content_ref: mfm_ids::ContentRef,
+    reader: crate::ExportAsyncReader,
+) -> Application {
+    let store_scope_id = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+        .expect("the fixed test store scope is valid");
+    Application::new(
+        store_scope_id,
+        policy,
+        Vec::new(),
+        TestApplicationBackend {
+            mode: TestApplicationMode::Sentinel,
+            export: Some(std::sync::Mutex::new(Some(TestExport {
+                content_ref,
+                reader,
+            }))),
+            dependency_run_id: Some(dependency_run_id),
         },
     )
 }
@@ -1086,6 +1141,7 @@ pub fn application_with_export_for_test(
 struct TestApplicationBackend {
     mode: TestApplicationMode,
     export: Option<std::sync::Mutex<Option<TestExport>>>,
+    dependency_run_id: Option<RunId>,
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -1168,9 +1224,12 @@ impl ApplicationBackend for TestApplicationBackend {
 
     async fn export_run(
         &self,
-        _call: &AuthorizedRunCall<'_, run_grant::Export>,
+        call: &AuthorizedRunCall<'_, run_grant::Export>,
         _request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
+        if let Some(run_id) = &self.dependency_run_id {
+            call.authorize_required_dependency(run_id.clone()).await?;
+        }
         let Some(export) = &self.export else {
             return Err(self.failure());
         };
@@ -1206,11 +1265,14 @@ fn wallet_deployment_invalid() -> PublicError {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::task::{Context, Poll};
 
     use super::{
-        application_for_test, run_grant, AuthorizedRunCall, EvmWalletDeployment,
+        application_for_test, application_with_dependency_export_for_test,
+        application_with_export_for_test, run_grant, AuthorizedRunCall, EvmWalletDeployment,
         EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial, TestApplicationMode,
     };
     use crate::{
@@ -1219,10 +1281,12 @@ mod tests {
     };
     use async_trait::async_trait;
     use mfm_ids::{
-        EntryPointId, InvocationIdentity, RunId, SchemaId, StableId, StoreScopeId, TenantScopeId,
+        ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
+        SchemaId, StableId, StoreScopeId, TenantScopeId,
     };
     use mfm_spec::{CanonicalJsonValue, EntryPointContract, PlanningProfile};
     use mfm_values::MfmValue as _;
+    use tokio::io::{AsyncRead, ReadBuf};
 
     #[test]
     fn wallet_deployment_assembly_authorities_are_affine_and_nonserializable() {
@@ -1234,6 +1298,31 @@ mod tests {
     struct FixedPolicy {
         expected_grant: RunAccessGrant,
         result: Result<AuthorizedTenant, AccessPolicyError>,
+    }
+
+    struct RootOnlyDecisionPolicy {
+        root_run_id: RunId,
+    }
+
+    #[async_trait]
+    impl RunAccessPolicy for RootOnlyDecisionPolicy {
+        async fn authorize(
+            &self,
+            _credential: &SecretCredential,
+            grant: RunAccessGrant,
+            target: &AccessTarget,
+        ) -> Result<AuthorizedTenant, AccessPolicyError> {
+            assert_eq!(grant, RunAccessGrant::Export);
+            let AccessTarget::RunTarget { run_id, .. } = target else {
+                panic!("expected run export target");
+            };
+            let authorized = AuthorizedTenant::new(tenant('1'), principal('1'));
+            if run_id == &self.root_run_id {
+                Ok(authorized.with_decision_ref(decision_ref('1')))
+            } else {
+                Ok(authorized)
+            }
+        }
     }
 
     #[async_trait]
@@ -1275,7 +1364,8 @@ mod tests {
                     == mfm_evm::EVM_SUBMIT_TRANSACTION_OPERATION_ID
                     && configured_target == &self.expected_target =>
                 {
-                    Ok(AuthorizedTenant::new(tenant('1'), principal('1')))
+                    Ok(AuthorizedTenant::new(tenant('1'), principal('1'))
+                        .with_decision_ref(decision_ref('1')))
                 }
                 AccessTarget::AdmitTarget { .. } => Err(AccessPolicyError::GrantDenied),
                 AccessTarget::RunTarget { .. } => panic!("unexpected run target"),
@@ -1291,7 +1381,8 @@ mod tests {
 
         let granted = FixedPolicy {
             expected_grant: RunAccessGrant::Export,
-            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('1'))),
+            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('1'))
+                .with_decision_ref(decision_ref('1'))),
         };
         let call = authorized_export_call(
             &granted,
@@ -1321,7 +1412,8 @@ mod tests {
 
         let other_tenant = FixedPolicy {
             expected_grant: RunAccessGrant::Export,
-            result: Ok(AuthorizedTenant::new(tenant('2'), principal('1'))),
+            result: Ok(AuthorizedTenant::new(tenant('2'), principal('1'))
+                .with_decision_ref(decision_ref('1'))),
         };
         let call = authorized_export_call(
             &other_tenant,
@@ -1337,7 +1429,8 @@ mod tests {
 
         let other_principal = FixedPolicy {
             expected_grant: RunAccessGrant::Export,
-            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('2'))),
+            result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('2'))
+                .with_decision_ref(decision_ref('2'))),
         };
         let call = authorized_export_call(
             &other_principal,
@@ -1350,6 +1443,76 @@ mod tests {
             .await
             .expect_err("cross-principal source export");
         assert_eq!(error.code(), "SourceRunExportDenied");
+    }
+
+    struct CountingReader {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for CountingReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _context: &mut Context<'_>,
+            _buffer: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn export_without_a_retained_root_decision_emits_no_bytes() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let application = application_with_export_for_test(
+            Arc::new(FixedPolicy {
+                expected_grant: RunAccessGrant::Export,
+                result: Ok(AuthorizedTenant::new(tenant('1'), principal('1'))),
+            }),
+            test_content_ref(),
+            Box::pin(CountingReader {
+                polls: Arc::clone(&polls),
+            }),
+        );
+        let error = application
+            .export_run(
+                SecretCredential::new(b"opaque".to_vec()).expect("credential"),
+                run_id(),
+                crate::ExportRequest::new(mfm_replay::portable::ExportKind::Semantic),
+            )
+            .await
+            .expect_err("missing root decision must deny export");
+        assert_eq!(error.code(), "SourceRunExportDenied");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn denied_dependency_export_emits_no_bytes() {
+        let root_run_id = run_id();
+        let dependency_run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"dependency-run"),
+        );
+        let polls = Arc::new(AtomicUsize::new(0));
+        let application = application_with_dependency_export_for_test(
+            Arc::new(RootOnlyDecisionPolicy {
+                root_run_id: root_run_id.clone(),
+            }),
+            dependency_run_id,
+            test_content_ref(),
+            Box::pin(CountingReader {
+                polls: Arc::clone(&polls),
+            }),
+        );
+        let error = application
+            .export_run(
+                SecretCredential::new(b"opaque".to_vec()).expect("credential"),
+                root_run_id,
+                crate::ExportRequest::new(mfm_replay::portable::ExportKind::Semantic),
+            )
+            .await
+            .expect_err("missing dependency decision must deny export");
+        assert_eq!(error.code(), "SourceRunExportDenied");
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1431,6 +1594,7 @@ mod tests {
             store_scope_id,
             tenant_scope_id,
             authenticated_principal_id: principal('1'),
+            authorization_decision_ref: Some(decision_ref('1')),
             run_id,
             grant: RunAccessGrant::Export,
             _marker: std::marker::PhantomData,
@@ -1453,6 +1617,30 @@ mod tests {
 
     fn principal(digit: char) -> StableId {
         StableId::new(format!("mfm.test/principal-{digit}")).expect("principal")
+    }
+
+    fn decision_ref(digit: char) -> mfm_ids::ContentDigest {
+        mfm_ids::ContentDigest::from_digest(
+            mfm_ids::DigestAlgorithm::Sha256V1,
+            mfm_canonical::sha256_digest_bytes(&[b'd', digit as u8]),
+        )
+    }
+
+    fn test_content_ref() -> ContentRef {
+        ContentRef::new(
+            SchemaId::new(
+                "mfm.test.export",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                mfm_canonical::sha256_digest_bytes(b"mfm.test.export.schema"),
+            )
+            .expect("schema"),
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                mfm_canonical::sha256_digest_bytes(b"mfm.test.export.bytes"),
+            ),
+        )
+        .expect("content ref")
     }
 
     fn run_id() -> RunId {

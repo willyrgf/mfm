@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use mfm_ids::{
 use mfm_journal::structured::{
     canonical_json, CommittedBatch, HistoryObject, ObservationOutcome,
     PriorRunFactSelectionResponse, PriorRunFactSourceManifest, PriorRunFactSourceRule, RunRecord,
-    StateOutcomeRef, TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
+    SemanticHead, StateOutcomeRef, TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
@@ -27,7 +28,7 @@ use mfm_program::structured::{
 };
 use mfm_program_derive::MfmValue;
 use mfm_replay::portable::{
-    ExportKind, PortableFixation, PortableRunExport, ReplayTrustSnapshot,
+    AuthorizedExportClosure, ExportKind, PortableFixation, PortableRunExport, ReplayTrustSnapshot,
     RetainedPhysicalReleaseTrust, StoreCheckpointTrust,
 };
 use mfm_replay::structured::project_replay_result;
@@ -1654,14 +1655,43 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         .load_for_export(&producer_run)
         .await
         .expect("load recursively authorized producer export");
+    let producer_cutoff = match producer_export.semantic_head() {
+        SemanticHead::Genesis { admission_ref, .. } => admission_ref.run_sequence,
+        SemanticHead::Transition { transition_ref, .. } => transition_ref.run_sequence,
+    };
     let consumer_export = postgres_reader
         .load_for_export(&portable_consumer_run)
         .await
-        .expect("load recursively authorized consumer export")
-        .with_authorized_sources(vec![producer_export])
+        .expect("load recursively authorized consumer export");
+    let consumer_cutoff = match consumer_export.semantic_head() {
+        SemanticHead::Genesis { admission_ref, .. } => admission_ref.run_sequence,
+        SemanticHead::Transition { transition_ref, .. } => transition_ref.run_sequence,
+    };
+    let consumer_export = consumer_export
+        .with_authorized_sources(
+            Some(consumer_cutoff),
+            vec![(producer_export, Some(producer_cutoff))],
+        )
         .expect("seal recursively authorized consumer sources");
-    let portable = PortableRunExport::from_export_evidence(&consumer_export, ExportKind::Semantic)
-        .expect("encode recursively authorized portable export");
+    let consumer_closure = AuthorizedExportClosure::new(
+        consumer_export,
+        StableId::new("mfm.storage-test/principal").expect("principal"),
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(b"consumer-export-decision"),
+        ),
+        BTreeMap::from([(
+            producer_run.clone(),
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(b"producer-export-decision"),
+            ),
+        )]),
+    )
+    .expect("seal recursively authorized consumer closure");
+    let portable =
+        PortableRunExport::from_authorized_export_closure(&consumer_closure, ExportKind::Semantic)
+            .expect("encode recursively authorized portable export");
     assert_eq!(portable.source_run_count(), 1);
     let portable_bytes = portable
         .to_canonical_bytes()

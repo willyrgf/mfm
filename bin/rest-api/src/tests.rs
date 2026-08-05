@@ -10,7 +10,8 @@ use mfm_app::{
     application_for_test, application_with_export_for_test, AccessPolicyError, AccessTarget,
     AuthorizedTenant, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
 };
-use mfm_ids::{ContentRef, StableId, TenantScopeId};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId, TenantScopeId};
 use tokio::io::{AsyncRead, ReadBuf};
 use tower::ServiceExt as _;
 
@@ -32,7 +33,11 @@ impl RecordingPolicy {
                 ))
                 .expect("tenant scope"),
                 StableId::new(format!("mfm.rest.test/principal-{tenant_hex}")).expect("principal"),
-            )),
+            )
+            .with_decision_ref(ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(&[b'r', tenant_hex as u8]),
+            ))),
             calls: Mutex::new(Vec::new()),
         })
     }

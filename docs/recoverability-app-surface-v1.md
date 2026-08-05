@@ -130,13 +130,19 @@ serializes only after that closure succeeds. Missing, denied, wrong-target, wron
 cyclic, and otherwise inaccessible dependencies collapse to one redacted `SourceRunExportDenied`
 error and emit zero bytes.
 
+Semantic dependency discovery is cut at the exact semantic batch and follows each producer only
+through the maximum transition head required by selected routes. Decision references are opaque
+content-addressed policy evidence retained in the seal; offline replay binds the exact closure
+digest through its explicit trust snapshot without live resolution.
+
 The one current export is a bounded canonical frame stream owned by `mfm-replay`:
 
 ```text
 version = "mfm.structured-portable-run-export-stream.v2" (terminal seal)
 frame = { ordinal, kind = "batch" | "seal", previous_frame_digest, payload }
 batch payload = one exact committed-batch envelope
-seal payload = root run, export kind, source closure reference, fixation, counts, bytes, chain
+seal payload = root run, export kind, source closure reference, per-run principal/grant/decision
+references, fixation, counts, bytes, chain
 ```
 
 Semantic selection includes every full atomic batch through the semantic cutoff, so an adjacent
