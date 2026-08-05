@@ -29,6 +29,7 @@ closed implementation work and the remaining proof/deployment gaps.
 
 - Implementation candidate: `a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d`
 - Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
+- Final evidence refresh: `d0459d4d3cf552e389c1bebce11b96fe0930c9cc`.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), and `a027640c` (evidence
   refresh). None changes Rust, SQL, generated contracts, or test behavior.
