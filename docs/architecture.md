@@ -258,8 +258,10 @@ The external checkpoint owner is a separate control-plane authority outside ever
 provider child. It retains one acknowledged prefix and at most one exact prepared transition.
 Children prepare before SQL, acknowledge only the observed exact successor prefix, and reconcile
 before readiness: predecessor retains `Prepared` for identical-only retry, successor finalizes it,
-and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. No child-local
-file, copied database, or public attestation can reset that checkpoint.
+and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. PostgreSQL
+read paths retry only the bounded commit-before-acknowledgement observation; a persistent mismatch
+still rejects the operation. No child-local file, copied database, or public attestation can reset
+that checkpoint.
 
 ## Portfolio placement
 

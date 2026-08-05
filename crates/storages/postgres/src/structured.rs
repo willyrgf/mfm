@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{
@@ -27,6 +28,27 @@ use crate::transaction::{
 };
 
 const OBJECT_INSERT_CHUNK_SIZE: usize = 8_192;
+const MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS: usize = 4;
+
+// SQL commits precede external checkpoint acknowledgement. A concurrent read
+// may therefore observe a valid indexed prefix one acknowledgement step ahead;
+// retry that bounded race, while returning the final integrity error unchanged.
+async fn retry_transient_checkpoint_read<T, F, Fut>(
+    mut operation: F,
+) -> Result<T, StructuredStoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, StructuredStoreError>>,
+{
+    let mut result = operation().await;
+    for _ in 1..MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS {
+        if !matches!(&result, Err(StructuredStoreError::InvalidHistory)) {
+            return result;
+        }
+        result = operation().await;
+    }
+    result
+}
 
 fn checkpoint_mutation(
     target: &TargetBinding,
@@ -426,7 +448,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
     }
 
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             let fixation = self
                 .target
                 .checkpoint()
@@ -515,14 +537,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id: run_id.clone(),
                 batches,
             }))
-        })
+        }))
     }
 
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, mfm_store::structured::StructuredRunSnapshot> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             let fixation = self
                 .target
                 .checkpoint()
@@ -612,14 +634,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
             transaction.commit_checked(&self.target).await?;
             Ok(mfm_store::structured::StructuredRunSnapshot { history, head })
-        })
+        }))
     }
 
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             let fixation = self
                 .target
                 .checkpoint()
@@ -667,7 +689,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             transaction.validate_target(&self.target).await?;
             transaction.commit_checked(&self.target).await?;
             Ok(head)
-        })
+        }))
     }
 
     fn load_prefix<'a>(
@@ -675,7 +697,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         run_id: &'a RunId,
         through_sequence: u64,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             if through_sequence == 0 {
                 return Err(invalid(
                     "structured PostgreSQL prefix sequence must be positive",
@@ -804,14 +826,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id: run_id.clone(),
                 batches,
             }))
-        })
+        }))
     }
 
     fn tenant_fact_frontier<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
     ) -> StructuredBackendFuture<'a, TenantFactFrontier> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             let fixation = self
                 .target
                 .checkpoint()
@@ -898,7 +920,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 tenant_scope_id.clone(),
                 fact_order,
             ))
-        })
+        }))
     }
 
     fn scan_fact_publications<'a>(
@@ -908,7 +930,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         through_order: u64,
         maximum_items: u32,
     ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             if first_order == 0 || maximum_items == 0 || maximum_items > 1_024 {
                 return Err(invalid(
                     "structured PostgreSQL tenant fact page is outside the fixed bounds",
@@ -1037,7 +1059,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
             transaction.commit_checked(&self.target).await?;
             Ok(publications)
-        })
+        }))
     }
 
     fn append<'a>(
@@ -1519,7 +1541,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         append_request_id: &'a AppendRequestId,
         candidate_digest: &'a ContentDigest,
     ) -> StructuredBackendFuture<'a, Option<CommittedBatch>> {
-        Box::pin(async move {
+        Box::pin(retry_transient_checkpoint_read(move || async move {
             let fixation = self
                 .target
                 .checkpoint()
@@ -1597,7 +1619,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             transaction.commit_checked(&self.target).await?;
             self.acknowledge_batch_checkpoints(&batch).await?;
             Ok(Some(batch))
-        })
+        }))
     }
 }
 

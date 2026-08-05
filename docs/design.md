@@ -412,13 +412,17 @@ or any target/incarnation/public-head mismatch rejects readiness without repair 
 An exact append retry whose batch is already durable may return `ExistingSame` after later
 successors have advanced the stream: reconciliation must match the external run and fact heads to
 the indexed current heads and must never rewind them to the retried predecessor.
+Because SQL commit precedes external acknowledgement, a concurrent read may briefly observe a
+valid indexed prefix one checkpoint step ahead; PostgreSQL read paths retry that exact transient
+`InvalidHistory` observation a fixed number of times and still fail closed with the final error.
 
 ## Snapshot, export, and authorization boundaries
 
 The indexed checkpoint head is the first decision-bearing query in every PostgreSQL snapshot. A
 repeatable-read transaction then loads the selected prefix and validates its exact external target
-and checkpoint successor before commit. Configuration and run stream identities are stable across
-successors; predecessor digests are compare-and-append preconditions only.
+and checkpoint successor before commit. A bounded retry covers only the commit-before-acknowledgement
+window; persistent mismatch remains an integrity failure. Configuration and run stream identities
+are stable across successors; predecessor digests are compare-and-append preconditions only.
 
 Store ingress rejects any record that names an absent content-addressed object. Structural path
 references and other semantic identities are not falsely treated as standalone objects; object
