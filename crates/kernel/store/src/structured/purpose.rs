@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use mfm_canonical::limits::MAX_PORTABLE_FACT_ROUTES;
 pub use mfm_canonical::limits::MAX_PORTABLE_SOURCE_RUNS;
 use mfm_ids::{
     AccessAttemptId, ContentRef, InvocationIdentity, OccurrenceId, RequestDigest, RunId,
@@ -1113,8 +1114,8 @@ impl ExportFragment {
                 TenantFactCoordinate::None => None,
             })
             .collect::<Vec<_>>();
-        let fact_routes = export_fact_routes(&verified)?;
         let direct_source_run_ids = verified.direct_source_run_ids()?;
+        let fact_routes = export_fact_routes(&verified)?;
         Ok(Self {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
@@ -1168,6 +1169,9 @@ pub fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<Export
         .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
         for query in response.query_results {
             for selected in query.selected {
+                if routes.len() >= MAX_PORTABLE_FACT_ROUTES {
+                    return Err(super::StructuredStoreError::InvalidHistory);
+                }
                 routes.push(ExportFactRoute {
                     consumer_record: assigned.record_ref.clone(),
                     producer_transition: selected.producer_transition_ref,
