@@ -25,7 +25,7 @@ use mfm_spec::structured::OperationOutcome;
 
 use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
 use super::fold::{StructuredFrontier, VerifiedStructuredRun};
-use super::Result;
+use super::{PhysicalTargetIdentity, Result};
 
 /// Minimum identity header retained by every purpose projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,10 +165,16 @@ impl<B: StructuredHistoryBackend> ReplayRunReader<B> {
 impl<B: StructuredHistoryBackend> ExportRunReader<B> {
     /// Loads one verified run as portable-export evidence only.
     pub async fn load_for_export(&self, run_id: &RunId) -> Result<ExportRunEvidence> {
+        let physical_target = self
+            .reader
+            .store_identity()
+            .physical_target
+            .clone()
+            .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
         self.reader
             .load_verified(run_id)
             .await
-            .and_then(ExportRunEvidence::from_verified)
+            .and_then(|verified| ExportRunEvidence::from_verified(verified, physical_target))
     }
 }
 
@@ -665,6 +671,7 @@ impl RecordedRunEvidence {
 struct ExportFragment {
     run_id: RunId,
     header: RunEvidenceHeader,
+    physical_target: PhysicalTargetIdentity,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
     #[cfg(any(test, feature = "test-support"))]
@@ -742,6 +749,10 @@ impl<'a> ExportEncoderView<'a> {
     pub fn header(&self) -> RunEvidenceHeader {
         self.fragment.header.clone()
     }
+    /// Exact physical target fixation retained by deployment qualification.
+    pub const fn physical_target(&self) -> &PhysicalTargetIdentity {
+        &self.fragment.physical_target
+    }
     /// Exact physical head.
     pub const fn journal_head(&self) -> &JournalHead {
         &self.fragment.journal_head
@@ -790,6 +801,10 @@ impl<'a> ExportEncoderSource<'a> {
     pub const fn header(&self) -> &RunEvidenceHeader {
         &self.fragment.header
     }
+    /// Exact source physical target fixation.
+    pub const fn physical_target(&self) -> &PhysicalTargetIdentity {
+        &self.fragment.physical_target
+    }
     /// Exact source physical head.
     pub const fn journal_head(&self) -> &JournalHead {
         &self.fragment.journal_head
@@ -817,8 +832,11 @@ impl<'a> ExportEncoderSource<'a> {
 }
 
 impl ExportRunEvidence {
-    fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
-        let fragment = ExportFragment::from_verified(verified)?;
+    fn from_verified(
+        verified: VerifiedStructuredRun,
+        physical_target: PhysicalTargetIdentity,
+    ) -> Result<Self> {
+        let fragment = ExportFragment::from_verified(verified, physical_target)?;
         Ok(Self {
             header: fragment.header.clone(),
             fragment,
@@ -841,6 +859,7 @@ impl ExportRunEvidence {
                 || source.header().tenant_scope_id() != self.header.tenant_scope_id()
                 || source.header().store_scope_id() != self.header.store_scope_id()
                 || source.header().store_epoch() != self.header.store_epoch()
+                || source.fragment.physical_target != self.fragment.physical_target
                 || !seen.insert(source.run_id().clone())
             {
                 return Err(super::fold::StructuredStoreError::InvalidHistory);
@@ -862,6 +881,8 @@ impl ExportRunEvidence {
                 || pair[1].header.store_scope_id != *self.header.store_scope_id()
                 || pair[0].header.store_epoch != self.header.store_epoch
                 || pair[1].header.store_epoch != self.header.store_epoch
+                || pair[0].physical_target != self.fragment.physical_target
+                || pair[1].physical_target != self.fragment.physical_target
         }) {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
         }
@@ -1043,7 +1064,10 @@ impl ExportRunEvidence {
 }
 
 impl ExportFragment {
-    fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+    fn from_verified(
+        verified: VerifiedStructuredRun,
+        physical_target: PhysicalTargetIdentity,
+    ) -> Result<Self> {
         let batches = verified.batches().to_vec();
         let batch_frames = batches
             .iter()
@@ -1078,6 +1102,7 @@ impl ExportFragment {
         Ok(Self {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
+            physical_target,
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
             #[cfg(any(test, feature = "test-support"))]

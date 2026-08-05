@@ -20,8 +20,9 @@ pub use adapter::StoreHistoryAdapter;
 pub use assembly::assemble_with_backend;
 pub use assembly::{assemble_structured_runtime, AssembledStructuredRuntime};
 pub use backend::{
-    BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication,
+    BackendAppendOutcome, PhysicalTargetIdentity, RawRunHistory, StructuredBackendFuture,
+    StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreIdentity,
+    TenantFactPublication,
 };
 pub use canonical_append::{
     validate_append_objects, validate_envelope_frame, validate_record_object_closure,

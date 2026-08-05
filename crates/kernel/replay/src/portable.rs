@@ -17,8 +17,8 @@ use mfm_journal::structured::{
 };
 use mfm_store::structured::{
     export_fact_routes, recorded_evidence_from_verified, verify_offline_recorded_history,
-    ExportEncoderView, ExportRunEvidence, ProgramVerifier, PublicPhysicalBindingVerifier,
-    RawRunHistory, RecordedRunEvidence, StructuredStoreError,
+    ExportEncoderView, ExportRunEvidence, PhysicalTargetIdentity, ProgramVerifier,
+    PublicPhysicalBindingVerifier, RawRunHistory, RecordedRunEvidence, StructuredStoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -78,6 +78,8 @@ pub struct PortableFixation {
     pub store_epoch: StoreEpoch,
     /// Tenant scope authorized for this exact portable closure.
     pub tenant_scope_id: TenantScopeId,
+    /// Exact physical target, fence generation, release, and current incarnation.
+    pub physical_target: PhysicalTargetIdentity,
 }
 
 /// One strict portable export assembled from sealed evidence.
@@ -295,6 +297,7 @@ impl PortableRunExport {
             store_scope_id: store_scope_id.clone(),
             store_epoch,
             tenant_scope_id: view.header().tenant_scope_id().clone(),
+            physical_target: view.physical_target().clone(),
         };
         let mut export = Self {
             version: PORTABLE_EXPORT_VERSION.to_owned(),
@@ -607,6 +610,7 @@ impl PortableRunExport {
                 &self.store_scope_id,
                 &self.tenant_scope_id,
                 self.fixation.store_epoch,
+                &self.fixation.physical_target,
                 matches!(self.kind, ExportKind::Semantic),
             )?;
         }
@@ -910,6 +914,7 @@ fn portable_prefix_from_source(
         store_scope_id: first.store_scope_id.clone(),
         store_epoch: first.store_epoch,
         tenant_scope_id: source.header().tenant_scope_id().clone(),
+        physical_target: source.physical_target().clone(),
     };
     let cutoff = batches
         .last()
@@ -935,6 +940,7 @@ fn portable_prefix_from_source(
         &prefix.fixation.store_scope_id,
         &prefix.tenant_scope_id,
         prefix.fixation.store_epoch,
+        &prefix.fixation.physical_target,
         semantic_cutoff_required,
     )?;
     Ok(prefix)
@@ -1036,11 +1042,13 @@ fn validate_prefix(
     store_scope_id: &StoreScopeId,
     tenant_scope_id: &TenantScopeId,
     store_epoch: StoreEpoch,
+    physical_target: &PhysicalTargetIdentity,
     semantic_cutoff: bool,
 ) -> Result<(), PortableExportError> {
     if prefix.batches.is_empty()
         || &prefix.fixation.store_scope_id != store_scope_id
         || prefix.fixation.store_epoch != store_epoch
+        || &prefix.fixation.physical_target != physical_target
         || &prefix.fixation.tenant_scope_id != tenant_scope_id
         || &prefix.tenant_scope_id != tenant_scope_id
         || prefix.batches.last().map(|batch| &batch.head) != Some(&prefix.fixation.journal_head)

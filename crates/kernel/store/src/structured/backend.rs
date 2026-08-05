@@ -12,7 +12,7 @@ use super::fold::{
 };
 use super::qualification::PublicPhysicalBindingVerifier;
 
-pub use mfm_runtime::history::StructuredStoreIdentity;
+pub use mfm_runtime::history::{PhysicalTargetIdentity, StructuredStoreIdentity};
 
 /// Boxed asynchronous structured-history backend operation.
 pub type StructuredBackendFuture<'a, T> =

@@ -11,8 +11,8 @@ use mfm_facts::{
     FactSelectionScanBounds, FactSet, FactTieBreak, ProposedFactValue,
 };
 use mfm_ids::{
-    AppendRequestId, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId, StoreScopeId,
-    TenantScopeId,
+    AppendRequestId, ContentDigest, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId,
+    StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, CommittedBatch, HistoryObject, ObservationOutcome,
@@ -43,9 +43,9 @@ use mfm_storage_postgres::{
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
     ConfigurationRevision, ConfigurationStreamKey, ExportRunReader, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    StructuredAdmissionMaterial, StructuredFrontier, StructuredHistoryBackend,
-    StructuredStoreError, StructuredStoreIdentity,
+    PhysicalBindingSupersession, PhysicalTargetIdentity, ProposedCanonicalValue,
+    PublicPhysicalBindingVerifier, StructuredAdmissionMaterial, StructuredFrontier,
+    StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -1230,6 +1230,16 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
         StructuredStoreIdentity {
             store_scope_id: postgres_admission_batch.store_scope_id.clone(),
             store_epoch: postgres_admission_batch.store_epoch,
+            physical_target: Some(PhysicalTargetIdentity {
+                target_key: "postgres-memory-fixture-target".to_owned(),
+                database_oid: 1,
+                fence_generation: 1,
+                release_epoch: 1,
+                current_incarnation_ref: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(b"postgres-memory-fixture-target"),
+                ),
+            }),
         },
         memory_registry,
         Arc::clone(&physical_verifier),

@@ -21,7 +21,7 @@ pub use cursor::{
     StructuredFrontier,
 };
 pub use error::HistoryError;
-pub use identity::StructuredStoreIdentity;
+pub use identity::{PhysicalTargetIdentity, StructuredStoreIdentity};
 pub use port::{
     AppendAttemptApi, AuthorizationApi, HistoryFuture, RuntimeHistoryPort, VerifiedRunView,
 };

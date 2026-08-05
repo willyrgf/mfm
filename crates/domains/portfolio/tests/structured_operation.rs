@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     ComponentFuture, ReadAdapterCompletion, ReadAdapterInvoker, ReadCapabilityContract,
 };
@@ -50,8 +51,8 @@ use mfm_spec::structured::{
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, PhysicalBindingAuthorization, PhysicalBindingSupersession,
-    ProposedCanonicalValue, PublicPhysicalBindingVerifier, StructuredAdmissionMaterial,
-    StructuredStoreError, StructuredStoreIdentity,
+    PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
+    StructuredAdmissionMaterial, StructuredStoreError, StructuredStoreIdentity,
 };
 use serde_json::json;
 
@@ -457,6 +458,16 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
             ))
             .expect("execution store scope"),
             store_epoch: StoreEpoch::new(1),
+            physical_target: Some(PhysicalTargetIdentity {
+                target_key: format!("portfolio-fixture-target-{discriminator}"),
+                database_oid: u32::from(discriminator),
+                fence_generation: 1,
+                release_epoch: 1,
+                current_incarnation_ref: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(&[discriminator, 6]),
+                ),
+            }),
         },
         registry,
         Arc::new(TestPublicBindingVerifier),

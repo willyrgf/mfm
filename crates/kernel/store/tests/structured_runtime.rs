@@ -1,8 +1,11 @@
 //! Authority and identity proofs for sealed runtime/store assembly.
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContract};
-use mfm_ids::{InvocationIdentity, RunId, StableId, StoreEpoch, StoreScopeId, TenantScopeId};
-use mfm_runtime::history::StructuredStoreIdentity;
+use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContract};
+use mfm_ids::{
+    ContentDigest, DigestAlgorithm, InvocationIdentity, RunId, StableId, StoreEpoch, StoreScopeId,
+    TenantScopeId,
+};
+use mfm_runtime::history::{PhysicalTargetIdentity, StructuredStoreIdentity};
 use mfm_store::structured::{
     AuditRunReader, ExportRunReader, PublicRunReader, ReplayRunReader, StoreHistoryAdapter,
     StructuredMemoryBackend, TraceRunReader,
@@ -13,6 +16,16 @@ fn store_identity() -> StructuredStoreIdentity {
         store_scope_id: StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "1".repeat(32)))
             .expect("scope"),
         store_epoch: StoreEpoch::new(1),
+        physical_target: Some(PhysicalTargetIdentity {
+            target_key: "fixture-target".to_owned(),
+            database_oid: 1,
+            fence_generation: 1,
+            release_epoch: 1,
+            current_incarnation_ref: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(b"fixture-target"),
+            ),
+        }),
     }
 }
 

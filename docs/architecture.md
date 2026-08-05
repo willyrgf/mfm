@@ -129,6 +129,9 @@ The fold marks physical checks as retained-history replay or current-candidate q
 supplies the exact prior binding plus folded minimum lineage head for refresh. A deployment
 verifier can consequently retain historical releases for callback-free restart while requiring
 new Effect attempts and supersession proofs to follow one strict old-to-new release relation.
+Target-bound store identities retain the exact physical target key, database identity, fence
+generation, release epoch, and current-incarnation reference. Portable export evidence copies that
+identity into every run fixation; source closure admission rejects any physical-target mismatch.
 
 Prior-run fact selection keeps its pure and persisted responsibilities separate:
 

@@ -1912,6 +1912,7 @@ impl FoldMachine {
         let identity = StructuredStoreIdentity {
             store_scope_id: batch.store_scope_id.clone(),
             store_epoch: batch.store_epoch,
+            physical_target: None,
         };
         match &first.record {
             RunRecord::RunAdmitted(_) => Err(invalid("RunAdmitted appears after the first record")),

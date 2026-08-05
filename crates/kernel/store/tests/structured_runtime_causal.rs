@@ -18,8 +18,8 @@ use mfm_certify::structured::{
 };
 use mfm_facts::{FactProposal, FactSet, ProposedFactValue};
 use mfm_ids::{
-    AppendRequestId, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId, StoreEpoch,
-    StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentDigest, DigestAlgorithm, InvocationIdentity, RunId, SchemaId, StableId,
+    StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     derive_commit_digest, derive_record_hash, domain_content_digest, AssignedRecord,
@@ -50,9 +50,10 @@ use mfm_spec::structured::{
 };
 use mfm_store::structured::{
     assemble_structured_runtime, BackendAppendOutcome, CanonicalRunAppend,
-    PhysicalBindingAuthorization, PhysicalBindingSupersession, PublicPhysicalBindingVerifier,
-    RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
-    StructuredRunSnapshot, StructuredStoreError, StructuredStoreIdentity, TenantFactPublication,
+    PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalTargetIdentity,
+    PublicPhysicalBindingVerifier, RawRunHistory, StructuredBackendFuture,
+    StructuredHistoryBackend, StructuredMemoryBackend, StructuredRunSnapshot, StructuredStoreError,
+    StructuredStoreIdentity, TenantFactPublication,
 };
 use serde::{Deserialize, Serialize};
 
@@ -2694,6 +2695,16 @@ fn store_identity(discriminator: u8) -> StructuredStoreIdentity {
         ))
         .expect("store scope"),
         store_epoch: StoreEpoch::new(1),
+        physical_target: Some(PhysicalTargetIdentity {
+            target_key: format!("fixture-target-{discriminator}"),
+            database_oid: u32::from(discriminator),
+            fence_generation: 1,
+            release_epoch: 1,
+            current_incarnation_ref: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(&[discriminator, 6]),
+            ),
+        }),
     }
 }
 
