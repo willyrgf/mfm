@@ -520,6 +520,8 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
 
 struct TestPublicBindingVerifier;
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for TestPublicBindingVerifier {}
+
 impl PublicPhysicalBindingVerifier for TestPublicBindingVerifier {
     fn verify_authorization(
         &self,

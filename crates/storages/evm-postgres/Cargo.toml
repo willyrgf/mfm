@@ -12,6 +12,7 @@ layer = "storage"
 domain = "evm"
 
 [dependencies]
+mfm-authority-seal = { path = "../../kernel/authority-seal" }
 alloy-primitives = { workspace = true }
 hex = { workspace = true }
 ring = { workspace = true }

@@ -24,6 +24,7 @@ tracing = { workspace = true }
 zeroize = "1.7"
 
 mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-authority-seal = { path = "../../kernel/authority-seal" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-certify = { path = "../../kernel/certify" }
 mfm-evm = { path = "../../domains/evm" }

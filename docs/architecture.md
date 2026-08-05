@@ -149,8 +149,11 @@ Prior-run fact selection keeps its pure and persisted responsibilities separate:
   retains no backend, pool, writer, or generic query handle. Registry finalization requires the
   complete expected entry-point identity set and rejects missing, extra, or duplicate identities.
 
-Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. Production adapters
-and backends stay private to store assembly; Runtime never receives a raw backend or writer. It
+Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. The history port,
+physical-binding verifier, wallet authority, and PostgreSQL checkpoint ports all inherit
+workspace-private authority markers; ordinary downstream crates therefore cannot implement a
+look-alike authority by satisfying the visible methods. Production adapters and backends stay
+private to store assembly; Runtime never receives a raw backend or writer. It
 loads one verified prefix, selects the minimum actionable occurrence path, and performs exactly one
 action. The scanner travels through the same ordinary Read
 authorization/invocation/observation/settlement protocol. Runtime passes the newly committed

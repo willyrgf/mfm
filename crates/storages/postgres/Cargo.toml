@@ -9,6 +9,7 @@ autotests = false
 layer = "storage"
 
 [dependencies]
+mfm-authority-seal = { path = "../../kernel/authority-seal" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }

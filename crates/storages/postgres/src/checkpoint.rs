@@ -325,7 +325,9 @@ impl CheckpointState {
 }
 
 /// Deployment-owned authority for prepared and acknowledged append checkpoints.
-pub trait ExternalCheckpointAuthority: Send + Sync {
+pub trait ExternalCheckpointAuthority:
+    mfm_authority_seal::ExternalCheckpointAuthoritySeal + Send + Sync
+{
     /// Registers the deployment-issued target tuple before a session bundle is
     /// returned. Durable authorities persist this admission outside PostgreSQL.
     #[allow(clippy::too_many_arguments)]
@@ -433,6 +435,9 @@ pub struct ExternalCheckpointLedger {
     gate: Arc<Mutex<()>>,
     persistence: Option<Arc<PathBuf>>,
 }
+
+#[cfg(feature = "test-support")]
+impl mfm_authority_seal::ExternalCheckpointAuthoritySeal for ExternalCheckpointLedger {}
 
 #[cfg(feature = "test-support")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

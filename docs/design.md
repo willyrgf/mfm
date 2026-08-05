@@ -48,6 +48,10 @@ structural values; they are not instructions.
   Runtime performs at most one semantic transition or one audited external-access operation per
   `drive_once` call. Callers never supply a trusted run digest for admission; the store derives
   `RunId` from the annex `mfm.run-id-preimage.v1`.
+- Authority-bearing integration traits (`RuntimeHistoryPort`, physical-binding verification,
+  wallet authority, checkpoint authority, and deployment credential issuance) require a
+  workspace-private marker. Downstream callers can consume the completed products but cannot
+  implement a look-alike authority from the visible method set.
 - Every external operation is authorized durably before possible entry. One committed
   authorization can mint exactly one affine invocation authority.
 - Every normal invoker completion is frozen as pending observation material and committed before

@@ -136,6 +136,8 @@ impl State for FactReadState {
 
 struct NoPhysicalBindings;
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for NoPhysicalBindings {}
+
 impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
     fn verify_authorization(
         &self,

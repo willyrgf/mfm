@@ -22,6 +22,7 @@ test-support = []
 backend-conformance = ["test-support"]
 
 [dependencies]
+mfm-authority-seal = { path = "../authority-seal" }
 mfm-canonical = { path = "../canonical" }
 mfm-certify = { path = "../certify" }
 mfm-runtime = { path = "../runtime", features = ["store-authority"] }

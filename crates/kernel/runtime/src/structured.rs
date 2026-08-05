@@ -43,9 +43,10 @@ impl RuntimeProcessRegistry {
     /// Moves the complete certified registry into Runtime ownership.
     #[doc(hidden)]
     #[cfg(feature = "store-authority")]
-    pub fn from_certified(
+    pub fn from_certified<C: mfm_authority_seal::RuntimeAssemblyConsumerSeal>(
         inner: CertifiedProcessRegistry,
         token: &RuntimeAssemblyToken,
+        _consumer: C,
     ) -> std::result::Result<Self, RuntimeAssemblyError> {
         if !inner.matches_assembly_token(token) {
             return Err(RuntimeAssemblyError);
@@ -301,10 +302,11 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
     /// the constructor intentionally does not accept independently split ports.
     #[doc(hidden)]
     #[cfg(feature = "store-authority")]
-    pub fn from_assembled(
+    pub fn from_assembled<C: mfm_authority_seal::RuntimeAssemblyConsumerSeal>(
         history: P,
         processes: RuntimeProcessRegistry,
         token: RuntimeAssemblyToken,
+        _consumer: C,
     ) -> std::result::Result<Self, RuntimeAssemblyError> {
         if !processes.matches_assembly_token(&token) {
             return Err(RuntimeAssemblyError);

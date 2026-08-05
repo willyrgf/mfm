@@ -2713,6 +2713,8 @@ struct ExactPhysicalBindingVerifier {
     certificate_lineages: BTreeMap<ContentRef, Option<ContentRef>>,
 }
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for ExactPhysicalBindingVerifier {}
+
 impl ExactPhysicalBindingVerifier {
     fn new(
         document: &mfm_spec::structured::CertifiedProgramDocument,

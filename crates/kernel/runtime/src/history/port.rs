@@ -88,7 +88,7 @@ pub trait AuthorizationApi: Send {
 /// Production adapters are private to store assembly and own the sole fold and
 /// backend. A caller-implemented test port conveys authority only over resources
 /// that port already owns and cannot be attached to MFM production backends.
-pub trait RuntimeHistoryPort: Send + Sync {
+pub trait RuntimeHistoryPort: mfm_authority_seal::RuntimeHistoryPortSeal + Send + Sync {
     /// Verified run view loaded for drive and mutation basing.
     type VerifiedRun: VerifiedRunView;
 

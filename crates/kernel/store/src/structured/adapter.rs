@@ -160,6 +160,11 @@ pub struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
     verified_run: Mutex<Option<VerifiedStructuredRun>>,
 }
 
+impl<B: StructuredHistoryBackend> mfm_authority_seal::RuntimeHistoryPortSeal
+    for StoreHistoryAdapter<B>
+{
+}
+
 impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
     pub(super) fn from_writer(writer: StructuredRunHistoryWriter<B>) -> Self {
         Self {

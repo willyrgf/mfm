@@ -2317,6 +2317,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "k256",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-certify",
  "mfm-evm",
@@ -2349,6 +2350,10 @@ dependencies = [
  "uuid",
  "zeroize",
 ]
+
+[[package]]
+name = "mfm-authority-seal"
+version = "0.1.0"
 
 [[package]]
 name = "mfm-bitcoin"
@@ -2405,6 +2410,7 @@ name = "mfm-certify"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-facts",
@@ -2429,6 +2435,7 @@ dependencies = [
  "alloy-primitives",
  "derive_more 1.0.0",
  "hex",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2455,6 +2462,7 @@ dependencies = [
  "bytes",
  "hex",
  "k256",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2508,6 +2516,7 @@ dependencies = [
  "hex",
  "k256",
  "mfm-app",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-certify",
  "mfm-evm",
@@ -2587,6 +2596,7 @@ name = "mfm-portfolio"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "mfm-authority-seal",
  "mfm-bitcoin",
  "mfm-canonical",
  "mfm-capabilities",
@@ -2682,6 +2692,7 @@ name = "mfm-runtime"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2730,6 +2741,7 @@ version = "0.1.0"
 dependencies = [
  "alloy-primitives",
  "hex",
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",
@@ -2752,6 +2764,7 @@ dependencies = [
 name = "mfm-storage-postgres"
 version = "0.1.0"
 dependencies = [
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-certify",
  "mfm-facts",
@@ -2777,6 +2790,7 @@ dependencies = [
 name = "mfm-store"
 version = "0.1.0"
 dependencies = [
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-certify",

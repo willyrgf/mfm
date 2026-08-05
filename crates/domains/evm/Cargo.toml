@@ -19,6 +19,7 @@ test-support = []
 authority-integration = []
 
 [dependencies]
+mfm-authority-seal = { path = "../../kernel/authority-seal" }
 alloy-consensus = { workspace = true }
 alloy-eips = { workspace = true }
 alloy-primitives = { workspace = true, features = ["k256", "serde"] }

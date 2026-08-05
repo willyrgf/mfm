@@ -13,6 +13,10 @@ use super::purpose::{
 };
 use super::qualification::PublicPhysicalBindingVerifier;
 
+struct StoreAssemblyConsumer;
+
+impl mfm_authority_seal::RuntimeAssemblyConsumerSeal for StoreAssemblyConsumer {}
+
 /// Complete production assembly result. Never includes store, writer, backend, or port.
 pub struct AssembledStructuredRuntime<B: StructuredHistoryBackend> {
     /// Sole Runtime mutation authority.
@@ -39,15 +43,17 @@ pub fn assemble_structured_runtime<B: StructuredHistoryBackend>(
     registry: QualifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> std::result::Result<AssembledStructuredRuntime<B>, HistoryError> {
-    let (admission, processes, assembly_token) = registry.into_runtime_parts();
+    let (admission, processes, assembly_token) = registry.into_runtime_parts(StoreAssemblyConsumer);
     let program_verifier = build_program_verifier(admission);
     let store = StructuredRunStore::new(backend, program_verifier, physical_binding_verifier);
     let (writer, reader) = store.split();
     let history = StoreHistoryAdapter::from_writer(writer);
-    let processes = RuntimeProcessRegistry::from_certified(processes, &assembly_token)
-        .map_err(|_| HistoryError::InvalidHistory)?;
-    let runtime = Runtime::from_assembled(history, processes, assembly_token)
-        .map_err(|_| HistoryError::InvalidHistory)?;
+    let processes =
+        RuntimeProcessRegistry::from_certified(processes, &assembly_token, StoreAssemblyConsumer)
+            .map_err(|_| HistoryError::InvalidHistory)?;
+    let runtime =
+        Runtime::from_assembled(history, processes, assembly_token, StoreAssemblyConsumer)
+            .map_err(|_| HistoryError::InvalidHistory)?;
     Ok(AssembledStructuredRuntime {
         runtime,
         public_reader: PublicRunReader::new(reader.clone()),

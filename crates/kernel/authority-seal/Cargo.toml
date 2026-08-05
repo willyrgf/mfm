@@ -1,0 +1,16 @@
+[package]
+name = "mfm-authority-seal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Private marker traits for MFM authority boundaries"
+license = "MIT"
+
+[lib]
+name = "mfm_authority_seal"
+path = "src/lib.rs"
+
+[package.metadata.mfm]
+layer = "kernel"
+domain-facing = false
+binary-facing = false

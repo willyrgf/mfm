@@ -67,6 +67,8 @@ impl ProgramVerifier for FixtureProgramVerifier {
 
 struct NoPhysicalBindings;
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for NoPhysicalBindings {}
+
 impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
     fn verify_authorization(
         &self,
@@ -87,6 +89,8 @@ impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
 }
 
 struct AcceptPhysicalBindings;
+
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for AcceptPhysicalBindings {}
 
 impl PublicPhysicalBindingVerifier for AcceptPhysicalBindings {
     fn verify_authorization(
