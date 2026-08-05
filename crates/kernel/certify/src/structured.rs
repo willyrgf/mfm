@@ -4104,8 +4104,9 @@ impl QualifiedProgramRegistry {
     /// rather than splitting and reassembling halves independently.
     #[doc(hidden)]
     #[cfg(any(test, feature = "runtime-authority"))]
-    pub fn into_runtime_parts(
+    pub fn into_runtime_parts<C: mfm_authority_seal::RuntimeAssemblyConsumerSeal>(
         self,
+        _consumer: C,
     ) -> (
         AdmissionVerificationRegistry,
         CertifiedProcessRegistry,

@@ -62,7 +62,9 @@ pub struct PhysicalBindingSupersession<'a> {
 /// Implementations may inspect only immutable public certificate and lineage
 /// data. They receive no invoker, target session, credential, writer, mutation
 /// permit, fence issuer, or domain-specific resource authority.
-pub trait PublicPhysicalBindingVerifier: Send + Sync {
+pub trait PublicPhysicalBindingVerifier:
+    mfm_authority_seal::PhysicalBindingVerifierSeal + Send + Sync
+{
     /// Verifies exact implementation membership and any required non-rollback
     /// descendant relation for one proposed authorization.
     fn verify_authorization(

@@ -22,6 +22,7 @@ path = "src/lib.rs"
 store-authority = ["mfm-certify/runtime-authority"]
 
 [dependencies]
+mfm-authority-seal = { path = "../authority-seal" }
 futures-util = "0.3.32"
 mfm-canonical = { path = "../canonical" }
 mfm-certify = { path = "../certify" }

@@ -28,6 +28,10 @@ use mfm_program_derive::MfmValue;
 use mfm_spec::structured::{ProposedStateOutcome, StructuredComponentDependency};
 use serde::{Deserialize, Serialize};
 
+struct TestAssemblyConsumer;
+
+impl mfm_authority_seal::RuntimeAssemblyConsumerSeal for TestAssemblyConsumer {}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
     namespace = "mfm.test",
@@ -4210,7 +4214,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
         stable_resource_lineage_contract_ref: None,
         minimum_lineage_head_ref: None,
     };
-    let (_, processes, _) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts(TestAssemblyConsumer);
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified Read capability");
@@ -4395,7 +4399,7 @@ fn infallible_no_refresh_effect_settles_reviewed_safe_failure_as_success() {
         stable_resource_lineage_contract_ref: None,
         minimum_lineage_head_ref: None,
     };
-    let (_, processes, _) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts(TestAssemblyConsumer);
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified Effect capability");
@@ -4766,7 +4770,7 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
         stable_resource_lineage_contract_ref: Some(&resource_ref),
         minimum_lineage_head_ref: None,
     };
-    let (_, processes, _) = registry.into_runtime_parts();
+    let (_, processes, _) = registry.into_runtime_parts(TestAssemblyConsumer);
     let capability_identity = processes
         .component_identity(StructuredComponentKind::Capability, &capability_ref)
         .expect("qualified refreshable Effect capability");

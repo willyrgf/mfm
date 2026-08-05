@@ -2626,7 +2626,9 @@ impl WalletNonceStoreLineageHead {
 }
 
 /// Narrow target-bound wallet nonce authority used only by registered adapters.
-pub trait WalletNonceAuthority: Send + Sync + 'static {
+pub trait WalletNonceAuthority:
+    mfm_authority_seal::WalletNonceAuthoritySeal + Send + Sync + 'static
+{
     /// Returns the exact provider-qualified activation sealed into this authority.
     fn domain_activation_attestation(&self) -> &WalletNonceDomainActivationAttestation;
 

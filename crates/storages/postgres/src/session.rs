@@ -307,7 +307,7 @@ impl std::fmt::Debug for PostgresTargetAdmission {
 /// A deployment broker owns the raw login material and calls issue_target
 /// exactly once. The resulting admission remains move-only and is consumed by
 /// a session opener.
-pub trait DeploymentCredentialSink {
+pub trait DeploymentCredentialSink: mfm_authority_seal::DeploymentCredentialSinkSeal {
     /// Issues one target admission from deployment-owned login material and
     /// the deployment-owned non-rollback checkpoint authority.
     fn issue_target(
@@ -322,7 +322,9 @@ pub trait DeploymentCredentialSink {
 }
 
 /// Deployment-side credential broker for one-shot target admission.
-pub trait DeploymentCredentialBroker: Send + 'static {
+pub trait DeploymentCredentialBroker:
+    mfm_authority_seal::DeploymentCredentialBrokerSeal + Send + 'static
+{
     /// Consumes the broker and asks the PostgreSQL boundary to issue one
     /// opaque admission. Raw credentials never cross this API as a returned
     /// application value.
@@ -333,6 +335,8 @@ pub trait DeploymentCredentialBroker: Send + 'static {
 }
 
 struct AdmissionSink;
+
+impl mfm_authority_seal::DeploymentCredentialSinkSeal for AdmissionSink {}
 
 impl DeploymentCredentialSink for AdmissionSink {
     fn issue_target(

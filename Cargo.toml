@@ -12,6 +12,7 @@ members = [
 	"crates/live/evm",
 	"crates/keystore",
 	"crates/kernel/canonical",
+	"crates/kernel/authority-seal",
 	"crates/kernel/capabilities",
 	"crates/kernel/certify",
 	"crates/kernel/journal",

@@ -902,6 +902,8 @@ struct ExactPhysicalBindingVerifier {
     wallet_resource_ref: ContentRef,
 }
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for ExactPhysicalBindingVerifier {}
+
 impl ExactPhysicalBindingVerifier {
     fn new(
         purposes: Vec<mfm_evm_live::EvmPhysicalBindingPurpose>,

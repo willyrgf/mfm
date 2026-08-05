@@ -53,6 +53,8 @@ struct RejectPort {
     calls: Mutex<Vec<&'static str>>,
 }
 
+impl mfm_authority_seal::RuntimeHistoryPortSeal for RejectPort {}
+
 impl RuntimeHistoryPort for RejectPort {
     type VerifiedRun = EmptyVerified;
 

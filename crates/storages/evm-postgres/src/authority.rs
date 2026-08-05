@@ -131,6 +131,8 @@ pub struct PostgresWalletNonceAuthority {
     supersession_heads: Mutex<BTreeMap<String, HistoryObject>>,
 }
 
+impl mfm_authority_seal::WalletNonceAuthoritySeal for PostgresWalletNonceAuthority {}
+
 impl PostgresWalletNonceAuthority {
     /// Test-only legacy seam for exercising the storage mutation classifier.
     /// Production callers must use the Runtime-authorized methods below.

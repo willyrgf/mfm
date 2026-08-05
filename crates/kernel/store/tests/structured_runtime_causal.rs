@@ -507,6 +507,8 @@ struct ExactPublicBindingVerifier {
     certificate: HistoryObject,
 }
 
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for ExactPublicBindingVerifier {}
+
 impl PublicPhysicalBindingVerifier for ExactPublicBindingVerifier {
     fn verify_authorization(
         &self,
@@ -540,6 +542,8 @@ struct RefreshBindingVerifier {
     lineage_head: HistoryObject,
     accept_supersession: bool,
 }
+
+impl mfm_authority_seal::PhysicalBindingVerifierSeal for RefreshBindingVerifier {}
 
 impl PublicPhysicalBindingVerifier for RefreshBindingVerifier {
     fn verify_authorization(
