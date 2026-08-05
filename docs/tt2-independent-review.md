@@ -201,9 +201,9 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
-| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; no real later-audit-suffix artifact fixture is retained. |
+| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; generated semantic/audit suffix vectors pass, but no real later-audit-suffix artifact fixture is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
-| TT2-REPLAY-05 | Conditional | Generated schema vectors and a five-vector portable artifact corpus plus no-service leaf pass; semantic-suffix and offline-fold artifact vectors remain. |
+| TT2-REPLAY-05 | Conditional | Generated schema vectors and a twelve-vector portable artifact corpus plus no-service replay/fold leaves pass; a real later-suffix artifact remains. |
 | TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | Protected key handoff/zeroization paths are present; Rust moves do not prove one stable allocation. |
@@ -268,14 +268,17 @@ Implemented and passing:
   and graph-validation layers;
 - principal/grant/decision retention and strict authorization-decision tamper
   rejection; and
-- a generated five-vector portable artifact corpus (recursive accept plus
-  omitted/extra/reordered/substituted source negatives) with no-service replay.
+- a generated twelve-vector portable artifact corpus (recursive accept,
+  omitted/extra/reordered/substituted source negatives, semantic/audit suffix
+  handling, false frontier/publication negatives, source identity/fixation
+  collisions, and an over-budget source-count negative) with no-service replay.
 
 Still required by the plan:
 
-- generated artifact vectors for false frontier/publication, cyclic/shared and
-  over-budget graphs, semantic-suffix handling, and offline folding (the
-  current five vectors are synthetic strict-decode cases);
+- a generated offline-fold acceptance vector (the current corpus carries a
+  rejection vector, while the production fixture covers acceptance);
+- true cyclic/shared dependency traversal vectors over nested source edges
+  (the current identity-collision vectors do not contain nested edges);
 - a real semantic artifact with a later audit suffix and its audit counterpart;
 - live production application multi-hop export and zero-byte denied-dependency
   integration assertion; and

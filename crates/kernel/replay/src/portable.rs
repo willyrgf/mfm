@@ -2038,8 +2038,27 @@ mod tests {
             let bytes = decode_hex(vector["bytes_hex"].as_str().expect("artifact bytes"));
             match vector["kind"].as_str().expect("artifact vector kind") {
                 "strict_decode_acceptance" => {
-                    PortableRunExport::strict_decode(&bytes)
+                    let export = PortableRunExport::strict_decode(&bytes)
                         .unwrap_or_else(|error| panic!("{}: {error:?}", vector["id"]));
+                    if vector
+                        .get("offline_fold")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("rejection")
+                    {
+                        let release = AcceptRelease;
+                        let checkpoint = AcceptCheckpoint;
+                        let trust = ReplayTrustSnapshot::new(&RejectProgram, &RejectPhysical)
+                            .with_authorized_closure(
+                                export.closure_reference(),
+                                &release,
+                                &checkpoint,
+                            );
+                        assert!(
+                            PortableRunExport::verify_offline(&bytes, &trust).is_err(),
+                            "{} must reject during offline fold",
+                            vector["id"]
+                        );
+                    }
                 }
                 "strict_decode_rejection" => {
                     assert!(

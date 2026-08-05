@@ -12,12 +12,12 @@ annex_sha256: 07763edfa6b58af2b6c9697850fc7df82c847e38f19133f3b9d4f20dd437c14d
 annex_schema_count: 53
 annex_domain_count: 5
 annex_logical_key_count: 5
-corpus_bytes: 127303
-corpus_sha256: bf02a5e160340365cdbf389b073d62ae73d981519b7854094000b2f1f5609967
+corpus_bytes: 945078
+corpus_sha256: f89803d5b9d82ddcf66ad1068c14717d65dae0b4d1b69b4b61b8396f0b8f3cbb
 corpus_positive_count: 19
 corpus_negative_count: 3
 corpus_relational_count: 1
-corpus_portable_artifact_count: 5
+corpus_portable_artifact_count: 12
 ```
 
 Portable transfer is one bounded newline-delimited canonical frame stream:
