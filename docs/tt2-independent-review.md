@@ -141,7 +141,8 @@ predicate for the wrapper without changing SQL text or query behavior.
 configuration resolution and retries an ambiguous append only with identical
 canonical bytes through the qualified backend. `4e11e3550` strengthens the
 durable-row/unknown-acknowledgement fake and verifies that recovery retains one
-row; the current exact gate exercises that reviewed source.
+row. `5711097b` adds the generated portable corpus and replay assertion; the
+current exact gate exercises that reviewed source.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
