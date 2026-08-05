@@ -87,7 +87,7 @@ three and is pinned to `d67a3bc3a`.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4`; final evidence refresh follows | CONDITIONAL; residuals below |
+| Current implementation candidate | `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4`; final evidence `ebc4f8a81bf3178b8928a14655bed0412a269934` | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
