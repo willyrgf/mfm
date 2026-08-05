@@ -24,21 +24,21 @@ use mfm_evm::{
     sign_eip1559_guarded, signing_failure_is_integrity, AccountAddress,
     AttestCandidateIdentityCapability, AttestCandidateIdentityRequest, AttestedWalletCandidate,
     BroadcastExactCandidateCapability, BroadcastExactCandidateRequest, BroadcastLineageHead,
-    EvmBroadcastResource, EvmChainInstanceBinding, EvmFinalizedHeadCapability,
-    EvmFinalizedHeadObservation, EvmFinalizedHeadRequest, EvmInclusionBlockCapability,
-    EvmInclusionBlockObservation, EvmInclusionBlockRequest, EvmPendingNonceCapability,
-    EvmPendingNonceRequest, EvmReceiptLookupCapability, EvmReceiptLookupObservation,
-    EvmReceiptLookupRequest, EvmRoutingGenerationRef, EvmSubmissionFailure,
-    EvmSubmissionProcessQualification, EvmTransactionLookupCapability,
-    EvmTransactionLookupObservation, EvmTransactionLookupRequest, EvmWalletReceiptStatus,
-    EvmWalletReference, ObservedPendingNonceFloor, SubmittedCandidateProof, TransactionNonce,
-    UnsignedWalletCandidate,
+    EvmBroadcastResource, EvmCandidateSigner, EvmCandidateSignerCompletion,
+    EvmChainInstanceBinding, EvmFinalizedHeadCapability, EvmFinalizedHeadObservation,
+    EvmFinalizedHeadRequest, EvmInclusionBlockCapability, EvmInclusionBlockObservation,
+    EvmInclusionBlockRequest, EvmPendingNonceCapability, EvmPendingNonceRequest,
+    EvmReceiptLookupCapability, EvmReceiptLookupObservation, EvmReceiptLookupRequest,
+    EvmRoutingGenerationRef, EvmSubmissionFailure, EvmSubmissionProcessQualification,
+    EvmTransactionLookupCapability, EvmTransactionLookupObservation, EvmTransactionLookupRequest,
+    EvmWalletReceiptStatus, EvmWalletReference, ObservedPendingNonceFloor, SubmittedCandidateProof,
+    TransactionNonce, UnsignedWalletCandidate,
 };
 use mfm_ids::{ContentRef, StableId};
 use mfm_journal::structured::{AccessKind, HistoryObject, RecordRef};
 use mfm_program::structured::{
     RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
-    RuntimeResourceAuthority,
+    RuntimeResourceAuthority, RuntimeSigner,
 };
 use mfm_signing::QualifiedReadSigningProvider;
 use mfm_spec::structured::{
@@ -1052,6 +1052,25 @@ where
     }
 }
 
+impl BoundedComponentInvoker<EvmCandidateSigner> for EvmStructuredLiveBindings {
+    fn invoke<'a>(
+        &'a self,
+        request: &'a AttestCandidateIdentityRequest,
+    ) -> ComponentFuture<'a, EvmCandidateSignerCompletion> {
+        Box::pin(async move {
+            match self.attest_candidate(request).await {
+                Ok(attested) => EvmCandidateSignerCompletion::Returned(attested),
+                Err(LiveInvocationFailure::Safe(failure)) => {
+                    EvmCandidateSignerCompletion::SafeFailure(failure)
+                }
+                Err(LiveInvocationFailure::Integrity) => {
+                    EvmCandidateSignerCompletion::IntegrityFault
+                }
+            }
+        })
+    }
+}
+
 impl BoundedComponentInvoker<EvmBroadcastResource> for EvmStructuredLiveBindings {
     fn invoke<'a>(&'a self, _request: &'a ()) -> ComponentFuture<'a, ()> {
         Box::pin(async {})
@@ -1112,6 +1131,17 @@ pub fn register_evm_live_submission_bindings(
         )?,
     ];
 
+    registry.register_signer::<EvmCandidateSigner, _>(
+        implementation_descriptor(
+            StructuredComponentKind::Signer,
+            EvmCandidateSigner::contract()
+                .and_then(|contract| contract.content_ref().map_err(Into::into))
+                .map_err(certification_error)?,
+            stable("mfm.evm-live.implementation/candidate-signer")?,
+            qualification,
+        ),
+        Arc::clone(&bindings),
+    )?;
     registry.register_resource_authority::<EvmBroadcastResource, _>(
         implementation_descriptor(
             StructuredComponentKind::Resource,

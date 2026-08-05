@@ -35,22 +35,22 @@ use crate::submission::{
     EvmSubmissionConfiguration, EvmSubmissionExpansion, EvmSubmissionOutput, EvmSubmissionRequest,
     EvmTransactionLookupCapability, EvmTransactionLookupObservation, EvmTransactionLookupRequest,
     ExtractSubmissionWorkState, FailureReconciliationRequest, IntentBoundSubmission,
-    MarkActivationReconcileState, MarkCandidateCompletedState, MarkSubmissionCompletedState,
-    MarkSubmissionResumedState, ObservationRoundDecision, ObserveActivatedTransactionState,
-    ObserveCandidateReceiptState, ObserveCanonicalInclusionState, ObserveFinalizedHeadState,
-    ObservePendingNonceState, ObservedPendingSubmission, PendingEvmSubmissionFailure,
-    PermittedCandidateWork, PostReservePreparedSubmission, PrepareExhaustionReconciliationState,
-    PrepareRetainedCandidateObservationState, PreparedCandidateActivation,
-    PreparedWalletSubmission, ProjectCompletedWalletDispositionState, QualifiedPendingSubmission,
-    QualifyPendingNonceFloorState, ReadCandidateStatusAfterFailureState,
-    ReadCandidateWalletNonceStatusState, ReadExhaustionStatusState,
-    ReadObservedCandidateStatusState, ReadPostReserveWalletNonceStatusState,
-    ReadReservationStatusAfterFailureState, ReadWalletNonceStatusState, ReserveWalletNonceState,
-    SelectCandidateAttemptRouteState, SelectCandidateSlotState, SelectObservationRoundState,
-    SelectSubmissionTerminalState, SelectTerminalEvidenceState,
-    StructuredSubmitEvmTransactionState, SubmissionProgress, SubmissionTerminalDecision,
-    SubmissionWork, TerminalEvidenceDecision, TerminalEvidenceWork, UnsignedWalletCandidate,
-    VerifyCanonicalInclusionState, WalletStatusBaseline, WalletStatusDecision,
+    MarkActivationReconcileState, MarkCandidateCompletedState, ObservationRoundDecision,
+    ObserveActivatedTransactionState, ObserveCandidateReceiptState, ObserveCanonicalInclusionState,
+    ObserveFinalizedHeadState, ObservePendingNonceState, ObservedPendingSubmission,
+    PendingEvmSubmissionFailure, PermittedCandidateWork, PostReservePreparedSubmission,
+    PrepareExhaustionReconciliationState, PrepareRetainedCandidateObservationState,
+    PreparedCandidateActivation, PreparedWalletSubmission, ProjectCompletedWalletDispositionState,
+    QualifiedPendingSubmission, QualifyPendingNonceFloorState,
+    ReadCandidateStatusAfterFailureState, ReadCandidateWalletNonceStatusState,
+    ReadExhaustionStatusState, ReadObservedCandidateStatusState,
+    ReadPostReserveWalletNonceStatusState, ReadReservationStatusAfterFailureState,
+    ReadWalletNonceStatusState, ReserveWalletNonceState, SelectCandidateAttemptRouteState,
+    SelectCandidateSlotState, SelectObservationRoundState, SelectSubmissionTerminalState,
+    SelectTerminalEvidenceState, StructuredSubmitEvmTransactionState, SubmissionProgress,
+    SubmissionTerminalDecision, SubmissionWork, TerminalEvidenceDecision, TerminalEvidenceWork,
+    UnsignedWalletCandidate, VerifyCanonicalInclusionState, WalletStatusBaseline,
+    WalletStatusDecision,
 };
 use crate::submission_expansion::{
     candidate_attempt_recipe, initial_reservation_recipe, HandlePendingEvmSubmissionFailureState,
@@ -345,14 +345,6 @@ pure_process!(
     submission_process::mark_candidate_completed
 );
 pure_process!(
-    MarkSubmissionCompletedState,
-    submission_process::mark_submission_completed
-);
-pure_process!(
-    MarkSubmissionResumedState,
-    submission_process::mark_submission_resumed
-);
-pure_process!(
     SelectTerminalEvidenceState,
     submission_process::select_terminal_evidence
 );
@@ -560,8 +552,6 @@ pub fn register_evm_submission_process(
     register_state::<VerifyCanonicalInclusionState>(registry, qualification, &fixture)?;
     register_state::<CompleteWalletNonceState>(registry, qualification, &fixture)?;
     register_state::<MarkCandidateCompletedState>(registry, qualification, &fixture)?;
-    register_state::<MarkSubmissionCompletedState>(registry, qualification, &fixture)?;
-    register_state::<MarkSubmissionResumedState>(registry, qualification, &fixture)?;
     register_state::<ProjectCompletedWalletDispositionState>(registry, qualification, &fixture)?;
     register_state::<SelectSubmissionTerminalState>(registry, qualification, &fixture)?;
 

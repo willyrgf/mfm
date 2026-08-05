@@ -2035,7 +2035,7 @@ async fn assemble_runtime(
             .expect("certified EVM program reference")
             .content_digest()
             .as_str(),
-        "content:sha256-v1:166ddcb518c4c5818abfec0fbb8353455775c340f1833dfea5b835a6a73302db",
+        "content:sha256-v1:2d31e9545426c34cac61af9244a432eb2b52fbb34cd6d2c8fffb54c2224ad35d",
         "the production EVM submission program must retain its exact certification identity"
     );
     assert_eq!(certified.authored().root.declarations.len(), 1);
@@ -2181,7 +2181,7 @@ fn qualified_submission_registry(
 fn submission_profile() -> StructuredExpansionProfile {
     StructuredExpansionProfile {
         policies: Vec::new(),
-        max_occurrences: 2048,
+        max_occurrences: 4096,
         max_declarations: 4096,
         max_lanes: 1,
         max_fan_out_depth: 1,
