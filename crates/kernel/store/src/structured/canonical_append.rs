@@ -357,7 +357,10 @@ mod tests {
 
     #[test]
     fn shared_bounds_match_the_authoritative_postgres_limits() {
-        assert_eq!(MAX_STORED_FRAME_BYTES, 16_777_216);
+        assert_eq!(
+            MAX_STORED_FRAME_BYTES,
+            mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES
+        );
         assert_eq!(MAX_BATCH_OBJECTS, 65_536);
     }
 }

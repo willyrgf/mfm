@@ -20,7 +20,7 @@ LIMITS: dict[str, tuple[str, int, str]] = {
     "max_canonical_json_depth": ("MAX_CANONICAL_JSON_DEPTH", 64, "usize"),
     "max_object_entries": ("MAX_OBJECT_ENTRIES", 1_048_576, "usize"),
     "max_string_utf8_bytes": ("MAX_STRING_UTF8_BYTES", 16_777_216, "usize"),
-    "max_stored_frame_bytes": ("MAX_STORED_FRAME_BYTES", 16_777_216, "usize"),
+    "max_stored_frame_bytes": ("MAX_STORED_FRAME_BYTES", 32 * 1024 * 1024, "usize"),
     "max_batch_objects": ("MAX_BATCH_OBJECTS", 65_536, "usize"),
     "max_batch_records": ("MAX_BATCH_RECORDS", 65_536, "usize"),
     "max_portable_export_bytes": ("MAX_PORTABLE_EXPORT_BYTES", 16 * 1024 * 1024, "u64"),
@@ -591,7 +591,11 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                     field("append_request_id", string("valid_unicode_scalar_string", 1, 512)),
                     field(
                         "canonical_value",
-                        string("valid_unicode_scalar_string", 1, 16_777_216),
+                        string(
+                            "valid_unicode_scalar_string",
+                            1,
+                            LIMITS["max_configuration_revision_bytes"][1],
+                        ),
                     ),
                     field("key", canonical_value),
                     field("predecessor_ref", nullable(content_ref)),
@@ -821,7 +825,11 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                 [
                     field(
                         "canonical_json",
-                        string("valid_unicode_scalar_string", 1, 16_777_216),
+                        string(
+                            "valid_unicode_scalar_string",
+                            1,
+                            LIMITS["max_stored_frame_bytes"][1],
+                        ),
                     ),
                     field("content_ref", content_ref),
                     field("object_type", reference("mfm.primitive-stable_id.v1")),

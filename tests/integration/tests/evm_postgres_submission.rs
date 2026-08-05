@@ -21,7 +21,9 @@ use mfm_app::{
     EvmWalletDeploymentReleaseMaterial, ExportKind, ExportRequest, PageRequest, PublicJsonResponse,
     ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
 };
-use mfm_canonical::{sha256_digest_bytes, CanonicalValue, RecoverabilityContract};
+use mfm_canonical::{
+    limits::MAX_CANONICAL_JSON_BYTES, sha256_digest_bytes, CanonicalValue, RecoverabilityContract,
+};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_evm::{
     canonical_wallet_reference, derive_evm_chain_lineage_id, derive_evm_semantic_signer_id,
@@ -138,7 +140,7 @@ const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
 const SUBMISSION_TOKEN: &str = "integration-submission";
 const CROSS_CHAIN_SUBMISSION_TOKEN: &str = "cross-chain-submission";
-const MAX_ANNEX_BYTES: usize = 16_777_216;
+const MAX_ANNEX_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
 const BLOCK_NUMBER: &str = "0x64";
 const BLOCK_HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const FINALIZED_NUMBER: &str = "0x65";

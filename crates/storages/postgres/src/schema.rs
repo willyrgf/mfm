@@ -9,7 +9,7 @@ use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v5";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v6";
 
 /// Applies the current destructive baseline for integration fixtures.
 #[cfg(feature = "test-support")]
@@ -30,7 +30,7 @@ pub async fn migrate_test_database(database_url: &str) -> Result<()> {
 const RELATION_MANIFEST_SHA256: &str =
     "cf3b8c51d969611e9f6ca7ca9585ac58aab35358cd3bbd46418b29a05adcbb76";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "023fca709cdf093c44b51f79b74a372172e85df7edf86381c530f883c50bba5c";
+    "d50e4a03598024f35e9f00b52e6630784b85f464cc5e561dd120579b67dc60e2";
 const INDEX_MANIFEST_SHA256: &str =
     "8ae2874ce7db6d9186a54776764748579716aeec882a739a6189281aacb4ee81";
 const EXECUTABLE_MANIFEST_SHA256: &str =
@@ -201,10 +201,8 @@ impl CatalogManifestHashes {
 }
 
 async fn validate_catalog_shape(connection: &mut PgConnection) -> Result<()> {
-    if !catalog_manifest_hashes(connection)
-        .await?
-        .is_authoritative()
-    {
+    let hashes = catalog_manifest_hashes(connection).await?;
+    if !hashes.is_authoritative() {
         return Err(PostgresStoreError::SchemaAuthorityMismatch);
     }
     Ok(())

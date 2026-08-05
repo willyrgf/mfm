@@ -86,10 +86,10 @@ certification, decoding, and replay; the JSON-node limit is an eightfold envelop
 component-definition bound for structured protocol and schema nodes. Exceeding any bound is a
 typed rejection and never a process-stack operation.
 
-The generated recoverability annex allows canonical JSON values up to 32 MiB. This ceiling is
-separate from the smaller string, stored-frame, portable-export, and provider-proof budgets: it
-admits the largest qualified structured-program value while keeping every transport and retained
-payload bound explicit.
+The generated recoverability annex allows canonical JSON values and retained history frames up to
+32 MiB. These ceilings remain separate from the smaller string, portable-export, and
+provider-proof budgets: they admit the largest qualified structured-program value while keeping
+every transport and retained payload bound explicit.
 
 Only the canonical `CertifiedProgramDocument` is execution authority. Its content-addressed root
 binds the authored program, expanded program, expansion profile and proof, policy proof, component

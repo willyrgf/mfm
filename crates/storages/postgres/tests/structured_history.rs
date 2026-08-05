@@ -2178,7 +2178,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     .expect("remove object frame bound for hostile mutation");
     sqlx::query(
         "UPDATE run_history_batch_objects \
-            SET canonical_json = '\"' || repeat('a', 16777216) || '\"' \
+            SET canonical_json = '\"' || repeat('a', 33554432) || '\"' \
           WHERE run_id = $1 AND run_sequence = 1 AND object_ordinal = $2",
     )
     .bind(run_id.as_str())
@@ -2194,7 +2194,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     sqlx::query(
         "ALTER TABLE run_history_batch_objects \
          ADD CONSTRAINT run_history_batch_objects_json_v1 CHECK ( \
-             octet_length(canonical_json) BETWEEN 1 AND 16777216 \
+             octet_length(canonical_json) BETWEEN 1 AND 33554432 \
          )",
     )
     .execute(&mutation_pool)
