@@ -398,6 +398,9 @@ predecessor, successor, operation, and optional successor target before SQL muta
 prepared predecessor retains the preparation and permits only its byte-identical retry; startup at
 the prepared successor acknowledges it. Rollback, database-ahead state, a competing successor,
 or any target/incarnation/public-head mismatch rejects readiness without repair or fallback.
+An exact append retry whose batch is already durable may return `ExistingSame` after later
+successors have advanced the stream: reconciliation must match the external run and fact heads to
+the indexed current heads and must never rewind them to the retried predecessor.
 
 ## Snapshot, export, and authorization boundaries
 
