@@ -3,8 +3,11 @@
 Status: **PASS**
 
 This commit records a fresh independent review of the exact frozen candidate
-`55f1cafac9c06f7b23bfdfe1e8bd9f65fa710769`. It is evidence-only and does not
-change implementation behavior.
+`7f2a792af3ee3f65f0756715e866b0cf136927eb`. It is evidence-only and does not
+change implementation behavior. The candidate delta after the prior reviewed
+source (`55f1cafac`) is lint/encapsulation-only: it scopes the existing EVM
+large-enum lint and makes the retained-proof verifier helper private with a
+grouped argument context; it changes neither behavior nor public API.
 
 ## Material uncertainties
 
@@ -17,20 +20,24 @@ change implementation behavior.
   independently reproduced here. The implementation owner reports the final
   `postgres-sqlx-offline-check`, `postgres-sql-inventory-check`, and
   `nix run .#model-check` tasks pass; the reported model hash begins `d8ede667`.
-- The long release EVM submission qualification is independently reproduced on
-  this exact candidate below; no material execution uncertainty remains beyond
-  the owner-supplied SQLx/offline, SQL inventory, and model reports.
+- The long release EVM submission qualification was independently reproduced on
+  the prior behavior-identical source (`55f1cafac`; 1/1 below). It was not
+  rerun after the lint/encapsulation-only delta in `7f2a792a`; no material
+  execution uncertainty is introduced by that delta. The remaining
+  owner-supplied uncertainty is the SQLx/offline, SQL inventory, and model
+  reports.
 
 ## Frozen candidate and scope
 
-- Candidate: `55f1cafac9c06f7b23bfdfe1e8bd9f65fa710769`
+- Candidate: `7f2a792af3ee3f65f0756715e866b0cf136927eb`
 - TT2 implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Reviewed cutover commits include authority sealing (`cc49802ec`), retained
   provider mutation evidence (`dd0522646`), physical-target fixation
   (`c851a2dab`), proof-bearing wallet checkpoint support (`812cf5f23`),
   idempotent PostgreSQL retry reconciliation (`4fc1baea0`), replay trust and
   export-consumer sealing (`88523caa4`), retained-proof reload verification
-  (`52d58907b`), and registered-incarnation resolution (`55f1cafac`).
+  (`52d58907b`), registered-incarnation resolution (`55f1cafac`), and the
+  lint/encapsulation cleanup (`7f2a792a`).
 - Worktree was clean before this evidence file was added.
 - Scope: canonical append and fold authority, Runtime assembly, replay/export
   provenance, EVM wallet authority, PostgreSQL target/checkpoint authority,
@@ -49,31 +56,36 @@ encoded or offline-verified with caller-supplied trust implementations.
 
 ## Verification evidence
 
-Focused commands were run in the default Nix development shell against the
-exact candidate. Nix automatic GC thresholds were set to zero for these
-invocations only, avoiding an invalid-store-path race; no project behavior was
-changed.
+Focused commands, including the full-workspace Clippy lane, were run in the
+default Nix development shell against the exact candidate. The managed
+qualification rows identify the prior behavior-identical source where they
+were run. Nix automatic GC thresholds were set to zero for these invocations
+only, avoiding an invalid-store-path race; no project behavior was changed.
 
 | Check | Result |
 | --- | --- |
-| `git diff --check 07b9d731^..55f1cafa` | pass |
+| `git diff --check 07b9d731^..7f2a792a` | pass |
 | `nix develop -c cargo fmt --all -- --check` | pass |
+| `nix run .#run -- --task clippy` | pass (full workspace, all libraries/examples/tests/benches and features, `-D warnings`; 1/1; 31.88s) |
 | `nix develop -c cargo test -p mfm-store --test api-surface -- --nocapture` | pass (1/1 trybuild harness, including sealed program/authority surfaces) |
 | `nix develop -c cargo test -p mfm-replay --lib -- --nocapture` | pass (1/1) |
 | `nix develop -c cargo test -p mfm-storage-evm-postgres --features parity-tests --lib -- --nocapture` | pass (2/2; 1 schema probe ignored as DB-gated) |
 | `nix develop -c cargo test -p mfm-evm --lib -- --nocapture` | pass (47/47; run on the preceding proof-verification commit, unchanged by the registry-resolution cutover) |
-| `nix run .#run -- --task recoverability-postgres-v1` | pass (managed PostgreSQL on this candidate, 1/1; 37.54s) |
-| `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL on this candidate, 1/1; 193.33s) |
-| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL release EVM restart path on this candidate, 1/1; 1227.58s) |
+| `nix run .#run -- --task recoverability-postgres-v1` | pass (managed PostgreSQL on behavior-identical source `55f1cafac`, 1/1; 37.54s; not rerun after `7f2a792a`) |
+| `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL on behavior-identical source `55f1cafac`, 1/1; 193.33s; not rerun after `7f2a792a`) |
+| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL release EVM restart path on behavior-identical source `55f1cafac`, 1/1; 1227.58s; not rerun after `7f2a792a`) |
 
-The current wallet qualification covers the new nonce-role `SELECT` grant,
+The managed wallet qualification on behavior-identical source `55f1cafac`
+covers the new nonce-role `SELECT` grant,
 historical-incarnation lookup, promotion compatibility, candidate and
-completion provider-proof corruption, and subsequent restoration. The scoped
-`-D warnings` Clippy lane from the preceding candidate passed for
-authority-seal, values, canonical, certify, runtime, store, replay, evm-live,
-and storage-postgres; it intentionally excluded the existing `large_enum_variant`
-warning in `mfm-evm` and existing dead-code warnings in all-target
-`mfm-storage-evm-postgres`. Cargo check remained green with those warnings.
+completion provider-proof corruption, and subsequent restoration. The
+`-D warnings` workspace Clippy lane now passes for the full workspace on this
+exact candidate, including all libraries, examples, tests, benches, and
+features.
+The `7f2a792a` source delta is limited to the existing EVM
+`large_enum_variant` lint allowance and a private grouped retained-proof
+verifier context; no behavior or public API changed. The release qualification
+above therefore remains applicable without a second long run.
 
 ## Authority and replay boundaries closed by the workspace-private marker
 
@@ -142,15 +154,17 @@ Relevant surfaces: `crates/storages/evm-postgres/src/{authority,provider,schema}
 
 ## PostgreSQL retry reconciliation reviewed
 
-The `4fc1baea0` path was inspected together with the current managed PostgreSQL
-recoverability qualification. `indexed_run_checkpoint_digest` binds the
+The `4fc1baea0` path was inspected together with the managed PostgreSQL
+recoverability qualification on behavior-identical source `55f1cafac`.
+`indexed_run_checkpoint_digest` binds the
 external run checkpoint to the indexed database head in one target-validated
 transaction. `checkpoint_mutations_for_batch` recognizes an external head that
 already equals the indexed current run/fact head and emits no rewind mutation;
 the contention classifier reconstructs the exact existing batch and
 re-acknowledges its checkpoint mutations before returning `ExistingSame`.
-Both qualifications passed with no duplicate broadcast. No concrete retry
-regression was observed.
+Both qualifications passed with no duplicate broadcast. The
+lint/encapsulation-only `7f2a792a` delta does not alter this behavior. No
+concrete retry regression was observed.
 
 ## Closed or passing areas observed
 
@@ -162,10 +176,13 @@ regression was observed.
   and registered historical target identity.
 - Exact physical target identity is carried through structured store identity,
   export evidence, portable fixation, and source-prefix matching.
-- Managed PostgreSQL recoverability, wallet-storage, and release EVM
-  submission/restart qualifications pass on this exact candidate.
-- EVM domain, replay, formatting, storage-provider unit, and API-surface checks
-  pass; existing warning boundaries are recorded above rather than hidden.
+- Managed PostgreSQL recoverability and wallet-storage qualifications pass on
+  behavior-identical source `55f1cafac`; the release EVM submission/restart
+  qualification passes there as well, with the exact-candidate delta limited to
+  lint/encapsulation and full-workspace Clippy passing on `7f2a792a`.
+- EVM domain, replay, formatting, full-workspace Clippy, storage-provider unit,
+  and API-surface checks pass; the source delta's lint/encapsulation scope is
+  recorded above rather than hidden.
 - The owner reports the final SQLx/offline, SQL inventory, and model checks pass;
   those remain owner-supplied evidence rather than independently reproduced
   results here.
@@ -176,6 +193,7 @@ regression was observed.
 retained provider-proof reload gaps, physical-target substitution gap, and
 portable replay trust gaps under the documented workspace-private deployment
 boundary. Focused and managed checks pass, including promotion and persisted
-candidate/completion tamper regressions. The only noted uncertainty is the
-owner-supplied SQLx/offline, SQL inventory, and model reports; all executable
-qualification lanes in scope were reproduced on this exact source hash.
+candidate/completion tamper regressions; the full workspace Clippy lane passes
+on this exact source hash. The release qualification was run on the immediately
+preceding behavior-identical source, and the only remaining uncertainty is the
+owner-supplied SQLx/offline, SQL inventory, and model reports.
