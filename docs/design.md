@@ -269,7 +269,8 @@ treat a merely well-shaped completeness claim as authoritative.
 run view, transition trace, access audit, and replay summary from the sole store fold. Pages are
 fixed to one journal head. Portable export first authorizes every recursively referenced prior-run
 source under the sealed export purpose and only then serializes exact committed-batch envelopes,
-source relationships, and semantic/physical fixation with a closure reference; denied or incomplete
+source relationships, and semantic/physical fixation with the exact target key, database identity,
+fence generation, release epoch, and current-incarnation reference with a closure reference; denied or incomplete
 source closures emit zero bytes. Offline verification uses only bundle bytes and an explicit trust
 snapshot against the store's read-only fold entry. Current portable exports use a bounded
 newline-delimited frame stream with media type
@@ -420,6 +421,9 @@ must bind the access kind and retained physical certificate (and the exact state
 stateful adapters) before entering its provider. An ordinary public Effect adapter call returns an
 integrity fault. Wallet completion records retain a bounded canonical recovery closure so schema
 validation remains within the generated frame budget while preserving rehashable public evidence.
+Wallet activation and completion closures also retain the verified provider-issued mutation
+attestation returned for the exact prepared mutation; reload rejects any candidate or terminal
+closure whose provider evidence is absent, substituted, or inconsistent with its recovery preimage.
 
 ## Application and transport surface
 

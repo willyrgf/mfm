@@ -12,7 +12,9 @@ use mfm_journal::structured::{
     TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
-use mfm_runtime::history::{RuntimeHistoryPort, StructuredAdmissionCommand};
+use mfm_runtime::history::{
+    PhysicalTargetIdentity, RuntimeHistoryPort, StructuredAdmissionCommand,
+};
 use mfm_spec::structured::{
     fan_out_join_contract_canonical_json, fan_out_join_contract_ref,
     lane_outcome_contract_canonical_json, lane_outcome_contract_ref, never_failure_contract_ref,
@@ -4577,6 +4579,16 @@ fn store_identity(discriminator: u8) -> StructuredStoreIdentity {
         ))
         .expect("store scope"),
         store_epoch: StoreEpoch::new(1),
+        physical_target: Some(PhysicalTargetIdentity {
+            target_key: format!("fixture-target-{discriminator}"),
+            database_oid: u32::from(discriminator),
+            fence_generation: 1,
+            release_epoch: 1,
+            current_incarnation_ref: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(&[discriminator, 6]),
+            ),
+        }),
     }
 }
 

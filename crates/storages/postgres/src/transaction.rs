@@ -4,7 +4,11 @@
 //! checks, advisory locks, and commit classification live here. DML helpers require
 //! [`LockedWriteTx`] or [`LockedConfigurationWriteTx`].
 
-use mfm_store::structured::{StructuredStoreError, StructuredStoreIdentity};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_ids::{ContentDigest, DigestAlgorithm};
+use mfm_store::structured::{
+    PhysicalTargetIdentity, StructuredStoreError, StructuredStoreIdentity,
+};
 use sqlx::{Postgres, Row, Transaction};
 
 use crate::schema::SCHEMA_CONTRACT_VERSION;
@@ -348,8 +352,28 @@ async fn validate_target(
 }
 
 pub(crate) fn store_identity_from_binding(binding: &TargetBinding) -> StructuredStoreIdentity {
+    let incarnation_preimage = format!(
+        "mfm.postgres.physical-target-incarnation.v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+        binding.target_key().as_str(),
+        binding.database_oid(),
+        binding.schema_name(),
+        binding.store_scope_id().as_str(),
+        binding.store_epoch(),
+        binding.fence_generation(),
+        binding.release_epoch(),
+    );
     StructuredStoreIdentity {
         store_scope_id: binding.store_scope_id().clone(),
         store_epoch: binding.store_epoch(),
+        physical_target: Some(PhysicalTargetIdentity {
+            target_key: binding.target_key().as_str().to_owned(),
+            database_oid: binding.database_oid(),
+            fence_generation: binding.fence_generation(),
+            release_epoch: binding.release_epoch(),
+            current_incarnation_ref: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(incarnation_preimage.as_bytes()),
+            ),
+        }),
     }
 }

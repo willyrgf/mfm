@@ -7,13 +7,13 @@ parser, migration reader, dual writer, or fallback are retained.
 Current artifact metadata:
 
 ```text
-annex_bytes: 48828
-annex_sha256: ec589eaf432ebf6f1869e5f7968bd58d79db01bcbea91a01e88d4768608da2e6
-annex_schema_count: 51
+annex_bytes: 50084
+annex_sha256: a0895ede0f94009312187d2da66de27659c30466db2fdaf2f16750a86c6094ec
+annex_schema_count: 52
 annex_domain_count: 5
 annex_logical_key_count: 5
 corpus_bytes: 44765
-corpus_sha256: 053de47c7f9c6f9429abf064ef8127036150f2228d7f4a071532386362fb0c8f
+corpus_sha256: 41622e8f46a824a1a539e4864d45ba392570b3463e6e0b6c1f44752858b46c99
 corpus_positive_count: 18
 corpus_negative_count: 3
 corpus_relational_count: 1
@@ -24,7 +24,7 @@ Portable transfer is one bounded newline-delimited canonical frame stream:
 ```text
 contract: mfm.portable-run-export-stream.v1
 frame_contract: mfm.portable-run-export-frame.v1
-stream_schema_id: schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:af2eb5dcab068611d4aafadc860064b5ee8d61adc030ad711b3616907b6c057b
+stream_schema_id: schema:mfm.portable-run-export-stream:1:sha256-jcs-v1:4255f12dd378ebf4e6ecfc895e4615159d4fe03cd756c46808d89e8013e42deb
 frame_schema_id: schema:mfm.portable-run-export-frame:1:sha256-jcs-v1:df1ce7d16564af5b0aaa94d02fd51c2602bdd0504cb1a4aaa859eef0c524274d
 version: mfm.structured-portable-run-export-stream.v2
 media_type: application/vnd.mfm.structured-run-export-stream.v2

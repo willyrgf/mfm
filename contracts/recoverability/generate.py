@@ -837,6 +837,19 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                 "content_ref hashes the exact canonical_json UTF-8 bytes",
             ),
         ),
+        "mfm.portable-physical-target.v1": (
+            ["P-AP-01", "P-RH-01"],
+            object_shape(
+                [
+                    field("current_incarnation_ref", reference("mfm.primitive-content_digest.v1")),
+                    field("database_oid", unsigned(4_294_967_295)),
+                    field("fence_generation", unsigned(18_446_744_073_709_551_615)),
+                    field("release_epoch", unsigned(18_446_744_073_709_551_615)),
+                    field("target_key", string("valid_unicode_scalar_string", 1, 512)),
+                ],
+                "the target identity binds the exact physical database, fence, release, and current incarnation",
+            ),
+        ),
         "mfm.portable-fixation.v1": (
             ["P-AP-01", "P-RH-01"],
             object_shape(
@@ -849,6 +862,7 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
                     field("store_epoch", reference("mfm.primitive-store_epoch.v1")),
                     field("store_scope_id", reference("mfm.primitive-store_scope_id.v1")),
                     field("tenant_scope_id", reference("mfm.primitive-tenant_scope_id.v1")),
+                    field("physical_target", reference("mfm.portable-physical-target.v1")),
                 ],
                 "semantic and physical fixation bind one exact export prefix",
             ),
