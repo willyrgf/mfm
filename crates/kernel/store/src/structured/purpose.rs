@@ -1114,11 +1114,7 @@ impl ExportFragment {
             })
             .collect::<Vec<_>>();
         let fact_routes = export_fact_routes(&verified)?;
-        let direct_source_run_ids = fact_routes
-            .iter()
-            .map(|route| route.producer_transition.run_id.clone())
-            .filter(|run_id| run_id != verified.run_id())
-            .collect();
+        let direct_source_run_ids = verified.direct_source_run_ids()?;
         Ok(Self {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
