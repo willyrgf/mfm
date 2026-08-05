@@ -81,6 +81,7 @@ Post-step-12 implementation and proof revisions:
 | `5711097b` | expand generated portable replay corpus |
 | `74bfa335` | add generated offline replay acceptance vector |
 | `6284e8d9` | expand generated portable graph corpus |
+| `82e474ca` | bound wallet status to current projection |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -94,8 +95,12 @@ adds a generated offline-fold acceptance vector derived from the production
 zero-state export, and `6284e8d9` adds production-shaped semantic/audit cutoff
 vectors plus shared-DAG and cycle graph vectors that exercise the real source
 closure expander. These revisions remain corpus/test-only and do not change
-production replay/runtime behavior. The corrected source gate below starts
-after `6284e8d9`; this evidence refresh is documentation-only after that gate.
+production replay/runtime behavior. `82e474ca` is the bounded EVM projection
+cutover: normal status no longer performs a lifetime reservation `COUNT/MAX`,
+and its managed qualification adds a primary-key `EXPLAIN` regression plus a
+current-frontier omission check. The corrected source gate below runs on
+`82e474ca`; this evidence and contract-wording refresh is documentation-only
+after that gate.
 
 ## Independent review checkpoints
 
@@ -106,7 +111,8 @@ after `6284e8d9`; this evidence refresh is documentation-only after that gate.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `6284e8d926e2ff866eae94c714420050cfe29643` | independent implementation and post-gate evidence review completed on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
+| Generated portable graph candidate | `6284e8d926e2ff866eae94c714420050cfe29643` | independent implementation and post-gate evidence review completed on this exact revision; superseded by the bounded projection cutover below | CONDITIONAL; residuals below |
+| Bounded wallet projection candidate | `82e474caf83bea3338da116e5735f06367f80742` | independent implementation review and exact composed gate below cover this revision | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -134,15 +140,15 @@ Current exact composed gate:
 
 ```text
 nix run .#ci
-source: 6284e8d926e2ff866eae94c714420050cfe29643
-run id: run-1862293-1785966011921687322
-result: ok — 13 passed, 0 failed in 1938.53s
-structured EVM submission: ok in 1259.57s
+source: 82e474caf83bea3338da116e5735f06367f80742
+run id: run-1900515-1785969180314881458
+result: ok — 13 passed, 0 failed in 1811.86s
+structured EVM submission: ok in 1322.75s
 ```
 
 The run also observed the PostgreSQL recoverability leaf and wallet-nonce
 qualification as passing, plus Bitcoin parity and closing-source-revision.
-The closing-source-revision leaf observed the pinned `6284e8d9` source; the
+The closing-source-revision leaf observed the pinned `82e474ca` source; the
 evidence refresh after the run is documentation-only.
 The portable leaf consumed the tracked generated corpus and passed 9/9 replay
 tests; deterministic regeneration was checked separately with
@@ -151,7 +157,7 @@ tests; deterministic regeneration was checked separately with
 `aaed5cbea0feb3650d8e3d912f6b8f3f688230427619185defe77adb12ac9b80`, 15
 artifact vectors, and two source-graph vectors.
 The final independent checkpoint reviewed the exact run summary and closing
-source leaf: all 13 nodes succeeded, workspace nextest reported 590 passed and
+source leaf for `82e474ca`: all 13 nodes succeeded, workspace nextest reported 590 passed and
 1 skipped, and the closing leaf printed the full candidate hash above. It also
 confirmed that generator determinism is separate evidence rather than a
 hidden step inside the portable corpus leaf.
@@ -205,7 +211,7 @@ predecessor and retry fixes. The focused store suite now passes 33/33,
 including bounded configuration-reader retry and identical-append ambiguity
 recovery regressions. The historical composed gate includes the source-bound
 fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
-`6284e8d9`.
+`82e474ca`.
 
 ## TT2 disposition at the current candidate
 
