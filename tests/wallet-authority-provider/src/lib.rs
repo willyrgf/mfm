@@ -3232,17 +3232,22 @@ async fn handle_write(
                     operation_key: retained_key,
                     mutation,
                 } if retained_context == context && retained_key == operation_key => {
-                    let prepared = match state.prepare_checkpoint(mutation.as_ref(), None).await {
+                    let signature = channel.assertion_signature(
+                        "prepare-mutation",
+                        &(&context, &operation_key, &mutation),
+                    )?;
+                    let checkpoint_mutation = checkpoint_mutation_with_provider_attestation(
+                        mutation.as_ref(),
+                        &signature,
+                    )?;
+                    let prepared = match state.prepare_checkpoint(&checkpoint_mutation, None).await
+                    {
                         Ok(prepared) => prepared,
                         Err(_) => {
                             channel.send(&ProviderReply::Rejected).await?;
                             return Ok(());
                         }
                     };
-                    let signature = channel.assertion_signature(
-                        "prepare-mutation",
-                        &(&context, &operation_key, &mutation),
-                    )?;
                     if channel
                         .send(&ProviderReply::MutationPrepared {
                             provider_attestation: signature,
@@ -4216,6 +4221,56 @@ fn apply_checkpoint_mutation(
             head.current_incarnation_ref = next_ref_json;
             Ok(())
         }
+    }
+}
+
+fn checkpoint_mutation_with_provider_attestation(
+    mutation: &ProviderMutation,
+    provider_attestation: &str,
+) -> Result<ProviderMutation, ProviderTestError> {
+    if provider_attestation.is_empty()
+        || provider_attestation.len() > 4_096
+        || !provider_attestation
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(ProviderTestError::Invalid);
+    }
+    match mutation {
+        ProviderMutation::CandidateActivation {
+            request,
+            candidate,
+            state_input_ref,
+        } => {
+            let mut candidate = candidate.clone();
+            if !candidate.provider_activation_attestation.is_empty() {
+                return Err(ProviderTestError::Invalid);
+            }
+            candidate.provider_activation_attestation = provider_attestation.to_owned();
+            Ok(ProviderMutation::CandidateActivation {
+                request: request.clone(),
+                candidate,
+                state_input_ref: state_input_ref.clone(),
+            })
+        }
+        ProviderMutation::Completion {
+            request,
+            completion,
+            state_input_ref,
+        } => {
+            let completion = completion
+                .clone()
+                .with_provider_completion_attestation(provider_attestation.to_owned())
+                .map_err(|_| ProviderTestError::Invalid)?;
+            Ok(ProviderMutation::Completion {
+                request: request.clone(),
+                completion,
+                state_input_ref: state_input_ref.clone(),
+            })
+        }
+        ProviderMutation::ActivationIssuance { .. }
+        | ProviderMutation::Reservation { .. }
+        | ProviderMutation::Promotion { .. } => Ok(mutation.clone()),
     }
 }
 
