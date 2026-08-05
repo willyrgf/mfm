@@ -3182,6 +3182,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         &mutation_texts[mutation_text_start..]
     );
 
+    let final_status_text_start = query_proxy.statement_texts().len();
     let long_history_statement_start = query_proxy.statement_count();
     let long_history_status = query_authority
         .read_status(&state_input, &status_request)
@@ -3199,6 +3200,14 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     assert_eq!(
         long_history_statement_count, baseline_statement_count,
         "status statement count must stay constant after {LONG_HISTORY_RESERVATIONS} completed reservations"
+    );
+    let final_status_texts = query_proxy.statement_texts();
+    assert!(
+        !final_status_texts[final_status_text_start..]
+            .iter()
+            .any(|sql| is_lifetime_reservation_aggregate(sql)),
+        "post-history status must not issue a lifetime reservation aggregate: {:?}",
+        &final_status_texts[final_status_text_start..]
     );
 
     let frontier_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
