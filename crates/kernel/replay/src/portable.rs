@@ -2025,8 +2025,8 @@ mod tests {
         assert!(omitted_route.to_canonical_bytes().is_err());
     }
 
-    #[test]
-    fn generated_portable_artifact_corpus_round_trips() {
+    #[tokio::test]
+    async fn generated_portable_artifact_corpus_round_trips() {
         let corpus: serde_json::Value = serde_json::from_slice(include_bytes!(
             "../../../../contracts/recoverability/v1/corpus.json"
         ))
@@ -2058,6 +2058,56 @@ mod tests {
                             "{} must reject during offline fold",
                             vector["id"]
                         );
+                    } else if vector
+                        .get("offline_fold")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("acceptance")
+                    {
+                        let discriminator = vector["fixture_discriminator"]
+                            .as_u64()
+                            .and_then(|value| u8::try_from(value).ok())
+                            .expect("offline acceptance fixture discriminator");
+                        let fixture =
+                            mfm_store::structured::test_support::zero_state_export(discriminator)
+                                .await
+                                .expect("offline acceptance fixture");
+                        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
+                            fixture.into_replay_parts();
+                        let closure = AuthorizedExportClosure::new(
+                            fixture_export,
+                            StableId::new("mfm.portable-test/principal").expect("principal"),
+                            decision_ref(1),
+                            BTreeMap::new(),
+                        )
+                        .expect("seal offline acceptance fixture");
+                        let generated = PortableRunExport::from_authorized_export_closure(
+                            &closure,
+                            ExportKind::Semantic,
+                        )
+                        .expect("encode offline acceptance fixture");
+                        assert_eq!(
+                            generated
+                                .to_canonical_bytes()
+                                .expect("canonical offline acceptance fixture"),
+                            bytes,
+                            "{} must retain the generated fixture bytes",
+                            vector["id"]
+                        );
+                        let release = AcceptRelease;
+                        let checkpoint = AcceptCheckpoint;
+                        let trust =
+                            ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
+                                .with_authorized_closure(
+                                    generated.closure_reference(),
+                                    &release,
+                                    &checkpoint,
+                                );
+                        let offline = PortableRunExport::verify_offline(&bytes, &trust)
+                            .expect("generated offline acceptance");
+                        let online = super::project_replay_result(&fixture_recorded)
+                            .expect("online acceptance projection");
+                        assert_eq!(offline.as_bytes(), online.as_bytes());
+                        assert_eq!(offline.schema_id(), online.schema_id());
                     }
                 }
                 "strict_decode_rejection" => {
