@@ -199,7 +199,14 @@ impl PostgresWalletNonceAuthority {
         connection: &mut PgConnection,
         reservation: &ReservationClosure,
     ) -> Result<Vec<ActiveWalletCandidate>> {
-        load_candidates(connection, reservation, &self.validator).await
+        load_candidates(
+            connection,
+            reservation,
+            &self.validator,
+            &self.activation_verifier,
+            &self.schema_name,
+        )
+        .await
     }
 
     async fn load_validated_completion(
@@ -211,6 +218,8 @@ impl PostgresWalletNonceAuthority {
         let completion = load_completion(
             connection,
             reservation.reservation.semantic_reservation_key.as_str(),
+            &self.activation_verifier,
+            &self.schema_name,
         )
         .await?;
         if completion.as_ref().is_some_and(|retained| {
@@ -418,6 +427,8 @@ impl PostgresWalletNonceAuthority {
             && load_completion(
                 connection,
                 frontier.reservation.semantic_reservation_key.as_str(),
+                &self.activation_verifier,
+                &self.schema_name,
             )
             .await?
             .is_some()
@@ -1120,6 +1131,8 @@ impl PostgresWalletNonceAuthority {
         let retained = load_candidate_by_key(
             &mut read.transaction,
             request.candidate_operation_key.as_str(),
+            &self.activation_verifier,
+            &self.schema_name,
         )
         .await?;
         let result = match retained {
@@ -1980,6 +1993,8 @@ impl PostgresWalletNonceAuthority {
                 match load_candidate_by_key(
                     &mut write.transaction,
                     request.candidate_operation_key.as_str(),
+                    &self.activation_verifier,
+                    &self.schema_name,
                 )
                 .await
                 {
@@ -2039,6 +2054,8 @@ impl PostgresWalletNonceAuthority {
                 match load_candidate_by_key(
                     &mut write.transaction,
                     request.candidate_operation_key.as_str(),
+                    &self.activation_verifier,
+                    &self.schema_name,
                 )
                 .await
                 {
@@ -2333,6 +2350,8 @@ impl PostgresWalletNonceAuthority {
                 match load_completion_by_key(
                     &mut write.transaction,
                     request.completion_key.as_str(),
+                    &self.activation_verifier,
+                    &self.schema_name,
                 )
                 .await
                 {
@@ -2998,6 +3017,8 @@ async fn load_reservation(
 async fn load_candidate_by_key(
     connection: &mut PgConnection,
     candidate_key: &str,
+    activation_verifier: &OfflineActivationVerifier,
+    schema_name: &str,
 ) -> Result<Option<RetainedCandidate>> {
     let row = sqlx::query(
         "SELECT semantic_candidate_operation_key, semantic_reservation_key, candidate_ordinal, \
@@ -3009,7 +3030,11 @@ async fn load_candidate_by_key(
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
-    row.map(|row| {
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let database_oid = session_identity(connection).await?.0;
+    Ok(Some({
         let request: ActivateEvmCandidateRequest = decode_row_json(&row, "request_json")?;
         let candidate: ActiveWalletCandidate = decode_row_json(&row, "active_candidate_json")?;
         let state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
@@ -3030,19 +3055,33 @@ async fn load_candidate_by_key(
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
-        Ok(RetainedCandidate {
+        let mut preimage_candidate = candidate.clone();
+        preimage_candidate.provider_activation_attestation.clear();
+        activation_verifier.verify_retained_mutation(
+            &candidate.provider_activation_attestation,
+            schema_name,
+            database_oid,
+            retained_key,
+            &ProviderMutation::CandidateActivation {
+                request: request.clone(),
+                candidate: preimage_candidate,
+                state_input_ref: state_input_ref.clone(),
+            },
+        )?;
+        RetainedCandidate {
             request,
             candidate,
             state_input_ref,
-        })
-    })
-    .transpose()
+        }
+    }))
 }
 
 async fn load_candidates(
     connection: &mut PgConnection,
     reservation: &ReservationClosure,
     validator: &EvmSubmissionCapabilityImplementation,
+    activation_verifier: &OfflineActivationVerifier,
+    schema_name: &str,
 ) -> Result<Vec<ActiveWalletCandidate>> {
     let maximum = mfm_evm::EVM_WALLET_REPLACEMENT_LIMIT;
     let rows = sqlx::query(
@@ -3062,6 +3101,7 @@ async fn load_candidates(
     if rows.len() > maximum {
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
+    let database_oid = session_identity(connection).await?.0;
     let mut candidates = Vec::with_capacity(rows.len());
     for (ordinal, row) in rows.into_iter().enumerate() {
         let retained_ordinal: i32 = row
@@ -3109,6 +3149,19 @@ async fn load_candidates(
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
+        let mut preimage_candidate = candidate.clone();
+        preimage_candidate.provider_activation_attestation.clear();
+        activation_verifier.verify_retained_mutation(
+            &candidate.provider_activation_attestation,
+            schema_name,
+            database_oid,
+            expected_key.as_str(),
+            &ProviderMutation::CandidateActivation {
+                request: request.clone(),
+                candidate: preimage_candidate,
+                state_input_ref: state_input_ref.clone(),
+            },
+        )?;
         candidates.push(candidate);
     }
     Ok(candidates)
@@ -3140,6 +3193,8 @@ async fn load_candidate_preimages(
 async fn load_completion(
     connection: &mut PgConnection,
     reservation_key: &str,
+    activation_verifier: &OfflineActivationVerifier,
+    schema_name: &str,
 ) -> Result<Option<RetainedCompletion>> {
     let row = sqlx::query(
         "SELECT semantic_completion_key, semantic_reservation_key, request_json, \
@@ -3151,12 +3206,19 @@ async fn load_completion(
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
-    decode_completion_row(row)
+    let database_oid = if row.is_some() {
+        Some(session_identity(connection).await?.0)
+    } else {
+        None
+    };
+    decode_completion_row(row, activation_verifier, schema_name, database_oid)
 }
 
 async fn load_completion_by_key(
     connection: &mut PgConnection,
     completion_key: &str,
+    activation_verifier: &OfflineActivationVerifier,
+    schema_name: &str,
 ) -> Result<Option<RetainedCompletion>> {
     let row = sqlx::query(
         "SELECT semantic_completion_key, semantic_reservation_key, request_json, \
@@ -3168,11 +3230,22 @@ async fn load_completion_by_key(
     .fetch_optional(&mut *connection)
     .await
     .map_err(|_| PostgresEvmWalletError::Unavailable)?;
-    decode_completion_row(row)
+    let database_oid = if row.is_some() {
+        Some(session_identity(connection).await?.0)
+    } else {
+        None
+    };
+    decode_completion_row(row, activation_verifier, schema_name, database_oid)
 }
 
-fn decode_completion_row(row: Option<sqlx::postgres::PgRow>) -> Result<Option<RetainedCompletion>> {
+fn decode_completion_row(
+    row: Option<sqlx::postgres::PgRow>,
+    activation_verifier: &OfflineActivationVerifier,
+    schema_name: &str,
+    database_oid: Option<u32>,
+) -> Result<Option<RetainedCompletion>> {
     row.map(|row| {
+        let database_oid = database_oid.ok_or(PostgresEvmWalletError::InvalidAuthority)?;
         let request: CompleteEvmNonceRequest = decode_row_json(&row, "request_json")?;
         let terminal_outcome: CanonicalTerminalOutcome =
             decode_row_json(&row, "canonical_terminal_outcome_json")?;
@@ -3195,6 +3268,20 @@ fn decode_completion_row(row: Option<sqlx::postgres::PgRow>) -> Result<Option<Re
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
+        let completion_preimage = completion
+            .provider_mutation_preimage()
+            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        activation_verifier.verify_retained_mutation(
+            &completion.provider_completion_attestation,
+            schema_name,
+            database_oid,
+            retained_completion_key,
+            &ProviderMutation::Completion {
+                request: request.clone(),
+                completion: completion_preimage,
+                state_input_ref: state_input_ref.clone(),
+            },
+        )?;
         Ok(RetainedCompletion {
             request,
             terminal_outcome,

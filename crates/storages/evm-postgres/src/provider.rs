@@ -179,6 +179,7 @@ impl WalletAuthorityProviderClient {
         let mut channel = ProviderChannel {
             read: BufReader::new(read),
             write,
+            provider_id: self.trust.provider_id.as_str().to_owned(),
             authentication_challenge: [0; 32],
             public_key: self.trust.public_key,
         };
@@ -425,6 +426,44 @@ impl WalletAuthorityProviderClient {
             .verify(&signed, signature.as_ref())
             .map_err(|_| PostgresEvmWalletError::FenceRejected);
         verified
+    }
+
+    pub(crate) fn verify_retained_mutation_proof(
+        &self,
+        proof: &str,
+        expected_store_incarnation: &WalletNonceStoreIncarnation,
+        expected_schema: &str,
+        expected_database_oid: u32,
+        expected_operation_key: &str,
+        mutation: &ProviderMutation,
+    ) -> Result<()> {
+        let proof = decode_persisted_mutation_proof(proof)?;
+        // Historical wallet rows survive an authorized physical promotion. The
+        // provider proof must therefore belong to this store lineage and an
+        // already qualified writer epoch, while the signed context still
+        // identifies the exact target that prepared the mutation.
+        if proof.provider_id != self.trust.provider_id.as_str()
+            || proof.operation_key != expected_operation_key
+            || proof.context.schema_name != expected_schema
+            || proof.context.database_oid != expected_database_oid
+            || proof
+                .context
+                .store_incarnation
+                .wallet_nonce_store_lineage_id
+                != expected_store_incarnation.wallet_nonce_store_lineage_id
+            || proof.context.store_incarnation.writer_epoch
+                > expected_store_incarnation.writer_epoch
+        {
+            return Err(PostgresEvmWalletError::InvalidAuthority);
+        }
+        validate_persisted_mutation_context(&proof.context)?;
+        verify_persisted_mutation_proof(
+            &self.trust.public_key,
+            &proof,
+            &proof.context,
+            expected_operation_key,
+            mutation,
+        )
     }
 }
 
@@ -868,6 +907,24 @@ impl OfflineActivationVerifier {
         &self.provider_fence_head_ref
     }
 
+    pub(crate) fn verify_retained_mutation(
+        &self,
+        proof: &str,
+        schema_name: &str,
+        database_oid: u32,
+        operation_key: &str,
+        mutation: &ProviderMutation,
+    ) -> Result<()> {
+        self.client.verify_retained_mutation_proof(
+            proof,
+            &self.store_incarnation,
+            schema_name,
+            database_oid,
+            operation_key,
+            mutation,
+        )
+    }
+
     pub(crate) async fn begin_read(&self) -> Result<PendingReadLease> {
         let request = ProviderRequest::BeginRead {
             registry_issuance_ref: self.exact_attestation.registry_issuance_ref.clone(),
@@ -969,6 +1026,17 @@ pub(crate) struct ProviderTargetContext {
     pub(crate) schema_name: String,
     pub(crate) application_marker: String,
     pub(crate) store_incarnation: WalletNonceStoreIncarnation,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedMutationProof {
+    provider_id: String,
+    challenge: String,
+    context: ProviderTargetContext,
+    operation_key: String,
+    payload_digest: String,
+    signature: String,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -1209,20 +1277,22 @@ impl WriteTransactionLease {
             ProviderReply::MutationPrepared {
                 provider_attestation,
             } => {
-                let provider_attestation = Zeroizing::new(provider_attestation);
-                verify_channel_assertion(
-                    channel,
-                    "prepare-mutation",
-                    &(&self.context, &self.operation_key, mutation.as_ref()),
-                    &provider_attestation,
-                )?;
-                if !valid_provider_attestation(&provider_attestation) {
+                let proof = decode_persisted_mutation_proof(&provider_attestation)?;
+                if proof.provider_id != channel.provider_id
+                    || proof.context != self.context
+                    || proof.operation_key != self.operation_key
+                {
                     return Ok(ProviderDisposition::Integrity);
                 }
+                verify_persisted_mutation_proof(
+                    &channel.public_key,
+                    &proof,
+                    &self.context,
+                    &self.operation_key,
+                    mutation.as_ref(),
+                )?;
                 self.mutation_prepared = true;
-                Ok(ProviderDisposition::Current(
-                    provider_attestation.as_str().to_owned(),
-                ))
+                Ok(ProviderDisposition::Current(provider_attestation))
             }
             reply => disposition_without_value(reply),
         }
@@ -1559,6 +1629,7 @@ impl RegistryPromotionLease {
 struct ProviderChannel {
     read: BufReader<ReadHalf<UnixStream>>,
     write: WriteHalf<UnixStream>,
+    provider_id: String,
     authentication_challenge: [u8; 32],
     public_key: [u8; 32],
 }
@@ -1828,6 +1899,73 @@ fn valid_provider_attestation(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_PROVIDER_PROOF_BYTES
         && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn decode_persisted_mutation_proof(value: &str) -> Result<PersistedMutationProof> {
+    if !valid_provider_attestation(value) {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    let proof: PersistedMutationProof =
+        serde_json::from_str(value).map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    if serde_json::to_string(&proof).map_or(true, |encoded| encoded != value) {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    Ok(proof)
+}
+
+fn validate_persisted_mutation_context(context: &ProviderTargetContext) -> Result<()> {
+    if context.database_oid == 0
+        || context.backend_pid <= 0
+        || context.transaction_id.is_none()
+        || context.snapshot_id.is_some()
+        || !valid_marker(&context.application_marker)
+    {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    context
+        .store_incarnation
+        .validate()
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)
+}
+
+fn verify_persisted_mutation_proof(
+    public_key: &[u8; 32],
+    proof: &PersistedMutationProof,
+    expected_context: &ProviderTargetContext,
+    expected_operation_key: &str,
+    mutation: &ProviderMutation,
+) -> Result<()> {
+    if proof.context != *expected_context || proof.operation_key != expected_operation_key {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    validate_persisted_mutation_context(expected_context)?;
+    let payload_digest = mfm_journal::structured::domain_content_digest(
+        "mfm.wallet-authority-provider.assertion-payload.v1",
+        &(&proof.context, &proof.operation_key, mutation),
+    )
+    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    if proof.payload_digest != payload_digest.as_str() {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    let challenge =
+        hex::decode(&proof.challenge).map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    if challenge.len() != 32 {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    let signature = decode_signature(&proof.signature)?;
+    let mut signed = Vec::with_capacity(
+        ASSERTION_DOMAIN.len()
+            + challenge.len()
+            + "prepare-mutation".len()
+            + proof.payload_digest.len(),
+    );
+    signed.extend_from_slice(ASSERTION_DOMAIN);
+    signed.extend_from_slice(&challenge);
+    signed.extend_from_slice(b"prepare-mutation");
+    signed.extend_from_slice(proof.payload_digest.as_bytes());
+    UnparsedPublicKey::new(&ED25519, *public_key)
+        .verify(&signed, signature.as_ref())
+        .map_err(|_| PostgresEvmWalletError::FenceRejected)
 }
 
 fn decode_signature(signature: &str) -> Result<Zeroizing<[u8; 64]>> {
