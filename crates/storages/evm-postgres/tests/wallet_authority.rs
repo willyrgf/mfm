@@ -2636,7 +2636,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         qualified_activation.clone(),
         fixture.next_incarnation.clone(),
         fixture.next_public_head.clone(),
-        provider_client,
+        provider_client.clone(),
     )
     .await
     .expect("open the promoted successor authority");
@@ -2754,6 +2754,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         }) => completion,
         other => panic!("unexpected successor completion result: {other:?}"),
     };
+
     let successor_status_request = ReadEvmWalletNonceStatusRequest {
         nonce_domain: successor_request.nonce_domain.clone(),
         domain_activation_attestation: qualified_activation.clone(),
@@ -3023,6 +3024,121 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             ..
         }) if retained_completion == &completion
     ));
+
+    // Compare one real status operation before and after appending a substantial
+    // completed lineage. The proxy counts wire-level statement executions, so
+    // this guards the production authority path rather than a copied SQL plan.
+    let query_proxy = PostgresCommitFaultProxy::start(&database_url)
+        .await
+        .expect("start long-history query-count proxy");
+    let query_role_urls = role_urls.through_proxy(query_proxy.database_url());
+    let query_authority = open_wallet_nonce_authority(
+        &query_role_urls.nonce_application,
+        &schema,
+        qualified_activation.clone(),
+        fixture.next_incarnation.clone(),
+        fixture.next_public_head.clone(),
+        provider_client.clone(),
+    )
+    .await
+    .expect("open fresh current authority through query-count proxy");
+    let baseline_statement_start = query_proxy.statement_count();
+    let baseline_status = query_authority
+        .read_status(&state_input, &status_request)
+        .await;
+    let baseline_statement_count = query_proxy
+        .statement_count()
+        .saturating_sub(baseline_statement_start);
+    assert!(
+        matches!(
+            &baseline_status,
+            ReadAdapterCompletion::Returned(WalletNonceStatus::Completed { .. })
+        ),
+        "unexpected baseline bounded status: {baseline_status:?}"
+    );
+    assert!(
+        baseline_statement_count > 0,
+        "the proxy must observe the bounded status statements"
+    );
+
+    const LONG_HISTORY_RESERVATIONS: u64 = 64;
+    for offset in 0..LONG_HISTORY_RESERVATIONS {
+        let nonce = 12_u64 + offset;
+        let long_history_request = fixture.reserve_request(
+            qualified_activation.clone(),
+            nonce,
+            &format!("long-history-{offset}"),
+        );
+        let long_history_reservation = match successor_authority
+            .reserve(&state_input, &long_history_request)
+            .await
+        {
+            EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved {
+                reservation,
+            }) => reservation,
+            other => panic!("unexpected long-history reservation result: {other:?}"),
+        };
+        assert_eq!(long_history_reservation.nonce, nonce);
+        let (long_history_activation, _) =
+            fixture.activation_request(&long_history_request, &long_history_reservation);
+        let long_history_candidate = match successor_authority
+            .activate_candidate(&state_input, &long_history_activation)
+            .await
+        {
+            EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+                candidate,
+            }) => candidate,
+            other => panic!("unexpected long-history activation result: {other:?}"),
+        };
+        let long_history_completion =
+            fixture.completion_request(&long_history_reservation, &long_history_candidate);
+        assert!(matches!(
+            successor_authority
+                .complete(&state_input, &long_history_completion)
+                .await,
+            EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed { .. })
+        ));
+    }
+
+    let long_history_statement_start = query_proxy.statement_count();
+    let long_history_status = query_authority
+        .read_status(&state_input, &status_request)
+        .await;
+    let long_history_statement_count = query_proxy
+        .statement_count()
+        .saturating_sub(long_history_statement_start);
+    assert!(
+        matches!(
+            &long_history_status,
+            ReadAdapterCompletion::Returned(WalletNonceStatus::Completed { .. })
+        ),
+        "unexpected long-history bounded status: {long_history_status:?}"
+    );
+    assert_eq!(
+        long_history_statement_count, baseline_statement_count,
+        "status statement count must stay constant after {LONG_HISTORY_RESERVATIONS} completed reservations"
+    );
+
+    let frontier_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS false) \
+         SELECT semantic_reservation_key FROM {schema}.wallet_nonce_reservations \
+          WHERE wallet_nonce_domain_id = $1 AND nonce = $2::numeric"
+    )))
+    .bind(fixture.nonce_domain.as_str())
+    .bind((11_u64 + LONG_HISTORY_RESERVATIONS).to_string())
+    .fetch_all(&probe_pool)
+    .await
+    .expect("explain bounded current frontier lookup")
+    .join("\n");
+    assert!(
+        frontier_plan.contains("Index Scan using wallet_nonce_reservations_nonce_v1")
+            || frontier_plan.contains("Index Only Scan using wallet_nonce_reservations_nonce_v1"),
+        "frontier lookup must retain its unique index plan after long history: {frontier_plan}"
+    );
+    assert!(
+        frontier_plan.contains("rows=1"),
+        "frontier lookup must visit one retained row: {frontier_plan}"
+    );
 
     drop(probe_pool);
     drop(successor_authority);
