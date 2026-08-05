@@ -1648,7 +1648,7 @@ mod tests {
         let checkpoint = AcceptCheckpoint;
         let trust = ReplayTrustSnapshot::new(
             &fixture.program_verifier,
-            &fixture.physical_binding_verifier,
+            fixture.physical_binding_verifier(),
         )
         .with_authorized_closure(export.closure_reference(), &release, &checkpoint);
 

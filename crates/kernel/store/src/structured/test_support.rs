@@ -67,7 +67,7 @@ impl ProgramVerifier for FixtureProgramVerifier {
 }
 
 /// Physical-binding verifier for the fixture's target-fixed retained history.
-pub struct AcceptPhysicalBindings;
+struct AcceptPhysicalBindings;
 
 impl mfm_authority_seal::PhysicalBindingVerifierSeal for AcceptPhysicalBindings {}
 
@@ -99,7 +99,14 @@ pub struct OfflineExportFixture {
     /// Program trust used by the store fold and the isolated replay fold.
     pub program_verifier: FixtureProgramVerifier,
     /// Physical-binding trust used by the store fold and isolated replay fold.
-    pub physical_binding_verifier: AcceptPhysicalBindings,
+    physical_binding_verifier: AcceptPhysicalBindings,
+}
+
+impl OfflineExportFixture {
+    /// Returns the fixture's opaque physical-binding trust for replay tests.
+    pub fn physical_binding_verifier(&self) -> &dyn PublicPhysicalBindingVerifier {
+        &self.physical_binding_verifier
+    }
 }
 
 /// Builds one bounded, zero-state run through the store's real admission and export readers.
