@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`6284e8d926e2ff866eae94c714420050cfe29643`. Focused checks and its exact
+`82e474caf83bea3338da116e5735f06367f80742`. Focused checks and its exact
 composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -34,10 +34,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `6284e8d926e2ff866eae94c714420050cfe29643`
+- Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
-- Final evidence refresh: this document's next evidence commit; the candidate
-  review was performed against the exact hash above.
+- Final evidence refresh: this documentation-only commit after the exact gate;
+  the candidate review was performed against the exact hash above.
 - Implementation revisions leading to the prior candidate: `e68aca910`
   (idempotent configuration checkpoint predecessor classification), `fcd56ab09`
   (bounded transient checkpoint-read retries), and `f99e3a84c` (SQL inventory
@@ -50,13 +50,16 @@ both the closed implementation work and the remaining proof/deployment gaps.
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
   (production-shaped suffix and nested source-graph vectors); none changes
-  production replay/runtime behavior.
+  production replay/runtime behavior. `82e474ca` then removed the normal-path
+  lifetime reservation `COUNT/MAX`, added the bounded projection `EXPLAIN`
+  regression and current-frontier omission regression, and was reviewed as the
+  current implementation candidate.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
   `ebc4f8a81`, `7530a4479`, and `f8568ff26`. None changes Rust, SQL, generated
   contracts, or test behavior. The current evidence refresh follows the
-  `6284e8d9` gate and is documentation-only.
+  `82e474ca` gate and is documentation-only.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -102,16 +105,16 @@ The current exact composed gate ran on the reviewed implementation candidate:
 
 ```text
 nix run .#ci
-source: 6284e8d926e2ff866eae94c714420050cfe29643
-run id: run-1862293-1785966011921687322
-result: ok — 13 passed, 0 failed in 1938.53s
-structured EVM submission: ok in 1259.57s
+source: 82e474caf83bea3338da116e5735f06367f80742
+run id: run-1900515-1785969180314881458
+result: ok — 13 passed, 0 failed in 1811.86s
+structured EVM submission: ok in 1322.75s
 ```
 
 The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
 parity, and closing-source-revision leaves. It was run without separate
 composed check/test/test-db gates immediately beforehand. The closing-source-
-revision leaf observed the pinned `6284e8d9` source; the evidence-only refresh
+revision leaf observed the pinned `82e474ca` source; the evidence-only refresh
 after the run does not alter that implementation source.
 The portable leaf consumed the tracked generated corpus and passed 9/9 replay
 tests; deterministic regeneration was checked separately with
@@ -139,9 +142,9 @@ PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
-That current run started after `6284e8d9` and no commits were made during
+That current run started after `82e474ca` and no commits were made during
 it, so its source hash and closing-source-revision observation agree. The
-current run above is the source gate for `6284e8d9`; the post-gate revision
+current run above is the source gate for `82e474ca`; the post-gate revision
 only adds evidence prose and does not alter production runtime behavior.
 The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
@@ -161,7 +164,8 @@ canonical bytes through the qualified backend. `4e11e3550` strengthens the
 durable-row/unknown-acknowledgement fake and verifies that recovery retains one
 row. `5711097b`, `74bfa335`, and `6284e8d9` add the generated portable corpus,
 offline-fold acceptance, production-shaped suffix, and nested source-graph
-vectors; the current exact gate exercises that reviewed source.
+vectors; `82e474ca` adds the bounded wallet projection cutover, and the current
+exact gate exercises that reviewed source.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
@@ -333,7 +337,7 @@ as a quality residual rather than hidden as a simplification win.
 ## Final verdict
 
 The current implementation is materially stronger, all focused checks are
-green, and the exact composed gate for `6284e8d9` is green. The strict plan
+green, and the exact composed gate for `82e474ca` is green. The strict plan
 acceptance condition is not met. The review remains **CONDITIONAL /
 INCOMPLETE** until the residual proof matrices, a valid later-history portable
 artifact and live app integration, production trust deployment, and
