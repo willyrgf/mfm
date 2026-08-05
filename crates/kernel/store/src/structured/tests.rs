@@ -498,7 +498,7 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
     );
     assert!(resolved.objects.iter().all(|object| {
         object.object_type.as_str() != "structured.certified_program_document"
-            && object.canonical_json.len() < 16_777_216
+            && object.canonical_json.len() < mfm_canonical::limits::MAX_STORED_FRAME_BYTES
     }));
     assert!(fixture.document.component_closure.iter().all(|component| {
         resolved

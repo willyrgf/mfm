@@ -19,7 +19,7 @@ pub const MAX_OBJECT_ENTRIES: usize = 1048576;
 pub const MAX_STRING_UTF8_BYTES: usize = 16777216;
 
 /// Generated `max_stored_frame_bytes` budget.
-pub const MAX_STORED_FRAME_BYTES: usize = 16777216;
+pub const MAX_STORED_FRAME_BYTES: usize = 33554432;
 
 /// Generated `max_batch_objects` budget.
 pub const MAX_BATCH_OBJECTS: usize = 65536;

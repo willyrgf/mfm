@@ -87,7 +87,7 @@ CREATE TABLE store_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT store_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.structured-run-history-postgres.v5'
+        schema_contract_version = 'mfm.structured-run-history-postgres.v6'
     )
 );
 
@@ -147,7 +147,7 @@ SELECT
 FROM identity_parts;
 
 INSERT INTO store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.structured-run-history-postgres.v5');
+VALUES (TRUE, 'mfm.structured-run-history-postgres.v6');
 
 INSERT INTO target_authority (
     singleton,
@@ -239,7 +239,7 @@ CREATE TABLE run_history_batches (
         AND (predecessor_commit_digest IS NULL OR length(predecessor_commit_digest) BETWEEN 1 AND 512)
     ),
     CONSTRAINT run_history_batches_envelope_json_v1 CHECK (
-        octet_length(batch_envelope_json) BETWEEN 2 AND 16777216
+        octet_length(batch_envelope_json) BETWEEN 2 AND 33554432
     )
 );
 
@@ -271,7 +271,7 @@ CREATE TABLE run_history_batch_objects (
         octet_length(content_digest) BETWEEN 1 AND 512
     ),
     CONSTRAINT run_history_batch_objects_json_v1 CHECK (
-        octet_length(canonical_json) BETWEEN 1 AND 16777216
+        octet_length(canonical_json) BETWEEN 1 AND 33554432
     )
 );
 
