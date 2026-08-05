@@ -845,8 +845,12 @@ impl ExportRunEvidence {
     }
 
     /// Seals the already-authorized recursive source prefixes into this export
-    /// evidence. The source values remain inaccessible outside the encoder
-    /// accessors below and are never interchangeable with other purpose data.
+    /// evidence. The supplied values may be the complete closure flattened by
+    /// a caller or recursively nested; graph validation below requires every
+    /// value to be reachable from an immediate source and rejects omissions,
+    /// substitutions, cycles, and unrelated values. The source values remain
+    /// inaccessible outside the encoder accessors below and are never
+    /// interchangeable with other purpose data.
     pub fn with_authorized_sources(mut self, sources: Vec<ExportRunEvidence>) -> Result<Self> {
         if !self.authorized_sources.is_empty() {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
@@ -868,7 +872,7 @@ impl ExportRunEvidence {
             self.authorized_sources.push(source.fragment);
             self.authorized_sources.extend(source.authorized_sources);
         }
-        if direct != expected_direct {
+        if !expected_direct.is_subset(&direct) {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
         }
         self.authorized_sources
@@ -1299,7 +1303,10 @@ fn reject_export_source_cycles(
 
 #[cfg(test)]
 mod export_source_closure_tests {
-    use super::{expand_export_source_closure, ExportSourceClosureError, MAX_PORTABLE_SOURCE_RUNS};
+    use super::{
+        expand_export_source_closure, ExportRunEvidence, ExportSourceClosureError,
+        MAX_PORTABLE_SOURCE_RUNS,
+    };
     use mfm_ids::{DigestAlgorithm, RunId};
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -1372,5 +1379,55 @@ mod export_source_closure_tests {
         })
         .expect_err("over budget");
         assert_eq!(error, ExportSourceClosureError::OverBudget);
+    }
+
+    fn rename_export(
+        evidence: &mut ExportRunEvidence,
+        run_id: RunId,
+        direct_source_run_ids: BTreeSet<RunId>,
+    ) {
+        evidence.fragment.run_id = run_id.clone();
+        evidence.fragment.header.run_id = run_id.clone();
+        evidence.header.run_id = run_id;
+        evidence.fragment.direct_source_run_ids = direct_source_run_ids;
+    }
+
+    #[tokio::test]
+    async fn flattened_multi_hop_source_closure_is_accepted() {
+        let root_id = run(1);
+        let middle_id = run(2);
+        let leaf_id = run(3);
+        let mut root = super::super::test_support::zero_state_export(1)
+            .await
+            .expect("root fixture")
+            .export;
+        let mut middle = super::super::test_support::zero_state_export(1)
+            .await
+            .expect("middle fixture")
+            .export;
+        let mut leaf = super::super::test_support::zero_state_export(1)
+            .await
+            .expect("leaf fixture")
+            .export;
+        rename_export(
+            &mut root,
+            root_id.clone(),
+            BTreeSet::from([middle_id.clone()]),
+        );
+        rename_export(
+            &mut middle,
+            middle_id.clone(),
+            BTreeSet::from([leaf_id.clone()]),
+        );
+        rename_export(&mut leaf, leaf_id.clone(), BTreeSet::new());
+
+        let sealed = root
+            .with_authorized_sources(vec![middle, leaf])
+            .expect("flattened recursive closure");
+        let source_ids = sealed
+            .authorized_source_prefixes()
+            .map(|source| source.run_id().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(source_ids, vec![middle_id, leaf_id]);
     }
 }
