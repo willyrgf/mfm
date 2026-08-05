@@ -1562,7 +1562,7 @@ fn classify_fold_error(error: StructuredStoreError) -> PortableExportError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::sync::Arc;
 
     use mfm_canonical::sha256_digest_bytes;
@@ -1578,8 +1578,9 @@ mod tests {
     use mfm_spec::structured::CertifiedProgramRoot;
     use mfm_spec::CanonicalJsonValue;
     use mfm_store::structured::{
-        PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalTargetIdentity,
-        ProgramVerifier, PublicPhysicalBindingVerifier, StructuredStoreError, VerifiedProgramData,
+        expand_export_source_closure, ExportSourceClosureError, PhysicalBindingAuthorization,
+        PhysicalBindingSupersession, PhysicalTargetIdentity, ProgramVerifier,
+        PublicPhysicalBindingVerifier, StructuredStoreError, VerifiedProgramData,
     };
 
     use super::{
@@ -2118,6 +2119,68 @@ mod tests {
                     );
                 }
                 other => panic!("unknown portable artifact vector kind: {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn generated_nested_source_graph_vectors_exercise_expander() {
+        let corpus: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../../contracts/recoverability/v1/corpus.json"
+        ))
+        .expect("recoverability corpus");
+        for vector in corpus["portable_source_graph_vectors"]
+            .as_array()
+            .expect("portable source graph vectors")
+        {
+            let root = RunId::parse(
+                vector["root_run_id"]
+                    .as_str()
+                    .expect("source graph root run id"),
+            )
+            .expect("source graph root");
+            let edges = vector["edges"]
+                .as_object()
+                .expect("source graph edges")
+                .iter()
+                .map(|(run_id, dependencies)| {
+                    let run_id = RunId::parse(run_id).expect("source graph run");
+                    let dependencies = dependencies
+                        .as_array()
+                        .expect("source graph dependencies")
+                        .iter()
+                        .map(|dependency| {
+                            RunId::parse(dependency.as_str().expect("source graph dependency"))
+                                .expect("source graph dependency run")
+                        })
+                        .collect::<BTreeSet<_>>();
+                    (run_id, dependencies)
+                })
+                .collect::<BTreeMap<_, _>>();
+            let root_sources = edges.get(&root).cloned().expect("root graph edges");
+            let result = expand_export_source_closure(&root, root_sources, |run_id| {
+                Ok::<_, ExportSourceClosureError>(edges.get(run_id).cloned().unwrap_or_default())
+            });
+            match vector["kind"].as_str().expect("source graph vector kind") {
+                "source_graph_acceptance" => {
+                    let expected = vector["expected_sources"]
+                        .as_array()
+                        .expect("source graph expected sources")
+                        .iter()
+                        .map(|run_id| {
+                            RunId::parse(run_id.as_str().expect("expected source run"))
+                                .expect("expected source")
+                        })
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(result.expect("nested shared source graph"), expected);
+                }
+                "source_graph_rejection" => {
+                    assert_eq!(
+                        result.expect_err("nested cyclic source graph"),
+                        ExportSourceClosureError::Cycle
+                    );
+                }
+                other => panic!("unknown source graph vector kind: {other}"),
             }
         }
     }
