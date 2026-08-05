@@ -141,6 +141,9 @@ const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
 const SUBMISSION_TOKEN: &str = "integration-submission";
 const CROSS_CHAIN_SUBMISSION_TOKEN: &str = "cross-chain-submission";
 const MAX_ANNEX_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
+// Keep the end-to-end fixture above the historical single-frame boundary even though the
+// generated retained-frame ceiling now admits the larger 32 MiB certified-program envelope.
+const HISTORICAL_SINGLE_FRAME_BYTES: usize = 16_777_216;
 const BLOCK_NUMBER: &str = "0x64";
 const BLOCK_HASH: &str = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const FINALIZED_NUMBER: &str = "0x65";
@@ -385,9 +388,9 @@ async fn qualified_evm_submission_restarts_after_one_broadcast_and_completes() {
                 .expect("canonical reconstructed batch")
                 .as_bytes()
                 .len()
-                > MAX_ANNEX_BYTES
+                > HISTORICAL_SINGLE_FRAME_BYTES
         }),
-        "qualification must exercise a full committed batch larger than one storage frame"
+        "qualification must exercise a full committed batch larger than the historical single-frame boundary"
     );
     let audit = HistoryAudit::from_batches(&batches);
     assert!(audit.closed);
