@@ -12,6 +12,8 @@ mod memory;
 mod mutation;
 mod purpose;
 mod qualification;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 
 pub use adapter::RegistryProgramVerifier;
 #[doc(hidden)]
