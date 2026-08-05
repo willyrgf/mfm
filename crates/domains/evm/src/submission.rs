@@ -790,9 +790,20 @@ pub struct CandidateTransactionObservation {
 /// Semantic signer inventory entry used by attestation and broadcast adapters.
 pub enum EvmCandidateSigner {}
 
+/// Closed completion returned by the process-qualified semantic signer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EvmCandidateSignerCompletion {
+    /// Candidate signing completed with an attested candidate.
+    Returned(AttestedWalletCandidate),
+    /// The signer was operationally unavailable.
+    SafeFailure(EvmSubmissionFailure),
+    /// The candidate or signer binding violated its integrity contract.
+    IntegrityFault,
+}
+
 impl BoundedComponentContract for EvmCandidateSigner {
     type Request = AttestCandidateIdentityRequest;
-    type Completion = Result<AttestedWalletCandidate, EvmSubmissionFailure>;
+    type Completion = EvmCandidateSignerCompletion;
 }
 
 impl SignerContract for EvmCandidateSigner {}
@@ -1770,18 +1781,6 @@ pure_state!(
     CompletedWalletNonce,
     CandidateResolution,
     "mfm.evm.state/mark-candidate-completed"
-);
-pure_state!(
-    MarkSubmissionCompletedState,
-    CompletedWalletNonce,
-    SubmissionProgress,
-    "mfm.evm.state/mark-submission-completed"
-);
-pure_state!(
-    MarkSubmissionResumedState,
-    SubmissionWork,
-    SubmissionProgress,
-    "mfm.evm.state/mark-submission-resumed"
 );
 reconciling_read_state!(
     ObserveActivatedTransactionState,

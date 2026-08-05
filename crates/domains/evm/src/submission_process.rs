@@ -1587,26 +1587,6 @@ pub(crate) fn mark_candidate_completed(
     })
 }
 
-pub(crate) fn mark_submission_completed(
-    completion: &CompletedWalletNonce,
-) -> ProposedStateOutcome<SubmissionProgress, mfm_program::structured::Never> {
-    ProposedStateOutcome::Success(SubmissionProgress {
-        work: None,
-        completion: Some(completion.clone()),
-        failure: None,
-    })
-}
-
-pub(crate) fn mark_submission_resumed(
-    work: &SubmissionWork,
-) -> ProposedStateOutcome<SubmissionProgress, mfm_program::structured::Never> {
-    ProposedStateOutcome::Success(SubmissionProgress {
-        work: Some(work.clone()),
-        completion: None,
-        failure: None,
-    })
-}
-
 pub(crate) fn select_submission_terminal(
     progress: &SubmissionProgress,
 ) -> ProposedStateOutcome<SubmissionTerminalDecision, mfm_program::structured::Never> {
