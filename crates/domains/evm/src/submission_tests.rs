@@ -1269,6 +1269,11 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
             && c.attested_candidate.transaction_hash
                 == completed.canonical_terminal_outcome.transaction_hash
     }));
+    assert!(!completed.provider_completion_attestation.is_empty());
+    assert!(completed
+        .sealed_activated_candidates
+        .iter()
+        .all(|candidate| !candidate.provider_activation_attestation.is_empty()));
 
     let mut forged = completed.clone();
     forged.sealed_activated_candidates.clear();
@@ -1279,6 +1284,21 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
     assert!(
         forged.validate().is_err(),
         "witness digest mismatch rejected"
+    );
+
+    let mut forged = completed.clone();
+    forged.provider_completion_attestation = "substituted-provider-proof".to_owned();
+    assert!(
+        forged.validate().is_err(),
+        "provider completion evidence substitution rejected"
+    );
+
+    let mut forged = completed.clone();
+    forged.sealed_activated_candidates[0].provider_activation_attestation =
+        "substituted-provider-proof".to_owned();
+    assert!(
+        forged.validate().is_err(),
+        "provider activation evidence substitution rejected"
     );
 
     let mut forged = completed;
@@ -1525,6 +1545,7 @@ fn completed_status(fixture: &QualificationFixture) -> WalletNonceStatus {
             .content_digest()
             .to_owned(),
         completion_evidence_ref,
+        "fixture-provider-attestation".to_owned(),
         reservation,
         request.transaction_intent().clone(),
         request.candidate_family().clone(),

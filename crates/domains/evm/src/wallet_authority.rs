@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
-use mfm_canonical::limits::MAX_COMPLETION_RECOVERY_BYTES;
+use mfm_canonical::limits::{MAX_COMPLETION_RECOVERY_BYTES, MAX_PROVIDER_PROOF_BYTES};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
     AccessFaultCode, ComponentFuture, EffectAdapterCompletion, EffectCapabilityContract,
@@ -178,6 +178,7 @@ struct CompletedRecoveryClosure {
     canonical_terminal_outcome: CanonicalTerminalOutcome,
     terminal_witnesses: TerminalWitnesses,
     sealed_activated_candidates: Vec<ActiveWalletCandidate>,
+    provider_completion_attestation: String,
     original_terminal_witnesses_ref: String,
     completion_evidence_ref: EvmWalletReference,
 }
@@ -1545,6 +1546,8 @@ pub struct ActiveWalletCandidate {
     pub attested_candidate: AttestedWalletCandidate,
     /// Permanent activation proof.
     pub activation_evidence_ref: EvmWalletReference,
+    /// Provider-issued attestation retained with the activation closure.
+    pub provider_activation_attestation: String,
 }
 
 /// Closed activation precondition authored by exact pure states.
@@ -1752,6 +1755,7 @@ pub fn validate_active_wallet_candidate_prefix(
                 != *transaction_intent.signing_profile_contract_ref()
             || validate_reference(&attested.signer_attestation_ref).is_err()
             || validate_reference(&candidate.activation_evidence_ref).is_err()
+            || !valid_provider_attestation(&candidate.provider_activation_attestation)
             || !crate::submission::validate_transaction_hash(&attested.transaction_hash)
             || !descriptor_refs.insert(attested.candidate_descriptor_ref.clone())
             || !unsigned_digests.insert(attested.unsigned_candidate_digest.clone())
@@ -2019,6 +2023,8 @@ pub struct CompletedWalletNonce {
     pub original_terminal_witnesses_ref: String,
     /// Permanent completion evidence.
     pub completion_evidence_ref: EvmWalletReference,
+    /// Provider-issued terminal mutation attestation retained for recovery.
+    pub provider_completion_attestation: String,
     /// Canonical, bounded full recovery closure.
     pub recovery_closure: String,
 }
@@ -2036,6 +2042,7 @@ impl CompletedWalletNonce {
         sealed_activated_candidates: Vec<ActiveWalletCandidate>,
         original_terminal_witnesses_ref: String,
         completion_evidence_ref: EvmWalletReference,
+        provider_completion_attestation: String,
         reservation: ReservedWalletNonce,
         transaction_intent: EvmTransactionIntent,
         candidate_family: EvmCandidateFamily,
@@ -2071,6 +2078,7 @@ impl CompletedWalletNonce {
             canonical_terminal_outcome: canonical_terminal_outcome.clone(),
             terminal_witnesses: terminal_witnesses.clone(),
             sealed_activated_candidates: sealed_activated_candidates.clone(),
+            provider_completion_attestation: provider_completion_attestation.clone(),
             original_terminal_witnesses_ref: original_terminal_witnesses_ref.clone(),
             completion_evidence_ref: completion_evidence_ref.clone(),
         })?;
@@ -2084,8 +2092,30 @@ impl CompletedWalletNonce {
             sealed_activated_candidates,
             original_terminal_witnesses_ref,
             completion_evidence_ref,
+            provider_completion_attestation,
             recovery_closure,
         })
+    }
+
+    /// Adds the provider attestation returned for the exact terminal mutation.
+    ///
+    /// The mutation is prepared before its SQL row is inserted, so the provider
+    /// proof is attached immediately after that preparation and before the
+    /// completion becomes durable.
+    pub fn with_provider_completion_attestation(
+        mut self,
+        provider_completion_attestation: String,
+    ) -> Result<Self, WalletAuthorityContractError> {
+        if !valid_provider_attestation(&provider_completion_attestation) {
+            return Err(WalletAuthorityContractError::Invalid(
+                "provider_completion_attestation",
+            ));
+        }
+        let mut closure = decode_completed_recovery(&self.recovery_closure)?;
+        closure.provider_completion_attestation = provider_completion_attestation.clone();
+        self.recovery_closure = encode_completed_recovery(&closure)?;
+        self.provider_completion_attestation = provider_completion_attestation;
+        Ok(self)
     }
 
     /// Revalidates the complete public recovery closure against itself.
@@ -2102,6 +2132,13 @@ impl CompletedWalletNonce {
         let candidate_family = &closure.candidate_family;
         let domain_activation_attestation = &closure.domain_activation_attestation;
         let qualified_floor = &closure.qualified_floor;
+        if !valid_provider_attestation(&closure.provider_completion_attestation)
+            || closure.provider_completion_attestation != self.provider_completion_attestation
+        {
+            return Err(WalletAuthorityContractError::Invalid(
+                "completed_wallet_nonce_provider_attestation",
+            ));
+        }
         reservation.validate()?;
         completion_request.validate()?;
         transaction_intent.validate()?;
@@ -2281,6 +2318,7 @@ impl CompletedWalletNonce {
                 != self.semantic_completion_key
             || self.original_terminal_witnesses_ref != witnesses_ref.content_digest()
             || validate_reference(&self.completion_evidence_ref).is_err()
+            || !valid_provider_attestation(&self.provider_completion_attestation)
             || self.sealed_activated_candidates.is_empty()
             || self.sealed_activated_candidates.len() > EVM_WALLET_REPLACEMENT_LIMIT
             || !self.sealed_activated_candidates.iter().any(|candidate| {
@@ -2303,6 +2341,7 @@ impl CompletedWalletNonce {
                 || candidate.attested_candidate.semantic_reservation_key
                     != self.semantic_reservation_key
                 || validate_reference(&candidate.activation_evidence_ref).is_err()
+                || !valid_provider_attestation(&candidate.provider_activation_attestation)
             {
                 return Err(WalletAuthorityContractError::Invalid(
                     "completed_wallet_nonce_prefix",
@@ -2311,6 +2350,12 @@ impl CompletedWalletNonce {
         }
         Ok(())
     }
+}
+
+fn valid_provider_attestation(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROVIDER_PROOF_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 /// One transactionally consistent wallet-nonce status snapshot.
