@@ -17,12 +17,9 @@ change implementation behavior.
   independently reproduced here. The implementation owner reports the final
   `postgres-sqlx-offline-check`, `postgres-sql-inventory-check`, and
   `nix run .#model-check` tasks pass; the reported model hash begins `d8ede667`.
-- The long release EVM submission qualification was run on the immediate
-  predecessor (`52d58907b`) and passed. The current candidate adds only the
-  historical-incarnation registry resolution and its ACL/schema updates; the
-  current managed wallet qualification exercises that path, promotion, and
-  provider-proof tamper checks. Re-running the release lane on this exact hash
-  would remove this remaining execution-evidence uncertainty.
+- The long release EVM submission qualification is independently reproduced on
+  this exact candidate below; no material execution uncertainty remains beyond
+  the owner-supplied SQLx/offline, SQL inventory, and model reports.
 
 ## Frozen candidate and scope
 
@@ -67,7 +64,7 @@ changed.
 | `nix develop -c cargo test -p mfm-evm --lib -- --nocapture` | pass (47/47; run on the preceding proof-verification commit, unchanged by the registry-resolution cutover) |
 | `nix run .#run -- --task recoverability-postgres-v1` | pass (managed PostgreSQL on this candidate, 1/1; 37.54s) |
 | `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL on this candidate, 1/1; 193.33s) |
-| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL release EVM restart path on `52d58907b`, 1/1; 1344.07s) |
+| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL release EVM restart path on this candidate, 1/1; 1227.58s) |
 
 The current wallet qualification covers the new nonce-role `SELECT` grant,
 historical-incarnation lookup, promotion compatibility, candidate and
@@ -152,8 +149,7 @@ transaction. `checkpoint_mutations_for_batch` recognizes an external head that
 already equals the indexed current run/fact head and emits no rewind mutation;
 the contention classifier reconstructs the exact existing batch and
 re-acknowledges its checkpoint mutations before returning `ExistingSame`.
-The qualification passed, and the release EVM restart qualification on the
-immediate predecessor passed with no duplicate broadcast. No concrete retry
+Both qualifications passed with no duplicate broadcast. No concrete retry
 regression was observed.
 
 ## Closed or passing areas observed
@@ -166,9 +162,8 @@ regression was observed.
   and registered historical target identity.
 - Exact physical target identity is carried through structured store identity,
   export evidence, portable fixation, and source-prefix matching.
-- Managed PostgreSQL recoverability and wallet-storage qualifications pass on
-  this exact candidate; the release EVM restart qualification passes on the
-  immediate proof-verification predecessor.
+- Managed PostgreSQL recoverability, wallet-storage, and release EVM
+  submission/restart qualifications pass on this exact candidate.
 - EVM domain, replay, formatting, storage-provider unit, and API-surface checks
   pass; existing warning boundaries are recorded above rather than hidden.
 - The owner reports the final SQLx/offline, SQL inventory, and model checks pass;
@@ -182,6 +177,5 @@ retained provider-proof reload gaps, physical-target substitution gap, and
 portable replay trust gaps under the documented workspace-private deployment
 boundary. Focused and managed checks pass, including promotion and persisted
 candidate/completion tamper regressions. The only noted uncertainty is the
-unrerun long release lane on this final source hash; its changed behavior is
-covered directly by the current wallet qualification and the predecessor lane
-passed.
+owner-supplied SQLx/offline, SQL inventory, and model reports; all executable
+qualification lanes in scope were reproduced on this exact source hash.
