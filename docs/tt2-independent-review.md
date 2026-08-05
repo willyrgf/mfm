@@ -133,7 +133,8 @@ Bitcoin parity, and closing-source-revision. Focused evidence additionally
 records nine portable replay tests, four flattened recursive closure tests, two
 portable source/fact-route bound regressions,
 exact frame/total byte limits and one-over denials, root target/tenant trust
-tamper denials, and online/offline projection byte equality. The managed
+tamper denials, bounded wallet projection `EXPLAIN` coverage, and online/offline
+projection byte equality. The managed
 PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
@@ -194,6 +195,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
+| `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
 | `configured_value_history_linearizes_same_stream_append_races` | pass in composed gate | N/A; added after baseline |
 
@@ -219,7 +221,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-04 | Closed | Exhaustion reconciles authoritative final status before closing. |
 | TT2-EVM-05 | Closed | Stable caller intent and separate semantic digest conflict behavior are implemented and tested. |
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
-| TT2-EVM-07 | Conditional | Current status paths are bounded; the required lifetime/long-history cost matrix is absent. |
+| TT2-EVM-07 | Conditional | Normal status now reads the maintained domain projection, exact frontier, and bounded candidate prefix without lifetime reservation `COUNT/MAX`; the primary-key `EXPLAIN` regression passes, while the long-history query-count/latency matrix remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
 | TT2-EVM-09 | Conditional | Completion has terminal witnesses/prefixes; complete independent public-result closure proof is incomplete. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |

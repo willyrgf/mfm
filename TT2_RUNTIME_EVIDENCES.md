@@ -197,7 +197,7 @@ portable source/fact-route bound regressions, exact frame and total-byte
 limit/one-over checks, root target/tenant trust tamper denials, serialized
 recursive-prefix tamper cases, the generated 15-vector portable artifact
 corpus and two nested source-graph vectors, application root/dependency
-zero-byte denials, and online/offline
+zero-byte denials, bounded wallet projection `EXPLAIN` coverage, and online/offline
 projection byte parity. The managed PostgreSQL recursive parity fixture passed
 17/17 on the corresponding current storage sequence, and the composed gate
 passed the configured-value same-stream append race after the checkpoint
@@ -229,7 +229,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-04 | Closed | Definite failure reconciles final authoritative status before closure. |
 | EVM-05 | Closed | Stable intent and separate semantic digest/conflict behavior are covered by domain tests. |
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
-| EVM-07 | Conditional | Status/projection paths are bounded in the current design; lifetime/long-history cost proof is not complete. |
+| EVM-07 | Conditional | Normal status now reads the maintained domain projection, exact frontier, and bounded candidate prefix without lifetime reservation `COUNT/MAX`; the primary-key `EXPLAIN` regression passes, while the long-history query-count/latency matrix remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
 | EVM-09 | Conditional | Completion retains terminal witnesses and activated prefixes, but a full independent public-result closure audit is incomplete. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
