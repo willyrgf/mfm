@@ -132,8 +132,8 @@ structured EVM submission: ok in 1237.39s
 
 The run also observed the PostgreSQL recoverability leaf and wallet-nonce
 qualification as passing, plus Bitcoin parity and closing-source-revision.
-The exact run was clean at the pinned source; the evidence refresh after it is
-documentation-only.
+The closing-source-revision leaf observed the pinned implementation source;
+the evidence refresh after the run is documentation-only.
 
 Earlier exact composed gate (historical; d67 implementation):
 

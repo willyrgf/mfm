@@ -101,8 +101,9 @@ structured EVM submission: ok in 1237.39s
 
 The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
 parity, and closing-source-revision leaves. It was run without separate
-composed check/test/test-db gates immediately beforehand. The evidence-only
-refresh after the run does not alter this source tree.
+composed check/test/test-db gates immediately beforehand. The closing-source-
+revision leaf observed the pinned implementation source; the evidence-only
+refresh after the run does not alter that implementation source.
 
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
 replay corpus, workspace nextest, doctests, PostgreSQL SQLx checks,
