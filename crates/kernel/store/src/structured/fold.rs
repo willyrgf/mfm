@@ -340,13 +340,15 @@ impl VerifiedStructuredRun {
                 for selected in &query.selected {
                     let producer = &selected.producer_transition_ref.run_id;
                     if producer != consumer {
+                        if !sources.contains(producer)
+                            && sources.len() >= super::MAX_PORTABLE_SOURCE_RUNS
+                        {
+                            return Err(invalid("fact source count exceeds export bound"));
+                        }
                         sources.insert(producer.clone());
                     }
                 }
             }
-        }
-        if sources.len() > super::MAX_PORTABLE_SOURCE_RUNS {
-            return Err(invalid("fact source count exceeds export bound"));
         }
         Ok(sources)
     }
