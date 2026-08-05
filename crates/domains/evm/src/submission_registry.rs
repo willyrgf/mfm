@@ -1633,6 +1633,7 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
     let active_candidate = ActiveWalletCandidate {
         attested_candidate: attested.clone(),
         activation_evidence_ref: common_ref.clone(),
+        provider_activation_attestation: "fixture-provider-attestation".to_owned(),
     };
     let active = ActiveCandidateWork {
         candidate: candidate.clone(),

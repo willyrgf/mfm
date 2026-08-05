@@ -683,7 +683,7 @@ impl PostgresWalletNonceAuthority {
         write: &mut WriteTransaction<'_>,
         mutation: Box<ProviderMutation>,
     ) -> std::result::Result<
-        (),
+        String,
         EffectAdapterCompletion<R, EvmSubmissionFailure, WalletNonceStoreLineageHead>,
     > {
         let disposition =
@@ -709,7 +709,7 @@ impl PostgresWalletNonceAuthority {
         let database_rollback_observed = transaction.rollback().await.is_ok();
         let provider_finished = matches!(
             lease.finish(false).await,
-            Ok(ProviderDisposition::Current(()))
+            Ok(ProviderDisposition::Current(_))
         );
         if database_rollback_observed && provider_finished {
             completion
@@ -1305,7 +1305,7 @@ impl PostgresWalletNonceAuthority {
             Ok(()) => {
                 let completion = if matches!(
                     lease.finish(true).await,
-                    Ok(ProviderDisposition::Current(()))
+                    Ok(ProviderDisposition::Current(_))
                 ) {
                     completion
                 } else {
@@ -1332,7 +1332,7 @@ impl PostgresWalletNonceAuthority {
             Ok(()) => {
                 let completion = if matches!(
                     lease.finish(true).await,
-                    Ok(ProviderDisposition::Current(()))
+                    Ok(ProviderDisposition::Current(_))
                 ) {
                     completion
                 } else {
@@ -1359,7 +1359,7 @@ impl PostgresWalletNonceAuthority {
             Ok(()) => {
                 let completion = if matches!(
                     lease.finish(true).await,
-                    Ok(ProviderDisposition::Current(()))
+                    Ok(ProviderDisposition::Current(_))
                 ) {
                     completion
                 } else {
@@ -2218,11 +2218,14 @@ impl PostgresWalletNonceAuthority {
                         return self.abort_write(write, completion).await;
                     }
                 };
-                let candidate = ActiveWalletCandidate {
+                let mut candidate = ActiveWalletCandidate {
                     attested_candidate: request.next_candidate.clone(),
                     activation_evidence_ref,
+                    // The provider signs the exact mutation envelope before the
+                    // attestation can be attached to the durable candidate.
+                    provider_activation_attestation: String::new(),
                 };
-                if let Err(completion) = self
+                let provider_attestation = match self
                     .prepare_mutation(
                         &mut write,
                         Box::new(ProviderMutation::CandidateActivation {
@@ -2233,8 +2236,10 @@ impl PostgresWalletNonceAuthority {
                     )
                     .await
                 {
-                    return self.abort_write(write, completion).await;
-                }
+                    Ok(attestation) => attestation,
+                    Err(completion) => return self.abort_write(write, completion).await,
+                };
+                candidate.provider_activation_attestation = provider_attestation;
                 if insert_candidate(&mut write.transaction, request, &candidate, state_input_ref)
                     .await
                     .is_err()
@@ -2534,7 +2539,7 @@ impl PostgresWalletNonceAuthority {
                         return self.abort_write(write, completion).await;
                     }
                 };
-                let completed = match CompletedWalletNonce::with_recovery_closure(
+                let mut completed = match CompletedWalletNonce::with_recovery_closure(
                     request.nonce_domain.clone(),
                     reservation.reservation.nonce,
                     reservation.reservation.semantic_reservation_key.clone(),
@@ -2544,6 +2549,7 @@ impl PostgresWalletNonceAuthority {
                     candidates.clone(),
                     original_terminal_witnesses_ref,
                     completion_evidence_ref,
+                    String::new(),
                     (*reservation.reservation).clone(),
                     (*reservation.transaction_intent).clone(),
                     (*reservation.candidate_family).clone(),
@@ -2572,12 +2578,7 @@ impl PostgresWalletNonceAuthority {
                         return self.abort_write(write, failure).await;
                     }
                 };
-                if completed.validate().is_err() {
-                    let failure =
-                        EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
-                    return self.abort_write(write, failure).await;
-                }
-                if let Err(failure) = self
+                let provider_attestation = match self
                     .prepare_mutation(
                         &mut write,
                         Box::new(ProviderMutation::Completion {
@@ -2588,6 +2589,22 @@ impl PostgresWalletNonceAuthority {
                     )
                     .await
                 {
+                    Ok(attestation) => attestation,
+                    Err(failure) => return self.abort_write(write, failure).await,
+                };
+                completed = match completed
+                    .with_provider_completion_attestation(provider_attestation)
+                {
+                    Ok(completed) => completed,
+                    Err(_) => {
+                        let failure =
+                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
+                        return self.abort_write(write, failure).await;
+                    }
+                };
+                if completed.validate().is_err() {
+                    let failure =
+                        EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
                     return self.abort_write(write, failure).await;
                 }
                 if insert_completion(&mut write.transaction, request, &completed, state_input_ref)

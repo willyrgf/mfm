@@ -1190,7 +1190,7 @@ impl WriteTransactionLease {
     pub(crate) async fn prepare_mutation(
         &mut self,
         mutation: Box<ProviderMutation>,
-    ) -> Result<ProviderDisposition<()>> {
+    ) -> Result<ProviderDisposition<String>> {
         if !self.revalidated || self.mutation_prepared {
             return Ok(ProviderDisposition::Integrity);
         }
@@ -1216,8 +1216,13 @@ impl WriteTransactionLease {
                     &(&self.context, &self.operation_key, mutation.as_ref()),
                     &provider_attestation,
                 )?;
+                if !valid_provider_attestation(&provider_attestation) {
+                    return Ok(ProviderDisposition::Integrity);
+                }
                 self.mutation_prepared = true;
-                Ok(ProviderDisposition::Current(()))
+                Ok(ProviderDisposition::Current(
+                    provider_attestation.as_str().to_owned(),
+                ))
             }
             reply => disposition_without_value(reply),
         }
@@ -1817,6 +1822,12 @@ fn disposition_without_value<T>(reply: ProviderReply) -> Result<ProviderDisposit
         ProviderReply::Integrity | ProviderReply::Rejected => Ok(ProviderDisposition::Integrity),
         _ => Err(PostgresEvmWalletError::InvalidAuthority),
     }
+}
+
+fn valid_provider_attestation(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_PROVIDER_PROOF_BYTES
+        && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 fn decode_signature(signature: &str) -> Result<Zeroizing<[u8; 64]>> {
