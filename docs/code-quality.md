@@ -39,8 +39,8 @@ of the facts its consumers rely on.
 
 Use the smallest Rust mechanism that expresses the guarantee:
 
-- Use structs for coexisting facts (product types) and enums for alternatives (sum types), with 
-  state-specific data in its variant. Avoid a status plus correlated flags or `Option` fields. 
+- Use structs for coexisting facts (product types) and enums for alternatives (sum types), with
+  state-specific data in its variant. Avoid a status plus correlated flags or `Option` fields.
   Match exhaustively when a new variant requires a decision.
 - Use newtypes for semantic distinctions and private fields with fallible constructors for value
   invariants. Any public constructor, conversion, `Default`, or deserialization path must preserve
@@ -54,7 +54,7 @@ validate a primitive and keep passing it through the core. Fallible construction
 redaction-safe error, methods preserve the invariant, and internal APIs accept the domain type.
 Treat data as untrusted whenever it crosses a trust boundary.
 
-Use runtime checks only for ambient or changing facts that one value cannot prove. Put each check at 
+Use runtime checks only for ambient or changing facts that one value cannot prove. Put each check at
 its owning capability and return an explicit checked outcome that downstream APIs require. Do not add
 type machinery more complex than the invalid states, branches, or change sites it removes.
 
