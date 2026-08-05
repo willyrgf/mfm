@@ -109,6 +109,49 @@ where
         .expect("join managed wallet test thread");
 }
 
+fn is_lifetime_reservation_aggregate(sql: &str) -> bool {
+    let normalized = sql
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    normalized.contains("wallet_nonce_reservations")
+        && (normalized.contains("count(") || normalized.contains("max("))
+}
+
+async fn append_completed_test_reservation(
+    authority: &PostgresWalletNonceAuthority,
+    fixture: &Fixture,
+    activation: &WalletNonceDomainActivationAttestation,
+    state_input: &LexicalValueRef,
+    nonce: u64,
+    token: &str,
+) {
+    let reserve_request = fixture.reserve_request(activation.clone(), nonce, token);
+    let reservation = match authority.reserve(state_input, &reserve_request).await {
+        EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved { reservation }) => {
+            reservation
+        }
+        other => panic!("unexpected long-history reservation result: {other:?}"),
+    };
+    assert_eq!(reservation.nonce, nonce);
+    let (activation_request, _) = fixture.activation_request(&reserve_request, &reservation);
+    let candidate = match authority
+        .activate_candidate(state_input, &activation_request)
+        .await
+    {
+        EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated { candidate }) => {
+            candidate
+        }
+        other => panic!("unexpected long-history activation result: {other:?}"),
+    };
+    let completion_request = fixture.completion_request(&reservation, &candidate);
+    assert!(matches!(
+        authority.complete(state_input, &completion_request).await,
+        EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed { .. })
+    ));
+}
+
 async fn current_wallet_projection_uses_bounded_primary_key_lookup_inner() {
     let base_url =
         std::env::var("DATABASE_URL").expect("DATABASE_URL is required for parity tests");
@@ -3025,9 +3068,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         }) if retained_completion == &completion
     ));
 
-    // Compare one real status operation before and after appending a substantial
-    // completed lineage. The proxy counts wire-level statement executions, so
-    // this guards the production authority path rather than a copied SQL plan.
+    // Compare real status and mutation operations before and after appending a
+    // substantial completed lineage. The proxy observes the production
+    // authority path, including SQL text for rejecting lifetime aggregates.
     let query_proxy = PostgresCommitFaultProxy::start(&database_url)
         .await
         .expect("start long-history query-count proxy");
@@ -3042,6 +3085,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     )
     .await
     .expect("open fresh current authority through query-count proxy");
+    let proof_text_start = query_proxy.statement_texts().len();
     let baseline_statement_start = query_proxy.statement_count();
     let baseline_status = query_authority
         .read_status(&state_input, &status_request)
@@ -3060,45 +3104,83 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         baseline_statement_count > 0,
         "the proxy must observe the bounded status statements"
     );
+    let baseline_status_texts = query_proxy.statement_texts();
+    assert!(
+        !baseline_status_texts[proof_text_start..]
+            .iter()
+            .any(|sql| is_lifetime_reservation_aggregate(sql)),
+        "baseline status must not issue a lifetime reservation aggregate: {:?}",
+        &baseline_status_texts[proof_text_start..]
+    );
 
     const LONG_HISTORY_RESERVATIONS: u64 = 64;
-    for offset in 0..LONG_HISTORY_RESERVATIONS {
-        let nonce = 12_u64 + offset;
-        let long_history_request = fixture.reserve_request(
-            qualified_activation.clone(),
+    let mutation_text_start = query_proxy.statement_texts().len();
+    append_completed_test_reservation(
+        &query_authority,
+        &fixture,
+        &qualified_activation,
+        &state_input,
+        12,
+        "long-history-12",
+    )
+    .await;
+
+    let mutation_baseline_start = query_proxy.statement_count();
+    append_completed_test_reservation(
+        &query_authority,
+        &fixture,
+        &qualified_activation,
+        &state_input,
+        13,
+        "long-history-13",
+    )
+    .await;
+    let mutation_baseline_count = query_proxy
+        .statement_count()
+        .saturating_sub(mutation_baseline_start);
+    assert!(
+        mutation_baseline_count > 0,
+        "the proxy must observe the bounded mutation statements"
+    );
+
+    for nonce in 14_u64..=74_u64 {
+        append_completed_test_reservation(
+            &query_authority,
+            &fixture,
+            &qualified_activation,
+            &state_input,
             nonce,
-            &format!("long-history-{offset}"),
-        );
-        let long_history_reservation = match successor_authority
-            .reserve(&state_input, &long_history_request)
-            .await
-        {
-            EffectAdapterCompletion::Returned(ReserveWalletNonceResponse::Reserved {
-                reservation,
-            }) => reservation,
-            other => panic!("unexpected long-history reservation result: {other:?}"),
-        };
-        assert_eq!(long_history_reservation.nonce, nonce);
-        let (long_history_activation, _) =
-            fixture.activation_request(&long_history_request, &long_history_reservation);
-        let long_history_candidate = match successor_authority
-            .activate_candidate(&state_input, &long_history_activation)
-            .await
-        {
-            EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
-                candidate,
-            }) => candidate,
-            other => panic!("unexpected long-history activation result: {other:?}"),
-        };
-        let long_history_completion =
-            fixture.completion_request(&long_history_reservation, &long_history_candidate);
-        assert!(matches!(
-            successor_authority
-                .complete(&state_input, &long_history_completion)
-                .await,
-            EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed { .. })
-        ));
+            &format!("long-history-{nonce}"),
+        )
+        .await;
     }
+
+    let mutation_final_start = query_proxy.statement_count();
+    append_completed_test_reservation(
+        &query_authority,
+        &fixture,
+        &qualified_activation,
+        &state_input,
+        75,
+        "long-history-75",
+    )
+    .await;
+    let mutation_final_count = query_proxy
+        .statement_count()
+        .saturating_sub(mutation_final_start);
+    assert_eq!(
+        mutation_final_count, mutation_baseline_count,
+        "mutation statement count must stay constant after {LONG_HISTORY_RESERVATIONS} completed reservations"
+    );
+
+    let mutation_texts = query_proxy.statement_texts();
+    assert!(
+        !mutation_texts[mutation_text_start..]
+            .iter()
+            .any(|sql| is_lifetime_reservation_aggregate(sql)),
+        "mutations must not issue a lifetime reservation aggregate: {:?}",
+        &mutation_texts[mutation_text_start..]
+    );
 
     let long_history_statement_start = query_proxy.statement_count();
     let long_history_status = query_authority
