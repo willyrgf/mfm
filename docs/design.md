@@ -413,8 +413,12 @@ An exact append retry whose batch is already durable may return `ExistingSame` a
 successors have advanced the stream: reconciliation must match the external run and fact heads to
 the indexed current heads and must never rewind them to the retried predecessor.
 Because SQL commit precedes external acknowledgement, a concurrent read may briefly observe a
-valid indexed prefix one checkpoint step ahead; PostgreSQL read paths retry that exact transient
-`InvalidHistory` observation a fixed number of times and still fail closed with the final error.
+valid indexed prefix one checkpoint step ahead; PostgreSQL run and configuration read paths retry
+that exact transient `InvalidHistory` observation a fixed number of times and still fail closed
+with the final error. A configuration append whose SQL commit or checkpoint acknowledgement is
+ambiguous reconnects through the append authority and retries only the identical canonical
+revision; a durable prepared successor is acknowledged, while divergence remains an ambiguity or
+integrity failure.
 
 ## Snapshot, export, and authorization boundaries
 
@@ -423,6 +427,9 @@ repeatable-read transaction then loads the selected prefix and validates its exa
 and checkpoint successor before commit. A bounded retry covers only the commit-before-acknowledgement
 window; persistent mismatch remains an integrity failure. Configuration and run stream identities
 are stable across successors; predecessor digests are compare-and-append preconditions only.
+Configuration resolution uses the same bounded load classification as append preparation, so the
+application admission path cannot turn a transient checkpoint race into a false missing or
+malformed configuration result.
 
 Store ingress rejects any record that names an absent content-addressed object. Structural path
 references and other semantic identities are not falsely treated as standalone objects; object

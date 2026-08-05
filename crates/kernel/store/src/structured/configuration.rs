@@ -320,23 +320,77 @@ pub struct ConfigurationHistoryWriter<B: ConfigurationHistoryBackend> {
 
 const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 4;
 
+async fn load_with_checkpoint_retry<B: ConfigurationHistoryBackend>(
+    backend: &B,
+    key: &ConfigurationStreamKey,
+) -> Result<Option<RawConfigurationHistory>, StructuredStoreError> {
+    // SQL commits precede external checkpoint acknowledgement. A concurrent
+    // PostgreSQL read can therefore observe one durable prefix before its
+    // checkpoint successor; retry only that bounded InvalidHistory window.
+    let mut loaded = backend.load(key).await;
+    for _ in 1..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
+        if !matches!(&loaded, Err(StructuredStoreError::InvalidHistory)) {
+            return loaded;
+        }
+        loaded = backend.load(key).await;
+    }
+    loaded
+}
+
 impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
     async fn load_for_append(
         &self,
         key: &ConfigurationStreamKey,
     ) -> Result<Option<RawConfigurationHistory>, StructuredStoreError> {
-        // The external checkpoint is acknowledged after the SQL commit. A
-        // concurrent append can therefore make one read transiently observe
-        // the durable row before its checkpoint successor; retry that bounded
-        // window, but preserve every other error and the final invalid result.
-        let mut loaded = self.backend.load(key).await;
-        for _ in 1..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
-            if !matches!(&loaded, Err(StructuredStoreError::InvalidHistory)) {
-                return loaded;
+        load_with_checkpoint_retry(self.backend.as_ref(), key).await
+    }
+
+    async fn retry_ambiguous_append(
+        &self,
+        revision: &ConfigurationRevision,
+    ) -> Result<ConfigurationRevision, StructuredStoreError> {
+        for _ in 0..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
+            let outcome = self
+                .backend
+                .append(CanonicalConfigurationAppend::from_store_verified(
+                    revision.clone(),
+                )?)
+                .await?;
+            match outcome {
+                ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
+                | ConfigurationBackendAppendOutcome::ExistingSame(returned)
+                    if returned == *revision =>
+                {
+                    return Ok(revision.clone())
+                }
+                ConfigurationBackendAppendOutcome::NewlyCommitted(_)
+                | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
+                    return Err(invalid("configuration backend substituted committed bytes"));
+                }
+                ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {}
+                ConfigurationBackendAppendOutcome::StaleHead => {
+                    let resolved = self.load_for_append(revision.key()).await?;
+                    match resolved.as_ref().and_then(|history| {
+                        history_append_identity(
+                            history.revisions.iter(),
+                            revision.append_request_id(),
+                        )
+                    }) {
+                        Some(existing) if existing == revision => return Ok(revision.clone()),
+                        Some(_) => return Err(StructuredStoreError::AppendConflict),
+                        None if resolved.as_ref().is_none_or(|history| {
+                            history
+                                .head
+                                .as_ref()
+                                .map(ConfigurationHistoryHead::revision_ref)
+                                == revision.predecessor_ref()
+                        }) => {}
+                        None => return Err(StructuredStoreError::StaleHead),
+                    }
+                }
             }
-            loaded = self.backend.load(key).await;
         }
-        loaded
+        Err(StructuredStoreError::AcknowledgementUnknown)
     }
 
     /// Appends one exact revision or returns the existing byte-identical result.
@@ -438,17 +492,12 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 Err(StructuredStoreError::StaleHead)
             }
             ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {
-                // Reconnect through the backend's read path and classify the
-                // exact append identity before allowing a retry. This is the
-                // configuration equivalent of run acknowledgement recovery.
-                let resolved = self.load_for_append(revision.key()).await?;
-                match resolved.as_ref().and_then(|history| {
-                    history_append_identity(history.revisions.iter(), revision.append_request_id())
-                }) {
-                    Some(existing) if existing == &revision => Ok(revision),
-                    Some(_) => Err(StructuredStoreError::AppendConflict),
-                    None => Err(StructuredStoreError::AcknowledgementUnknown),
-                }
+                // Reconnect through the append authority, reacquire its lock,
+                // and retry the identical canonical revision. The backend's
+                // idempotent branch acknowledges a prepared durable successor;
+                // a missing row retries the prepared predecessor. No external
+                // operation is reinvoked with different bytes.
+                self.retry_ambiguous_append(&revision).await
             }
         }
     }
@@ -468,9 +517,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryReader<B> {
         expected_value_contract_ref: &ContentRef,
     ) -> Result<VerifiedConfiguredValue, StructuredStoreError> {
         require_store(self.backend.as_ref(), key)?;
-        let history = self
-            .backend
-            .load(key)
+        let history = load_with_checkpoint_retry(self.backend.as_ref(), key)
             .await?
             .ok_or(StructuredStoreError::RunNotFound)?;
         let verified = verify_configuration_history(history)?;
@@ -734,6 +781,7 @@ fn invalid(_message: &'static str) -> StructuredStoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn store_scope() -> StoreScopeId {
         StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "1".repeat(32)))
@@ -760,6 +808,61 @@ mod tests {
 
     fn contract() -> ContentRef {
         content_ref("mfm.fixture-configured-contract", b"contract").expect("contract")
+    }
+
+    #[derive(Clone)]
+    struct FlakyConfigurationBackend {
+        inner: MemoryConfigurationHistoryBackend,
+        transient_loads: Arc<AtomicUsize>,
+        ambiguous_append: Arc<AtomicBool>,
+    }
+
+    impl ConfigurationHistoryBackend for FlakyConfigurationBackend {
+        fn store_scope_id(&self) -> &StoreScopeId {
+            self.inner.store_scope_id()
+        }
+
+        fn load<'a>(
+            &'a self,
+            key: &'a ConfigurationStreamKey,
+        ) -> ConfigurationBackendFuture<'a, Option<RawConfigurationHistory>> {
+            Box::pin(async move {
+                if self
+                    .transient_loads
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    return Err(StructuredStoreError::InvalidHistory);
+                }
+                self.inner.load(key).await
+            })
+        }
+
+        fn append<'a>(
+            &'a self,
+            revision: CanonicalConfigurationAppend,
+        ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
+            Box::pin(async move {
+                if self.ambiguous_append.swap(false, Ordering::AcqRel) {
+                    return Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown);
+                }
+                self.inner.append(revision).await
+            })
+        }
+    }
+
+    fn flaky_backend(
+        inner: MemoryConfigurationHistoryBackend,
+        transient_loads: usize,
+        ambiguous_append: bool,
+    ) -> FlakyConfigurationBackend {
+        FlakyConfigurationBackend {
+            inner,
+            transient_loads: Arc::new(AtomicUsize::new(transient_loads)),
+            ambiguous_append: Arc::new(AtomicBool::new(ambiguous_append)),
+        }
     }
 
     #[test]
@@ -847,6 +950,66 @@ mod tests {
             ))
             .await;
         assert_eq!(stale, Err(StructuredStoreError::StaleHead));
+    }
+
+    #[tokio::test]
+    async fn reader_retries_bounded_transient_checkpoint_mismatch() {
+        let inner = MemoryConfigurationHistoryBackend::new(store_scope());
+        let stream = key('9');
+        let (writer, _) = ConfigurationHistoryStore::new(inner.clone()).split();
+        let expected = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                None,
+                AppendRequestId::new("configured-reader-retry").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"retry":true}"#).expect("value"),
+            ))
+            .await
+            .expect("revision");
+
+        let flaky = flaky_backend(inner, 2, false);
+        let (_, reader) = ConfigurationHistoryStore::new(flaky.clone()).split();
+        assert_eq!(
+            reader
+                .resolve(&stream, &contract())
+                .await
+                .expect("reader retries transient mismatch")
+                .revision(),
+            &expected
+        );
+        assert_eq!(
+            flaky.transient_loads.load(Ordering::Acquire),
+            0,
+            "all transient load failures must be consumed by the bounded retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_retries_identical_append_after_unknown_acknowledgement() {
+        let inner = MemoryConfigurationHistoryBackend::new(store_scope());
+        let flaky = flaky_backend(inner, 0, true);
+        let (writer, reader) = ConfigurationHistoryStore::new(flaky).split();
+        let stream = key('0');
+        let revision = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                None,
+                AppendRequestId::new("configured-ack-unknown").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"acknowledged":true}"#).expect("value"),
+            ))
+            .await
+            .expect("identical append retry resolves acknowledgement ambiguity");
+
+        assert_eq!(
+            reader
+                .resolve(&stream, &contract())
+                .await
+                .expect("resolve retried append")
+                .revision(),
+            &revision
+        );
     }
 
     #[tokio::test]
