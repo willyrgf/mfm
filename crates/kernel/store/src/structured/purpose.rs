@@ -1169,9 +1169,7 @@ pub fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<Export
         .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
         for query in response.query_results {
             for selected in query.selected {
-                if routes.len() >= MAX_PORTABLE_FACT_ROUTES {
-                    return Err(super::StructuredStoreError::InvalidHistory);
-                }
+                ensure_fact_route_capacity(routes.len())?;
                 routes.push(ExportFactRoute {
                     consumer_record: assigned.record_ref.clone(),
                     producer_transition: selected.producer_transition_ref,
@@ -1181,6 +1179,13 @@ pub fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<Export
         }
     }
     Ok(routes)
+}
+
+fn ensure_fact_route_capacity(current: usize) -> Result<()> {
+    if current >= MAX_PORTABLE_FACT_ROUTES {
+        return Err(super::StructuredStoreError::InvalidHistory);
+    }
+    Ok(())
 }
 
 fn terminal_public_outcome(
@@ -1314,7 +1319,7 @@ fn reject_export_source_cycles(
 mod export_source_closure_tests {
     use super::{
         expand_export_source_closure, ExportRunEvidence, ExportSourceClosureError,
-        MAX_PORTABLE_SOURCE_RUNS,
+        MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_SOURCE_RUNS,
     };
     use mfm_ids::{DigestAlgorithm, RunId};
     use std::collections::{BTreeMap, BTreeSet};
@@ -1438,5 +1443,11 @@ mod export_source_closure_tests {
             .map(|source| source.run_id().clone())
             .collect::<Vec<_>>();
         assert_eq!(source_ids, vec![middle_id, leaf_id]);
+    }
+
+    #[test]
+    fn fact_route_bound_rejects_before_insert() {
+        assert!(super::ensure_fact_route_capacity(MAX_PORTABLE_FACT_ROUTES - 1).is_ok());
+        assert!(super::ensure_fact_route_capacity(MAX_PORTABLE_FACT_ROUTES).is_err());
     }
 }

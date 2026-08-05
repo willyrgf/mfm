@@ -339,14 +339,7 @@ impl VerifiedStructuredRun {
             for query in &response.query_results {
                 for selected in &query.selected {
                     let producer = &selected.producer_transition_ref.run_id;
-                    if producer != consumer {
-                        if !sources.contains(producer)
-                            && sources.len() >= super::MAX_PORTABLE_SOURCE_RUNS
-                        {
-                            return Err(invalid("fact source count exceeds export bound"));
-                        }
-                        sources.insert(producer.clone());
-                    }
+                    insert_bounded_source(&mut sources, consumer, producer)?;
                 }
             }
         }
@@ -356,6 +349,50 @@ impl VerifiedStructuredRun {
     /// Returns the terminal nominal operation-outcome reference, when closed.
     pub const fn closed_outcome_ref(&self) -> Option<&ContentRef> {
         self.state.continuation.closed_outcome_ref.as_ref()
+    }
+}
+
+fn insert_bounded_source(
+    sources: &mut BTreeSet<RunId>,
+    consumer: &RunId,
+    producer: &RunId,
+) -> super::Result<()> {
+    if producer == consumer || sources.contains(producer) {
+        return Ok(());
+    }
+    if sources.len() >= super::MAX_PORTABLE_SOURCE_RUNS {
+        return Err(invalid("fact source count exceeds export bound"));
+    }
+    sources.insert(producer.clone());
+    Ok(())
+}
+
+#[cfg(test)]
+mod source_bound_tests {
+    use std::collections::BTreeSet;
+
+    use mfm_ids::RunId;
+
+    use super::super::MAX_PORTABLE_SOURCE_RUNS;
+    use super::insert_bounded_source;
+
+    fn run(index: usize) -> RunId {
+        RunId::parse(format!("run:sha256-jcs-v1:{index:064x}")).expect("run id")
+    }
+
+    #[test]
+    fn distinct_source_bound_rejects_before_insert() {
+        let consumer = run(0);
+        let mut sources = BTreeSet::new();
+        for index in 1..=MAX_PORTABLE_SOURCE_RUNS {
+            insert_bounded_source(&mut sources, &consumer, &run(index)).expect("within bound");
+        }
+        assert_eq!(sources.len(), MAX_PORTABLE_SOURCE_RUNS);
+        assert!(
+            insert_bounded_source(&mut sources, &consumer, &run(MAX_PORTABLE_SOURCE_RUNS + 1))
+                .is_err()
+        );
+        assert_eq!(sources.len(), MAX_PORTABLE_SOURCE_RUNS);
     }
 }
 
