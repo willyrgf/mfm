@@ -10,10 +10,11 @@ use mfm_canonical::limits::{
     MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
 };
 use mfm_evm::{
-    ActivateEvmCandidateRequest, ActiveWalletCandidate, CompleteEvmNonceRequest,
-    CompletedWalletNonce, EvmRoutingCatalogDescriptor, EvmWalletReference, ReserveEvmNonceRequest,
-    ReservedWalletNonce, WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord,
-    WalletNonceStoreIncarnation, WalletNonceStoreLineageHead, WalletNonceStoreSuccessor,
+    canonical_wallet_reference, ActivateEvmCandidateRequest, ActiveWalletCandidate,
+    CompleteEvmNonceRequest, CompletedWalletNonce, EvmRoutingCatalogDescriptor, EvmWalletReference,
+    ReserveEvmNonceRequest, ReservedWalletNonce, WalletNonceDomainActivationAttestation,
+    WalletNonceDomainActivationRecord, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
+    WalletNonceStoreSuccessor,
 };
 use mfm_ids::{ContentDigest, ContentRef, StableId};
 use mfm_journal::structured::{
@@ -24,12 +25,14 @@ use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sqlx::PgConnection;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::net::UnixStream;
 use tokio::time::timeout;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{PostgresEvmWalletError, Result};
+use crate::support::{canonical_json, decode_canonical, reference_text};
 
 const PROTOCOL_VERSION: u16 = 3;
 const MAX_MESSAGE_BYTES: usize = MAX_PROVIDER_MESSAGE_BYTES;
@@ -428,8 +431,9 @@ impl WalletAuthorityProviderClient {
         verified
     }
 
-    pub(crate) fn verify_retained_mutation_proof(
+    pub(crate) async fn verify_retained_mutation_proof(
         &self,
+        connection: &mut PgConnection,
         proof: &str,
         expected_store_incarnation: &WalletNonceStoreIncarnation,
         expected_schema: &str,
@@ -438,6 +442,7 @@ impl WalletAuthorityProviderClient {
         mutation: &ProviderMutation,
     ) -> Result<()> {
         let proof = decode_persisted_mutation_proof(proof)?;
+        verify_historical_incarnation(connection, &proof.context.store_incarnation).await?;
         // Historical wallet rows survive an authorized physical promotion. The
         // provider proof must therefore belong to this store lineage and an
         // already qualified writer epoch, while the signed context still
@@ -907,22 +912,26 @@ impl OfflineActivationVerifier {
         &self.provider_fence_head_ref
     }
 
-    pub(crate) fn verify_retained_mutation(
+    pub(crate) async fn verify_retained_mutation(
         &self,
+        connection: &mut PgConnection,
         proof: &str,
         schema_name: &str,
         database_oid: u32,
         operation_key: &str,
         mutation: &ProviderMutation,
     ) -> Result<()> {
-        self.client.verify_retained_mutation_proof(
-            proof,
-            &self.store_incarnation,
-            schema_name,
-            database_oid,
-            operation_key,
-            mutation,
-        )
+        self.client
+            .verify_retained_mutation_proof(
+                connection,
+                proof,
+                &self.store_incarnation,
+                schema_name,
+                database_oid,
+                operation_key,
+                mutation,
+            )
+            .await
     }
 
     pub(crate) async fn begin_read(&self) -> Result<PendingReadLease> {
@@ -1911,6 +1920,40 @@ fn decode_persisted_mutation_proof(value: &str) -> Result<PersistedMutationProof
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
     Ok(proof)
+}
+
+async fn verify_historical_incarnation(
+    connection: &mut PgConnection,
+    incarnation: &WalletNonceStoreIncarnation,
+) -> Result<()> {
+    let incarnation_ref = canonical_wallet_reference(incarnation)
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let retained_json = sqlx::query_scalar::<_, String>(
+        "SELECT incarnation_json FROM wallet_store_incarnations \
+         WHERE wallet_nonce_store_lineage_id = $1 \
+           AND writer_epoch = $2::numeric \
+           AND incarnation_ref = $3",
+    )
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .bind(reference_text(&incarnation_ref)?)
+    .fetch_optional(&mut *connection)
+    .await
+    .map_err(|_| PostgresEvmWalletError::Unavailable)?
+    .ok_or(PostgresEvmWalletError::InvalidAuthority)?;
+    let retained: WalletNonceStoreIncarnation = decode_canonical(&retained_json)?;
+    retained
+        .validate()
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let retained_ref = canonical_wallet_reference(&retained)
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    if retained != *incarnation
+        || retained_ref != incarnation_ref
+        || canonical_json(&retained)? != retained_json
+    {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    Ok(())
 }
 
 fn validate_persisted_mutation_context(context: &ProviderTargetContext) -> Result<()> {

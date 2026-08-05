@@ -10,7 +10,8 @@ JSON-RPC, signing, Runtime scheduling, or RunHistory folding.
 
 `migrations/0001_wallet_authority.sql` is the one current schema. It creates separately privileged
 owner, activation-registry admin/public, and wallet-application surfaces. Normal status/mutation
-uses an immutable activation proof with offline verification and makes zero registry queries.
+uses an immutable activation proof with offline verification; retained candidate/completion reload
+also resolves each signed historical incarnation against the local append-only registry.
 
 Each runtime surface authenticates through its own unprivileged `LOGIN NOINHERIT` principal. The
 principal must hold exactly one of `mfm_evm_wallet_activation_admin`,
@@ -35,7 +36,8 @@ The provider returns an opaque non-serializable `QualifiedEvmRoutingCatalog`; pu
 attestation, and membership objects alone cannot construct it. Cloning the client copies only its
 endpoint configuration and public trust anchor. Provider signing authority and target inventory
 remain in the separate provider process. Normal wallet execution verifies the immutable activation
-proof offline and makes zero registry queries. The activation issuance reference commits the
+proof offline and makes no external registry calls; retained closure reload performs only the local
+historical-incarnation lookup described above. The activation issuance reference commits the
 logical provider identity and activation record; restart hydration recomputes it, so only the same
 logical provider can recover issued activations.
 

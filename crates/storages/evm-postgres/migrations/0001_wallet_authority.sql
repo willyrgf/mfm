@@ -455,7 +455,8 @@ BEGIN
     );
 
     EXECUTE format(
-        'GRANT SELECT ON TABLE %I.wallet_store_schema_metadata TO mfm_evm_wallet_nonce_application',
+        'GRANT SELECT ON TABLE %I.wallet_store_schema_metadata, %I.wallet_store_incarnations TO mfm_evm_wallet_nonce_application',
+        schema_name,
         schema_name
     );
     EXECUTE format(
