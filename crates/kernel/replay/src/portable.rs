@@ -1532,7 +1532,7 @@ mod tests {
         .is_err());
         assert_eq!(
             PortableRunExport::strict_decode(
-                &[vec![b'{'; MAX_PORTABLE_FRAME_BYTES as usize], vec![b'\n']].concat()
+                &[vec![b'{'; MAX_PORTABLE_FRAME_BYTES], vec![b'\n']].concat()
             ),
             Err(PortableExportError::TooLarge)
         );
