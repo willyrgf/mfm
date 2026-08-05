@@ -49,6 +49,8 @@ struct FixtureProgramVerifier {
     value_schemas: BTreeMap<ContentRef, SchemaIdentity>,
 }
 
+impl mfm_authority_seal::ProgramVerifierSeal for FixtureProgramVerifier {}
+
 impl ProgramVerifier for FixtureProgramVerifier {
     fn verify(
         &self,

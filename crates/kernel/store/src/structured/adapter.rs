@@ -28,6 +28,8 @@ pub struct RegistryProgramVerifier {
     verified_programs: Mutex<BTreeMap<ContentRef, Arc<VerifiedProgramData>>>,
 }
 
+impl mfm_authority_seal::ProgramVerifierSeal for RegistryProgramVerifier {}
+
 impl RegistryProgramVerifier {
     /// Wraps one concrete admission-verification registry without live process authority.
     pub fn new(registry: AdmissionVerificationRegistry) -> Self {

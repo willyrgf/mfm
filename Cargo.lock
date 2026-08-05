@@ -2655,6 +2655,7 @@ dependencies = [
 name = "mfm-replay"
 version = "0.1.0"
 dependencies = [
+ "mfm-authority-seal",
  "mfm-canonical",
  "mfm-ids",
  "mfm-journal",

@@ -112,7 +112,7 @@ impl VerifiedProgramData {
 ///
 /// Production uses [`mfm_certify::structured::AdmissionVerificationRegistry`]. Offline portable
 /// verification supplies the same concrete registry through a store-owned adapter.
-pub trait ProgramVerifier: Send + Sync {
+pub trait ProgramVerifier: mfm_authority_seal::ProgramVerifierSeal + Send + Sync {
     /// Verifies one certified root against its exact authored program bytes.
     fn verify(
         &self,

@@ -954,7 +954,14 @@ impl ExportRunEvidence {
     }
 
     /// Gives the portable encoder one borrowed view of the sealed fragments.
-    pub fn with_encoder_view<T>(&self, f: impl FnOnce(ExportEncoderView<'_>) -> T) -> T {
+    pub fn with_encoder_view<C, T>(
+        &self,
+        _consumer: C,
+        f: impl FnOnce(ExportEncoderView<'_>) -> T,
+    ) -> T
+    where
+        C: mfm_authority_seal::ExportEncoderConsumerSeal,
+    {
         f(ExportEncoderView {
             fragment: &self.fragment,
             authorized_sources: &self.authorized_sources,

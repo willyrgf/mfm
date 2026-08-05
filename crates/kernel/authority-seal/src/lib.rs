@@ -13,6 +13,18 @@ pub trait RuntimeHistoryPortSeal: Send + Sync {}
 /// Marker required by the store's physical-binding verifier.
 pub trait PhysicalBindingVerifierSeal: Send + Sync {}
 
+/// Marker required by the store's deterministic program verifier.
+pub trait ProgramVerifierSeal: Send + Sync {}
+
+/// Marker required by offline replay's retained-release trust.
+pub trait RetainedPhysicalReleaseTrustSeal: Send + Sync {}
+
+/// Marker required by offline replay's external checkpoint trust.
+pub trait StoreCheckpointTrustSeal: Send + Sync {}
+
+/// Marker required by the portable encoder consumer.
+pub trait ExportEncoderConsumerSeal: Send + Sync {}
+
 /// Marker required by the EVM wallet authority.
 pub trait WalletNonceAuthoritySeal: Send + Sync {}
 
