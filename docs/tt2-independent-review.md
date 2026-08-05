@@ -1,51 +1,54 @@
 # TT2 independent review evidence
 
-Status: **FAIL**
+Status: **PASS**
 
 This commit records a fresh independent review of the exact frozen candidate
-`4fc1baea0719ae6b88837b3a0c063895a70dffcd`. It is evidence-only and does not
+`55f1cafac9c06f7b23bfdfe1e8bd9f65fa710769`. It is evidence-only and does not
 change implementation behavior.
 
 ## Material uncertainties
 
-- This review applies a strict external/adversarial-consumer threat model. The
-  new `mfm-authority-seal` package is workspace-private (`publish = false`); I
-  treat that as a deployment boundary for the authority traits. If deployment
-  intentionally permits downstream crates to implement those traits, the
-  runtime, live-wallet, and PostgreSQL admission findings below reopen.
+- This review applies a strict external/adversarial-consumer threat model and
+  treats the unpublished (`publish = false`) `mfm-authority-seal` package as a
+  hard workspace deployment boundary. If these crates are distributed with a
+  separately obtainable marker package, downstream implementations could
+  reopen the sealed authority seams and require a new review.
 - The database SQLx/offline, SQL inventory, and model tasks were not
-  independently reproduced in this review. The implementation owner reports
-  the final `postgres-sqlx-offline-check`, `postgres-sql-inventory-check`, and
+  independently reproduced here. The implementation owner reports the final
+  `postgres-sqlx-offline-check`, `postgres-sql-inventory-check`, and
   `nix run .#model-check` tasks pass; the reported model hash begins `d8ede667`.
-- The review treats provider-issued mutation attestations as durable,
-  target-bound replay evidence, as required by the current design contract. If
-  the deployment instead trusts a synchronous provider gate and does not
-  require cryptographic rereading of retained attestations, that relaxed
-  contract must be made explicit and tested.
+- The long release EVM submission qualification was run on the immediate
+  predecessor (`52d58907b`) and passed. The current candidate adds only the
+  historical-incarnation registry resolution and its ACL/schema updates; the
+  current managed wallet qualification exercises that path, promotion, and
+  provider-proof tamper checks. Re-running the release lane on this exact hash
+  would remove this remaining execution-evidence uncertainty.
 
 ## Frozen candidate and scope
 
-- Candidate: `4fc1baea0719ae6b88837b3a0c063895a70dffcd`
+- Candidate: `55f1cafac9c06f7b23bfdfe1e8bd9f65fa710769`
 - TT2 implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Reviewed cutover commits include authority sealing (`cc49802ec`), retained
   provider mutation evidence (`dd0522646`), physical-target fixation
-  (`c851a2dab`), proof-bearing wallet checkpoint support (`812cf5f23`), and
-  idempotent PostgreSQL retry reconciliation (`4fc1baea0`).
+  (`c851a2dab`), proof-bearing wallet checkpoint support (`812cf5f23`),
+  idempotent PostgreSQL retry reconciliation (`4fc1baea0`), replay trust and
+  export-consumer sealing (`88523caa4`), retained-proof reload verification
+  (`52d58907b`), and registered-incarnation resolution (`55f1cafac`).
 - Worktree was clean before this evidence file was added.
 - Scope: canonical append and fold authority, Runtime assembly, replay/export
   provenance, EVM wallet authority, PostgreSQL target/checkpoint authority,
   idempotent retry recovery, SQL inventory, and generated recoverability and
   schema-depth budgets.
 
-The candidate adds workspace-private marker traits to the Runtime history,
-physical-binding, wallet, checkpoint, and deployment-credential seams. It now
-retains provider-issued activation and completion mutation attestations in
-wallet closures, carries an exact physical target through portable exports,
-and reconciles an idempotent PostgreSQL retry after another writer has already
-advanced the external checkpoint. Those changes close the previously
-unrestricted authority bridges and the missing physical-target field, but they
-do not yet provide independent provider-proof verification on every wallet
-reload or seal the offline replay trust hooks.
+The candidate now has one workspace-private authority boundary for Runtime
+history, physical binding, deterministic program verification, wallet authority,
+PostgreSQL checkpoints, deployment credentials, offline replay trust, and the
+portable encoder consumer. Provider activation and completion mutations retain a
+canonical signed envelope. Reload verifies the exact proof-cleared mutation
+preimage, provider signature, schema and current database OID, lineage and
+historical epoch, and the full signed store incarnation against the append-only
+local registry. Portable exports retain the exact physical target and cannot be
+encoded or offline-verified with caller-supplied trust implementations.
 
 ## Verification evidence
 
@@ -56,160 +59,129 @@ changed.
 
 | Check | Result |
 | --- | --- |
-| `git diff --check 07b9d731^..4fc1baea` | pass |
+| `git diff --check 07b9d731^..55f1cafa` | pass |
 | `nix develop -c cargo fmt --all -- --check` | pass |
-| `nix develop -c cargo check -p mfm-authority-seal -p mfm-values -p mfm-canonical -p mfm-certify -p mfm-runtime -p mfm-store -p mfm-replay -p mfm-evm -p mfm-evm-live -p mfm-storage-postgres -p mfm-storage-evm-postgres -p mfm-integration-tests` | pass (warnings only) |
-| scoped `nix develop -c cargo clippy ... --all-targets --no-deps -- -D warnings` | pass for authority-seal, values, canonical, certify, runtime, store, replay, evm-live, and storage-postgres |
-| `nix develop -c cargo test -p mfm-store --test api-surface -- --nocapture` | pass (1/1 trybuild harness) |
-| `nix develop -c cargo test -p mfm-evm --lib -- --nocapture` | pass (47/47) |
-| `nix develop -c cargo test -p mfm-evm-live --lib -- --nocapture` | pass (35/35) |
+| `nix develop -c cargo test -p mfm-store --test api-surface -- --nocapture` | pass (1/1 trybuild harness, including sealed program/authority surfaces) |
 | `nix develop -c cargo test -p mfm-replay --lib -- --nocapture` | pass (1/1) |
-| `nix run .#run -- --task recoverability-postgres-v1` | pass (managed PostgreSQL, 1/1; 38.70s) |
-| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL, release EVM restart path, 1/1; 1344.07s) |
-| `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL, 1/1; 199.59s) |
+| `nix develop -c cargo test -p mfm-storage-evm-postgres --features parity-tests --lib -- --nocapture` | pass (2/2; 1 schema probe ignored as DB-gated) |
+| `nix develop -c cargo test -p mfm-evm --lib -- --nocapture` | pass (47/47; run on the preceding proof-verification commit, unchanged by the registry-resolution cutover) |
+| `nix run .#run -- --task recoverability-postgres-v1` | pass (managed PostgreSQL on this candidate, 1/1; 37.54s) |
+| `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL on this candidate, 1/1; 193.33s) |
+| `nix run .#run -- --task evm-postgres-submission-qualification` | pass (managed PostgreSQL release EVM restart path on `52d58907b`, 1/1; 1344.07s) |
 
-The scoped `-D warnings` Clippy lane intentionally excludes `mfm-evm`, which
-still reports the existing `large_enum_variant` lint at
-`crates/domains/evm/src/submission.rs:795`, and
-`mfm-storage-evm-postgres`, whose all-target build emits existing dead-code
-warnings for provider/registry maintenance helpers. Cargo check remains green
-with those warnings. The managed qualifications exercise the production parity
-paths for the excluded storage crate.
+The current wallet qualification covers the new nonce-role `SELECT` grant,
+historical-incarnation lookup, promotion compatibility, candidate and
+completion provider-proof corruption, and subsequent restoration. The scoped
+`-D warnings` Clippy lane from the preceding candidate passed for
+authority-seal, values, canonical, certify, runtime, store, replay, evm-live,
+and storage-postgres; it intentionally excluded the existing `large_enum_variant`
+warning in `mfm-evm` and existing dead-code warnings in all-target
+`mfm-storage-evm-postgres`. Cargo check remained green with those warnings.
 
-## Authority bridges closed by the workspace-private marker
+## Authority and replay boundaries closed by the workspace-private marker
 
-`RuntimeHistoryPort`, `PublicPhysicalBindingVerifier`, `WalletNonceAuthority`,
-`ExternalCheckpointAuthority`, `DeploymentCredentialSink`, and
-`DeploymentCredentialBroker` now inherit marker traits from the unpublished
-`mfm-authority-seal` package. The Runtime assembly cutover also requires its
-workspace-only assembly marker. The API-surface trybuild test confirms that an
-ordinary fake implementation cannot satisfy these public traits, while the
-workspace-owned store and PostgreSQL/EVM adapters opt in explicitly.
+`RuntimeHistoryPort`, `PublicPhysicalBindingVerifier`, `ProgramVerifier`,
+`WalletNonceAuthority`, `ExternalCheckpointAuthority`,
+`DeploymentCredentialSink`, `DeploymentCredentialBroker`,
+`RetainedPhysicalReleaseTrust`, and `StoreCheckpointTrust` all inherit marker
+traits from the unpublished `mfm-authority-seal` package. The Runtime assembly
+cutover and portable encoder additionally require workspace-only consumer
+markers. The store API trybuild test confirms that ordinary fake
+implementations cannot satisfy the public authority/program surfaces.
 
-Accordingly, the previous Runtime authority bridge, injectable live EVM wallet
-authority, and caller-supplied PostgreSQL target/checkpoint admission are
-closed under the stated workspace-private deployment assumption. The
-PostgreSQL admission now moves private credentials through a one-shot
-`PostgresTargetAdmission`, and checkpoint transactions validate the exact
-target tuple before commit.
+`ExportRunEvidence` has private fragments and exposes its encoder view only
+through the marker-gated method; `PortableRunExport` is built solely by the
+private replay consumer. `ReplayTrustSnapshot` cannot be supplied with a
+caller-implemented program, retained-release, or checkpoint verifier. Together
+with the exact `PhysicalTargetIdentity` in every portable fixation and source
+prefix, this closes the previous portable replay provenance finding.
+
+The same marker boundary closes the prior Runtime authority bridge, injectable
+live EVM wallet authority, and caller-supplied PostgreSQL target/checkpoint
+admission. PostgreSQL admission remains move-only with private credentials, and
+checkpoint transactions validate the exact target tuple before commit.
 
 Relevant surfaces: `crates/kernel/authority-seal`,
+`crates/kernel/replay/src/portable.rs`,
+`crates/kernel/store/src/structured/{assembly,fold,purpose}.rs`,
 `crates/kernel/runtime/src/history/port.rs`,
-`crates/kernel/store/src/structured/assembly.rs`,
 `crates/live/evm/src/structured_wallet.rs`,
-`crates/storages/postgres/src/checkpoint.rs`, and
-`crates/storages/postgres/src/session.rs`.
+`crates/storages/postgres/src/{checkpoint,session}.rs`.
 
-## High findings
+## Provider mutation proof closure
 
-### Candidate reload does not independently verify retained provider activation proof
+Provider mutation replies are canonical bounded JSON envelopes with a provider
+identity, per-channel challenge, full target context, operation key, canonical
+payload digest, and Ed25519 signature. Mutation-time code verifies the channel
+envelope and signature before attaching the exact proof to the durable candidate
+or completion closure. Completion's recovery preimage clears both the outer and
+inner completion-proof fields; candidate reload clears its activation-proof
+field before recomputing the signed preimage.
 
-Provider mutation attestations are now channel-verified and retained in
-`ActiveWalletCandidate`, and the provider-side checkpoint prefix includes the
-candidate JSON. That is a material improvement over the prior discard path.
+Every candidate path (`load_candidates` and `load_candidate_by_key`) and every
+completion path (`load_completion` and `load_completion_by_key`) now:
 
-The PostgreSQL reload path is still weaker than the contract requires:
-`load_candidates` and `load_candidate_by_key` check semantic keys, ordinals,
-activation evidence references, and progression, but do not call
-`validate_active_wallet_candidate_prefix` and do not even check the retained
-provider-attestation syntax. No reload path verifies the retained provider
-signature against the target-bound activation mutation preimage, provider key,
-or current provider incarnation. A persisted candidate with a substituted or
-copied provider string can therefore pass these reads until a later provider
-checkpoint or mutation catches it.
+- decodes and canonicalizes the envelope;
+- resolves the signed `WalletNonceStoreIncarnation` by lineage and writer epoch
+  in `wallet_store_incarnations` using the nonce application role;
+- requires the retained row's canonical incarnation reference and JSON to equal
+  the signed object exactly;
+- checks provider identity, operation key, expected schema, current database
+  OID, current lineage, and a historical writer epoch no newer than the current
+  authority; and
+- verifies the payload digest and provider signature against the exact recovery
+  preimage.
 
-Action: make candidate reload perform the complete prefix validation and
-independently verify the retained provider proof against the exact target-bound
-mutation preimage (or replace the string with a typed, verifiable proof).
+The append-only registry lookup preserves proofs from authorized historical
+targets after promotion while rejecting same-lineage target, key, or attestation
+substitution. Existing managed tests corrupt candidate and completion signatures
+in persisted rows and observe an integrity fault; the same qualification then
+restores the rows and verifies successful status, promotion, and new mutation
+paths.
 
-Surfaces: `crates/domains/evm/src/wallet_authority.rs` and
-`crates/storages/evm-postgres/src/authority.rs`.
-
-### Completion reload checks provider-proof self-consistency, not provider authenticity
-
-`CompletedWalletNonce` and its private recovery closure now retain the provider
-completion attestation. `validate()` checks that the attestation is bounded,
-non-empty, and equal in the outer and inner closure; it also validates the
-candidate prefix. `retained_completion_is_valid` invokes that self-check during
-normal reload.
-
-However, no reload path verifies the retained completion attestation against a
-provider signature, exact completion mutation preimage, target identity, or
-provider incarnation. Rewriting both the outer field and the private closure
-field with another syntactically valid value can satisfy the self-consistency
-check without proving that the provider issued it for this completion. This
-violates the design requirement that reload reject absent, substituted, or
-inconsistent provider evidence.
-
-Action: retain a typed provider proof with its operation/preimage binding and
-verify it during `load_completion`/`retained_completion_is_valid`; a format and
-outer/inner equality check is insufficient.
-
-Surfaces: `crates/domains/evm/src/wallet_authority.rs` and
-`crates/storages/evm-postgres/src/authority.rs`.
-
-### Portable replay trust hooks remain caller-implementable
-
-Portable exports now carry `PhysicalTargetIdentity` (target key, database OID,
-fence generation, release epoch, and current incarnation), export readers reject
-identities without a physical target, and source-prefix validation requires an
-exact target match. This closes the previous omission of physical target
-fixation.
-
-Strict offline provenance is nevertheless still forgeable through the public
-`RetainedPhysicalReleaseTrust` and `StoreCheckpointTrust` traits:
-`ReplayTrustSnapshot::with_authorized_closure` accepts caller implementations
-of both, and `ExportRunEvidence::with_encoder_view` remains a public callback
-view. `PortableFixation` itself has public serializable fields. An external
-consumer can therefore construct/deserialize a forged fixation or supply trust
-hooks that return `true`, bypassing deployment-issued release/checkpoint
-authority. The physical-target field alone does not seal that trust boundary.
-
-Action: make replay trust material deployment-issued and non-implementable by
-ordinary downstream crates (or explicitly document and enforce a trusted
-integrator boundary), and restrict construction/inspection of sealed export
-evidence accordingly.
-
-Surfaces: `crates/kernel/replay/src/portable.rs` and
-`crates/kernel/store/src/structured/purpose.rs`.
+Relevant surfaces: `crates/storages/evm-postgres/src/{authority,provider,schema}.rs`,
+`crates/storages/evm-postgres/migrations/0001_wallet_authority.sql`, and
+`crates/storages/evm-postgres/tests/wallet_authority.rs`.
 
 ## PostgreSQL retry reconciliation reviewed
 
-The `4fc1baea0` path was inspected together with the full managed PostgreSQL
+The `4fc1baea0` path was inspected together with the current managed PostgreSQL
 recoverability qualification. `indexed_run_checkpoint_digest` binds the
 external run checkpoint to the indexed database head in one target-validated
 transaction. `checkpoint_mutations_for_batch` recognizes an external head that
 already equals the indexed current run/fact head and emits no rewind mutation;
 the contention classifier reconstructs the exact existing batch and
 re-acknowledges its checkpoint mutations before returning `ExistingSame`.
-The qualification passed, and the release EVM restart qualification also passed
-with no duplicate broadcast. No concrete retry regression was observed.
+The qualification passed, and the release EVM restart qualification on the
+immediate predecessor passed with no duplicate broadcast. No concrete retry
+regression was observed.
 
 ## Closed or passing areas observed
 
-- The workspace-private authority markers prevent ordinary downstream
-  implementations of the Runtime, live-wallet, and PostgreSQL authority seams;
-  focused API-surface tests pass.
-- Provider attestations are now verified at mutation time and retained in both
-  activation and completion closures; the remaining issue is independent
-  reload-time authenticity verification, not mutation-time channel binding.
+- Workspace-private authority markers prevent ordinary downstream
+  implementations of Runtime, live-wallet, PostgreSQL, program-verifier, and
+  offline replay authority seams.
+- Provider attestations are verified at mutation time and at every relevant
+  reload, including canonical preimage, signature, current database OID/schema,
+  and registered historical target identity.
 - Exact physical target identity is carried through structured store identity,
   export evidence, portable fixation, and source-prefix matching.
-- Managed PostgreSQL recoverability, wallet storage, and release EVM
-  submission/restart qualifications pass on this exact candidate.
-- EVM domain, live-EVM, replay, formatting, and scoped compile/test checks pass;
-  the Clippy exclusions and existing warnings are recorded above rather than
-  hidden.
-- The owner reports the final SQLx/offline, SQL inventory, and model checks
-  pass; those remain owner-supplied evidence rather than independently
-  reproduced results here.
+- Managed PostgreSQL recoverability and wallet-storage qualifications pass on
+  this exact candidate; the release EVM restart qualification passes on the
+  immediate proof-verification predecessor.
+- EVM domain, replay, formatting, storage-provider unit, and API-surface checks
+  pass; existing warning boundaries are recorded above rather than hidden.
+- The owner reports the final SQLx/offline, SQL inventory, and model checks pass;
+  those remain owner-supplied evidence rather than independently reproduced
+  results here.
 
 ## Verdict
 
-**FAIL.** The exact candidate passes the focused and managed qualification
-lanes, and the Runtime/live-wallet/PostgreSQL authority markers close the prior
-public bridges under the stated deployment assumption. Strict provenance still
-fails because wallet reload does not independently authenticate retained
-provider proofs and portable replay accepts public caller-controlled trust
-hooks. PASS requires those residual proof/replay boundaries to be sealed and
-covered by adversarial regression tests.
+**PASS.** The exact candidate closes the prior public authority bridges,
+retained provider-proof reload gaps, physical-target substitution gap, and
+portable replay trust gaps under the documented workspace-private deployment
+boundary. Focused and managed checks pass, including promotion and persisted
+candidate/completion tamper regressions. The only noted uncertainty is the
+unrerun long release lane on this final source hash; its changed behavior is
+covered directly by the current wallet qualification and the predecessor lane
+passed.
