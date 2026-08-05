@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`f99e3a84ced87246d19a93a4a19a1ab300d5e398`. Focused checks and its exact
+`4e11e3556348cf61d27294a2caa18f5e0dba3635`. Focused checks and its exact
 composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -31,14 +31,18 @@ both the closed implementation work and the remaining proof/deployment gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `f99e3a84ced87246d19a93a4a19a1ab300d5e398`
-- Prior implementation/evidence tip: `b3dfd83777b4b1f54b349c5ac07d105dbd757cab`.
+- Implementation candidate: `4e11e3556348cf61d27294a2caa18f5e0dba3635`
+- Prior implementation/evidence tip: `6d4f4893371a2e48dbacb0ed5f5959547306c029`.
 - Final evidence refresh: this document's next evidence commit; the candidate
   review was performed against the exact hash above.
-- Implementation revisions after the prior candidate: `e68aca910` (idempotent
-  configuration checkpoint predecessor classification), `fcd56ab09` (bounded
-  transient checkpoint-read retries), and `f99e3a84c` (SQL inventory ownership
-  for the retry wrappers).
+- Implementation revisions leading to the prior candidate: `e68aca910`
+  (idempotent configuration checkpoint predecessor classification), `fcd56ab09`
+  (bounded transient checkpoint-read retries), and `f99e3a84c` (SQL inventory
+  ownership for the retry wrappers).
+- Implementation revision in this candidate: `6d4f48933` (configuration
+  reader retry and identical append ambiguity recovery, with focused tests and
+  design/architecture contract updates), followed by `4e11e3550` (durable-row
+  ambiguity regression strengthening).
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
@@ -65,7 +69,7 @@ result: ok — 13 passed, 0 failed in 1738.58s
 structured EVM submission: ok in 1229.82s
 ```
 
-The current exact composed gate ran on the reviewed implementation candidate:
+The immediately preceding f99 implementation gate also passed:
 
 ```text
 nix run .#ci
@@ -73,6 +77,26 @@ source: f99e3a84ced87246d19a93a4a19a1ab300d5e398
 run id: run-1733167-1785954807662948771
 result: ok — 13 passed, 0 failed in 1933.45s
 structured EVM submission: ok in 1416.48s
+```
+
+The subsequent 6d implementation gate also passed:
+
+```text
+nix run .#ci
+source: 6d4f4893371a2e48dbacb0ed5f5959547306c029
+run id: run-1760799-1785957370345872343
+result: ok — 13 passed, 0 failed in 1802.02s
+structured EVM submission: ok in 1261.66s
+```
+
+The current exact composed gate ran on the reviewed implementation candidate:
+
+```text
+nix run .#ci
+source: 4e11e3556348cf61d27294a2caa18f5e0dba3635
+run id: run-1782118-1785959378805247010
+result: ok — 13 passed, 0 failed in 1761.62s
+structured EVM submission: ok in 1237.39s
 ```
 
 The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
@@ -94,7 +118,7 @@ check/test/test-db runs.
 
 That historical run started after `d67a3bc3` and no commits were made during
 it, so its source hash and closing-source-revision observation agree. The
-current run above is the source gate for `f99e3a84c`. The earlier
+current run above is the source gate for `4e11e3550`. The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the current gate.
 
@@ -106,11 +130,20 @@ commit-before-external-ack read window exposed `InvalidHistory`; `fcd56ab09`
 adds bounded retries only for that read classification and preserves the final
 error for persistent mismatches. `f99e3a84c` updates the static SQL ownership
 predicate for the wrapper without changing SQL text or query behavior.
+`6d4f48933` extends the bounded read classification through application
+configuration resolution and retries an ambiguous append only with identical
+canonical bytes through the qualified backend. `4e11e3550` strengthens the
+durable-row/unknown-acknowledgement fake and verifies that recovery retains one
+row; the current exact gate exercises that reviewed source.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
 applicable* rather than inferred. Existing API rejection tests preserve the
 baseline negative behavior.
+
+The current `mfm-store` focused suite passes 33/33, including the two
+configuration recovery tests (7/7 in their module); formatting and diff checks
+also pass. The exact composed run independently passes all 13 leaves.
 
 ### Named focused regression matrix
 
@@ -132,6 +165,8 @@ baseline negative behavior.
 | `structured::purpose::export_source_closure_tests::flattened_multi_hop_source_closure_is_accepted` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::fanout_pending_bound_rejects_before_enqueue` | pass | N/A; introduced after baseline |
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
+| `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
+| `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
 | `configured_value_history_linearizes_same_stream_append_races` | pass in composed gate | N/A; added after baseline |
 
@@ -147,7 +182,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-01 | Conditional | Target/checkpoint trust is explicit and testable; concrete external production fence implementation is absent. |
 | TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; cross-process acknowledgement and fault injection remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
-| TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction and bounded retries reconcile raced append identities. |
+| TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Canonical ingress is shared; a complete memory/PostgreSQL acceptance corpus is not independently reproduced. |
 | TT2-STORE-06 | Conditional | Inventory and producer-prefix bounds exist; generic/builder query inventory and long-history proof are incomplete. |
 | TT2-STORE-07 | Closed | Dense publication routes use bounded unique producer-prefix verification. |
@@ -202,7 +237,10 @@ using the same canonical-revision digest as the external checkpoint, while
 checkpoint reads retry only the bounded, classified commit-before-ack
 `InvalidHistory` window. Persistent mismatches and all other errors remain
 fail-closed. The SQL inventory review covers the wrapper's direct queries
-without changing their text or ownership semantics.
+without changing their text or ownership semantics. Configuration resolution
+uses the same bounded read classification, and ambiguous configuration appends
+reconnect through the append authority before retrying only the exact canonical
+revision.
 
 ## PostgreSQL and EVM matrix status
 
@@ -260,9 +298,8 @@ as a quality residual rather than hidden as a simplification win.
 
 ## Final verdict
 
-The current implementation is materially stronger and all focused checks are
 The current implementation is materially stronger, all focused checks are
-green, and the exact composed gate for `f99e3a84c` is green. The strict plan
+green, and the exact composed gate for `4e11e3550` is green. The strict plan
 acceptance condition is not met. The review remains **CONDITIONAL /
 INCOMPLETE** until the residual proof matrices, expanded portable artifact
 corpus and live app integration, production trust deployment, and

@@ -76,6 +76,8 @@ Post-step-12 implementation and proof revisions:
 | `e68aca910` | classify configuration idempotent checkpoint predecessors |
 | `fcd56ab09` | retry transient checkpoint read races |
 | `f99e3a84c` | inventory checkpoint retry query ownership |
+| `6d4f48933` | complete configuration ambiguity recovery |
+| `4e11e3550` | strengthen configuration ambiguity regression |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -83,7 +85,7 @@ later `42c80525` whitespace cleanup, `a027640c` review refresh, `d0459d4d`
 bounded-source review refresh, `8803a585` evidence pin, `ebc4f8a81`,
 `7530a4479`, and `f8568ff26` are documentation-only commits. The corrected
 source gate below starts after the implementation revisions through
-`f99e3a84c`; the final evidence refresh is documentation-only after that gate.
+`4e11e3550`; the final evidence refresh is documentation-only after that gate.
 
 ## Independent review checkpoints
 
@@ -94,7 +96,7 @@ source gate below starts after the implementation revisions through
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `f99e3a84ced87246d19a93a4a19a1ab300d5e398` | independent review requested on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
+| Current implementation candidate | `4e11e3556348cf61d27294a2caa18f5e0dba3635` | independent review requested on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -122,10 +124,10 @@ Current exact composed gate:
 
 ```text
 nix run .#ci
-source: f99e3a84ced87246d19a93a4a19a1ab300d5e398
-run id: run-1733167-1785954807662948771
-result: ok — 13 passed, 0 failed in 1933.45s
-structured EVM submission: ok in 1416.48s
+source: 4e11e3556348cf61d27294a2caa18f5e0dba3635
+run id: run-1782118-1785959378805247010
+result: ok — 13 passed, 0 failed in 1761.62s
+structured EVM submission: ok in 1237.39s
 ```
 
 The run also observed the PostgreSQL recoverability leaf and wallet-nonce
@@ -133,7 +135,7 @@ qualification as passing, plus Bitcoin parity and closing-source-revision.
 The exact run was clean at the pinned source; the evidence refresh after it is
 documentation-only.
 
-Previous exact composed gate (historical):
+Earlier exact composed gate (historical; d67 implementation):
 
 ```text
 nix run .#ci
@@ -143,13 +145,28 @@ result: ok — 13 passed, 0 failed in 1738.58s
 structured EVM submission: ok in 1229.82s
 ```
 
+The immediately preceding 6d implementation gate is retained as historical
+evidence:
+
+```text
+nix run .#ci
+source: 6d4f4893371a2e48dbacb0ed5f5959547306c029
+run id: run-1760799-1785957370345872343
+result: ok — 13 passed, 0 failed in 1802.02s
+structured EVM submission: ok in 1261.66s
+```
+
 The earlier candidate diagnostics included a same-stream configuration race
 and a transient commit-before-checkpoint-ack read race. `e68aca910` aligns the
 idempotent predecessor digest with the checkpoint's canonical-revision head,
 and `fcd56ab09` adds bounded retries only for the resulting transient
 `InvalidHistory` reads. `f99e3a84c` updates the reviewed SQL inventory
 ownership predicate for those wrappers; it does not change SQL text or query
-semantics. The final run above exercises these changes.
+semantics. `6d4f48933` extends the bounded read classification to application
+configuration resolution and reconnects ambiguous appends through an identical
+canonical retry. `4e11e3550` strengthens the durable-row/unknown-acknowledgement
+regression and asserts one retained row; the final run above exercises the
+reviewed source.
 
 Additional focused evidence on the current implementation sequence includes
 six bounded recursive source-closure tests, eight portable replay tests, two
@@ -160,9 +177,11 @@ corpus, application root/dependency zero-byte denials, and online/offline
 projection byte parity. The managed PostgreSQL recursive parity fixture passed
 17/17 on the corresponding current storage sequence, and the composed gate
 passed the configured-value same-stream append race after the checkpoint
-predecessor and retry fixes. The historical composed gate includes the
-source-bound fix in `d67a3bc3`; the current run's closing-source-revision leaf
-observed `f99e3a84c`.
+predecessor and retry fixes. The focused store suite now passes 33/33,
+including bounded configuration-reader retry and identical-append ambiguity
+recovery regressions. The historical composed gate includes the source-bound
+fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
+`4e11e3550`.
 
 ## TT2 disposition at the current candidate
 
