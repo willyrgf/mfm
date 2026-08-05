@@ -46,6 +46,26 @@ fn sql_checkpoint_head(
         .transpose()
 }
 
+// Checkpoint heads hash canonical serialized revisions, whereas a revision's
+// content reference hashes its domain payload. Idempotent replay must use the
+// former for the predecessor mutation or it will reject an otherwise valid
+// already-committed append as stale.
+fn sql_checkpoint_predecessor(
+    history: &RawConfigurationHistory,
+) -> Result<Option<ContentDigest>, StructuredStoreError> {
+    history
+        .revisions
+        .iter()
+        .rev()
+        .nth(1)
+        .map(|revision| {
+            canonical_json(revision)
+                .map(|canonical| checkpoint_digest(canonical.as_bytes()))
+                .map_err(|_| invalid("configuration checkpoint predecessor is not canonical"))
+        })
+        .transpose()
+}
+
 struct StoredConfigurationRow {
     revision_sequence: u64,
     store_scope_id: String,
@@ -348,9 +368,11 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                                 Ok(ConfigurationBackendAppendOutcome::StaleHead)
                             };
                         }
-                        let predecessor = existing
-                            .predecessor_ref()
-                            .map(|reference| reference.content_digest().clone());
+                        let predecessor = sql_checkpoint_predecessor(
+                            history
+                                .as_ref()
+                                .ok_or_else(|| invalid("configuration history is absent"))?,
+                        )?;
                         if external_head != predecessor && external_head != Some(successor_digest) {
                             return Ok(ConfigurationBackendAppendOutcome::StaleHead);
                         }
