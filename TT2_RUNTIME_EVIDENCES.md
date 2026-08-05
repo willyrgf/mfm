@@ -172,7 +172,7 @@ Additional focused evidence on the current implementation sequence includes
 six bounded recursive source-closure tests, eight portable replay tests, two
 portable source/fact-route bound regressions, exact frame and total-byte
 limit/one-over checks, root target/tenant trust tamper denials, serialized
-recursive-prefix tamper cases, the generated five-vector portable artifact
+recursive-prefix tamper cases, the generated twelve-vector portable artifact
 corpus, application root/dependency zero-byte denials, and online/offline
 projection byte parity. The managed PostgreSQL recursive parity fixture passed
 17/17 on the corresponding current storage sequence, and the composed gate
@@ -213,9 +213,9 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
 | REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
-| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; no real later-audit semantic suffix fixture exists yet. |
+| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; generated semantic/audit suffix vectors pass, but no real production later-audit artifact fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
-| REPLAY-05 | Conditional | Generated schema vectors plus a generated five-vector portable artifact corpus and no-service replay leaf pass; a real later-suffix artifact remains. |
+| REPLAY-05 | Conditional | Generated schema vectors plus a generated twelve-vector portable artifact corpus and no-service replay/fold leaves pass; a real later-suffix artifact remains. |
 | APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | Protected key movement and zeroization checks exist; same-allocation lifetime is not established by Rust move semantics. |
@@ -247,10 +247,10 @@ keystore lanes remain part of the composed gate.
 
 The following are the concrete blockers to an unconditional §13 PASS:
 
-1. add a real semantic export with a later audit suffix, expand generated
-   artifact vectors to cover false frontier/publication, cyclic/shared/over-
-   budget graphs and offline folding, and add a live application multi-hop
-   export integration;
+1. add a real semantic export with a later audit suffix, true cyclic/shared
+   dependency traversal vectors over nested source edges, a generated
+   offline-fold acceptance vector, and a live application multi-hop export
+   integration;
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;

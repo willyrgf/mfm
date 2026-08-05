@@ -126,6 +126,210 @@ def canonical(value: Any) -> bytes:
     ).encode()
 
 
+def portable_raw_digest(value: bytes) -> str:
+    """Return the raw content digest grammar used by portable frame streams."""
+
+    return f"content:sha256-v1:{hashlib.sha256(value).hexdigest()}"
+
+
+def portable_jcs_digest(value: bytes) -> str:
+    """Return the journal JCS digest grammar used by portable fixture heads."""
+
+    return f"sha256-jcs-v1:{hashlib.sha256(value).hexdigest()}"
+
+
+def portable_frame_bytes(frame: dict[str, Any]) -> bytes:
+    return canonical(frame) + b"\n"
+
+
+def portable_chain_step(previous: str, frame: str) -> str:
+    return portable_raw_digest((previous + frame).encode())
+
+
+def portable_closure_digest(seal: dict[str, Any]) -> str:
+    payload = seal["payload"]
+    body = {
+        "authorization_decisions": payload["authorization_decisions"],
+        "fixation": payload["fixation"],
+        "kind": payload["kind"],
+        "root_run_id": payload["root_run_id"],
+        "run_fixations": payload["run_fixations"],
+        "source_run_ids": payload["source_run_ids"],
+        "store_scope_id": payload["store_scope_id"],
+        "tenant_scope_id": payload["tenant_scope_id"],
+        "version": payload["version"],
+    }
+    return portable_raw_digest(canonical(body))
+
+
+def reseal_portable_frames(frames: list[dict[str, Any]], kind: str | None = None) -> bytes:
+    """Recompute a fixture stream after a deliberate semantic mutation.
+
+    The generated corpus owns exact bytes, so these mutations must use the same
+    canonical frame, closure, and chain rules as the Rust encoder. The helper
+    intentionally does not validate the resulting stream; rejection vectors
+    exercise the decoder's semantic checks.
+    """
+
+    if len(frames) < 2 or frames[-1]["kind"] != "seal":
+        raise ValueError("portable fixture must contain batch frames and a seal")
+    if kind is not None:
+        frames[-1]["payload"]["kind"] = kind
+    seal = frames[-1]
+    chain = portable_raw_digest(b"mfm.portable-export.frame-chain-genesis")
+    for frame in frames[:-1]:
+        encoded = portable_frame_bytes(frame)
+        digest = portable_raw_digest(encoded[:-1])
+        chain = portable_chain_step(chain, digest)
+    final_frame_digest = portable_raw_digest(portable_frame_bytes(frames[-2])[:-1])
+    payload = seal["payload"]
+    payload["final_frame_digest"] = final_frame_digest
+    payload["frame_chain_digest"] = chain
+    payload["closure_reference"] = portable_closure_digest(seal)
+    payload["total_frames"] = len(frames)
+    payload["total_bytes"] = 0
+    seal["ordinal"] = len(frames) - 1
+    seal["previous_frame_digest"] = final_frame_digest
+    seal_bytes = b""
+    total_bytes = 0
+    for _ in range(8):
+        payload["total_bytes"] = total_bytes
+        seal_bytes = portable_frame_bytes(seal)
+        next_total = sum(len(portable_frame_bytes(frame)) for frame in frames[:-1]) + len(seal_bytes)
+        if next_total == total_bytes:
+            break
+        total_bytes = next_total
+    payload["total_bytes"] = total_bytes
+    seal_bytes = portable_frame_bytes(seal)
+    final_total = sum(len(portable_frame_bytes(frame)) for frame in frames[:-1]) + len(seal_bytes)
+    if final_total != total_bytes:
+        raise ValueError("portable fixture seal size did not converge")
+    return b"".join(portable_frame_bytes(frame) for frame in frames[:-1]) + seal_bytes
+
+
+def portable_suffix_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]]:
+    """Build semantic/audit suffix and frontier/publication tamper vectors."""
+
+    parsed = [json.loads(frame) for frame in portable_frames]
+    root = parsed[0]
+    source = parsed[1]
+    later = json.loads(json.dumps(root))
+    later["ordinal"] = 1
+    later["previous_frame_digest"] = portable_raw_digest(portable_frame_bytes(root)[:-1])
+    later_batch = later["payload"]["batch"]
+    later_batch["append_request_id"] = "portable-golden-later-append"
+    later_batch["candidate_digest"] = portable_raw_digest(b"portable-later-candidate")
+    later_batch["head"] = {
+        "commit_digest": portable_jcs_digest(b"portable-later-commit"),
+        "run_sequence": 2,
+    }
+    later_batch["predecessor"] = root["payload"]["batch"]["head"]
+    source["ordinal"] = 2
+    source["previous_frame_digest"] = portable_raw_digest(portable_frame_bytes(later)[:-1])
+    suffix_frames = [root, later, source, parsed[2]]
+    suffix_frames[-1]["payload"]["fixation"]["journal_head"] = later_batch["head"]
+    suffix_frames[-1]["payload"]["run_fixations"][0]["fixation"][
+        "journal_head"
+    ] = later_batch["head"]
+    suffix_semantic = reseal_portable_frames(
+        json.loads(json.dumps(suffix_frames)), "semantic"
+    )
+    suffix_audit = reseal_portable_frames(json.loads(json.dumps(suffix_frames)), "audit")
+
+    frontier_frames = [json.loads(json.dumps(frame)) for frame in parsed]
+    frontier_batch = frontier_frames[1]["payload"]["batch"]
+    frontier_batch["tenant_fact_coordinate"]["frontier"]["fact_order"] = 2
+    frontier_seal = frontier_frames[2]["payload"]
+    frontier_seal["run_fixations"][0]["fact_routes"][0]["publication_frontier"][
+        "fact_order"
+    ] = 2
+    frontier_seal["run_fixations"][1]["fact_frontiers"][0]["fact_order"] = 2
+    false_frontier = reseal_portable_frames(frontier_frames)
+
+    publication_frames = [json.loads(json.dumps(frame)) for frame in parsed]
+    publication_route = publication_frames[2]["payload"]["run_fixations"][0]["fact_routes"][0]
+    publication_route["producer_transition"]["record_hash"] = portable_jcs_digest(
+        b"portable-false-publication"
+    )
+    false_publication = reseal_portable_frames(publication_frames)
+
+    return [
+        {
+            "bytes_hex": suffix_semantic.hex(),
+            "expected_error": "invalid",
+            "id": "portable/semantic-suffix/reject-later-audit",
+            "kind": "strict_decode_rejection",
+        },
+        {
+            "bytes_hex": suffix_audit.hex(),
+            "id": "portable/audit-suffix/accept-later-audit",
+            "kind": "strict_decode_acceptance",
+        },
+        {
+            "bytes_hex": false_frontier.hex(),
+            "expected_error": "invalid",
+            "id": "portable/graph/reject-false-frontier",
+            "kind": "strict_decode_rejection",
+        },
+        {
+            "bytes_hex": false_publication.hex(),
+            "expected_error": "invalid",
+            "id": "portable/graph/reject-false-publication",
+            "kind": "strict_decode_rejection",
+        },
+    ]
+
+
+def portable_graph_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]]:
+    """Build bounded graph-shape rejection vectors from the recursive fixture."""
+
+    parsed = [json.loads(frame) for frame in portable_frames]
+
+    cyclic_frames = [json.loads(json.dumps(frame)) for frame in parsed]
+    cyclic_payload = cyclic_frames[-1]["payload"]
+    cyclic_payload["source_run_ids"][0] = cyclic_payload["root_run_id"]
+    cyclic_payload["run_fixations"][1]["run_id"] = cyclic_payload["root_run_id"]
+    cyclic = reseal_portable_frames(cyclic_frames)
+
+    shared_frames = [json.loads(json.dumps(frame)) for frame in parsed]
+    shared_payload = shared_frames[-1]["payload"]
+    shared_payload["run_fixations"].append(
+        json.loads(json.dumps(shared_payload["run_fixations"][1]))
+    )
+    shared = reseal_portable_frames(shared_frames)
+
+    over_budget_frames = [json.loads(json.dumps(frame)) for frame in parsed]
+    over_budget_payload = over_budget_frames[-1]["payload"]
+    root_run_id = over_budget_payload["root_run_id"]
+    over_budget_payload["source_run_ids"] = [
+        f"run:sha256-jcs-v1:{index:064x}"
+        for index in range(1, 4098)
+        if f"run:sha256-jcs-v1:{index:064x}" != root_run_id
+    ]
+    over_budget = reseal_portable_frames(over_budget_frames)
+
+    return [
+        {
+            "bytes_hex": cyclic.hex(),
+            "expected_error": "invalid",
+            "id": "portable/graph/reject-root-source-identity-collision",
+            "kind": "strict_decode_rejection",
+        },
+        {
+            "bytes_hex": shared.hex(),
+            "expected_error": "invalid",
+            "id": "portable/graph/reject-duplicate-source-fixation",
+            "kind": "strict_decode_rejection",
+        },
+        {
+            "bytes_hex": over_budget.hex(),
+            "expected_error": "invalid",
+            "id": "portable/graph/reject-source-count-over-budget",
+            "kind": "strict_decode_rejection",
+        },
+    ]
+
+
 def string(grammar: str, minimum: int, maximum: int) -> dict[str, Any]:
     return {
         "grammar": grammar,
@@ -1515,6 +1719,7 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
             "bytes_hex": portable_artifact.hex(),
             "id": "portable/recursive-golden/accept",
             "kind": "strict_decode_acceptance",
+            "offline_fold": "rejection",
         },
         {
             "bytes_hex": omitted_source.hex(),
@@ -1541,6 +1746,8 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
             "kind": "strict_decode_rejection",
         },
     ]
+    portable_artifact_vectors.extend(portable_suffix_vectors(portable_frames))
+    portable_artifact_vectors.extend(portable_graph_vectors(portable_frames))
     return {
         "artifacts": {
             "annex_bytes": len(annex_bytes),
