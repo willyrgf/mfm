@@ -3,8 +3,8 @@
 This append-only ledger records the implementation candidate, focused evidence,
 and the independent review for `IMPL_PLAN_PROBLEMS_TT2_IMPLRFC_RUNTIME.md`.
 It is deliberately not a blanket pass: the runtime cutover is substantially
-implemented and the current source gate is green, but the plan's strict §12/§13
-acceptance bar still has identified proof and deployment-boundary gaps.
+implemented and the focused candidate checks are green, but the plan's strict
+§12/§13 acceptance bar still has identified proof and deployment-boundary gaps.
 
 ## Material uncertainties
 
@@ -21,14 +21,15 @@ acceptance bar still has identified proof and deployment-boundary gaps.
 - No injected process-kill matrix was run for every EVM broadcast/receipt,
   finality, promotion, and completion boundary. The release qualification
   covers restart/reload paths, not all kill points.
-- The application production path has no live multi-hop export integration
-  fixture. Store-level recursive fixtures and a real PostgreSQL one-hop parity
-  test exist, while the app still materializes a flat source list and
-  reauthorizes it transiently.
-- The portable closure digest binds tenant, target, heads, graph, and purpose
-  data available to the current API, but does not yet retain an authenticated
-  principal/grant/decision object as a separately verifiable authorization
-  artifact.
+- The application production path still has no live multi-hop export
+  integration fixture. The implementation now performs kind-aware fixed-point
+  discovery and retains an authenticated principal, fixed export grant, and
+  content-addressed decision reference for every selected prefix; the live
+  production deployment proof remains absent.
+- Decision references are intentionally opaque content-addressed policy
+  evidence. Offline replay does not resolve them live; the explicit trust
+  snapshot binds the exact closure digest. If deployment requires independent
+  decision-record resolution, that is a new authority contract.
 
 ## Ordered implementation revisions
 
@@ -71,6 +72,7 @@ Post-step-12 implementation and proof revisions:
 | `3c7525a61` | bound export source discovery |
 | `a7ef6b636` | bound portable source and fact route discovery |
 | `d67a3bc3a` | add portable source bound regressions |
+| `b3dfd8377` | retain kind-aware export authorization closure |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -88,20 +90,22 @@ five and is pinned to `d67a3bc3a`.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4`; final evidence `ebc4f8a81bf3178b8928a14655bed0412a269934` | CONDITIONAL; residuals below |
+| Current implementation candidate | `b3dfd83777b4b1f54b349c5ac07d105dbd757cab` | independent review requested on this exact revision; final evidence follows | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
 All direct Rust tooling was run in the default Nix development shell. The
-current source gate was run once on the exact implementation candidate, without
-preceding it with separate composed check/test/test-db gates.
+previous exact source gate below was run once on its pinned implementation
+candidate, without preceding it with separate composed check/test/test-db
+gates. The current candidate has focused checks recorded below and still
+requires its own exact composed gate.
 
 | Check | Evidence |
 | --- | --- |
 | formatting | pass (`nix develop -c cargo fmt --all -- --check`) |
 | workspace Clippy | pass (`-D warnings`) |
 | metadata and SQLx offline | pass |
-| portable replay leaf | pass; `mfm-replay` unit corpus 5/5 |
+| portable replay leaf | pass; `mfm-replay` unit corpus 8/8, including generated artifact vectors |
 | workspace nextest and doctests | pass |
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
@@ -110,7 +114,7 @@ preceding it with separate composed check/test/test-db gates.
 | Bitcoin parity | pass |
 | closing source revision | pass |
 
-Exact composed gate:
+Previous exact composed gate (historical; the new candidate still requires the exact gate):
 
 ```text
 nix run .#ci
@@ -120,17 +124,22 @@ result: ok — 13 passed, 0 failed in 1738.58s
 structured EVM submission: ok in 1229.82s
 ```
 
+The exact `.#ci` gate for `b3dfd83777b4b1f54b349c5ac07d105dbd757cab` is
+pending; it is the next verification action on this candidate. The focused
+checks below are current-candidate evidence and must not be read as a
+substitute for that composed gate.
+
 Additional focused evidence on the current implementation sequence includes
-four flattened recursive source-closure tests, five portable replay tests, two
-portable source/fact-route bound regressions,
-exact frame and total-byte limit/one-over checks, root target/tenant trust
-tamper denials, and online/offline projection byte parity. The managed
-PostgreSQL recursive parity fixture passed 17/17 on the corresponding current
-storage sequence. The final composed gate includes the source-bound fix in
-`d67a3bc3`; its closing-source-revision leaf observed the post-cleanup tree,
-while the run's source implementation pin is the exact hash above. The run
-started after `d67a3bc3` and no commits were made during it, so the source pin
-and closing leaf agree for this final gate.
+six bounded recursive source-closure tests, eight portable replay tests, two
+portable source/fact-route bound regressions, exact frame and total-byte
+limit/one-over checks, root target/tenant trust tamper denials, serialized
+recursive-prefix tamper cases, the generated five-vector portable artifact
+corpus, application root/dependency zero-byte denials, and online/offline
+projection byte parity. The managed PostgreSQL recursive parity fixture passed
+17/17 on the corresponding current storage sequence. The historical composed
+gate includes the source-bound fix in `d67a3bc3`; its closing-source-revision
+leaf observed the post-cleanup tree. The current candidate still needs its own
+closing-source-revision observation in `.#ci`.
 
 ## TT2 disposition at the current candidate
 
@@ -160,13 +169,13 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
-| REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and parity are implemented; source-prefix tamper/publication corpus and live multi-hop app proof remain. |
+| REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
-| REPLAY-03 | Conditional | Exact semantic cutoff is enforced; no real later-audit semantic suffix fixture exists yet. |
+| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; no real later-audit semantic suffix fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
-| REPLAY-05 | Conditional | Generated schema vectors and a no-service test leaf exist; a generated full portable artifact corpus is still missing. |
+| REPLAY-05 | Conditional | Generated schema vectors plus a generated five-vector portable artifact corpus and no-service replay leaf pass; a real later-suffix artifact remains. |
 | APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
-| APP-02 | Conditional | Flattened recursive closure is accepted and graph-checked; principal/grant/decision retention and app-level zero-byte denial are not fully proven. |
+| APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | Protected key movement and zeroization checks exist; same-allocation lifetime is not established by Rust move semantics. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
 | VERIFY-01 | Conditional | Broad and focused gates pass, but the required complete proof matrix is not present. |
@@ -196,19 +205,17 @@ keystore lanes remain part of the composed gate.
 
 The following are the concrete blockers to an unconditional §13 PASS:
 
-1. add serialized source-prefix false-frontier/publication tamper cases and a
-   cyclic/shared/over-budget/omission/substitution portable artifact corpus;
-2. add a real semantic export with a later audit suffix, a live app multi-hop
-   export integration, and an app-level denied-dependency zero-byte assertion;
-3. generate and consume a full portable artifact corpus rather than only schema
-   vectors and unit fixtures;
-4. bind an authenticated principal/grant/decision into the retained export
-   authorization closure;
-5. provide concrete production retained-release/checkpoint trust implementations;
-6. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
-   matrices; and
-7. substantiate same-allocation key lifetime and long-history cost/LOC ownership
-   evidence.
+1. add a real semantic export with a later audit suffix, expand generated
+   artifact vectors to cover false frontier/publication, cyclic/shared/over-
+   budget graphs and offline folding, and add a live application multi-hop
+   export integration;
+2. provide concrete production retained-release/checkpoint trust implementations;
+3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
+   matrices;
+4. substantiate same-allocation key lifetime and long-history cost/LOC ownership
+   evidence; and
+5. close the remaining STORE-05/06, EVM-07/09, APP-01, QUALITY-01, and VERIFY-01
+   production proof matrices.
 
 Until those items are resolved or the normative plan is deliberately amended,
 the honest disposition is **CONDITIONAL / INCOMPLETE**, not PASS.
