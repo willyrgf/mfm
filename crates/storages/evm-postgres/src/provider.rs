@@ -431,33 +431,30 @@ impl WalletAuthorityProviderClient {
         verified
     }
 
-    pub(crate) async fn verify_retained_mutation_proof(
+    async fn verify_retained_mutation_proof(
         &self,
-        connection: &mut PgConnection,
-        proof: &str,
-        expected_store_incarnation: &WalletNonceStoreIncarnation,
-        expected_schema: &str,
-        expected_database_oid: u32,
-        expected_operation_key: &str,
-        mutation: &ProviderMutation,
+        verification: RetainedMutationVerification<'_>,
     ) -> Result<()> {
-        let proof = decode_persisted_mutation_proof(proof)?;
-        verify_historical_incarnation(connection, &proof.context.store_incarnation).await?;
+        let proof = decode_persisted_mutation_proof(verification.proof)?;
+        verify_historical_incarnation(verification.connection, &proof.context.store_incarnation)
+            .await?;
         // Historical wallet rows survive an authorized physical promotion. The
         // provider proof must therefore belong to this store lineage and an
         // already qualified writer epoch, while the signed context still
         // identifies the exact target that prepared the mutation.
         if proof.provider_id != self.trust.provider_id.as_str()
-            || proof.operation_key != expected_operation_key
-            || proof.context.schema_name != expected_schema
-            || proof.context.database_oid != expected_database_oid
+            || proof.operation_key != verification.expected_operation_key
+            || proof.context.schema_name != verification.expected_schema
+            || proof.context.database_oid != verification.expected_database_oid
             || proof
                 .context
                 .store_incarnation
                 .wallet_nonce_store_lineage_id
-                != expected_store_incarnation.wallet_nonce_store_lineage_id
+                != verification
+                    .expected_store_incarnation
+                    .wallet_nonce_store_lineage_id
             || proof.context.store_incarnation.writer_epoch
-                > expected_store_incarnation.writer_epoch
+                > verification.expected_store_incarnation.writer_epoch
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
@@ -466,8 +463,8 @@ impl WalletAuthorityProviderClient {
             &self.trust.public_key,
             &proof,
             &proof.context,
-            expected_operation_key,
-            mutation,
+            verification.expected_operation_key,
+            verification.mutation,
         )
     }
 }
@@ -922,15 +919,15 @@ impl OfflineActivationVerifier {
         mutation: &ProviderMutation,
     ) -> Result<()> {
         self.client
-            .verify_retained_mutation_proof(
+            .verify_retained_mutation_proof(RetainedMutationVerification {
                 connection,
                 proof,
-                &self.store_incarnation,
-                schema_name,
-                database_oid,
-                operation_key,
+                expected_store_incarnation: &self.store_incarnation,
+                expected_schema: schema_name,
+                expected_database_oid: database_oid,
+                expected_operation_key: operation_key,
                 mutation,
-            )
+            })
             .await
     }
 
@@ -1046,6 +1043,16 @@ struct PersistedMutationProof {
     operation_key: String,
     payload_digest: String,
     signature: String,
+}
+
+struct RetainedMutationVerification<'a> {
+    connection: &'a mut PgConnection,
+    proof: &'a str,
+    expected_store_incarnation: &'a WalletNonceStoreIncarnation,
+    expected_schema: &'a str,
+    expected_database_oid: u32,
+    expected_operation_key: &'a str,
+    mutation: &'a ProviderMutation,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
