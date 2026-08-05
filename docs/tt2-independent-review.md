@@ -3,7 +3,7 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`4e11e3556348cf61d27294a2caa18f5e0dba3635`. Focused checks and its exact
+`5711097baaac0d2f879f0f700828e19e501ff771`. Focused checks and its exact
 composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -31,23 +31,27 @@ both the closed implementation work and the remaining proof/deployment gaps.
 
 ## Candidate and review scope
 
-- Implementation candidate: `4e11e3556348cf61d27294a2caa18f5e0dba3635`
-- Prior implementation/evidence tip: `6d4f4893371a2e48dbacb0ed5f5959547306c029`.
+- Implementation candidate: `5711097baaac0d2f879f0f700828e19e501ff771`
+- Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this document's next evidence commit; the candidate
   review was performed against the exact hash above.
 - Implementation revisions leading to the prior candidate: `e68aca910`
   (idempotent configuration checkpoint predecessor classification), `fcd56ab09`
   (bounded transient checkpoint-read retries), and `f99e3a84c` (SQL inventory
   ownership for the retry wrappers).
-- Implementation revision in this candidate: `6d4f48933` (configuration
+- Implementation revision in the prior candidate: `6d4f48933` (configuration
   reader retry and identical append ambiguity recovery, with focused tests and
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
+- Current post-gate corpus/test-only revision: `5711097b` (deterministic
+  portable-vector generation, generated corpus/README, replay corpus assertion,
+  and evidence prose; no production replay/runtime behavior).
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
   `ebc4f8a81`, `7530a4479`, and `f8568ff26`. None changes Rust, SQL, generated
-  contracts, or test behavior.
+  contracts, or test behavior. The current evidence refresh follows the
+  `5711097b` gate and is documentation-only.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -93,23 +97,23 @@ The current exact composed gate ran on the reviewed implementation candidate:
 
 ```text
 nix run .#ci
-source: 4e11e3556348cf61d27294a2caa18f5e0dba3635
-run id: run-1782118-1785959378805247010
-result: ok — 13 passed, 0 failed in 1761.62s
-structured EVM submission: ok in 1237.39s
+source: 5711097baaac0d2f879f0f700828e19e501ff771
+run id: run-1818387-1785962312532176668
+result: ok — 13 passed, 0 failed in 2092.41s
+structured EVM submission: ok in 1377.44s
 ```
 
 The same run passed the PostgreSQL recoverability, wallet-nonce, Bitcoin
 parity, and closing-source-revision leaves. It was run without separate
 composed check/test/test-db gates immediately beforehand. The closing-source-
-revision leaf observed the pinned implementation source; the evidence-only
-refresh after the run does not alter that implementation source.
+revision leaf observed the pinned `5711097b` source; the evidence-only refresh
+after the run does not alter that implementation source.
 
 The green leaves were formatting, Clippy, metadata, SQLx offline, portable
 replay corpus, workspace nextest, doctests, PostgreSQL SQLx checks,
 recoverability, wallet-nonce storage qualification, structured EVM submission,
 Bitcoin parity, and closing-source-revision. Focused evidence additionally
-records five portable replay tests, four flattened recursive closure tests, two
+records eight portable replay tests, four flattened recursive closure tests, two
 portable source/fact-route bound regressions,
 exact frame/total byte limits and one-over denials, root target/tenant trust
 tamper denials, and online/offline projection byte equality. The managed
@@ -119,7 +123,9 @@ check/test/test-db runs.
 
 That historical run started after `d67a3bc3` and no commits were made during
 it, so its source hash and closing-source-revision observation agree. The
-current run above is the source gate for `4e11e3550`. The earlier
+current run above is the source gate for `5711097b`; the post-gate revision
+only adds corpus/test evidence and does not alter production runtime behavior.
+The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the current gate.
 
@@ -303,7 +309,7 @@ as a quality residual rather than hidden as a simplification win.
 ## Final verdict
 
 The current implementation is materially stronger, all focused checks are
-green, and the exact composed gate for `4e11e3550` is green. The strict plan
+green, and the exact composed gate for `5711097b` is green. The strict plan
 acceptance condition is not met. The review remains **CONDITIONAL /
 INCOMPLETE** until the residual proof matrices, expanded portable artifact
 corpus and live app integration, production trust deployment, and

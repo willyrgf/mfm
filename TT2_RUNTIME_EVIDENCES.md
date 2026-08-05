@@ -78,14 +78,18 @@ Post-step-12 implementation and proof revisions:
 | `f99e3a84c` | inventory checkpoint retry query ownership |
 | `6d4f48933` | complete configuration ambiguity recovery |
 | `4e11e3550` | strengthen configuration ambiguity regression |
+| `5711097b` | expand generated portable replay corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
 later `42c80525` whitespace cleanup, `a027640c` review refresh, `d0459d4d`
 bounded-source review refresh, `8803a585` evidence pin, `ebc4f8a81`,
-`7530a4479`, and `f8568ff26` are documentation-only commits. The corrected
-source gate below starts after the implementation revisions through
-`4e11e3550`; the final evidence refresh is documentation-only after that gate.
+`7530a447`, and `f8568ff26` are documentation-only commits. `5711097b` is a
+post-step-12 corpus/test-only revision: it adds deterministic generator
+resealing helpers, generated portable vectors, the replay corpus assertion, and
+evidence prose, without changing production replay/runtime behavior. The
+corrected source gate below starts after the revisions through `5711097b`; this
+evidence refresh is documentation-only after that gate.
 
 ## Independent review checkpoints
 
@@ -96,7 +100,7 @@ source gate below starts after the implementation revisions through
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `4e11e3556348cf61d27294a2caa18f5e0dba3635` | independent review requested on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
+| Current implementation candidate | `5711097baaac0d2f879f0f700828e19e501ff771` | independent review completed on this exact revision; exact composed gate and focused evidence below | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -124,16 +128,16 @@ Current exact composed gate:
 
 ```text
 nix run .#ci
-source: 4e11e3556348cf61d27294a2caa18f5e0dba3635
-run id: run-1782118-1785959378805247010
-result: ok — 13 passed, 0 failed in 1761.62s
-structured EVM submission: ok in 1237.39s
+source: 5711097baaac0d2f879f0f700828e19e501ff771
+run id: run-1818387-1785962312532176668
+result: ok — 13 passed, 0 failed in 2092.41s
+structured EVM submission: ok in 1377.44s
 ```
 
 The run also observed the PostgreSQL recoverability leaf and wallet-nonce
 qualification as passing, plus Bitcoin parity and closing-source-revision.
-The closing-source-revision leaf observed the pinned implementation source;
-the evidence refresh after the run is documentation-only.
+The closing-source-revision leaf observed the pinned `5711097b` source; the
+evidence refresh after the run is documentation-only.
 
 Earlier exact composed gate (historical; d67 implementation):
 
@@ -165,7 +169,8 @@ ownership predicate for those wrappers; it does not change SQL text or query
 semantics. `6d4f48933` extends the bounded read classification to application
 configuration resolution and reconnects ambiguous appends through an identical
 canonical retry. `4e11e3550` strengthens the durable-row/unknown-acknowledgement
-regression and asserts one retained row; the final run above exercises the
+regression and asserts one retained row. `5711097b` adds the generated
+portable corpus and replay assertion; the final run above exercises that
 reviewed source.
 
 Additional focused evidence on the current implementation sequence includes
@@ -181,7 +186,7 @@ predecessor and retry fixes. The focused store suite now passes 33/33,
 including bounded configuration-reader retry and identical-append ambiguity
 recovery regressions. The historical composed gate includes the source-bound
 fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
-`4e11e3550`.
+`5711097b`.
 
 ## TT2 disposition at the current candidate
 
