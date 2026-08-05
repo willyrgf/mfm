@@ -318,14 +318,34 @@ pub struct ConfigurationHistoryWriter<B: ConfigurationHistoryBackend> {
     backend: Arc<B>,
 }
 
+const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 4;
+
 impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
+    async fn load_for_append(
+        &self,
+        key: &ConfigurationStreamKey,
+    ) -> Result<Option<RawConfigurationHistory>, StructuredStoreError> {
+        // The external checkpoint is acknowledged after the SQL commit. A
+        // concurrent append can therefore make one read transiently observe
+        // the durable row before its checkpoint successor; retry that bounded
+        // window, but preserve every other error and the final invalid result.
+        let mut loaded = self.backend.load(key).await;
+        for _ in 1..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
+            if !matches!(&loaded, Err(StructuredStoreError::InvalidHistory)) {
+                return loaded;
+            }
+            loaded = self.backend.load(key).await;
+        }
+        loaded
+    }
+
     /// Appends one exact revision or returns the existing byte-identical result.
     pub async fn append(
         &self,
         request: ConfigurationAppendRequest,
     ) -> Result<ConfigurationRevision, StructuredStoreError> {
         require_store(self.backend.as_ref(), &request.key)?;
-        let history = self.backend.load(&request.key).await?;
+        let history = self.load_for_append(&request.key).await?;
         let verified = history
             .clone()
             .map(verify_configuration_history)
@@ -380,7 +400,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // race cannot turn an append conflict into an unrelated stale
                 // predecessor result.
                 for _ in 0..3 {
-                    let resolved = self.backend.load(revision.key()).await?;
+                    let resolved = self.load_for_append(revision.key()).await?;
                     match resolved.as_ref().and_then(|history| {
                         history_append_identity(
                             history.revisions.iter(),
@@ -421,7 +441,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // Reconnect through the backend's read path and classify the
                 // exact append identity before allowing a retry. This is the
                 // configuration equivalent of run acknowledgement recovery.
-                let resolved = self.backend.load(revision.key()).await?;
+                let resolved = self.load_for_append(revision.key()).await?;
                 match resolved.as_ref().and_then(|history| {
                     history_append_identity(history.revisions.iter(), revision.append_request_id())
                 }) {
