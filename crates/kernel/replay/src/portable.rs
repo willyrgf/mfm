@@ -341,6 +341,12 @@ impl PortableRunExport {
         ContentRef::new(schema_id, raw_digest(&bytes)).map_err(|_| PortableExportError::Invalid)
     }
 
+    /// Returns the exact recursive source-closure identity authorized by an
+    /// external trust snapshot.
+    pub const fn closure_reference(&self) -> &ContentDigest {
+        &self.closure_reference
+    }
+
     /// Strictly decodes and validates one frame stream without ambient IO.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self, PortableExportError> {
         decode_frames(bytes)
@@ -1417,7 +1423,93 @@ fn classify_fold_error(error: StructuredStoreError) -> PortableExportError {
 
 #[cfg(test)]
 mod tests {
-    use super::{PortableExportError, PortableRunExport, MAX_PORTABLE_EXPORT_BYTES};
+    use std::sync::Arc;
+
+    use mfm_canonical::sha256_digest_bytes;
+    use mfm_ids::{
+        AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, JournalCommitDigest,
+        JournalRecordHash, RunId, RunSemanticStateDigest, SchemaId, StableId, StoreEpoch,
+        StoreScopeId, TenantScopeId,
+    };
+    use mfm_journal::structured::{
+        AssignedRecord, CommittedBatch, JournalHead, RecordRef, RunClosed, RunRecord, SemanticHead,
+        TenantFactCoordinate,
+    };
+    use mfm_spec::structured::CertifiedProgramRoot;
+    use mfm_spec::CanonicalJsonValue;
+    use mfm_store::structured::{
+        PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalTargetIdentity,
+        ProgramVerifier, PublicPhysicalBindingVerifier, StructuredStoreError, VerifiedProgramData,
+    };
+
+    use super::{
+        ExportKind, PortableExportError, PortableFixation, PortableRunExport, ReplayTrustSnapshot,
+        RetainedPhysicalReleaseTrust, StoreCheckpointTrust, MAX_PORTABLE_EXPORT_BYTES,
+        MAX_PORTABLE_FRAME_BYTES,
+    };
+
+    struct RejectProgram;
+
+    impl mfm_authority_seal::ProgramVerifierSeal for RejectProgram {}
+
+    impl ProgramVerifier for RejectProgram {
+        fn verify(
+            &self,
+            _entry_point_id: &StableId,
+            _root: &CertifiedProgramRoot,
+            _authored: &CanonicalJsonValue,
+        ) -> Result<Arc<VerifiedProgramData>, StructuredStoreError> {
+            Err(StructuredStoreError::Certification)
+        }
+    }
+
+    struct RejectPhysical;
+
+    impl mfm_authority_seal::PhysicalBindingVerifierSeal for RejectPhysical {}
+
+    impl PublicPhysicalBindingVerifier for RejectPhysical {
+        fn verify_authorization(
+            &self,
+            _context: &PhysicalBindingAuthorization<'_>,
+            _certificate: &mfm_journal::structured::HistoryObject,
+        ) -> Result<(), StructuredStoreError> {
+            Err(StructuredStoreError::Certification)
+        }
+
+        fn verify_supersession(
+            &self,
+            _context: &PhysicalBindingSupersession<'_>,
+            _public_lineage_head: &mfm_journal::structured::HistoryObject,
+            _evidence: &mfm_journal::structured::HistoryObject,
+        ) -> Result<(), StructuredStoreError> {
+            Err(StructuredStoreError::Certification)
+        }
+    }
+
+    struct AcceptRelease;
+
+    impl mfm_authority_seal::RetainedPhysicalReleaseTrustSeal for AcceptRelease {}
+
+    impl RetainedPhysicalReleaseTrust for AcceptRelease {
+        fn verify(&self, _fixation: &PortableFixation, _kind: ExportKind) -> bool {
+            true
+        }
+    }
+
+    struct AcceptCheckpoint;
+
+    impl mfm_authority_seal::StoreCheckpointTrustSeal for AcceptCheckpoint {}
+
+    impl StoreCheckpointTrust for AcceptCheckpoint {
+        fn verify(
+            &self,
+            _fixation: &PortableFixation,
+            _kind: ExportKind,
+            _closure_reference: &ContentDigest,
+        ) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn oversized_and_monolithic_documents_fail_before_full_decode() {
@@ -1433,6 +1525,204 @@ mod tests {
             br#"{\"version\":\"mfm.structured-portable-run-export.v1\"}"#
         )
         .is_err());
+        assert_eq!(
+            PortableRunExport::strict_decode(
+                &[vec![b'{'; MAX_PORTABLE_FRAME_BYTES as usize], vec![b'\n']].concat()
+            ),
+            Err(PortableExportError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn golden_frame_stream_rejects_omission_extra_substitution_reordering_and_stale_head() {
+        let export = golden_export();
+        let bytes = export
+            .to_canonical_bytes()
+            .expect("encode synthetic portable golden");
+        let decoded = PortableRunExport::strict_decode(&bytes).expect("decode synthetic golden");
+        assert_eq!(decoded, export);
+
+        let reject_program = RejectProgram;
+        let reject_physical = RejectPhysical;
+        let release = AcceptRelease;
+        let checkpoint = AcceptCheckpoint;
+        let trust = ReplayTrustSnapshot::new(&reject_program, &reject_physical)
+            .with_authorized_closure(export.closure_reference(), &release, &checkpoint);
+        assert_eq!(
+            PortableRunExport::verify_offline(&bytes, &trust),
+            Err(PortableExportError::Invalid)
+        );
+
+        let frames = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<Vec<u8>>>();
+        assert_eq!(frames.len(), 2);
+        let join = |frames: &[Vec<u8>]| {
+            let mut stream = Vec::new();
+            for frame in frames {
+                stream.extend_from_slice(frame);
+                stream.push(b'\n');
+            }
+            stream
+        };
+
+        let mut omitted = frames.clone();
+        omitted.remove(0);
+        assert!(PortableRunExport::strict_decode(&join(&omitted)).is_err());
+
+        let mut extra = frames.clone();
+        extra.insert(0, frames[0].clone());
+        assert!(PortableRunExport::strict_decode(&join(&extra)).is_err());
+
+        let mut substituted = frames.clone();
+        substituted[0][0] = b'[';
+        assert!(PortableRunExport::strict_decode(&join(&substituted)).is_err());
+
+        let mut reordered = frames.clone();
+        reordered.swap(0, 1);
+        assert!(PortableRunExport::strict_decode(&join(&reordered)).is_err());
+
+        let mut stale_head = frames.clone();
+        let position = stale_head[0]
+            .iter()
+            .position(|byte| *byte == b'1')
+            .expect("synthetic batch sequence digit");
+        stale_head[0][position] = b'2';
+        assert!(PortableRunExport::strict_decode(&join(&stale_head)).is_err());
+
+        let mut semantic_suffix = golden_export();
+        let first_batch = semantic_suffix.batches[0].clone();
+        let mut later_batch = first_batch.clone();
+        later_batch.predecessor = Some(first_batch.head.clone());
+        later_batch.append_request_id =
+            AppendRequestId::new("portable-golden-later-append").expect("later append request");
+        later_batch.candidate_digest = ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(b"portable-later-candidate"),
+        );
+        later_batch.head = JournalHead {
+            run_sequence: 2,
+            commit_digest: JournalCommitDigest::from_digest(sha256_digest_bytes(
+                b"portable-later-commit",
+            )),
+        };
+        semantic_suffix.fixation.journal_head = later_batch.head.clone();
+        semantic_suffix.batches.push(later_batch);
+        semantic_suffix.closure_reference = semantic_suffix
+            .compute_closure_reference()
+            .expect("semantic suffix closure reference");
+        let semantic_suffix_bytes =
+            super::encode_frames(&semantic_suffix).expect("encode hostile semantic suffix");
+        assert_eq!(
+            PortableRunExport::strict_decode(&semantic_suffix_bytes),
+            Err(PortableExportError::Invalid)
+        );
+
+        semantic_suffix.kind = ExportKind::Audit;
+        semantic_suffix.closure_reference = semantic_suffix
+            .compute_closure_reference()
+            .expect("audit suffix closure reference");
+        let audit_suffix_bytes =
+            super::encode_frames(&semantic_suffix).expect("encode audit suffix");
+        assert!(PortableRunExport::strict_decode(&audit_suffix_bytes).is_ok());
+    }
+
+    fn golden_export() -> PortableRunExport {
+        let store_scope_id =
+            StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "1".repeat(32)))
+                .expect("store scope");
+        let tenant_scope_id =
+            TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32)))
+                .expect("tenant scope");
+        let run_id = RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"portable-golden-run"),
+        );
+        let record_ref = RecordRef {
+            run_id: run_id.clone(),
+            run_sequence: 1,
+            ordinal: 0,
+            record_hash: JournalRecordHash::from_digest(sha256_digest_bytes(b"portable-record")),
+        };
+        let journal_head = JournalHead {
+            run_sequence: 1,
+            commit_digest: JournalCommitDigest::from_digest(sha256_digest_bytes(
+                b"portable-commit",
+            )),
+        };
+        let outcome_ref = ContentRef::new(
+            SchemaId::new(
+                "mfm.portable-test.outcome",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"portable-outcome-schema"),
+            )
+            .expect("outcome schema"),
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(b"portable-outcome"),
+            ),
+        )
+        .expect("outcome ref");
+        let batch = CommittedBatch {
+            store_scope_id: store_scope_id.clone(),
+            store_epoch: StoreEpoch::new(1),
+            predecessor: None,
+            append_request_id: AppendRequestId::new("portable-golden-append")
+                .expect("append request id"),
+            tenant_fact_coordinate: TenantFactCoordinate::None,
+            candidate_digest: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(b"portable-candidate"),
+            ),
+            records: vec![AssignedRecord {
+                record_ref: record_ref.clone(),
+                record: RunRecord::RunClosed(RunClosed { outcome_ref }),
+            }],
+            objects: Vec::new(),
+            head: journal_head.clone(),
+        };
+        let fixation = PortableFixation {
+            semantic_head: SemanticHead::Genesis {
+                admission_ref: record_ref,
+                semantic_state_digest: RunSemanticStateDigest::from_digest(sha256_digest_bytes(
+                    b"portable-semantic",
+                )),
+            },
+            journal_head,
+            store_scope_id: store_scope_id.clone(),
+            store_epoch: StoreEpoch::new(1),
+            tenant_scope_id: tenant_scope_id.clone(),
+            physical_target: PhysicalTargetIdentity {
+                target_key: "portable-test-target".to_owned(),
+                database_oid: 7,
+                fence_generation: 1,
+                release_epoch: 1,
+                current_incarnation_ref: ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(b"portable-incarnation"),
+                ),
+            },
+        };
+        let mut export = PortableRunExport {
+            version: super::PORTABLE_EXPORT_VERSION.to_owned(),
+            kind: super::ExportKind::Semantic,
+            store_scope_id,
+            tenant_scope_id,
+            run_id,
+            fixation,
+            source_run_ids: Vec::new(),
+            source_prefixes: Vec::new(),
+            batches: vec![batch],
+            fact_routes: Vec::new(),
+            closure_reference: super::placeholder_digest(),
+        };
+        export.closure_reference = export
+            .compute_closure_reference()
+            .expect("closure reference");
+        export
     }
 
     fn json_depth(bytes: &[u8]) -> Option<usize> {
