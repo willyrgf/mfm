@@ -1278,7 +1278,7 @@ pub(crate) struct SubmissionWork {
 
 /// Route selected for one candidate attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case")]
 #[mfm(
     namespace = "mfm.evm",
     name = "candidate-slot-route",
