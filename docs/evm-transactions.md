@@ -202,6 +202,8 @@ reservation scan occurs on normal paths. Full historical dense-prefix/count/max 
 checked during schema qualification/open-role validation. Immutable application-role history and
 schema qualification preserve wallet append-only currentness, while externally retained checkpoints
 preserve target and deployment lineage.
+The managed qualification also compares the wire-level statement count for one retained status read
+before and after 64 completed reservations and checks the analyzed unique-frontier index plan.
 
 ## Promotion
 

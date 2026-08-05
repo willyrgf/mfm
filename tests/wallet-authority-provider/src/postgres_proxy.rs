@@ -102,6 +102,15 @@ impl PostgresCommitFaultProxy {
         &self.database_url
     }
 
+    /// Returns the number of frontend statement executions observed by the proxy.
+    ///
+    /// The counter includes simple-query (`Q`) and extended-protocol execute (`E`)
+    /// messages. It is intended for qualification tests that compare a fixed
+    /// operation before and after adding historical rows.
+    pub fn statement_count(&self) -> u64 {
+        self.state.executed_statements.load(Ordering::Acquire)
+    }
+
     /// Arms a fault for the next `attempts` commit messages and returns the intercept target.
     pub fn arm(&self, fault: CommitFault, attempts: usize) -> Result<u64, ProviderTestError> {
         if attempts == 0 {
@@ -188,6 +197,7 @@ impl Drop for PostgresCommitFaultProxy {
 struct ProxyState {
     plan: Mutex<Option<FaultPlan>>,
     intercepted: AtomicU64,
+    executed_statements: AtomicU64,
     intercepted_changed: Notify,
     held_lost_acknowledgements: AtomicU64,
     held_lost_acknowledgements_changed: Notify,
@@ -254,6 +264,9 @@ async fn proxy_connection(
             frontend = read_frontend_frame(&mut client, startup_forwarded) => {
                 let frontend = frontend?;
                 startup_forwarded = true;
+                if frontend.typed && matches!(frontend.kind(), b'Q' | b'E') {
+                    state.executed_statements.fetch_add(1, Ordering::AcqRel);
+                }
                 if frontend.is_commit() {
                     match state.take_fault()? {
                         Some(CommitFault::RollBackBeforeCommit) => {
