@@ -846,6 +846,11 @@ mod tests {
         ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
             Box::pin(async move {
                 if self.ambiguous_append.swap(false, Ordering::AcqRel) {
+                    // Persist the exact row, then hide the acknowledgement so
+                    // the writer must recover through the backend's idempotent
+                    // existing-same path rather than treating it as a fresh
+                    // append.
+                    self.inner.append(revision).await?;
                     return Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown);
                 }
                 self.inner.append(revision).await
@@ -989,7 +994,7 @@ mod tests {
     async fn writer_retries_identical_append_after_unknown_acknowledgement() {
         let inner = MemoryConfigurationHistoryBackend::new(store_scope());
         let flaky = flaky_backend(inner, 0, true);
-        let (writer, reader) = ConfigurationHistoryStore::new(flaky).split();
+        let (writer, reader) = ConfigurationHistoryStore::new(flaky.clone()).split();
         let stream = key('0');
         let revision = writer
             .append(ConfigurationAppendRequest::new(
@@ -1009,6 +1014,12 @@ mod tests {
                 .expect("resolve retried append")
                 .revision(),
             &revision
+        );
+        let state = flaky.inner.state.lock().expect("memory state");
+        assert_eq!(
+            state.revisions.get(&stream).map(Vec::len),
+            Some(1),
+            "ambiguous acknowledgement recovery must not duplicate the durable row"
         );
     }
 
