@@ -320,7 +320,13 @@ mod tests {
             // A direct literal is reviewed fixed SQL. Any computed SQL, including
             // a wrapper around a literal or a value alias, must go through the
             // private catalog path below.
-            if !self.call_stack.iter().all(|parent| parent == "pin") {
+            // The retry wrapper owns the same fixed SQL body as the direct
+            // pinned future; both remain reviewed static-query boundaries.
+            if !self
+                .call_stack
+                .iter()
+                .all(|parent| matches!(parent.as_str(), "pin" | "retry_transient_checkpoint_read"))
+            {
                 return false;
             }
             let Expr::Path(path) = expression.func.as_ref() else {
