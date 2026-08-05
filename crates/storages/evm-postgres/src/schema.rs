@@ -43,13 +43,13 @@ const REQUIRED_TABLES: &[&str] = &[
 // development and verification environment. A same-name weakened constraint, trigger, function,
 // owner, or column therefore cannot pass qualification.
 const COLUMN_MANIFEST_SHA256: &str =
-    "286c163b0d8f126840622e4dd7f9c6d150be988f8e32a10884a068d3b056fee9";
+    "76046146c524688624a9fc4f6de132ced37fa3daa25f0df70aec164afc2e81f9";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "9bb702b332689c45b771815af94245ab31c945632f87a341e846323dc4e581b2";
+    "f75b9182717023cd7927e050423cb1629d2d206bc72623204ccdb4d875eec353";
 const TRIGGER_MANIFEST_SHA256: &str =
     "e19f09ad27003b64c8aa75c0a0ba0c3450414e9ca5a3f3487a227c4f0c3c1b22";
 const FUNCTION_MANIFEST_SHA256: &str =
-    "c12159cefc0c3714f9245f09c17e4165cacfa530e3b943871fa27070cf5066ac";
+    "d571f59a37f0083fc9b76547fbac608a1dec8aff1c44297c39fdaee3082224d4";
 const TABLE_MANIFEST_SHA256: &str =
     "3061b01017092161b7f967f5a5a0938c9539411931036ab26b6817694ac84a4b";
 const ACL_MANIFEST_SHA256: &str =
@@ -987,6 +987,12 @@ async fn validate_nonce_prefix_integrity(connection: &mut PgConnection) -> Resul
                  FROM wallet_nonce_reservations \
                  WHERE wallet_nonce_domain_id = domain.wallet_nonce_domain_id \
              ) AS reservations ON TRUE \
+             LEFT JOIN LATERAL ( \
+                 SELECT semantic_reservation_key AS chain_head \
+                 FROM wallet_nonce_reservations \
+                 WHERE wallet_nonce_domain_id = domain.wallet_nonce_domain_id \
+                 ORDER BY nonce DESC LIMIT 1 \
+             ) AS chain ON TRUE \
              WHERE domain.activation_record_json::jsonb \
                        #>> '{wallet_nonce_domain,digest}' <> domain.wallet_nonce_domain_id \
                 OR domain.activation_record_json::jsonb \
@@ -998,6 +1004,8 @@ async fn validate_nonce_prefix_integrity(connection: &mut PgConnection) -> Resul
                 OR (reservations.retained_count = 0 AND domain.local_high_water_nonce IS NOT NULL) \
                 OR (reservations.retained_count > 0 \
                     AND domain.local_high_water_nonce IS DISTINCT FROM reservations.maximum_nonce) \
+                OR domain.retained_reservation_count IS DISTINCT FROM reservations.retained_count \
+                OR domain.retained_reservation_chain_head_ref IS DISTINCT FROM chain.chain_head \
          ), invalid_reservations AS ( \
              SELECT 1 FROM ordered_reservations AS reservation \
              JOIN wallet_nonce_domains AS domain USING (wallet_nonce_domain_id) \
