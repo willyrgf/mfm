@@ -855,6 +855,15 @@ impl ExportRunEvidence {
         if !self.authorized_sources.is_empty() {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
         }
+        let supplied_count = sources.iter().try_fold(0usize, |count, source| {
+            count
+                .checked_add(1)
+                .and_then(|count| count.checked_add(source.authorized_sources.len()))
+                .ok_or(super::fold::StructuredStoreError::InvalidHistory)
+        })?;
+        if self.authorized_sources.len().saturating_add(supplied_count) > MAX_PORTABLE_SOURCE_RUNS {
+            return Err(super::fold::StructuredStoreError::InvalidHistory);
+        }
         let mut seen = BTreeSet::new();
         let expected_direct = self.fragment.direct_source_run_ids.clone();
         let mut direct = BTreeSet::new();

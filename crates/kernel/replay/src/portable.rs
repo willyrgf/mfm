@@ -1437,8 +1437,8 @@ mod tests {
         StoreScopeId, TenantScopeId,
     };
     use mfm_journal::structured::{
-        AssignedRecord, CommittedBatch, JournalHead, RecordRef, RunClosed, RunRecord, SemanticHead,
-        TenantFactCoordinate,
+        AssignedRecord, CommittedBatch, HistoryObject, JournalHead, RecordRef, RunClosed,
+        RunRecord, SemanticHead, TenantFactCoordinate,
     };
     use mfm_spec::structured::CertifiedProgramRoot;
     use mfm_spec::CanonicalJsonValue;
@@ -1516,6 +1516,35 @@ mod tests {
         }
     }
 
+    struct ExpectedTarget {
+        target_key: String,
+    }
+
+    impl mfm_authority_seal::RetainedPhysicalReleaseTrustSeal for ExpectedTarget {}
+
+    impl RetainedPhysicalReleaseTrust for ExpectedTarget {
+        fn verify(&self, fixation: &PortableFixation, _kind: ExportKind) -> bool {
+            fixation.physical_target.target_key == self.target_key
+        }
+    }
+
+    struct ExpectedTenant {
+        tenant_scope_id: TenantScopeId,
+    }
+
+    impl mfm_authority_seal::StoreCheckpointTrustSeal for ExpectedTenant {}
+
+    impl StoreCheckpointTrust for ExpectedTenant {
+        fn verify(
+            &self,
+            fixation: &PortableFixation,
+            _kind: ExportKind,
+            _closure_reference: &ContentDigest,
+        ) -> bool {
+            fixation.tenant_scope_id == self.tenant_scope_id
+        }
+    }
+
     #[test]
     fn oversized_and_monolithic_documents_fail_before_full_decode() {
         let oversize = vec![b'{'; (MAX_PORTABLE_EXPORT_BYTES as usize) + 1];
@@ -1535,6 +1564,118 @@ mod tests {
                 &[vec![b'{'; MAX_PORTABLE_FRAME_BYTES], vec![b'\n']].concat()
             ),
             Err(PortableExportError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn exact_frame_limit_succeeds_and_one_byte_over_fails() {
+        let frame = |payload_len| super::PortableFrame {
+            kind: super::PortableFrameKind::Batch,
+            ordinal: 0,
+            payload: serde_json::Value::String("x".repeat(payload_len)),
+            previous_frame_digest: None,
+        };
+        let target = MAX_PORTABLE_FRAME_BYTES - 1;
+        let mut low = 0usize;
+        let mut high = target;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let length = mfm_journal::structured::canonical_json(&frame(middle))
+                .expect("canonical frame")
+                .as_bytes()
+                .len();
+            if length <= target {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let exact = frame(low);
+        assert_eq!(
+            mfm_journal::structured::canonical_json(&exact)
+                .expect("exact canonical frame")
+                .as_bytes()
+                .len()
+                .saturating_add(1),
+            MAX_PORTABLE_FRAME_BYTES
+        );
+        assert_eq!(
+            super::encode_frame(&exact)
+                .expect("exact frame limit")
+                .len(),
+            MAX_PORTABLE_FRAME_BYTES
+        );
+        assert_eq!(
+            super::encode_frame(&frame(low + 1)),
+            Err(PortableExportError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn exact_total_limit_succeeds_and_one_byte_over_fails() {
+        let target = MAX_PORTABLE_EXPORT_BYTES as usize;
+        let mut low_payload = 0usize;
+        let mut high_payload = MAX_PORTABLE_FRAME_BYTES;
+        while low_payload < high_payload {
+            let middle = low_payload + (high_payload - low_payload).div_ceil(2);
+            if padding_frame(middle).is_ok() {
+                low_payload = middle;
+            } else {
+                high_payload = middle - 1;
+            }
+        }
+        let mut fixed_payload = low_payload;
+        loop {
+            let base = super::encode_frames(&sized_audit_export(fixed_payload, 0));
+            if let Ok(bytes) = base {
+                assert!(bytes.len() < target);
+                let full_len =
+                    super::encode_frames(&sized_audit_export(fixed_payload, fixed_payload))
+                        .ok()
+                        .map(|bytes| bytes.len());
+                assert!(full_len.is_none_or(|length| length >= target));
+                break;
+            }
+            fixed_payload = fixed_payload
+                .checked_sub(1_000)
+                .expect("portable frame can hold one batch");
+        }
+
+        let mut low = 0usize;
+        let mut high = fixed_payload;
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            let length = super::encode_frames(&sized_audit_export(fixed_payload, middle))
+                .ok()
+                .map(|bytes| bytes.len());
+            if length.is_some_and(|length| length <= target) {
+                low = middle;
+            } else {
+                high = middle - 1;
+            }
+        }
+        let exact = super::encode_frames(&sized_audit_export(fixed_payload, low))
+            .expect("exact total limit");
+        assert_eq!(exact.len(), target);
+        assert_eq!(
+            super::encode_frames(&sized_audit_export(fixed_payload, low + 1)),
+            Err(PortableExportError::TooLarge)
+        );
+        assert_eq!(
+            PortableRunExport::strict_decode(&exact)
+                .expect("decode exact total limit")
+                .to_canonical_bytes()
+                .expect("re-encode exact total limit"),
+            exact
+        );
+        let many_small =
+            super::encode_frames(&sized_audit_export(128, 128)).expect("many-small-frame export");
+        assert_eq!(
+            PortableRunExport::strict_decode(&many_small)
+                .expect("decode many-small-frame export")
+                .to_canonical_bytes()
+                .expect("re-encode many-small-frame export"),
+            many_small
         );
     }
 
@@ -1657,6 +1798,64 @@ mod tests {
             PortableRunExport::verify_offline(&bytes, &trust).expect("offline projection");
         assert_eq!(offline.as_bytes(), online.as_bytes());
         assert_eq!(offline.schema_id(), online.schema_id());
+
+        let expected_target = export.fixation.physical_target.target_key.clone();
+        let mut wrong_target = export;
+        wrong_target.fixation.physical_target.target_key = "forged-target".to_owned();
+        wrong_target.closure_reference = wrong_target
+            .compute_closure_reference()
+            .expect("wrong-target closure reference");
+        let wrong_target_bytes = super::encode_frames(&wrong_target).expect("wrong-target bytes");
+        let expected_target = ExpectedTarget {
+            target_key: expected_target,
+        };
+        let accepted_checkpoint = AcceptCheckpoint;
+        let target_trust = ReplayTrustSnapshot::new(
+            &fixture.program_verifier,
+            fixture.physical_binding_verifier(),
+        )
+        .with_authorized_closure(
+            wrong_target.closure_reference(),
+            &expected_target,
+            &accepted_checkpoint,
+        );
+        assert_eq!(
+            PortableRunExport::verify_offline(&wrong_target_bytes, &target_trust),
+            Err(PortableExportError::Invalid)
+        );
+
+        let tenant_fixture = mfm_store::structured::test_support::zero_state_export(202)
+            .await
+            .expect("build tenant fixture");
+        let mut wrong_tenant =
+            PortableRunExport::from_export_evidence(&tenant_fixture.export, ExportKind::Semantic)
+                .expect("encode tenant fixture");
+        let original_tenant = wrong_tenant.tenant_scope_id.clone();
+        wrong_tenant.tenant_scope_id =
+            TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "f".repeat(32)))
+                .expect("forged tenant");
+        wrong_tenant.fixation.tenant_scope_id = wrong_tenant.tenant_scope_id.clone();
+        wrong_tenant.closure_reference = wrong_tenant
+            .compute_closure_reference()
+            .expect("wrong-tenant closure reference");
+        let wrong_tenant_bytes = super::encode_frames(&wrong_tenant).expect("wrong-tenant bytes");
+        let expected_tenant = ExpectedTenant {
+            tenant_scope_id: original_tenant,
+        };
+        let accepted_release = AcceptRelease;
+        let tenant_trust = ReplayTrustSnapshot::new(
+            &tenant_fixture.program_verifier,
+            tenant_fixture.physical_binding_verifier(),
+        )
+        .with_authorized_closure(
+            wrong_tenant.closure_reference(),
+            &accepted_release,
+            &expected_tenant,
+        );
+        assert_eq!(
+            PortableRunExport::verify_offline(&wrong_tenant_bytes, &tenant_trust),
+            Err(PortableExportError::Invalid)
+        );
     }
 
     fn golden_export() -> PortableRunExport {
@@ -1753,6 +1952,94 @@ mod tests {
             .compute_closure_reference()
             .expect("closure reference");
         export
+    }
+
+    fn sized_audit_export(fixed_payload: usize, variable_payload: usize) -> PortableRunExport {
+        let template = golden_export();
+        let base_batch = template.batches[0].clone();
+        let mut export = template;
+        export.kind = ExportKind::Audit;
+        let mut predecessor = None;
+        let mut batches = Vec::with_capacity(17);
+        for sequence in 1..=17u64 {
+            let mut batch = base_batch.clone();
+            batch.predecessor = predecessor.clone();
+            batch.head = JournalHead {
+                run_sequence: sequence,
+                commit_digest: JournalCommitDigest::from_digest(sha256_digest_bytes(
+                    &sequence.to_be_bytes(),
+                )),
+            };
+            let payload_len = if sequence == 17 {
+                variable_payload
+            } else {
+                fixed_payload
+            };
+            batch.objects = vec![HistoryObject {
+                object_type: StableId::new("mfm.portable-test.padding").expect("padding type"),
+                content_ref: ContentRef::new(
+                    SchemaId::new(
+                        "mfm.portable-test.padding",
+                        "1",
+                        DigestAlgorithm::Sha256JcsV1,
+                        sha256_digest_bytes(b"padding-schema"),
+                    )
+                    .expect("padding schema"),
+                    ContentDigest::from_digest(
+                        DigestAlgorithm::Sha256V1,
+                        sha256_digest_bytes(b"padding-content"),
+                    ),
+                )
+                .expect("padding content ref"),
+                canonical_json: format!("\"{}\"", "x".repeat(payload_len)),
+            }];
+            predecessor = Some(batch.head.clone());
+            batches.push(batch);
+        }
+        export.fixation.journal_head = batches.last().expect("sized batches").head.clone();
+        export.batches = batches;
+        export.closure_reference = export
+            .compute_closure_reference()
+            .expect("sized closure reference");
+        export
+    }
+
+    fn padding_frame(payload_len: usize) -> Result<Vec<u8>, PortableExportError> {
+        let export = golden_export();
+        let payload = serde_json::to_value(super::PortableBatchPayload {
+            batch: padding_batch(payload_len),
+            run_id: export.run_id,
+        })
+        .map_err(|_| PortableExportError::Invalid)?;
+        super::encode_frame(&super::PortableFrame {
+            kind: super::PortableFrameKind::Batch,
+            ordinal: 0,
+            payload,
+            previous_frame_digest: None,
+        })
+    }
+
+    fn padding_batch(payload_len: usize) -> CommittedBatch {
+        let mut batch = golden_export().batches[0].clone();
+        batch.objects = vec![HistoryObject {
+            object_type: StableId::new("mfm.portable-test.padding").expect("padding type"),
+            content_ref: ContentRef::new(
+                SchemaId::new(
+                    "mfm.portable-test.padding",
+                    "1",
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(b"padding-schema"),
+                )
+                .expect("padding schema"),
+                ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(b"padding-content"),
+                ),
+            )
+            .expect("padding content ref"),
+            canonical_json: format!("\"{}\"", "x".repeat(payload_len)),
+        }];
+        batch
     }
 
     fn json_depth(bytes: &[u8]) -> Option<usize> {
