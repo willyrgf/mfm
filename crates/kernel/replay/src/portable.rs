@@ -347,6 +347,11 @@ impl PortableRunExport {
         &self.closure_reference
     }
 
+    /// Returns the number of recursively authorized source prefixes in this export.
+    pub const fn source_run_count(&self) -> usize {
+        self.source_run_ids.len()
+    }
+
     /// Strictly decodes and validates one frame stream without ambient IO.
     pub fn strict_decode(bytes: &[u8]) -> Result<Self, PortableExportError> {
         decode_frames(bytes)

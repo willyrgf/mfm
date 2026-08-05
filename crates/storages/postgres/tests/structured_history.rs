@@ -26,6 +26,11 @@ use mfm_program::structured::{
     StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
+use mfm_replay::portable::{
+    ExportKind, PortableFixation, PortableRunExport, ReplayTrustSnapshot,
+    RetainedPhysicalReleaseTrust, StoreCheckpointTrust,
+};
+use mfm_replay::structured::project_replay_result;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
 use mfm_runtime::structured::{DriveOutcome, Runtime, RuntimeFaultCode, RuntimeStoreFaultKind};
 use mfm_spec::structured::{
@@ -44,8 +49,8 @@ use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
     ConfigurationRevision, ConfigurationStreamKey, ExportRunReader, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, PhysicalTargetIdentity, ProposedCanonicalValue,
-    PublicPhysicalBindingVerifier, StructuredAdmissionMaterial, StructuredFrontier,
-    StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
+    PublicPhysicalBindingVerifier, RegistryProgramVerifier, StructuredAdmissionMaterial,
+    StructuredFrontier, StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -154,6 +159,31 @@ impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
         _evidence: &HistoryObject,
     ) -> std::result::Result<(), StructuredStoreError> {
         Err(StructuredStoreError::Certification)
+    }
+}
+
+struct AcceptRetainedRelease;
+
+impl mfm_authority_seal::RetainedPhysicalReleaseTrustSeal for AcceptRetainedRelease {}
+
+impl RetainedPhysicalReleaseTrust for AcceptRetainedRelease {
+    fn verify(&self, _fixation: &PortableFixation, _kind: ExportKind) -> bool {
+        true
+    }
+}
+
+struct AcceptStoreCheckpoint;
+
+impl mfm_authority_seal::StoreCheckpointTrustSeal for AcceptStoreCheckpoint {}
+
+impl StoreCheckpointTrust for AcceptStoreCheckpoint {
+    fn verify(
+        &self,
+        _fixation: &PortableFixation,
+        _kind: ExportKind,
+        _closure_reference: &ContentDigest,
+    ) -> bool {
+        true
     }
 }
 
@@ -1576,6 +1606,10 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
 async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let database = TestDatabase::create().await;
     let postgres_fixture = qualified_fact_scan_fixture();
+    let consumer_operation = postgres_fixture.consumer_operation.clone();
+    let offline_program_verifier = Arc::new(RegistryProgramVerifier::new(
+        postgres_fixture.registry.admission_verification_registry(),
+    ));
     let postgres_assembled = open_structured_authoritative(
         database.application_sessions().await,
         postgres_fixture.registry,
@@ -1587,6 +1621,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         runtime: postgres_runtime,
         public_reader: postgres_public_reader,
         export_reader: postgres_reader,
+        replay_reader: postgres_replay_reader,
         ..
     } = postgres_assembled;
     let postgres_identity = postgres_public_reader.store_identity().clone();
@@ -1601,6 +1636,36 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         postgres_fixture.request,
     )
     .await;
+
+    let portable_consumer_run = derive_run_id(
+        &postgres_identity.store_scope_id,
+        &default_tenant(),
+        &consumer_operation,
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000081").expect("consumer inv"),
+    );
+    let consumer_export = postgres_reader
+        .load_for_export(&portable_consumer_run)
+        .await
+        .expect("load recursively authorized consumer export");
+    let portable = PortableRunExport::from_export_evidence(&consumer_export, ExportKind::Semantic)
+        .expect("encode recursively authorized portable export");
+    assert_eq!(portable.source_run_count(), 1);
+    let portable_bytes = portable
+        .to_canonical_bytes()
+        .expect("encode recursively authorized portable frames");
+    let recorded = postgres_replay_reader
+        .load_for_recorded_verify(&portable_consumer_run)
+        .await
+        .expect("load online recorded replay");
+    let release = AcceptRetainedRelease;
+    let checkpoint = AcceptStoreCheckpoint;
+    let trust = ReplayTrustSnapshot::new(&*offline_program_verifier, &NoPhysicalBindings)
+        .with_authorized_closure(portable.closure_reference(), &release, &checkpoint);
+    let offline = PortableRunExport::verify_offline(&portable_bytes, &trust)
+        .expect("fold recursively authorized portable export offline");
+    let online = project_replay_result(&recorded).expect("project online recorded replay");
+    assert_eq!(offline.as_bytes(), online.as_bytes());
+    assert_eq!(offline.schema_id(), online.schema_id());
 
     let reopened_fixture = qualified_fact_scan_fixture();
     let consumer_run = derive_run_id(
