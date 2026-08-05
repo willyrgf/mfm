@@ -2764,6 +2764,34 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         &mut admin_connection,
         &schema,
         "wallet_nonce_domains",
+        "retained_reservation_count",
+        "wallet_nonce_domain_id",
+        successor_request.nonce_domain.as_str(),
+        "999",
+        successor_request.nonce_domain.as_str(),
+        &successor_authority,
+        &state_input,
+        &successor_status_request,
+    )
+    .await;
+    assert_status_scalar_rewrite_rejected(
+        &mut admin_connection,
+        &schema,
+        "wallet_nonce_domains",
+        "retained_reservation_chain_head_ref",
+        "wallet_nonce_domain_id",
+        successor_request.nonce_domain.as_str(),
+        "mfm.evm.test/torn-reservation-chain-head",
+        successor_request.nonce_domain.as_str(),
+        &successor_authority,
+        &state_input,
+        &successor_status_request,
+    )
+    .await;
+    assert_status_scalar_rewrite_rejected(
+        &mut admin_connection,
+        &schema,
+        "wallet_nonce_domains",
         "wallet_nonce_domain_id",
         "wallet_nonce_domain_id",
         successor_request.nonce_domain.as_str(),
@@ -4490,10 +4518,21 @@ async fn assert_status_scalar_rewrite_rejected(
     status_request: &ReadEvmWalletNonceStatusRequest,
 ) {
     let table = qualified_test_table(schema, table);
+    let numeric_column = column == "retained_reservation_count";
     let column = test_identifier(column);
     let key_column = test_identifier(key_column);
+    let column_select = if numeric_column {
+        format!("{column}::text")
+    } else {
+        column.clone()
+    };
+    let column_assignment = if numeric_column {
+        format!("{column} = $2::numeric")
+    } else {
+        format!("{column} = $2")
+    };
     let original = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
-        "SELECT {column} FROM {table} WHERE {key_column} = $1"
+        "SELECT {column_select} FROM {table} WHERE {key_column} = $1"
     )))
     .bind(key)
     .fetch_one(&mut *connection)
@@ -4503,7 +4542,7 @@ async fn assert_status_scalar_rewrite_rejected(
 
     set_replication_role(connection, "replica").await;
     let changed = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {table} SET {column} = $2 WHERE {key_column} = $1"
+        "UPDATE {table} SET {column_assignment} WHERE {key_column} = $1"
     )))
     .bind(key)
     .bind(replacement)
@@ -4517,7 +4556,7 @@ async fn assert_status_scalar_rewrite_rejected(
 
     set_replication_role(connection, "replica").await;
     let restored = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {table} SET {column} = $2 WHERE {key_column} = $1"
+        "UPDATE {table} SET {column_assignment} WHERE {key_column} = $1"
     )))
     .bind(restoration_key)
     .bind(original)

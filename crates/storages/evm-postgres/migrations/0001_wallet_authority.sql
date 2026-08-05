@@ -339,6 +339,14 @@ BEGIN
        OR (OLD.local_high_water_nonce IS NOT NULL
            AND NEW.local_high_water_nonce < OLD.local_high_water_nonce)
        OR (NEW.local_high_water_nonce = OLD.local_high_water_nonce
+           AND (NEW.retained_reservation_count <> OLD.retained_reservation_count
+                OR NEW.retained_reservation_chain_head_ref
+                   IS DISTINCT FROM OLD.retained_reservation_chain_head_ref))
+       OR (OLD.local_high_water_nonce IS NOT NULL
+           AND NEW.local_high_water_nonce > OLD.local_high_water_nonce
+           AND (NEW.retained_reservation_count <> OLD.retained_reservation_count + 1
+                OR NEW.retained_reservation_chain_head_ref IS NULL))
+       OR (NEW.local_high_water_nonce = OLD.local_high_water_nonce
            AND NEW.retained_reservation_count = OLD.retained_reservation_count
            AND NEW.retained_reservation_chain_head_ref
                IS NOT DISTINCT FROM OLD.retained_reservation_chain_head_ref
