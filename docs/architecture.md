@@ -277,7 +277,9 @@ audit, and export call. The policy derives tenant and stable principal from the 
 admission authorization names the exact operation, configured target, and invocation before
 configuration resolution. Export authorizes the sealed root and every recursively referenced
 prior-run source under the same target, tenant, principal, and export purpose before any byte is
-serialized. EVM configured values own semantic transaction material only, and the app constructs
+serialized, then hands replay an opaque closure retaining the authenticated principal, fixed
+`export` grant, and each content-addressed policy-decision reference. EVM configured values own
+semantic transaction material only, and the app constructs
 the identity-bound request after authorization from that configuration plus the selector's bounded
 caller token. Tenant equality is checked after callback-free load.
 

@@ -846,17 +846,21 @@ impl ExportRunEvidence {
     }
 
     /// Seals the already-authorized recursive source prefixes into this export
-    /// evidence. The supplied values may be the complete closure flattened by
-    /// a caller or recursively nested; graph validation below requires every
-    /// value to be reachable from an immediate source and rejects omissions,
-    /// substitutions, cycles, and unrelated values. The source values remain
-    /// inaccessible outside the encoder accessors below and are never
-    /// interchangeable with other purpose data.
-    pub fn with_authorized_sources(mut self, sources: Vec<ExportRunEvidence>) -> Result<Self> {
+    /// evidence. The supplied values are the complete flattened closure, with
+    /// one exact required-head cutoff per source. Graph validation below
+    /// requires every value to be reachable from an immediate source and
+    /// rejects omissions, substitutions, cycles, and unrelated values. The
+    /// source values remain inaccessible outside the encoder accessors below
+    /// and are never interchangeable with other purpose data.
+    pub fn with_authorized_sources(
+        mut self,
+        root_cutoff: Option<u64>,
+        sources: Vec<(ExportRunEvidence, Option<u64>)>,
+    ) -> Result<Self> {
         if !self.authorized_sources.is_empty() {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
         }
-        let supplied_count = sources.iter().try_fold(0usize, |count, source| {
+        let supplied_count = sources.iter().try_fold(0usize, |count, (source, _)| {
             count
                 .checked_add(1)
                 .and_then(|count| count.checked_add(source.authorized_sources.len()))
@@ -865,10 +869,14 @@ impl ExportRunEvidence {
         if self.authorized_sources.len().saturating_add(supplied_count) > MAX_PORTABLE_SOURCE_RUNS {
             return Err(super::fold::StructuredStoreError::InvalidHistory);
         }
+        let expected_direct = self.direct_source_run_ids_through(root_cutoff)?;
         let mut seen = BTreeSet::new();
-        let expected_direct = self.fragment.direct_source_run_ids.clone();
         let mut direct = BTreeSet::new();
-        for source in sources {
+        let mut source_cutoffs = BTreeMap::<RunId, Option<u64>>::new();
+        for (source, cutoff) in sources {
+            if !source.authorized_sources.is_empty() {
+                return Err(super::fold::StructuredStoreError::InvalidHistory);
+            }
             if source.run_id() == self.run_id()
                 || source.header().tenant_scope_id() != self.header.tenant_scope_id()
                 || source.header().store_scope_id() != self.header.store_scope_id()
@@ -879,6 +887,10 @@ impl ExportRunEvidence {
                 return Err(super::fold::StructuredStoreError::InvalidHistory);
             }
             direct.insert(source.run_id().clone());
+            if source.direct_source_run_ids_through(cutoff)?.len() > MAX_PORTABLE_SOURCE_RUNS {
+                return Err(super::fold::StructuredStoreError::InvalidHistory);
+            }
+            source_cutoffs.insert(source.run_id().clone(), cutoff);
             self.authorized_sources.push(source.fragment);
             self.authorized_sources.extend(source.authorized_sources);
         }
@@ -908,9 +920,13 @@ impl ExportRunEvidence {
         let mut graph = BTreeMap::<RunId, BTreeSet<RunId>>::new();
         graph.insert(self.fragment.run_id.clone(), expected_direct.clone());
         for fragment in &self.authorized_sources {
+            let cutoff = source_cutoffs
+                .get(&fragment.run_id)
+                .copied()
+                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
             graph.insert(
                 fragment.run_id.clone(),
-                fragment.direct_source_run_ids.clone(),
+                fragment.direct_source_run_ids_through(cutoff)?,
             );
         }
         // Validate the complete supplied graph, not only the root's immediate
@@ -951,10 +967,13 @@ impl ExportRunEvidence {
             if !reachable.insert(run_id.clone()) {
                 continue;
             }
-            let fragment = fragments
+            fragments
                 .get(&run_id)
                 .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
-            for nested in &fragment.direct_source_run_ids {
+            for nested in graph
+                .get(&run_id)
+                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?
+            {
                 if nested == &self.fragment.run_id {
                     return Err(super::fold::StructuredStoreError::InvalidHistory);
                 }
@@ -990,6 +1009,11 @@ impl ExportRunEvidence {
     /// Returns the minimum export header.
     pub(crate) const fn header(&self) -> &RunEvidenceHeader {
         &self.header
+    }
+
+    /// Returns the exact semantic cutoff retained by this export evidence.
+    pub const fn semantic_head(&self) -> &SemanticHead {
+        &self.fragment.semantic_head
     }
 
     /// Returns every verified physical append head in sequence order.
@@ -1063,7 +1087,27 @@ impl ExportRunEvidence {
     /// serialization. Callers must authorize each returned identity before any
     /// export byte is emitted.
     pub fn direct_source_run_ids(&self) -> Result<BTreeSet<RunId>> {
-        Ok(self.fragment.direct_source_run_ids.clone())
+        self.direct_source_run_ids_through(None)
+    }
+
+    /// Returns fact routes whose consumer record is no later than the supplied
+    /// physical append sequence. `None` retains the complete folded history.
+    pub fn fact_routes_through(&self, cutoff: Option<u64>) -> Vec<ExportFactRoute> {
+        self.fragment
+            .fact_routes
+            .iter()
+            .filter(|route| {
+                cutoff.is_none_or(|sequence| route.consumer_record.run_sequence <= sequence)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Returns distinct prior-run producers required through one exact export
+    /// cutoff. The result is derived from retained verified routes and remains
+    /// bounded by the portable source budget.
+    pub fn direct_source_run_ids_through(&self, cutoff: Option<u64>) -> Result<BTreeSet<RunId>> {
+        self.fragment.direct_source_run_ids_through(cutoff)
     }
 
     /// Returns whether this opaque evidence belongs to the caller's authorized
@@ -1085,6 +1129,27 @@ impl ExportRunEvidence {
 }
 
 impl ExportFragment {
+    fn direct_source_run_ids_through(&self, cutoff: Option<u64>) -> Result<BTreeSet<RunId>> {
+        if self.fact_routes.is_empty() {
+            return Ok(self.direct_source_run_ids.clone());
+        }
+        let mut sources = BTreeSet::new();
+        for route in &self.fact_routes {
+            if cutoff.is_some_and(|sequence| route.consumer_record.run_sequence > sequence) {
+                continue;
+            }
+            let producer = route.producer_transition.run_id.clone();
+            if producer == self.run_id || sources.contains(&producer) {
+                continue;
+            }
+            if sources.len() >= MAX_PORTABLE_SOURCE_RUNS {
+                return Err(super::fold::StructuredStoreError::InvalidHistory);
+            }
+            sources.insert(producer);
+        }
+        Ok(sources)
+    }
+
     fn from_verified(
         verified: VerifiedStructuredRun,
         physical_target: PhysicalTargetIdentity,
@@ -1233,18 +1298,26 @@ where
     F: FnMut(&RunId) -> std::result::Result<BTreeSet<RunId>, E>,
     E: From<ExportSourceClosureError>,
 {
+    if root_sources.len() > MAX_PORTABLE_SOURCE_RUNS {
+        return Err(ExportSourceClosureError::OverBudget.into());
+    }
     let mut authorized = BTreeSet::new();
-    let mut pending = root_sources;
+    let mut pending = root_sources.clone();
+    pending.remove(root_run_id);
+    if pending.len() > MAX_PORTABLE_SOURCE_RUNS {
+        return Err(ExportSourceClosureError::OverBudget.into());
+    }
     let mut edges: std::collections::BTreeMap<RunId, BTreeSet<RunId>> =
-        std::collections::BTreeMap::from([(root_run_id.clone(), pending.clone())]);
+        std::collections::BTreeMap::from([(root_run_id.clone(), root_sources)]);
 
     while let Some(run_id) = pending.pop_first() {
-        if run_id == *root_run_id || !authorized.insert(run_id.clone()) {
+        if run_id == *root_run_id || authorized.contains(&run_id) {
             continue;
         }
-        if authorized.len() > MAX_PORTABLE_SOURCE_RUNS {
+        if authorized.len() >= MAX_PORTABLE_SOURCE_RUNS {
             return Err(ExportSourceClosureError::OverBudget.into());
         }
+        authorized.insert(run_id.clone());
         let sources = load_sources(&run_id)?;
         if sources.len() > MAX_PORTABLE_SOURCE_RUNS {
             return Err(ExportSourceClosureError::OverBudget.into());
@@ -1252,6 +1325,15 @@ where
         edges.insert(run_id.clone(), sources.clone());
         for source in sources {
             if source != *root_run_id && !authorized.contains(&source) {
+                if !pending.contains(&source) {
+                    let queued_new = pending
+                        .iter()
+                        .filter(|run_id| !authorized.contains(*run_id))
+                        .count();
+                    if authorized.len().saturating_add(queued_new) >= MAX_PORTABLE_SOURCE_RUNS {
+                        return Err(ExportSourceClosureError::OverBudget.into());
+                    }
+                }
                 pending.insert(source);
             }
         }
@@ -1395,6 +1477,27 @@ mod export_source_closure_tests {
         assert_eq!(error, ExportSourceClosureError::OverBudget);
     }
 
+    #[test]
+    fn fanout_pending_bound_rejects_before_enqueue() {
+        let root = run(1);
+        let first = run(2);
+        let mut fanout = BTreeSet::new();
+        let mut graph = BTreeMap::new();
+        for index in 3..=(MAX_PORTABLE_SOURCE_RUNS + 2) {
+            let hex = format!("{index:064x}");
+            let leaf = RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("leaf run id");
+            fanout.insert(leaf.clone());
+            graph.insert(leaf, BTreeSet::new());
+        }
+        graph.insert(root.clone(), BTreeSet::from([first.clone()]));
+        graph.insert(first.clone(), fanout);
+        let error = expand_export_source_closure(&root, graph[&root].clone(), |id| {
+            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
+        })
+        .expect_err("pending fanout bound");
+        assert_eq!(error, ExportSourceClosureError::OverBudget);
+    }
+
     fn rename_export(
         evidence: &mut ExportRunEvidence,
         run_id: RunId,
@@ -1436,7 +1539,7 @@ mod export_source_closure_tests {
         rename_export(&mut leaf, leaf_id.clone(), BTreeSet::new());
 
         let sealed = root
-            .with_authorized_sources(vec![middle, leaf])
+            .with_authorized_sources(None, vec![(middle, None), (leaf, None)])
             .expect("flattened recursive closure");
         let source_ids = sealed
             .authorized_source_prefixes()

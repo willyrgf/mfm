@@ -278,7 +278,15 @@ ordinary consumer cannot substitute callbacks that accept forged fixations. Curr
 newline-delimited frame stream with media type
 `application/vnd.mfm.structured-run-export-stream.v2`; each canonical frame carries an ordinal,
 kind, payload, and predecessor digest, and a terminal seal binds the exact closure, fixation,
-counts, bytes, and chain. Legacy monolithic JSON objects and retired bytes are rejected.
+per-run authenticated principal, fixed `export` grant, content-addressed policy-decision
+references, counts, bytes, and chain. Legacy monolithic JSON objects and retired bytes are
+rejected.
+
+Authorization discovery uses the requested kind's exact root cutoff and recursively advances each
+producer only to the maximum transition head required by selected fact routes. A later audit-only
+suffix therefore cannot add a semantic-export dependency. Decision references in the terminal seal
+are opaque content-addressed policy evidence; offline consumers do not resolve them live, and the
+explicit trust snapshot must bind the exact closure digest before folding.
 
 Recorded replay is verification-only: it folds the committed prefix and returns its bounded
 summary. It never falls back to live callbacks or compares current history.

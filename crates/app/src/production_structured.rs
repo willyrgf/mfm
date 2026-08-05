@@ -521,7 +521,9 @@ impl ApplicationBackend for ProductionBackend {
         debug_assert_eq!(call.grant(), crate::RunAccessGrant::Export);
         // Phase one: authorize the complete recursive source closure with zero
         // bytes emitted. Phase two serializes only after that succeeds.
-        let evidence = self.authorize_export_source_closure(call).await?;
+        let evidence = self
+            .authorize_export_source_closure(call, request.kind())
+            .await?;
         write_structured_export(&evidence, request).await
     }
 }
@@ -820,33 +822,75 @@ impl ProductionBackend {
     async fn authorize_export_source_closure(
         &self,
         call: &AuthorizedRunCall<'_, run_grant::Export>,
-    ) -> Result<ExportRunEvidence, PublicError> {
+        kind: mfm_replay::portable::ExportKind,
+    ) -> Result<mfm_replay::portable::AuthorizedExportClosure, PublicError> {
         let root = self
             .load_export_authorized(call.tenant_scope_id(), call.run_id())
             .await?;
+        let root_cutoff = match kind {
+            mfm_replay::portable::ExportKind::Semantic => Some(semantic_cutoff(&root)?),
+            mfm_replay::portable::ExportKind::Audit => None,
+        };
         let root_sources = root
-            .direct_source_run_ids()
+            .direct_source_run_ids_through(root_cutoff)
             .map_err(|_| PublicError::source_run_export_denied())?;
+        let root_decision_ref = call
+            .authorization_decision_ref()
+            .cloned()
+            .ok_or_else(PublicError::source_run_export_denied)?;
         if root_sources.is_empty() {
-            return Ok(root);
+            return mfm_replay::portable::AuthorizedExportClosure::new(
+                root,
+                call.authenticated_principal_id().clone(),
+                root_decision_ref,
+                BTreeMap::new(),
+            )
+            .map_err(|_| PublicError::source_run_export_denied());
         }
 
         let root_run_id = call.run_id().clone();
+        let mut required_heads = BTreeMap::<RunId, u64>::new();
+        for route in root.fact_routes_through(root_cutoff) {
+            if route.producer_transition().run_id != root_run_id {
+                required_heads
+                    .entry(route.producer_transition().run_id.clone())
+                    .and_modify(|head| {
+                        *head = (*head).max(route.producer_transition().run_sequence)
+                    })
+                    .or_insert(route.producer_transition().run_sequence);
+            }
+        }
+        if required_heads.len() > mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS {
+            return Err(PublicError::source_run_export_denied());
+        }
         let mut discovery: BTreeMap<RunId, BTreeSet<RunId>> =
             BTreeMap::from([(root_run_id.clone(), root_sources.clone())]);
         let mut authorized = BTreeSet::new();
-        let mut pending = root_sources;
-        let mut source_evidence = Vec::new();
+        let mut pending = required_heads.keys().cloned().collect::<BTreeSet<_>>();
+        let mut loaded_heads = BTreeMap::<RunId, u64>::new();
+        let mut source_evidence = BTreeMap::<RunId, ExportRunEvidence>::new();
+        let mut source_decision_refs = BTreeMap::new();
 
         while let Some(source_run_id) = pending.pop_first() {
-            if source_run_id == root_run_id || !authorized.insert(source_run_id.clone()) {
+            if source_run_id == root_run_id {
                 continue;
             }
-            if authorized.len() > mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS {
-                return Err(PublicError::source_run_export_denied());
+            let required_head = required_heads
+                .get(&source_run_id)
+                .copied()
+                .ok_or_else(PublicError::source_run_export_denied)?;
+            if loaded_heads.get(&source_run_id) == Some(&required_head) {
+                continue;
             }
-            call.authorize_required_dependency(source_run_id.clone())
-                .await?;
+            if authorized.insert(source_run_id.clone()) {
+                if authorized.len() > mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS {
+                    return Err(PublicError::source_run_export_denied());
+                }
+                let decision = call
+                    .authorize_required_dependency(source_run_id.clone())
+                    .await?;
+                source_decision_refs.insert(decision.run_id, decision.decision_ref);
+            }
             let evidence = self
                 .export_reader
                 .load_for_export(&source_run_id)
@@ -857,14 +901,43 @@ impl ProductionBackend {
             {
                 return Err(PublicError::source_run_export_denied());
             }
-            let nested = evidence
-                .direct_source_run_ids()
-                .map_err(|_| PublicError::source_run_export_denied())?;
-            source_evidence.push(evidence);
+            let mut nested = BTreeSet::new();
+            for route in evidence.fact_routes_through(Some(required_head)) {
+                let nested_run_id = route.producer_transition().run_id.clone();
+                if nested_run_id != source_run_id {
+                    nested.insert(nested_run_id.clone());
+                    required_heads
+                        .entry(nested_run_id)
+                        .and_modify(|head| {
+                            *head = (*head).max(route.producer_transition().run_sequence)
+                        })
+                        .or_insert(route.producer_transition().run_sequence);
+                }
+            }
+            loaded_heads.insert(source_run_id.clone(), required_head);
+            source_evidence.insert(source_run_id.clone(), evidence);
             discovery.insert(source_run_id.clone(), nested.clone());
             for nested_run in nested {
                 if nested_run != root_run_id && !authorized.contains(&nested_run) {
+                    if !pending.contains(&nested_run) {
+                        let queued_new = pending
+                            .iter()
+                            .filter(|run_id| !authorized.contains(*run_id))
+                            .count();
+                        if authorized.len().saturating_add(queued_new)
+                            >= mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS
+                        {
+                            return Err(PublicError::source_run_export_denied());
+                        }
+                    }
                     pending.insert(nested_run);
+                }
+            }
+            for (run_id, head) in &required_heads {
+                if loaded_heads.get(run_id).is_some_and(|loaded| head > loaded)
+                    && !pending.contains(run_id)
+                {
+                    pending.insert(run_id.clone());
                 }
             }
         }
@@ -879,13 +952,38 @@ impl ProductionBackend {
                 .ok_or(ExportSourceClosureError::OverBudget)
         })
         .map_err(|_| PublicError::source_run_export_denied())?;
-        root.with_authorized_sources(source_evidence)
-            .map_err(|_| PublicError::source_run_export_denied())
+        let sealed = root
+            .with_authorized_sources(
+                root_cutoff,
+                source_evidence
+                    .into_iter()
+                    .map(|(run_id, evidence)| (evidence, required_heads.get(&run_id).copied()))
+                    .collect(),
+            )
+            .map_err(|_| PublicError::source_run_export_denied())?;
+        mfm_replay::portable::AuthorizedExportClosure::new(
+            sealed,
+            call.authenticated_principal_id().clone(),
+            root_decision_ref,
+            source_decision_refs,
+        )
+        .map_err(|_| PublicError::source_run_export_denied())
     }
 }
 
 fn classify_export_dependency_store_error(_error: StructuredStoreError) -> PublicError {
     PublicError::source_run_export_denied()
+}
+
+fn semantic_cutoff(evidence: &ExportRunEvidence) -> Result<u64, PublicError> {
+    match evidence.semantic_head() {
+        mfm_journal::structured::SemanticHead::Genesis { admission_ref, .. } => {
+            Ok(admission_ref.run_sequence)
+        }
+        mfm_journal::structured::SemanticHead::Transition { transition_ref, .. } => {
+            Ok(transition_ref.run_sequence)
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1058,12 +1156,14 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
 }
 
 async fn write_structured_export(
-    evidence: &ExportRunEvidence,
+    closure: &mfm_replay::portable::AuthorizedExportClosure,
     request: ExportRequest,
 ) -> Result<ExportedRun, PublicError> {
-    let export =
-        mfm_replay::portable::PortableRunExport::from_export_evidence(evidence, request.kind())
-            .map_err(|_| export_stream_io_error())?;
+    let export = mfm_replay::portable::PortableRunExport::from_authorized_export_closure(
+        closure,
+        request.kind(),
+    )
+    .map_err(|_| export_stream_io_error())?;
     let bytes = export
         .to_canonical_bytes()
         .map_err(|_| export_stream_io_error())?;

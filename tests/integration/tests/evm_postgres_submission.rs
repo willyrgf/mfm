@@ -55,8 +55,8 @@ use mfm_evm_live::{
     EvmPhysicalBindingReleaseHistory, EvmStructuredLiveBindings, EvmStructuredWalletBindings,
 };
 use mfm_ids::{
-    AppendRequestId, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
-    SchemaId, StableId, StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity,
+    RunId, SchemaId, StableId, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, AccessKind, CommittedBatch, HistoryObject, LexicalValueRef, ObservationOutcome,
@@ -722,10 +722,13 @@ impl RunAccessPolicy for AllowTenantPolicy {
         if credential.expose_to_policy() != SECRET_CREDENTIAL_CANARY.as_bytes() {
             return Err(AccessPolicyError::AuthenticationRequired);
         }
-        Ok(AuthorizedTenant::new(
-            self.tenant.clone(),
-            stable("mfm.evm.integration/principal"),
-        ))
+        Ok(
+            AuthorizedTenant::new(self.tenant.clone(), stable("mfm.evm.integration/principal"))
+                .with_decision_ref(ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(b"mfm.evm.integration/export-decision"),
+                )),
+        )
     }
 }
 

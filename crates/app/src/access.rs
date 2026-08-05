@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use mfm_ids::{InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
+use mfm_ids::{ContentDigest, InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
 use zeroize::{Zeroize, Zeroizing};
 
 /// Maximum opaque credential size admitted by the application boundary.
@@ -82,6 +82,7 @@ pub enum AccessTarget {
 pub struct AuthorizedTenant {
     tenant_scope_id: TenantScopeId,
     authenticated_principal_id: StableId,
+    authorization_decision_ref: Option<ContentDigest>,
 }
 
 impl AuthorizedTenant {
@@ -93,7 +94,18 @@ impl AuthorizedTenant {
         Self {
             tenant_scope_id,
             authenticated_principal_id,
+            authorization_decision_ref: None,
         }
+    }
+
+    /// Attaches the content-addressed decision retained by the deployment policy.
+    ///
+    /// Export construction requires this reference for the root and every recursively authorized
+    /// source. Other facade operations may use [`AuthorizedTenant::new`] when no retained export
+    /// closure is produced.
+    pub fn with_decision_ref(mut self, decision_ref: ContentDigest) -> Self {
+        self.authorization_decision_ref = Some(decision_ref);
+        self
     }
 
     /// Returns the immutable tenant selected by the trusted policy.
@@ -106,8 +118,17 @@ impl AuthorizedTenant {
         &self.authenticated_principal_id
     }
 
-    pub(crate) fn into_parts(self) -> (TenantScopeId, StableId) {
-        (self.tenant_scope_id, self.authenticated_principal_id)
+    /// Returns the retained policy-decision reference, when the deployment supplied one.
+    pub const fn authorization_decision_ref(&self) -> Option<&ContentDigest> {
+        self.authorization_decision_ref.as_ref()
+    }
+
+    pub(crate) fn into_parts(self) -> (TenantScopeId, StableId, Option<ContentDigest>) {
+        (
+            self.tenant_scope_id,
+            self.authenticated_principal_id,
+            self.authorization_decision_ref,
+        )
     }
 }
 
