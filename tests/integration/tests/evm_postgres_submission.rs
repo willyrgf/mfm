@@ -257,7 +257,7 @@ fn provider_deployment_policy(fixture: &Fixture) -> ProviderDeploymentAssemblyPo
 }
 
 #[tokio::test]
-async fn qualified_evm_submission_restarts_after_one_broadcast_and_completes() {
+async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_completes() {
     let database = TestDatabase::create().await;
     let fixture = Fixture::new();
     let wallet_url = database.activation_admin_url();
@@ -351,35 +351,39 @@ async fn qualified_evm_submission_restarts_after_one_broadcast_and_completes() {
 
     let rpc = LoopbackRpc::start(fixture.sender).await;
     assert!(rpc.endpoint().contains(PROVIDER_TEXT_CANARY));
+    // The production application must own a fresh semantic intent from an
+    // empty wallet authority. The deterministic worker is deliberately not
+    // run here: doing so would pre-complete the same caller token and turn the
+    // real keystore path into a read-only projection test.
     run_worker(
         &database,
         rpc.endpoint(),
-        PHASE_ADMIT_BROADCAST,
+        PHASE_PRODUCTION_ADMIT,
         &activation,
         &provider,
     )
     .await;
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
-    assert_eq!(rpc.operation_count("eth_getTransactionReceipt"), 0);
 
     rpc.enable_finality();
     run_worker(
         &database,
         rpc.endpoint(),
-        PHASE_RESUME_COMPLETE,
+        PHASE_PRODUCTION_RESUME,
         &activation,
         &provider,
     )
     .await;
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
     assert_eq!(rpc.operation_count("eth_getTransactionCount"), 1);
+    assert!(rpc.operation_count("eth_chainId") >= 1);
+    assert!(rpc.operation_count("eth_getBalance") >= 1);
 
     let submission_run_id = derive_application_run_id(
         &history_store_scope_id(&database.database_url, &database.history_schema).await,
         &fixture.tenant,
-        &operation_id(),
-        &InvocationIdentity::new("00000000-0000-4000-8000-000000000051")
-            .expect("invocation identity"),
+        &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
+        &InvocationIdentity::new(SUBMISSION_INVOCATION).expect("submission invocation identity"),
     );
     let batches = database.history_batches(submission_run_id).await;
     assert!(
@@ -444,31 +448,6 @@ async fn qualified_evm_submission_restarts_after_one_broadcast_and_completes() {
         1
     );
     wallet_pool.close().await;
-
-    run_worker(
-        &database,
-        rpc.endpoint(),
-        PHASE_PRODUCTION_ADMIT,
-        &activation,
-        &provider,
-    )
-    .await;
-    run_worker(
-        &database,
-        rpc.endpoint(),
-        PHASE_PRODUCTION_RESUME,
-        &activation,
-        &provider,
-    )
-    .await;
-
-    assert_eq!(
-        rpc.operation_count("eth_sendRawTransaction"),
-        1,
-        "production restart must converge on the already completed semantic intent"
-    );
-    assert!(rpc.operation_count("eth_chainId") >= 1);
-    assert!(rpc.operation_count("eth_getBalance") >= 1);
     database.assert_canaries_absent_from_persistence().await;
 
     rpc.shutdown().await;
@@ -926,12 +905,34 @@ async fn run_production_application_worker(
                 "submission response must bind the derived run identity"
             );
 
-            for run_id in [&portfolio_run_id, &submission_run_id] {
+            application
+                .drive_once(credential(), portfolio_run_id.clone())
+                .await
+                .expect("advance production portfolio before restart");
+            let history_control = isolated_pool(base_url, history_schema).await;
+            let broadcast_capability = broadcast_capability_ref();
+            let mut observed_broadcast = false;
+            for _ in 0..MAX_DRIVES {
                 application
-                    .drive_once(credential(), run_id.clone())
+                    .drive_once(credential(), submission_run_id.clone())
                     .await
-                    .expect("advance production run before restart");
+                    .expect("advance production submission before restart");
+                if broadcast_observation_exists(
+                    &history_control,
+                    &submission_run_id,
+                    &broadcast_capability,
+                )
+                .await
+                {
+                    observed_broadcast = true;
+                    break;
+                }
             }
+            history_control.close().await;
+            assert!(
+                observed_broadcast,
+                "production application did not persist the exact broadcast observation"
+            );
             let portfolio_view = application
                 .read_public_run(credential(), portfolio_run_id)
                 .await
