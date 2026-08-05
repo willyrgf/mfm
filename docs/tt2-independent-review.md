@@ -3,10 +3,11 @@
 Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of implementation candidate
-`d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2`. The composed source gate for that
-candidate passed, but the plan requires a PASS only when every Blocker/High
-requirement has its focused proof. The review therefore records both the
-closed implementation work and the remaining proof/deployment gaps.
+`b3dfd83777b4b1f54b349c5ac07d105dbd757cab`. Focused checks for that candidate
+pass; its exact composed source gate is pending. The plan requires a PASS only
+when every Blocker/High requirement has its focused proof. The review therefore
+records both the closed implementation work and the remaining proof/deployment
+gaps.
 
 ## Material uncertainties
 
@@ -21,15 +22,20 @@ closed implementation work and the remaining proof/deployment gaps.
 - Restart/reload qualification does not equal an injected process-kill matrix
   at every EVM broadcast, receipt, finality, promotion, and completion edge.
 - No live application multi-hop export integration proves the production
-  closure path; current application authorization remains transient and the
-  retained closure lacks an independently authenticated principal/grant/
-  decision object.
+  closure path. The application now performs kind-aware fixed-point discovery,
+  retains an authenticated principal/fixed export grant/decision reference per
+  selected prefix, and fails before reader access on denied root/dependency
+  decisions; the production integration proof is still absent.
+- The decision references are intentionally opaque content-addressed policy
+  evidence. Offline replay binds the exact closure digest through its explicit
+  trust snapshot and does not resolve policy live.
 
 ## Candidate and review scope
 
-- Implementation candidate: `d67a3bc3aac44d6820ee47a9235a8bfdbb3a6ed2`
+- Implementation candidate: `b3dfd83777b4b1f54b349c5ac07d105dbd757cab`
 - Prior implementation/evidence tip: `a027640c90735a4e762fb83eb0d889ebf28176f4`.
-- Final evidence refresh: `ebc4f8a81bf3178b8928a14655bed0412a269934`.
+- Final evidence refresh: this document's next evidence commit; the candidate
+  review was performed against the exact hash above.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), and `8803a585` (evidence pin).
@@ -44,8 +50,8 @@ closed implementation work and the remaining proof/deployment gaps.
 
 ## Verification evidence
 
-The exact current implementation gate ran in the default Nix development
-environment:
+The previous exact implementation gate ran in the default Nix development
+environment and is historical evidence for the preceding source sequence:
 
 ```text
 nix run .#ci
@@ -67,10 +73,11 @@ PostgreSQL recursive parity fixture passed 17/17 on the same implementation
 sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
-This final run started after `d67a3bc3` and no commits were made during it, so
-the source hash and closing-source-revision observation agree. The earlier
+That historical run started after `d67a3bc3` and no commits were made during
+it, so its source hash and closing-source-revision observation agree. The
+current candidate's exact `.#ci` gate is still pending. The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
-is retained only as historical evidence, not as the final gate.
+is retained only as historical evidence, not as the current gate.
 
 The new regressions are post-`a4dada89`; that historical baseline has no
 corresponding test cases, so “fails against baseline” is recorded as *not
@@ -85,6 +92,9 @@ baseline negative behavior.
 | `portable::tests::exact_frame_limit_succeeds_and_one_byte_over_fails` | pass | N/A; introduced after baseline |
 | `portable::tests::exact_total_limit_succeeds_and_one_byte_over_fails` | pass | N/A; introduced after baseline |
 | `portable::tests::golden_frame_stream_rejects_omission_extra_substitution_reordering_and_stale_head` | pass | N/A; introduced after baseline |
+| `portable::tests::serialized_authorization_decision_tampering_is_rejected` | pass | N/A; introduced after baseline |
+| `portable::tests::serialized_recursive_prefix_tampering_is_rejected` | pass | N/A; introduced after baseline |
+| `portable::tests::generated_portable_artifact_corpus_round_trips` | pass | N/A; introduced after baseline |
 | `portable::tests::production_store_export_folds_offline_and_preserves_projection_bytes` | pass | N/A; introduced after baseline |
 | `structured::fold::source_bound_tests::distinct_source_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::fact_route_bound_rejects_before_insert` | pass | N/A; introduced after baseline |
@@ -92,6 +102,8 @@ baseline negative behavior.
 | `structured::purpose::export_source_closure_tests::cyclic_source_graph_is_rejected` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::over_budget_source_graph_is_rejected` | pass | N/A; introduced after baseline |
 | `structured::purpose::export_source_closure_tests::flattened_multi_hop_source_closure_is_accepted` | pass | N/A; introduced after baseline |
+| `structured::purpose::export_source_closure_tests::fanout_pending_bound_rejects_before_enqueue` | pass | N/A; introduced after baseline |
+| `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
 | `configured_value_history_linearizes_same_stream_append_races` | pass in composed gate | N/A; added after baseline |
 
@@ -123,13 +135,13 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
-| TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity are implemented; serialized source-prefix tamper and live app multi-hop corpus remain. |
+| TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
-| TT2-REPLAY-03 | Conditional | Exact semantic cutoff is implemented; no real later-audit-suffix artifact fixture is retained. |
+| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; no real later-audit-suffix artifact fixture is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
-| TT2-REPLAY-05 | Conditional | Generated schema vectors and no-service leaf pass; full generated portable artifact corpus is absent. |
+| TT2-REPLAY-05 | Conditional | Generated schema vectors and a five-vector portable artifact corpus plus no-service leaf pass; semantic-suffix and offline-fold artifact vectors remain. |
 | TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
-| TT2-APP-02 | Conditional | Flattened recursive closure is graph-checked; principal/grant retention and app zero-byte denial are not fully proven. |
+| TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | Protected key handoff/zeroization paths are present; Rust moves do not prove one stable allocation. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
 | TT2-VERIFY-01 | Conditional | Broad/focused gates pass, but the plan's complete authority/fault/offline/security matrix is incomplete. |
@@ -146,15 +158,16 @@ validates the exact target tuple in the transaction. Provider mutation proofs
 are canonical, signed, target-bound, and rechecked on candidate/completion
 reload against registered historical incarnations.
 
-The recent flattened-source change is intentionally subset-based: a complete
-flattened recursive list may contain the root's direct sources, while graph
-validation still rejects omissions, substitutions, disconnected extras, cycles,
-root edges, and metadata mismatches. `ExportFragment::from_verified` now calls
-the bounded `direct_source_run_ids` path before materializing source IDs. The
-fold rejects the first distinct producer beyond `MAX_PORTABLE_SOURCE_RUNS`, and
-route collection rejects the first fact route beyond `MAX_PORTABLE_FACT_ROUTES`,
-so neither source discovery nor route materialization grows past its named
-bound.
+The flattened recursive source list is now cutoff-aware and sealed against the
+full reachable graph: graph validation rejects omissions, substitutions,
+disconnected extras, cycles, root edges, tenant/store/target mismatches, and
+cutoff/head inconsistencies. Production discovery uses a pure bounded expander
+with a fixed-point requeue when a shared source is later required at a higher
+head; each selected prefix retains an authenticated principal, fixed export
+grant, and opaque content-addressed decision reference. The fold rejects the
+first distinct producer beyond `MAX_PORTABLE_SOURCE_RUNS`, and route collection
+rejects the first fact route beyond `MAX_PORTABLE_FACT_ROUTES`, so neither
+source discovery nor route materialization grows past its named bound.
 
 ## PostgreSQL and EVM matrix status
 
@@ -178,17 +191,21 @@ Implemented and passing:
 - canonical frame/chain tamper checks;
 - root physical-target and tenant trust denials; and
 - omission, extra, substitution, reorder, and stale-head checks at the frame
-  and graph-validation layers.
+  and graph-validation layers;
+- principal/grant/decision retention and strict authorization-decision tamper
+  rejection; and
+- a generated five-vector portable artifact corpus (recursive accept plus
+  omitted/extra/reordered/substituted source negatives) with no-service replay.
 
 Still required by the plan:
 
-- serialized source-prefix false-frontier and false-publication tamper corpus;
-- cyclic/shared/over-budget/omission/substitution dependency artifact corpus;
+- generated artifact vectors for false frontier/publication, cyclic/shared and
+  over-budget graphs, semantic-suffix handling, and offline folding (the
+  current five vectors are synthetic strict-decode cases);
 - a real semantic artifact with a later audit suffix and its audit counterpart;
-- live application multi-hop export and zero-byte denied-dependency assertion;
-- generated full portable artifacts (the current `corpus.json` is schema
-  vectors, not a portable artifact corpus); and
-- principal/grant/decision binding in the retained authorization closure.
+- live production application multi-hop export and zero-byte denied-dependency
+  integration assertion; and
+- concrete production retained-release/checkpoint trust implementations.
 
 ## Deletion, redaction, and size audit
 
@@ -208,9 +225,10 @@ as a quality residual rather than hidden as a simplification win.
 
 ## Final verdict
 
-The current implementation is materially stronger and its exact source gate is
-green, but the strict plan acceptance condition is not met. The review remains
-**CONDITIONAL / INCOMPLETE** until the residual proof matrices, portable artifact
-corpus and app integration, production trust deployment, principal-bound
-authorization closure, and allocation/ownership evidence are supplied or the
-normative plan is deliberately amended.
+The current implementation is materially stronger and all focused checks are
+green. The prior exact source gate is green, but the exact gate for this
+candidate is still pending and the strict plan acceptance condition is not
+met. The review remains **CONDITIONAL / INCOMPLETE** until the residual proof
+matrices, expanded portable artifact corpus and live app integration,
+production trust deployment, and allocation/ownership evidence are supplied or
+the normative plan is deliberately amended.
