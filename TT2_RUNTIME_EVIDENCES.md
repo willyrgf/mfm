@@ -69,10 +69,13 @@ Post-step-12 implementation and proof revisions:
 | `2d5b17139` | hide fixture authority behind replay accessor |
 | `076a50c1d` | complete portable replay bound and trust proofs |
 | `3c7525a61` | bound export source discovery |
+| `a7ef6b636` | bound portable source and fact route discovery |
 
-`ef3e412d5` (`wording in code-quality`) was committed while the final gate was
-running. It changes only prose and whitespace in `docs/code-quality.md`; it is
-not part of the implementation candidate exercised below.
+`ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
+running. It changes only prose and whitespace in `docs/code-quality.md`. The
+later `42c80525` whitespace cleanup and `a027640c` evidence refresh are
+documentation-only commits. The corrected-source gate below starts after all
+three and is pinned to `a7ef6b636`.
 
 ## Independent review checkpoints
 
@@ -83,7 +86,7 @@ not part of the implementation candidate exercised below.
 | Retry/authority candidate | `4fc1baea0` | `16fe501a` | FAIL; replay trust/incarnation fixes followed |
 | Registered-incarnation candidate | `55f1cafac` | `9bd6f7056` | PASS for that scope |
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
-| Current implementation candidate | `3c7525a61da4ba3238398c1a5a1cc2a940dd99ff` | this ledger/review refresh | CONDITIONAL; residuals below |
+| Current implementation candidate | `a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d` | prior review `a027640c90735a4e762fb83eb0d889ebf28176f4` plus this refresh | CONDITIONAL; residuals below |
 
 ## Focused and composed verification
 
@@ -109,10 +112,10 @@ Exact composed gate:
 
 ```text
 nix run .#ci
-source: 3c7525a61da4ba3238398c1a5a1cc2a940dd99ff
-run id: run-1538729-1785942335027178292
-result: ok — 13 passed, 0 failed in 2072.95s
-structured EVM submission: ok in 1495.20s
+source: a7ef6b636acbc3aaa65b26c06563a254b3c1bc1d
+run id: run-1564803-1785945104353521495
+result: ok — 13 passed, 0 failed in 1937.35s
+structured EVM submission: ok in 1377.19s
 ```
 
 Additional focused evidence on the current implementation sequence includes
@@ -120,9 +123,11 @@ four flattened recursive source-closure tests, five portable replay tests,
 exact frame and total-byte limit/one-over checks, root target/tenant trust
 tamper denials, and online/offline projection byte parity. The managed
 PostgreSQL recursive parity fixture passed 17/17 on the corresponding current
-storage sequence. The final composed gate reran the current tree's behavior
-after those changes; the only later source commit is the prose-only
-`ef3e412d5` noted above.
+storage sequence. The final composed gate includes the source-bound fix in
+`a7ef6b636`; its closing-source-revision leaf observed the post-cleanup tree,
+while the run's source implementation pin is the exact hash above. The run
+started after `a7ef6b636` and no commits were made during it, so the source pin
+and closing leaf agree for this final gate.
 
 ## TT2 disposition at the current candidate
 
@@ -166,11 +171,12 @@ proof or deployment evidence is still missing; it is not a waiver.
 
 ## Baseline and deletion audits
 
-The new portable, trust, recursive, fresh-keystore, and configuration-race
-regressions were added after `a4dada89`; the baseline has no corresponding
-tests to execute. They therefore have not been represented as an artificial
-“baseline failure.” Existing API rejection and replay tests retain their
-historical baseline behavior.
+The named regression matrix and baseline disposition are recorded in the
+independent review. The new portable, trust, recursive, fresh-keystore, and
+configuration-race regressions were added after `a4dada89`; the baseline has
+no corresponding tests to execute, so their baseline result is *not
+applicable*, not an inferred failure. Existing API rejection and replay tests
+retain their historical baseline behavior.
 
 The source deletion audit was run with `rg` over `crates`, `bin`, and `tests`.
 There are no production matches for the removed authority names, raw session
