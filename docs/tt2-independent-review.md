@@ -23,20 +23,24 @@ It is evidence-only and does not change implementation behavior.
 
 ## Frozen candidate and scope
 
-- Candidate: `d9e53a5e96749f667656a94af5c2bcec2aea1ddb`
+- Candidate: `774f0b7429b22d0a145b28a6f92a528603710593`
 - TT2 implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Worktree was clean before this evidence file was added.
 - Scope: canonical append and fold authority, Runtime assembly, replay/export
   provenance, EVM wallet authority, PostgreSQL target/checkpoint authority, SQL
   inventory, and generated recoverability and schema-depth budgets.
 
-This rebuild folds PostgreSQL checkpoint/reload/fact-scan changes into the frozen
-implementation: test-support checkpoint state has a sidecar persistence path,
-concurrent read fixations share one barrier, configuration reload rechecks the
-reconstructed canonical head against the external fixation, envelope reload uses
-explicit field closure, and parity fact-scan fixtures run complete folds on worker
-stacks. These changes do not seal the public production authority traits recorded
-below.
+This final rebuild folds the PostgreSQL checkpoint/reload/fact-scan changes and
+wallet-authority hardening into the frozen implementation: test-support checkpoint
+state has a sidecar persistence path, concurrent read fixations share one barrier,
+configuration reload rechecks the reconstructed canonical head against the
+external fixation, envelope reload uses explicit field closure, parity fact-scan
+fixtures run complete folds on worker stacks, and wallet projection state now
+retains a reservation count and chain-head reference. The wallet SQL trigger,
+schema manifests, promotion refresh, state-input retry guards, historical-frontier
+check, and numeric count/head corruption assertions are included in the exact
+verification below. These changes do not seal the public production authority
+traits recorded below.
 
 ## Verification evidence
 
@@ -47,7 +51,7 @@ changed.
 
 | Check | Result |
 | --- | --- |
-| `git diff --check 07b9d731^..d9e53a5e` | pass |
+| `git diff --check 07b9d731^..774f0b74` | pass |
 | `nix develop -c cargo fmt --all -- --check` | pass |
 | `nix develop -c cargo check -p mfm-values -p mfm-canonical -p mfm-certify -p mfm-runtime -p mfm-store -p mfm-evm -p mfm-evm-live -p mfm-storage-evm-postgres -p mfm-storage-postgres` | pass (warnings only) |
 | `nix develop -c cargo clippy -p mfm-values -p mfm-canonical -p mfm-certify -p mfm-runtime -p mfm-store -p mfm-evm-live -p mfm-storage-postgres --all-targets -- -D warnings` | pass |
@@ -58,12 +62,18 @@ changed.
 | `nix develop -c cargo test -p mfm-evm-live -p mfm-storage-postgres -p mfm-storage-evm-postgres --lib` | pass (35/35, 6/6, and 2/2; 1 schema test ignored as DB-gated) |
 | `nix develop -c cargo test -p mfm-storage-postgres --features test-support --lib -- --nocapture` | pass (13/13, including checkpoint barrier/reload tests) |
 | `nix develop -c cargo test -p mfm-storage-postgres --features parity-tests --test structured-history --no-run` | pass (parity integration target compiles) |
+| `nix run .#run -- --task wallet-nonce-postgres-storage-qualification` | pass (managed PostgreSQL, 1/1; 186.68s) |
 | `nix develop -c cargo test -p mfm-canonical -p mfm-facts -p mfm-replay -p mfm-runtime --lib -- --nocapture` | pass (2/2, 14/14, 1/1, and 0 tests) |
-| `mfm-store` feature tree and authority-surface searches | pass for the recorded findings; `store-authority` still unifies `runtime-authority` |
+| `mfm-store` and `mfm-storage-evm-postgres` feature trees plus authority-surface searches | pass for the recorded findings; `store-authority` still unifies `runtime-authority`, and `mfm-storage-evm-postgres` enables `mfm-evm/authority-integration` |
 
 The owner additionally reports successful final PostgreSQL SQLx/offline and SQL
 inventory tasks and the model check; those remain owner-supplied evidence rather
 than independently reproduced results here.
+
+The scoped `-D warnings` Clippy lane excludes `mfm-storage-evm-postgres`, whose
+all-target build still emits existing dead-code warnings for provider/registry
+maintenance helpers. The exact managed wallet qualification above exercises that
+crate's production parity target. Cargo check remains green with those warnings.
 
 ## Blocker: Runtime authority bridge remains public
 
@@ -162,6 +172,11 @@ Surfaces: `crates/kernel/replay/src/portable.rs` and
   the test-support unit suite passes 13/13.
 - PostgreSQL batch reload uses explicit envelope and record field closure, and the
   parity integration target compiles with the updated fact-scan worker-stack tests.
+- Wallet authority projection now checks retained reservation count, maximum nonce,
+  chain-head identity, current frontier, and current incarnation; promotion
+  refreshes current projection fields, and SQL trigger guards reject same-head
+  rewrites and malformed count transitions. The managed wallet qualification
+  passes its numeric count/head corruption and retry/frontier cases.
 - Expected authorization matching recomputes record hashes and checks scope and
   lineage; substituted-ordinal certification coverage passes.
 - Live EVM authorized-provider guards and exact transport inventories pass their
