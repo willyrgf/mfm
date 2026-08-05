@@ -792,6 +792,7 @@ pub enum EvmCandidateSigner {}
 
 /// Closed completion returned by the process-qualified semantic signer.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum EvmCandidateSignerCompletion {
     /// Candidate signing completed with an attested candidate.
     Returned(AttestedWalletCandidate),
