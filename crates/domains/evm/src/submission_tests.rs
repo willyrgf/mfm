@@ -1292,6 +1292,29 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
         "offline closure reload must preserve the canonical public result"
     );
 
+    let mut forged_closure: serde_json::Value =
+        serde_json::from_str(&completed.recovery_closure).expect("decode recovery closure JSON");
+    forged_closure["activation_requests"][0]["activation_permit"]["exact_next_ordinal"] =
+        serde_json::json!(1_u16);
+    let mut forged = completed.clone();
+    forged.recovery_closure =
+        serde_json::to_string(&forged_closure).expect("encode forged activation permit");
+    assert!(
+        forged.validate().is_err(),
+        "activation permit substitution must be rejected"
+    );
+
+    let mut forged_closure: serde_json::Value =
+        serde_json::from_str(&completed.recovery_closure).expect("decode recovery closure JSON");
+    forged_closure["reservation_request"]["observation_rounds"] = serde_json::json!(1_u8);
+    let mut forged = completed.clone();
+    forged.recovery_closure =
+        serde_json::to_string(&forged_closure).expect("encode forged observation rounds");
+    assert!(
+        forged.validate().is_err(),
+        "reservation observation-round substitution must be rejected"
+    );
+
     let mut forged = completed.clone();
     forged.sealed_activated_candidates.clear();
     assert!(forged.validate().is_err(), "empty sealed prefix rejected");

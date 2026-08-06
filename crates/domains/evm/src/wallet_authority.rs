@@ -2192,6 +2192,7 @@ impl CompletedWalletNonce {
             || reservation_request.submission_intent_id != reservation.submission_intent_id
             || reservation_request.submission_semantics_digest
                 != closure.submission_semantics_digest
+            || reservation_request.observation_rounds != closure.observation_rounds
             || reservation_request.transaction_intent != *transaction_intent
             || reservation_request.candidate_family != *candidate_family
             || reservation_request.qualified_floor != *qualified_floor
@@ -2259,12 +2260,19 @@ impl CompletedWalletNonce {
                 "completed_wallet_nonce_reservation_evidence",
             ));
         }
-        for ((request, state_input), candidate) in closure
+        for (ordinal, ((request, state_input), candidate)) in closure
             .activation_requests
             .iter()
             .zip(&closure.activation_state_inputs)
             .zip(&self.sealed_activated_candidates)
+            .enumerate()
         {
+            let expected_permit = derive_exact_candidate_activation_permit_inner(
+                reservation,
+                &self.sealed_activated_candidates[..ordinal],
+                request.next_candidate.candidate_ordinal,
+                request.next_candidate.candidate_ordinal,
+            )?;
             let expected_activation = domain_content_digest(
                 "mfm.evm.wallet-candidate-activation-evidence.v1",
                 &(request, state_input, &reservation.resource_lineage_ref),
@@ -2276,6 +2284,7 @@ impl CompletedWalletNonce {
             )?;
             if request.next_candidate != candidate.attested_candidate
                 || request.nonce_domain != self.nonce_domain
+                || request.activation_permit != expected_permit
                 || request.candidate_operation_key != expected_operation_key
                 || candidate.activation_evidence_ref.content_digest()
                     != expected_activation.as_str()
