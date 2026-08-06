@@ -445,6 +445,35 @@ fn decrypt_wrong_length_rejects_before_allocating_plaintext() {
 }
 
 #[test]
+fn decrypt_oversized_ciphertext_rejects_before_allocating_plaintext() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("oversized".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    keystore
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == key_id)
+        .expect("oversized entry")
+        .encrypted_data
+        .push(0);
+
+    let witness = KeyMaterialWitness::new();
+    assert!(matches!(
+        keystore.private_key_for_test_with_ownership_witness(key_id, witness.clone()),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
+    assert!(!witness.observed_cleanup());
+    assert!(!witness.observed_transfer());
+}
+
+#[test]
 fn decrypt_unwind_zeroizes_the_production_allocation() {
     use super::super::secure_key::KeyMaterialWitness;
 
