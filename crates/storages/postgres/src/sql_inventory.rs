@@ -69,8 +69,28 @@ mod tests {
                 true,
             ),
             (
+                "positive_generic_scalar",
+                r#"fn f() { let _ = sqlx::query_scalar::<_, i64>("SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_generic_query_as",
+                r#"fn f() { let _ = sqlx::query_as::<_, (i64,)>("SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_query_as_macro",
+                r#"fn f() { let _ = sqlx::query_as!(i64, "SELECT 1"); }"#,
+                true,
+            ),
+            (
                 "negative_wrapper",
                 r#"fn f() { let _ = helper(sqlx::query("SELECT 1")); }"#,
+                false,
+            ),
+            (
+                "negative_generic_wrapper",
+                r#"fn f() { let _ = helper(sqlx::query_scalar::<_, i64>("SELECT 1")); }"#,
                 false,
             ),
             (
@@ -91,6 +111,11 @@ mod tests {
             (
                 "negative_builder_alias",
                 r#"use sqlx::QueryBuilder as Builder; fn f() { let _ = Builder::<sqlx::Postgres>::new("SELECT 1"); }"#,
+                false,
+            ),
+            (
+                "negative_builder_push",
+                r#"fn f() { let mut b = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT 1"); b.push(" WHERE 1 = 1"); }"#,
                 false,
             ),
             (
