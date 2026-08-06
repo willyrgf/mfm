@@ -5,7 +5,7 @@ Status: **CONDITIONAL / INCOMPLETE**
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
 The historical gate remains separate from the focused follow-up evidence below.
-The latest implementation tip is `a11925b7`; the focused follow-up sequence
+The latest implementation tip is `e20d1a59`; the focused follow-up sequence
 includes the managed receipt/finality/post-closure crash-boundary extensions
 below. It also
 includes `88af683d`, which adds the detached hostile wire and cryptographic
@@ -187,8 +187,24 @@ result: ok — 1 passed, 0 failed in 1620.25s
 ```
 
 This is a post-closure process-loss witness; pre-completion-commit,
-acknowledgement, ambiguity, cross-process, replacement, and scale matrices
-remain conditional.
+deployment checkpoint acknowledgement, ambiguity, cross-process, replacement,
+and scale matrices remain conditional.
+
+Revision `e20d1a59` adds the missing repository-local EVM completion
+acknowledgement witness to the managed wallet authority matrix. A committed
+completion loses its PostgreSQL acknowledgement, retries by its exact
+completion key, returns the original closure, and leaves exactly one retained
+row:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+run id: run-2436682-1786023975122635293
+result: ok — 1 passed, 0 failed in 671.13s
+```
+
+Pre-completion-commit process loss, deployment checkpoint acknowledgement,
+promotion, ambiguity, cross-process, replacement, and scale matrices remain
+conditional.
 
 This closes the repository-local production-scale EVM leaf blocker. The
 deployment-owned provider-trust and broader crash, ambiguity, latency, and
@@ -209,9 +225,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   this repository.
 - The managed qualification now injects four status-137 child-process exits
   after durable broadcast, receipt, finality, and closed-response observations
-  and proves resume without a second broadcast; pre-completion-commit,
-  acknowledgement, promotion, ambiguity, cross-process, replacement, and
-  scale kill matrices remain unverified.
+  and proves resume without a second broadcast. Revision `e20d1a59` separately
+  proves a committed completion with a lost acknowledgement resolves by exact
+  key and retains one row; pre-completion-commit process loss, deployment
+  checkpoint acknowledgement, promotion, ambiguity, cross-process,
+  replacement, and scale kill matrices remain unverified.
 - No live application multi-hop export integration proves the production
   closure path. The application now performs kind-aware fixed-point discovery,
   retains an authenticated principal/fixed export grant/decision reference per
@@ -264,7 +282,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `a11925b7` (`exercise evm completion crash boundary`),
+- Focused follow-up candidate: `e20d1a59` (`exercise completion acknowledgement recovery`),
+  following `a11925b7` (`exercise evm completion crash boundary`),
   following `23060ca0` (`exercise evm receipt and finality crash boundaries`),
   following `923fce06` (`cover detached audit context boundaries`),
   following `88af683d` (`strengthen detached audit hostile corpus`),
@@ -1384,7 +1403,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed production leaf passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials; `88af683d` adds independent payload, signature/key, challenge, and canonical-wire substitution denials; `923fce06` adds independent context-bound, store-incarnation, proof-size, and unknown-field denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
-| TT2-EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation, `23060ca0` adds exits after receipt and finality observations, and `a11925b7` adds a post-closed-response exit; the final resumed qualification reloads the persisted completion and proves exactly one raw broadcast (`run-2422160-1786021998684634852`, 1/1 in 1620.25s). Pre-completion-commit, acknowledgement, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
+| TT2-EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation, `23060ca0` adds exits after receipt and finality observations, and `a11925b7` adds a post-closed-response exit; the final resumed qualification reloads the persisted completion and proves exactly one raw broadcast (`run-2422160-1786021998684634852`, 1/1 in 1620.25s). `e20d1a59` separately proves committed completion acknowledgement loss resolves by exact key with one retained row (`run-2436682-1786023975122635293`, 1/1 in 671.13s). Pre-completion-commit process loss, deployment checkpoint acknowledgement, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the retained store-shaped authorization/observation artifact passes Audit offline parity and Semantic rejection. Live production evidence remains. |
