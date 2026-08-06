@@ -98,6 +98,7 @@ Post-step-12 implementation and proof revisions:
 | `e7624406` | bound postgres snapshot retries |
 | `bd98e8ca` | hide actionable frontier from purpose evidence |
 | `a1a78b84` | seal offline replay fold boundary |
+| `eb38ea44` | prove valid later audit suffix export |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -148,6 +149,13 @@ package tests remain green; the expanded 16-case application privacy matrix
 also passes. The broader runtime/audit/replay/export isolation matrix is still
 a verification residual.
 
+`eb38ea44` adds a real store-shaped one-state Read history with committed
+authorization and observed return batches. Its audit export folds offline and
+matches the online recorded projection byte-for-byte; carrying the same later
+physical suffix as a semantic export is rejected before fold. The full replay
+library now passes 10/10, while the broader live multi-hop and retained corpus
+proofs remain separate residuals.
+
 ## Independent review checkpoints
 
 | Checkpoint | Candidate | Review evidence | Result |
@@ -163,6 +171,7 @@ a verification residual.
 | Retry-boundary correction | `e7624406` | exact configuration/recoverability checks and independent review confirm one bounded PostgreSQL snapshot-retry owner | PASS for retry scope; global residuals below |
 | Purpose-status isolation cutover | `bd98e8ca` | full frontier removed from public/recorded products; 14-case compile-fail matrix and package regressions pass | PASS for API scope; broader isolation residuals below |
 | Offline-fold boundary cutover | `a1a78b84` | opaque `OfflineVerifiedRun` replaces the public full-fold conversion seam; 16-case compile-fail matrix, store/replay package tests, and portable corpus pass | PASS for API scope (independent review); broader isolation residuals below |
+| Later-audit suffix proof | `eb38ea44` | real store-shaped authorization/observation suffix: audit offline parity passes and semantic carry-forward is rejected; replay 10/10 | PASS for implementation scope; retained/live residuals below |
 
 ## Focused and composed verification
 
@@ -294,9 +303,9 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
 | REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
-| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; synthesized semantic/audit suffix vectors pass strict reject/accept behavior, but no genuinely valid production later-audit artifact fixture exists yet. |
+| REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; a real store-shaped authorization/observation suffix folds as an audit export with byte-identical offline parity, while carrying it as a semantic export is rejected. Retained independent artifact provenance and live production evidence remain. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
-| REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
+| REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, the generated offline-fold acceptance leaf, and the store-shaped later-audit parity test pass; a retained generated later-audit artifact and complete schema/corpus matrix remain. |
 | APP-01 | Conditional | Public, recorded-replay, and offline replay products now expose only fold-derived status plus bounded export metadata; the 16-case application trybuild matrix rejects raw-record, frontier, trace authorization-request, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
@@ -328,12 +337,11 @@ keystore lanes remain part of the composed gate.
 
 The following are the concrete blockers to an unconditional §13 PASS:
 
-1. add a genuinely valid production semantic export with a later audit suffix
-   that can be folded offline, and a live application multi-hop export
-   integration. The current generated suffix vectors prove strict semantic/audit
-   cutoff behavior on synthesized envelopes; the generated shared-DAG and cycle
-   vectors prove the source-closure algorithm, but neither substitutes for that
-   real later-history artifact or live application fixture;
+1. retain a generated later-audit artifact in the portable corpus and add a live
+   application multi-hop export integration. The store-shaped observed-read
+   fixture now proves the real audit suffix and semantic cutoff behavior; the
+   generated shared-DAG and cycle vectors prove the source-closure algorithm,
+   but the retained corpus and live application fixture remain;
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;
@@ -435,6 +443,10 @@ nix develop -c cargo test -p mfm-store --lib — 33 passed on `a1a78b84`
 nix develop -c cargo test -p mfm-replay --lib — 9 passed on `a1a78b84`
 nix develop -c cargo fmt --all -- --check — pass on `a1a78b84`
 nix run .#run -- --task portable-replay-corpus — run id `run-2069857-1785983372700769978`, 1/1 passed on `a1a78b84`
+nix develop -c cargo test -p mfm-store --lib — 33 passed on `eb38ea44`
+nix develop -c cargo test -p mfm-replay --lib — 10 passed on `eb38ea44`
+nix develop -c cargo clippy -p mfm-replay --all-targets -- -D warnings — pass on `eb38ea44`
+nix develop -c cargo fmt --all -- --check — pass on `eb38ea44`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and

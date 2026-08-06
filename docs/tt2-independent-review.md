@@ -12,10 +12,12 @@ below. The earlier APP-01 proof revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
 bounded PostgreSQL owner. Focused checks and the historical exact composed
-source gate pass. The latest purpose-isolation cutover is `a1a78b84`, which
-keeps the full verified cursor and object graph inside the store while exposing
-only an opaque offline summary; its predecessor `bd98e8ca` removed the full
-actionable frontier from public and recorded-replay evidence.
+source gate pass. The latest replay-proof cutover is `eb38ea44`, which adds a
+real store-shaped later audit suffix and verifies its offline parity; the
+preceding purpose-isolation cutover `a1a78b84` keeps the full verified cursor
+and object graph inside the store while exposing only an opaque offline
+summary. Its predecessor `bd98e8ca` removed the full actionable frontier from
+public and recorded-replay evidence.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -37,9 +39,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   retains an authenticated principal/fixed export grant/decision reference per
   selected prefix, and fails before reader access on denied root/dependency
   decisions; the production integration proof is still absent.
-- The generated suffix vectors prove strict semantic-cutoff rejection and
-  audit-cutoff acceptance, but their later envelope is synthesized from cloned
-  root records and is not a valid foldable later production history.
+- The store-shaped observed-read fixture now proves a foldable later
+  authorization/observation suffix and online/offline audit parity. The
+  generated suffix vectors remain synthesized corpus provenance rather than a
+  retained independent artifact; live Postgres/application replay evidence is
+  still absent.
 - The decision references are intentionally opaque content-addressed policy
   evidence. Offline replay binds the exact closure digest through its explicit
   trust snapshot and does not resolve policy live.
@@ -99,6 +103,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `VerifiedStructuredRun` conversion seam. The explicit offline fold now
   returns opaque `OfflineVerifiedRun` metadata, with compile-fail coverage for
   frontier access and the removed full-fold type.
+- Later-audit suffix proof: `eb38ea44` adds a store-shaped one-state Read
+  history with committed authorization and observed return batches. Audit
+  export folds offline with byte-identical projection, while the same suffix
+  carried as Semantic is rejected at strict decode.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -358,6 +366,34 @@ cursor, records, objects, and live bindings remain store-private, while replay
 retains its bounded route/dependency checks. This is PASS for the API scope;
 TT2-APP-01 remains Conditional for the broader matrix.
 
+The later-audit suffix proof was then qualified on exact `eb38ea44`:
+
+```text
+nix develop -c cargo test -p mfm-store --lib
+source: eb38ea44
+result: 33 passed, 0 failed
+
+nix develop -c cargo test -p mfm-replay --lib
+source: eb38ea44
+result: 10 passed, 0 failed
+
+nix develop -c cargo clippy -p mfm-replay --all-targets -- -D warnings
+source: eb38ea44
+result: pass
+
+nix develop -c cargo fmt --all -- --check
+source: eb38ea44
+result: pass
+```
+
+Independent review of exact `eb38ea44` passes the REPLAY-03 implementation
+scope: the store-shaped fixture contains admission, a committed Read
+authorization, and a later Returned observation; Audit folds offline with
+byte-identical projection, while carrying that physical suffix as Semantic is
+rejected. The fixture uses `StructuredMemoryBackend` test support, so retained
+independent artifact provenance and live Postgres/application/multi-process
+evidence remain conditional under REPLAY-03/05.
+
 Additional focused evidence on the current tree:
 
 ```text
@@ -474,9 +510,9 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
-| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
+| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the store-shaped authorization/observation suffix passes Audit offline parity and Semantic rejection. Retained independent artifact provenance and live production evidence remain. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
-| TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
+| TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, the generated offline-fold acceptance leaf, and store-shaped later-audit parity pass; retained generated later-audit provenance and the complete live matrix remain. |
 | TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
@@ -566,10 +602,10 @@ Implemented and passing:
 
 Still required by the plan:
 
-- a genuinely valid semantic artifact with a later audit suffix and its audit
-  counterpart that can be folded offline. The current suffix vectors prove
-  strict semantic/audit cutoff behavior on synthesized envelopes, not a valid
-  later production history;
+- retained independent semantic/audit artifacts with later suffix provenance
+  and complete live Postgres/application replay evidence. The store-shaped
+  suffix now proves the fold and cutoff behavior, while the generated corpus
+  vectors remain synthetic;
 - live production application multi-hop export and zero-byte denied-dependency
   integration assertion; and
 - concrete production retained-release/checkpoint trust implementations.
