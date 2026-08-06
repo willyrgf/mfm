@@ -357,7 +357,12 @@ pub fn validate_envelope_frame(canonical_envelope: &str) -> Result<(), Structure
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES};
+    use super::{validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES};
+
+    fn canonical_string_with_bytes(byte_len: usize) -> String {
+        assert!(byte_len >= 2);
+        format!("\"{}\"", "x".repeat(byte_len - 2))
+    }
 
     #[test]
     fn shared_bounds_match_the_authoritative_postgres_limits() {
@@ -366,5 +371,19 @@ mod tests {
             mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES
         );
         assert_eq!(MAX_BATCH_OBJECTS, 65_536);
+    }
+
+    #[test]
+    fn envelope_frame_accepts_exact_byte_limit() {
+        let frame = canonical_string_with_bytes(MAX_STORED_FRAME_BYTES);
+        assert_eq!(frame.len(), MAX_STORED_FRAME_BYTES);
+        validate_envelope_frame(&frame).expect("exact stored-frame limit is accepted");
+    }
+
+    #[test]
+    fn envelope_frame_rejects_one_byte_over_limit() {
+        let frame = canonical_string_with_bytes(MAX_STORED_FRAME_BYTES + 1);
+        assert_eq!(frame.len(), MAX_STORED_FRAME_BYTES + 1);
+        assert!(validate_envelope_frame(&frame).is_err());
     }
 }
