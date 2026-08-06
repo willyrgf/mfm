@@ -23,7 +23,8 @@ use mfm_evm::{
 };
 use mfm_ids::{StableId, TenantScopeId};
 use mfm_journal::structured::{domain_content_digest, LexicalValueRef, TypedValueRef};
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
+use serde::{Deserialize, Serialize};
 
 const SIGNING_SEED: [u8; 32] = [0x42; 32];
 const WRONG_SIGNING_SEED: [u8; 32] = [0x24; 32];
@@ -494,6 +495,160 @@ fn mutation_from_completion_closure(completion: &CompletedWalletNonce) -> Provid
     }
 }
 
+/// Independent wire-shaped view used by the detached audit. This deliberately does not call the
+/// storage verifier: it reconstructs the provider mutation from the persisted closure and hashes
+/// that local representation before checking the provider signature.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DetachedAuditMutation {
+    Completion {
+        request: CompleteEvmNonceRequest,
+        completion: CompletedWalletNonce,
+        state_input_ref: LexicalValueRef,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DetachedAuditContext {
+    database_oid: u32,
+    backend_pid: i32,
+    transaction_id: Option<u32>,
+    snapshot_id: Option<String>,
+    schema_name: String,
+    application_marker: String,
+    store_incarnation: WalletNonceStoreIncarnation,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct DetachedAuditProof {
+    provider_id: String,
+    challenge: String,
+    context: DetachedAuditContext,
+    operation_key: String,
+    payload_digest: String,
+    signature: String,
+}
+
+struct DetachedAuditTrust {
+    provider_id: String,
+    public_key: [u8; 32],
+    operation_key: String,
+    context: DetachedAuditContext,
+}
+
+fn detached_audit_context(context: &ProviderTargetContext) -> DetachedAuditContext {
+    serde_json::from_value(serde_json::to_value(context).expect("provider context JSON"))
+        .expect("detached provider context")
+}
+
+fn detached_audit_mutation_from_closure(
+    recovery_closure: &str,
+) -> std::result::Result<DetachedAuditMutation, &'static str> {
+    let closure: serde_json::Value =
+        serde_json::from_str(recovery_closure).map_err(|_| "closure")?;
+    let request: CompleteEvmNonceRequest = serde_json::from_value(
+        closure
+            .get("completion_request")
+            .ok_or("completion request")?
+            .clone(),
+    )
+    .map_err(|_| "completion request")?;
+    let state_input_ref: LexicalValueRef = serde_json::from_value(
+        closure
+            .get("completion_state_input")
+            .ok_or("completion state input")?
+            .clone(),
+    )
+    .map_err(|_| "completion state input")?;
+    let completion = CompletedWalletNonce::from_recovery_closure(recovery_closure)
+        .map_err(|_| "completion closure")?
+        .provider_mutation_preimage()
+        .map_err(|_| "completion preimage")?;
+    Ok(DetachedAuditMutation::Completion {
+        request,
+        completion,
+        state_input_ref,
+    })
+}
+
+fn independently_verify_detached_completion(
+    recovery_closure: &str,
+    proof_value: &str,
+    trust: &DetachedAuditTrust,
+) -> std::result::Result<String, &'static str> {
+    const AUDIT_ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
+
+    if proof_value.is_empty()
+        || proof_value.len() > MAX_PROVIDER_PROOF_BYTES
+        || !proof_value.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err("proof bounds");
+    }
+    let proof: DetachedAuditProof = serde_json::from_str(proof_value).map_err(|_| "proof JSON")?;
+    if serde_json::to_string(&proof).map_err(|_| "proof encoding")? != proof_value {
+        return Err("proof canonicality");
+    }
+    if proof.provider_id != trust.provider_id
+        || proof.operation_key != trust.operation_key
+        || proof.context != trust.context
+    {
+        return Err("proof binding");
+    }
+    let context = &proof.context;
+    if context.database_oid == 0
+        || context.backend_pid <= 0
+        || context.transaction_id.is_none()
+        || context.snapshot_id.is_some()
+        || context.application_marker.len() != 62
+        || !context
+            .application_marker
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("provider context");
+    }
+    context
+        .store_incarnation
+        .validate()
+        .map_err(|_| "store incarnation")?;
+
+    let mutation = detached_audit_mutation_from_closure(recovery_closure)?;
+    let payload_digest = domain_content_digest(
+        "mfm.wallet-authority-provider.assertion-payload.v1",
+        &(&proof.context, &proof.operation_key, &mutation),
+    )
+    .map_err(|_| "payload digest")?;
+    if proof.payload_digest != payload_digest.as_str() {
+        return Err("payload binding");
+    }
+    let challenge = hex::decode(&proof.challenge).map_err(|_| "challenge")?;
+    if challenge.len() != 32 {
+        return Err("challenge length");
+    }
+    let signature = hex::decode(&proof.signature).map_err(|_| "signature")?;
+    if signature.len() != 64 {
+        return Err("signature length");
+    }
+    let mut signed = Vec::with_capacity(
+        AUDIT_ASSERTION_DOMAIN.len()
+            + challenge.len()
+            + "prepare-mutation".len()
+            + proof.payload_digest.len(),
+    );
+    signed.extend_from_slice(AUDIT_ASSERTION_DOMAIN);
+    signed.extend_from_slice(&challenge);
+    signed.extend_from_slice(b"prepare-mutation");
+    signed.extend_from_slice(proof.payload_digest.as_bytes());
+    UnparsedPublicKey::new(&ED25519, trust.public_key)
+        .verify(&signed, &signature)
+        .map_err(|_| "provider signature")?;
+
+    CompletedWalletNonce::project_public_result_from_recovery_closure(recovery_closure)
+        .map_err(|_| "public projection")
+}
+
 #[test]
 fn detached_completion_proof_verifies_and_rehydrates_without_io() {
     let fixture = persisted_completion_fixture();
@@ -533,6 +688,70 @@ fn detached_completion_proof_verifies_and_rehydrates_without_io() {
             .completion
             .canonical_terminal_outcome
             .canonical_public_result,
+    );
+}
+
+#[test]
+fn independent_detached_audit_verifies_provider_proof_and_public_projection() {
+    let fixture = persisted_completion_fixture();
+    let trust = DetachedAuditTrust {
+        provider_id: fixture.provider_id.clone(),
+        public_key: public_key(&SIGNING_SEED),
+        operation_key: fixture.operation_key.clone(),
+        context: detached_audit_context(&fixture.context),
+    };
+    let public_result = independently_verify_detached_completion(
+        &fixture.completion.recovery_closure,
+        &fixture.completion.provider_completion_attestation,
+        &trust,
+    )
+    .expect("independent detached completion audit");
+    assert_eq!(public_result, r#"{"execution_disposition":"succeeded"}"#);
+    assert_eq!(
+        public_result,
+        CompletedWalletNonce::project_public_result_from_recovery_closure(
+            &fixture.completion.recovery_closure,
+        )
+        .expect("closure-only public projection"),
+    );
+    assert_eq!(
+        serde_json::to_value(&fixture.mutation).expect("storage mutation JSON"),
+        serde_json::to_value(
+            &detached_audit_mutation_from_closure(&fixture.completion.recovery_closure)
+                .expect("detached mutation from closure"),
+        )
+        .expect("detached mutation JSON"),
+    );
+}
+
+#[test]
+fn independent_detached_audit_rejects_provider_and_projection_substitutions() {
+    let fixture = persisted_completion_fixture();
+    let trust = DetachedAuditTrust {
+        provider_id: fixture.provider_id.clone(),
+        public_key: public_key(&SIGNING_SEED),
+        operation_key: fixture.operation_key.clone(),
+        context: detached_audit_context(&fixture.context),
+    };
+    let mut forged_proof: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_proof.provider_id = "mfm.evm.fixture/substituted-provider".to_owned();
+    let forged_proof = serde_json::to_string(&forged_proof).expect("substituted proof");
+    assert!(independently_verify_detached_completion(
+        &fixture.completion.recovery_closure,
+        &forged_proof,
+        &trust,
+    )
+    .is_err());
+
+    let forged_projection = fixture.completion.recovery_closure.replace(
+        r#"\"execution_disposition\":\"succeeded\""#,
+        r#"\"execution_disposition\":\"reverted\""#,
+    );
+    assert!(
+        CompletedWalletNonce::project_public_result_from_recovery_closure(&forged_projection)
+            .is_err()
     );
 }
 
