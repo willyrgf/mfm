@@ -283,7 +283,7 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 | TT2-STORE-02 | High | Open | Multi-statement PostgreSQL reads are torn under `READ COMMITTED` | STORE-03, STORE-04 |
 | TT2-STORE-03 | High | Partial | Full-history loads after session issuance do not verify `run_history_heads` in the load snapshot | STORE-03 |
 | TT2-STORE-04 | High | Open | Contention classification queries an already-aborted transaction | STORE-01 |
-| TT2-STORE-05 | Medium | Partial | Memory and PostgreSQL still accept different canonical inputs | STORE-04 |
+| TT2-STORE-05 | Medium | Partial | The shared canonical boundary now aligns bounded memory/PostgreSQL inputs, but the complete generated/scale corpus remains unverified | STORE-04 |
 | TT2-STORE-06 | Medium | Partial | The SQL inventory misses generic and builder queries | STORE-05 |
 | TT2-STORE-07 | High | Partial | Prior-fact verification can repeatedly refold growing prefixes | STORE-06 |
 | TT2-EVM-01 | High | Proof gap | The production path reused an intent already completed by the deterministic path | EVM-01, VERIFY-01 |
@@ -646,23 +646,22 @@ Violated contract:
 Both backends must consume the same store-owned bounded canonical append/configuration values and
 accept or reject an identical corpus.
 
-Current implementation:
+Current implementation and evidence:
 
-- The shared append validator checks only object count/order/size/hash at
-  [canonical_append.rs lines 16-35](crates/kernel/store/src/structured/canonical_append.rs#L16).
-- Memory calls only that object validator at
-  [memory.rs lines 207-234](crates/kernel/store/src/structured/memory.rs#L207).
-- PostgreSQL additionally serializes and bounds the entire batch envelope at
-  [structured.rs lines 538-542](crates/storages/postgres/src/structured.rs#L538).
-- PostgreSQL configuration revisions have a 16 MiB bound in
-  [configuration.rs](crates/storages/postgres/src/configuration.rs#L18), while the memory
-  configuration backend has no equivalent candidate contract.
+- `CanonicalRunAppend` validates the complete bounded batch envelope before either backend
+  receives it; database envelope checks remain defense in depth.
+- `CanonicalConfigurationAppend` now canonicalizes and bounds the complete serialized revision
+  at `MAX_CONFIGURATION_REVISION_BYTES` before dispatch, so memory and PostgreSQL share the same
+  ingress decision.
+- Managed `run-2109539-1785986642051610798` passes 18 structured-history tests, including a
+  memory/PostgreSQL corpus for positive, exact-limit, one-byte-over, stale-predecessor, and
+  idempotent-replay outcomes.
 
 Consequence:
 
-The same semantically validated candidate can succeed in memory and fail in production storage.
-Tests against memory therefore do not prove production admissibility, and replay/conformance
-behavior differs by backend.
+The previously observed memory/production acceptance divergence is closed for the shared
+boundary and covered vector set. A complete generated, hostile, and scale acceptance corpus is
+still not independently reproduced, so the item remains Partial.
 
 Required resolution properties and proof:
 
