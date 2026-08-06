@@ -118,6 +118,7 @@ Post-step-12 implementation and proof revisions:
 | `db1b7503` | witness malformed ciphertext and wrong key identity |
 | `c832e5d8` | cover matching public key identity witness |
 | `624af5b2` | align configuration parity with sealed run status |
+| `7e467952` | expand sql inventory syntax fixtures |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -154,6 +155,11 @@ backend dispatch. Its managed qualification adds exact and one-byte-over
 serialized-revision vectors alongside positive, stale-predecessor, and
 idempotent replay cases, and refreshes integration assertions to the sealed
 `RunEvidenceStatus` API after the frontier cutover.
+
+`7e467952` extends the AST inventory fixture corpus with generic scalar and
+`query_as` calls, the checked `query_as!` macro, wrapped generic calls, and a
+`QueryBuilder::push` fragment. The runtime inventory and fixture tests pass;
+the broader query ownership and scale audit remains a separate residual.
 
 `1ef7d694` bounds configuration append ambiguity and transient configuration
 reads at eight attempts. `e7624406` removes the generic store-level snapshot
@@ -226,6 +232,7 @@ their own exact revisions.
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
 | configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2109539-1785986642051610798`, 18/18 structured-history tests |
+| PostgreSQL SQL inventory syntax fixtures | pass; `mfm-storage-postgres` inventory tests 2/2 |
 | wallet-nonce PostgreSQL storage qualification | pass |
 | structured EVM submission qualification | pass |
 | Bitcoin parity | pass |
@@ -337,7 +344,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, and idempotent replay cases; the complete generated/scale acceptance corpus remains unverified. |
-| STORE-06 | Conditional | SQL inventory and bounded producer-prefix path exist; generic/builder query inventory and long-history bound proof remain. |
+| STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
 | EVM-02 | Closed | Recovery reobserves chain state before any retained-candidate broadcast. |
