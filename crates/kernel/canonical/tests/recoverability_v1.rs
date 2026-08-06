@@ -108,6 +108,23 @@ fn structured_wire_contract_rejects_old_or_noncanonical_shapes() {
 }
 
 #[test]
+fn primitive_canonical_value_rejects_signed_json_numbers() {
+    let contract = RecoverabilityContract::embedded().expect("embedded annex is valid");
+    for bytes in [b"-1".as_slice(), b"-9223372036854775808"] {
+        assert_eq!(
+            contract
+                .strict_decode("mfm.primitive-canonical_value.v1", bytes)
+                .expect_err("signed native number must be rejected")
+                .code(),
+            RecoverabilityErrorCode::WrongType,
+        );
+    }
+    contract
+        .strict_decode("mfm.primitive-canonical_value.v1", b"1")
+        .expect("unsigned native number remains accepted");
+}
+
+#[test]
 fn current_fact_identity_query_and_run_domains_are_derived() {
     let contract = RecoverabilityContract::embedded().expect("embedded annex is valid");
     let corpus: Value = serde_json::from_slice(CORPUS).expect("corpus is JSON");

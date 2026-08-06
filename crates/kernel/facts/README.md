@@ -4,7 +4,8 @@ Pure fact authoring and selection semantics for the typed kernel.
 
 The crate owns:
 
-- exact descriptor projections and bounded canonical subject values;
+- exact descriptor projections and bounded canonical subject values (boolean, string, or
+  unsigned-integer scalars under the unsigned-native recoverability contract);
 - explicit producer-independent subject/response `ProposedFactValue` material,
   slot-indexed same-run `FactProposal`, and ordered, duplicate-free `FactSet`
   with nondecreasing fact-slot groups;

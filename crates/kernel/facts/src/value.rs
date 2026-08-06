@@ -23,11 +23,6 @@ impl FactScalar {
         Self::from_canonical_value(CanonicalValue::Bool(value))
     }
 
-    /// Creates a checked signed-integer scalar.
-    pub fn signed(value: i64) -> Result<Self> {
-        Self::from_canonical_value(CanonicalValue::Signed(value))
-    }
-
     /// Creates a checked unsigned-integer scalar.
     pub fn unsigned(value: u64) -> Result<Self> {
         Self::from_canonical_value(CanonicalValue::Unsigned(value))
@@ -37,13 +32,10 @@ impl FactScalar {
     pub fn from_canonical_value(value: CanonicalValue) -> Result<Self> {
         if !matches!(
             value,
-            CanonicalValue::Bool(_)
-                | CanonicalValue::String(_)
-                | CanonicalValue::Signed(_)
-                | CanonicalValue::Unsigned(_)
+            CanonicalValue::Bool(_) | CanonicalValue::String(_) | CanonicalValue::Unsigned(_)
         ) {
             return Err(FactError::Descriptor(
-                "fact scalar must be a boolean, string, or integer",
+                "fact scalar must be a boolean, string, or unsigned integer",
             ));
         }
         Ok(Self {
