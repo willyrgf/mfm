@@ -229,11 +229,7 @@ impl PriorRunFactSourceManifest {
     pub fn to_history_object(&self) -> Result<HistoryObject> {
         self.validate()?;
         let canonical = canonical_json(self)?;
-        if canonical.as_bytes().len() > MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES {
-            return Err(StructuredJournalError::Invariant(
-                "prior-run fact source manifest exceeds its canonical byte bound",
-            ));
-        }
+        validate_prior_run_source_manifest_bytes(canonical.as_bytes())?;
         HistoryObject::new(
             StableId::new(ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE)
                 .map_err(|_| StructuredJournalError::Identity)?,
@@ -244,11 +240,7 @@ impl PriorRunFactSourceManifest {
 
     /// Strictly decodes and validates one admitted source-manifest object.
     pub fn from_history_object(object: &HistoryObject) -> Result<Self> {
-        if object.canonical_json.len() > MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES {
-            return Err(StructuredJournalError::Invariant(
-                "prior-run fact source manifest exceeds its canonical byte bound",
-            ));
-        }
+        validate_prior_run_source_manifest_bytes(object.canonical_json.as_bytes())?;
         object.validate()?;
         if object.object_type.as_str() != ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE
             || object.content_ref.schema_id() != &prior_run_fact_source_manifest_schema_id()?
@@ -300,6 +292,40 @@ impl PriorRunFactSourceManifest {
         self.rules
             .iter()
             .try_for_each(PriorRunFactSourceRule::validate)
+    }
+}
+
+fn validate_prior_run_source_manifest_bytes(bytes: &[u8]) -> Result<()> {
+    if bytes.len() > MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES {
+        return Err(StructuredJournalError::Invariant(
+            "prior-run fact source manifest exceeds its canonical byte bound",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod prior_run_source_manifest_limit_tests {
+    use super::*;
+
+    #[test]
+    fn exact_manifest_byte_budget_is_accepted_and_one_over_is_rejected() {
+        assert_eq!(
+            validate_prior_run_source_manifest_bytes(&vec![
+                b'x';
+                MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES
+            ]),
+            Ok(())
+        );
+        assert_eq!(
+            validate_prior_run_source_manifest_bytes(&vec![
+                b'x';
+                MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES + 1
+            ]),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source manifest exceeds its canonical byte bound",
+            ))
+        );
     }
 }
 
