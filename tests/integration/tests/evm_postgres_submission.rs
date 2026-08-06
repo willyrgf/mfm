@@ -3510,6 +3510,13 @@ async fn run_worker_expect_crash_before_completion_commit(
     );
     let ready_directory = tempfile::tempdir().expect("create completion readiness directory");
     let ready_path = ready_directory.path().join("wallet-authority-ready");
+    let intercept_target = commit_proxy
+        .arm_after_statement(
+            CommitFault::HoldTransactionBeforeCommit,
+            1,
+            "INSERT INTO wallet_nonce_completions",
+        )
+        .expect("arm completion pre-commit process-loss fault");
     let mut child = worker_command(
         database,
         endpoint,
@@ -3536,9 +3543,6 @@ async fn run_worker_expect_crash_before_completion_commit(
             String::from_utf8_lossy(&output.stderr),
         );
     }
-    let intercept_target = commit_proxy
-        .arm(CommitFault::HoldTransactionBeforeCommit, 1)
-        .expect("arm completion pre-commit process-loss fault");
     if tokio::time::timeout(
         COMPLETION_BOUNDARY_TIMEOUT,
         commit_proxy.wait_for_intercepts(intercept_target),
@@ -3621,6 +3625,13 @@ async fn run_worker_expect_completion_acknowledgement_loss(
     );
     let ready_directory = tempfile::tempdir().expect("create completion readiness directory");
     let ready_path = ready_directory.path().join("wallet-authority-ready");
+    let intercept_target = commit_proxy
+        .arm_after_statement(
+            CommitFault::CommitAndLoseAcknowledgement,
+            1,
+            "INSERT INTO wallet_nonce_completions",
+        )
+        .expect("arm initial completion acknowledgement fault");
     let mut child = worker_command(
         database,
         endpoint,
@@ -3647,9 +3658,6 @@ async fn run_worker_expect_completion_acknowledgement_loss(
             String::from_utf8_lossy(&output.stderr),
         );
     }
-    let intercept_target = commit_proxy
-        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
-        .expect("arm initial completion acknowledgement fault");
     let output = tokio::time::timeout(COMPLETION_BOUNDARY_TIMEOUT, child.wait_with_output())
         .await
         .expect("completion acknowledgement worker did not settle")
