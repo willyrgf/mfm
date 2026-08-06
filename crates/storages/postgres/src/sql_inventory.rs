@@ -205,6 +205,16 @@ mod tests {
                 false,
             ),
             (
+                "negative_dynamic_unchecked_macro_block_alias_after_use",
+                r#"fn f(x: &str) { let _ = q!(format!("SELECT {x}")); use sqlx::query_unchecked as q; }"#,
+                false,
+            ),
+            (
+                "negative_dynamic_unchecked_macro_block_glob_after_use",
+                r#"fn f(x: &str) { let _ = query_unchecked!(format!("SELECT {x}")); use sqlx::*; }"#,
+                false,
+            ),
+            (
                 "negative_wrapped_catalog",
                 r#"fn f() { let _ = sqlx::query(helper(crate::sql_catalog::schema_set_role("mfm_t_0123456789abcdef_qlf"))); }"#,
                 false,
@@ -247,10 +257,31 @@ mod tests {
         }
 
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            let query_aliases = self.query_aliases.clone();
+            let typed_query_aliases = self.typed_query_aliases.clone();
+            let builder_aliases = self.builder_aliases.clone();
+            let query_glob_imported = self.query_glob_imported;
             if let Some((_, items)) = &item.content {
                 self.register_scope_imports(items);
             }
             syn::visit::visit_item_mod(self, item);
+            self.query_aliases = query_aliases;
+            self.typed_query_aliases = typed_query_aliases;
+            self.builder_aliases = builder_aliases;
+            self.query_glob_imported = query_glob_imported;
+        }
+
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            let query_aliases = self.query_aliases.clone();
+            let typed_query_aliases = self.typed_query_aliases.clone();
+            let builder_aliases = self.builder_aliases.clone();
+            let query_glob_imported = self.query_glob_imported;
+            self.register_block_imports(&block.stmts);
+            syn::visit::visit_block(self, block);
+            self.query_aliases = query_aliases;
+            self.typed_query_aliases = typed_query_aliases;
+            self.builder_aliases = builder_aliases;
+            self.query_glob_imported = query_glob_imported;
         }
 
         fn visit_item_use(&mut self, item: &'ast ItemUse) {
@@ -376,9 +407,14 @@ mod tests {
             for item in items {
                 if let syn::Item::Use(item_use) = item {
                     self.register_item_use(item_use);
-                    if is_sqlx_glob(&item_use.tree) {
-                        self.query_glob_imported = true;
-                    }
+                }
+            }
+        }
+
+        fn register_block_imports(&mut self, statements: &[syn::Stmt]) {
+            for statement in statements {
+                if let syn::Stmt::Item(syn::Item::Use(item_use)) = statement {
+                    self.register_item_use(item_use);
                 }
             }
         }
@@ -391,6 +427,9 @@ mod tests {
                 &mut self.typed_query_aliases,
                 &mut self.builder_aliases,
             );
+            if is_sqlx_glob(&item.tree) {
+                self.query_glob_imported = true;
+            }
         }
 
         fn is_query_path(&self, path: &ExprPath) -> bool {
