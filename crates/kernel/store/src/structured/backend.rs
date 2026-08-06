@@ -61,6 +61,27 @@ pub struct StructuredRunSnapshot {
     pub head: Option<JournalHead>,
 }
 
+const MAX_STRUCTURED_LOAD_ATTEMPTS: usize = 4;
+
+async fn load_snapshot_with_retry<B: StructuredHistoryBackend>(
+    backend: &B,
+    run_id: &RunId,
+) -> std::result::Result<StructuredRunSnapshot, StructuredStoreError> {
+    // PostgreSQL commits durable rows before acknowledging the external
+    // checkpoint successor. A concurrent reader can therefore receive one
+    // transient invalid snapshot while the checkpoint and SQL prefix converge.
+    // Retry only that classified race; persistent corruption remains a bounded
+    // failure and is never hidden by a fallback fold.
+    let mut snapshot = backend.load_snapshot(run_id).await;
+    for _ in 1..MAX_STRUCTURED_LOAD_ATTEMPTS {
+        if !matches!(&snapshot, Err(StructuredStoreError::InvalidHistory)) {
+            return snapshot;
+        }
+        snapshot = backend.load_snapshot(run_id).await;
+    }
+    snapshot
+}
+
 /// Raw atomic persistence seam behind the one shared structured fold.
 ///
 /// Implementations perform only exact-head locking/CAS, immutable object and
@@ -218,7 +239,7 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
 
     /// Loads and callback-free verifies one exact run for a Runtime action.
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let snapshot = self.backend.load_snapshot(run_id).await?;
+        let snapshot = load_snapshot_with_retry(self.backend.as_ref(), run_id).await?;
         let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
         verify_actionable_history(
             prior_run_fact_source(&self.backend),
@@ -295,7 +316,7 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryReader<B> {
 
     /// Loads and callback-free verifies one recorded run without live IO.
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let snapshot = self.backend.load_snapshot(run_id).await?;
+        let snapshot = load_snapshot_with_retry(self.backend.as_ref(), run_id).await?;
         let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
         verify_actionable_history(
             prior_run_fact_source(&self.backend),

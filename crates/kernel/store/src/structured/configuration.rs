@@ -318,7 +318,7 @@ pub struct ConfigurationHistoryWriter<B: ConfigurationHistoryBackend> {
     backend: Arc<B>,
 }
 
-const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 4;
+const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 8;
 
 async fn load_with_checkpoint_retry<B: ConfigurationHistoryBackend>(
     backend: &B,
@@ -453,7 +453,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // Reclassify the unchanged identity from a fresh read so a
                 // race cannot turn an append conflict into an unrelated stale
                 // predecessor result.
-                for _ in 0..3 {
+                for _ in 0..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
                     let resolved = self.load_for_append(revision.key()).await?;
                     match resolved.as_ref().and_then(|history| {
                         history_append_identity(
