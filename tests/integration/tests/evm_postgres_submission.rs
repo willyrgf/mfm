@@ -3661,10 +3661,56 @@ async fn run_worker_expect_completion_acknowledgement_loss(
             String::from_utf8_lossy(&output.stderr),
         );
     }
-    let output = tokio::time::timeout(COMPLETION_BOUNDARY_TIMEOUT, child.wait_with_output())
+    let mut stdout_reader = child
+        .stdout
+        .take()
+        .expect("completion acknowledgement worker stdout");
+    let mut stderr_reader = child
+        .stderr
+        .take()
+        .expect("completion acknowledgement worker stderr");
+    let status = match tokio::time::timeout(COMPLETION_BOUNDARY_TIMEOUT, child.wait()).await {
+        Ok(status) => status.expect("run completion acknowledgement worker"),
+        Err(_) => {
+            let _ = child.start_kill();
+            let status = child
+                .wait()
+                .await
+                .expect("wait for timed-out completion acknowledgement worker");
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            stdout_reader
+                .read_to_end(&mut stdout)
+                .await
+                .expect("read timed-out completion acknowledgement stdout");
+            stderr_reader
+                .read_to_end(&mut stderr)
+                .await
+                .expect("read timed-out completion acknowledgement stderr");
+            commit_proxy.release_held_transactions();
+            panic!(
+                "completion acknowledgement worker did not settle (status {:?}): {}{}",
+                status,
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            );
+        }
+    };
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    stdout_reader
+        .read_to_end(&mut stdout)
         .await
-        .expect("completion acknowledgement worker did not settle")
-        .expect("run completion acknowledgement worker");
+        .expect("read completion acknowledgement stdout");
+    stderr_reader
+        .read_to_end(&mut stderr)
+        .await
+        .expect("read completion acknowledgement stderr");
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
     assert_canaries_absent("completion-ack stdout", &output.stdout);
     assert_canaries_absent("completion-ack stderr", &output.stderr);
     if tokio::time::timeout(
