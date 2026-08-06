@@ -404,6 +404,74 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
 }
 
 #[tokio::test]
+async fn run_commit_acknowledgement_loss_retries_identical_batch() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/run-ack-loss").expect("operation id");
+    let (registry, document) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let assembled = open_structured_authoritative(
+        database.application_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify run acknowledgement store");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let command = admission(
+        operation_id.clone(),
+        document.clone(),
+        "postgres-run-ack-loss",
+    );
+
+    arm_commit_acknowledgement_unknown(&database.schema);
+    let (run_id, first_attempt) = runtime
+        .admit_run(command)
+        .await
+        .expect("commit acknowledgement loss must remain recoverable");
+    assert_eq!(
+        first_attempt.outcome(),
+        &mfm_runtime::history::HistoryAppendOutcome::AcknowledgementUnknown
+    );
+
+    let (replayed_run_id, replay_attempt) = runtime
+        .admit_run(admission(operation_id, document, "postgres-run-ack-loss"))
+        .await
+        .expect("retry exact run append after unknown acknowledgement");
+    assert_eq!(replayed_run_id, run_id);
+    assert!(matches!(
+        replay_attempt.outcome(),
+        mfm_runtime::history::HistoryAppendOutcome::ExistingSame(_)
+    ));
+
+    let audit_pool = database.independent_pool().await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT pg_catalog.count(*)::bigint FROM run_history_batches WHERE run_id = $1",
+    )
+    .bind(run_id.as_str())
+    .fetch_one(&audit_pool)
+    .await
+    .expect("count recovered run append rows");
+    assert_eq!(
+        count, 1,
+        "unknown acknowledgement must not duplicate the batch"
+    );
+    assert!(matches!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("load recovered run")
+            .status(),
+        RunEvidenceStatus::Actionable
+    ));
+
+    audit_pool.close().await;
+    drop(reader);
+    drop(runtime);
+    database.cleanup().await;
+}
+
+#[tokio::test]
 async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-snapshot").expect("operation id");
