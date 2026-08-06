@@ -49,8 +49,9 @@ use mfm_storage_postgres::{
     TestTargetCredentials,
 };
 use mfm_store::structured::{
-    assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
-    ConfigurationHistoryStore, ConfigurationRevision, ConfigurationStreamKey, ExportRunReader,
+    assemble_in_memory_runtime, fact_scan_counters, reset_fact_scan_counters,
+    AssembledStructuredRuntime, ConfigurationAppendRequest, ConfigurationHistoryStore,
+    ConfigurationRevision, ConfigurationStreamKey, ExportRunReader,
     MemoryConfigurationHistoryBackend, PhysicalBindingAuthorization, PhysicalBindingSupersession,
     PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
     RegistryProgramVerifier, RunEvidenceStatus, StructuredAdmissionMaterial,
@@ -2671,6 +2672,75 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn prior_run_fact_scan_folds_one_shared_producer_prefix_once() {
+    let database = TestDatabase::create().await;
+    let fixture = qualified_fact_scan_fixture_with_producer_state_count(2);
+    let consumer_operation = fixture.consumer_operation.clone();
+    let assembled = open_structured_authoritative(
+        database.application_sessions().await,
+        fixture.registry,
+        Arc::new(NoPhysicalBindings),
+    )
+    .await
+    .expect("qualify repeated fact scanner store");
+    let AssembledStructuredRuntime {
+        runtime,
+        export_reader,
+        ..
+    } = assembled;
+    let store_scope = export_reader.store_identity().store_scope_id.clone();
+    let consumer_run = derive_run_id(
+        &store_scope,
+        &default_tenant(),
+        &consumer_operation,
+        &InvocationIdentity::new("00000000-0000-4000-8000-000000000081")
+            .expect("consumer invocation"),
+    );
+
+    let _response = drive_qualified_fact_scan(
+        runtime,
+        &export_reader,
+        fixture.producer_operation,
+        fixture.consumer_operation,
+        fixture.producer_document,
+        fixture.consumer_document,
+        fixture.source_object,
+        fixture.request,
+    )
+    .await;
+
+    // Recompute only the retained consumer response so the counters describe one
+    // complete PostgreSQL fact scan, not setup or parity loads above.
+    reset_fact_scan_counters();
+    let response = retained_fact_response(&export_reader, &consumer_run).await;
+    let counters = fact_scan_counters();
+    assert!(!response.is_empty(), "retained response must be present");
+    assert!(
+        counters.invocations > 0,
+        "the retained response must be scanned"
+    );
+    assert_eq!(
+        counters.maximum_publication_pages, 1,
+        "two dense publications fit one bounded page per scan"
+    );
+    assert_eq!(
+        counters.maximum_producer_prefix_loads, 1,
+        "all routes for one producer reuse one loaded prefix per scan"
+    );
+    assert_eq!(
+        counters.maximum_fold_batches, 3,
+        "one admission plus two producer transitions are folded once per scan"
+    );
+    assert_eq!(
+        counters.producer_prefix_loads, counters.invocations,
+        "each transiently retried scan still loads one producer prefix"
+    );
+
+    drop(export_reader);
+    database.cleanup().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prior_run_fact_scan_accepts_empty_frontier_and_excludes_ineligible_source() {
     let database = TestDatabase::create().await;
@@ -3477,19 +3547,30 @@ struct QualifiedFactScanFixture {
 }
 
 fn qualified_fact_scan_fixture() -> QualifiedFactScanFixture {
-    qualified_fact_scan_fixture_with_source_operation(None)
+    qualified_fact_scan_fixture_with_source_operation_and_state_count(None, 1)
 }
 
 fn qualified_fact_scan_fixture_excluding_producer() -> QualifiedFactScanFixture {
-    qualified_fact_scan_fixture_with_source_operation(Some(
-        stable("mfm.postgres.fixture/excluded-fact-scan-producer")
-            .expect("excluded source operation"),
-    ))
+    qualified_fact_scan_fixture_with_source_operation_and_state_count(
+        Some(
+            stable("mfm.postgres.fixture/excluded-fact-scan-producer")
+                .expect("excluded source operation"),
+        ),
+        1,
+    )
 }
 
-fn qualified_fact_scan_fixture_with_source_operation(
-    source_operation: Option<StableId>,
+fn qualified_fact_scan_fixture_with_producer_state_count(
+    producer_state_count: usize,
 ) -> QualifiedFactScanFixture {
+    qualified_fact_scan_fixture_with_source_operation_and_state_count(None, producer_state_count)
+}
+
+fn qualified_fact_scan_fixture_with_source_operation_and_state_count(
+    source_operation: Option<StableId>,
+    producer_state_count: usize,
+) -> QualifiedFactScanFixture {
+    assert!(producer_state_count > 0);
     let producer_operation =
         stable("mfm.postgres.fixture/fact-scan-producer").expect("producer operation");
     let consumer_operation =
@@ -3507,7 +3588,14 @@ fn qualified_fact_scan_fixture_with_source_operation(
         .expect("source manifest object");
     let request = FactSelectionRequest::new(
         source_object.content_ref.clone(),
-        FactSelectionScanBounds::new(1, 64, 1_048_576, 16, 65_536).expect("fact scan bounds"),
+        FactSelectionScanBounds::new(
+            u64::try_from(producer_state_count).expect("producer state count fits u64"),
+            64,
+            1_048_576,
+            16,
+            65_536,
+        )
+        .expect("fact scan bounds"),
         vec![FactSelectionQuery::new(
             fact_descriptor.descriptor_ref.clone(),
             CanonicalFactPredicate::from_canonical_json(br#"{"value":7}"#).expect("fact predicate"),
@@ -3588,7 +3676,8 @@ fn qualified_fact_scan_fixture_with_source_operation(
         )
         .expect("consumer state registration");
 
-    let producer_program = fact_state_program(producer_operation.clone());
+    let producer_program =
+        fact_state_program_with_count(producer_operation.clone(), producer_state_count);
     let consumer_program = fact_read_program(consumer_operation.clone());
     assembly
         .register_entry_point(
@@ -3663,13 +3752,11 @@ where
     // Keep each complete history fold on a Tokio worker stack; the test still drives the
     // producer and consumer sequentially, but does not inherit the small test-thread stack.
     let runtime = Arc::new(runtime);
-    assert_eq!(
-        request
-            .scan_bounds()
-            .expect("fixture scan bounds")
-            .maximum_publications(),
-        1
-    );
+    let expected_publications = request
+        .scan_bounds()
+        .expect("fixture scan bounds")
+        .maximum_publications();
+    assert!(expected_publications > 0);
     let store_scope = reader.store_identity().store_scope_id.clone();
     let producer_invocation =
         InvocationIdentity::new("00000000-0000-4000-8000-000000000080").expect("producer inv");
@@ -3700,17 +3787,30 @@ where
         .await
         .expect("admit fact scan producer");
     assert_eq!(got_producer, producer_run);
-    assert_eq!(
-        tokio::spawn({
+    for transition in 0..expected_publications {
+        let outcome = tokio::spawn({
             let runtime = Arc::clone(&runtime);
             let run_id = producer_run.clone();
             async move { runtime.drive_once(&run_id).await }
         })
         .await
         .expect("drive fact scan producer task")
-        .expect("drive fact scan producer"),
-        DriveOutcome::TransitionCommitted { closed: true }
-    );
+        .expect("drive fact scan producer");
+        assert!(
+            matches!(
+                outcome,
+                DriveOutcome::TransitionCommitted { closed: true }
+                    if transition + 1 == expected_publications
+            ) || matches!(
+                outcome,
+                DriveOutcome::TransitionCommitted { closed: false }
+                    if transition + 1 < expected_publications
+            ),
+            "producer transition {}/{} must close only at the final fact publication: {outcome:?}",
+            transition + 1,
+            expected_publications,
+        );
+    }
 
     let (got_consumer, _) = runtime
         .admit_run(fact_scan_admission(
@@ -3754,7 +3854,10 @@ where
         response_value.request_digest,
         request.request_digest().expect("fixture request digest")
     );
-    assert_eq!(response_value.attestation.frontier.fact_order, 1);
+    assert_eq!(
+        response_value.attestation.frontier.fact_order,
+        expected_publications
+    );
     let [query] = response_value.query_results.as_slice() else {
         panic!("fact scanner must return its one authored query");
     };
@@ -3876,18 +3979,31 @@ fn sequential_state_program(
 }
 
 fn fact_state_program(operation_id: StableId) -> mfm_spec::structured::AuthoredStructuredProgram {
+    fact_state_program_with_count(operation_id, 1)
+}
+
+fn fact_state_program_with_count(
+    operation_id: StableId,
+    state_count: usize,
+) -> mfm_spec::structured::AuthoredStructuredProgram {
+    assert!(state_count > 0);
     let mut builder =
         OperationBuilder::<Value, Never>::new(operation_id, stable("root").expect("root id"))
             .expect("builder");
-    let input = builder
+    let mut output = builder
         .input::<Value>(stable("input").expect("input id"))
         .expect("input root");
-    let output = builder
-        .root()
-        .state::<FactCopyState>(stable("fact-copy").expect("fact state label"), &input)
-        .expect("fact state")
-        .infallible()
-        .expect("infallible fact state");
+    for ordinal in 0..state_count {
+        output = builder
+            .root()
+            .state::<FactCopyState>(
+                stable(&format!("fact-copy-{ordinal}")).expect("fact state label"),
+                &output,
+            )
+            .expect("fact state")
+            .infallible()
+            .expect("infallible fact state");
+    }
     let completion = builder.succeed(&output).expect("success");
     builder.finish(completion).expect("fact program")
 }
