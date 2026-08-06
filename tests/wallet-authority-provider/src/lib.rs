@@ -2017,15 +2017,12 @@ impl ProviderState {
     }
 
     async fn recover_checkpoint_if_idle(&self) -> Result<(), ProviderTestError> {
-        let active_leases = self
-            .mutable
-            .lock()
-            .map_err(|_| ProviderTestError::Unavailable)?
-            .active_leases;
-        if active_leases != 0 {
+        // Lease admission takes this same mutex, so the idle check and the
+        // recovery CAS cannot be interleaved with a new provider mutation.
+        let _observation = self.checkpoint_observation.lock().await;
+        if self.active_leases()? != 0 {
             return Ok(());
         }
-        let _observation = self.checkpoint_observation.lock().await;
         let target = self.checkpoint_target()?;
         let prefix =
             wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
@@ -2300,6 +2297,13 @@ impl ProviderState {
         expected_incarnation: &WalletNonceStoreIncarnation,
         expected_provider_head: &EvmWalletReference,
     ) -> Result<ActiveLeaseGuard, ProviderTestError> {
+        // Keep checkpoint recovery from observing idle state while this lease
+        // is being admitted; the guard is held until the active-lease count is
+        // incremented.
+        let _observation = self
+            .checkpoint_observation
+            .try_lock()
+            .map_err(|_| ProviderTestError::Unavailable)?;
         let mut state = self
             .mutable
             .lock()
@@ -2324,6 +2328,13 @@ impl ProviderState {
     ) -> Result<ActiveLeaseGuard, ProviderTestError> {
         let incarnation_ref = canonical_wallet_reference(expected_incarnation)
             .map_err(|_| ProviderTestError::Invalid)?;
+        // Keep checkpoint recovery from observing idle state while this lease
+        // is being admitted; the guard is held until the active-lease count is
+        // incremented.
+        let _observation = self
+            .checkpoint_observation
+            .try_lock()
+            .map_err(|_| ProviderTestError::Unavailable)?;
         let mut state = self
             .mutable
             .lock()
