@@ -274,7 +274,7 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name()).await;
+            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
             let rows = select_rows(transaction.conn(), key, None).await?;
             transaction.commit_checked(&self.target).await?;
