@@ -183,7 +183,19 @@ impl Keystore {
         id: Uuid,
         witness: super::secure_key::KeyMaterialWitness,
     ) -> Result<super::secure_key::ProtectedKeyMaterial, KeystoreError> {
-        let decrypted = self.decrypt_entry_bytes(id)?;
+        let master_key = self.master_key.as_ref().ok_or(KeystoreError::Locked)?;
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or(KeystoreError::KeyNotFound(id))?;
+        let decrypted = self.decrypt_data_with_witness(
+            master_key,
+            &entry.nonce,
+            &entry.encrypted_data,
+            entry.id.as_bytes(),
+            &witness,
+        )?;
         super::secure_key::ProtectedKeyMaterial::from_decrypted_exact_with_witness(
             decrypted, witness,
         )
