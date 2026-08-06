@@ -7,8 +7,8 @@ This document began as the handoff problem ledger for the remediation implementa
 is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- current implementation/evidence source tip: `dcb726087a7fb1c239f0277e2191c066b60952a1`;
-- current evidence/documentation head before this refresh: `5a8b52a1`;
+- current implementation/evidence source tip: `f4fd9a9b8a2c9598158ca7dfa2b6dc28cb09b15a`;
+- current evidence/documentation head before this refresh: `8829dec9`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
   [PROBLEMS_TT1_IMPLRFC_RUNTIME.md](PROBLEMS_TT1_IMPLRFC_RUNTIME.md);
@@ -17,7 +17,7 @@ is the re-audit recorded below.
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The current production code being assessed is the source tree at `dcb72608`; the detailed finding
+The current production code being assessed is the source tree at `f4fd9a9b`; the detailed finding
 sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
@@ -56,7 +56,7 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
-## Current re-audit at `dcb72608`
+## Current re-audit at `f4fd9a9b`
 
 The later implementation revisions and focused evidence supersede the historical disposition
 above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
@@ -78,6 +78,9 @@ The configuration writer also recovers one committed-but-unknown acknowledgement
 revision and one durable row; broader acknowledgement-loss, promotion, and production-authority
 matrices remain conditional. The separate run-append fault witness now covers one injected
 serialization and one deadlock classification after rollback.
+The run append path also injects one committed-but-unknown acknowledgement, retries the exact
+candidate, and proves one durable batch with `ExistingSame` resolution; cross-process
+acknowledgement and promotion remain conditional.
 Deterministic run and configuration read barriers now release the external fixation, commit a
 successor while the reader remains in one repeatable-read snapshot, and prove old-complete-prefix
 then new-prefix behavior. Revision `dcb72608` also injects one `40001` and one `40P01` batch
@@ -311,7 +314,7 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 | TT2-AUTH-01 | Blocker | Closed | Live physical access is assembled behind Runtime-owned, marker-sealed authority | AUTH-01 |
 | TT2-AUTH-02 | Blocker | Closed | Production PostgreSQL login material is issued through an opaque deployment admission | AUTH-03 |
 | TT2-STORE-01 | Blocker | Conditional | The generic PostgreSQL target still needs concrete production external-fence integration | AUTH-04, STORE-02 |
-| TT2-STORE-02 | High | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared-successor restart, stale-worker sidecar arbitration, one committed-but-unknown acknowledgement recovery pass, and injected 40001/40P01 rollback classification pass, but broader acknowledgement-loss, promotion, and production fault matrices remain | STORE-03, STORE-04 |
+| TT2-STORE-02 | High | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared-successor restart, stale-worker sidecar arbitration, run and configuration committed-but-unknown acknowledgement recovery, and injected 40001/40P01 rollback classification pass, but cross-process acknowledgement, promotion, and production fault matrices remain | STORE-03, STORE-04 |
 | TT2-STORE-03 | High | Closed | Full-history loads verify the indexed head inside the same backend snapshot | STORE-03 |
 | TT2-STORE-04 | High | Closed | Contention classification rolls back before bounded identity reconciliation | STORE-01 |
 | TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; escaped JSON, exact UTF-8 byte-boundary/one-byte-over, 32-shape, and 32-revision sequential vectors pass, while the complete generated/hostile/large-scale corpus remains unverified | STORE-04 |
@@ -566,10 +569,10 @@ Current implementation:
 
 Current re-audit: the production read transactions now use `REPEATABLE READ`, query the indexed
 head before releasing the external fixation, and load batches/objects or revisions from that same
-transaction snapshot. Revision `dcb72608` adds deterministic run and configuration barriers that
-commit a successor after fixation release and prove the reader returns the old complete prefix;
-the next read observes the successor. The bullets above preserve the original finding at the
-historical tree.
+transaction snapshot. The current source retains deterministic run and configuration barriers
+that commit a successor after fixation release and prove the reader returns the old complete
+prefix; the next read observes the successor. The bullets above preserve the original finding at
+the historical tree.
 
 Minimal interleaving:
 
@@ -659,8 +662,8 @@ Current implementation:
 
 Current re-audit: the contention branches now roll back the failed transaction before reacquiring
 the canonical lock and classifying the append through a fresh transaction. The managed same-stream
-race, exact acknowledgement-recovery, and injected `40001`/`40P01` rollback tests pass this path;
-broader acknowledgement, promotion, and production cross-process fault injection remain
+race, run/configuration acknowledgement-recovery, and injected `40001`/`40P01` rollback tests
+pass this path; cross-process acknowledgement, promotion, and production fault injection remain
 unverified. The bullets above preserve the original finding at the historical tree.
 
 PostgreSQL marks a transaction failed after those errors. Further SQL cannot classify anything
