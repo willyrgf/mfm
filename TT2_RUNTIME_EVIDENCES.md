@@ -237,7 +237,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Normal status now reads the maintained domain projection, exact frontier, and bounded candidate prefix without lifetime reservation `COUNT/MAX`; the primary-key `EXPLAIN` regression passes, while the long-history query-count/latency matrix remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Completion retains terminal witnesses and activated prefixes, but a full independent public-result closure audit is incomplete. |
+| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip and hostile tamper tests pass, while persisted-closure-alone/later-run projection, multi-candidate reload, and independent offline/public-result proofs remain. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -309,6 +309,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `56c533ae` | `extend wallet query plan proof` | post-history `EXPLAIN (ANALYZE)` checks for projection, reservation, candidate, completion, and frontier paths |
 | `dec2f0c4` | `prove wallet completion closure reload` | serialized completion closure revalidates every preimage and preserves public-result bytes |
 | `266d6889` | `accept bounded wallet projection scan` | one-row domain projection plan is accepted explicitly; multi-row exact-key index checks remain strict |
+| `ed7b341e` | `bind completion closure permits` | exact per-candidate permit/ordinal and reservation observation-round bindings; hostile tamper tests; independent review found no implementation gap |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:
@@ -323,8 +324,10 @@ result: ok — 1 task, 4 tests passed, 0 failed in 660.48s
 Its real-history probe keeps normal-status and reserve/activate/complete
 statement counts constant after 64 completed reservations, captures frontend
 Q/P SQL text for baseline/mutation/final-status aggregate rejection, and
-checks `EXPLAIN (ANALYZE)` one-row/index plans for the maintained projection and
-exact historical keys. The superseded diagnostic `run-1971258-1785975345382628345`
+checks `EXPLAIN (ANALYZE)` indexed one-row plans for the frontier, exact
+reservation, candidate-prefix, and completion keys. The one-row domain
+projection is allowed to use a bounded sequential plan. The superseded
+diagnostic `run-1971258-1785975345382628345`
 failed only because the first version incorrectly required an index for the
 one-row domain projection; PostgreSQL selected a bounded sequential plan, and
 `266d6889` records that valid case.
@@ -338,11 +341,19 @@ nix run .#run -- --task postgres-sqlx-offline-check
 run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
 nix develop -c cargo test -p mfm-keystore — 86 unit tests + 9 doctests passed
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture — 1 passed
+nix develop -c cargo test -p mfm-evm — 47 unit tests + signing UI trybuild + 2 doctests passed on `ed7b341e`
 ```
 
+Independent review of exact `ed7b341e` confirmed the permit/ordinal and
+reservation observation-round bindings, and found no implementation gap in
+the closure cutover. Its residual is proof scope only: persisted-closure-alone
+projection, later-run/multi-candidate reload, and an independent offline/public
+result audit remain unexecuted.
+
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
-still lacks a full latency and adversarial non-aggregate scan matrix; EVM-09
-still lacks an independent offline/public-result audit; SEC-01 still lacks
-failure-path allocation witnesses; and the external trust, live multi-hop
+still lacks projection-index/scale, latency, and adversarial non-aggregate scan
+evidence; EVM-09 still lacks persisted-closure-alone/later-run projection,
+multi-candidate, and independent offline/public-result proofs; SEC-01 still
+lacks failure-path allocation witnesses; and the external trust, live multi-hop
 export, later-valid-audit-artifact, cross-process/fault, quality, and complete
 verification residuals remain Conditional.

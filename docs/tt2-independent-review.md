@@ -4,10 +4,10 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The focused follow-up candidate is `266d6889`, which includes the bounded
-wallet plan checks, completion-closure reload proof, and protected-key
-allocation continuity proof below. Focused checks and the historical exact
-composed source gate pass. The plan requires a PASS only when every
+The focused follow-up candidate is `ed7b341e`, which includes the bounded
+wallet plan checks, completion-closure reload proof, protected-key allocation
+continuity proof, and completion-closure permit/observation binding proof
+below. Focused checks and the historical exact composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
 
@@ -44,9 +44,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `266d6889` (`extend wallet query plan proof`,
-  `accept bounded wallet projection scan`), including `dec2f0c4` (completion
-  closure reload) and `9390503c` (production decrypt allocation witness).
+- Focused follow-up candidate: `ed7b341e` (`bind completion closure permits`),
+  including `266d6889` (bounded wallet projection scan), `dec2f0c4`
+  (completion closure reload), and `9390503c` (production decrypt allocation
+  witness).
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this documentation-only commit after the exact gate;
   the candidate review was performed against the exact hash above.
@@ -77,7 +78,7 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
   `ebc4f8a81`, `7530a4479`, and `f8568ff26`. None changes Rust, SQL, generated
   contracts, or test behavior. The current evidence refresh follows the
-  `82e474ca` gate and is documentation-only.
+  `82e474ca` gate; the closure-binding follow-up is `ed7b341e`.
 - Original implementation baseline: `07b9d7311daae32230d7a487aa82e07f0d27ff2b`
 - Historical review evidence: `258059180` (FAIL), `40612039f` (FAIL),
   `16fe501a` (FAIL), `9bd6f7056` (PASS for its candidate), and `76ce09085`
@@ -161,13 +162,21 @@ sequence. The full composed gate was not preceded by separate composed
 check/test/test-db runs.
 
 The focused follow-up candidate was qualified separately after the historical
-composed gate:
+composed gate. The final EVM closure-binding revision was then reviewed
+directly against its exact commit:
 
 ```text
 nix run .#run -- --task wallet-nonce-postgres-storage-qualification
 source: 266d6889
 run id: run-1977166-1785976039045273113
 result: ok — 1 task, 4 tests passed, 0 failed in 660.48s
+
+nix develop -c cargo test -p mfm-evm
+source: ed7b341e
+result: 47 unit tests passed; signing UI trybuild and 2 doctests passed
+
+independent review: ed7b341e
+result: exact validation and hostile-test review passed; no implementation gap
 ```
 
 That run includes the 64 completed reserve/activate/complete reservations,
@@ -282,9 +291,9 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-04 | Closed | Exhaustion reconciles authoritative final status before closing. |
 | TT2-EVM-05 | Closed | Stable caller intent and separate semantic digest conflict behavior are implemented and tested. |
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
-| TT2-EVM-07 | Conditional | A managed 64-reservation real-history probe holds status and reserve/activate/complete Q/E counts constant, captures Q/P SQL with no lifetime reservation `COUNT/MAX`, and checks indexed/one-row `EXPLAIN (ANALYZE)` plans for exact-key paths plus the bounded domain projection; a full latency and adversarial non-aggregate scan matrix remains. |
+| TT2-EVM-07 | Conditional | A managed 64-reservation probe holds status and reserve/activate/complete Q/E counts constant, rejects captured Q/P lifetime `COUNT/MAX`, and checks indexed one-row `EXPLAIN (ANALYZE)` plans for frontier/reservation/candidate/completion paths; the one-row domain projection may use a bounded sequential plan, and latency/scale plus a strict projection-index/non-aggregate scan matrix remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Completion retains terminal witnesses/prefixes and the full recovery closure; serialized closure reload revalidates every preimage and preserves the canonical public result, while an independent offline/public-result audit remains. |
+| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip and hostile tamper tests pass, while persisted-closure-alone/later-run projection, multi-candidate reload, and independent offline/public-result proofs remain. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
