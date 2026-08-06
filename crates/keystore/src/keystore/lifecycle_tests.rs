@@ -303,6 +303,10 @@ fn decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup() {
         format!("{address:?}"),
         "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf"
     );
+    secure
+        .sign_hash_recoverable(&[0_u8; 32])
+        .expect("sign with the transferred production allocation");
+    assert!(witness.observed_same_allocation());
     drop(secure);
     assert!(witness.observed_cleanup());
 }
