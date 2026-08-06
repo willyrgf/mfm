@@ -564,12 +564,10 @@ impl QualifiedEvmRoutingCatalog {
         let checkpoint = decode_fixed_opaque(&checkpoint)?;
         let finish_authorization_commitment =
             decode_fixed_opaque(&finish_authorization_commitment)?;
-        if route_challenges.is_empty()
-            || route_challenges.len() > MAX_DEPLOYMENT_ROUTES
-            || route_challenges.len() != self.descriptor.generations().len()
-        {
-            return Err(PostgresEvmWalletError::InvalidAuthority);
-        }
+        validate_deployment_route_count(
+            route_challenges.len(),
+            self.descriptor.generations().len(),
+        )?;
         let challenges = route_challenges
             .into_iter()
             .zip(self.descriptor.generations())
@@ -833,6 +831,13 @@ impl DeploymentAssemblyRouteProof {
             proof,
         })
     }
+}
+
+fn validate_deployment_route_count(route_count: usize, expected_count: usize) -> Result<()> {
+    if route_count == 0 || route_count > MAX_DEPLOYMENT_ROUTES || route_count != expected_count {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    Ok(())
 }
 
 /// Nonforgeable provider-finished evidence consumed by the application assembly bracket.
@@ -2170,5 +2175,47 @@ mod frame_tests {
         let one_byte_over = vec![b'x'; MAX_FINISH_AUTHORIZATION_BYTES + 1];
         let one_byte_over_digest = *mfm_canonical::sha256_digest_bytes(&one_byte_over).as_bytes();
         assert!(validate_finish_authorization(&one_byte_over, &one_byte_over_digest).is_err());
+    }
+
+    #[test]
+    fn deployment_route_count_accepts_exact_budget_and_rejects_one_route_over() {
+        assert!(
+            validate_deployment_route_count(MAX_DEPLOYMENT_ROUTES, MAX_DEPLOYMENT_ROUTES).is_ok()
+        );
+        assert!(validate_deployment_route_count(
+            MAX_DEPLOYMENT_ROUTES + 1,
+            MAX_DEPLOYMENT_ROUTES + 1
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn deployment_route_proof_accepts_exact_budget_and_rejects_one_byte_over() {
+        let route_generation_ref = ContentRef::new(
+            mfm_ids::SchemaId::new(
+                "mfm.test.provider-route-generation",
+                "1",
+                mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                mfm_canonical::sha256_digest_bytes(b"mfm.test.provider-route-generation"),
+            )
+            .expect("route schema"),
+            mfm_ids::ContentDigest::from_digest(
+                mfm_ids::DigestAlgorithm::Sha256V1,
+                mfm_canonical::sha256_digest_bytes(b"mfm.test.provider-route-generation.ref"),
+            ),
+        )
+        .expect("route generation reference");
+        DeploymentAssemblyRouteProof::new(
+            0,
+            route_generation_ref.clone(),
+            vec![b'x'; MAX_DEPLOYMENT_PROOF_BYTES].into_boxed_slice(),
+        )
+        .expect("exact deployment proof budget is accepted");
+        assert!(DeploymentAssemblyRouteProof::new(
+            0,
+            route_generation_ref,
+            vec![b'x'; MAX_DEPLOYMENT_PROOF_BYTES + 1].into_boxed_slice(),
+        )
+        .is_err());
     }
 }
