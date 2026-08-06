@@ -3358,9 +3358,9 @@ fn complete_structured_pipeline_has_stable_golden_bytes_and_execution() {
             "coverage_sha256=34c64ede64588319bd6a4ff105757cffab545345313642eb68a0a3ab860a1d85\n",
             "component_manifest_sha256=532e066ea4b6baca3b758c1fc1b072e39f6d1c26c910e3cf5955571b14f40ff2\n",
             "implementation_manifest_sha256=a4973d3abaf3088110571cfc3b8da047b06fae9f5d6a4023d45d3e4c9cbea9fb\n",
-            "root_sha256=4b95a5f535d0b5f032c88ea19d83a7915567eb28150a7869e3749239b57b0275\n",
-            "certified_ref=ContentRef { schema_id: Identity(\"schema:mfm.certified-program:1:sha256-jcs-v1:3fb6529deb28e23b49f2f978846d0051070f189478e301210233c019b0646b19\"), content_digest: Identity(\"content:sha256-v1:6f233dcf6d029c455c3acef4901aa7557811d48db7deda6c12f41e81db6a8d4d\") }\n",
-            "closure_digest=content:sha256-v1:75911bf40c9c8a829e685f5661822297dac9f41bd22b72956f390f665ef9d15a",
+            "root_sha256=fe2c9a5d477c35710ba8624f90fadaba822df5ca94d7edfd9cf1a08a9eea1b22\n",
+            "certified_ref=ContentRef { schema_id: Identity(\"schema:mfm.certified-program:1:sha256-jcs-v1:3fb6529deb28e23b49f2f978846d0051070f189478e301210233c019b0646b19\"), content_digest: Identity(\"content:sha256-v1:3b120f4a9b85f0770099e4d5c3ad00197102c388cd75e0a69561e45eaa4c039c\") }\n",
+            "closure_digest=content:sha256-v1:f969b2b474f5c0ac224d81806f2c620df75ab968cd03e35e6d8c6d92d842a7a4",
         )
     );
 }
@@ -5919,15 +5919,14 @@ fn fixture_closure_digest(
     let closure_items = closure
         .iter()
         .map(|object| {
-            (
-                &object.object_type,
-                &object.content_ref,
-                object
-                    .value
-                    .canonical_json()
-                    .expect("component canonical bytes")
-                    .to_vec(),
-            )
+            let canonical_value = object
+                .value
+                .canonical_json()
+                .expect("component canonical bytes");
+            let raw_value =
+                serde_json::value::RawValue::from_string(canonical_value.as_str().to_owned())
+                    .expect("raw component JSON");
+            (&object.object_type, &object.content_ref, raw_value)
         })
         .collect::<Vec<_>>();
     let canonical = canonical_fixture_bytes(&(components, closure_items));

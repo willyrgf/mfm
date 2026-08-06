@@ -107,6 +107,10 @@ closure, and secret-free implementation manifest. Admission resolves the trusted
 from the qualified registry; a caller cannot select weaker predicates. A persisted verifier
 extracts the authored object, repeats certification, and requires the exact root and complete
 document. Its cache is keyed by certified content identity, never by a nominal entry-point id.
+The closure digest inserts each already-canonical component value as raw JSON within its enclosing
+canonical preimage. This preserves the exact retained object bytes while avoiding a JSON number per
+byte representation that could inflate a valid qualified program past the generated 32 MiB
+canonical-document bound.
 
 Registered authored programs may be replaced only through the support-envelope API of process
 qualification before a registry is finalized. That replacement changes which authored candidate a

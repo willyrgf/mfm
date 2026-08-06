@@ -497,6 +497,12 @@ CertifiedProgramRef =
 )
 ```
 
+Each closure entry carries its exact already-canonical object bytes as raw JSON inside the enclosing
+canonical preimage. Implementations MUST NOT serialize those bytes as a JSON numeric array; that
+representation preserves the bytes but can expand a valid qualified program past the generated
+canonical-document budget. The raw JSON form remains deterministic because the object bytes have
+already passed canonical validation before insertion.
+
 `CertifiedProgram`, `CertifiedProgramRef`, and `canonical_component_closure_digest` are not
 closure inputs and can never be reached as outbound component references. The digest preimage is
 therefore non-self-referential. Registered schema field order plus the stated sequence/map rules,
