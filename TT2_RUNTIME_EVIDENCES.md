@@ -46,7 +46,7 @@ implemented and the focused candidate checks are green, but the plan's strict
   External termination, OOM, and other resource-failure behavior remains
   outside package-level witness coverage.
 - The shared configuration append boundary now rejects an oversized serialized
-  revision before backend dispatch. The clean managed 18-test PostgreSQL
+  revision before backend dispatch. The clean managed 19-test PostgreSQL
   qualification compares memory and PostgreSQL on positive, exact-limit,
   one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact
   UTF-8 byte-boundary value and its one-byte-over rejection, 32 deterministic
@@ -126,6 +126,7 @@ Post-step-12 implementation and proof revisions:
 | `fce1edca` | fix checkpoint preparation durability |
 | `27edd8c6` | harden checkpoint sidecar arbitration |
 | `cf74053f` | expand configuration boundary corpus |
+| `77a06884` | exercise configuration acknowledgement recovery |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -423,6 +424,23 @@ qualification retains the existing positive/exact/one-over, stale,
 idempotent, 32-shape, 32-successor, race, and fresh-process cases; broader
 generated, hostile, and large-scale coverage remains conditional.
 
+The acknowledgement-recovery and bounded-race follow-up was then qualified on
+the clean source tip `77a06884`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: 77a06884
+run id: run-2167617-1785992166392324915
+result: ok — 19 structured-history tests passed, 0 failed in 31.76s
+```
+
+This run injects one committed-but-unknown configuration acknowledgement and
+asserts exact retry, one durable row, and the recovered reader head. The
+configuration retry loop also yields between its bounded attempts so a
+committed SQL prefix and its external acknowledgement cannot be misclassified
+as a permanent stale result. The broader serialization/deadlock, promotion,
+and production-authority matrix remains unverified.
+
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
 
@@ -448,7 +466,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | AUTH-01 | Closed | Runtime/physical access is marker-sealed and API-surface tests reject ordinary implementations. |
 | AUTH-02 | Closed | PostgreSQL session issuance is bound to the external deployment authority and private credentials. |
 | STORE-01 | Conditional | External target/checkpoint trust is explicit and exercised by fakes; concrete production trust integration is absent. |
-| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared restart, strict acknowledgement, and stale-worker sidecar arbitration now pass, while injected serialization/deadlock, acknowledgement-loss, promotion, and production-authority matrices remain absent. |
+| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, and one committed-but-unknown acknowledgement recovery pass, while injected serialization/deadlock, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |

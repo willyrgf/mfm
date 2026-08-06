@@ -28,6 +28,10 @@ the complete corpus or deployment proof is absent. Revision `cf74053f` then
 adds escaped-JSON and exact UTF-8 byte-boundary vectors, including the matching
 one-byte-over rejection, and requalifies the full managed structured-history
 fixture.
+Revision `77a06884` then adds a committed-but-unknown configuration
+acknowledgement recovery witness and a bounded scheduling yield between exact
+retry classifications; the broader serialization/deadlock, promotion, and
+production-authority matrix remains conditional.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -123,6 +127,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - Configuration boundary corpus revision: `cf74053f` adds escaped-JSON and
   exact UTF-8 byte-boundary vectors with a one-byte-over rejection, then
   requalifies the managed memory/PostgreSQL fixture.
+- Configuration acknowledgement revision: `77a06884` injects one committed-
+  but-unknown acknowledgement, proves exact retry without a duplicate row, and
+  yields between bounded stale classifications.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -404,7 +411,7 @@ result: 10 checkpoint tests passed, 0 failed
 The sidecar now locks its file across workers, reloads the durable maps before
 mutating validation, and proves that a stale independently loaded worker cannot
 replace a newer prepared successor. Production external authority, injected
-serialization/deadlock, acknowledgement-loss, and promotion matrices remain
+serialization/deadlock, broader acknowledgement-loss, and promotion matrices remain
 outside this repository-local fixture.
 
 The expanded configuration boundary corpus was then qualified from clean source
@@ -420,6 +427,20 @@ result: ok — 18 structured-history tests passed, 0 failed in 31.72s
 The added vectors compare memory and PostgreSQL on escaped JSON, an exact
 UTF-8-sized serialized revision, and a one-byte-over UTF-8 revision; the same
 run retains the prior boundary, shape, scale, race, and fresh-process cases.
+
+The acknowledgement-recovery follow-up was then qualified from clean source
+tip `77a06884`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: 77a06884
+run id: run-2167617-1785992166392324915
+result: ok — 19 structured-history tests passed, 0 failed in 31.76s
+```
+
+The injected commit acknowledgement loss commits the row normally while
+returning `AcknowledgementUnknown`; the writer retries the exact revision,
+re-acknowledges the prepared successor, and the audit query confirms one row.
 
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
@@ -642,6 +663,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
 | `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2162922-1785991603848871458` (18/18 structured-history tests) | N/A; introduced after baseline |
+| `configuration_commit_acknowledgement_loss_retries_identical_revision` | pass in `run-2167617-1785992166392324915` (19/19 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
@@ -661,7 +683,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-AUTH-01 | Closed | Workspace-private authority marker and API-surface denial tests prevent ordinary external physical access. |
 | TT2-AUTH-02 | Closed | PostgreSQL session authority is externally deployed, move-only, and not a public raw-login capability. |
 | TT2-STORE-01 | Conditional | Target/checkpoint trust is explicit and testable; concrete external production fence implementation is absent. |
-| TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; prepared restart, strict acknowledgement, and stale-worker sidecar arbitration now pass, while injected serialization/deadlock, acknowledgement-loss, promotion, and production-authority matrices remain. |
+| TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; prepared restart, strict acknowledgement, stale-worker sidecar arbitration, and one committed-but-unknown acknowledgement recovery pass, while injected serialization/deadlock, promotion, and production-authority matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
