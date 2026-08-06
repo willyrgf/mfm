@@ -9,6 +9,8 @@ use mfm_facts::{
     FactSelectionReadFailureCode, FactSelectionReadResponse, FactSelectionRequest, FactSubject,
     FactTopK,
 };
+#[cfg(feature = "test-support")]
+use mfm_ids::StoreScopeId;
 use mfm_ids::{FactContentIdentityDigest, FactLogicalIdentityDigest, RunId, StableId};
 use mfm_journal::structured::{
     canonical_json, CommittedBatch, ObservationOutcome, PriorRunFactCompletenessMode,
@@ -19,7 +21,7 @@ use mfm_journal::structured::{
 use serde::Serialize;
 
 #[cfg(feature = "test-support")]
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use super::backend::{RawRunHistory, StructuredBackendFuture, TenantFactPublication};
 use super::fold::{
@@ -32,26 +34,14 @@ const FACT_CONTENT_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-content-identity
 const FACT_LOGICAL_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-logical-identity-preimage.v1";
 
 #[cfg(feature = "test-support")]
-static FACT_SCAN_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_PUBLICATION_PAGES: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_PRODUCER_PREFIX_LOADS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_FOLD_BATCHES: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_MAX_PUBLICATION_PAGES: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS: AtomicU64 = AtomicU64::new(0);
-#[cfg(feature = "test-support")]
-static FACT_SCAN_MAX_FOLD_BATCHES: AtomicU64 = AtomicU64::new(0);
+static FACT_SCAN_COUNTERS: OnceLock<Mutex<BTreeMap<String, FactScanCounters>>> = OnceLock::new();
 
 /// Test-only counters for one bounded prior-run fact scan.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FactScanCounters {
-    /// Number of outer and nested scan invocations.
+    /// Number of top-level scan invocations.
     pub invocations: u64,
     /// Number of dense publication-page backend reads.
     pub publication_pages: u64,
@@ -70,54 +60,84 @@ pub struct FactScanCounters {
 /// Resets test-only prior-run fact-scan counters.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn reset_fact_scan_counters() {
-    FACT_SCAN_INVOCATIONS.store(0, Ordering::Relaxed);
-    FACT_SCAN_PUBLICATION_PAGES.store(0, Ordering::Relaxed);
-    FACT_SCAN_PRODUCER_PREFIX_LOADS.store(0, Ordering::Relaxed);
-    FACT_SCAN_FOLD_BATCHES.store(0, Ordering::Relaxed);
-    FACT_SCAN_MAX_PUBLICATION_PAGES.store(0, Ordering::Relaxed);
-    FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.store(0, Ordering::Relaxed);
-    FACT_SCAN_MAX_FOLD_BATCHES.store(0, Ordering::Relaxed);
+pub fn reset_fact_scan_counters(store_scope_id: &StoreScopeId) {
+    FACT_SCAN_COUNTERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("fact scan counter mutex poisoned")
+        .insert(
+            store_scope_id.as_str().to_owned(),
+            FactScanCounters::default(),
+        );
 }
 
 /// Reads test-only prior-run fact-scan counters.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub fn fact_scan_counters() -> FactScanCounters {
-    FactScanCounters {
-        invocations: FACT_SCAN_INVOCATIONS.load(Ordering::Relaxed),
-        publication_pages: FACT_SCAN_PUBLICATION_PAGES.load(Ordering::Relaxed),
-        producer_prefix_loads: FACT_SCAN_PRODUCER_PREFIX_LOADS.load(Ordering::Relaxed),
-        fold_batches: FACT_SCAN_FOLD_BATCHES.load(Ordering::Relaxed),
-        maximum_publication_pages: FACT_SCAN_MAX_PUBLICATION_PAGES.load(Ordering::Relaxed),
-        maximum_producer_prefix_loads: FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.load(Ordering::Relaxed),
-        maximum_fold_batches: FACT_SCAN_MAX_FOLD_BATCHES.load(Ordering::Relaxed),
-    }
+pub fn fact_scan_counters(store_scope_id: &StoreScopeId) -> FactScanCounters {
+    FACT_SCAN_COUNTERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("fact scan counter mutex poisoned")
+        .get(store_scope_id.as_str())
+        .copied()
+        .unwrap_or_default()
 }
 
 #[cfg(feature = "test-support")]
-fn count_fact_scan_publication_page() {
-    FACT_SCAN_PUBLICATION_PAGES.fetch_add(1, Ordering::Relaxed);
+fn with_fact_scan_counters<F>(scope: &str, update: F)
+where
+    F: FnOnce(&mut FactScanCounters),
+{
+    let mut counters = FACT_SCAN_COUNTERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("fact scan counter mutex poisoned");
+    update(counters.entry(scope.to_owned()).or_default());
 }
 
 #[cfg(feature = "test-support")]
-fn count_fact_scan_producer_prefix_load() {
-    FACT_SCAN_PRODUCER_PREFIX_LOADS.fetch_add(1, Ordering::Relaxed);
+fn count_fact_scan_invocation(scope: &str) {
+    with_fact_scan_counters(scope, |counters| {
+        counters.invocations = counters.invocations.saturating_add(1);
+    });
 }
 
 #[cfg(feature = "test-support")]
-fn count_fact_scan_fold_batches(count: usize) {
+fn count_fact_scan_publication_page(scope: &str) {
+    with_fact_scan_counters(scope, |counters| {
+        counters.publication_pages = counters.publication_pages.saturating_add(1);
+    });
+}
+
+#[cfg(feature = "test-support")]
+fn count_fact_scan_producer_prefix_load(scope: &str) {
+    with_fact_scan_counters(scope, |counters| {
+        counters.producer_prefix_loads = counters.producer_prefix_loads.saturating_add(1);
+    });
+}
+
+#[cfg(feature = "test-support")]
+fn count_fact_scan_fold_batches(scope: &str, count: usize) {
     let Ok(count) = u64::try_from(count) else {
         return;
     };
-    FACT_SCAN_FOLD_BATCHES.fetch_add(count, Ordering::Relaxed);
+    with_fact_scan_counters(scope, |counters| {
+        counters.fold_batches = counters.fold_batches.saturating_add(count);
+    });
 }
 
 #[cfg(feature = "test-support")]
-fn record_fact_scan_maxima(session: &FactScanSession) {
-    FACT_SCAN_MAX_PUBLICATION_PAGES.fetch_max(session.publication_pages, Ordering::Relaxed);
-    FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.fetch_max(session.producer_prefix_loads, Ordering::Relaxed);
-    FACT_SCAN_MAX_FOLD_BATCHES.fetch_max(session.fold_batches, Ordering::Relaxed);
+fn record_fact_scan_maxima(scope: &str, session: &FactScanSession) {
+    with_fact_scan_counters(scope, |counters| {
+        counters.maximum_publication_pages = counters
+            .maximum_publication_pages
+            .max(session.publication_pages);
+        counters.maximum_producer_prefix_loads = counters
+            .maximum_producer_prefix_loads
+            .max(session.producer_prefix_loads);
+        counters.maximum_fold_batches = counters.maximum_fold_batches.max(session.fold_batches);
+    });
 }
 
 /// Store-internal purpose-only authority available to the retained fact scanner.
@@ -258,6 +278,8 @@ struct BackendFactScanPort {
 /// only producer cache used by a fact read, so shared producers are folded at
 /// most once and an active producer cannot be re-entered through a cycle.
 struct FactScanSession {
+    #[cfg(feature = "test-support")]
+    counter_scope: String,
     producer_cache: BTreeMap<RunId, Arc<VerifiedStructuredRun>>,
     active_producers: BTreeSet<RunId>,
     producer_history_bytes: u64,
@@ -274,8 +296,13 @@ struct FactScanSession {
 }
 
 impl FactScanSession {
-    fn new(bounds: &mfm_facts::FactSelectionScanBounds) -> Self {
+    fn new(
+        bounds: &mfm_facts::FactSelectionScanBounds,
+        #[cfg(feature = "test-support")] counter_scope: String,
+    ) -> Self {
         Self {
+            #[cfg(feature = "test-support")]
+            counter_scope,
             producer_cache: BTreeMap::new(),
             active_producers: BTreeSet::new(),
             producer_history_bytes: 0,
@@ -333,12 +360,18 @@ type ScanResult<T> = std::result::Result<T, ScanError>;
 impl BackendFactScanPort {
     async fn scan(&self, request: FactSelectionRequest) -> ScanResult<FactSelectionReadResponse> {
         let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
-        let mut session = FactScanSession::new(&bounds);
         #[cfg(feature = "test-support")]
-        FACT_SCAN_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let counter_scope = self.consumer_admission.store_scope_id.as_str().to_owned();
+        let mut session = FactScanSession::new(
+            &bounds,
+            #[cfg(feature = "test-support")]
+            counter_scope.clone(),
+        );
+        #[cfg(feature = "test-support")]
+        count_fact_scan_invocation(&counter_scope);
         let result = self.scan_with_session(request, &mut session).await;
         #[cfg(feature = "test-support")]
-        record_fact_scan_maxima(&session);
+        record_fact_scan_maxima(&counter_scope, &session);
         result
     }
 
@@ -405,7 +438,7 @@ impl BackendFactScanPort {
                         .publication_pages
                         .checked_add(1)
                         .ok_or(ScanError::Integrity)?;
-                    count_fact_scan_publication_page();
+                    count_fact_scan_publication_page(&session.counter_scope);
                 }
                 if publications.is_empty()
                     || publications.len()
@@ -585,7 +618,7 @@ impl BackendFactScanPort {
                         .producer_prefix_loads
                         .checked_add(1)
                         .ok_or(ScanError::Integrity)?;
-                    count_fact_scan_producer_prefix_load();
+                    count_fact_scan_producer_prefix_load(&session.counter_scope);
                 }
                 let raw = self
                     .source
@@ -639,7 +672,7 @@ impl BackendFactScanPort {
                             u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?,
                         )
                         .ok_or(ScanError::Integrity)?;
-                    count_fact_scan_fold_batches(raw.batches.len());
+                    count_fact_scan_fold_batches(&session.counter_scope, raw.batches.len());
                 }
                 if session.fold_work > session.maximum_producer_fold_batches {
                     return Err(ScanError::Safe(

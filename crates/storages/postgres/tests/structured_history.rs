@@ -2712,9 +2712,9 @@ async fn prior_run_fact_scan_folds_one_shared_producer_prefix_once() {
 
     // Recompute only the retained consumer response so the counters describe one
     // complete PostgreSQL fact scan, not setup or parity loads above.
-    reset_fact_scan_counters();
+    reset_fact_scan_counters(&store_scope);
     let response = retained_fact_response(&export_reader, &consumer_run).await;
-    let counters = fact_scan_counters();
+    let counters = fact_scan_counters(&store_scope);
     assert!(!response.is_empty(), "retained response must be present");
     assert!(
         counters.invocations > 0,
