@@ -141,6 +141,7 @@ Post-step-12 implementation and proof revisions:
 | `018a946a` | collect sql inventory imports before traversal |
 | `836e9c31` | harden sql inventory scope collection |
 | `2fea7802` | restore sql inventory builder scope |
+| `8a902d03` | fail closed sql file macros |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -186,10 +187,11 @@ macros. Revision `1edcf7bb` corrects their SQL argument positions and covers
 direct, renamed-alias, and glob imports with dynamic rejection fixtures;
 `018a946a` pre-collects file/module imports, and `836e9c31` adds block-scope
 pre-collection and restores import state on scope exit. Revision `2fea7802`
-restores `QueryBuilder` binding state across those same scopes. The clean
-Nixfied inventory leaf `run-2232004-1786000886918900083` passes the source and
-fixture tests (2/2); the broader query ownership and scale audit remains a
-separate residual.
+restores `QueryBuilder` binding state across those same scopes. Revision
+`8a902d03` recognizes every pinned SQLx `query_file*` form and rejects external
+file SQL before literal ownership parsing. The clean Nixfied inventory leaf
+`run-2236542-1786001395306859242` passes the source and fixture tests (2/2);
+the broader query ownership and scale audit remains a separate residual.
 
 Its managed inventory leaf also passed on the exact source tip:
 
@@ -206,6 +208,15 @@ nix run .#run -- --task postgres-sql-inventory-check
 source: 2fea7802
 run id: run-2232004-1786000886918900083
 result: ok — 2 inventory tests passed, 0 failed in 1.95s
+```
+
+The query-file fail-closed inventory leaf ran on clean source tip `8a902d03`:
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+source: 8a902d03
+run id: run-2236542-1786001395306859242
+result: ok — 2 inventory tests passed, 0 failed in 2.01s
 ```
 
 The current replay package re-audit also passes the complete portable boundary
@@ -269,7 +280,7 @@ replay remain unverified.
 | Offline-fold boundary cutover | `a1a78b84` | opaque `OfflineVerifiedRun` replaces the public full-fold conversion seam; 16-case compile-fail matrix, store/replay package tests, and portable corpus pass | PASS for API scope (independent review); broader isolation residuals below |
 | Later-audit suffix proof | `eb38ea44` | real store-shaped authorization/observation suffix: audit offline parity passes and semantic carry-forward is rejected; replay 10/10 | PASS for implementation scope; retained/live residuals below |
 | Bounded wallet query-shape proof | `2ac67ec9` | managed 64-reservation history keeps Q/E counts constant, every captured wallet-history `SELECT` has an exact key/prefix, lifetime aggregates are rejected, and the domain primary-key path is available under `enable_seqscan = off`; run `run-2218000-1785998748489917662` | CONDITIONAL; production latency envelope remains |
-| SQL inventory macro/import scope | `2fea7802` | independent review passes SQLx checked/unchecked argument semantics, direct/renamed/glob imports, after-use file/module/block declarations, and import/`QueryBuilder` scope restoration; run `run-2232004-1786000886918900083` passes 2/2 | PASS for current inventory scope; broader ownership/scale audit remains |
+| SQL inventory macro/import scope | `8a902d03` | independent review passes SQLx checked/unchecked and all six `query_file*` macro semantics, direct/renamed/glob imports, after-use file/module/block declarations, and import/`QueryBuilder` scope restoration; run `run-2236542-1786001395306859242` passes 2/2 | PASS for current inventory scope; broader ownership/scale audit remains |
 
 ## Focused and composed verification
 
@@ -586,7 +597,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed run `run-2223304-1785999851634604306` compares memory/PostgreSQL on positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, 64 deterministic shape values, a 64-revision stream, and an exact depth-limit value; one-level-over depth, float, duplicate-key, and malformed values are rejected before dispatch. The complete generated, hostile, and large-scale acceptance matrix remains unverified. |
-| STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2232004-1786000886918900083` pass 2/2. A full independent query ownership/scale audit remains. |
+| STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, all six `query_file*` forms (fail closed), wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2236542-1786001395306859242` pass 2/2. A full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
 | EVM-02 | Closed | Recovery reobserves chain state before any retained-candidate broadcast. |
@@ -684,6 +695,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `018a946a` | `collect sql inventory imports before traversal` | after-use file/module alias and glob declarations are pre-collected; managed inventory remains 2/2 |
 | `836e9c31` | `harden sql inventory scope collection` | block-local imports are pre-collected and file/module/block import state is restored; managed inventory run `run-2230514-1786000751269593986` passes 2/2 |
 | `2fea7802` | `restore sql inventory builder scope` | `QueryBuilder` binding state is restored across file/module/block scopes; managed inventory run `run-2232004-1786000886918900083` passes 2/2 |
+| `8a902d03` | `fail closed sql file macros` | all six pinned SQLx `query_file*` forms are recognized and rejected as external-file SQL; managed inventory run `run-2236542-1786001395306859242` passes 2/2 |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:
