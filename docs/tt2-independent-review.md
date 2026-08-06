@@ -339,9 +339,9 @@ result: pass
 
 The managed test includes positive, exact serialized
 `MAX_CONFIGURATION_REVISION_BYTES`, one-byte-over, stale-predecessor, and
-idempotent replay vectors with final reader parity. It also recompiles the
-PostgreSQL integration assertions against `RunEvidenceStatus`; no purpose
-wrapper calls the removed `.frontier()` API.
+idempotent replay vectors with final reader parity. A separate Nix release
+no-run check compiles the PostgreSQL integration assertions against
+`RunEvidenceStatus`; no purpose wrapper calls the removed `.frontier()` API.
 
 The focused SQL inventory check on `7e467952` passes both the source inventory
 and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,

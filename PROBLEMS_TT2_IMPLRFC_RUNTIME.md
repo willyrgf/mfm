@@ -2,13 +2,13 @@
 
 ## Status and scope
 
-This document is the handoff problem ledger for the remediation implementation reviewed at:
+This document began as the handoff problem ledger for the remediation implementation reviewed at
+`a4dada89`. Its historical findings remain useful for traceability, but the current disposition
+is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- reviewed head: `67f113edeac899befb67e2559e8e894c152c7158`;
-- implementation revision: `a4dada89a5b01cf2bf97f9e16c398fda0a5c1e42`;
-- evidence-only revisions: `ca01d81ace682b3230aa674f97cc36a90c870aef` and
-  `67f113edeac899befb67e2559e8e894c152c7158`;
+- current implementation/evidence source tip: `a2664734cd94c20b6075e2132f2348fbe188cf13`;
+- current evidence/documentation head before this refresh: `886fee0941c42838705f1f29662d43cc80ee7b72`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
   [PROBLEMS_TT1_IMPLRFC_RUNTIME.md](PROBLEMS_TT1_IMPLRFC_RUNTIME.md);
@@ -17,8 +17,8 @@ This document is the handoff problem ledger for the remediation implementation r
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The evidence revisions change only the review record. The production code being assessed is the
-tree at `a4dada89`.
+The current production code being assessed is the source tree at `a2664734`; the detailed finding
+sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
 
@@ -33,7 +33,7 @@ This is a problem statement for an architect, not an implementation plan. The re
 properties below describe outcomes. They deliberately do not freeze a mechanism before the
 architecture resolves the material uncertainties.
 
-## Review verdict
+## Historical review verdict at `a4dada89`
 
 The recorded final `GATE: PASS` is not supported by the reviewed tree. The implementation contains
 substantial and valuable remediation, but it is not a complete or safe end state for the RFC or the
@@ -56,6 +56,20 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
+## Current re-audit at `a2664734`
+
+The later implementation revisions and focused evidence supersede the historical disposition
+above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
+authority qualification, replay reproduction removal, semantic/audit suffix handling, portable
+byte budgets, purpose-bound projections, key-cleanup witnesses, and recursive export closure now
+have implementation and focused regression coverage. The current evidence ledger records those
+scopes as closed or conditional, with the remaining conditional work limited to deployment trust,
+cross-process/fault matrices, generated/scale corpus breadth, independent provider/public-result
+verification, and the full simplicity/isolation acceptance matrix.
+
+The current matrix is authoritative for this re-audit; the detailed sections below preserve the
+original finding text and line references for traceability.
+
 ## Classification
 
 ### Severity
@@ -77,7 +91,7 @@ relationships cannot be verified offline.
   from the RFC or frozen remediation plan.
 - Closed: both the implementation property and its exact hostile/regression proof are present.
 
-## Material uncertainties
+## Historical material uncertainties at `a4dada89`
 
 These choices require an architect decision before implementation planning. They do not make the
 current `GATE: PASS` acceptable.
@@ -277,38 +291,38 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 
 | ID | Severity | Disposition | Problem | Primary TT1 mapping |
 | --- | --- | --- | --- | --- |
-| TT2-AUTH-01 | Blocker | Open | Live physical access can be authorized and invoked without Runtime or a store append | AUTH-01 |
-| TT2-AUTH-02 | Blocker | Contract conflict | Public cloneable PostgreSQL login material retains raw DML authority | AUTH-03 |
-| TT2-STORE-01 | Blocker | Open | The generic PostgreSQL target has no external non-rollback fence | AUTH-04, STORE-02 |
-| TT2-STORE-02 | High | Open | Multi-statement PostgreSQL reads are torn under `READ COMMITTED` | STORE-03, STORE-04 |
-| TT2-STORE-03 | High | Partial | Full-history loads after session issuance do not verify `run_history_heads` in the load snapshot | STORE-03 |
-| TT2-STORE-04 | High | Open | Contention classification queries an already-aborted transaction | STORE-01 |
-| TT2-STORE-05 | Medium | Partial | The shared canonical boundary now aligns bounded memory/PostgreSQL inputs, but the complete generated/scale corpus remains unverified | STORE-04 |
-| TT2-STORE-06 | Medium | Partial | The SQL inventory misses generic and builder queries | STORE-05 |
-| TT2-STORE-07 | High | Partial | Prior-fact verification can repeatedly refold growing prefixes | STORE-06 |
-| TT2-EVM-01 | High | Proof gap | The production path reused an intent already completed by the deterministic path | EVM-01, VERIFY-01 |
-| TT2-EVM-02 | Blocker | Open | Recovery broadcasts a retained candidate before chain-state reobservation | EVM-03 |
-| TT2-EVM-03 | Blocker | Open | Replacement activation eligibility is self-certified | EVM-04 |
-| TT2-EVM-04 | High | Partial | Candidate-family exhaustion can close without final wallet-status reconciliation | EVM-03, EVM-04 |
-| TT2-EVM-05 | High | Open | `SubmissionIntentId` contradicts the RFC and current domain contract | EVM-08 |
-| TT2-EVM-06 | High | Open | Wallet release currentness is hard-wired to the initial incarnation | EVM-11 |
-| TT2-EVM-07 | High | Open | Wallet status and mutation cost grows with lifetime reservations | EVM-10 |
-| TT2-EVM-08 | High | Open | A retained signer path downgrades integrity failure to availability | EVM-07 |
-| TT2-EVM-09 | High | Partial | Completion is not itself the complete RFC public-result closure | EVM-09 |
-| TT2-EVM-10 | Medium | Partial | `u64::MAX` is still admitted into pending-nonce observation history | EVM-06 |
-| TT2-EVM-11 | High | Open | Pending-floor route and policy are syntax-checked, not authority-qualified | EVM-02, EVM-08 |
-| TT2-EVM-12 | High | Proof gap | Required crash, ambiguity, promotion, replacement, and scale matrices are absent | EVM-05, VERIFY-01 |
-| TT2-REPLAY-01 | Blocker | Open | Portable source relationships are not verified offline | PROV-01, APP-01, REPLAY-01 |
-| TT2-REPLAY-02 | High | Open | Production `Reproduce` is still a comparison with current live history | APP-02, REPLAY-01 |
-| TT2-REPLAY-03 | High | Open | A semantic artifact accepts a later audit suffix | REPLAY-01 |
-| TT2-REPLAY-04 | High | Open | Portable encoder and decoder enforce incompatible byte limits | REPLAY-01 |
-| TT2-REPLAY-05 | High | Partial | Replay schemas and generated corpus are incomplete and already drifted | REPLAY-03 |
-| TT2-APP-01 | High | Open | Purpose evidence types remain data-permissive | AUTH-05 |
-| TT2-APP-02 | High | Partial | Recursive source authorization is discarded before artifact construction | PROV-01, APP-01 |
-| TT2-SEC-01 | High | Open | The promised same-allocation key handoff is not established | SEC-01 |
-| TT2-QUALITY-01 | High | Open | Core ownership and LOC remain concentrated despite the simplification goal | QUALITY-01 |
-| TT2-VERIFY-01 | High | Proof gap | The acceptance proof matrix is materially incomplete | LANG-05, VERIFY-01 |
-| TT2-PROCESS-01 | High | Partial | The final review converts admitted residuals into an unsupported pass | PROCESS-01 |
+| TT2-AUTH-01 | Blocker | Closed | Live physical access is assembled behind Runtime-owned, marker-sealed authority | AUTH-01 |
+| TT2-AUTH-02 | Blocker | Closed | Production PostgreSQL login material is issued through an opaque deployment admission | AUTH-03 |
+| TT2-STORE-01 | Blocker | Conditional | The generic PostgreSQL target still needs concrete production external-fence integration | AUTH-04, STORE-02 |
+| TT2-STORE-02 | High | Conditional | Snapshot/head validation passes, but cross-process acknowledgement and fault matrices remain | STORE-03, STORE-04 |
+| TT2-STORE-03 | High | Closed | Full-history loads verify the indexed head inside the same backend snapshot | STORE-03 |
+| TT2-STORE-04 | High | Closed | Contention classification rolls back before bounded identity reconciliation | STORE-01 |
+| TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; complete generated/scale corpus remains unverified | STORE-04 |
+| TT2-STORE-06 | Medium | Conditional | AST inventory covers generic and builder forms; complete ownership/scale audit remains | STORE-05 |
+| TT2-STORE-07 | High | Closed | Prior-fact verification loads each required producer prefix once per scan | STORE-06 |
+| TT2-EVM-01 | High | Closed | The production path drives a fresh semantic intent through the qualified keystore signer | EVM-01, VERIFY-01 |
+| TT2-EVM-02 | Blocker | Closed | Recovery reobserves retained candidates before any conditional broadcast | EVM-03 |
+| TT2-EVM-03 | Blocker | Closed | Replacement activation consumes producer-authorized retained-prefix evidence | EVM-04 |
+| TT2-EVM-04 | High | Closed | Candidate-family exhaustion reconciles final wallet status before closure | EVM-03, EVM-04 |
+| TT2-EVM-05 | High | Closed | Stable caller intent and separate semantic digest conflict behavior are implemented | EVM-08 |
+| TT2-EVM-06 | High | Closed | Wallet release currentness follows registered historical incarnations and promotion | EVM-11 |
+| TT2-EVM-07 | High | Conditional | Normal status uses bounded projections; latency/scale and strict plan breadth remain | EVM-10 |
+| TT2-EVM-08 | High | Closed | Signer integrity failures remain integrity outcomes | EVM-07 |
+| TT2-EVM-09 | High | Conditional | Completion closure and reload pass; independent provider/public-result verification remains | EVM-09 |
+| TT2-EVM-10 | Medium | Closed | `u64::MAX` is rejected before pending-nonce observation and persistence | EVM-06 |
+| TT2-EVM-11 | High | Closed | Pending-floor route, policy, and semantics are authority-qualified | EVM-02, EVM-08 |
+| TT2-EVM-12 | High | Conditional | Release/restart qualification passes; crash, ambiguity, promotion, replacement, and scale matrices remain | EVM-05, VERIFY-01 |
+| TT2-REPLAY-01 | Blocker | Conditional | Recursive source proof, fixation, trust, bounds, and parity are implemented; live app multi-hop proof remains | PROV-01, APP-01, REPLAY-01 |
+| TT2-REPLAY-02 | High | Closed | Production reproduction/current-history comparison is deleted | APP-02, REPLAY-01 |
+| TT2-REPLAY-03 | High | Conditional | Exact semantic cutoff and kind-aware suffix rejection pass; live production evidence remains | REPLAY-01 |
+| TT2-REPLAY-04 | High | Closed | Encoder/decoder frame and total budgets share annex limits | REPLAY-01 |
+| TT2-REPLAY-05 | High | Conditional | Generated schema/corpus and online/offline parity pass; complete live matrix remains | REPLAY-03 |
+| TT2-APP-01 | High | Conditional | Purpose products expose bounded status/projection data; the complete isolation matrix remains | AUTH-05 |
+| TT2-APP-02 | High | Conditional | Recursive closure is retained and graph-checked; live production multi-hop proof remains | PROV-01, APP-01 |
+| TT2-SEC-01 | High | Conditional | Protected allocation and cleanup witnesses pass; external termination/OOM/resource classes remain | SEC-01 |
+| TT2-QUALITY-01 | High | Conditional | Duplicate paths were removed, but core ownership and LOC remain concentrated | QUALITY-01 |
+| TT2-VERIFY-01 | High | Conditional | Broad/focused gates pass; the complete acceptance matrix remains | LANG-05, VERIFY-01 |
+| TT2-PROCESS-01 | High | Conditional | Current evidence preserves residuals and exact provenance; strict PASS remains withheld | PROCESS-01 |
 
 ## Runtime and storage authority problems
 
