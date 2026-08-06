@@ -43,6 +43,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   package evidence, not members of the historical composed gate. The latest
   managed fixture now reloads a persisted two-candidate completion row before
   rehydrating and projecting its closure.
+- The latest keystore witness also covers source-to-`SecureKey` handoff and
+  zeroized cleanup after an authenticated post-decrypt invalid-key rejection;
+  direct witnesses for every malformed/corrupt format and valid-but-wrong
+  public/account identity, plus external termination/resource failures, remain
+  outside the focused package evidence.
 
 ## Candidate and review scope
 
@@ -53,7 +58,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   (shared decrypt failure cleanup), `ed7b341e` (completion closure permit and
   observation binding), `266d6889` (bounded wallet projection scan),
   `dec2f0c4` (completion closure reload), and `9390503c` (production decrypt
-  allocation witness).
+  allocation witness), `d2a39d7a` (post-decrypt invalid-key cleanup), and
+  `8b2e64ba` (failure-path handoff-pointer witness).
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this documentation-only commit after the exact gate;
   the candidate review was performed against the exact hash above.
@@ -224,9 +230,9 @@ run id: run-1981332-1785976730139548702 — ok, 1/1 task in 2.67s
 nix run .#run -- --task postgres-sqlx-offline-check
 run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
 nix develop -c cargo test -p mfm-keystore
-89 unit tests and 9 doctests passed after `61bf2091`
+91 unit tests and 9 doctests passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture
-7 decrypt-focused tests passed on `4fd1e757`
+8 decrypt-focused tests passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture
 1 focused test passed
 ```
@@ -335,7 +341,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
-| TT2-SEC-01 | Conditional | The shared production decrypt guard now witnesses one protected heap allocation and cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, and injected unwind; broader malformed-format/post-decrypt public-identity witnesses and external termination/resource-failure classes remain. |
+| TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
 | TT2-VERIFY-01 | Conditional | Broad/focused gates pass, but the plan's complete authority/fault/offline/security matrix is incomplete. |
 | TT2-PROCESS-01 | Conditional | Evidence is now revision-pinned and honest; a PASS is withheld until the residuals close. |
@@ -439,6 +445,6 @@ are green on their applicable revisions, and the exact composed gate for
 `82e474ca` is green. The strict plan acceptance condition is not met. The
 review remains **CONDITIONAL / INCOMPLETE** until the residual proof matrices,
 a valid later-history portable artifact and live app integration, production
-trust deployment, the independent EVM offline/public-result audit, broader
-keystore failure witnesses, and ownership evidence are supplied or the
+trust deployment, the independent EVM offline/public-result audit, remaining
+keystore format/identity/fault witnesses, and ownership evidence are supplied or the
 normative plan is deliberately amended.
