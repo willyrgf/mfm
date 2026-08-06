@@ -62,7 +62,9 @@ table of semantic truth. Backend indexes are rebuildable projections only.
 Configured values use a separate append-only stream keyed by store, tenant, entry operation, and
 target. A revision contains sequence, predecessor, append request id, exact configured-value
 contract, content reference, canonical bytes, and writer lineage. Application paths can resolve but
-cannot append. Configuration is not a RunHistory record family.
+cannot append. The shared append boundary bounds the canonical serialized revision before any
+backend receives it, so memory and PostgreSQL accept the same content-addressed revision bytes.
+Configuration is not a RunHistory record family.
 
 ## Certified program
 
