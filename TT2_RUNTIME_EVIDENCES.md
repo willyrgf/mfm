@@ -354,6 +354,16 @@ The numeric ordering fix keeps PostgreSQL's loaded prefix in sequence order
 after the tenth successor. The same managed run also rechecked the pre-existing
 race and fresh-process/role/schema cases.
 
+The separate release no-run integration compile was also rerun against the
+same implementation source:
+
+```text
+nix develop -c cargo test --release -p mfm-integration-tests \
+  --features parity-tests --test evm_postgres_submission --no-run
+source: 0a4b02e1
+result: pass
+```
+
 ## TT2 disposition at the current candidate
 
 “Conditional” means implementation exists but the plan-required production

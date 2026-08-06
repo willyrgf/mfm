@@ -343,9 +343,16 @@ result: pass
 The managed test includes positive, exact serialized
 `MAX_CONFIGURATION_REVISION_BYTES`, one-byte-over, stale-predecessor,
 idempotent replay, 32 deterministic JSON shape, and 32 sequential-successor
-vectors with final reader parity. A separate Nix release
-no-run check compiles the PostgreSQL integration assertions against
-`RunEvidenceStatus`; no purpose wrapper calls the removed `.frontier()` API.
+vectors with final reader parity. A separate Nix release no-run check compiles
+the PostgreSQL integration assertions against `RunEvidenceStatus`; no purpose
+wrapper calls the removed `.frontier()` API.
+
+```text
+nix develop -c cargo test --release -p mfm-integration-tests \
+  --features parity-tests --test evm_postgres_submission --no-run
+source: 0a4b02e1
+result: pass
+```
 
 The focused SQL inventory check on `7e467952` passes both the source inventory
 and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
