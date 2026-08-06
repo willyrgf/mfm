@@ -101,7 +101,7 @@ use mfm_storage_postgres::{
 use mfm_store::structured::{
     ConfigurationAppendRequest, ConfigurationStreamKey, PhysicalBindingAuthorization,
     PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    StructuredAdmissionMaterial, StructuredFrontier, StructuredStoreError,
+    RunEvidenceStatus, StructuredAdmissionMaterial, StructuredStoreError,
 };
 use ring::hmac;
 use serde_json::{json, Value};
@@ -655,8 +655,8 @@ async fn evm_postgres_submission_worker() {
                     .load_public(&run_id)
                     .await
                     .expect("verify pre-restart history")
-                    .frontier(),
-                StructuredFrontier::Complete
+                    .status(),
+                RunEvidenceStatus::Closed
             ));
         }
         PHASE_RESUME_COMPLETE => {
@@ -694,8 +694,8 @@ async fn evm_postgres_submission_worker() {
                     .load_public(&run_id)
                     .await
                     .expect("verify closed history")
-                    .frontier(),
-                StructuredFrontier::Complete
+                    .status(),
+                RunEvidenceStatus::Closed
             ));
         }
         _ => panic!("unknown worker mode"),
