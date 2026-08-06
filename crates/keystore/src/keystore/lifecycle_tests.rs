@@ -340,6 +340,35 @@ fn decrypt_authentication_failure_zeroizes_the_production_allocation() {
 }
 
 #[test]
+fn decrypt_aad_identity_mismatch_zeroizes_the_production_allocation() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let original_id = keystore
+        .import_private_key(
+            Some("aad-bound".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    let substituted_id = Uuid::new_v4();
+    keystore
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == original_id)
+        .expect("AAD-bound entry")
+        .id = substituted_id;
+
+    let witness = KeyMaterialWitness::new();
+    assert!(matches!(
+        keystore.private_key_for_test_with_ownership_witness(substituted_id, witness.clone()),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
+    assert!(witness.observed_cleanup());
+    assert!(!witness.observed_transfer());
+}
+
+#[test]
 fn decrypt_wrong_length_rejects_before_allocating_plaintext() {
     use super::super::secure_key::KeyMaterialWitness;
 
