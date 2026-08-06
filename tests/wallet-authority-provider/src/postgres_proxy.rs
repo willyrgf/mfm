@@ -1,5 +1,6 @@
 //! PostgreSQL wire proxy for deterministic commit-acknowledgement qualification.
 
+use std::collections::BTreeMap;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -156,7 +157,7 @@ impl PostgresCommitFaultProxy {
         }
         let statement_triggered = required_statement.as_ref().is_none_or(|needle| {
             self.state
-                .statement_texts
+                .executed_statement_texts
                 .lock()
                 .map(|texts| texts.iter().any(|statement| statement.contains(needle)))
                 .unwrap_or(false)
@@ -246,6 +247,7 @@ struct ProxyState {
     intercepted: AtomicU64,
     executed_statements: AtomicU64,
     statement_texts: Mutex<Vec<String>>,
+    executed_statement_texts: Mutex<Vec<String>>,
     intercepted_changed: Notify,
     held_lost_acknowledgements: AtomicU64,
     held_lost_acknowledgements_changed: Notify,
@@ -263,6 +265,12 @@ struct FaultPlan {
 impl ProxyState {
     fn record_statement(&self, statement: &str) {
         if let Ok(mut texts) = self.statement_texts.lock() {
+            texts.push(statement.to_owned());
+        }
+    }
+
+    fn record_executed_statement(&self, statement: &str) {
+        if let Ok(mut texts) = self.executed_statement_texts.lock() {
             texts.push(statement.to_owned());
         }
         if let Ok(mut plan) = self.plan.lock() {
@@ -328,6 +336,8 @@ async fn proxy_connection(
 ) -> io::Result<()> {
     let mut server = TcpStream::connect(upstream).await?;
     let mut startup_forwarded = false;
+    let mut prepared_statements = BTreeMap::<String, String>::new();
+    let mut bound_portals = BTreeMap::<String, String>::new();
     let mut suppress_commit_acknowledgement = false;
     let mut held_acknowledgement_generation = None;
     let mut commit_completed = false;
@@ -342,7 +352,28 @@ async fn proxy_connection(
                 if let Some(statement) = frontend.statement_text() {
                     state.record_statement(statement);
                 }
-                if frontend.is_commit() {
+                if let Some((name, statement)) = frontend.parse_statement() {
+                    prepared_statements.insert(name.to_owned(), statement.to_owned());
+                }
+                if let Some((portal, statement)) = frontend.bind_statement() {
+                    bound_portals.insert(portal.to_owned(), statement.to_owned());
+                }
+                let executed_statement = match frontend.kind() {
+                    b'Q' => frontend.statement_text().map(ToOwned::to_owned),
+                    b'E' => frontend
+                        .execute_portal()
+                        .and_then(|portal| bound_portals.get(portal))
+                        .and_then(|statement| prepared_statements.get(statement))
+                        .cloned(),
+                    _ => None,
+                };
+                if let Some(statement) = executed_statement.as_deref() {
+                    state.record_executed_statement(statement);
+                }
+                if executed_statement
+                    .as_deref()
+                    .is_some_and(is_commit_statement)
+                {
                     match state.take_fault()? {
                         Some(CommitFault::RollBackBeforeCommit) => {
                             server.shutdown().await?;
@@ -411,14 +442,31 @@ impl PostgresFrame {
         }
     }
 
-    fn is_commit(&self) -> bool {
-        if !self.typed || self.kind() != b'Q' || self.bytes.len() <= 5 {
-            return false;
+    fn parse_statement(&self) -> Option<(&str, &str)> {
+        if !self.typed || self.kind() != b'P' {
+            return None;
         }
-        std::str::from_utf8(&self.bytes[5..])
-            .ok()
-            .map(|query| query.trim_end_matches('\0').trim())
-            .is_some_and(|query| query.eq_ignore_ascii_case("commit"))
+        let body = self.bytes.get(5..)?;
+        let (name, offset) = cstring(body, 0)?;
+        let (statement, _) = cstring(body, offset)?;
+        Some((name, statement))
+    }
+
+    fn bind_statement(&self) -> Option<(&str, &str)> {
+        if !self.typed || self.kind() != b'B' {
+            return None;
+        }
+        let body = self.bytes.get(5..)?;
+        let (portal, offset) = cstring(body, 0)?;
+        let (statement, _) = cstring(body, offset)?;
+        Some((portal, statement))
+    }
+
+    fn execute_portal(&self) -> Option<&str> {
+        if !self.typed || self.kind() != b'E' {
+            return None;
+        }
+        cstring(self.bytes.get(5..)?, 0).map(|(portal, _)| portal)
     }
 
     fn is_successful_commit_completion(&self) -> bool {
@@ -442,6 +490,17 @@ impl PostgresFrame {
         };
         std::str::from_utf8(query).ok()
     }
+}
+
+fn is_commit_statement(statement: &str) -> bool {
+    statement.trim().eq_ignore_ascii_case("commit")
+}
+
+fn cstring(body: &[u8], offset: usize) -> Option<(&str, usize)> {
+    let value = body.get(offset..)?;
+    let end = value.iter().position(|byte| *byte == 0)?;
+    let text = std::str::from_utf8(&value[..end]).ok()?;
+    Some((text, offset.saturating_add(end).saturating_add(1)))
 }
 
 async fn read_frontend_frame(
@@ -542,8 +601,39 @@ mod tests {
         );
         state.record_statement("INSERT INTO wallet_nonce_completions (...)");
         assert_eq!(
+            state.take_fault().expect("unexecuted statement"),
+            None,
+            "parsing a statement must not arm the fault"
+        );
+        state.record_executed_statement("INSERT INTO wallet_nonce_completions (...)");
+        assert_eq!(
             state.take_fault().expect("triggered plan"),
             Some(CommitFault::HoldTransactionBeforeCommit)
         );
+    }
+
+    #[test]
+    fn extended_protocol_resolves_statement_only_on_execute() {
+        let parse = frontend_frame(b'P', b"\0INSERT INTO wallet_nonce_completions\0\0\0\0");
+        let bind = frontend_frame(b'B', b"\0\0\0\0\0\0\0\0\0");
+        let execute = frontend_frame(b'E', b"\0\0\0\0");
+        let (statement_name, statement) = parse.parse_statement().expect("parse statement");
+        assert_eq!(statement_name, "");
+        assert_eq!(statement, "INSERT INTO wallet_nonce_completions");
+        let (portal, bound_statement) = bind.bind_statement().expect("bind statement");
+        assert_eq!(portal, "");
+        assert_eq!(bound_statement, "");
+        assert_eq!(execute.execute_portal(), Some(""));
+    }
+
+    fn frontend_frame(kind: u8, body: &[u8]) -> PostgresFrame {
+        let length = u32::try_from(body.len() + 4)
+            .expect("bounded test frame")
+            .to_be_bytes();
+        let mut bytes = Vec::with_capacity(body.len() + 5);
+        bytes.push(kind);
+        bytes.extend_from_slice(&length);
+        bytes.extend_from_slice(body);
+        PostgresFrame { bytes, typed: true }
     }
 }
