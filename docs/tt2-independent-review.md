@@ -109,7 +109,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 128
   deterministic JSON shape values across 16 shape families, a 128-revision
   sequential stream, and an exact canonical depth-limit value against memory
-  and PostgreSQL. The shared
+  and PostgreSQL. The latest default-concurrency managed run also passes all
+  24 tests, including the same-stream race; two earlier attempts hit that
+  race intermittently. The shared
   run-envelope validator also accepts an exact `MAX_STORED_FRAME_BYTES` frame
   and rejects one byte over. One-level-
   over depth, float, duplicate-key, and malformed values are rejected before
@@ -207,6 +209,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `MAX_STORED_FRAME_BYTES` witnesses. Independent review confirms the shared
   limit equals the canonical and PostgreSQL octet-length bounds; the focused
   `mfm-store` target passes 3/3.
+- Default-concurrency qualification: clean managed run
+  `run-2246603-1786002530958490012` passes all 24 structured-history tests,
+  including `configured_value_history_linearizes_same_stream_append_races`;
+  two earlier attempts remain recorded as intermittent witnesses.
 - SQL inventory revisions: `40051076` adds the pinned SQLx
   `query_unchecked!`, `query_as_unchecked!`, and `query_scalar_unchecked!`
   macro forms; `1edcf7bb` corrects SQL argument indexing and covers direct,
@@ -662,6 +668,16 @@ that `MAX_STORED_FRAME_BYTES` equals the canonical package limit, and that the
 PostgreSQL `octet_length` constraint has the same exact and one-byte-over
 semantics.
 
+The latest default-concurrency managed qualification ran from clean source
+tip `897ec4b8` (documentation-only evidence refresh after implementation
+revision `9f61c39a`):
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+run id: run-2246603-1786002530958490012
+result: ok — 24 structured-history tests passed, 0 failed in 43.42s
+```
+
 Independent review of exact `8a902d03` passes the current STORE-06 inventory
 scope. The AST visitor recognizes checked and `_unchecked` SQLx query macros,
 fails closed on all six `query_file*` forms, uses SQLx's correct typed argument
@@ -902,7 +918,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
-| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in serialized `run-2240964-1786001827263556370` (24/24 structured-history tests, including 128 values across 16 shape families, 128 revisions, and depth/hostile vectors); default-thread race attempts remain separately recorded | N/A; introduced after baseline |
+| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in serialized `run-2240964-1786001827263556370` (24/24 structured-history tests, including 128 values across 16 shape families, 128 revisions, and depth/hostile vectors); latest default-concurrency run `run-2246603-1786002530958490012` also passes 24/24, while two earlier race attempts remain separately recorded | N/A; introduced after baseline |
 | `structured::canonical_append::tests::{envelope_frame_accepts_exact_byte_limit,envelope_frame_rejects_one_byte_over_limit}` | pass in focused `mfm-store` target on `9f61c39a` (exact/one-byte-over `MAX_STORED_FRAME_BYTES`) | N/A; introduced after baseline |
 | `configuration_commit_acknowledgement_loss_retries_identical_revision` | pass in `run-2167617-1785992166392324915` (19/19 structured-history tests) | N/A; introduced after baseline |
 | `configuration_load_keeps_one_snapshot_across_a_concurrent_append` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
@@ -932,7 +948,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-02 | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
-| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions and run frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over shared frame witnesses. Two default-concurrency attempts hit the pre-existing same-stream race witness, so this is targeted corpus evidence; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
+| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions and run frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over shared frame witnesses, and latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | TT2-STORE-06 | Conditional | Revisions `40051076` through `8a902d03` extend the AST inventory to checked and `_unchecked` SQLx query macros, fail closed on all six `query_file*` forms, correct typed SQL-argument positions, direct/renamed/glob and after-use imports, nested file/module/block scope restoration, aliases, generic forms, wrapped helpers, and QueryBuilder fragments (independent review and managed inventory run `run-2236542-1786001395306859242` pass 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded byte/work/session limits remain enforced. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
