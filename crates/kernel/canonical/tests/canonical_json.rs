@@ -92,6 +92,23 @@ fn parses_and_rejects_base64url_bytes() {
 }
 
 #[test]
+fn base64url_bytes_accept_exact_character_budget_and_reject_one_over() {
+    {
+        let exact = "A".repeat(mfm_canonical::limits::MAX_BASE64URL_CHARACTERS);
+        let decoded = CanonicalBytes::from_base64url_no_pad(exact).expect("exact base64url budget");
+        assert_eq!(
+            decoded.as_bytes().len(),
+            mfm_canonical::limits::MAX_BASE64URL_CHARACTERS / 4 * 3 + 1,
+        );
+    }
+
+    let one_over = "A".repeat(mfm_canonical::limits::MAX_BASE64URL_CHARACTERS + 1);
+    let error = CanonicalBytes::from_base64url_no_pad(one_over)
+        .expect_err("one character over the base64url budget");
+    assert!(error.message().contains("character bound"));
+}
+
+#[test]
 fn incremental_raw_content_hashing_matches_the_one_shot_contract() {
     let contract = mfm_canonical::RecoverabilityContract::embedded()
         .expect("embedded recoverability contract");
