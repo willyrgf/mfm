@@ -7,8 +7,8 @@ This document began as the handoff problem ledger for the remediation implementa
 is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- current implementation/evidence source tip: `f4fd9a9b8a2c9598158ca7dfa2b6dc28cb09b15a`;
-- current evidence/documentation head before this refresh: `8829dec9`;
+- current implementation/evidence source tip: `5f4be5067591721c55d6c327d3b012487c8873f9`;
+- current evidence/documentation head before this refresh: `d727d8da`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
   [PROBLEMS_TT1_IMPLRFC_RUNTIME.md](PROBLEMS_TT1_IMPLRFC_RUNTIME.md);
@@ -17,7 +17,7 @@ is the re-audit recorded below.
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The current production code being assessed is the source tree at `f4fd9a9b`; the detailed finding
+The current production code being assessed is the source tree at `5f4be506`; the detailed finding
 sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
@@ -56,7 +56,7 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
-## Current re-audit at `f4fd9a9b`
+## Current re-audit at `5f4be506`
 
 The later implementation revisions and focused evidence supersede the historical disposition
 above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
@@ -81,6 +81,10 @@ serialization and one deadlock classification after rollback.
 The run append path also injects one committed-but-unknown acknowledgement, retries the exact
 candidate, and proves one durable batch with `ExistingSame` resolution; cross-process
 acknowledgement and promotion remain conditional.
+The prior-run fact scanner now has a managed two-publication same-producer witness: one dense
+publication-page read, one producer-prefix load, and three producer batches folded per scan
+invocation, with retry totals asserted separately. This closes the repeated-growing-prefix work
+gap; recursive shared-producer and over-budget rejection remain bounded by the same session.
 Deterministic run and configuration read barriers now release the external fixation, commit a
 successor while the reader remains in one repeatable-read snapshot, and prove old-complete-prefix
 then new-prefix behavior. Revision `dcb72608` also injects one `40001` and one `40P01` batch
@@ -753,27 +757,28 @@ Required resolution properties and proof:
 
 Severity: High
 
-Disposition: Partial
+Disposition: Closed
 
 Current implementation:
 
-The scanner pages a dense publication route, but for every publication it loads the complete
-producer prefix at
-[fact_scan.rs lines 360-378](crates/kernel/store/src/structured/fact_scan.rs#L360) and runs the full
-callback-free verifier again at [lines 406-411](crates/kernel/store/src/structured/fact_scan.rs#L406).
-The configured publication bound is as high as one million.
+The scanner pages a dense publication route, computes one maximum required sequence per producer,
+loads that producer prefix once, and reuses the verified result for every routed publication. The
+bounded session tracks retained bytes, fold work, distinct producers, and active recursion, so a
+shared producer cannot trigger repeated growing-prefix folds. The clean managed
+`run-2201417-1785995479252415048` qualification from `5f4be506` exercises two successive
+publications from one producer and asserts one publication page, one producer-prefix load, and
+three folded producer batches per scan invocation.
 
 Failure shape:
 
-If one producer run publishes facts at successively longer prefixes, scanning N publications can
-rehydrate and refold prefixes 1 through N. Work and data transfer become quadratic even though the
-route scan itself is paged.
+If the producer cache or maximum-prefix grouping regresses, the same two-publication witness would
+observe multiple prefix loads or more than the three retained batches folded for one scan.
 
 Consequence:
 
-A contractually admitted request can exhaust CPU, memory bandwidth, or database IO without
-violating any byte/item bound. This is a denial-of-service and dexterity problem in a core reusable
-read.
+The current implementation keeps this work linear in dense route entries plus unique retained
+producer bytes for each bounded scan session. The remaining denial-of-service risk is limited to
+the explicit scan bounds and is covered by their rejection paths.
 
 Required resolution properties and proof:
 
@@ -781,7 +786,8 @@ Required resolution properties and proof:
   does not refold every predecessor repeatedly.
 - Bound total history bytes and verification work, not only publication count and result bytes.
 - Add an adversarial same-run long-prefix benchmark/test that asserts asymptotic query and fold
-  counts.
+  counts. The managed two-publication witness asserts the exact bounded page, prefix-load, and
+  fold counts without relying on elapsed time.
 
 ## EVM submission and wallet-authority problems
 

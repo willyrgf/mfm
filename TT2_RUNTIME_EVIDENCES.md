@@ -130,6 +130,7 @@ Post-step-12 implementation and proof revisions:
 | `df61d1b9` | prove postgres snapshot interleavings |
 | `dcb72608` | exercise postgres contention rollback |
 | `f4fd9a9b` | exercise run acknowledgement recovery |
+| `5f4be506` | measure fact producer fold bounds |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -493,6 +494,23 @@ The run append path commits one batch while returning
 `ExistingSame` with one durable row. Cross-process acknowledgement and
 promotion matrices remain conditional.
 
+The fact-scan work-bound follow-up was qualified from clean source tip
+`5f4be506`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: 5f4be506
+run id: run-2201417-1785995479252415048
+result: ok — 24 structured-history tests passed, 0 failed in 39.56s
+```
+
+The added same-producer fixture publishes two successive facts, then asserts
+one dense publication page, one producer-prefix load, and three producer
+batches folded for each scan invocation. Retries are counted separately and
+still perform one prefix load per invocation; the route and fold work therefore
+remain linear in unique retained producer history rather than publication
+count squared.
+
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
 
@@ -523,7 +541,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
-| STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
+| STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
 | EVM-02 | Closed | Recovery reobserves chain state before any retained-candidate broadcast. |
 | EVM-03 | Closed | Replacement evidence is producer-authorized and bound to the retained prefix/permit. |
