@@ -119,6 +119,50 @@ fn is_lifetime_reservation_aggregate(sql: &str) -> bool {
         && (normalized.contains("count(") || normalized.contains("max("))
 }
 
+fn assert_bounded_wallet_history_reads(statements: &[String], operation: &str) {
+    for sql in statements {
+        let normalized = sql
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if !normalized.starts_with("select") {
+            continue;
+        }
+        assert!(
+            !is_lifetime_reservation_aggregate(sql),
+            "{operation} issued a lifetime reservation aggregate: {sql}"
+        );
+        if normalized.contains("fromwallet_nonce_domains") {
+            assert!(
+                normalized.contains("wherewallet_nonce_domain_id=$1"),
+                "{operation} must address one wallet domain by primary key: {sql}"
+            );
+        }
+        if normalized.contains("fromwallet_nonce_reservations") {
+            assert!(
+                normalized.contains("wheresemantic_reservation_key=$1")
+                    || normalized.contains("wherewallet_nonce_domain_id=$1andnonce=$2::numeric"),
+                "{operation} must address one reservation by exact key or frontier nonce: {sql}"
+            );
+        }
+        if normalized.contains("fromwallet_nonce_candidates") {
+            assert!(
+                normalized.contains("wheresemantic_reservation_key=$1")
+                    || normalized.contains("wheresemantic_candidate_operation_key=$1"),
+                "{operation} must address only one reservation's candidates or an exact candidate key: {sql}"
+            );
+        }
+        if normalized.contains("fromwallet_nonce_completions") {
+            assert!(
+                normalized.contains("wheresemantic_reservation_key=$1")
+                    || normalized.contains("wheresemantic_completion_key=$1"),
+                "{operation} must address one completion by exact key: {sql}"
+            );
+        }
+    }
+}
+
 async fn append_completed_test_reservation(
     authority: &PostgresWalletNonceAuthority,
     fixture: &Fixture,
@@ -3118,12 +3162,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         "the proxy must observe the bounded status statements"
     );
     let baseline_status_texts = query_proxy.statement_texts();
-    assert!(
-        !baseline_status_texts[proof_text_start..]
-            .iter()
-            .any(|sql| is_lifetime_reservation_aggregate(sql)),
-        "baseline status must not issue a lifetime reservation aggregate: {:?}",
-        &baseline_status_texts[proof_text_start..]
+    assert_bounded_wallet_history_reads(
+        &baseline_status_texts[proof_text_start..],
+        "baseline status",
     );
 
     const LONG_HISTORY_RESERVATIONS: u64 = 64;
@@ -3156,7 +3197,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         "the proxy must observe the bounded mutation statements"
     );
 
-    for nonce in 14_u64..=74_u64 {
+    for nonce in 14_u64..=(10_u64 + LONG_HISTORY_RESERVATIONS) {
         append_completed_test_reservation(
             &query_authority,
             &fixture,
@@ -3187,13 +3228,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     );
 
     let mutation_texts = query_proxy.statement_texts();
-    assert!(
-        !mutation_texts[mutation_text_start..]
-            .iter()
-            .any(|sql| is_lifetime_reservation_aggregate(sql)),
-        "mutations must not issue a lifetime reservation aggregate: {:?}",
-        &mutation_texts[mutation_text_start..]
-    );
+    assert_bounded_wallet_history_reads(&mutation_texts[mutation_text_start..], "mutations");
 
     let final_status_text_start = query_proxy.statement_texts().len();
     let long_history_statement_start = query_proxy.statement_count();
@@ -3215,12 +3250,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         "status statement count must stay constant after {LONG_HISTORY_RESERVATIONS} completed reservations"
     );
     let final_status_texts = query_proxy.statement_texts();
-    assert!(
-        !final_status_texts[final_status_text_start..]
-            .iter()
-            .any(|sql| is_lifetime_reservation_aggregate(sql)),
-        "post-history status must not issue a lifetime reservation aggregate: {:?}",
-        &final_status_texts[final_status_text_start..]
+    assert_bounded_wallet_history_reads(
+        &final_status_texts[final_status_text_start..],
+        "post-history status",
     );
 
     let frontier_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
@@ -3267,6 +3299,41 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         projection_plan.contains("rows=1"),
         "domain projection must visit one retained row: {projection_plan}"
     );
+
+    // The default planner may choose a sequential scan for a one-row table. Verify
+    // separately that the required primary-key path remains available when the
+    // planner is constrained to use an index; historical rows must not determine
+    // whether this bounded projection can use its key.
+    let mut projection_index_transaction = probe_pool
+        .begin()
+        .await
+        .expect("begin strict projection-index plan transaction");
+    sqlx::query("SET LOCAL enable_seqscan = off")
+        .execute(&mut *projection_index_transaction)
+        .await
+        .expect("disable sequential scans for strict projection-index plan");
+    let projection_index_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (COSTS false) \
+         SELECT local_high_water_nonce::text, retained_reservation_count::text, \
+                retained_reservation_chain_head_ref, active_reservation_key, \
+                current_resource_frontier_ref, current_incarnation_ref \
+           FROM {schema}.wallet_nonce_domains \
+          WHERE wallet_nonce_domain_id = $1"
+    )))
+    .bind(successor_request.nonce_domain.as_str())
+    .fetch_all(&mut *projection_index_transaction)
+    .await
+    .expect("explain strict bounded domain projection lookup")
+    .join("\n");
+    assert!(
+        projection_index_plan.contains("Index Scan using wallet_nonce_domains_pkey")
+            || projection_index_plan.contains("Index Only Scan using wallet_nonce_domains_pkey"),
+        "bounded domain projection must retain its primary-key index path: {projection_index_plan}"
+    );
+    projection_index_transaction
+        .rollback()
+        .await
+        .expect("rollback strict projection-index plan transaction");
 
     let reservation_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
         "EXPLAIN (ANALYZE, COSTS false) \
