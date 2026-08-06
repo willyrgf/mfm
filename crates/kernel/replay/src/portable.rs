@@ -2110,10 +2110,11 @@ mod tests {
                             .as_u64()
                             .and_then(|value| u8::try_from(value).ok())
                             .expect("observed-read fixture discriminator");
-                        let fixture =
-                            mfm_store::structured::test_support::observed_read_export(discriminator)
-                                .await
-                                .expect("observed-read audit fixture");
+                        let fixture = mfm_store::structured::test_support::observed_read_export(
+                            discriminator,
+                        )
+                        .await
+                        .expect("observed-read audit fixture");
                         let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
                             fixture.into_replay_parts();
                         let closure = AuthorizedExportClosure::new(
