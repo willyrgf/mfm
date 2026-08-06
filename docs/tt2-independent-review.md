@@ -4,7 +4,7 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `df61d1b9`; the historical gate remains
+The current implementation tip is `dcb72608`; the historical gate remains
 separate from the focused follow-up evidence below.
 The focused follow-up candidate is `afec8457`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
@@ -32,13 +32,16 @@ one-byte-over rejection, and requalifies the full managed structured-history
 fixture.
 Revision `77a06884` then adds a committed-but-unknown configuration
 acknowledgement recovery witness and a bounded scheduling yield between exact
-retry classifications; the broader serialization/deadlock, promotion, and
-production-authority matrix remains conditional.
+retry classifications; broader acknowledgement, promotion, and
+production-authority matrices remain conditional.
 Revision `df61d1b9` then adds deterministic run and configuration snapshot
 interleavings: each reader returns the old complete prefix after a concurrent
 successor commits, and a later read observes that successor. The broader
-serialization/deadlock, promotion, and production-authority matrix remains
-conditional.
+acknowledgement, promotion, and production-authority matrix remains
+conditional. Revision `dcb72608` adds injected `40001` serialization and
+`40P01` deadlock failures, proves rollback before fresh classification, and
+retries both exact append requests; cross-process and deployment fault matrices
+remain conditional.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -140,6 +143,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - Snapshot interleaving revision: `df61d1b9` adds run and configuration
   repeatable-read barriers and qualifies the old-prefix/new-prefix outcome on
   the managed PostgreSQL task.
+- Contention rollback revision: `dcb72608` injects `40001` and `40P01` batch
+  failures, proves zero durable rows before fresh classification, and retries
+  each exact append on the managed PostgreSQL task.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -420,8 +426,8 @@ result: 10 checkpoint tests passed, 0 failed
 
 The sidecar now locks its file across workers, reloads the durable maps before
 mutating validation, and proves that a stale independently loaded worker cannot
-replace a newer prepared successor. Production external authority, injected
-serialization/deadlock, broader acknowledgement-loss, and promotion matrices remain
+replace a newer prepared successor. Production external authority, broader
+acknowledgement-loss, promotion, and cross-process fault matrices remain
 outside this repository-local fixture.
 
 The expanded configuration boundary corpus was then qualified from clean source
@@ -465,8 +471,24 @@ result: ok — 21 structured-history tests passed, 0 failed in 32.49s
 The run/configuration barriers release the external fixation, commit a
 successor while the reader's repeatable-read transaction remains open, and
 assert the old complete prefix. A subsequent read observes the successor.
-This closes the deterministic snapshot-interleaving proof; injected
-serialization/deadlock, promotion, and production-authority matrices remain.
+This closes the deterministic snapshot-interleaving proof; broader
+acknowledgement, promotion, and production-authority matrices remain.
+
+The contention rollback follow-up was independently rerun from clean source
+tip `dcb72608`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: dcb72608
+run id: run-2190510-1785994272280747833
+result: ok — 22 structured-history tests passed, 0 failed in 32.29s
+```
+
+The test injects one `40001` serialization failure and one `40P01` deadlock at
+batch insertion. Both attempts leave zero durable rows, classify only after
+rollback in a fresh transaction, and accept the identical append after fault
+removal. Cross-process acknowledgement, promotion, and production-authority
+matrices remain conditional.
 
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
@@ -690,8 +712,9 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
 | `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2162922-1785991603848871458` (18/18 structured-history tests) | N/A; introduced after baseline |
 | `configuration_commit_acknowledgement_loss_retries_identical_revision` | pass in `run-2167617-1785992166392324915` (19/19 structured-history tests) | N/A; introduced after baseline |
-| `configuration_load_keeps_one_snapshot_across_a_concurrent_append` | pass in `run-2177250-1785993122646524325` (21/21 structured-history tests) | N/A; introduced after baseline |
-| `run_snapshot_keeps_one_prefix_across_a_concurrent_transition` | pass in `run-2177250-1785993122646524325` (21/21 structured-history tests) | N/A; introduced after baseline |
+| `configuration_load_keeps_one_snapshot_across_a_concurrent_append` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
+| `run_snapshot_keeps_one_prefix_across_a_concurrent_transition` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
+| `contention_failures_rollback_before_exact_retry` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
@@ -711,7 +734,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-AUTH-01 | Closed | Workspace-private authority marker and API-surface denial tests prevent ordinary external physical access. |
 | TT2-AUTH-02 | Closed | PostgreSQL session authority is externally deployed, move-only, and not a public raw-login capability. |
 | TT2-STORE-01 | Conditional | Target/checkpoint trust is explicit and testable; concrete external production fence implementation is absent. |
-| TT2-STORE-02 | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared restart, strict acknowledgement, stale-worker sidecar arbitration, and one committed-but-unknown acknowledgement recovery pass; injected serialization/deadlock, promotion, and production-authority matrices remain. |
+| TT2-STORE-02 | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared restart, strict acknowledgement, stale-worker sidecar arbitration, one committed-but-unknown acknowledgement recovery pass, and injected `40001`/`40P01` rollback classification pass; broader acknowledgement-loss, promotion, and production-authority matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
@@ -790,11 +813,10 @@ callback-free fold validation consumes only the opaque summary.
 
 - PostgreSQL role, snapshot, deterministic interleaving, checkpoint,
   configured-value race, retry, SQL inventory/offline, and managed
-  recoverability lanes pass, including the exact interleaving run
-  `run-2177250-1785993122646524325` on `df61d1b9`.
-  Cross-process acknowledgement-loss,
-  serialization/deadlock, copied-target, and injected-fault matrices are not
-  complete.
+  recoverability lanes pass, including the exact contention run
+  `run-2190510-1785994272280747833` on `dcb72608`.
+  Cross-process acknowledgement-loss, promotion, copied-target, and broader
+  injected-fault matrices are not complete.
 - EVM domain and storage tests plus the current managed release qualification
   pass, including fresh production keystore signing/broadcast, provider-proof
   corruption, promotion/reload, recovery observations, and bounded long-history
