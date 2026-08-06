@@ -136,6 +136,8 @@ const PHASE_RESUME_COMPLETE: &str = "resume-complete";
 const PHASE_PRODUCTION_ADMIT: &str = "production-admit";
 const PHASE_PRODUCTION_RESUME: &str = "production-resume";
 const INJECTED_CRASH_AFTER_BROADCAST_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_BROADCAST";
+const INJECTED_CRASH_AFTER_RECEIPT_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_RECEIPT";
+const INJECTED_CRASH_AFTER_FINALITY_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_FINALITY";
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
@@ -367,6 +369,26 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
 
     rpc.enable_finality();
+    run_worker_expect_crash_after_receipt(
+        &database,
+        rpc.endpoint(),
+        PHASE_PRODUCTION_RESUME,
+        &activation,
+        &provider,
+    )
+    .await;
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+
+    run_worker_expect_crash_after_finality(
+        &database,
+        rpc.endpoint(),
+        PHASE_PRODUCTION_RESUME,
+        &activation,
+        &provider,
+    )
+    .await;
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+
     run_worker(
         &database,
         rpc.endpoint(),
@@ -828,6 +850,7 @@ async fn run_production_application_worker(
         &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
         &submission_invocation,
     );
+    let history_control = isolated_pool(base_url, history_schema).await;
 
     match mode {
         PHASE_PRODUCTION_ADMIT => {
@@ -915,7 +938,6 @@ async fn run_production_application_worker(
                 .drive_once(credential(), portfolio_run_id.clone())
                 .await
                 .expect("advance production portfolio before restart");
-            let history_control = isolated_pool(base_url, history_schema).await;
             let broadcast_capability = broadcast_capability_ref();
             let mut observed_broadcast = false;
             for _ in 0..MAX_DRIVES {
@@ -934,7 +956,6 @@ async fn run_production_application_worker(
                     break;
                 }
             }
-            history_control.close().await;
             assert!(
                 observed_broadcast,
                 "production application did not persist the exact broadcast observation"
@@ -952,7 +973,21 @@ async fn run_production_application_worker(
         }
         PHASE_PRODUCTION_RESUME => {
             drive_application_to_closed(&application, &portfolio_run_id).await;
-            drive_application_to_closed(&application, &submission_run_id).await;
+            let crash_after_receipt = std::env::var_os(INJECTED_CRASH_AFTER_RECEIPT_ENV).is_some();
+            let crash_after_finality =
+                std::env::var_os(INJECTED_CRASH_AFTER_FINALITY_ENV).is_some();
+            if crash_after_receipt || crash_after_finality {
+                drive_application_to_closed_with_injected_crash(
+                    &application,
+                    &submission_run_id,
+                    &history_control,
+                    crash_after_receipt,
+                    crash_after_finality,
+                )
+                .await;
+            } else {
+                drive_application_to_closed(&application, &submission_run_id).await;
+            }
             let wallet_pool = isolated_pool(base_url, wallet_schema).await;
             let completion_json = sqlx::query_scalar::<_, String>(
                 "SELECT completion_json FROM wallet_nonce_completions",
@@ -974,6 +1009,7 @@ async fn run_production_application_worker(
         }
         _ => panic!("unknown production application worker mode"),
     }
+    history_control.close().await;
 }
 
 async fn production_deployment_material(
@@ -1365,6 +1401,45 @@ async fn drive_application_to_closed(application: &mfm_app::Application, run_id:
         }
     }
     panic!("production application run did not close within its certified bound");
+}
+
+async fn drive_application_to_closed_with_injected_crash(
+    application: &mfm_app::Application,
+    run_id: &RunId,
+    history_control: &PgPool,
+    crash_after_receipt: bool,
+    crash_after_finality: bool,
+) {
+    let receipt_capability = read_capability_ref::<EvmReceiptLookupCapability>();
+    let finality_capability = read_capability_ref::<EvmFinalizedHeadCapability>();
+    for _ in 0..MAX_DRIVES {
+        let response = application
+            .drive_once(credential(), run_id.clone())
+            .await
+            .expect("drive production application run");
+        if crash_after_receipt
+            && capability_observation_exists(history_control, run_id, &receipt_capability).await
+        {
+            history_control.close().await;
+            std::process::exit(137);
+        }
+        if crash_after_finality
+            && capability_observation_exists(history_control, run_id, &finality_capability).await
+        {
+            history_control.close().await;
+            std::process::exit(137);
+        }
+        let rendered = response.public_json().expect("render drive response");
+        match rendered["kind"].as_str() {
+            Some("closed") => {
+                panic!("production application run closed before injected observation crash")
+            }
+            Some("advanced") => {}
+            Some("waiting") => panic!("production application run parked before completion"),
+            other => panic!("unexpected production drive outcome: {other:?}"),
+        }
+    }
+    panic!("production application run did not reach injected observation crash");
 }
 
 async fn verify_production_projections(
@@ -3193,10 +3268,18 @@ async fn broadcast_observation_exists(
     run_id: &RunId,
     broadcast_capability_ref: &ContentRef,
 ) -> bool {
+    capability_observation_exists(pool, run_id, broadcast_capability_ref).await
+}
+
+async fn capability_observation_exists(
+    pool: &PgPool,
+    run_id: &RunId,
+    capability_ref: &ContentRef,
+) -> bool {
     let batches = load_batches(pool, run_id).await;
     let audit = HistoryAudit::from_batches(&batches);
     audit.authorizations.iter().any(|(attempt, capability)| {
-        capability == broadcast_capability_ref
+        capability == capability_ref
             && matches!(
                 audit.observations.get(attempt),
                 Some(ObservationOutcome::Returned { .. })
@@ -3211,7 +3294,7 @@ async fn run_worker(
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
     provider: &ProviderProcess,
 ) {
-    let output = run_worker_process(database, endpoint, mode, activation, provider, false).await;
+    let output = run_worker_process(database, endpoint, mode, activation, provider, None).await;
     assert_canaries_absent("worker stdout", &output.stdout);
     assert_canaries_absent("worker stderr", &output.stderr);
     assert!(
@@ -3230,19 +3313,76 @@ async fn run_worker_expect_crash_after_broadcast(
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
     provider: &ProviderProcess,
 ) {
-    let output = run_worker_process(database, endpoint, mode, activation, provider, true).await;
+    let output = run_worker_process(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        Some(InjectedCrashBoundary::Broadcast),
+    )
+    .await;
+    assert_injected_worker_crash(output, mode, "broadcast");
+}
+
+async fn run_worker_expect_crash_after_receipt(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let output = run_worker_process(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        Some(InjectedCrashBoundary::Receipt),
+    )
+    .await;
+    assert_injected_worker_crash(output, mode, "receipt");
+}
+
+async fn run_worker_expect_crash_after_finality(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let output = run_worker_process(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        Some(InjectedCrashBoundary::Finality),
+    )
+    .await;
+    assert_injected_worker_crash(output, mode, "finality");
+}
+
+fn assert_injected_worker_crash(output: Output, mode: &str, boundary: &str) {
     assert_canaries_absent("crashed worker stdout", &output.stdout);
     assert_canaries_absent("crashed worker stderr", &output.stderr);
     assert!(
         !output.status.success(),
-        "injected EVM PostgreSQL worker crash unexpectedly succeeded"
+        "injected EVM PostgreSQL worker {mode} {boundary} crash unexpectedly succeeded"
     );
     assert_eq!(
         output.status.code(),
         Some(137),
-        "injected EVM PostgreSQL worker did not exit at the crash boundary"
+        "injected EVM PostgreSQL worker {mode} {boundary} did not exit at the crash boundary"
     );
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[derive(Clone, Copy)]
+enum InjectedCrashBoundary {
+    Broadcast,
+    Receipt,
+    Finality,
 }
 
 async fn run_worker_process(
@@ -3251,7 +3391,7 @@ async fn run_worker_process(
     mode: &str,
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
     provider: &ProviderProcess,
-    crash_after_broadcast: bool,
+    crash_boundary: Option<InjectedCrashBoundary>,
 ) -> Output {
     let mut command =
         tokio::process::Command::new(std::env::current_exe().expect("test executable"));
@@ -3295,10 +3435,20 @@ async fn run_worker_process(
         )
         .env(WORKER_MODE_ENV, mode)
         .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string());
-    if crash_after_broadcast {
-        command.env(INJECTED_CRASH_AFTER_BROADCAST_ENV, "1");
-    } else {
-        command.env_remove(INJECTED_CRASH_AFTER_BROADCAST_ENV);
+    for variable in [
+        INJECTED_CRASH_AFTER_BROADCAST_ENV,
+        INJECTED_CRASH_AFTER_RECEIPT_ENV,
+        INJECTED_CRASH_AFTER_FINALITY_ENV,
+    ] {
+        command.env_remove(variable);
+    }
+    if let Some(boundary) = crash_boundary {
+        let variable = match boundary {
+            InjectedCrashBoundary::Broadcast => INJECTED_CRASH_AFTER_BROADCAST_ENV,
+            InjectedCrashBoundary::Receipt => INJECTED_CRASH_AFTER_RECEIPT_ENV,
+            InjectedCrashBoundary::Finality => INJECTED_CRASH_AFTER_FINALITY_ENV,
+        };
+        command.env(variable, "1");
     }
     command
         .stdin(Stdio::null())
