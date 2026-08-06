@@ -17,8 +17,10 @@ real store-shaped later audit suffix and verifies its offline parity; the
 preceding purpose-isolation cutover `a1a78b84` keeps the full verified cursor
 and object graph inside the store while exposing only an opaque offline
 summary. Revision `1ca2f7cd` retains the observed-read audit bytes in the
-generated corpus and rebuilds them through the store fixture. Its predecessor
-`bd98e8ca` removed the full actionable frontier from
+generated corpus and rebuilds them through the store fixture. Revision
+`db1b7503` adds direct witnesses for oversized ciphertext and a valid key with
+the wrong public/account identity. Its predecessor `bd98e8ca` removed the full
+actionable frontier from
 public and recorded-replay evidence.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
@@ -57,11 +59,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   package evidence, not members of the historical composed gate. The latest
   managed fixture now reloads a persisted two-candidate completion row before
   rehydrating and projecting its closure.
-- The latest keystore witness also covers source-to-`SecureKey` handoff and
-  zeroized cleanup after an authenticated post-decrypt invalid-key rejection;
-  direct witnesses for every malformed/corrupt format and valid-but-wrong
-  public/account identity, plus external termination/resource failures, remain
-  outside the focused package evidence.
+- The latest keystore witnesses cover source-to-`SecureKey` handoff, truncated
+  and oversized ciphertext rejection before plaintext allocation, zeroized
+  cleanup after authentication/AAD and authenticated post-decrypt invalid-key
+  rejection, and an explicit valid-but-wrong public/account identity. External
+  termination/OOM/resource failures remain outside focused package evidence.
 - The explicit offline fold seam now returns an opaque `OfflineVerifiedRun`
   containing recorded status and bounded export metadata when callers provide
   `RawRunHistory` and concrete trust. The complete cursor/object graph remains
@@ -117,6 +119,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `contracts/recoverability/v1/portable_store_observed_read_audit.hex`, emits
   acceptance and Semantic-rejection vectors from the single generator owner,
   and rebuilds the bytes through the real store fixture before offline parity.
+- Keystore boundary witnesses: `db1b7503` adds explicit oversized-ciphertext
+  and valid-wrong-identity tests; the full package and Clippy checks pass on
+  that exact revision.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -418,6 +423,14 @@ nix develop -c cargo test -p mfm-keystore
 91 unit tests and 9 doctests passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture
 8 decrypt-focused tests passed on `8b2e64ba`
+nix develop -c cargo test -p mfm-keystore decrypt_oversized_ciphertext_rejects_before_allocating_plaintext -- --nocapture
+1 focused test passed on `db1b7503`
+nix develop -c cargo test -p mfm-keystore qualification_rejects_a_valid_key_with_wrong_public_and_account_identity -- --nocapture
+1 focused test passed on `db1b7503`
+nix develop -c cargo test -p mfm-keystore
+93 unit tests and 9 doctests passed on `db1b7503`
+nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings
+pass on `db1b7503`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture
 1 focused test passed
 nix develop -c cargo test -p mfm-app --test application-privacy-ui
@@ -428,6 +441,8 @@ nix develop -c cargo test -p mfm-replay --lib
 10 passed on `1ca2f7cd`
 python3 contracts/recoverability/generate.py
 deterministic regeneration passed on `1ca2f7cd`
+nix develop -c cargo fmt --all -- --check
+pass on `233c96cd`
 ```
 
 The wallet run started after `266d6889` and no commits were made during it,
@@ -496,6 +511,8 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
 | `decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup` (decrypt-to-sign allocation continuity) | pass in full `mfm-keystore` package | N/A; introduced after baseline |
+| `decrypt_oversized_ciphertext_rejects_before_allocating_plaintext` | pass in focused `mfm-keystore` test | N/A; introduced after baseline |
+| `qualification_rejects_a_valid_key_with_wrong_public_and_account_identity` | pass in focused `mfm-keystore` test | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
 | `configured_value_history_linearizes_same_stream_append_races` | pass in composed gate | N/A; added after baseline |
 
@@ -534,7 +551,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live matrix remains. |
 | TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
-| TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
+| TT2-SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid key with the wrong public/account identity; external termination/OOM/resource-failure classes remain. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
 | TT2-VERIFY-01 | Conditional | Broad/focused gates pass, but the plan's complete authority/fault/offline/security matrix is incomplete. |
 | TT2-PROCESS-01 | Conditional | Evidence is now revision-pinned and honest; a PASS is withheld until the residuals close. |
@@ -653,5 +670,5 @@ are green on their applicable revisions, and the exact composed gate for
 review remains **CONDITIONAL / INCOMPLETE** until the residual proof matrices,
 live app integration, production
 trust deployment, the independent EVM offline/public-result audit, remaining
-keystore format/identity/fault witnesses, and ownership evidence are supplied or the
+keystore external termination/OOM/resource-failure witnesses, and ownership evidence are supplied or the
 normative plan is deliberately amended.
