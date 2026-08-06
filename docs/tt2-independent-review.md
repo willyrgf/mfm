@@ -4,9 +4,10 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The focused follow-up candidate is `ed7b341e`, which includes the bounded
+The focused follow-up candidate is `afec8457`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
-continuity proof, and completion-closure permit/observation binding proof
+continuity and failure cleanup proofs, completion-closure permit/observation
+binding proof, and persisted multi-candidate closure-only rehydration proof
 below. Focused checks and the historical exact composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -39,15 +40,20 @@ both the closed implementation work and the remaining proof/deployment gaps.
   projection; a full latency and adversarial non-aggregate scan matrix is
   still not independently established.
 - The completion-closure reload and protected-key allocation tests are focused
-  package evidence, not members of the historical composed gate.
+  package evidence, not members of the historical composed gate. The latest
+  managed fixture now reloads a persisted two-candidate completion row before
+  rehydrating and projecting its closure.
 
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `ed7b341e` (`bind completion closure permits`),
-  including `266d6889` (bounded wallet projection scan), `dec2f0c4`
-  (completion closure reload), and `9390503c` (production decrypt allocation
-  witness).
+- Focused follow-up candidate: `afec8457` (`prove closure-alone
+  multi-candidate reload`), including `50c8cac1` (closure-only rehydration and
+  public projection), `4fd1e757` (AAD identity cleanup witness), `61bf2091`
+  (shared decrypt failure cleanup), `ed7b341e` (completion closure permit and
+  observation binding), `266d6889` (bounded wallet projection scan),
+  `dec2f0c4` (completion closure reload), and `9390503c` (production decrypt
+  allocation witness).
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this documentation-only commit after the exact gate;
   the candidate review was performed against the exact hash above.
@@ -71,8 +77,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   Q/E cardinality and Q/P SQL-text assertions, final-status capture, and
   `EXPLAIN (ANALYZE)` plan/row checks for the domain projection, exact
   reservation, candidate prefix, completion, and nonce frontier. It also
-  round-trips the complete wallet completion closure and exercises decrypt to
-  signing through the same protected heap allocation.
+  round-trips a persisted two-candidate wallet completion closure, rehydrates
+  and projects it from the closure alone, and exercises decrypt to signing
+  through the same protected heap allocation.
 - Documentation-only provenance after the earlier candidate: `ef3e412d5`
   (wording), `42c80525` (whitespace cleanup), `a027640c` (review refresh),
   `d0459d4d` (bounded-source review refresh), `8803a585` (evidence pin),
@@ -179,6 +186,27 @@ independent review: ed7b341e
 result: exact validation and hostile-test review passed; no implementation gap
 ```
 
+The latest closure-only rehydration regression was then qualified on the exact
+tip and reviewed independently:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: afec8457
+run id: run-2003174-1785978540996350273
+result: ok — 1 task, 4 tests passed, 0 failed in 671.76s
+
+independent review: afec8457
+result: persisted two-candidate completion reload, closure-only rehydration,
+and canonical public projection confirmed; no implementation gap
+```
+
+The long SQL test reloads an existing completion row through both authorities
+before the assertions, so the two-candidate closure is persisted PostgreSQL
+state rather than an in-memory-only construction. The remaining EVM-09 proof
+scope is an independent offline/public-result audit, including whether the
+provider completion attestation is independently verifiable without the
+storage verifier.
+
 That run includes the 64 completed reserve/activate/complete reservations,
 constant status and mutation statement counts, Q/P SQL-text rejection of
 lifetime reservation aggregates in baseline/mutation/final-status slices, and
@@ -196,7 +224,9 @@ run id: run-1981332-1785976730139548702 — ok, 1/1 task in 2.67s
 nix run .#run -- --task postgres-sqlx-offline-check
 run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
 nix develop -c cargo test -p mfm-keystore
-86 unit tests and 9 doctests passed
+89 unit tests and 9 doctests passed after `61bf2091`
+nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture
+7 decrypt-focused tests passed on `4fd1e757`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture
 1 focused test passed
 ```
@@ -205,10 +235,11 @@ The wallet run started after `266d6889` and no commits were made during it,
 so its focused source and result align. It is not a replacement for the
 historical full composed gate.
 
-That current run started after `82e474ca` and no commits were made during
-it, so its source hash and closing-source-revision observation agree. The
-current run above is the source gate for `82e474ca`; the post-gate revision
-only adds evidence prose and does not alter production runtime behavior.
+The historical composed run started on `82e474ca` with no commits during the
+run, so its source hash and closing-source-revision observation agree. That
+run remains the exact source gate for `82e474ca`; the later focused revisions
+change production/runtime behavior and are evidenced separately above rather
+than being treated as retroactively covered by the composed gate.
 The earlier
 `run-1538729` began before the unrelated `ef3e412d5` documentation commit and
 is retained only as historical evidence, not as the current gate.
@@ -263,7 +294,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
-| `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof) | pass in `run-1977166-1785976039045273113` | N/A; introduced after baseline |
+| `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
 | `decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup` (decrypt-to-sign allocation continuity) | pass in full `mfm-keystore` package | N/A; introduced after baseline |
 | `qualified_evm_submission_production_restarts_after_one_broadcast_and_completes` | pass in composed gate | N/A; fresh production path added after baseline |
@@ -293,7 +324,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | A managed 64-reservation probe holds status and reserve/activate/complete Q/E counts constant, rejects captured Q/P lifetime `COUNT/MAX`, and checks indexed one-row `EXPLAIN (ANALYZE)` plans for frontier/reservation/candidate/completion paths; the one-row domain projection may use a bounded sequential plan, and latency/scale plus a strict projection-index/non-aggregate scan matrix remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip and hostile tamper tests pass, while persisted-closure-alone/later-run projection, multi-candidate reload, and independent offline/public-result proofs remain. |
+| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, and a persisted two-candidate closure-only reload/public projection pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
@@ -304,7 +335,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
-| TT2-SEC-01 | Conditional | Full keystore tests now witness decrypt-to-handoff-to-sign through one protected heap allocation and cleanup; authentication-failure/unwind allocation witnesses remain a strict-plan residual. |
+| TT2-SEC-01 | Conditional | The shared production decrypt guard now witnesses one protected heap allocation and cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, and injected unwind; broader malformed-format/post-decrypt public-identity witnesses and external termination/resource-failure classes remain. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
 | TT2-VERIFY-01 | Conditional | Broad/focused gates pass, but the plan's complete authority/fault/offline/security matrix is incomplete. |
 | TT2-PROCESS-01 | Conditional | Evidence is now revision-pinned and honest; a PASS is withheld until the residuals close. |
@@ -408,5 +439,6 @@ are green on their applicable revisions, and the exact composed gate for
 `82e474ca` is green. The strict plan acceptance condition is not met. The
 review remains **CONDITIONAL / INCOMPLETE** until the residual proof matrices,
 a valid later-history portable artifact and live app integration, production
-trust deployment, failure-path allocation witnesses, and ownership evidence
-are supplied or the normative plan is deliberately amended.
+trust deployment, the independent EVM offline/public-result audit, broader
+keystore failure witnesses, and ownership evidence are supplied or the
+normative plan is deliberately amended.

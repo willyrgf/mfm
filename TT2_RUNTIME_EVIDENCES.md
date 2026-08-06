@@ -82,6 +82,10 @@ Post-step-12 implementation and proof revisions:
 | `74bfa335` | add generated offline replay acceptance vector |
 | `6284e8d9` | expand generated portable graph corpus |
 | `82e474ca` | bound wallet status to current projection |
+| `61bf2091` | witness decrypt failure cleanup |
+| `4fd1e757` | cover decrypt aad cleanup |
+| `50c8cac1` | rehydrate completion from closure |
+| `afec8457` | prove closure-alone multi-candidate reload |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -100,7 +104,11 @@ cutover: normal status no longer performs a lifetime reservation `COUNT/MAX`,
 and its managed qualification adds a primary-key `EXPLAIN` regression plus a
 current-frontier omission check. The corrected source gate below runs on
 `82e474ca`; this evidence and contract-wording refresh is documentation-only
-after that gate.
+after that gate. `61bf2091` adds the shared production decrypt allocation
+guard and failure cleanup witnesses, `4fd1e757` adds the AAD identity
+substitution cleanup witness, `50c8cac1` adds closure-only completion
+rehydration and canonical public projection, and `afec8457` proves those
+closure APIs against a persisted two-candidate PostgreSQL completion row.
 
 ## Independent review checkpoints
 
@@ -113,14 +121,16 @@ after that gate.
 | Lint-clean candidate | `7f2a792af` | `76ce09085` | PASS for that scope |
 | Generated portable graph candidate | `6284e8d926e2ff866eae94c714420050cfe29643` | independent implementation and post-gate evidence review completed on this exact revision; superseded by the bounded projection cutover below | CONDITIONAL; residuals below |
 | Bounded wallet projection candidate | `82e474caf83bea3338da116e5735f06367f80742` | independent implementation review and exact composed gate below cover this revision | CONDITIONAL; residuals below |
+| Closure/decrypt focused candidate | `afec8457` | focused decrypt cleanup, closure-only rehydration, and persisted two-candidate managed qualification reviewed on exact revision | CONDITIONAL; offline/public-result and broader fault residuals below |
 
 ## Focused and composed verification
 
 All direct Rust tooling was run in the default Nix development shell. The
-composed source gate was run once on the current implementation candidate,
-without preceding it with separate composed check/test/test-db gates. The
-focused checks and exact run are recorded below; the later evidence-only
-commit does not alter the gated source tree.
+historical composed source gate was run once on `82e474ca`, without preceding
+it with separate composed check/test/test-db gates. The focused checks and
+later exact runs are recorded below; documentation-only refreshes do not alter
+that gated source tree, while later focused code revisions are evidenced on
+their own exact revisions.
 
 | Check | Evidence |
 | --- | --- |
@@ -237,7 +247,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Normal status now reads the maintained domain projection, exact frontier, and bounded candidate prefix without lifetime reservation `COUNT/MAX`; the primary-key `EXPLAIN` regression passes, while the long-history query-count/latency matrix remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip and hostile tamper tests pass, while persisted-closure-alone/later-run projection, multi-candidate reload, and independent offline/public-result proofs remain. |
+| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, and persisted two-candidate closure-only reload/public projection pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -248,7 +258,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
-| SEC-01 | Conditional | Protected key movement and zeroization checks exist; same-allocation lifetime is not established by Rust move semantics. |
+| SEC-01 | Conditional | The shared production decrypt guard witnesses one protected heap allocation and cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, and injected unwind; broader malformed-format/post-decrypt public-identity witnesses and external termination/resource-failure classes remain. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
 | VERIFY-01 | Conditional | Broad and focused gates pass, but the required complete proof matrix is not present. |
 | PROCESS-01 | Conditional | This review now preserves residuals and exact provenance; strict PASS is withheld until the residual proof/deployment work closes. |
@@ -286,8 +296,9 @@ The following are the concrete blockers to an unconditional §13 PASS:
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;
-4. substantiate same-allocation key lifetime and long-history cost/LOC ownership
-   evidence; and
+4. complete the broader keystore malformed-format/post-decrypt identity and
+   external termination/resource-failure witness matrix, while retaining the
+   long-history cost/LOC ownership evidence; and
 5. close the remaining STORE-05/06, EVM-07/09, APP-01, QUALITY-01, and VERIFY-01
    production proof matrices.
 
@@ -310,6 +321,10 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `dec2f0c4` | `prove wallet completion closure reload` | serialized completion closure revalidates every preimage and preserves public-result bytes |
 | `266d6889` | `accept bounded wallet projection scan` | one-row domain projection plan is accepted explicitly; multi-row exact-key index checks remain strict |
 | `ed7b341e` | `bind completion closure permits` | exact per-candidate permit/ordinal and reservation observation-round bindings; hostile tamper tests; independent review found no implementation gap |
+| `61bf2091` | `witness decrypt failure cleanup` | shared production decrypt guard witnesses cleanup on auth failure, bounded rejection, and injected unwind; keystore package and Clippy pass |
+| `4fd1e757` | `cover decrypt aad cleanup` | substituted entry identity reaches the shared decrypt helper and zeroizes without ownership transfer; decrypt-focused suite 7/7 |
+| `50c8cac1` | `rehydrate completion from closure` | closure-only rehydration reconstructs outer fields, validates every retained preimage, and projects canonical public-result bytes |
+| `afec8457` | `prove closure-alone multi-candidate reload` | persisted two-candidate completion reload, closure-only rehydration, and canonical public projection; exact managed run and independent review pass |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:
@@ -332,6 +347,23 @@ failed only because the first version incorrectly required an index for the
 one-row domain projection; PostgreSQL selected a bounded sequential plan, and
 `266d6889` records that valid case.
 
+The latest exact managed leaf ran on `afec8457` with no intervening commits:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: afec8457
+run id: run-2003174-1785978540996350273
+result: ok — 1 task, 4 tests passed, 0 failed in 671.76s
+```
+
+Its long SQL test reloads the persisted completion through both authorities,
+confirms two retained candidates, then rehydrates and projects from the
+serialized recovery closure alone. Independent review of that exact revision
+confirmed the persisted multi-candidate evidence and found no implementation
+gap. The remaining EVM-09 scope is an independent offline/public-result audit,
+including provider-attestation/signature verification without the storage
+verifier.
+
 Additional current-tree leaves:
 
 ```text
@@ -339,21 +371,24 @@ nix run .#run -- --task postgres-sql-inventory-check
 run id: run-1981332-1785976730139548702 — ok, 1/1 task in 2.67s
 nix run .#run -- --task postgres-sqlx-offline-check
 run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
-nix develop -c cargo test -p mfm-keystore — 86 unit tests + 9 doctests passed
+nix develop -c cargo test -p mfm-keystore — 89 unit tests + 9 doctests passed after `61bf2091`
+nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture — 7 passed on `4fd1e757`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture — 1 passed
-nix develop -c cargo test -p mfm-evm — 47 unit tests + signing UI trybuild + 2 doctests passed on `ed7b341e`
+nix develop -c cargo test -p mfm-evm — 47 unit tests + signing UI trybuild + 2 doctests passed on `50c8cac1`
+nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `61bf2091`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
 reservation observation-round bindings, and found no implementation gap in
-the closure cutover. Its residual is proof scope only: persisted-closure-alone
-projection, later-run/multi-candidate reload, and an independent offline/public
-result audit remain unexecuted.
+the closure cutover. The later exact `afec8457` review closes the
+persisted-closure-alone/later-run and multi-candidate reload evidence. Its
+remaining proof scope is the independent offline/public-result audit.
 
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan
-evidence; EVM-09 still lacks persisted-closure-alone/later-run projection,
-multi-candidate, and independent offline/public-result proofs; SEC-01 still
-lacks failure-path allocation witnesses; and the external trust, live multi-hop
-export, later-valid-audit-artifact, cross-process/fault, quality, and complete
-verification residuals remain Conditional.
+evidence; EVM-09 still lacks the independent offline/public-result/provider
+attestation audit; SEC-01 still lacks broader malformed-format/post-decrypt
+identity and external termination/resource-failure witnesses; and the
+external trust, live multi-hop export, later-valid-audit-artifact,
+cross-process/fault, quality, and complete verification residuals remain
+Conditional.
