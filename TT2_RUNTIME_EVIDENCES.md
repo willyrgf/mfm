@@ -293,3 +293,56 @@ The following are the concrete blockers to an unconditional §13 PASS:
 
 Until those items are resolved or the normative plan is deliberately amended,
 the honest disposition is **CONDITIONAL / INCOMPLETE**, not PASS.
+
+## Focused follow-up after the bounded projection candidate
+
+This append-only entry records the next implementation/proof revisions. The
+historical composed gate above remains pinned to `82e474caf`; these focused
+checks do not retroactively turn that gate into a gate for the later tree.
+
+| Revision | Subject | Evidence |
+| --- | --- | --- |
+| `5bebfb72` | `prove bounded wallet reads across long history` | managed 64-reservation history and proxy cardinality baseline |
+| `4ab49f7b` | `harden long-history wallet query proof` | Q/P SQL capture, 64 reserve/activate/complete operations, mutation count/text checks |
+| `d7454e37` | `cover final wallet status query` | final-status Q/P slice rejects lifetime reservation aggregates |
+| `9390503c` | `prove production key allocation continuity` | decrypt-to-sign same protected heap allocation and cleanup witness |
+| `56c533ae` | `extend wallet query plan proof` | post-history `EXPLAIN (ANALYZE)` checks for projection, reservation, candidate, completion, and frontier paths |
+| `dec2f0c4` | `prove wallet completion closure reload` | serialized completion closure revalidates every preimage and preserves public-result bytes |
+| `266d6889` | `accept bounded wallet projection scan` | one-row domain projection plan is accepted explicitly; multi-row exact-key index checks remain strict |
+
+The corrected exact managed leaf ran after `266d6889` with no intervening
+commits:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: 266d6889
+run id: run-1977166-1785976039045273113
+result: ok — 1 task, 4 tests passed, 0 failed in 660.48s
+```
+
+Its real-history probe keeps normal-status and reserve/activate/complete
+statement counts constant after 64 completed reservations, captures frontend
+Q/P SQL text for baseline/mutation/final-status aggregate rejection, and
+checks `EXPLAIN (ANALYZE)` one-row/index plans for the maintained projection and
+exact historical keys. The superseded diagnostic `run-1971258-1785975345382628345`
+failed only because the first version incorrectly required an index for the
+one-row domain projection; PostgreSQL selected a bounded sequential plan, and
+`266d6889` records that valid case.
+
+Additional current-tree leaves:
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+run id: run-1981332-1785976730139548702 — ok, 1/1 task in 2.67s
+nix run .#run -- --task postgres-sqlx-offline-check
+run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
+nix develop -c cargo test -p mfm-keystore — 86 unit tests + 9 doctests passed
+nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture — 1 passed
+```
+
+The follow-up narrows, but does not eliminate, the residuals above. EVM-07
+still lacks a full latency and adversarial non-aggregate scan matrix; EVM-09
+still lacks an independent offline/public-result audit; SEC-01 still lacks
+failure-path allocation witnesses; and the external trust, live multi-hop
+export, later-valid-audit-artifact, cross-process/fault, quality, and complete
+verification residuals remain Conditional.
