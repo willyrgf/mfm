@@ -106,8 +106,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
 - Current parity/status revision: `624af5b2` (shared serialized configuration
-  bound, managed memory/PostgreSQL acceptance vectors, and stale purpose-status
-  assertions after the frontier cutover).
+bound, managed memory/PostgreSQL acceptance vectors, and stale purpose-status
+assertions after the frontier cutover).
+- SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
+  checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
   ambiguity retries at eight attempts, and `e7624406` removes the redundant
   generic store snapshot retry so PostgreSQL owns the single bounded
@@ -341,6 +343,11 @@ idempotent replay vectors with final reader parity. It also recompiles the
 PostgreSQL integration assertions against `RunEvidenceStatus`; no purpose
 wrapper calls the removed `.frontier()` API.
 
+The focused SQL inventory check on `7e467952` passes both the source inventory
+and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
+generic `query_as`, checked `query_as!`, wrapped generic, and `QueryBuilder`
+fragment forms; full independent ownership/scale proof remains conditional.
+
 The purpose-isolation cutover was qualified on its exact clean tip:
 
 ```text
@@ -564,7 +571,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, and idempotent replay across memory/PostgreSQL; the complete generated/scale acceptance corpus remains unverified. |
-| TT2-STORE-06 | Conditional | The syntax inventory now covers generic calls, aliases, SQLx macros, and `QueryBuilder` (focused inventory and SQLx-offline leaves pass); a full independent query ownership/scale audit remains. |
+| TT2-STORE-06 | Conditional | The syntax inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments (focused inventory tests 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | Dense publication routes use bounded unique producer-prefix verification. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
 | TT2-EVM-02 | Closed | Recovery observes chain state before broadcasting a retained candidate. |

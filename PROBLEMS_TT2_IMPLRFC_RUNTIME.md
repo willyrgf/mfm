@@ -676,22 +676,19 @@ Severity: Medium
 
 Disposition: Partial
 
-Current implementation:
+Current implementation and evidence:
 
-The source scanner recognizes only lines containing literal `sqlx::query(` or
-`sqlx::query_scalar(` at
-[sql_inventory.rs lines 53-70](crates/storages/postgres/src/sql_inventory.rs#L53). It misses common
-forms such as `sqlx::query_scalar::<_, T>(...)` and
-[`QueryBuilder::<Postgres>::new`](crates/storages/postgres/src/structured.rs#L1052). The repository
-contains multiple generic scalar calls that the inventory never examines.
-
-The dedicated `postgres-sql-inventory-check` task exists, but the scanner can pass while queries
-are unowned. The similarly named SQLx offline gate does not type-check dynamically assembled SQL.
+The inventory is now an AST visitor that recognizes direct and aliased SQLx calls, generic
+scalar/query-as forms, checked SQLx macros, wrapped helpers, and `QueryBuilder` construction and
+fragment methods. `7e467952` adds explicit syntax fixtures for each of those forms, and the source
+inventory plus fixture tests pass 2/2. The dedicated `postgres-sql-inventory-check` task remains
+the executable source gate; SQLx offline still does not type-check dynamically assembled SQL.
 
 Consequence:
 
-The gate's assurance claim is stronger than its coverage. New runtime queries can bypass both the
-allowlist and checked SQL metadata without making CI fail.
+The former generic/builder false-negative class is covered by the scanner and fixtures. A complete
+independent ownership and scale audit for every dynamic statement is still required before this
+item can be closed.
 
 Required resolution properties and proof:
 
