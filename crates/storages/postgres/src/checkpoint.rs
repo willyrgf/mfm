@@ -9,11 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "test-support")]
 use std::fs;
 #[cfg(feature = "test-support")]
+use std::fs::{File, OpenOptions};
+#[cfg(feature = "test-support")]
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "test-support")]
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+#[cfg(feature = "test-support")]
+use fs2::FileExt;
 #[cfg(feature = "test-support")]
 use mfm_canonical::sha256_digest_bytes;
 #[cfg(feature = "test-support")]
@@ -398,8 +402,8 @@ pub enum CheckpointError {
     NotPrepared,
 }
 
-/// Small deployment-side in-memory implementation useful for process-local orchestration and
-/// deterministic tests. Production deployments replace it with durable external state.
+/// Small sidecar-backed implementation useful for deterministic test orchestration. Production
+/// deployments replace it with a credential-broker-owned durable external authority.
 #[cfg(feature = "test-support")]
 type TargetAdmissionKey = (StoreScopeId, StoreEpoch, String);
 #[cfg(feature = "test-support")]
@@ -421,7 +425,20 @@ static PERSISTENCE_GATE: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::n
 static NEXT_PERSIST_TEMP: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(feature = "test-support")]
-/// Process-local checkpoint authority used by integration fixtures.
+struct PersistenceLease {
+    _process_gate: MutexGuard<'static, ()>,
+    file: File,
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for PersistenceLease {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+#[cfg(feature = "test-support")]
+/// Sidecar-backed checkpoint authority used by integration fixtures.
 #[derive(Clone, Default)]
 pub struct ExternalCheckpointLedger {
     // State is keyed by the stable stream identity. The predecessor belongs
@@ -454,11 +471,11 @@ impl ExternalCheckpointLedger {
     /// sidecar outside the PostgreSQL process. The schema name namespaces the
     /// sidecar, allowing a fresh worker process to reopen the same target.
     pub fn for_test(schema_name: &str) -> Self {
-        let mut ledger = Self {
+        let ledger = Self {
             persistence: Some(Arc::new(test_persistence_path(schema_name))),
             ..Self::default()
         };
-        ledger.load_persisted();
+        ledger.refresh_persisted();
         ledger
     }
 
@@ -466,85 +483,82 @@ impl ExternalCheckpointLedger {
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(bytes))
     }
 
-    fn load_persisted(&mut self) {
-        let Some(path) = self.persistence.as_deref() else {
-            return;
-        };
-        let Ok(bytes) = fs::read(path) else {
-            return;
-        };
-        let persisted: PersistedCheckpointLedger = serde_json::from_slice(&bytes)
-            .expect("test checkpoint sidecar must contain valid checkpoint state");
-        self.states
+    fn persistence_lease(&self) -> Option<PersistenceLease> {
+        let path = self.persistence.as_deref()?;
+        let parent = path.parent().expect("test checkpoint sidecar has a parent");
+        fs::create_dir_all(parent).expect("create test checkpoint sidecar directory");
+        let lock_path = path.with_extension("lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)
+            .expect("open test checkpoint sidecar lock");
+        let process_gate = PERSISTENCE_GATE.get_or_init(|| Mutex::new(()));
+        let process_gate = process_gate
             .lock()
-            .expect("checkpoint mutex poisoned")
-            .extend(persisted.states);
-        self.heads
-            .lock()
-            .expect("checkpoint mutex poisoned")
-            .extend(persisted.heads);
-        self.targets
-            .lock()
-            .expect("checkpoint mutex poisoned")
-            .extend(persisted.targets);
+            .expect("checkpoint persistence mutex poisoned");
+        file.lock_exclusive().expect("lock test checkpoint sidecar");
+        Some(PersistenceLease {
+            _process_gate: process_gate,
+            file,
+        })
     }
 
-    fn persist(&self) {
+    fn refresh_persisted(&self) {
+        let Some(_lease) = self.persistence_lease() else {
+            return;
+        };
+        self.refresh_persisted_locked();
+    }
+
+    fn refresh_persisted_locked(&self) {
         let Some(path) = self.persistence.as_deref() else {
             return;
         };
-        let gate = PERSISTENCE_GATE.get_or_init(|| Mutex::new(()));
-        let _gate = gate.lock().expect("checkpoint persistence mutex poisoned");
-        let mut persisted = fs::read(path)
+        let persisted = fs::read(path)
             .ok()
             .map(|bytes| {
                 serde_json::from_slice::<PersistedCheckpointLedger>(&bytes)
                     .expect("test checkpoint sidecar must contain valid checkpoint state")
             })
             .unwrap_or_default();
-        for (stream, state) in self
-            .states
-            .lock()
-            .expect("checkpoint mutex poisoned")
-            .iter()
-        {
-            if let Some(existing) = persisted
+        *self.states.lock().expect("checkpoint mutex poisoned") =
+            persisted.states.into_iter().collect();
+        *self.heads.lock().expect("checkpoint mutex poisoned") =
+            persisted.heads.into_iter().collect();
+        *self.targets.lock().expect("checkpoint mutex poisoned") =
+            persisted.targets.into_iter().collect();
+    }
+
+    fn persist_locked(&self) {
+        let Some(path) = self.persistence.as_deref() else {
+            return;
+        };
+        let mut persisted = PersistedCheckpointLedger {
+            states: self
                 .states
-                .iter_mut()
-                .find(|(candidate, _)| candidate == stream)
-            {
-                existing.1 = state.clone();
-            } else {
-                persisted.states.push((stream.clone(), state.clone()));
-            }
-        }
-        for (stream, head) in self.heads.lock().expect("checkpoint mutex poisoned").iter() {
-            if let Some(existing) = persisted
+                .lock()
+                .expect("checkpoint mutex poisoned")
+                .iter()
+                .map(|(stream, state)| (stream.clone(), state.clone()))
+                .collect(),
+            heads: self
                 .heads
-                .iter_mut()
-                .find(|(candidate, _)| candidate == stream)
-            {
-                existing.1 = head.clone();
-            } else {
-                persisted.heads.push((stream.clone(), head.clone()));
-            }
-        }
-        for (target, admission) in self
-            .targets
-            .lock()
-            .expect("checkpoint mutex poisoned")
-            .iter()
-        {
-            if let Some(existing) = persisted
+                .lock()
+                .expect("checkpoint mutex poisoned")
+                .iter()
+                .map(|(stream, head)| (stream.clone(), head.clone()))
+                .collect(),
+            targets: self
                 .targets
-                .iter_mut()
-                .find(|(candidate, _)| candidate == target)
-            {
-                existing.1 = admission.clone();
-            } else {
-                persisted.targets.push((target.clone(), admission.clone()));
-            }
-        }
+                .lock()
+                .expect("checkpoint mutex poisoned")
+                .iter()
+                .map(|(target, admission)| (target.clone(), admission.clone()))
+                .collect(),
+        };
         persisted.states.sort_by(|left, right| left.0.cmp(&right.0));
         persisted.heads.sort_by(|left, right| left.0.cmp(&right.0));
         persisted
@@ -592,6 +606,11 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         fence_generation: u64,
         release_epoch: u64,
     ) -> Result<(), CheckpointError> {
+        let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let mut targets = self.targets.lock().expect("checkpoint mutex poisoned");
         let key = (store_scope_id.clone(), store_epoch, target_key.to_owned());
         let incoming = TargetAdmission {
@@ -622,7 +641,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         };
         drop(targets);
         if result.is_ok() {
-            self.persist();
+            self.persist_locked();
         }
         result
     }
@@ -656,6 +675,10 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
 
     fn prepare(&self, mutation: &CheckpointMutation) -> Result<CheckpointState, CheckpointError> {
         let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let key = &mutation.key;
         self.validate_target(
             &mutation.target.store_scope_id,
@@ -701,7 +724,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
                 states.insert(stream, state.clone());
                 drop(states);
                 drop(heads);
-                self.persist();
+                self.persist_locked();
                 Ok(state)
             }
             Some(_) => Err(CheckpointError::Conflict),
@@ -713,7 +736,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
                 states.insert(stream, state.clone());
                 drop(states);
                 drop(heads);
-                self.persist();
+                self.persist_locked();
                 Ok(state)
             }
         }
@@ -721,6 +744,10 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
 
     fn acknowledge(&self, mutation: &CheckpointMutation) -> Result<(), CheckpointError> {
         let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let key = &mutation.key;
         self.validate_target(
             &mutation.target.store_scope_id,
@@ -767,7 +794,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
                 heads.insert(stream, successor);
                 drop(states);
                 drop(heads);
-                self.persist();
+                self.persist_locked();
                 Ok(())
             }
             Some(CheckpointState::Acknowledged {
@@ -785,6 +812,10 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
 
     fn fixate_read(&self, key: &CheckpointKey) -> Result<CheckpointReadFixation, CheckpointError> {
         let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let targets = self.targets.lock().expect("checkpoint mutex poisoned");
         if !targets.contains_key(&(
             key.store_scope_id.clone(),
@@ -794,7 +825,12 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
             return Err(CheckpointError::Conflict);
         }
         let stream = StreamIdentity::from(key);
-        let successor = self.current_head(key);
+        let successor = self
+            .heads
+            .lock()
+            .expect("checkpoint mutex poisoned")
+            .get(&stream)
+            .cloned();
         let mut fixations = self
             .read_fixations
             .lock()
@@ -839,6 +875,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
     }
 
     fn state(&self, key: &CheckpointKey) -> Option<CheckpointState> {
+        self.refresh_persisted();
         self.states
             .lock()
             .expect("checkpoint mutex poisoned")
@@ -847,6 +884,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
     }
 
     fn current_head(&self, key: &CheckpointKey) -> Option<ContentDigest> {
+        self.refresh_persisted();
         self.heads
             .lock()
             .expect("checkpoint mutex poisoned")
@@ -859,6 +897,10 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         mutations: &[CheckpointMutation],
     ) -> Result<Vec<CheckpointState>, CheckpointError> {
         let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let mut ordered = mutations.to_vec();
         ordered.sort_by(|left, right| left.key.cmp(&right.key));
         if ordered.windows(2).any(|pair| pair[0].key == pair[1].key) {
@@ -970,12 +1012,16 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         }
         drop(guard);
         drop(heads);
-        self.persist();
+        self.persist_locked();
         Ok(states)
     }
 
     fn acknowledge_many(&self, mutations: &[CheckpointMutation]) -> Result<(), CheckpointError> {
         let _gate = self.gate.lock().expect("checkpoint mutex poisoned");
+        let persistence = self.persistence_lease();
+        if persistence.is_some() {
+            self.refresh_persisted_locked();
+        }
         let mut ordered = mutations.to_vec();
         ordered.sort_by(|left, right| left.key.cmp(&right.key));
         let target_identity = ordered.first().map(|mutation| {
@@ -1070,7 +1116,7 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         }
         drop(guard);
         drop(heads);
-        self.persist();
+        self.persist_locked();
         Ok(())
     }
 }
@@ -1213,6 +1259,7 @@ mod tests {
         drop(reopened);
         drop(ledger);
         let _ = fs::remove_file(test_persistence_path(&schema_name));
+        let _ = fs::remove_file(test_persistence_path(&schema_name).with_extension("lock"));
     }
 
     #[test]
@@ -1282,6 +1329,32 @@ mod tests {
         drop(reopened);
         drop(ledger);
         let _ = fs::remove_file(test_persistence_path(&schema_name));
+        let _ = fs::remove_file(test_persistence_path(&schema_name).with_extension("lock"));
+    }
+
+    #[test]
+    fn independent_persisted_workers_reject_a_stale_conflicting_successor() {
+        let (schema_name, first_worker) = persisted_registered("workers");
+        let second_worker = ExternalCheckpointLedger::for_test(&schema_name);
+        let first = mutation(None, b"first");
+        let conflicting = mutation(None, b"conflicting");
+        first_worker
+            .prepare(&first)
+            .expect("first worker prepares successor");
+        assert_eq!(
+            second_worker.prepare(&conflicting),
+            Err(CheckpointError::Conflict)
+        );
+        assert_eq!(
+            second_worker.state(&first.key),
+            Some(CheckpointState::Prepared {
+                successor: checkpoint_digest(b"first"),
+            })
+        );
+        drop(second_worker);
+        drop(first_worker);
+        let _ = fs::remove_file(test_persistence_path(&schema_name));
+        let _ = fs::remove_file(test_persistence_path(&schema_name).with_extension("lock"));
     }
 
     #[test]
