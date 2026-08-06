@@ -16,7 +16,9 @@ source gate pass. The latest replay-proof cutover is `eb38ea44`, which adds a
 real store-shaped later audit suffix and verifies its offline parity; the
 preceding purpose-isolation cutover `a1a78b84` keeps the full verified cursor
 and object graph inside the store while exposing only an opaque offline
-summary. Its predecessor `bd98e8ca` removed the full actionable frontier from
+summary. Revision `1ca2f7cd` retains the observed-read audit bytes in the
+generated corpus and rebuilds them through the store fixture. Its predecessor
+`bd98e8ca` removed the full actionable frontier from
 public and recorded-replay evidence.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
@@ -40,10 +42,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   selected prefix, and fails before reader access on denied root/dependency
   decisions; the production integration proof is still absent.
 - The store-shaped observed-read fixture now proves a foldable later
-  authorization/observation suffix and online/offline audit parity. The
-  generated suffix vectors remain synthesized corpus provenance rather than a
-  retained independent artifact; live Postgres/application replay evidence is
-  still absent.
+  authorization/observation suffix and online/offline audit parity. Revision
+  `1ca2f7cd` retains its exact bytes as generator-owned corpus input and the
+  corpus test rebuilds and verifies that artifact; live Postgres/application
+  replay evidence is still absent.
 - The decision references are intentionally opaque content-addressed policy
   evidence. Offline replay binds the exact closure digest through its explicit
   trust snapshot and does not resolve policy live.
@@ -78,6 +80,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   allocation witness), `d2a39d7a` (post-decrypt invalid-key cleanup), and
   `8b2e64ba` (failure-path handoff-pointer witness), and `2fc4afa8`
   (purpose-isolation compile-fail cases).
+- Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
+  in replay corpus`), which adds the exact store-shaped observed-read bytes,
+  generator acceptance/rejection vectors, and an offline parity branch in the
+  corpus test.
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this documentation-only commit after the exact gate;
   the candidate review was performed against the exact hash above.
@@ -107,6 +113,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   history with committed authorization and observed return batches. Audit
   export folds offline with byte-identical projection, while the same suffix
   carried as Semantic is rejected at strict decode.
+- Artifact provenance cutover: `1ca2f7cd` retains those exact audit bytes in
+  `contracts/recoverability/v1/portable_store_observed_read_audit.hex`, emits
+  acceptance and Semantic-rejection vectors from the single generator owner,
+  and rebuilds the bytes through the real store fixture before offline parity.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -390,9 +400,12 @@ Independent review of exact `eb38ea44` passes the REPLAY-03 implementation
 scope: the store-shaped fixture contains admission, a committed Read
 authorization, and a later Returned observation; Audit folds offline with
 byte-identical projection, while carrying that physical suffix as Semantic is
-rejected. The fixture uses `StructuredMemoryBackend` test support, so retained
-independent artifact provenance and live Postgres/application/multi-process
-evidence remain conditional under REPLAY-03/05.
+rejected. The fixture uses `StructuredMemoryBackend` test support. Revision
+`1ca2f7cd` then retains the exact bytes as a generator-owned corpus artifact;
+its corpus test rebuilds the stream through `observed_read_export(203)`, runs
+offline verification, and compares projection bytes. Live
+Postgres/application/multi-process evidence remains conditional under
+REPLAY-03/05.
 
 Additional focused evidence on the current tree:
 
@@ -409,6 +422,12 @@ nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_p
 1 focused test passed
 nix develop -c cargo test -p mfm-app --test application-privacy-ui
 12 application privacy trybuild cases passed on `2fc4afa8`
+nix develop -c cargo test -p mfm-replay generated_portable_artifact_corpus_round_trips -- --nocapture
+pass on `1ca2f7cd` (retained observed-read artifact and semantic-suffix rejection)
+nix develop -c cargo test -p mfm-replay --lib
+10 passed on `1ca2f7cd`
+python3 contracts/recoverability/generate.py
+deterministic regeneration passed on `1ca2f7cd`
 ```
 
 The wallet run started after `266d6889` and no commits were made during it,
@@ -510,9 +529,9 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
-| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the store-shaped authorization/observation suffix passes Audit offline parity and Semantic rejection. Retained independent artifact provenance and live production evidence remain. |
+| TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the retained store-shaped authorization/observation artifact passes Audit offline parity and Semantic rejection. Live production evidence remains. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
-| TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, the generated offline-fold acceptance leaf, and store-shaped later-audit parity pass; retained generated later-audit provenance and the complete live matrix remain. |
+| TT2-REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live matrix remains. |
 | TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
@@ -592,20 +611,20 @@ Implemented and passing:
   and graph-validation layers;
 - principal/grant/decision retention and strict authorization-decision tamper
   rejection; and
-- a generated 15-vector portable artifact corpus (recursive accept,
+- a generated 17-vector portable artifact corpus (recursive accept,
   offline-fold acceptance, omitted/extra/reordered/substituted source negatives,
   semantic/audit suffix handling, false frontier/publication negatives, source
-  identity/fixation collisions, and an over-budget source-count negative) with
+  identity/fixation collisions, an over-budget source-count negative, and the
+  retained store-shaped observed-read audit artifact) with
   no-service replay; and
 - generated shared-DAG acceptance and nested-cycle rejection vectors that
   exercise the actual source-closure expander.
 
 Still required by the plan:
 
-- retained independent semantic/audit artifacts with later suffix provenance
-  and complete live Postgres/application replay evidence. The store-shaped
-  suffix now proves the fold and cutoff behavior, while the generated corpus
-  vectors remain synthetic;
+- complete live Postgres/application replay evidence. The retained
+  store-shaped suffix artifact now proves the fold and cutoff behavior in the
+  generated corpus;
 - live production application multi-hop export and zero-byte denied-dependency
   integration assertion; and
 - concrete production retained-release/checkpoint trust implementations.
@@ -632,7 +651,7 @@ The current implementation is materially stronger, all recorded focused checks
 are green on their applicable revisions, and the exact composed gate for
 `82e474ca` is green. The strict plan acceptance condition is not met. The
 review remains **CONDITIONAL / INCOMPLETE** until the residual proof matrices,
-a valid later-history portable artifact and live app integration, production
+live app integration, production
 trust deployment, the independent EVM offline/public-result audit, remaining
 keystore format/identity/fault witnesses, and ownership evidence are supplied or the
 normative plan is deliberately amended.
