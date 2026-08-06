@@ -653,9 +653,9 @@ Current implementation and evidence:
 - `CanonicalConfigurationAppend` now canonicalizes and bounds the complete serialized revision
   at `MAX_CONFIGURATION_REVISION_BYTES` before dispatch, so memory and PostgreSQL share the same
   ingress decision.
-- Managed `run-2109539-1785986642051610798` passes 18 structured-history tests, including a
-  memory/PostgreSQL corpus for positive, exact-limit, one-byte-over, stale-predecessor, and
-  idempotent-replay outcomes.
+- Managed `run-2114883-1785987374603393785` from clean source tip `a2664734` passes 18
+  structured-history tests, including a memory/PostgreSQL corpus for positive, exact-limit,
+  one-byte-over, stale-predecessor, and idempotent-replay outcomes.
 
 Consequence:
 
