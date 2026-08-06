@@ -18,9 +18,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   store/checkpoint trust are outside this workspace; the portable tests use
   explicit test implementations. Their deployment integration is therefore
   still unverified.
-- No injected process-kill matrix was run for every EVM broadcast/receipt,
-  finality, promotion, and completion boundary. The release qualification
-  covers restart/reload paths, not all kill points.
+- The managed qualification now injects one child-process exit (status 137)
+  immediately after the broadcast observation is durable, then resumes and
+  proves no second broadcast. The complete injected matrix for receipt,
+  finality, promotion, completion, ambiguity, and scale boundaries remains
+  unverified.
 - The application production path still has no live multi-hop export
   integration fixture. The implementation now performs kind-aware fixed-point
   discovery and retains an authenticated principal, fixed export grant, and
@@ -171,6 +173,7 @@ Post-step-12 implementation and proof revisions:
 | `f5815ccb` | audit detached evm completion proofs |
 | `6cd74eef` | fix certified closure digest encoding |
 | `64517b46` | strengthen detached audit substitution proof |
+| `bc469cc8` | exercise evm crash recovery boundary |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -666,6 +669,22 @@ Revision `64517b46` extends the negative audit matrix so the forged projection
 closure is rejected by the independent verifier itself, not only by the
 production projection helper; the focused storage target remains green.
 
+Revision `bc469cc8` makes the managed production qualification inject an
+explicit status-137 child-process exit after the broadcast observation has
+committed. The fresh resume worker then closes the same run and the test
+asserts exactly one `eth_sendRawTransaction` call, preserving the existing
+provider/application and no-secret-output checks:
+
+```text
+nix run .#run -- --task evm-postgres-submission-qualification
+run id: run-2394128-1786018130470251941
+result: ok — 1 passed, 0 failed in 1218.27s (task total 1218.81s)
+```
+
+This closes the post-broadcast crash/restart boundary for the repository-local
+qualification scope. Receipt, finality, promotion, completion, ambiguity,
+cross-process, and scale fault matrices remain conditional.
+
 The production-scale EVM leaf is therefore PASS for this repository-local
 qualification scope. Deployment-owned provider trust and the broader crash,
 ambiguity, latency, and production-authority matrices remain conditional.
@@ -892,7 +911,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed `evm-postgres-submission-qualification` passes 1/1; `64517b46` sends the forged projection closure through the independent verifier. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
-| EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
+| EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation; the resumed managed qualification closes the run and proves exactly one raw broadcast (`run-2394128-1786018130470251941`, 1/1). Receipt, finality, promotion, completion, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
 | REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; the retained store-shaped authorization/observation artifact folds as an audit export with byte-identical offline parity, while carrying it as a semantic export is rejected. Live production evidence remains. |
@@ -1139,8 +1158,9 @@ has exact query-shape, non-aggregate, projection-index, and 64-row scale
 evidence, but still lacks an independent production latency envelope; EVM-09
 now has the repository-local independent offline/public-result/provider
 attestation audit and a passing repository-local production-scale leaf after
-`6cd74eef`, while production deployment/provider trust and the broader crash,
-ambiguity, latency, and production-authority matrices remain conditional;
+`6cd74eef`; `bc469cc8` adds one post-broadcast crash/restart witness, while
+production deployment/provider trust and the broader crash, ambiguity,
+latency, and production-authority matrices remain conditional;
 SEC-01 now has direct malformed-ciphertext and wrong-identity
 witnesses, but still lacks external termination/OOM/resource-failure coverage;
 and the
