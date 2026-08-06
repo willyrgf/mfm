@@ -647,6 +647,79 @@ impl AuditRunEvidence {
     }
 }
 
+/// Opaque result of one explicit offline replay fold.
+///
+/// The store consumes the complete verified cursor and object graph before
+/// constructing this value. Replay receives only the recorded status and the
+/// identifier-level metadata required to validate a portable export; callers
+/// cannot recover the internal frontier, cursor, records, or objects.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfflineVerifiedRun {
+    recorded: RecordedRunEvidence,
+    run_id: RunId,
+    header: RunEvidenceHeader,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
+    direct_source_run_ids: BTreeSet<RunId>,
+    fact_routes: Vec<ExportFactRoute>,
+}
+
+impl OfflineVerifiedRun {
+    pub(crate) fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+        let run_id = verified.run_id().clone();
+        let header = RunEvidenceHeader::from_admission(verified.admission());
+        let journal_head = verified.journal_head().clone();
+        let semantic_head = verified.semantic_head().clone();
+        let direct_source_run_ids = verified.direct_source_run_ids()?;
+        let fact_routes = export_fact_routes(&verified)?;
+        let recorded = RecordedRunEvidence::from_verified(verified);
+        Ok(Self {
+            recorded,
+            run_id,
+            header,
+            journal_head,
+            semantic_head,
+            direct_source_run_ids,
+            fact_routes,
+        })
+    }
+
+    /// Returns the exact folded run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the authenticated tenant scope fixed by the folded admission.
+    pub const fn tenant_scope_id(&self) -> &TenantScopeId {
+        self.header.tenant_scope_id()
+    }
+
+    /// Returns the exact folded physical head.
+    pub const fn journal_head(&self) -> &JournalHead {
+        &self.journal_head
+    }
+
+    /// Returns the exact folded semantic head.
+    pub const fn semantic_head(&self) -> &SemanticHead {
+        &self.semantic_head
+    }
+
+    /// Returns bounded identifier-level prior-run dependencies.
+    pub const fn direct_source_run_ids(&self) -> &BTreeSet<RunId> {
+        &self.direct_source_run_ids
+    }
+
+    /// Returns bounded selected-fact routes for export validation.
+    pub fn fact_routes(&self) -> &[ExportFactRoute] {
+        &self.fact_routes
+    }
+
+    /// Consumes the opaque fold result into recorded-replay evidence.
+    pub fn into_recorded(self) -> RecordedRunEvidence {
+        self.recorded
+    }
+}
+
 /// Sealed recorded-replay evidence. Cannot be used as public, export, trace, or audit evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordedRunEvidence {
@@ -668,11 +741,6 @@ impl RecordedRunEvidence {
             status: RunEvidenceStatus::from_frontier(verified.frontier()),
             record_count: verified.records().len(),
         }
-    }
-
-    /// Wraps one offline-folded verified run as recorded-replay evidence.
-    pub(crate) fn from_offline_verified(verified: VerifiedStructuredRun) -> Self {
-        Self::from_verified(verified)
     }
 
     /// Returns the exact run identity.
@@ -1248,7 +1316,7 @@ impl ExportFragment {
 }
 
 /// Extracts the exact selected-fact routes from one offline-folded run.
-pub fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<ExportFactRoute>> {
+fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<ExportFactRoute>> {
     let fact_response_contract = mfm_spec::structured::structured_value_contract_ref::<
         mfm_facts::FactSelectionReadResponse,
     >()

@@ -23,6 +23,8 @@ purpose reader returns only its purpose-sealed evidence newtype (`PublicRunEvide
 complete `VerifiedStructuredRun` publicly, and cross-purpose evidence substitution is a type error.
 Public and recorded-replay evidence expose only a fold-derived status tag; actionable frontier
 details and capability references remain internal to the fold.
+The explicit offline verifier returns only an opaque recorded-status/export-metadata summary;
+the complete `VerifiedStructuredRun` is not part of the crate's public API.
 Assembly never returns a store, writer, port, backend, pool, proposal constructor, or append
 attempt. Semantic mutation is reachable only through Runtime's `RuntimeHistoryPort`, implemented by
 a private adapter.

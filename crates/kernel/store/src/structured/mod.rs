@@ -45,7 +45,7 @@ pub use fact_scan::PriorRunFactScanCompletion;
 pub use fold::{
     verify_offline_recorded_history, ActionableState, LaneCursor, ObservationQualification,
     ProgramCursor, ProgramVerifier, StateLeaf, StructuredFrontier, StructuredStoreError,
-    VerifiedProgramData, VerifiedStructuredRun,
+    VerifiedProgramData,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::{assemble_in_memory_runtime, StructuredMemoryBackend};
@@ -60,17 +60,12 @@ pub use mutation::{ObservationCommit, StructuredAdmissionRequest, StructuredAppe
 // Runtime-facing authorization proof type.
 pub use mfm_runtime::history::CommittedAccessAuthorization;
 pub use purpose::{
-    expand_export_source_closure, export_fact_routes, AuditAccessEntry, AuditObservation,
-    AuditRunEvidence, AuditRunReader, ExportEncoderSource, ExportEncoderView, ExportFactRoute,
-    ExportRunEvidence, ExportRunReader, ExportSourceClosureError, PublicRunEvidence,
+    expand_export_source_closure, AuditAccessEntry, AuditObservation, AuditRunEvidence,
+    AuditRunReader, ExportEncoderSource, ExportEncoderView, ExportFactRoute, ExportRunEvidence,
+    ExportRunReader, ExportSourceClosureError, OfflineVerifiedRun, PublicRunEvidence,
     PublicRunReader, RecordedRunEvidence, ReplayRunReader, RunEvidenceStatus, TraceRunEvidence,
     TraceRunReader, TraceTransitionEntry, MAX_PORTABLE_SOURCE_RUNS,
 };
-
-/// Converts an offline-verified fold result into sealed recorded-replay evidence.
-pub fn recorded_evidence_from_verified(verified: VerifiedStructuredRun) -> RecordedRunEvidence {
-    RecordedRunEvidence::from_offline_verified(verified)
-}
 pub use qualification::{
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,
     PublicPhysicalBindingVerifier,

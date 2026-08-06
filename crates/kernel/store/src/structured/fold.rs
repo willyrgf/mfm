@@ -404,8 +404,12 @@ pub fn verify_offline_recorded_history(
     raw: RawRunHistory,
     program_verifier: &dyn ProgramVerifier,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
-) -> super::Result<VerifiedStructuredRun> {
-    verify_recorded_history(raw, program_verifier, physical_binding_verifier)
+) -> super::Result<super::purpose::OfflineVerifiedRun> {
+    super::purpose::OfflineVerifiedRun::from_verified(verify_recorded_history(
+        raw,
+        program_verifier,
+        physical_binding_verifier,
+    )?)
 }
 
 #[cfg(test)]

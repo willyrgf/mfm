@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `mfm_store::structured::VerifiedStructuredRun`
+ --> tests/ui/structured/fail/verified_structured_run_is_not_public.rs:1:5
+  |
+1 | use mfm_store::structured::VerifiedStructuredRun;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `VerifiedStructuredRun` in `structured`
