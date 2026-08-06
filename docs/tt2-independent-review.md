@@ -4,7 +4,7 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `5f4be506`; the historical gate remains
+The current implementation tip is `bb002b19`; the historical gate remains
 separate from the focused follow-up evidence below.
 The focused follow-up candidate is `afec8457`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
@@ -48,7 +48,9 @@ promotion remain conditional.
 Revision `5f4be506` adds a two-publication same-producer fact-scan witness:
 each scan invocation reads one dense page, loads one producer prefix, and folds
 three retained producer batches, with transient retry totals measured
-separately. This closes the repeated-growing-prefix work gap.
+separately. Revision `bb002b19` scopes those test-only counters by store
+identity, so isolated parallel schemas cannot contaminate the proof. This
+closes the repeated-growing-prefix work gap.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -160,6 +162,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   one producer and asserts one publication page, one producer-prefix load, and
   three folded producer batches per scan invocation on the managed PostgreSQL
   task.
+- Fact-scan counter-scope revision: `bb002b19` keys the test-only measurements
+  by store identity and requalifies the same 24-test managed lane.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -520,19 +524,20 @@ reloads an actionable run. Cross-process acknowledgement, promotion, and
 production-authority matrices remain conditional.
 
 The fact-scan work-bound follow-up was independently rerun from clean source
-tip `5f4be506`:
+tip `bb002b19`:
 
 ```text
 RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
-source: 5f4be506
-run id: run-2201417-1785995479252415048
-result: ok — 24 structured-history tests passed, 0 failed in 39.56s
+source: bb002b19
+run id: run-2206767-1785995910502340324
+result: ok — 24 structured-history tests passed, 0 failed in 37.57s
 ```
 
 The same-producer fixture publishes two successive facts. The counters assert
 one dense page, one prefix load, and three producer batches folded per scan
 invocation; transient retries each repeat one bounded prefix load rather than
-refolding a growing prefix for every route.
+refolding a growing prefix for every route. The counters are keyed by store
+identity, so isolated parallel schemas cannot contaminate the measurement.
 
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
@@ -760,7 +765,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `run_snapshot_keeps_one_prefix_across_a_concurrent_transition` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
 | `contention_failures_rollback_before_exact_retry` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
 | `run_commit_acknowledgement_loss_retries_identical_batch` | pass in `run-2194313-1785994645494655426` (23/23 structured-history tests) | N/A; introduced after baseline |
-| `prior_run_fact_scan_folds_one_shared_producer_prefix_once` | pass in `run-2201417-1785995479252415048` (24/24 structured-history tests) | N/A; introduced after baseline |
+| `prior_run_fact_scan_folds_one_shared_producer_prefix_once` | pass in `run-2206767-1785995910502340324` (24/24 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
@@ -785,7 +790,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
 | TT2-STORE-06 | Conditional | The syntax inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments (focused inventory tests 2/2); a full independent query ownership/scale audit remains. |
-| TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; bounded byte/work/session limits remain enforced. |
+| TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded byte/work/session limits remain enforced. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
 | TT2-EVM-02 | Closed | Recovery observes chain state before broadcasting a retained candidate. |
 | TT2-EVM-03 | Closed | Replacement eligibility carries producer-authorized prefix evidence and permits. |
@@ -860,7 +865,7 @@ callback-free fold validation consumes only the opaque summary.
 - PostgreSQL role, snapshot, deterministic interleaving, checkpoint,
   configured-value race, retry, SQL inventory/offline, and managed
   recoverability lanes pass, including the exact fact-scan work-bound run
-  `run-2201417-1785995479252415048` on `5f4be506`.
+  `run-2206767-1785995910502340324` on `bb002b19`.
   Cross-process acknowledgement-loss, promotion, copied-target, and broader
   injected-fault matrices are not complete.
 - EVM domain and storage tests plus the current managed release qualification

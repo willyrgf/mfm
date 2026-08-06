@@ -7,8 +7,8 @@ This document began as the handoff problem ledger for the remediation implementa
 is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- current implementation/evidence source tip: `5f4be5067591721c55d6c327d3b012487c8873f9`;
-- current evidence/documentation head before this refresh: `d727d8da`;
+- current implementation/evidence source tip: `bb002b198cd7b15eb3319ec26f983dbc836ceaf8`;
+- current evidence/documentation head before this refresh: `0e7c6314`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
   [PROBLEMS_TT1_IMPLRFC_RUNTIME.md](PROBLEMS_TT1_IMPLRFC_RUNTIME.md);
@@ -17,7 +17,7 @@ is the re-audit recorded below.
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The current production code being assessed is the source tree at `5f4be506`; the detailed finding
+The current production code being assessed is the source tree at `bb002b19`; the detailed finding
 sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
@@ -56,7 +56,7 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
-## Current re-audit at `5f4be506`
+## Current re-audit at `bb002b19`
 
 The later implementation revisions and focused evidence supersede the historical disposition
 above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
@@ -83,8 +83,10 @@ candidate, and proves one durable batch with `ExistingSame` resolution; cross-pr
 acknowledgement and promotion remain conditional.
 The prior-run fact scanner now has a managed two-publication same-producer witness: one dense
 publication-page read, one producer-prefix load, and three producer batches folded per scan
-invocation, with retry totals asserted separately. This closes the repeated-growing-prefix work
-gap; recursive shared-producer and over-budget rejection remain bounded by the same session.
+invocation, with retry totals asserted separately. The test-only counters are scoped by store
+identity, so parallel isolated schemas cannot contaminate the measurement. This closes the
+repeated-growing-prefix work gap; recursive shared-producer and over-budget rejection remain
+bounded by the same session.
 Deterministic run and configuration read barriers now release the external fixation, commit a
 successor while the reader remains in one repeatable-read snapshot, and prove old-complete-prefix
 then new-prefix behavior. Revision `dcb72608` also injects one `40001` and one `40P01` batch
@@ -765,7 +767,7 @@ The scanner pages a dense publication route, computes one maximum required seque
 loads that producer prefix once, and reuses the verified result for every routed publication. The
 bounded session tracks retained bytes, fold work, distinct producers, and active recursion, so a
 shared producer cannot trigger repeated growing-prefix folds. The clean managed
-`run-2201417-1785995479252415048` qualification from `5f4be506` exercises two successive
+`run-2206767-1785995910502340324` qualification from `bb002b19` exercises two successive
 publications from one producer and asserts one publication page, one producer-prefix load, and
 three folded producer batches per scan invocation.
 
