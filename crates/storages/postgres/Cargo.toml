@@ -9,6 +9,7 @@ autotests = false
 layer = "storage"
 
 [dependencies]
+fs2 = { version = "0.4.3", optional = true }
 mfm-authority-seal = { path = "../../kernel/authority-seal" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
@@ -35,7 +36,7 @@ mfm-store = { path = "../../kernel/store", features = ["backend-conformance"] }
 mfm-values = { path = "../../kernel/values" }
 
 [features]
-test-support = []
+test-support = ["dep:fs2"]
 parity-tests = ["mfm-store/backend-conformance", "test-support"]
 
 [[test]]
