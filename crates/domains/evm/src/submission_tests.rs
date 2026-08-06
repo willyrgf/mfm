@@ -1291,6 +1291,16 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
         completed.canonical_terminal_outcome.canonical_public_result,
         "offline closure reload must preserve the canonical public result"
     );
+    let rehydrated = CompletedWalletNonce::from_recovery_closure(&completed.recovery_closure)
+        .expect("rehydrate completion from closure alone");
+    assert_eq!(rehydrated, completed);
+    assert_eq!(
+        CompletedWalletNonce::project_public_result_from_recovery_closure(
+            &completed.recovery_closure
+        )
+        .expect("project public result from closure alone"),
+        completed.canonical_terminal_outcome.canonical_public_result
+    );
 
     let mut forged_closure: serde_json::Value =
         serde_json::from_str(&completed.recovery_closure).expect("decode recovery closure JSON");
