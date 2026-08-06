@@ -3231,6 +3231,92 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         "frontier lookup must visit one retained row: {frontier_plan}"
     );
 
+    let projection_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS false) \
+         SELECT local_high_water_nonce, retained_reservation_count, \
+                retained_reservation_chain_head_ref, active_reservation_key, \
+                current_resource_frontier_ref, current_incarnation_ref \
+           FROM {schema}.wallet_nonce_domains \
+          WHERE wallet_nonce_domain_id = $1"
+    )))
+    .bind(successor_request.nonce_domain.as_str())
+    .fetch_all(&probe_pool)
+    .await
+    .expect("explain bounded domain projection lookup")
+    .join("\n");
+    assert!(
+        projection_plan.contains("Index Scan using wallet_nonce_domains_pkey")
+            || projection_plan.contains("Index Only Scan using wallet_nonce_domains_pkey"),
+        "domain projection must use its primary-key index after long history: {projection_plan}"
+    );
+    assert!(
+        projection_plan.contains("rows=1"),
+        "domain projection must visit one retained row: {projection_plan}"
+    );
+
+    let reservation_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS false) \
+         SELECT semantic_reservation_key, wallet_nonce_domain_id, nonce \
+           FROM {schema}.wallet_nonce_reservations \
+          WHERE semantic_reservation_key = $1"
+    )))
+    .bind(successor_reservation.semantic_reservation_key.as_str())
+    .fetch_all(&probe_pool)
+    .await
+    .expect("explain exact reservation lookup")
+    .join("\n");
+    assert!(
+        reservation_plan.contains("Index Scan using wallet_nonce_reservations_pkey")
+            || reservation_plan.contains("Index Only Scan using wallet_nonce_reservations_pkey"),
+        "reservation lookup must use its primary-key index after long history: {reservation_plan}"
+    );
+    assert!(
+        reservation_plan.contains("rows=1"),
+        "reservation lookup must visit one retained row: {reservation_plan}"
+    );
+
+    let candidate_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS false) \
+         SELECT semantic_candidate_operation_key, candidate_ordinal \
+           FROM {schema}.wallet_nonce_candidates \
+          WHERE semantic_reservation_key = $1 \
+          ORDER BY candidate_ordinal LIMIT $2"
+    )))
+    .bind(successor_reservation.semantic_reservation_key.as_str())
+    .bind((mfm_evm::EVM_WALLET_REPLACEMENT_LIMIT + 1) as i64)
+    .fetch_all(&probe_pool)
+    .await
+    .expect("explain bounded candidate prefix lookup")
+    .join("\n");
+    assert!(
+        candidate_plan.contains("wallet_nonce_candidates_ordinal_v1"),
+        "candidate prefix must use its reservation/ordinal index after long history: {candidate_plan}"
+    );
+    assert!(
+        candidate_plan.contains("rows=1"),
+        "candidate prefix must visit one retained row in this fixture: {candidate_plan}"
+    );
+
+    let completion_plan = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "EXPLAIN (ANALYZE, COSTS false) \
+         SELECT semantic_completion_key, semantic_reservation_key \
+           FROM {schema}.wallet_nonce_completions \
+          WHERE semantic_reservation_key = $1"
+    )))
+    .bind(successor_reservation.semantic_reservation_key.as_str())
+    .fetch_all(&probe_pool)
+    .await
+    .expect("explain exact completion lookup")
+    .join("\n");
+    assert!(
+        completion_plan.contains("Index Scan") || completion_plan.contains("Index Only Scan"),
+        "completion lookup must use an index after long history: {completion_plan}"
+    );
+    assert!(
+        completion_plan.contains("rows=1"),
+        "completion lookup must visit one retained row: {completion_plan}"
+    );
+
     drop(probe_pool);
     drop(successor_authority);
     drop(sibling_database_authority);
