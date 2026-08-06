@@ -12,6 +12,8 @@ use sqlx::{Postgres, Row, Transaction};
 
 use crate::checkpoint::{CheckpointKey, CheckpointMutation, CheckpointStream, ReadFixationGuard};
 use crate::session::{RoleSession, TargetBinding};
+#[cfg(feature = "test-support")]
+use crate::transaction::await_read_phase_barrier;
 use crate::transaction::{
     begin_configuration_read, begin_configuration_write_locked, CommitOutcome,
     LockedConfigurationWriteTx, ReadTx,
@@ -271,6 +273,8 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
             fixation_guard
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name()).await;
             transaction.validate_target(&self.target).await?;
             let rows = select_rows(transaction.conn(), key, None).await?;
             transaction.commit_checked(&self.target).await?;

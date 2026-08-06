@@ -52,7 +52,9 @@ pub use session::{
 pub use structured::PostgresStructuredHistoryBackend;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub use transaction::arm_commit_acknowledgement_unknown;
+pub use transaction::{
+    arm_commit_acknowledgement_unknown, arm_read_phase_barrier, ReadPhaseBarrier,
+};
 
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests {

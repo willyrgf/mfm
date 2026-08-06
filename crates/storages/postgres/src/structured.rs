@@ -22,6 +22,8 @@ use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 use crate::checkpoint::{CheckpointKey, CheckpointMutation, CheckpointStream, ReadFixationGuard};
 use crate::session::{PostgresApplicationSessions, RoleSession, TargetBinding};
 use crate::sql_catalog::StructuredBatchQuery;
+#[cfg(feature = "test-support")]
+use crate::transaction::await_read_phase_barrier;
 use crate::transaction::{
     begin_read, begin_run_write, lock_run_and_tenant, store_identity_from_binding, LockedWriteTx,
     ReadTx,
@@ -498,6 +500,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             fixation_guard
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name()).await;
             transaction.validate_target(&self.target).await?;
             let rows = select_batch_rows(
                 transaction.conn(),
@@ -593,6 +597,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             fixation_guard
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name()).await;
             transaction.validate_target(&self.target).await?;
             let rows = select_batch_rows(
                 transaction.conn(),
@@ -754,6 +760,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             fixation_guard
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name()).await;
             transaction.validate_target(&self.target).await?;
             let rows = sqlx::query(
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
