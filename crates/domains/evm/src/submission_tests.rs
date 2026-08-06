@@ -1379,7 +1379,7 @@ fn completed_projection_is_a_redaction_safe_public_output() {
         crate::ExecutionDisposition::Succeeded
     );
 
-    let encoded = serde_json::to_value(&output).expect("serialize public output");
+    let encoded = serde_json::to_value(output).expect("serialize public output");
     assert_eq!(
         encoded,
         serde_json::json!({"execution_disposition": "succeeded"})
