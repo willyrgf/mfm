@@ -22,6 +22,9 @@ operation DSL
        +-> authorized Effect -> registered invoker -> transport/signer/resource authority
 
 store purpose readers -> same fold -> purpose-sealed evidence (public/trace/audit/replay/export)
+
+Public and recorded-replay evidence expose only a fold-derived status tag;
+actionable frontier details remain inside the store fold and Runtime adapter.
 ```
 
 Only `State` is executable. `Match` and `FanOut` are structural. Runtime performs one verified

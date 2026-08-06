@@ -973,10 +973,10 @@ async fn pure_runtime_commits_the_exact_callback_output_once() {
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
     assert_eq!(callback_input.load(Ordering::SeqCst), 4);
     let verified = reader.load_public(&run_id).await.expect("closed");
-    assert!(matches!(
-        verified.frontier(),
-        mfm_store::structured::StructuredFrontier::Complete
-    ));
+    assert_eq!(
+        verified.status(),
+        mfm_store::structured::RunEvidenceStatus::Closed
+    );
     assert_eq!(
         runtime.drive_once(&run_id).await.expect("closed drive"),
         DriveOutcome::Closed
@@ -1903,14 +1903,14 @@ async fn frozen_effect_supersession_is_not_rewritten_after_persistence_integrity
             .await
             .expect("integrity failure remains auditable");
         match expected_frontier {
-            "blocked" => assert!(matches!(
-                verified.frontier(),
-                mfm_store::structured::StructuredFrontier::BlockedIntegrity
-            )),
-            "possible-entry" => assert!(matches!(
-                verified.frontier(),
-                mfm_store::structured::StructuredFrontier::PossibleEntry
-            )),
+            "blocked" => assert_eq!(
+                verified.status(),
+                mfm_store::structured::RunEvidenceStatus::BlockedIntegrity
+            ),
+            "possible-entry" => assert_eq!(
+                verified.status(),
+                mfm_store::structured::RunEvidenceStatus::PossibleEntry
+            ),
             _ => panic!("unknown expected frontier"),
         }
     }
@@ -1973,14 +1973,14 @@ async fn invalid_supersession_evidence_is_rejected_without_a_diagnostic_observat
     assert_eq!(binding_source.second.target_calls.load(Ordering::SeqCst), 0);
     assert_eq!(binding_calls.load(Ordering::SeqCst), 1);
     assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(
+    assert_eq!(
         reader
             .load_public(&run_id)
             .await
             .expect("authorization-only prefix")
-            .frontier(),
-        mfm_store::structured::StructuredFrontier::PossibleEntry
-    ));
+            .status(),
+        mfm_store::structured::RunEvidenceStatus::PossibleEntry
+    );
 }
 
 fn refreshable_effect_registry(
@@ -2206,14 +2206,14 @@ async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation(
     assert_eq!(binding_source.second.target_calls.load(Ordering::SeqCst), 0);
     assert_eq!(binding_calls.load(Ordering::SeqCst), 1);
     assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
-    assert!(matches!(
+    assert_eq!(
         reader
             .load_public(&run_id)
             .await
             .expect("parked Effect")
-            .frontier(),
-        mfm_store::structured::StructuredFrontier::PossibleEntry
-    ));
+            .status(),
+        mfm_store::structured::RunEvidenceStatus::PossibleEntry
+    );
     assert_eq!(
         runtime
             .drive_once(&run_id)

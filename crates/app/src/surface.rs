@@ -668,13 +668,7 @@ impl PublicRunView {
             "entry_point_operation_id": evidence.header().entry_point_operation_id(),
             "journal_head": evidence.journal_head(),
             "semantic_head": evidence.semantic_head(),
-            "status": match evidence.frontier() {
-                mfm_store::structured::StructuredFrontier::Actions(_) => "actionable",
-                mfm_store::structured::StructuredFrontier::WaitingReads => "waiting_reads",
-                mfm_store::structured::StructuredFrontier::PossibleEntry => "possible_entry",
-                mfm_store::structured::StructuredFrontier::BlockedIntegrity => "blocked_integrity",
-                mfm_store::structured::StructuredFrontier::Complete => "closed",
-            },
+            "status": evidence.status().as_str(),
             "outcome": outcome,
         }))
     }

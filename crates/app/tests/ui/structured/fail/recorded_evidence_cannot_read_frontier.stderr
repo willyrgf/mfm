@@ -1,0 +1,5 @@
+error[E0599]: no method named `frontier` found for reference `&RecordedRunEvidence` in the current scope
+ --> tests/ui/structured/fail/recorded_evidence_cannot_read_frontier.rs:4:22
+  |
+4 |     let _ = evidence.frontier();
+  |                      ^^^^^^^^ method not found in `&RecordedRunEvidence`

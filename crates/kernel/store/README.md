@@ -21,6 +21,8 @@ only `Runtime` plus sealed purpose readers (public-read, trace, audit, replay, e
 purpose reader returns only its purpose-sealed evidence newtype (`PublicRunEvidence`,
 `TraceRunEvidence`, `AuditRunEvidence`, `RecordedRunEvidence`, `ExportRunEvidence`); none expose
 complete `VerifiedStructuredRun` publicly, and cross-purpose evidence substitution is a type error.
+Public and recorded-replay evidence expose only a fold-derived status tag; actionable frontier
+details and capability references remain internal to the fold.
 Assembly never returns a store, writer, port, backend, pool, proposal constructor, or append
 attempt. Semantic mutation is reachable only through Runtime's `RuntimeHistoryPort`, implemented by
 a private adapter.

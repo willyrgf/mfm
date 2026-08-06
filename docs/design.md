@@ -154,6 +154,10 @@ The fold derives:
 - the exact terminal root outcome; and
 - complete records and append heads in physical chronology.
 
+Public-read and recorded-replay purpose projections retain only the
+fold-derived `RunEvidenceStatus`; the actionable frontier and its capability,
+input, and state references remain internal to the fold and Runtime adapter.
+
 Incremental mutation returns a successor produced by the same fold state. Refolding every complete
 prefix from raw persisted batches must produce an equivalent verified run.
 The private production adapter may retain at most one verified successor, including a non-mutating
