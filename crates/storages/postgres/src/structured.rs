@@ -501,7 +501,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name()).await;
+            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
             let rows = select_batch_rows(
                 transaction.conn(),
@@ -510,6 +510,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 None,
             )
             .await?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
             if rows.is_empty() {
                 if indexed_head.is_some() {
                     return Err(invalid(
@@ -598,7 +600,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name()).await;
+            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
             let rows = select_batch_rows(
                 transaction.conn(),
@@ -607,6 +609,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 None,
             )
             .await?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
             let history = if rows.is_empty() {
                 None
             } else {
@@ -761,7 +765,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .release()
                 .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name()).await;
+            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
             let rows = sqlx::query(
                 "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
@@ -779,6 +783,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .iter()
             .map(StoredBatchRow::decode)
             .collect::<Result<Vec<_>, _>>()?;
+            #[cfg(feature = "test-support")]
+            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
             if rows.is_empty() {
                 if indexed_head.is_none() && fixation.successor().is_some() {
                     return Err(invalid(

@@ -443,7 +443,7 @@ async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
     // The read fixes the old indexed head, releases its external fixation, and
     // then waits here. The writer can commit a successor while the repeatable-
     // read snapshot remains pinned to the old complete prefix.
-    let barrier = arm_read_phase_barrier(&database.schema);
+    let barrier = arm_read_phase_barrier(&database.schema, "after_head");
     let (snapshot, second) = {
         let read_future = reader.resolve(&stream, &contract);
         tokio::pin!(read_future);
@@ -516,13 +516,19 @@ async fn run_snapshot_keeps_one_prefix_across_a_concurrent_transition() {
         .expect("append baseline admission");
     assert_eq!(admitted, run_id);
 
-    let barrier = arm_read_phase_barrier(&database.schema);
+    let head_barrier = arm_read_phase_barrier(&database.schema, "after_head");
+    let batches_barrier = arm_read_phase_barrier(&database.schema, "after_batches");
     let snapshot = {
         let read_future = reader.load_public(&run_id);
         tokio::pin!(read_future);
         tokio::select! {
-            _ = barrier.wait_until_reached() => {}
+            _ = head_barrier.wait_until_reached() => {}
             result = &mut read_future => panic!("run snapshot completed before barrier: {result:?}"),
+        }
+        head_barrier.release();
+        tokio::select! {
+            _ = batches_barrier.wait_until_reached() => {}
+            result = &mut read_future => panic!("run snapshot completed before object barrier: {result:?}"),
         }
         assert_eq!(
             runtime
@@ -531,7 +537,7 @@ async fn run_snapshot_keeps_one_prefix_across_a_concurrent_transition() {
                 .expect("append concurrent transition"),
             DriveOutcome::TransitionCommitted { closed: true }
         );
-        barrier.release();
+        batches_barrier.release();
         read_future
             .as_mut()
             .await
