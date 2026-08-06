@@ -12,8 +12,10 @@ below. The earlier APP-01 proof revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
 bounded PostgreSQL owner. Focused checks and the historical exact composed
-source gate pass. The latest purpose-isolation cutover is `bd98e8ca`, which
-removes the full actionable frontier from public and recorded-replay evidence.
+source gate pass. The latest purpose-isolation cutover is `a1a78b84`, which
+keeps the full verified cursor and object graph inside the store while exposing
+only an opaque offline summary; its predecessor `bd98e8ca` removed the full
+actionable frontier from public and recorded-replay evidence.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -54,11 +56,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   direct witnesses for every malformed/corrupt format and valid-but-wrong
   public/account identity, plus external termination/resource failures, remain
   outside the focused package evidence.
-- The store's public offline fold seam still returns a full verified run to the
-  replay crate when callers provide `RawRunHistory` and concrete trust. This is
-  intentional for callback-free replay validation, but it is not sealed by the
-  purpose evidence newtypes; making APP-01 cover arbitrary callers would need a
-  new replay-consumer authority contract.
+- The explicit offline fold seam now returns an opaque `OfflineVerifiedRun`
+  containing recorded status and bounded export metadata when callers provide
+  `RawRunHistory` and concrete trust. The complete cursor/object graph remains
+  store-private; the broader runtime/audit/replay/export matrix is still not
+  independently reproduced.
 
 ## Candidate and review scope
 
@@ -93,6 +95,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `StructuredFrontier` access with the data-free `RunEvidenceStatus`, updates
   app/replay projections, and adds frontier-denial compile-fail cases for both
   products.
+- Offline-fold boundary cutover: `a1a78b84` removes the public
+  `VerifiedStructuredRun` conversion seam. The explicit offline fold now
+  returns opaque `OfflineVerifiedRun` metadata, with compile-fail coverage for
+  frontier access and the removed full-fold type.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -309,13 +315,48 @@ run id: run-2049878-1785982143970760651
 result: ok — 1 task, 0 failed in 99.91s
 ```
 
+The offline-fold boundary cutover was then qualified on its exact clean tip:
+
+```text
+nix develop -c cargo test -p mfm-app --test application-privacy-ui
+source: a1a78b84
+result: 16/16 compile-fail cases passed
+
+nix develop -c cargo test -p mfm-store --lib
+source: a1a78b84
+result: 33 passed, 0 failed
+
+nix develop -c cargo test -p mfm-replay --lib
+source: a1a78b84
+result: 9 passed, 0 failed
+
+nix develop -c cargo fmt --all -- --check
+source: a1a78b84
+result: pass
+
+nix run .#run -- --task portable-replay-corpus
+source: a1a78b84
+run id: run-2069857-1785983372700769978
+result: ok — 1 task, 0 failed in 20.76s
+```
+
+The cutover keeps the complete verified cursor, records, objects, and live
+bindings inside `mfm-store`. Replay consumes only the opaque summary's status
+and bounded identifier/fact-route metadata before producing recorded evidence;
+the 16-case application matrix rejects both frontier access and importing the
+removed full-fold type.
+
 The cutover preserves the transport status strings while preventing callers
 from reading actionable state, capability references, input, or execution
 details through public or recorded evidence. Independent review of exact
 `bd98e8ca` found no direct leak or contract mismatch and confirmed the
 exhaustive five-tag mapping. A complete runtime/audit/replay/export isolation
 matrix remains outside this focused proof; the explicit offline fold seam is
-the replay-only residual described in the material uncertainties.
+now opaque and is covered by the exact follow-up checks above. Independent
+review of exact `a1a78b84` found no implementation gap: the full verified
+cursor, records, objects, and live bindings remain store-private, while replay
+retains its bounded route/dependency checks. This is PASS for the API scope;
+TT2-APP-01 remains Conditional for the broader matrix.
 
 Additional focused evidence on the current tree:
 
@@ -436,7 +477,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 14-case application privacy trybuild matrix rejects public raw-record enumeration, public/recorded frontier access, and trace authorization-request access, while complete runtime data-isolation proof and the replay-only offline fold seam's arbitrary-caller boundary remain outstanding. |
+| TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
@@ -482,6 +523,11 @@ the internal `StructuredFrontier` and its actionable state/capability details
 are consumed before the purpose wrapper is constructed. The application and
 replay projections use the status tag directly, and the focused UI matrix
 rejects frontier access for both products.
+
+The offline replay entry point now returns an opaque `OfflineVerifiedRun` with
+recorded status and bounded export metadata. The full `VerifiedStructuredRun`,
+cursor, object graph, and live bindings are no longer exported; replay's
+callback-free fold validation consumes only the opaque summary.
 
 ## PostgreSQL and EVM matrix status
 
