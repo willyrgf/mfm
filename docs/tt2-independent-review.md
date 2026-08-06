@@ -9,8 +9,10 @@ wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
 below. The latest APP-01 proof revision is `2fc4afa8`, which adds two
-purpose-isolation compile-fail cases. Focused checks and the historical exact
-composed source gate pass. The plan requires a PASS only when every
+purpose-isolation compile-fail cases. The latest retry-boundary correction is
+`e7624406`, which removes redundant store-level snapshot retries and leaves one
+bounded PostgreSQL owner. Focused checks and the historical exact composed
+source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
 
@@ -74,6 +76,12 @@ both the closed implementation work and the remaining proof/deployment gaps.
   reader retry and identical append ambiguity recovery, with focused tests and
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
+- Retry-boundary correction: `1ef7d694` bounds configuration append/load
+  ambiguity retries at eight attempts, and `e7624406` removes the redundant
+  generic store snapshot retry so PostgreSQL owns the single bounded
+  eight-attempt checkpoint-read retry. The exact configuration suite passes
+  7/7, the full `mfm-store` library suite passes 33/33, and the managed
+  recoverability task passes on `e7624406`.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -82,6 +90,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   lifetime reservation `COUNT/MAX`, added the bounded projection `EXPLAIN`
   regression and current-frontier omission regression, and was reviewed as the
   current implementation candidate.
+- The retry-boundary review candidate is `e7624406` (parent `1ef7d694`): the
+  generic store snapshot retry is deleted, PostgreSQL retains the sole bounded
+  eight-attempt checkpoint-read retry, and configuration retry loops share the
+  eight-attempt bound.
 - The focused follow-up adds a 64-reservation managed history probe with
   Q/E cardinality and Q/P SQL-text assertions, final-status capture, and
   `EXPLAIN (ANALYZE)` plan/row checks for the domain projection, exact
@@ -224,6 +236,37 @@ post-history `EXPLAIN (ANALYZE)` checks. The historical diagnostic
 over-constrained the one-row domain projection to an index plan, while
 PostgreSQL correctly selected a one-row sequential plan. `266d6889` records
 that bounded projection case explicitly.
+
+The retry-boundary correction was then qualified on its exact clean tip:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: e7624406
+run id: run-2046822-1785981827251476177
+result: ok — 1 task, 0 failed in 36.81s
+
+nix develop -c cargo test -p mfm-store --lib configuration -- --nocapture
+source: e7624406
+result: 7 passed, 0 failed
+
+nix develop -c cargo test -p mfm-store --lib
+source: e7624406
+result: 33 passed, 0 failed
+
+nix develop -c cargo fmt --all -- --check
+result: pass
+
+independent review: e7624406
+result: snapshot retry ownership is singular and finite; no correctness gap
+```
+
+The correction deletes the generic store retry, so each structured reader or
+writer invokes its backend once; PostgreSQL's checkpoint-read helper is the
+sole eight-attempt owner. Configuration's eight-attempt load and identity
+recovery loops remain finite and reuse the canonical revision digest. The
+review notes that the bound is per nested loop and that PostgreSQL retries the
+classified `InvalidHistory` result even when corruption is persistent; these
+are bounded resource/diagnostic residuals, not correctness failures.
 
 Additional focused evidence on the current tree:
 
@@ -374,21 +417,24 @@ rejects the first fact route beyond `MAX_PORTABLE_FACT_ROUTES`, so neither
 source discovery nor route materialization grows past its named bound.
 
 The PostgreSQL append path now compares idempotent configuration predecessors
-using the same canonical-revision digest as the external checkpoint, while
-checkpoint reads retry only the bounded, classified commit-before-ack
+using the same canonical-revision digest as the external checkpoint. Structured
+readers and writers perform one backend snapshot call; PostgreSQL owns the
+single bounded eight-attempt retry for the classified commit-before-ack
 `InvalidHistory` window. Persistent mismatches and all other errors remain
 fail-closed. The SQL inventory review covers the wrapper's direct queries
 without changing their text or ownership semantics. Configuration resolution
-uses the same bounded read classification, and ambiguous configuration appends
-reconnect through the append authority before retrying only the exact canonical
-revision.
+and ambiguous configuration appends use their shared finite eight-attempt
+classification and retry only the exact canonical revision. The bound is per
+nested loop, and persistent `InvalidHistory` is retried until exhaustion; both
+are explicit bounded residuals rather than fallback behavior.
 
 ## PostgreSQL and EVM matrix status
 
 - PostgreSQL role, snapshot, checkpoint, configured-value race, retry, SQL
-  inventory/offline, and managed recoverability lanes pass. Cross-process
-  acknowledgement-loss, serialization/deadlock, copied-target, and injected-
-  fault matrices are not complete.
+  inventory/offline, and managed recoverability lanes pass, including the
+  exact post-correction run on `e7624406`. Cross-process acknowledgement-loss,
+  serialization/deadlock, copied-target, and injected-fault matrices are not
+  complete.
 - EVM domain and storage tests plus the current managed release qualification
   pass, including fresh production keystore signing/broadcast, provider-proof
   corruption, promotion/reload, recovery observations, and bounded long-history
