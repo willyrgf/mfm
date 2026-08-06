@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `219c588b`; the historical gate remains
+The current implementation tip is `2512ebf8`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `219c588b`, which includes the bounded
+The focused follow-up candidate is `2512ebf8`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -15,8 +15,8 @@ below. It includes `9f61c39a` (`prove canonical frame boundaries`),
 `78dbc354`/`e5f8c3b0` (exact retained-object frame proof and predicate
 isolation), `a1ad9814` (provider-proof byte bounds), `c36e233e`
 (finish-authorization byte bound), `75ac74f5` (deployment route-count and
-proof bounds), and `219c588b` (shared canonical batch-count bounds). The earlier
-APP-01 proof
+proof bounds), `219c588b` (shared canonical batch-count bounds), and
+`2512ebf8` (completion-recovery byte bound). The earlier APP-01 proof
 revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
@@ -130,7 +130,7 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `219c588b` (`prove canonical batch count bounds`),
+- Focused follow-up candidate: `2512ebf8` (`prove completion recovery byte bound`),
   including `6525fad6` (`expand configuration corpus breadth`),
   including `8a902d03` (`fail closed SQL file macros`),
   including `2fea7802` (`restore SQL inventory builder scope`),
@@ -156,7 +156,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   (`cover exact object frame boundary`), `e5f8c3b0` (predicate isolation),
   `a1ad9814` (provider-proof byte bounds), `c36e233e`
   (finish-authorization byte bound), `75ac74f5` (deployment assembly
-  route-count/proof bounds), and `219c588b` (canonical batch-count bounds).
+  route-count/proof bounds), `219c588b` (canonical batch-count bounds), and
+  `2512ebf8` (completion-recovery byte bound).
 - Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
   in replay corpus`), which adds the exact store-shaped observed-read bytes,
   generator acceptance/rejection vectors, and an offline parity branch in the
@@ -241,6 +242,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   65,536-object counts, empty-record rejection, and one-over rejection pass in
   the focused canonical-append target (5/5); independent review marks the
   count boundary PASS.
+- Completion-recovery bound revision: `2512ebf8` routes both canonical
+  encode/decode paths through one `MAX_COMPLETION_RECOVERY_BYTES` predicate.
+  Exact 524,288-byte and one-over tests pass in the focused EVM target (1/1),
+  preserving the reviewed `BoundExceeded("completion_recovery")` error.
 - Default-concurrency qualification: clean managed run
   `run-2246603-1786002530958490012` passes all 24 structured-history tests,
   including `configured_value_history_linearizes_same_stream_append_races`;
@@ -737,6 +742,18 @@ completion; the finish-authorization over-limit test uses a fresh matching
 digest, so digest mismatch cannot explain the rejection. The broader
 offline/provider-attestation audit remains conditional.
 
+The completion-recovery boundary target ran from clean source tip `2512ebf8`:
+
+```text
+nix develop -c cargo test -p mfm-evm --lib completion_recovery_limit -- --nocapture
+source: 2512ebf8
+result: ok — 1 completion-recovery boundary test passed, 0 failed
+```
+
+Independent review confirms both canonical completion-recovery paths apply the
+generated 524,288-byte bound before returning the closure; the broader
+offline/public-result audit remains conditional.
+
 Independent review of exact `8a902d03` passes the current STORE-06 inventory
 scope. The AST visitor recognizes checked and `_unchecked` SQLx query macros,
 fails closed on all six `query_file*` forms, uses SQLx's correct typed argument
@@ -983,6 +1000,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `structured::canonical_append::tests::object_frame_accepts_exact_limit_and_rejects_one_byte_over` | pass in focused `mfm-store` target on `219c588b`; exact content-addressed object accepted and shared predicate rejects one byte over | N/A; introduced after baseline |
 | `wallet_authority::provider_attestation_tests::provider_attestation_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `a1ad9814`; exact/one-byte-over generated provider-proof budget | N/A; introduced after baseline |
 | `provider::frame_tests::{provider_attestation_accepts_exact_budget_and_rejects_one_byte_over,finish_authorization_accepts_exact_budget_and_rejects_one_byte_over,deployment_route_count_accepts_exact_budget_and_rejects_one_route_over,deployment_route_proof_accepts_exact_budget_and_rejects_one_byte_over}` | pass in focused `mfm-storage-evm-postgres` target on `75ac74f5` (6/6 provider frame tests); valid route references and fresh matching digest isolate the route/proof and finish-authorization over-limit rejections | N/A; introduced after baseline |
+| `wallet_authority::completion_recovery_limit_tests::completion_recovery_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `2512ebf8` (exact/one-over generated `MAX_COMPLETION_RECOVERY_BYTES`) | N/A; introduced after baseline |
 | `configuration_commit_acknowledgement_loss_retries_identical_revision` | pass in `run-2167617-1785992166392324915` (19/19 structured-history tests) | N/A; introduced after baseline |
 | `configuration_load_keeps_one_snapshot_across_a_concurrent_append` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
 | `run_snapshot_keeps_one_prefix_across_a_concurrent_transition` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
@@ -1022,7 +1040,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, a persisted two-candidate closure-only reload/public projection, and exact/one-byte-over provider-proof, finish-authorization, route-count, and route-proof budget witnesses pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
+| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, persisted two-candidate closure-only reload/public projection, exact/one-byte-over completion-recovery, provider-proof, finish-authorization, route-count, and route-proof budget witnesses pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
