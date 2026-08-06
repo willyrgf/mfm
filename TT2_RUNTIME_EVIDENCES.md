@@ -86,6 +86,8 @@ Post-step-12 implementation and proof revisions:
 | `4fd1e757` | cover decrypt aad cleanup |
 | `50c8cac1` | rehydrate completion from closure |
 | `afec8457` | prove closure-alone multi-candidate reload |
+| `d2a39d7a` | witness post-decrypt key cleanup |
+| `8b2e64ba` | witness failed decrypt handoff address |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -109,6 +111,9 @@ guard and failure cleanup witnesses, `4fd1e757` adds the AAD identity
 substitution cleanup witness, `50c8cac1` adds closure-only completion
 rehydration and canonical public projection, and `afec8457` proves those
 closure APIs against a persisted two-candidate PostgreSQL completion row.
+`d2a39d7a` adds the authenticated post-decrypt invalid-key cleanup witness;
+`8b2e64ba` adds direct source-to-`SecureKey` handoff-pointer coverage on that
+failure path and moves the test transfer witness after the ownership move.
 
 ## Independent review checkpoints
 
@@ -258,7 +263,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
 | APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
-| SEC-01 | Conditional | The shared production decrypt guard witnesses one protected heap allocation and cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, and injected unwind; broader malformed-format/post-decrypt public-identity witnesses and external termination/resource-failure classes remain. |
+| SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
 | VERIFY-01 | Conditional | Broad and focused gates pass, but the required complete proof matrix is not present. |
 | PROCESS-01 | Conditional | This review now preserves residuals and exact provenance; strict PASS is withheld until the residual proof/deployment work closes. |
@@ -296,9 +301,10 @@ The following are the concrete blockers to an unconditional §13 PASS:
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;
-4. complete the broader keystore malformed-format/post-decrypt identity and
-   external termination/resource-failure witness matrix, while retaining the
-   long-history cost/LOC ownership evidence; and
+4. complete direct witnesses for other malformed/corrupt keystore formats and
+   a valid-but-wrong public/account identity, plus external termination and
+   resource-failure classes, while retaining the long-history cost/LOC
+   ownership evidence; and
 5. close the remaining STORE-05/06, EVM-07/09, APP-01, QUALITY-01, and VERIFY-01
    production proof matrices.
 
@@ -325,6 +331,8 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `4fd1e757` | `cover decrypt aad cleanup` | substituted entry identity reaches the shared decrypt helper and zeroizes without ownership transfer; decrypt-focused suite 7/7 |
 | `50c8cac1` | `rehydrate completion from closure` | closure-only rehydration reconstructs outer fields, validates every retained preimage, and projects canonical public-result bytes |
 | `afec8457` | `prove closure-alone multi-candidate reload` | persisted two-candidate completion reload, closure-only rehydration, and canonical public projection; exact managed run and independent review pass |
+| `d2a39d7a` | `witness post-decrypt key cleanup` | authenticated invalid-key payload reaches post-decrypt identity rejection and zeroized cleanup; focused decrypt suite 8/8 |
+| `8b2e64ba` | `witness failed decrypt handoff address` | source-to-`SecureKey` handoff pointer equality and cleanup are directly asserted on post-decrypt rejection; full keystore and Clippy pass |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:
@@ -371,11 +379,11 @@ nix run .#run -- --task postgres-sql-inventory-check
 run id: run-1981332-1785976730139548702 — ok, 1/1 task in 2.67s
 nix run .#run -- --task postgres-sqlx-offline-check
 run id: run-1981529-1785976737932619794 — ok, 1/1 task in 5.07s
-nix develop -c cargo test -p mfm-keystore — 89 unit tests + 9 doctests passed after `61bf2091`
-nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture — 7 passed on `4fd1e757`
+nix develop -c cargo test -p mfm-keystore — 91 unit tests + 9 doctests passed on `8b2e64ba`
+nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture — 8 passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture — 1 passed
 nix develop -c cargo test -p mfm-evm — 47 unit tests + signing UI trybuild + 2 doctests passed on `50c8cac1`
-nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `61bf2091`
+nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `8b2e64ba`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
@@ -387,8 +395,9 @@ remaining proof scope is the independent offline/public-result audit.
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan
 evidence; EVM-09 still lacks the independent offline/public-result/provider
-attestation audit; SEC-01 still lacks broader malformed-format/post-decrypt
-identity and external termination/resource-failure witnesses; and the
+attestation audit; SEC-01 still lacks direct witnesses for other
+malformed/corrupt formats and a valid-but-wrong public/account identity, plus
+external termination/resource-failure coverage; and the
 external trust, live multi-hop export, later-valid-audit-artifact,
 cross-process/fault, quality, and complete verification residuals remain
 Conditional.
