@@ -63,9 +63,10 @@ above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, E
 authority qualification, replay reproduction removal, semantic/audit suffix handling, portable
 byte budgets, purpose-bound projections, key-cleanup witnesses, and recursive export closure now
 have implementation and focused regression coverage. The current evidence ledger records those
-scopes as closed or conditional, with the remaining conditional work limited to deployment trust,
-cross-process/fault matrices, generated/scale corpus breadth, independent provider/public-result
-verification, and the full simplicity/isolation acceptance matrix.
+scopes as closed or conditional, with remaining work including deployment trust,
+cross-process/fault matrices, generated/scale corpus breadth, live application multi-hop and
+production evidence, independent provider/public-result verification, external
+termination/OOM/resource-failure coverage, and the full simplicity/isolation acceptance matrix.
 
 The current matrix is authoritative for this re-audit; the detailed sections below preserve the
 original finding text and line references for traceability.
