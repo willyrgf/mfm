@@ -138,6 +138,8 @@ const PHASE_PRODUCTION_RESUME: &str = "production-resume";
 const INJECTED_CRASH_AFTER_BROADCAST_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_BROADCAST";
 const INJECTED_CRASH_AFTER_RECEIPT_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_RECEIPT";
 const INJECTED_CRASH_AFTER_FINALITY_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_FINALITY";
+const INJECTED_CRASH_AFTER_COMPLETION_ENV: &str =
+    "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_COMPLETION";
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
@@ -380,6 +382,16 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
 
     run_worker_expect_crash_after_finality(
+        &database,
+        rpc.endpoint(),
+        PHASE_PRODUCTION_RESUME,
+        &activation,
+        &provider,
+    )
+    .await;
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+
+    run_worker_expect_crash_after_completion(
         &database,
         rpc.endpoint(),
         PHASE_PRODUCTION_RESUME,
@@ -976,13 +988,16 @@ async fn run_production_application_worker(
             let crash_after_receipt = std::env::var_os(INJECTED_CRASH_AFTER_RECEIPT_ENV).is_some();
             let crash_after_finality =
                 std::env::var_os(INJECTED_CRASH_AFTER_FINALITY_ENV).is_some();
-            if crash_after_receipt || crash_after_finality {
+            let crash_after_completion =
+                std::env::var_os(INJECTED_CRASH_AFTER_COMPLETION_ENV).is_some();
+            if crash_after_receipt || crash_after_finality || crash_after_completion {
                 drive_application_to_closed_with_injected_crash(
                     &application,
                     &submission_run_id,
                     &history_control,
                     crash_after_receipt,
                     crash_after_finality,
+                    crash_after_completion,
                 )
                 .await;
             } else {
@@ -1409,6 +1424,7 @@ async fn drive_application_to_closed_with_injected_crash(
     history_control: &PgPool,
     crash_after_receipt: bool,
     crash_after_finality: bool,
+    crash_after_completion: bool,
 ) {
     let receipt_capability = read_capability_ref::<EvmReceiptLookupCapability>();
     let finality_capability = read_capability_ref::<EvmFinalizedHeadCapability>();
@@ -1431,6 +1447,10 @@ async fn drive_application_to_closed_with_injected_crash(
         }
         let rendered = response.public_json().expect("render drive response");
         match rendered["kind"].as_str() {
+            Some("closed") if crash_after_completion => {
+                history_control.close().await;
+                std::process::exit(137);
+            }
             Some("closed") => {
                 panic!("production application run closed before injected observation crash")
             }
@@ -3363,6 +3383,25 @@ async fn run_worker_expect_crash_after_finality(
     assert_injected_worker_crash(output, mode, "finality");
 }
 
+async fn run_worker_expect_crash_after_completion(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let output = run_worker_process(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        Some(InjectedCrashBoundary::Completion),
+    )
+    .await;
+    assert_injected_worker_crash(output, mode, "completion");
+}
+
 fn assert_injected_worker_crash(output: Output, mode: &str, boundary: &str) {
     assert_canaries_absent("crashed worker stdout", &output.stdout);
     assert_canaries_absent("crashed worker stderr", &output.stderr);
@@ -3383,6 +3422,7 @@ enum InjectedCrashBoundary {
     Broadcast,
     Receipt,
     Finality,
+    Completion,
 }
 
 async fn run_worker_process(
@@ -3439,6 +3479,7 @@ async fn run_worker_process(
         INJECTED_CRASH_AFTER_BROADCAST_ENV,
         INJECTED_CRASH_AFTER_RECEIPT_ENV,
         INJECTED_CRASH_AFTER_FINALITY_ENV,
+        INJECTED_CRASH_AFTER_COMPLETION_ENV,
     ] {
         command.env_remove(variable);
     }
@@ -3447,6 +3488,7 @@ async fn run_worker_process(
             InjectedCrashBoundary::Broadcast => INJECTED_CRASH_AFTER_BROADCAST_ENV,
             InjectedCrashBoundary::Receipt => INJECTED_CRASH_AFTER_RECEIPT_ENV,
             InjectedCrashBoundary::Finality => INJECTED_CRASH_AFTER_FINALITY_ENV,
+            InjectedCrashBoundary::Completion => INJECTED_CRASH_AFTER_COMPLETION_ENV,
         };
         command.env(variable, "1");
     }
