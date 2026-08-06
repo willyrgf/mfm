@@ -233,6 +233,11 @@ enum CheckpointRequest {
         target: CheckpointTarget,
         observed_prefix_digest: String,
     },
+    Recover {
+        fence_lineage_ref: EvmWalletReference,
+        target: CheckpointTarget,
+        observed_prefix_digest: String,
+    },
     Prepare {
         fence_lineage_ref: EvmWalletReference,
         target: CheckpointTarget,
@@ -477,6 +482,40 @@ fn apply_checkpoint_request(
             }
             Ok(CheckpointReply::Current { epoch: state.epoch })
         }
+        CheckpointRequest::Recover {
+            fence_lineage_ref,
+            target,
+            observed_prefix_digest,
+        } => {
+            if fence_lineage_ref != state.fence_lineage_ref {
+                return Err(ProviderTestError::Invalid);
+            }
+            if let Some(prepared) = state.prepared.clone() {
+                if observed_prefix_digest == prepared.predecessor_digest && target == state.target {
+                    state.prepared = None;
+                } else if observed_prefix_digest == prepared.successor_digest
+                    && target
+                        == prepared
+                            .successor_target
+                            .clone()
+                            .unwrap_or_else(|| state.target.clone())
+                {
+                    state.acknowledged_prefix_digest = prepared.successor_digest;
+                    state.epoch = prepared.epoch;
+                    if let Some(successor_target) = prepared.successor_target {
+                        state.target = successor_target;
+                    }
+                    state.prepared = None;
+                } else {
+                    return Err(ProviderTestError::Invalid);
+                }
+            } else if target != state.target
+                || observed_prefix_digest != state.acknowledged_prefix_digest
+            {
+                return Err(ProviderTestError::Invalid);
+            }
+            Ok(CheckpointReply::Current { epoch: state.epoch })
+        }
         CheckpointRequest::Prepare {
             fence_lineage_ref,
             target,
@@ -595,6 +634,26 @@ impl CheckpointClient {
         let observed_prefix_digest = prefix.digest()?;
         let reply = self
             .request(&CheckpointRequest::Verify {
+                fence_lineage_ref: self.fence_lineage_ref.clone(),
+                target: target.clone(),
+                observed_prefix_digest,
+            })
+            .await?;
+        let CheckpointReply::Current { epoch } = reply else {
+            return Err(ProviderTestError::Invalid);
+        };
+        *self.epoch.lock().await = epoch;
+        Ok(())
+    }
+
+    async fn recover(
+        &self,
+        target: &CheckpointTarget,
+        prefix: &WalletCheckpointPrefix,
+    ) -> Result<(), ProviderTestError> {
+        let observed_prefix_digest = prefix.digest()?;
+        let reply = self
+            .request(&CheckpointRequest::Recover {
                 fence_lineage_ref: self.fence_lineage_ref.clone(),
                 target: target.clone(),
                 observed_prefix_digest,
@@ -1957,6 +2016,22 @@ impl ProviderState {
         self.checkpoint.verify(&target, &prefix).await
     }
 
+    async fn recover_checkpoint_if_idle(&self) -> Result<(), ProviderTestError> {
+        let active_leases = self
+            .mutable
+            .lock()
+            .map_err(|_| ProviderTestError::Unavailable)?
+            .active_leases;
+        if active_leases != 0 {
+            return Ok(());
+        }
+        let _observation = self.checkpoint_observation.lock().await;
+        let target = self.checkpoint_target()?;
+        let prefix =
+            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
+        self.checkpoint.recover(&target, &prefix).await
+    }
+
     async fn prepare_checkpoint(
         &self,
         mutation: &ProviderMutation,
@@ -2782,6 +2857,7 @@ async fn serve_connection(
             store_incarnation,
             current_public_lineage_head,
         } => {
+            state.recover_checkpoint_if_idle().await?;
             let provider_head = {
                 let retained = state
                     .mutable
@@ -4800,6 +4876,57 @@ mod frame_tests {
             },
         )
         .is_err());
+    }
+
+    #[test]
+    fn idle_recovery_aborts_prepared_predecessor_before_a_fresh_mutation() {
+        let target = checkpoint_target();
+        let predecessor = checkpoint_digest(0x67);
+        let prepared = PreparedCheckpoint {
+            epoch: 1,
+            predecessor_digest: predecessor.clone(),
+            successor_digest: checkpoint_digest(0x68),
+            operation_digest: checkpoint_digest(0x69),
+            successor_target: None,
+        };
+        let mut state = CheckpointAuthorityState {
+            authentication_token: Zeroizing::new([0x6a; 32]),
+            fence_lineage_ref: checkpoint_reference(0x6b),
+            target: target.clone(),
+            epoch: 0,
+            acknowledged_prefix_digest: predecessor.clone(),
+            prepared: Some(prepared),
+        };
+        assert!(matches!(
+            apply_checkpoint_request(
+                &mut state,
+                CheckpointRequest::Recover {
+                    fence_lineage_ref: checkpoint_reference(0x6b),
+                    target: target.clone(),
+                    observed_prefix_digest: predecessor.clone(),
+                },
+            ),
+            Ok(CheckpointReply::Current { epoch: 0 })
+        ));
+        assert!(state.prepared.is_none());
+
+        let replacement = PreparedCheckpoint {
+            epoch: 1,
+            predecessor_digest: predecessor,
+            successor_digest: checkpoint_digest(0x6c),
+            operation_digest: checkpoint_digest(0x6d),
+            successor_target: None,
+        };
+        assert!(apply_checkpoint_request(
+            &mut state,
+            CheckpointRequest::Prepare {
+                fence_lineage_ref: checkpoint_reference(0x6b),
+                target,
+                expected_epoch: 0,
+                prepared: replacement,
+            },
+        )
+        .is_ok());
     }
 
     #[test]
