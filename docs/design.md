@@ -163,6 +163,10 @@ The fold derives:
 Public-read and recorded-replay purpose projections retain only the
 fold-derived `RunEvidenceStatus`; the actionable frontier and its capability,
 input, and state references remain internal to the fold and Runtime adapter.
+Typed operation results that cross the terminal public boundary are separate reviewed
+`PublicOutputs` contracts: they project only redaction-safe product fields, while recovery
+closures, provider attestations, signed envelopes, and other verification preimages remain
+internal evidence.
 
 The explicit offline replay entry point consumes raw history plus concrete trust
 and returns an opaque `OfflineVerifiedRun` containing only recorded status and

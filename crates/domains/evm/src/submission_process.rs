@@ -1615,7 +1615,7 @@ pub(crate) fn project_completed(
         match completion.canonical_terminal_outcome.execution_disposition {
             ExecutionDisposition::Succeeded => CompletedProjection::Success {
                 output: EvmSubmissionOutput {
-                    completion: completion.clone(),
+                    execution_disposition: ExecutionDisposition::Succeeded,
                 },
             },
             ExecutionDisposition::Reverted => CompletedProjection::Failure {

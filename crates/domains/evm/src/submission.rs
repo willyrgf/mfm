@@ -13,7 +13,7 @@ use mfm_program::structured::{
     RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
     SafeFailureMayFail, SafeFailureNotApplicable, State,
 };
-use mfm_program_derive::{MfmConfig, MfmValue};
+use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_spec::structured::{
     structured_value_contract_ref, StructuredComponentDependency, StructuredComponentKind,
     StructuredLiveComponentContract,
@@ -441,8 +441,12 @@ fn validate_submission_semantics(
     Ok(())
 }
 
-/// Successful public output after permanent nonce completion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+/// Redaction-safe public output after permanent nonce completion.
+///
+/// The persisted [`CompletedWalletNonce`] remains the complete recovery closure. Only its
+/// canonical terminal disposition crosses the public run-result boundary; provider attestations,
+/// signed envelopes, and recovery preimages remain internal evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue, PublicOutputs)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.evm",
@@ -451,8 +455,8 @@ fn validate_submission_semantics(
     schema = "mfm.evm.submission_output"
 )]
 pub struct EvmSubmissionOutput {
-    /// Canonical permanent wallet completion.
-    pub completion: CompletedWalletNonce,
+    /// Canonical terminal execution disposition.
+    pub execution_disposition: crate::ExecutionDisposition,
 }
 
 /// Abstract authored submission state replaced by [`EvmSubmissionExpansion`].
