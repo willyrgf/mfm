@@ -3550,9 +3550,11 @@ async fn run_worker_expect_crash_before_completion_commit(
         activation,
         provider,
         None,
-        Some(&proxy_nonce_url),
-        Some(&ready_path),
-        false,
+        WorkerCommandOptions {
+            nonce_application_url: Some(&proxy_nonce_url),
+            ready_path: Some(&ready_path),
+            ..WorkerCommandOptions::default()
+        },
     )
     .spawn()
     .expect("spawn completion pre-commit worker");
@@ -3666,9 +3668,11 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         activation,
         provider,
         None,
-        Some(&proxy_nonce_url),
-        Some(&ready_path),
-        true,
+        WorkerCommandOptions {
+            nonce_application_url: Some(&proxy_nonce_url),
+            ready_path: Some(&ready_path),
+            skip_projection_verify: true,
+        },
     )
     .spawn()
     .expect("spawn completion acknowledgement worker");
@@ -3819,6 +3823,13 @@ enum InjectedCrashBoundary {
     Completion,
 }
 
+#[derive(Default)]
+struct WorkerCommandOptions<'a> {
+    nonce_application_url: Option<&'a str>,
+    ready_path: Option<&'a Path>,
+    skip_projection_verify: bool,
+}
+
 async fn run_worker_process(
     database: &TestDatabase,
     endpoint: &str,
@@ -3834,9 +3845,7 @@ async fn run_worker_process(
         activation,
         provider,
         crash_boundary,
-        None,
-        None,
-        false,
+        WorkerCommandOptions::default(),
     )
     .output()
     .await
@@ -3850,13 +3859,12 @@ fn worker_command(
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
     provider: &ProviderProcess,
     crash_boundary: Option<InjectedCrashBoundary>,
-    nonce_application_url: Option<&str>,
-    ready_path: Option<&Path>,
-    skip_projection_verify: bool,
+    options: WorkerCommandOptions<'_>,
 ) -> tokio::process::Command {
     let mut command =
         tokio::process::Command::new(std::env::current_exe().expect("test executable"));
-    let nonce_url = nonce_application_url
+    let nonce_url = options
+        .nonce_application_url
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| database.nonce_application_url());
     command
@@ -3909,11 +3917,11 @@ fn worker_command(
     ] {
         command.env_remove(variable);
     }
-    if skip_projection_verify {
+    if options.skip_projection_verify {
         command.env(SKIP_PRODUCTION_PROJECTION_VERIFY_ENV, "1");
     }
     command.env_remove(WORKER_READY_FILE_ENV);
-    if let Some(path) = ready_path {
+    if let Some(path) = options.ready_path {
         command.env(WORKER_READY_FILE_ENV, path);
     }
     if let Some(boundary) = crash_boundary {
