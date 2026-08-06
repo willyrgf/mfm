@@ -8,11 +8,13 @@ The focused follow-up candidate is `afec8457`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
-below. The latest APP-01 proof revision is `2fc4afa8`, which adds two
+below. The earlier APP-01 proof revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
 bounded PostgreSQL owner. Focused checks and the historical exact composed
-source gate pass. The plan requires a PASS only when every
+source gate pass. The latest purpose-isolation cutover is `bd98e8ca`, which
+removes the full actionable frontier from public and recorded-replay evidence.
+The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
 
@@ -82,6 +84,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
   eight-attempt checkpoint-read retry. The exact configuration suite passes
   7/7, the full `mfm-store` library suite passes 33/33, and the managed
   recoverability task passes on `e7624406`.
+- Purpose-isolation cutover: `bd98e8ca` replaces public and recorded-replay
+  `StructuredFrontier` access with the data-free `RunEvidenceStatus`, updates
+  app/replay projections, and adds frontier-denial compile-fail cases for both
+  products.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -268,6 +274,41 @@ review notes that the bound is per nested loop and that PostgreSQL retries the
 classified `InvalidHistory` result even when corruption is persistent; these
 are bounded resource/diagnostic residuals, not correctness failures.
 
+The purpose-isolation cutover was qualified on its exact clean tip:
+
+```text
+nix develop -c cargo test -p mfm-app --test application-privacy-ui
+source: bd98e8ca
+result: 14/14 compile-fail cases passed
+
+nix develop -c cargo test -p mfm-store --lib
+source: bd98e8ca
+result: 33 passed, 0 failed
+
+nix develop -c cargo test -p mfm-replay --lib
+source: bd98e8ca
+result: 9 passed, 0 failed
+
+nix develop -c cargo test -p mfm-app --lib
+source: bd98e8ca
+result: 31 passed, 0 failed
+
+nix run .#run -- --task portable-replay-corpus
+source: bd98e8ca
+run id: run-2057202-1785982481856354937
+result: ok — 1 task, 0 failed in 21.60s
+
+nix run .#run -- --task postgres-sqlx-check
+source: bd98e8ca
+run id: run-2049878-1785982143970760651
+result: ok — 1 task, 0 failed in 99.91s
+```
+
+The cutover preserves the transport status strings while preventing callers
+from reading actionable state, capability references, input, or execution
+details through public or recorded evidence. A complete runtime/audit/replay/
+export isolation matrix remains outside this focused proof.
+
 Additional focused evidence on the current tree:
 
 ```text
@@ -387,7 +428,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 12-case application privacy trybuild matrix rejects public raw-record enumeration and trace authorization-request access, while complete runtime data-isolation proof remains outstanding. |
+| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 14-case application privacy trybuild matrix rejects public raw-record enumeration, public/recorded frontier access, and trace authorization-request access, while complete runtime data-isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
@@ -427,6 +468,12 @@ and ambiguous configuration appends use their shared finite eight-attempt
 classification and retry only the exact canonical revision. The bound is per
 nested loop, and persistent `InvalidHistory` is retried until exhaustion; both
 are explicit bounded residuals rather than fallback behavior.
+
+Public and recorded-replay purpose products retain only `RunEvidenceStatus`;
+the internal `StructuredFrontier` and its actionable state/capability details
+are consumed before the purpose wrapper is constructed. The application and
+replay projections use the status tag directly, and the focused UI matrix
+rejects frontier access for both products.
 
 ## PostgreSQL and EVM matrix status
 
