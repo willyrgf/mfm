@@ -561,6 +561,13 @@ Current implementation:
   [configuration.rs lines 199-208](crates/storages/postgres/src/configuration.rs#L199).
 - The memory backends take one mutex snapshot, so this is also a backend semantic difference.
 
+Current re-audit: the production read transactions now use `REPEATABLE READ`, query the indexed
+head before releasing the external fixation, and load batches/objects or revisions from that same
+transaction snapshot. Revision `df61d1b9` adds deterministic run and configuration barriers that
+commit a successor after fixation release and prove the reader returns the old complete prefix;
+the next read observes the successor. The bullets above preserve the original finding at the
+historical tree.
+
 Minimal interleaving:
 
 1. Reader statement one observes batches through head H.
@@ -646,6 +653,12 @@ Current implementation:
   [lines 1193-1201](crates/storages/postgres/src/structured.rs#L1193).
 - The code then calls `classify_existing_under_lock` on the same transaction, which immediately
   issues `SELECT` queries at [lines 1204-1224](crates/storages/postgres/src/structured.rs#L1204).
+
+Current re-audit: the contention branches now roll back the failed transaction before reacquiring
+the canonical lock and classifying the append through a fresh transaction. The managed same-stream
+race and exact acknowledgement-recovery tests pass this path; deterministic serialization/deadlock
+and production cross-process fault injection remain unverified. The bullets above preserve the
+original finding at the historical tree.
 
 PostgreSQL marks a transaction failed after those errors. Further SQL cannot classify anything
 until rollback.
