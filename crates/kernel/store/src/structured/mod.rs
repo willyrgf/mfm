@@ -42,6 +42,9 @@ pub use configuration::{
 };
 #[doc(hidden)]
 pub use fact_scan::PriorRunFactScanCompletion;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use fact_scan::{fact_scan_counters, reset_fact_scan_counters, FactScanCounters};
 pub use fold::{
     verify_offline_recorded_history, ActionableState, LaneCursor, ObservationQualification,
     ProgramCursor, ProgramVerifier, StateLeaf, StructuredFrontier, StructuredStoreError,

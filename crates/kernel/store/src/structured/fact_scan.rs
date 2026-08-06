@@ -18,6 +18,9 @@ use mfm_journal::structured::{
 };
 use serde::Serialize;
 
+#[cfg(feature = "test-support")]
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use super::backend::{RawRunHistory, StructuredBackendFuture, TenantFactPublication};
 use super::fold::{
     verify_recorded_history, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
@@ -27,6 +30,95 @@ use super::qualification::PublicPhysicalBindingVerifier;
 const SCAN_PAGE_ITEMS: u32 = 1_024;
 const FACT_CONTENT_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-content-identity-preimage.v1";
 const FACT_LOGICAL_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-logical-identity-preimage.v1";
+
+#[cfg(feature = "test-support")]
+static FACT_SCAN_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_PUBLICATION_PAGES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_PRODUCER_PREFIX_LOADS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_FOLD_BATCHES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_MAX_PUBLICATION_PAGES: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "test-support")]
+static FACT_SCAN_MAX_FOLD_BATCHES: AtomicU64 = AtomicU64::new(0);
+
+/// Test-only counters for one bounded prior-run fact scan.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactScanCounters {
+    /// Number of outer and nested scan invocations.
+    pub invocations: u64,
+    /// Number of dense publication-page backend reads.
+    pub publication_pages: u64,
+    /// Number of producer-prefix backend reads.
+    pub producer_prefix_loads: u64,
+    /// Number of retained producer batches folded.
+    pub fold_batches: u64,
+    /// Maximum dense publication pages in one scan invocation.
+    pub maximum_publication_pages: u64,
+    /// Maximum producer-prefix loads in one scan invocation.
+    pub maximum_producer_prefix_loads: u64,
+    /// Maximum producer batches folded in one scan invocation.
+    pub maximum_fold_batches: u64,
+}
+
+/// Resets test-only prior-run fact-scan counters.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn reset_fact_scan_counters() {
+    FACT_SCAN_INVOCATIONS.store(0, Ordering::Relaxed);
+    FACT_SCAN_PUBLICATION_PAGES.store(0, Ordering::Relaxed);
+    FACT_SCAN_PRODUCER_PREFIX_LOADS.store(0, Ordering::Relaxed);
+    FACT_SCAN_FOLD_BATCHES.store(0, Ordering::Relaxed);
+    FACT_SCAN_MAX_PUBLICATION_PAGES.store(0, Ordering::Relaxed);
+    FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.store(0, Ordering::Relaxed);
+    FACT_SCAN_MAX_FOLD_BATCHES.store(0, Ordering::Relaxed);
+}
+
+/// Reads test-only prior-run fact-scan counters.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn fact_scan_counters() -> FactScanCounters {
+    FactScanCounters {
+        invocations: FACT_SCAN_INVOCATIONS.load(Ordering::Relaxed),
+        publication_pages: FACT_SCAN_PUBLICATION_PAGES.load(Ordering::Relaxed),
+        producer_prefix_loads: FACT_SCAN_PRODUCER_PREFIX_LOADS.load(Ordering::Relaxed),
+        fold_batches: FACT_SCAN_FOLD_BATCHES.load(Ordering::Relaxed),
+        maximum_publication_pages: FACT_SCAN_MAX_PUBLICATION_PAGES.load(Ordering::Relaxed),
+        maximum_producer_prefix_loads: FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.load(Ordering::Relaxed),
+        maximum_fold_batches: FACT_SCAN_MAX_FOLD_BATCHES.load(Ordering::Relaxed),
+    }
+}
+
+#[cfg(feature = "test-support")]
+fn count_fact_scan_publication_page() {
+    FACT_SCAN_PUBLICATION_PAGES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(feature = "test-support")]
+fn count_fact_scan_producer_prefix_load() {
+    FACT_SCAN_PRODUCER_PREFIX_LOADS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(feature = "test-support")]
+fn count_fact_scan_fold_batches(count: usize) {
+    let Ok(count) = u64::try_from(count) else {
+        return;
+    };
+    FACT_SCAN_FOLD_BATCHES.fetch_add(count, Ordering::Relaxed);
+}
+
+#[cfg(feature = "test-support")]
+fn record_fact_scan_maxima(session: &FactScanSession) {
+    FACT_SCAN_MAX_PUBLICATION_PAGES.fetch_max(session.publication_pages, Ordering::Relaxed);
+    FACT_SCAN_MAX_PRODUCER_PREFIX_LOADS.fetch_max(session.producer_prefix_loads, Ordering::Relaxed);
+    FACT_SCAN_MAX_FOLD_BATCHES.fetch_max(session.fold_batches, Ordering::Relaxed);
+}
 
 /// Store-internal purpose-only authority available to the retained fact scanner.
 ///
@@ -173,6 +265,12 @@ struct FactScanSession {
     maximum_distinct_producers: u64,
     maximum_retained_source_bytes: u64,
     maximum_producer_fold_batches: u64,
+    #[cfg(feature = "test-support")]
+    publication_pages: u64,
+    #[cfg(feature = "test-support")]
+    producer_prefix_loads: u64,
+    #[cfg(feature = "test-support")]
+    fold_batches: u64,
 }
 
 impl FactScanSession {
@@ -185,6 +283,12 @@ impl FactScanSession {
             maximum_distinct_producers: bounds.maximum_distinct_producers(),
             maximum_retained_source_bytes: bounds.maximum_retained_source_bytes(),
             maximum_producer_fold_batches: bounds.maximum_producer_fold_batches(),
+            #[cfg(feature = "test-support")]
+            publication_pages: 0,
+            #[cfg(feature = "test-support")]
+            producer_prefix_loads: 0,
+            #[cfg(feature = "test-support")]
+            fold_batches: 0,
         }
     }
 }
@@ -230,7 +334,12 @@ impl BackendFactScanPort {
     async fn scan(&self, request: FactSelectionRequest) -> ScanResult<FactSelectionReadResponse> {
         let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
         let mut session = FactScanSession::new(&bounds);
-        self.scan_with_session(request, &mut session).await
+        #[cfg(feature = "test-support")]
+        FACT_SCAN_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
+        let result = self.scan_with_session(request, &mut session).await;
+        #[cfg(feature = "test-support")]
+        record_fact_scan_maxima(&session);
+        result
     }
 
     fn scan_with_session<'a>(
@@ -290,6 +399,14 @@ impl BackendFactScanPort {
                     )
                     .await
                     .map_err(classify_backend_scan_error)?;
+                #[cfg(feature = "test-support")]
+                {
+                    session.publication_pages = session
+                        .publication_pages
+                        .checked_add(1)
+                        .ok_or(ScanError::Integrity)?;
+                    count_fact_scan_publication_page();
+                }
                 if publications.is_empty()
                     || publications.len()
                         > usize::try_from(SCAN_PAGE_ITEMS).map_err(|_| ScanError::Integrity)?
@@ -462,6 +579,14 @@ impl BackendFactScanPort {
                 return Err(ScanError::Integrity);
             }
             let result = async {
+                #[cfg(feature = "test-support")]
+                {
+                    session.producer_prefix_loads = session
+                        .producer_prefix_loads
+                        .checked_add(1)
+                        .ok_or(ScanError::Integrity)?;
+                    count_fact_scan_producer_prefix_load();
+                }
                 let raw = self
                     .source
                     .load_producer_prefix(producer, through_sequence)
@@ -506,6 +631,16 @@ impl BackendFactScanPort {
                         u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?,
                     )
                     .ok_or(ScanError::Integrity)?;
+                #[cfg(feature = "test-support")]
+                {
+                    session.fold_batches = session
+                        .fold_batches
+                        .checked_add(
+                            u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?,
+                        )
+                        .ok_or(ScanError::Integrity)?;
+                    count_fact_scan_fold_batches(raw.batches.len());
+                }
                 if session.fold_work > session.maximum_producer_fold_batches {
                     return Err(ScanError::Safe(
                         FactSelectionReadFailureCode::PublicationBoundExceeded,
