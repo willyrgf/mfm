@@ -123,17 +123,27 @@ fn qualified_binding_for_implementation(
     generation_seed: u8,
     implementation_id: &str,
 ) -> VerifiedGenerationGuardedSignerBinding {
+    qualified_binding_with_public_key(
+        address,
+        generation_seed,
+        implementation_id,
+        test_public_key(),
+    )
+}
+
+fn qualified_binding_with_public_key(
+    address: Address,
+    generation_seed: u8,
+    implementation_id: &str,
+    public_key: PublicKeyBytes,
+) -> VerifiedGenerationGuardedSignerBinding {
     VerifiedGenerationGuardedSignerBinding::verify(
         signer_ref(),
         implementation_id,
         algorithm(),
         profile(),
-        PublicSigningIdentity::new(
-            algorithm(),
-            Some(test_public_key()),
-            Some(format!("{address:#x}")),
-        )
-        .expect("complete public identity"),
+        PublicSigningIdentity::new(algorithm(), Some(public_key), Some(format!("{address:#x}")))
+            .expect("complete public identity"),
         content_ref(generation_seed),
         content_ref(generation_seed.wrapping_add(1)),
         content_ref(generation_seed.wrapping_add(2)),
@@ -153,6 +163,16 @@ fn persisted_audit_count(bytes: &[u8]) -> usize {
 fn test_public_key() -> PublicKeyBytes {
     let mut key_bytes = [0_u8; 32];
     key_bytes[31] = 1;
+    public_key_for_private_key(key_bytes)
+}
+
+fn other_public_key() -> PublicKeyBytes {
+    let mut key_bytes = [0_u8; 32];
+    key_bytes[31] = 2;
+    public_key_for_private_key(key_bytes)
+}
+
+fn public_key_for_private_key(key_bytes: [u8; 32]) -> PublicKeyBytes {
     let public_key = k256::SecretKey::from_slice(&key_bytes)
         .expect("test key")
         .public_key()
@@ -652,18 +672,18 @@ async fn wrong_key_identity_is_rejected_by_the_generic_contract() {
 #[tokio::test]
 async fn qualification_rejects_a_valid_key_with_wrong_public_and_account_identity() {
     let keystore = test_keystore();
-    let guard = TestGenerationGuard::new(GuardVerdict::Current);
-    let provider = KeystoreSignerProvider::new_with_config(
+    let wrong_account_guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let wrong_account_provider = KeystoreSignerProvider::new_with_config(
         qualified_binding(keystore.address, 0x1c),
         keystore.other_entry_id,
         &keystore.keystore_path,
         &keystore.unlock_file,
-        guard.clone(),
+        wrong_account_guard.clone(),
         KeystoreConfig::insecure_integration_test(),
     )
     .expect("candidate");
 
-    let result = provider
+    let result = wrong_account_provider
         .qualify(semantic_signer_id(), content_ref(0x1f))
         .await;
     assert!(matches!(
@@ -672,7 +692,34 @@ async fn qualification_rejects_a_valid_key_with_wrong_public_and_account_identit
             reason: SigningProviderError::BindingMismatch
         })
     ));
-    assert_eq!(guard.checks(), 1);
+    assert_eq!(wrong_account_guard.checks(), 1);
+
+    let wrong_public_guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let wrong_public_provider = KeystoreSignerProvider::new_with_config(
+        qualified_binding_with_public_key(
+            keystore.address,
+            0x1d,
+            KEYSTORE_SIGNING_IMPLEMENTATION_ID,
+            other_public_key(),
+        ),
+        keystore.entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        wrong_public_guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+
+    let result = wrong_public_provider
+        .qualify(semantic_signer_id(), content_ref(0x20))
+        .await;
+    assert!(matches!(
+        result,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::BindingMismatch
+        })
+    ));
+    assert_eq!(wrong_public_guard.checks(), 1);
 }
 
 #[tokio::test]
