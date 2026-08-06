@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `49d2e77c`; the historical gate remains
+The current implementation tip is `70e6900e`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `49d2e77c`, which includes the bounded
+The focused follow-up candidate is `70e6900e`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -16,8 +16,9 @@ below. It includes `9f61c39a` (`prove canonical frame boundaries`),
 isolation), `a1ad9814` (provider-proof byte bounds), `c36e233e`
 (finish-authorization byte bound), `75ac74f5` (deployment route-count and
 proof bounds), `219c588b` (shared canonical batch-count bounds), and
-`2512ebf8` (completion-recovery byte bound), and `49d2e77c` (nested collection
-count bounds). The earlier APP-01 proof
+`2512ebf8` (completion-recovery byte bound), `49d2e77c` (nested collection
+count bounds), and `70e6900e` (prior-run source-manifest byte bound). The
+earlier APP-01 proof
 revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
@@ -131,7 +132,7 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `49d2e77c` (`cover nested collection count bounds`),
+- Focused follow-up candidate: `70e6900e` (`prove prior-run manifest byte bound`),
   including `6525fad6` (`expand configuration corpus breadth`),
   including `8a902d03` (`fail closed SQL file macros`),
   including `2fea7802` (`restore SQL inventory builder scope`),
@@ -159,7 +160,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   (finish-authorization byte bound), `75ac74f5` (deployment assembly
   route-count/proof bounds), `219c588b` (canonical batch-count bounds), and
   `2512ebf8` (completion-recovery byte bound), and `49d2e77c` (nested
-  collection count bounds).
+  collection count bounds), and `70e6900e` (prior-run source-manifest byte
+  bound).
 - Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
   in replay corpus`), which adds the exact store-shaped observed-read bytes,
   generator acceptance/rejection vectors, and an offline parity branch in the
@@ -253,6 +255,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   witnesses for both generated collection budgets, alongside the batch-count
   cases, pass in the focused canonical-append target (5/5); independent review
   marks the collection boundary PASS.
+- Prior-run manifest-bound revision: `70e6900e` routes both history-object
+  encode and decode through one private byte validator. Exact 16,777,216-byte
+  and one-byte-over witnesses pass in the focused `mfm-journal` structured
+  target (3/3); independent review marks this shared ingress/rehydration
+  boundary PASS.
 - Default-concurrency qualification: clean managed run
   `run-2246603-1786002530958490012` passes all 24 structured-history tests,
   including `configured_value_history_linearizes_same_stream_append_races`;
@@ -716,6 +723,21 @@ semantics. The exact retained object is content-addressed and valid; the
 object one-byte-over assertion exercises the shared length predicate directly,
 so canonical/content-ref failure cannot explain the rejection.
 
+The prior-run source-manifest boundary target ran from clean source tip
+`70e6900e`:
+
+```text
+nix develop -c cargo test -p mfm-journal --lib structured:: -- --nocapture
+source: 70e6900e
+result: ok — 3 structured-journal unit tests passed, 0 failed
+```
+
+Independent review confirms that both history-object encode and decode call the
+same private byte validator, accepting the exact generated 16,777,216-byte
+budget and rejecting one byte over before deeper canonical or content-reference
+validation. The broader source-manifest rule/reference corpus remains
+conditional.
+
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
 revision `9f61c39a`):
@@ -1005,6 +1027,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `structured::canonical_append::tests::count_bounds_accept_exact_limits_and_reject_empty_or_one_over` | pass in focused `mfm-store` target on `49d2e77c`; records/objects accept exact 65,536, nested arrays/objects exact 1,048,576, and empty/one-over cases are classified before deeper validation | N/A; introduced after baseline |
 | `structured::canonical_append::tests::{envelope_frame_accepts_exact_byte_limit,envelope_frame_rejects_one_byte_over_limit}` | pass in focused `mfm-store` target on `49d2e77c` (exact/one-byte-over `MAX_STORED_FRAME_BYTES`) | N/A; introduced after baseline |
 | `structured::canonical_append::tests::object_frame_accepts_exact_limit_and_rejects_one_byte_over` | pass in focused `mfm-store` target on `49d2e77c`; exact content-addressed object accepted and shared predicate rejects one byte over | N/A; introduced after baseline |
+| `structured::prior_run_source_manifest_limit_tests::exact_manifest_byte_budget_is_accepted_and_one_over_is_rejected` | pass in focused `mfm-journal` target on `70e6900e` (3/3 structured-journal tests); shared encode/decode byte predicate accepts exact 16,777,216 bytes and rejects one byte over | N/A; introduced after baseline |
 | `wallet_authority::provider_attestation_tests::provider_attestation_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `a1ad9814`; exact/one-byte-over generated provider-proof budget | N/A; introduced after baseline |
 | `provider::frame_tests::{provider_attestation_accepts_exact_budget_and_rejects_one_byte_over,finish_authorization_accepts_exact_budget_and_rejects_one_byte_over,deployment_route_count_accepts_exact_budget_and_rejects_one_route_over,deployment_route_proof_accepts_exact_budget_and_rejects_one_byte_over}` | pass in focused `mfm-storage-evm-postgres` target on `75ac74f5` (6/6 provider frame tests); valid route references and fresh matching digest isolate the route/proof and finish-authorization over-limit rejections | N/A; introduced after baseline |
 | `wallet_authority::completion_recovery_limit_tests::completion_recovery_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `2512ebf8` (exact/one-over generated `MAX_COMPLETION_RECOVERY_BYTES`) | N/A; introduced after baseline |
@@ -1036,7 +1059,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-02 | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
-| TT2-STORE-05 | Conditional | Shared canonical ingress bounds batch counts, nested collection counts, serialized configuration revisions, run frames, and retained objects before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` plus `e5f8c3b0` add a valid exact-limit object and isolate the shared one-byte-over length predicate; `219c588b` adds exact 65,536-record/object and empty/one-over count witnesses, and `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
+| TT2-STORE-05 | Conditional | Shared canonical ingress bounds batch counts, nested collection counts, serialized configuration revisions, prior-run source manifests, run frames, and retained objects before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` plus `e5f8c3b0` add a valid exact-limit object and isolate the shared one-byte-over length predicate; `219c588b` adds exact 65,536-record/object and empty/one-over count witnesses, and `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Revision `70e6900e` adds a shared prior-run source-manifest byte predicate with exact 16,777,216-byte and one-byte-over witnesses; the focused journal target passes 3/3. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | TT2-STORE-06 | Conditional | Revisions `40051076` through `8a902d03` extend the AST inventory to checked and `_unchecked` SQLx query macros, fail closed on all six `query_file*` forms, correct typed SQL-argument positions, direct/renamed/glob and after-use imports, nested file/module/block scope restoration, aliases, generic forms, wrapped helpers, and QueryBuilder fragments (independent review and managed inventory run `run-2236542-1786001395306859242` pass 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded byte/work/session limits remain enforced. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |

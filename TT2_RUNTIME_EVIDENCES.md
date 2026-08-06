@@ -157,6 +157,7 @@ Post-step-12 implementation and proof revisions:
 | `219c588b` | prove canonical batch count bounds |
 | `2512ebf8` | prove completion recovery byte bound |
 | `49d2e77c` | cover nested collection count bounds |
+| `70e6900e` | prove prior-run manifest byte bound |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -479,6 +480,12 @@ decode paths through one generated `MAX_COMPLETION_RECOVERY_BYTES` predicate.
 The focused `mfm-evm` boundary target accepts 524,288 bytes and rejects one
 over (1/1); independent review marks this local closure-size boundary PASS.
 
+Revision `70e6900e` routes both prior-run source-manifest history-object
+encoding and decoding through one private byte validator. The generated
+16,777,216-byte manifest budget is accepted exactly and rejected at one byte
+over by the focused `mfm-journal` target (3/3); independent review marks this
+shared ingress/rehydration boundary PASS.
+
 The provider-boundary budget targets ran from the focused revisions:
 
 ```text
@@ -687,7 +694,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress bounds batch counts, nested collection counts, serialized configuration revisions, run frames, and retained object frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` adds a valid exact-limit retained object, `e5f8c3b0` isolates the shared object/envelope one-byte-over predicate, and `219c588b` adds exact 65,536-record/object plus empty/one-over count witnesses; `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress bounds batch counts, nested collection counts, serialized configuration revisions, prior-run source manifests, run frames, and retained object frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` adds a valid exact-limit retained object, `e5f8c3b0` isolates the shared object/envelope one-byte-over predicate, and `219c588b` adds exact 65,536-record/object plus empty/one-over count witnesses; `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Revision `70e6900e` adds a shared prior-run source-manifest byte predicate with exact 16,777,216-byte and one-byte-over witnesses; the focused journal target passes 3/3. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, all six `query_file*` forms (fail closed), wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2236542-1786001395306859242` pass 2/2. A full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
@@ -791,6 +798,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `219c588b` | `prove canonical batch count bounds` | shared canonical ingress count predicate accepts exact 65,536 records and objects and rejects empty records/one-over counts; focused canonical-append target passes 5/5 |
 | `2512ebf8` | `prove completion recovery byte bound` | EVM completion-recovery encode/decode paths share the generated 524,288-byte predicate; exact/one-over focused boundary test passes 1/1 |
 | `49d2e77c` | `cover nested collection count bounds` | shared `validate_count` covers batch records/objects and nested arrays/objects; exact generated limits and one-over cases pass in the 5/5 canonical-append target |
+| `70e6900e` | `prove prior-run manifest byte bound` | shared private manifest-byte validator covers history-object encode/decode; exact 16,777,216-byte and one-byte-over cases pass in the 3/3 `mfm-journal` structured target |
 | `897ec4b8` | `record default configuration qualification` | latest default-concurrency managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests; earlier intermittent race witnesses remain provenance |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |
