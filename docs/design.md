@@ -470,10 +470,11 @@ validation remains within the generated frame budget while preserving rehashable
 Wallet activation and completion closures also retain the provider-issued mutation attestation
 returned for the exact prepared mutation. The retained envelope carries the signed provider
 challenge, target context, operation key, canonical payload digest, and signature; reload verifies
-that envelope against the exact recovery preimage and resolves its full signed physical incarnation
-against the append-only registry before accepting it. Historical writer epochs are accepted only
-within the current store lineage, so promotion does not invalidate already committed closures while
-same-lineage target, key, or attestation substitutions fail closed.
+that envelope against the exact recovery preimage in a callback-free storage verifier, then performs
+the separate historical-incarnation lookup against the append-only registry before accepting it.
+Historical writer epochs are accepted only within the current store lineage, so promotion does not
+invalidate already committed closures while same-lineage target, key, or attestation substitutions
+fail closed.
 
 ## Application and transport surface
 

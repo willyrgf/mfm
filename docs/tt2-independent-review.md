@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `da2b41a4`; the historical gate remains
+The current implementation tip is `618cadea`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `da2b41a4`, which includes the bounded
+The focused follow-up candidate is `618cadea`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -67,6 +67,15 @@ key/prefix predicates to every captured wallet-history `SELECT`, preserves the
 64-reservation constant-query witness, and checks the domain projection's
 primary-key path with sequential scans disabled; its clean managed leaf is
 `run-2218000-1785998748489917662` (4/4 tests).
+Revisions `25dc49e7`, `b59d820a`, and `618cadea` split the callback-free
+provider proof check from the SQL historical-incarnation lookup and add a 3/3
+crate-local Completion corpus. The proof is installed in the persisted
+completion closure; the test rehydrates typed completion request/state-input
+and derives the provider preimage from closure bytes before verifying it
+without `PgConnection`. Signature/key, payload, provider/op, target-policy,
+challenge, canonical-JSON, non-ASCII, and generated proof-budget substitutions
+are rejected. The full EVM-09 deployment/provider-trust, historical-row tamper,
+and production offline/public-result matrix remains conditional.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -298,6 +307,13 @@ both the closed implementation work and the remaining proof/deployment gaps.
   target (1/1); full canonical targets pass 3/13/6 plus 3 doctests, and the
   affected facts, values, journal, and store targets remain green. Independent
   review marks this parser boundary PASS.
+- Detached provider proof cutover: `25dc49e7` removes the mixed SQL/crypto
+  verifier; `b59d820a`/`618cadea` add the persisted-closure Completion corpus.
+  The focused storage target passes 3/3 without `PgConnection`, including
+  closure-derived typed request/state-input/preimage verification and hostile
+  provider, context-policy, digest, signature, challenge, canonicality, and
+  budget cases. The historical-row and deployment trust portions remain
+  conditional.
 - Default-concurrency qualification: clean managed run
   `run-2246603-1786002530958490012` passes all 24 structured-history tests,
   including `configured_value_history_linearizes_same_stream_append_races`;
@@ -856,6 +872,26 @@ The one-byte-over input is rejected before number scanning, JSON parsing, or
 canonical allocation; the exact 33,554,432-byte input remains accepted. The
 facts, values, journal, and store package targets also pass on this source tip.
 
+The detached provider-proof cutover then ran from clean source tip `618cadea`:
+
+```text
+nix develop -c cargo test -p mfm-storage-evm-postgres --lib mutation_proof_tests --no-fail-fast
+source: 618cadea
+result: ok — 3 detached Completion proof tests passed, 0 failed
+
+nix develop -c cargo check -p mfm-storage-evm-postgres
+source: 25dc49e7
+result: ok
+```
+
+The pure path performs no `PgConnection` work. The corpus installs the signed
+proof in the completion closure, rehydrates typed request/state-input values,
+derives the provider preimage from those closure bytes, and rejects crypto,
+payload, target-policy, canonicality, challenge, non-ASCII, and generated
+budget substitutions. Reload callers perform the separate historical
+incarnation lookup; the production/deployment and historical-row tamper
+matrices remain conditional.
+
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
 revision `9f61c39a`):
@@ -1194,7 +1230,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, persisted two-candidate closure-only reload/public projection, exact/one-byte-over completion-recovery, provider-proof, finish-authorization, route-count, and route-proof budget witnesses pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
+| TT2-EVM-09 | Conditional | Closure/preimage and persisted reload evidence remains green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; the proof is rehydrated from closure bytes before verification. Independent deployment/provider trust, historical-row tamper, and production offline/public-result matrices remain. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |

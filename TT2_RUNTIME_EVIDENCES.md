@@ -163,6 +163,9 @@ Post-step-12 implementation and proof revisions:
 | `26bbb44d` | bound base64url parser ingress |
 | `6f135845` | remove unreachable signed native values |
 | `da2b41a4` | bound plain canonical json ingress |
+| `25dc49e7` | split detached provider proof verification from history lookup |
+| `b59d820a` | add detached completion proof hostile corpus |
+| `618cadea` | isolate detached provider proof corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -531,6 +534,21 @@ full canonical targets pass 3/13/6 plus 3 doctests, and the affected facts,
 values, journal, and store package targets remain green. Independent review
 marks the plain-parser boundary PASS.
 
+Revision `25dc49e7` splits the provider mutation-proof verifier from the
+SQL-bound historical-incarnation adapter. One callback-free path now owns
+bounded proof parsing, canonical round-trip, provider/op binding, context shape,
+payload digest, challenge, and Ed25519 checks; retained reloads separately
+enforce schema/database/store-lineage/epoch policy and then call the explicit
+append-only incarnation lookup. The obsolete combined verifier and wrapper are
+deleted. Revisions `b59d820a` and `618cadea` add a deterministic Completion
+corpus whose proof is installed in the persisted closure, rehydrated from
+closure JSON into typed request/state-input/preimage values, and verified
+without `PgConnection`. The corpus passes 3/3 and rejects signature/key,
+payload, provider/op, schema/database/lineage/epoch, challenge, canonical-JSON,
+non-ASCII, and generated proof-budget substitutions. The full EVM-09 item
+remains Conditional for independent deployment/provider trust and the broader
+historical-row tamper and production offline/public-result matrices.
+
 The provider-boundary budget targets ran from the focused revisions:
 
 ```text
@@ -750,7 +768,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, persisted two-candidate closure-only reload/public projection, and exact/one-byte-over completion-recovery, provider-proof, finish-authorization, route-count, and route-proof budget witnesses pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
+| EVM-09 | Conditional | Closure/preimage and persisted reload evidence remains green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; the proof is installed in and rehydrated from the persisted closure. Independent deployment/provider trust, historical-row tamper, and production offline/public-result matrices remain. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
