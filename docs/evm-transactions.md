@@ -33,6 +33,13 @@ reconciliation, and exhaustion are bounded by the admitted expansion.
 `CompletedWalletNonce` recovery closure is retained by the wallet authority for internal
 verification and is never serialized into the public run result.
 
+The persisted completion closure and its provider mutation attestation are also independently
+auditable without PostgreSQL or a live provider: a detached verifier rehydrates the closure,
+reconstructs the exact completion mutation, checks the explicit provider trust snapshot and
+Ed25519 proof, and compares the closure-only public projection byte-for-byte. The storage reload
+path still performs its separate historical-incarnation lookup; the detached audit does not mint
+runtime authority.
+
 The managed qualification pins the content-addressed certification identity of this production
 entry program and certifies it again after reversing component registration order. Any authored,
 expanded, or normalized representation change therefore requires deliberate identity regeneration

@@ -476,6 +476,9 @@ returned for the exact prepared mutation. The retained envelope carries the sign
 challenge, target context, operation key, canonical payload digest, and signature; reload verifies
 that envelope against the exact recovery preimage in a callback-free storage verifier, then performs
 the separate historical-incarnation lookup against the append-only registry before accepting it.
+The same persisted closure/proof boundary has a detached, callback-free audit witness that
+reconstructs the completion mutation and public projection independently of that storage verifier;
+it consumes an explicit provider trust snapshot and performs no PostgreSQL or live-provider IO.
 Historical writer epochs are accepted only within the current store lineage, so promotion does not
 invalidate already committed closures while same-lineage target, key, or attestation substitutions
 fail closed.
