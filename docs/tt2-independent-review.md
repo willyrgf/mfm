@@ -379,6 +379,21 @@ unprepared `acknowledge_many` calls fail closed. This is repository-local test
 authority evidence, not a concrete production checkpoint deployment or a full
 cross-process contention/fault matrix.
 
+The clean source sequence immediately before this checkpoint-only change also
+refreshed the source-local inventory and portable corpus leaves:
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+source: b38ae5c3
+run id: run-2141603-1785989203587902728
+result: 2 inventory tests passed, 0 failed in 1.96s
+
+nix run .#run -- --task portable-replay-corpus
+source: b38ae5c3
+run id: run-2144669-1785989584718916467
+result: 10 replay corpus tests passed, 0 failed in 21.14s
+```
+
 The focused SQL inventory check on `7e467952` passes both the source inventory
 and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
 generic `query_as`, checked `query_as!`, wrapped generic, and `QueryBuilder`
