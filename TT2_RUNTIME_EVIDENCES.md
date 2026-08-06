@@ -132,6 +132,7 @@ Post-step-12 implementation and proof revisions:
 | `f4fd9a9b` | exercise run acknowledgement recovery |
 | `5f4be506` | measure fact producer fold bounds |
 | `bb002b19` | scope fact scan counters |
+| `2ac67ec9` | tighten bounded wallet query proof |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -242,6 +243,7 @@ replay remain unverified.
 | Purpose-status isolation cutover | `bd98e8ca` | full frontier removed from public/recorded products; 14-case compile-fail matrix and package regressions pass | PASS for API scope; broader isolation residuals below |
 | Offline-fold boundary cutover | `a1a78b84` | opaque `OfflineVerifiedRun` replaces the public full-fold conversion seam; 16-case compile-fail matrix, store/replay package tests, and portable corpus pass | PASS for API scope (independent review); broader isolation residuals below |
 | Later-audit suffix proof | `eb38ea44` | real store-shaped authorization/observation suffix: audit offline parity passes and semantic carry-forward is rejected; replay 10/10 | PASS for implementation scope; retained/live residuals below |
+| Bounded wallet query-shape proof | `2ac67ec9` | managed 64-reservation history keeps Q/E counts constant, every captured wallet-history `SELECT` has an exact key/prefix, lifetime aggregates are rejected, and the domain primary-key path is available under `enable_seqscan = off`; run `run-2218000-1785998748489917662` | CONDITIONAL; production latency envelope remains |
 
 ## Focused and composed verification
 
@@ -550,7 +552,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-04 | Closed | Definite failure reconciles final authoritative status before closure. |
 | EVM-05 | Closed | Stable intent and separate semantic digest/conflict behavior are covered by domain tests. |
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
-| EVM-07 | Conditional | Normal status now reads the maintained domain projection, exact frontier, and bounded candidate prefix without lifetime reservation `COUNT/MAX`; the primary-key `EXPLAIN` regression passes, while the long-history query-count/latency matrix remains. |
+| EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
 | EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, and persisted two-candidate closure-only reload/public projection pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
@@ -603,7 +605,8 @@ The following are the concrete blockers to an unconditional §13 PASS:
 4. cover external termination, OOM, and resource-failure classes in the
    keystore boundary while retaining the long-history cost/LOC ownership
    evidence; and
-5. close the remaining STORE-05/06, EVM-07/09, APP-01, QUALITY-01, and VERIFY-01
+5. close the remaining STORE-05/06, the EVM-07 latency envelope, EVM-09, APP-01,
+   QUALITY-01, and VERIFY-01
    production proof matrices.
 
 Until those items are resolved or the normative plan is deliberately amended,
@@ -632,6 +635,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `d2a39d7a` | `witness post-decrypt key cleanup` | authenticated invalid-key payload reaches post-decrypt identity rejection and zeroized cleanup; focused decrypt suite 8/8 |
 | `8b2e64ba` | `witness failed decrypt handoff address` | source-to-`SecureKey` handoff pointer equality and cleanup are directly asserted on post-decrypt rejection; full keystore and Clippy pass |
 | `2fc4afa8` | `prove purpose information isolation` | application trybuild privacy suite passes all 12 cases, including public raw-record enumeration and trace authorization-request accessor denial |
+| `2ac67ec9` | `tighten bounded wallet query proof` | managed 64-reservation history keeps Q/E counts constant; exact wallet-history query predicates, lifetime-aggregate rejection, and strict projection-index availability pass in `run-2218000-1785998748489917662` |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:
@@ -670,6 +674,23 @@ confirmed the persisted multi-candidate evidence and found no implementation
 gap. The remaining EVM-09 scope is an independent offline/public-result audit,
 including provider-attestation/signature verification without the storage
 verifier.
+
+The bounded wallet query-shape follow-up ran from clean source tip
+`2ac67ec9`:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: 2ac67ec9
+run id: run-2218000-1785998748489917662
+result: ok — 4 wallet-authority tests passed, 0 failed in 673.40s
+```
+
+The managed 64-reservation witness keeps status and reserve/activate/complete
+statement counts constant, rejects lifetime reservation aggregates, checks
+exact key/prefix predicates on every captured wallet-history `SELECT`, and
+verifies that the domain projection's primary-key plan remains available when
+sequential scans are disabled. A production latency envelope remains
+unmeasured.
 
 Additional current-tree leaves:
 
@@ -743,9 +764,18 @@ verification and online/offline projection parity. REPLAY-03/05 now retain
 the later-audit artifact provenance; live Postgres/application replay remains
 outside this focused corpus proof.
 
-The follow-up narrows, but does not eliminate, the residuals above. EVM-07
-still lacks projection-index/scale, latency, and adversarial non-aggregate scan
-evidence; EVM-09 still lacks the independent offline/public-result/provider
+Independent review of exact `2ac67ec9` passes the current EVM-07 SQL-path
+scope: every current wallet-history `SELECT` is covered by an exact domain,
+reservation, candidate, or completion predicate, the managed artifact is clean
+and 4/4, and the strict projection-index check is meaningful as an index-path
+availability witness. The review notes that the checks are intentionally
+substring-based and do not prove a default planner choice, multi-domain scale,
+or production latency; those remain conditional.
+
+The follow-up narrows, but does not eliminate, the residuals above. EVM-07 now
+has exact query-shape, non-aggregate, projection-index, and 64-row scale
+evidence, but still lacks an independent production latency envelope; EVM-09
+still lacks the independent offline/public-result/provider
 attestation audit; SEC-01 now has direct malformed-ciphertext and wrong-identity
 witnesses, but still lacks external termination/OOM/resource-failure coverage;
 and the

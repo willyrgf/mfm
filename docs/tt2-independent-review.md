@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `bb002b19`; the historical gate remains
+The current implementation tip is `2ac67ec9`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `afec8457`, which includes the bounded
+The focused follow-up candidate is `2ac67ec9`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -50,7 +50,11 @@ each scan invocation reads one dense page, loads one producer prefix, and folds
 three retained producer batches, with transient retry totals measured
 separately. Revision `bb002b19` scopes those test-only counters by store
 identity, so isolated parallel schemas cannot contaminate the proof. This
-closes the repeated-growing-prefix work gap.
+closes the repeated-growing-prefix work gap. Revision `2ac67ec9` adds exact
+key/prefix predicates to every captured wallet-history `SELECT`, preserves the
+64-reservation constant-query witness, and checks the domain projection's
+primary-key path with sequential scans disabled; its clean managed leaf is
+`run-2218000-1785998748489917662` (4/4 tests).
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -80,10 +84,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - The decision references are intentionally opaque content-addressed policy
   evidence. Offline replay binds the exact closure digest through its explicit
   trust snapshot and does not resolve policy live.
-- The new wallet `EXPLAIN (ANALYZE)` assertions establish indexed/one-row
-  plans for the multi-row exact-key paths and a one-row plan for the domain
-  projection; a full latency and adversarial non-aggregate scan matrix is
-  still not independently established.
+- The wallet proof now captures every observed wallet-history `SELECT` and
+  requires an exact domain, reservation, candidate, or completion key/prefix,
+  rejects lifetime aggregates, and verifies the domain primary-key path under
+  a strict planner setting. A full production latency envelope remains
+  unmeasured.
 - The completion-closure reload and protected-key allocation tests are focused
   package evidence, not members of the historical composed gate. The latest
   managed fixture now reloads a persisted two-candidate completion row before
@@ -109,8 +114,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `afec8457` (`prove closure-alone
-  multi-candidate reload`), including `50c8cac1` (closure-only rehydration and
+- Focused follow-up candidate: `2ac67ec9` (`tighten bounded wallet query
+  proof`), including `afec8457` (`prove closure-alone
+  multi-candidate reload`), `50c8cac1` (closure-only rehydration and
   public projection), `4fd1e757` (AAD identity cleanup witness), `61bf2091`
   (shared decrypt failure cleanup), `ed7b341e` (completion closure permit and
   observation binding), `266d6889` (bounded wallet projection scan),
@@ -164,6 +170,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   task.
 - Fact-scan counter-scope revision: `bb002b19` keys the test-only measurements
   by store identity and requalifies the same 24-test managed lane.
+- Bounded wallet query-shape revision: `2ac67ec9` requires exact key/prefix
+  predicates for every captured wallet-history `SELECT`, retains the 64-row
+  constant-query witness, and checks the domain primary-key path with
+  sequential scans disabled; managed run `run-2218000-1785998748489917662`
+  passes 4/4 tests.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -539,6 +550,29 @@ invocation; transient retries each repeat one bounded prefix load rather than
 refolding a growing prefix for every route. The counters are keyed by store
 identity, so isolated parallel schemas cannot contaminate the measurement.
 
+The bounded wallet query-shape follow-up was independently rerun from clean
+source tip `2ac67ec9`:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: 2ac67ec9
+run id: run-2218000-1785998748489917662
+result: ok — 4 wallet-authority tests passed, 0 failed in 673.40s
+```
+
+The managed 64-reservation witness keeps status and reserve/activate/complete
+statement counts constant, rejects lifetime reservation aggregates, checks
+exact key/prefix predicates on every captured wallet-history `SELECT`, and
+verifies that the domain projection's primary-key plan remains available when
+sequential scans are disabled. A production latency envelope remains
+unmeasured.
+
+Independent review of exact `2ac67ec9` passes this current-path EVM-07 scope.
+The substring-based SQL checks cover every current authority query, and the
+strict projection check witnesses index-path availability. They do not prove a
+default planner choice, multi-domain scale, or production latency; EVM-07
+therefore remains conditional for that envelope.
+
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
 
@@ -767,7 +801,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `run_commit_acknowledgement_loss_retries_identical_batch` | pass in `run-2194313-1785994645494655426` (23/23 structured-history tests) | N/A; introduced after baseline |
 | `prior_run_fact_scan_folds_one_shared_producer_prefix_once` | pass in `run-2206767-1785995910502340324` (24/24 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
-| `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
+| `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof, exact wallet-history query-shape checks, and persisted two-candidate closure-only projection) | pass in `run-2218000-1785998748489917662` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
 | `decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup` (decrypt-to-sign allocation continuity) | pass in full `mfm-keystore` package | N/A; introduced after baseline |
 | `decrypt_oversized_ciphertext_rejects_before_allocating_plaintext` | pass in focused `mfm-keystore` test | N/A; introduced after baseline |
@@ -797,7 +831,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-04 | Closed | Exhaustion reconciles authoritative final status before closing. |
 | TT2-EVM-05 | Closed | Stable caller intent and separate semantic digest conflict behavior are implemented and tested. |
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
-| TT2-EVM-07 | Conditional | A managed 64-reservation probe holds status and reserve/activate/complete Q/E counts constant, rejects captured Q/P lifetime `COUNT/MAX`, and checks indexed one-row `EXPLAIN (ANALYZE)` plans for frontier/reservation/candidate/completion paths; the one-row domain projection may use a bounded sequential plan, and latency/scale plus a strict projection-index/non-aggregate scan matrix remains. |
+| TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
 | TT2-EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, and a persisted two-candidate closure-only reload/public projection pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
@@ -870,10 +904,10 @@ callback-free fold validation consumes only the opaque summary.
   injected-fault matrices are not complete.
 - EVM domain and storage tests plus the current managed release qualification
   pass, including fresh production keystore signing/broadcast, provider-proof
-  corruption, promotion/reload, recovery observations, and bounded long-history
-  plan/row checks. A full kill-point matrix, provider ambiguity matrix,
-  latency/non-aggregate scan matrix, and every different-run crash boundary
-  remain unexecuted.
+  corruption, promotion/reload, recovery observations, exact bounded
+  long-history query-shape checks, and indexed projection availability. A full
+  kill-point matrix, provider ambiguity matrix, production latency envelope,
+  and every different-run crash boundary remain unexecuted.
 
 ## Portable corpus status
 
