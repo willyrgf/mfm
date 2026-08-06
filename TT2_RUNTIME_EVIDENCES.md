@@ -30,11 +30,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   evidence. Offline replay does not resolve them live; the explicit trust
   snapshot binds the exact closure digest. If deployment requires independent
   decision-record resolution, that is a new authority contract.
-- The store still exposes its explicit offline fold seam (`RawRunHistory` plus
-  concrete trust) to `mfm-replay`, whose internal validation needs the full
-  verified cursor and object graph. That replay-only seam is intentionally
-  separate from production purpose readers; sealing it from every arbitrary
-  external crate would require a new replay-consumer authority contract.
+- The explicit offline fold seam (`RawRunHistory` plus concrete trust) now
+  returns an opaque `OfflineVerifiedRun` containing only recorded status and
+  bounded export metadata. The full verified cursor and object graph remain
+  store-private; the complete runtime/audit/replay/export isolation matrix is
+  still unverified.
 
 ## Ordered implementation revisions
 
@@ -97,6 +97,7 @@ Post-step-12 implementation and proof revisions:
 | `1ef7d694` | retry transient structured history loads |
 | `e7624406` | bound postgres snapshot retries |
 | `bd98e8ca` | hide actionable frontier from purpose evidence |
+| `a1a78b84` | seal offline replay fold boundary |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -139,10 +140,13 @@ conditional.
 `bd98e8ca` replaces the public and recorded-replay purpose projections' full
 `StructuredFrontier` with the shared, data-free `RunEvidenceStatus`. The app and
 replay adapters consume only its redaction-safe tag, and the compile-fail
-privacy matrix now rejects frontier access for both products (14/14 total
-cases). Store (33/33), replay (9/9), and app (31/31) package tests remain
-green; the broader runtime/audit/replay/export isolation matrix is still a
-verification residual.
+privacy matrix rejects frontier access for both products. `a1a78b84` then
+removes the public `VerifiedStructuredRun` conversion seam: explicit offline
+fold callers receive only an opaque `OfflineVerifiedRun` with recorded status
+and bounded export metadata. Store (33/33), replay (9/9), and app (31/31)
+package tests remain green; the expanded 16-case application privacy matrix
+also passes. The broader runtime/audit/replay/export isolation matrix is still
+a verification residual.
 
 ## Independent review checkpoints
 
@@ -158,6 +162,7 @@ verification residual.
 | Closure/decrypt focused candidate | `afec8457` | focused decrypt cleanup, closure-only rehydration, and persisted two-candidate managed qualification reviewed on exact revision | CONDITIONAL; offline/public-result and broader fault residuals below |
 | Retry-boundary correction | `e7624406` | exact configuration/recoverability checks and independent review confirm one bounded PostgreSQL snapshot-retry owner | PASS for retry scope; global residuals below |
 | Purpose-status isolation cutover | `bd98e8ca` | full frontier removed from public/recorded products; 14-case compile-fail matrix and package regressions pass | PASS for API scope; broader isolation residuals below |
+| Offline-fold boundary cutover | `a1a78b84` | opaque `OfflineVerifiedRun` replaces the public full-fold conversion seam; 16-case compile-fail matrix, store/replay package tests, and portable corpus pass | PASS for API scope (independent review); broader isolation residuals below |
 
 ## Focused and composed verification
 
@@ -292,7 +297,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; synthesized semantic/audit suffix vectors pass strict reject/accept behavior, but no genuinely valid production later-audit artifact fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
 | REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| APP-01 | Conditional | Public and recorded-replay products now expose only fold-derived status, and the 14-case application trybuild matrix rejects raw-record, frontier, and trace authorization-request access; complete runtime/audit/replay/export isolation proof and the replay-only offline fold seam's arbitrary-caller boundary remain outstanding. |
+| APP-01 | Conditional | Public, recorded-replay, and offline replay products now expose only fold-derived status plus bounded export metadata; the 16-case application trybuild matrix rejects raw-record, frontier, trace authorization-request, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
@@ -425,6 +430,11 @@ nix develop -c cargo test -p mfm-app --lib — 31 passed on `bd98e8ca`
 nix develop -c cargo test -p mfm-replay --lib — 9 passed on `bd98e8ca`
 nix run .#run -- --task portable-replay-corpus — run id `run-2057202-1785982481856354937`, 1/1 passed on `bd98e8ca`
 nix run .#run -- --task postgres-sqlx-check — run id `run-2049878-1785982143970760651`, 1/1 passed on `bd98e8ca`
+nix develop -c cargo test -p mfm-app --test application-privacy-ui — 16/16 passed on `a1a78b84`
+nix develop -c cargo test -p mfm-store --lib — 33 passed on `a1a78b84`
+nix develop -c cargo test -p mfm-replay --lib — 9 passed on `a1a78b84`
+nix develop -c cargo fmt --all -- --check — pass on `a1a78b84`
+nix run .#run -- --task portable-replay-corpus — run id `run-2069857-1785983372700769978`, 1/1 passed on `a1a78b84`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
@@ -443,9 +453,14 @@ exhaustion; these remain bounded resource/diagnostic residuals.
 Independent review of exact `bd98e8ca` confirms no direct leak or contract
 mismatch: public and recorded-replay products retain only `RunEvidenceStatus`,
 the status mapping is exhaustive and annex-exact, and the 14-case compile-fail
-and package matrix is green. APP-01 remains Conditional until the complete
-runtime, audit, replay, and export isolation matrix is independently reproduced;
-the explicit offline fold seam remains a replay-only residual described above.
+and package matrix is green. The follow-up offline seam cutover at `a1a78b84`
+is covered by the exact package tests above and keeps the full verified cursor
+store-private. Independent review of exact `a1a78b84` found no implementation
+gap: the full verified cursor, records, objects, and live bindings remain
+store-private, while replay retains its bounded route/dependency checks. This
+is PASS for the API scope; APP-01 remains Conditional until the complete
+runtime, audit, replay, and export isolation matrix is independently
+reproduced.
 
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan
