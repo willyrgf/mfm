@@ -343,10 +343,12 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         MemoryConfigurationHistoryBackend::new(database.store_scope_id().await),
     )
     .split();
+    let tenant_scope_id =
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "9".repeat(32))).expect("tenant");
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
-        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "9".repeat(32))).expect("tenant"),
-        operation_id,
+        tenant_scope_id.clone(),
+        operation_id.clone(),
         StableId::new("mfm.postgres.fixture/configured-parity-target").expect("target"),
     );
     let contract = admission_object(
@@ -477,6 +479,125 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     assert_eq!(
         postgres_one_over,
         Err(mfm_runtime::history::HistoryError::InvalidHistory)
+    );
+
+    // Exercise a deterministic shape corpus through both backends. Each vector uses a separate
+    // stream so one invalid value cannot hide a later acceptance decision behind a stale head.
+    for ordinal in 0_u32..32 {
+        let json = match ordinal % 8 {
+            0 => format!(r#"{{"ordinal":{ordinal}}}"#),
+            1 => format!(
+                r#"{{"enabled":{},"label":"vector-{ordinal}"}}"#,
+                ordinal % 2 == 0
+            ),
+            2 => format!(
+                r#"[{}, {}, {{"nested": "vector-{ordinal}"}}]"#,
+                ordinal,
+                ordinal + 1
+            ),
+            3 => format!(r#""vector-{ordinal}""#),
+            4 => format!(
+                r#"{{"items":[{}, {}, {}]}}"#,
+                ordinal,
+                ordinal + 1,
+                ordinal + 2
+            ),
+            5 => format!(r#"{{"unicode":"café-{ordinal}","ordinal":{ordinal}}}"#),
+            6 => format!(r#"{{"nested":{{"ordinal":{ordinal},"ok":true}}}}"#),
+            _ => format!(r#"[true,false,null,"vector-{ordinal}"]"#),
+        };
+        let vector_stream = ConfigurationStreamKey::new(
+            database.store_scope_id().await,
+            tenant_scope_id.clone(),
+            operation_id.clone(),
+            StableId::new(format!(
+                "mfm.postgres.fixture/configured-parity-vector-{ordinal:02}"
+            ))
+            .expect("vector target"),
+        );
+        let append_id =
+            AppendRequestId::new(format!("postgres-configured-parity-vector-{ordinal:02}"))
+                .expect("vector append id");
+        let value = ProposedCanonicalValue::from_json(&json).expect("generated JSON value");
+        let postgres_vector = postgres_writer
+            .append(ConfigurationAppendRequest::new(
+                vector_stream.clone(),
+                None,
+                append_id.clone(),
+                contract.clone(),
+                value.clone(),
+            ))
+            .await;
+        let memory_vector = memory_writer
+            .append(ConfigurationAppendRequest::new(
+                vector_stream,
+                None,
+                append_id,
+                contract.clone(),
+                value,
+            ))
+            .await;
+        assert_eq!(postgres_vector, memory_vector, "generated vector {ordinal}");
+        assert!(
+            postgres_vector.is_ok(),
+            "generated vector {ordinal} must append"
+        );
+    }
+
+    // Keep a bounded sequential run as a scale witness in addition to the separate-shape corpus.
+    let scale_stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        tenant_scope_id,
+        operation_id,
+        StableId::new("mfm.postgres.fixture/configured-parity-scale").expect("scale target"),
+    );
+    let mut scale_predecessor: Option<ConfigurationRevision> = None;
+    for sequence in 0_u32..32 {
+        let value = ProposedCanonicalValue::from_json(&format!(
+            r#"{{"sequence":{},"payload":"scale-{sequence}"}}"#,
+            sequence
+        ))
+        .expect("scale JSON value");
+        let append_id =
+            AppendRequestId::new(format!("postgres-configured-parity-scale-{sequence:02}"))
+                .expect("scale append id");
+        let postgres_scale = postgres_writer
+            .append(ConfigurationAppendRequest::new(
+                scale_stream.clone(),
+                scale_predecessor
+                    .as_ref()
+                    .map(|revision| revision.revision_ref().clone()),
+                append_id.clone(),
+                contract.clone(),
+                value.clone(),
+            ))
+            .await;
+        let memory_scale = memory_writer
+            .append(ConfigurationAppendRequest::new(
+                scale_stream.clone(),
+                scale_predecessor
+                    .as_ref()
+                    .map(|revision| revision.revision_ref().clone()),
+                append_id,
+                contract.clone(),
+                value,
+            ))
+            .await;
+        assert_eq!(postgres_scale, memory_scale, "scale append {sequence}");
+        scale_predecessor = Some(postgres_scale.expect("scale append"));
+    }
+    let postgres_scale_current = postgres_reader
+        .resolve(&scale_stream, &contract)
+        .await
+        .expect("resolve PostgreSQL scale head");
+    let memory_scale_current = memory_reader
+        .resolve(&scale_stream, &contract)
+        .await
+        .expect("resolve memory scale head");
+    assert_eq!(postgres_scale_current, memory_scale_current);
+    assert_eq!(
+        postgres_scale_current.revision(),
+        scale_predecessor.as_ref().unwrap()
     );
 
     let stale_value = ProposedCanonicalValue::from_json(r#"{"stale":true}"#).expect("stale value");
