@@ -450,7 +450,15 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
             .expect("recovery submission invocation identity"),
     );
+    let original_submission_run_id = derive_application_run_id(
+        &history_store_scope_id(&database.database_url, &database.history_schema).await,
+        &fixture.tenant,
+        &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
+        &InvocationIdentity::new(SUBMISSION_INVOCATION)
+            .expect("original submission invocation identity"),
+    );
     let batches = database.history_batches(submission_run_id).await;
+    let original_batches = database.history_batches(original_submission_run_id).await;
     assert!(
         batches.iter().any(|batch| {
             canonical_json(batch)
@@ -468,9 +476,16 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         .observations
         .values()
         .all(|outcome| matches!(outcome, ObservationOutcome::Returned { .. })));
+    let original_audit = HistoryAudit::from_batches(&original_batches);
+    assert!(original_audit
+        .observations
+        .values()
+        .any(|outcome| { matches!(outcome, ObservationOutcome::EntryUnknown { .. }) }));
+    let mut audited_capabilities = original_audit.capability_refs.clone();
+    audited_capabilities.extend(audit.capability_refs.iter().cloned());
     for capability in expected_access_capabilities() {
         assert!(
-            audit.capability_refs.contains(&capability),
+            audited_capabilities.contains(&capability),
             "missing audited capability {capability:?}"
         );
     }
