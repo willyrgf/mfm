@@ -169,6 +169,15 @@ run id: run-2113805-1785987174287207054
 result: ok — 1 task passed in 2.42s
 ```
 
+The current replay package re-audit also passes the complete portable boundary
+suite on the clean evidence tip:
+
+```text
+nix develop -c cargo test -p mfm-replay --lib
+source: 886fee09
+result: ok — 10 passed, 0 failed
+```
+
 `1ef7d694` bounds configuration append ambiguity and transient configuration
 reads at eight attempts. `e7624406` removes the generic store-level snapshot
 retry introduced by that revision and keeps the bounded retry at the
