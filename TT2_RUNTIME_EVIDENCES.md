@@ -168,6 +168,7 @@ Post-step-12 implementation and proof revisions:
 | `618cadea` | isolate detached provider proof corpus |
 | `f3a15978` | prove managed historical incarnation lookup tamper |
 | `137ed63b` | redact evm submission public output |
+| `f5815ccb` | audit detached evm completion proofs |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -594,6 +595,38 @@ result: fail — 0 passed, 1 failed in 148.51s
 failure: connect_production_application returned redacted ProductionRegistryInvalid
 ```
 
+Revision `f5815ccb` adds an independent detached completion audit. The test
+reconstructs the wire-shaped Completion mutation from persisted recovery
+closure JSON, verifies the explicit provider id, operation key, target
+context, canonical payload digest, challenge, and Ed25519 signature, and then
+projects the public result from closure bytes alone. It does not call the
+storage verifier and performs no PostgreSQL or live-provider IO. The audit
+asserts exact `{"execution_disposition":"succeeded"}` bytes, checks wire-shape
+parity with the storage mutation, and rejects provider and projection
+substitutions.
+
+Focused verification on the committed source passed:
+
+```text
+nix develop -c cargo fmt --all -- --check
+result: ok
+
+nix develop -c cargo test -p mfm-storage-evm-postgres --lib mutation_proof_tests --no-fail-fast
+result: ok — 5 detached-audit/proof tests passed, 0 failed
+
+nix develop -c cargo test -p mfm-storage-evm-postgres --lib
+result: ok — 11 passed, 0 failed, 1 ignored (managed schema)
+
+nix develop -c cargo check -p mfm-storage-evm-postgres
+result: ok
+```
+
+The independent repository-local offline/public-result audit is now green;
+the production deployment/provider-trust matrix and production-scale leaf
+remain conditional. The production leaf still fails before admission because
+the 32-candidate expansion produces an approximately 97.4 MiB closure digest
+JSON value against the generated 32 MiB canonical-document bound.
+
 The failure is before admission/worker execution. Diagnostic-only inspection
 of the same registry path (removed before the committed rerun) identified the
 bounded cause: the 32-candidate EVM expansion is about 26.3 MiB, while the
@@ -822,7 +855,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, and the public-result redaction boundary remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema. Independent deployment/provider trust and production offline/public-result matrices remain; the managed production leaf is currently blocked by the canonical closure-size failure recorded above. |
+| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, and the detached offline audit remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider. Production deployment/provider trust and the production-scale leaf remain conditional; the managed production leaf is blocked by the canonical closure-size failure recorded above. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -963,9 +996,10 @@ Its long SQL test reloads the persisted completion through both authorities,
 confirms two retained candidates, then rehydrates and projects from the
 serialized recovery closure alone. Independent review of that exact revision
 confirmed the persisted multi-candidate evidence and found no implementation
-gap. The remaining EVM-09 scope is an independent offline/public-result audit,
-including provider-attestation/signature verification without the storage
-verifier.
+gap. At this historical revision the remaining EVM-09 scope was an independent
+offline/public-result audit, including provider-attestation/signature
+verification without the storage verifier; revision `f5815ccb` supplies that
+repository-local detached audit.
 
 The bounded wallet query-shape follow-up ran from clean source tip
 `2ac67ec9`:
@@ -1027,8 +1061,10 @@ nix develop -c cargo fmt --all -- --check — pass on `c832e5d8`
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
 reservation observation-round bindings, and found no implementation gap in
 the closure cutover. The later exact `afec8457` review closes the
-persisted-closure-alone/later-run and multi-candidate reload evidence. Its
-remaining proof scope is the independent offline/public-result audit.
+persisted-closure-alone/later-run and multi-candidate reload evidence. The
+detached repository-local offline/public-result audit is supplied by
+`f5815ccb`; production deployment/provider trust and production-scale proof
+remain conditional.
 
 Independent review of exact `e7624406` confirms that snapshot retry ownership
 is singular and finite: the generic store wrapper is deleted and PostgreSQL's
@@ -1067,8 +1103,9 @@ or production latency; those remain conditional.
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07 now
 has exact query-shape, non-aggregate, projection-index, and 64-row scale
 evidence, but still lacks an independent production latency envelope; EVM-09
-still lacks the independent offline/public-result/provider
-attestation audit; SEC-01 now has direct malformed-ciphertext and wrong-identity
+now has the repository-local independent offline/public-result/provider
+attestation audit, while production deployment/provider trust and the
+production-scale leaf remain conditional; SEC-01 now has direct malformed-ciphertext and wrong-identity
 witnesses, but still lacks external termination/OOM/resource-failure coverage;
 and the
 external trust, live multi-hop export,
