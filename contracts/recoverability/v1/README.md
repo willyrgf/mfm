@@ -12,12 +12,12 @@ annex_sha256: 07763edfa6b58af2b6c9697850fc7df82c847e38f19133f3b9d4f20dd437c14d
 annex_schema_count: 53
 annex_domain_count: 5
 annex_logical_key_count: 5
-corpus_bytes: 1115887
-corpus_sha256: aaed5cbea0feb3650d8e3d912f6b8f3f688230427619185defe77adb12ac9b80
+corpus_bytes: 1229532
+corpus_sha256: 16b2116380d36459e21771e50338e44139c227b134ff04825e78b55e4be1c1d5
 corpus_positive_count: 19
 corpus_negative_count: 3
 corpus_relational_count: 1
-corpus_portable_artifact_count: 15
+corpus_portable_artifact_count: 17
 corpus_portable_source_graph_count: 2
 ```
 
