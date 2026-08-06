@@ -21,9 +21,11 @@ implemented and the focused candidate checks are green, but the plan's strict
 - The managed qualification now injects four child-process exits (status 137)
   after durable broadcast, receipt, finality, and closed-response observations,
   then resumes and proves no second broadcast. The managed wallet authority also
-  proves a committed completion whose acknowledgement is lost, with exact-key
-  replay and one retained row. Pre-completion-commit process loss, deployment
-  checkpoint acknowledgement, promotion, ambiguity, cross-process,
+  proves an existing-completion idempotent replay transaction whose
+  acknowledgement is lost, with exact-key replay and one retained row. The
+  production-shaped worker loses the process while the initial completion COMMIT
+  is held before forwarding, then resumes with zero pre-resume completion rows.
+  Deployment checkpoint acknowledgement, promotion, ambiguity, cross-process,
   replacement, and scale boundaries remain unverified.
 - The application production path still has no live multi-hop export
   integration fixture. The implementation now performs kind-aware fixed-point
@@ -182,6 +184,7 @@ Post-step-12 implementation and proof revisions:
 | `23060ca0` | exercise evm receipt and finality crash boundaries |
 | `a11925b7` | exercise evm completion crash boundary |
 | `e20d1a59` | exercise completion acknowledgement recovery |
+| `c5eb01ad` | exercise evm completion commit process loss |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -738,12 +741,14 @@ run id: run-2422160-1786021998684634852
 result: ok — 1 passed, 0 failed in 1620.25s
 ```
 
-This is a post-closure process-loss witness; pre-completion-commit,
-deployment checkpoint acknowledgement, ambiguity, cross-process, replacement,
-and scale matrices remain conditional. The managed wallet authority separately
-qualifies a committed completion with a lost acknowledgement: exact-key retry
-returns the original closure and the persisted completion count remains one
-(`run-2436682-1786023975122635293`, 1/1 in 671.13s).
+This is a post-closure process-loss witness. The managed wallet authority
+separately qualifies an existing-completion idempotent replay whose
+acknowledgement is lost: exact-key retry returns the original closure and the
+persisted completion count remains one (`run-2436682-1786023975122635293`, 1/1
+in 671.13s). Revision `c5eb01ad` adds a production-shaped process loss while
+the initial completion COMMIT is held before forwarding; the child is killed,
+the wallet completion remains absent, and a later resume completes with one raw
+broadcast (`run-2446216-1786025082185171356`, 1/1 in 1811.93s).
 
 The production-scale EVM leaf is therefore PASS for this repository-local
 qualification scope. Deployment-owned provider trust and the broader crash,
@@ -971,7 +976,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed `evm-postgres-submission-qualification` passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials; `88af683d` adds independent payload, signature/key, challenge, and canonical-wire substitution denials; `923fce06` adds independent context-bound, store-incarnation, proof-size, and unknown-field denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
-| EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation, `23060ca0` adds exits after receipt and finality observations, and `a11925b7` adds a post-closed-response exit; the final resumed qualification reloads the persisted completion and proves exactly one raw broadcast (`run-2422160-1786021998684634852`, 1/1 in 1620.25s). `e20d1a59` separately proves committed completion acknowledgement loss resolves by exact key with one retained row (`run-2436682-1786023975122635293`, 1/1 in 671.13s). Pre-completion-commit process loss, deployment checkpoint acknowledgement, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
+| EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation, `23060ca0` adds exits after receipt and finality observations, and `a11925b7` adds a post-closed-response exit; the final resumed qualification reloads the persisted completion and proves exactly one raw broadcast (`run-2422160-1786021998684634852`, 1/1 in 1620.25s). `e20d1a59` separately proves an existing-completion idempotent replay acknowledgement loss resolves by exact key with one retained row (`run-2436682-1786023975122635293`, 1/1 in 671.13s). `c5eb01ad` adds a production-shaped process loss while the initial completion COMMIT is held before forwarding, with zero completion rows before resume and one final broadcast (`run-2446216-1786025082185171356`, 1/1 in 1811.93s). Deployment checkpoint acknowledgement, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
 | REPLAY-01 | Conditional | Recursive source proof, fixation, trust, limits, and serialized source-prefix tamper coverage are implemented; live multi-hop app proof remains. |
 | REPLAY-02 | Closed | Reproduction/current-history comparison and the old capability surface are deleted. |
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; the retained store-shaped authorization/observation artifact folds as an audit export with byte-identical offline parity, while carrying it as a semantic export is rejected. Live production evidence remains. |
