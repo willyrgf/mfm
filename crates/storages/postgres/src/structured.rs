@@ -28,7 +28,7 @@ use crate::transaction::{
 };
 
 const OBJECT_INSERT_CHUNK_SIZE: usize = 8_192;
-const MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS: usize = 4;
+const MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS: usize = 8;
 
 // SQL commits precede external checkpoint acknowledgement. A concurrent read
 // may therefore observe a valid indexed prefix one acknowledgement step ahead;
