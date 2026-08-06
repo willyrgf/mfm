@@ -164,13 +164,14 @@ impl PriorRunFactSourceRule {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.certified_program_refs.len() > MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE
-            || self.fact_descriptor_refs.is_empty()
-            || self.fact_descriptor_refs.len() > MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE
-            || self
-                .certified_program_refs
-                .windows(2)
-                .any(|pair| pair[0] >= pair[1])
+        validate_prior_run_source_rule_counts(
+            self.certified_program_refs.len(),
+            self.fact_descriptor_refs.len(),
+        )?;
+        if self
+            .certified_program_refs
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
             || self
                 .fact_descriptor_refs
                 .windows(2)
@@ -277,9 +278,8 @@ impl PriorRunFactSourceManifest {
                     "prior-run fact source manifest reference count overflowed",
                 ))
         })?;
+        validate_prior_run_source_manifest_counts(self.rules.len(), reference_count)?;
         if self.version != PRIOR_RUN_SOURCE_MANIFEST_VERSION
-            || self.rules.len() > MAX_PRIOR_RUN_SOURCE_RULES
-            || reference_count > MAX_PRIOR_RUN_SOURCE_REFERENCES
             || self
                 .rules
                 .windows(2)
@@ -299,6 +299,34 @@ fn validate_prior_run_source_manifest_bytes(bytes: &[u8]) -> Result<()> {
     if bytes.len() > MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES {
         return Err(StructuredJournalError::Invariant(
             "prior-run fact source manifest exceeds its canonical byte bound",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prior_run_source_rule_counts(
+    certified_program_count: usize,
+    fact_descriptor_count: usize,
+) -> Result<()> {
+    if certified_program_count > MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE
+        || fact_descriptor_count == 0
+        || fact_descriptor_count > MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE
+    {
+        return Err(StructuredJournalError::Invariant(
+            "prior-run fact source rule is not bounded canonical material",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_prior_run_source_manifest_counts(
+    rule_count: usize,
+    reference_count: usize,
+) -> Result<()> {
+    if rule_count > MAX_PRIOR_RUN_SOURCE_RULES || reference_count > MAX_PRIOR_RUN_SOURCE_REFERENCES
+    {
+        return Err(StructuredJournalError::Invariant(
+            "prior-run fact source manifest is not bounded canonical material",
         ));
     }
     Ok(())
@@ -324,6 +352,70 @@ mod prior_run_source_manifest_limit_tests {
             ]),
             Err(StructuredJournalError::Invariant(
                 "prior-run fact source manifest exceeds its canonical byte bound",
+            ))
+        );
+    }
+}
+
+#[cfg(test)]
+mod prior_run_source_count_limit_tests {
+    use super::*;
+
+    #[test]
+    fn exact_rule_counts_are_accepted_and_one_over_is_rejected() {
+        assert_eq!(
+            validate_prior_run_source_rule_counts(MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE, 1,),
+            Ok(())
+        );
+        assert_eq!(
+            validate_prior_run_source_rule_counts(MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE + 1, 1,),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source rule is not bounded canonical material",
+            ))
+        );
+        assert_eq!(
+            validate_prior_run_source_rule_counts(0, MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE,),
+            Ok(())
+        );
+        assert_eq!(
+            validate_prior_run_source_rule_counts(0, MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE + 1,),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source rule is not bounded canonical material",
+            ))
+        );
+        assert_eq!(
+            validate_prior_run_source_rule_counts(0, 0),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source rule is not bounded canonical material",
+            ))
+        );
+    }
+
+    #[test]
+    fn exact_manifest_counts_are_accepted_and_one_over_is_rejected() {
+        assert_eq!(
+            validate_prior_run_source_manifest_counts(
+                MAX_PRIOR_RUN_SOURCE_RULES,
+                MAX_PRIOR_RUN_SOURCE_REFERENCES,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_prior_run_source_manifest_counts(
+                MAX_PRIOR_RUN_SOURCE_RULES + 1,
+                MAX_PRIOR_RUN_SOURCE_REFERENCES,
+            ),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source manifest is not bounded canonical material",
+            ))
+        );
+        assert_eq!(
+            validate_prior_run_source_manifest_counts(
+                MAX_PRIOR_RUN_SOURCE_RULES,
+                MAX_PRIOR_RUN_SOURCE_REFERENCES + 1,
+            ),
+            Err(StructuredJournalError::Invariant(
+                "prior-run fact source manifest is not bounded canonical material",
             ))
         );
     }
