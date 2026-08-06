@@ -212,6 +212,11 @@ def reseal_portable_frames(frames: list[dict[str, Any]], kind: str | None = None
     return b"".join(portable_frame_bytes(frame) for frame in frames[:-1]) + seal_bytes
 
 
+PORTABLE_STORE_OBSERVED_READ_AUDIT_HEX = (
+    ROOT / "portable_store_observed_read_audit.hex"
+).read_text(encoding="ascii").strip()
+
+
 def portable_suffix_vectors(portable_frames: list[bytes]) -> list[dict[str, Any]]:
     """Build semantic/audit suffix and frontier/publication tamper vectors."""
 
@@ -325,6 +330,35 @@ def portable_real_suffix_vectors(portable_artifact: bytes) -> list[dict[str, Any
             "id": "portable/production-suffix/accept-audit-later",
             "kind": "strict_decode_acceptance",
             "source_fixture": "zero_state_export(201)",
+        },
+    ]
+
+
+def portable_store_observed_read_vectors() -> list[dict[str, Any]]:
+    """Retain a real store-shaped audit artifact and its semantic-cutoff rejection."""
+
+    artifact = bytes.fromhex(PORTABLE_STORE_OBSERVED_READ_AUDIT_HEX)
+    parsed = [json.loads(frame) for frame in artifact.splitlines()]
+    if len(parsed) < 4 or parsed[-1]["kind"] != "seal":
+        raise ValueError("observed-read audit fixture must contain a batch suffix and seal")
+    if parsed[-1]["payload"]["kind"] != "audit":
+        raise ValueError("observed-read fixture must be an audit export")
+    semantic = reseal_portable_frames(json.loads(json.dumps(parsed)), "semantic")
+    return [
+        {
+            "bytes_hex": artifact.hex(),
+            "fixture_discriminator": 203,
+            "id": "portable/production-observed-read/accept-audit",
+            "kind": "strict_decode_acceptance",
+            "offline_fold": "observed_read",
+            "source_fixture": "observed_read_export(203)",
+        },
+        {
+            "bytes_hex": semantic.hex(),
+            "expected_error": "invalid",
+            "id": "portable/production-observed-read/reject-semantic-suffix",
+            "kind": "strict_decode_rejection",
+            "source_fixture": "observed_read_export(203)",
         },
     ]
 
@@ -1845,6 +1879,7 @@ def build_corpus(annex: dict[str, Any], annex_bytes: bytes) -> dict[str, Any]:
         },
     ]
     portable_artifact_vectors.extend(portable_real_suffix_vectors(bytes.fromhex(PORTABLE_OFFLINE_ACCEPTANCE_HEX)))
+    portable_artifact_vectors.extend(portable_store_observed_read_vectors())
     portable_artifact_vectors.extend(portable_suffix_vectors(portable_frames))
     portable_artifact_vectors.extend(portable_graph_vectors(portable_frames))
     return {

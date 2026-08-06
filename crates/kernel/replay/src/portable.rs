@@ -2101,6 +2101,56 @@ mod tests {
                             .expect("online acceptance projection");
                         assert_eq!(offline.as_bytes(), online.as_bytes());
                         assert_eq!(offline.schema_id(), online.schema_id());
+                    } else if vector
+                        .get("offline_fold")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("observed_read")
+                    {
+                        let discriminator = vector["fixture_discriminator"]
+                            .as_u64()
+                            .and_then(|value| u8::try_from(value).ok())
+                            .expect("observed-read fixture discriminator");
+                        let fixture =
+                            mfm_store::structured::test_support::observed_read_export(discriminator)
+                                .await
+                                .expect("observed-read audit fixture");
+                        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
+                            fixture.into_replay_parts();
+                        let closure = AuthorizedExportClosure::new(
+                            fixture_export,
+                            StableId::new("mfm.portable-test/principal").expect("principal"),
+                            decision_ref(3),
+                            BTreeMap::new(),
+                        )
+                        .expect("seal observed-read audit fixture");
+                        let generated = PortableRunExport::from_authorized_export_closure(
+                            &closure,
+                            ExportKind::Audit,
+                        )
+                        .expect("encode observed-read audit fixture");
+                        assert_eq!(
+                            generated
+                                .to_canonical_bytes()
+                                .expect("canonical observed-read audit fixture"),
+                            bytes,
+                            "{} must retain the independent store-shaped artifact",
+                            vector["id"]
+                        );
+                        let release = AcceptRelease;
+                        let checkpoint = AcceptCheckpoint;
+                        let trust =
+                            ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
+                                .with_authorized_closure(
+                                    generated.closure_reference(),
+                                    &release,
+                                    &checkpoint,
+                                );
+                        let offline = PortableRunExport::verify_offline(&bytes, &trust)
+                            .expect("offline observed-read audit fixture");
+                        let online = super::project_replay_result(&fixture_recorded)
+                            .expect("online observed-read audit projection");
+                        assert_eq!(offline.as_bytes(), online.as_bytes());
+                        assert_eq!(offline.schema_id(), online.schema_id());
                     }
                 }
                 "strict_decode_rejection" => {
