@@ -260,6 +260,7 @@ mod tests {
             let query_aliases = self.query_aliases.clone();
             let typed_query_aliases = self.typed_query_aliases.clone();
             let builder_aliases = self.builder_aliases.clone();
+            let builder_bindings = self.builder_bindings.clone();
             let query_glob_imported = self.query_glob_imported;
             if let Some((_, items)) = &item.content {
                 self.register_scope_imports(items);
@@ -268,6 +269,7 @@ mod tests {
             self.query_aliases = query_aliases;
             self.typed_query_aliases = typed_query_aliases;
             self.builder_aliases = builder_aliases;
+            self.builder_bindings = builder_bindings;
             self.query_glob_imported = query_glob_imported;
         }
 
@@ -275,12 +277,14 @@ mod tests {
             let query_aliases = self.query_aliases.clone();
             let typed_query_aliases = self.typed_query_aliases.clone();
             let builder_aliases = self.builder_aliases.clone();
+            let builder_bindings = self.builder_bindings.clone();
             let query_glob_imported = self.query_glob_imported;
             self.register_block_imports(&block.stmts);
             syn::visit::visit_block(self, block);
             self.query_aliases = query_aliases;
             self.typed_query_aliases = typed_query_aliases;
             self.builder_aliases = builder_aliases;
+            self.builder_bindings = builder_bindings;
             self.query_glob_imported = query_glob_imported;
         }
 
