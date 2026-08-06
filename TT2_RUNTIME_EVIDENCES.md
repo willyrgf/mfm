@@ -49,8 +49,8 @@ implemented and the focused candidate checks are green, but the plan's strict
   revision before backend dispatch. The clean managed 24-test PostgreSQL
   qualification compares memory and PostgreSQL on positive, exact-limit,
   one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact
-  UTF-8 byte-boundary value and its one-byte-over rejection, 64 deterministic
-  JSON shape values, a 64-revision sequential stream, and an exact canonical
+  UTF-8 byte-boundary value and its one-byte-over rejection, 128 deterministic
+  JSON shape values, a 128-revision sequential stream, and an exact canonical
   depth-limit value. One-level-over depth, float, duplicate-key, and malformed
   values are rejected before backend dispatch; the complete generated,
   hostile, and large-scale acceptance matrix remains unverified.
@@ -142,6 +142,7 @@ Post-step-12 implementation and proof revisions:
 | `836e9c31` | harden sql inventory scope collection |
 | `2fea7802` | restore sql inventory builder scope |
 | `8a902d03` | fail closed sql file macros |
+| `6525fad6` | expand configuration corpus breadth |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -281,6 +282,7 @@ replay remain unverified.
 | Later-audit suffix proof | `eb38ea44` | real store-shaped authorization/observation suffix: audit offline parity passes and semantic carry-forward is rejected; replay 10/10 | PASS for implementation scope; retained/live residuals below |
 | Bounded wallet query-shape proof | `2ac67ec9` | managed 64-reservation history keeps Q/E counts constant, every captured wallet-history `SELECT` has an exact key/prefix, lifetime aggregates are rejected, and the domain primary-key path is available under `enable_seqscan = off`; run `run-2218000-1785998748489917662` | CONDITIONAL; production latency envelope remains |
 | SQL inventory macro/import scope | `8a902d03` | independent review passes SQLx checked/unchecked and all six `query_file*` macro semantics, direct/renamed/glob imports, after-use file/module/block declarations, and import/`QueryBuilder` scope restoration; run `run-2236542-1786001395306859242` passes 2/2 | PASS for current inventory scope; broader ownership/scale audit remains |
+| Configuration corpus breadth | `6525fad6` | serialized managed run expands memory/PostgreSQL parity to 128 generated shape values and 128 sequential revisions; all 24 tests pass with test threads serialized, while default-concurrency race attempts remain separate | CONDITIONAL; generated/hostile/production-scale corpus remains incomplete |
 
 ## Focused and composed verification
 
@@ -417,6 +419,15 @@ successors across memory/PostgreSQL, plus an exact canonical JSON depth-limit
 append. One-level-over depth, float, duplicate-key, and malformed inputs are
 rejected by the shared canonical constructor before either backend receives an
 append.
+
+Revision `6525fad6` expands the same fixture to 128 deterministic values across
+16 canonical shape families (including null, empty collections, negative/zero,
+escaped, nested, variable payload, and unsorted-key forms) and a 128-revision
+sequential stream. The serialized managed run uses
+`RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1` and
+passes all 24/24 tests; two default-concurrency attempts independently hit the
+pre-existing same-stream race witness (23/24), so this is targeted corpus
+evidence rather than a default-concurrency gate pass.
 
 The separate release no-run integration compile was also rerun against the
 same implementation source:
@@ -596,7 +607,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed run `run-2223304-1785999851634604306` compares memory/PostgreSQL on positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, 64 deterministic shape values, a 64-revision stream, and an exact depth-limit value; one-level-over depth, float, duplicate-key, and malformed values are rejected before dispatch. The complete generated, hostile, and large-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Two default-concurrency attempts hit the pre-existing same-stream race witness, so this is targeted corpus evidence; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, all six `query_file*` forms (fail closed), wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2236542-1786001395306859242` pass 2/2. A full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
@@ -690,6 +701,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `2fc4afa8` | `prove purpose information isolation` | application trybuild privacy suite passes all 12 cases, including public raw-record enumeration and trace authorization-request accessor denial |
 | `2ac67ec9` | `tighten bounded wallet query proof` | managed 64-reservation history keeps Q/E counts constant; exact wallet-history query predicates, lifetime-aggregate rejection, and strict projection-index availability pass in `run-2218000-1785998748489917662` |
 | `a3ad0e9a` | `expand configuration acceptance corpus` | managed memory/PostgreSQL parity grows to 64 shapes and 64 sequential revisions; exact canonical depth boundary and hostile pre-dispatch rejections pass in `run-2223304-1785999851634604306` |
+| `6525fad6` | `expand configuration corpus breadth` | serialized managed memory/PostgreSQL parity grows to 128 values across 16 shape families and 128 sequential revisions; `run-2240964-1786001827263556370` passes 24/24, while default-thread race attempts remain separately recorded |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |
 | `018a946a` | `collect sql inventory imports before traversal` | after-use file/module alias and glob declarations are pre-collected; managed inventory remains 2/2 |
