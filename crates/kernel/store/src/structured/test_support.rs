@@ -16,12 +16,20 @@ use mfm_journal::structured::{
     HistoryObject, PriorRunFactSourceManifest, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
-use mfm_runtime::history::StructuredAdmissionMaterial;
+use mfm_runtime::history::{
+    AccessAuthorizationProposal, AccessObservationProposal, ProposedCanonicalValue,
+    ProposedObservationOutcome, StructuredAdmissionMaterial,
+};
 use mfm_spec::structured::{
-    BlockTail, CertifiedComponentObject, CertifiedProgramComponents, CertifiedProgramDocument,
-    CertifiedProgramRoot, CertifiedStructuralBounds, ExpandedBlock, ExpandedStructuredProgram,
-    FailureScope, FailureScopeBinding, LexicalProducer, LexicalSlot, StructuralPath,
-    StructuralPathSegment, StructuredFailureContract, StructuredPublicContractRefs,
+    BlockTail, CertifiedComponentObject, CertifiedFailureBoundary, CertifiedProgramComponents,
+    CertifiedProgramDocument, CertifiedProgramRoot, CertifiedStructuralBounds, ExpandedBlock,
+    ExpandedDeclaration, ExpandedStateBinding, ExpandedStructuredProgram, FailureScope,
+    FailureScopeBinding, LexicalProducer, LexicalSlot, NoFailureBoundary, ResultRole,
+    SecretFreeImplementationManifest, SecretFreeImplementationManifestEntry, SemanticCallPath,
+    SemanticPathSegment, StructuralPath, StructuralPathSegment, StructuredComponentKind,
+    StructuredFailureContract, StructuredLiveComponentContract, StructuredPublicContractRefs,
+    StructuredSafeFailureDispositionContract, StructuredStateContract,
+    StructuredStateExecutionContract,
 };
 use mfm_spec::CanonicalJsonValue;
 use mfm_values::{RetainedValueContract, SchemaIdentity, SchemaKind, SchemaShape};
@@ -143,6 +151,85 @@ pub async fn zero_state_export(discriminator: u8) -> super::Result<OfflineExport
         .await?;
     let export_reader = ExportRunReader::new(reader.clone());
     let export = export_reader.load_for_export(&run_id).await?;
+    let recorded = ReplayRunReader::new(reader)
+        .load_for_recorded_verify(&run_id)
+        .await?;
+    Ok(OfflineExportFixture {
+        export,
+        recorded,
+        program_verifier,
+        physical_binding_verifier: AcceptPhysicalBindings,
+    })
+}
+
+/// Builds one real read authorization/observation suffix after admission.
+///
+/// The returned export remains semantically rooted at admission while its
+/// physical journal contains the later authorization and observation batches.
+/// Replay tests use it to prove that an audit export accepts the suffix and a
+/// semantic export rejects carrying it past the semantic cutoff.
+pub async fn observed_read_export(discriminator: u8) -> super::Result<OfflineExportFixture> {
+    let fixture = one_read_state_fixture(discriminator);
+    let program_verifier = verifier(&fixture);
+    let store = StructuredRunStore::new(
+        StructuredMemoryBackend::new(store_identity(discriminator)),
+        Arc::new(verifier(&fixture)),
+        Arc::new(AcceptPhysicalBindings),
+    );
+    let (writer, reader) = store.split();
+    let run_id = run_id(discriminator);
+    writer
+        .admit_run(admission(&fixture, run_id.clone(), discriminator))
+        .await?;
+    let verified = reader.load_verified(&run_id).await?;
+    let super::StructuredFrontier::Actions(actions) = verified.frontier() else {
+        return Err(super::StructuredStoreError::InvalidHistory);
+    };
+    let action = actions
+        .first()
+        .cloned()
+        .ok_or(super::StructuredStoreError::InvalidHistory)?;
+    let authorization = writer
+        .authorize_access(
+            verified,
+            &AccessAuthorizationProposal::new(
+                mfm_ids::AppendRequestId::new(format!(
+                    "portable-fixture-read-authorization-{discriminator}"
+                ))
+                .map_err(|_| super::StructuredStoreError::InvalidHistory)?,
+                action.input,
+                ProposedCanonicalValue::from_json("7")
+                    .map_err(|_| super::StructuredStoreError::InvalidHistory)?,
+                admission_object(
+                    "fixture.physical-binding",
+                    "fixture.physical-binding",
+                    discriminator,
+                ),
+            ),
+        )
+        .await?;
+    let (authorization, authorized) = authorization
+        .into_committed_access_authorization()
+        .ok_or(super::StructuredStoreError::InvalidHistory)?;
+    writer
+        .commit_observation(
+            authorized,
+            &AccessObservationProposal::new(
+                mfm_ids::AppendRequestId::new(format!(
+                    "portable-fixture-read-observation-{discriminator}"
+                ))
+                .map_err(|_| super::StructuredStoreError::InvalidHistory)?,
+                authorization.authorization_ref().clone(),
+                ProposedObservationOutcome::Returned(
+                    ProposedCanonicalValue::from_json("8")
+                        .map_err(|_| super::StructuredStoreError::InvalidHistory)?,
+                ),
+            ),
+        )
+        .await?;
+    let export = ExportRunReader::new(reader.clone())
+        .load_for_export(&run_id)
+        .await?;
     let recorded = ReplayRunReader::new(reader)
         .load_for_recorded_verify(&run_id)
         .await?;
@@ -276,6 +363,165 @@ fn zero_state_fixture(discriminator: u8) -> Fixture {
         expanded,
         input,
         value_schema,
+    }
+}
+
+fn one_read_state_fixture(discriminator: u8) -> Fixture {
+    let mut fixture = zero_state_fixture(discriminator);
+    let root_path = fixture.expanded.root.path.clone();
+    let label = StableId::new("only-read").expect("read state label");
+    let occurrence_path = root_path
+        .child(StructuralPathSegment::Declaration {
+            label: label.clone(),
+            ordinal: 0,
+        })
+        .expect("read occurrence path");
+    let occurrence_id = occurrence_path.occurrence_id().expect("read occurrence id");
+    let semantic_call_id = SemanticCallPath::new(vec![SemanticPathSegment {
+        label: label.clone(),
+        discriminator: None,
+    }])
+    .expect("read semantic path")
+    .identity()
+    .expect("read semantic call id");
+    let contract_ref = fixture.input.contract_ref.clone();
+    let adapter_ref = content_ref("fixture.adapter-contract", discriminator);
+    let capability = StructuredLiveComponentContract::new_read_capability(
+        StableId::new(format!("fixture.read-capability-{discriminator}"))
+            .expect("read capability id"),
+        contract_ref.clone(),
+        contract_ref.clone(),
+        contract_ref.clone(),
+        adapter_ref.clone(),
+    )
+    .expect("read capability contract");
+    let capability_ref = capability.content_ref().expect("read capability ref");
+    let state_contract = StructuredStateContract::new(
+        StableId::new(format!("fixture.read-state-{discriminator}"))
+            .expect("read state contract id"),
+        StructuredStateExecutionContract::Read {
+            capability_contract_ref: capability_ref.clone(),
+        },
+        contract_ref.clone(),
+        contract_ref.clone(),
+        StructuredFailureContract::Never,
+        StructuredSafeFailureDispositionContract::AllValidEvidenceSettlesSuccess {},
+        None,
+    )
+    .expect("read state contract");
+    let state_contract_ref = state_contract.state_contract_ref.clone();
+    let output = LexicalSlot {
+        lexical_path: occurrence_path.clone(),
+        contract_ref: contract_ref.clone(),
+        producer: LexicalProducer::StateOutput {
+            occurrence_id: occurrence_id.clone(),
+            role: ResultRole::SuccessOutput,
+        },
+    };
+    fixture.expanded.root.declarations =
+        vec![ExpandedDeclaration::State(Box::new(ExpandedStateBinding {
+            semantic_call_id,
+            occurrence_id,
+            occurrence_path,
+            label,
+            contract: state_contract,
+            inputs: vec![fixture.input.clone()],
+            output_slot: output.clone(),
+            failure_boundary: CertifiedFailureBoundary::NoFailure(NoFailureBoundary {
+                never_contract_ref: fixture
+                    .expanded
+                    .failure_contract
+                    .contract_ref()
+                    .expect("never failure ref"),
+            }),
+        }))];
+    fixture.expanded.root.tail = BlockTail::Normal(output);
+    let contract = value_contract(&fixture.value_schema, discriminator);
+    fixture.document = document(&fixture.expanded, &contract, discriminator);
+    fixture
+        .document
+        .component_closure
+        .push(CertifiedComponentObject {
+            object_type: StableId::new("structured.capability_contract")
+                .expect("capability object type"),
+            content_ref: capability_ref.clone(),
+            value: CanonicalJsonValue::new(
+                serde_json::to_value(&capability).expect("capability JSON"),
+            )
+            .expect("capability canonical value"),
+        });
+    let implementation_manifest = SecretFreeImplementationManifest {
+        entries: vec![
+            SecretFreeImplementationManifestEntry {
+                component_kind: StructuredComponentKind::State,
+                semantic_contract_ref: state_contract_ref,
+                implementation_contract_ref: content_ref(
+                    "fixture.state-implementation",
+                    discriminator,
+                ),
+            },
+            SecretFreeImplementationManifestEntry {
+                component_kind: StructuredComponentKind::Capability,
+                semantic_contract_ref: capability_ref,
+                implementation_contract_ref: content_ref(
+                    "fixture.capability-implementation",
+                    discriminator,
+                ),
+            },
+            SecretFreeImplementationManifestEntry {
+                component_kind: StructuredComponentKind::Adapter,
+                semantic_contract_ref: adapter_ref,
+                implementation_contract_ref: content_ref(
+                    "fixture.adapter-implementation",
+                    discriminator,
+                ),
+            },
+        ],
+    };
+    let implementation_object = fixture_component_object(
+        "structured.secret_free_implementation_manifest",
+        "fixture.secret-free-implementation-manifest",
+        &implementation_manifest,
+    );
+    fixture
+        .document
+        .root
+        .components
+        .secret_free_implementation_manifest_closure_ref =
+        implementation_object.content_ref.clone();
+    fixture
+        .document
+        .component_closure
+        .push(implementation_object);
+    fixture
+}
+
+fn fixture_component_object<T: serde::Serialize>(
+    object_type: &str,
+    schema_name: &str,
+    value: &T,
+) -> CertifiedComponentObject {
+    let value = CanonicalJsonValue::new(serde_json::to_value(value).expect("component JSON"))
+        .expect("canonical component value");
+    let canonical = value.canonical_json().expect("component canonical JSON");
+    let schema = SchemaId::new(
+        schema_name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("fixture.schema:{schema_name}:1").as_bytes()),
+    )
+    .expect("component schema");
+    CertifiedComponentObject {
+        object_type: StableId::new(object_type).expect("component object type"),
+        content_ref: ContentRef::new(
+            schema,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical.as_bytes()),
+            ),
+        )
+        .expect("component content ref"),
+        value,
     }
 }
 

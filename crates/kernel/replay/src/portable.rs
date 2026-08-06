@@ -2271,6 +2271,52 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn production_audit_export_accepts_later_observation_suffix() {
+        let fixture = mfm_store::structured::test_support::observed_read_export(203)
+            .await
+            .expect("build observed-read export fixture");
+        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
+            fixture.into_replay_parts();
+        let closure = AuthorizedExportClosure::new(
+            fixture_export,
+            StableId::new("mfm.portable-test/principal").expect("principal"),
+            decision_ref(3),
+            BTreeMap::new(),
+        )
+        .expect("seal observed-read export evidence");
+        let audit = PortableRunExport::from_authorized_export_closure(&closure, ExportKind::Audit)
+            .expect("encode later-audit export");
+        assert!(
+            audit.batches.len() >= 3,
+            "audit export must carry the suffix"
+        );
+        let audit_bytes = audit
+            .to_canonical_bytes()
+            .expect("encode later-audit frames");
+        let release = AcceptRelease;
+        let checkpoint = AcceptCheckpoint;
+        let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
+            .with_authorized_closure(audit.closure_reference(), &release, &checkpoint);
+        let online = super::project_replay_result(&fixture_recorded).expect("online audit result");
+        let offline = PortableRunExport::verify_offline(&audit_bytes, &trust)
+            .expect("offline later-audit result");
+        assert_eq!(offline.as_bytes(), online.as_bytes());
+        assert_eq!(offline.schema_id(), online.schema_id());
+
+        let mut semantic_suffix = audit;
+        semantic_suffix.kind = ExportKind::Semantic;
+        semantic_suffix.closure_reference = semantic_suffix
+            .compute_closure_reference()
+            .expect("semantic suffix closure reference");
+        let semantic_suffix_bytes =
+            super::encode_frames(&semantic_suffix).expect("encode semantic suffix candidate");
+        assert_eq!(
+            PortableRunExport::strict_decode(&semantic_suffix_bytes),
+            Err(PortableExportError::Invalid)
+        );
+    }
+
     fn golden_export() -> PortableRunExport {
         let store_scope_id =
             StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "1".repeat(32)))
