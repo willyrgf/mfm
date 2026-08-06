@@ -5,7 +5,7 @@ Status: **CONDITIONAL / INCOMPLETE**
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
 The historical gate remains separate from the focused follow-up evidence below.
-The latest implementation tip is `64517b46`; the focused follow-up candidate
+The latest implementation tip is `bc469cc8`; the focused follow-up candidate
 before the public-result cutover was `f3a15978`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
@@ -122,6 +122,21 @@ Revision `64517b46` extends the negative audit matrix so the forged projection
 closure is rejected by the independent verifier itself, not only by the
 production projection helper; the focused storage package remains green.
 
+Revision `bc469cc8` makes the managed production qualification inject an
+explicit status-137 child-process exit after the broadcast observation has
+committed. The fresh resume worker closes the same run and the test asserts
+exactly one `eth_sendRawTransaction` call:
+
+```text
+nix run .#run -- --task evm-postgres-submission-qualification
+run id: run-2394128-1786018130470251941
+result: ok — 1 passed, 0 failed in 1218.27s (task total 1218.81s)
+```
+
+This closes the post-broadcast crash/restart boundary for the repository-local
+qualification scope. Receipt, finality, promotion, completion, ambiguity,
+cross-process, and scale fault matrices remain conditional.
+
 This closes the repository-local production-scale EVM leaf blocker. The
 deployment-owned provider-trust and broader crash, ambiguity, latency, and
 production-authority matrices remain conditional.
@@ -139,8 +154,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - Retained physical-release and store/checkpoint trust have test
   implementations but no concrete production deployment implementation in
   this repository.
-- Restart/reload qualification does not equal an injected process-kill matrix
-  at every EVM broadcast, receipt, finality, promotion, and completion edge.
+- The managed qualification now injects one status-137 child-process exit
+  immediately after a durable broadcast observation and proves resume without
+  a second broadcast; the complete receipt/finality/promotion/completion,
+  ambiguity, cross-process, and scale kill matrix remains unverified.
 - No live application multi-hop export integration proves the production
   closure path. The application now performs kind-aware fixed-point discovery,
   retains an authenticated principal/fixed export grant/decision reference per
@@ -193,7 +210,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `64517b46` (`strengthen detached audit substitution proof`),
+- Focused follow-up candidate: `bc469cc8` (`exercise evm crash recovery boundary`),
+  following `64517b46` (`strengthen detached audit substitution proof`),
   following `6cd74eef` (`fix certified closure digest encoding`),
   following `137ed63b` (`redact evm submission public output`),
   following `f3a15978` (`prove managed historical incarnation lookup tamper`),
@@ -1307,7 +1325,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed production leaf passes 1/1; `64517b46` sends the forged projection closure through the independent verifier. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
-| TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
+| TT2-EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation; the resumed managed qualification closes the run and proves exactly one raw broadcast (`run-2394128-1786018130470251941`, 1/1). Receipt, finality, promotion, completion, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
 | TT2-REPLAY-01 | Conditional | Recursive proof/fixation/trust/bounds/parity and serialized source-prefix tamper coverage are implemented; live app multi-hop production proof remains. |
 | TT2-REPLAY-02 | Closed | Reproduction owns no hidden current-history comparison; old `compare_current` capability is deleted. |
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the retained store-shaped authorization/observation artifact passes Audit offline parity and Semantic rejection. Live production evidence remains. |
