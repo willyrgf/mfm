@@ -6,7 +6,7 @@ use std::process::{Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use alloy_primitives::{keccak256, Address, PrimitiveSignature, B256, U256};
 use axum::body::{to_bytes, Body};
@@ -320,7 +320,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     .expect("provider RPC inventory")
     .with_deployment_assembly_policies(vec![provider_deployment_policy(&fixture)])
     .expect("provider deployment policy");
-    let provider = ProviderProcess::spawn(
+    let mut provider = ProviderProcess::spawn(
         env!("CARGO_BIN_EXE_mfm-integration-wallet-authority-provider"),
         provider_config,
     )
@@ -397,7 +397,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         rpc.endpoint(),
         PHASE_PRODUCTION_RESUME,
         &activation,
-        &provider,
+        &mut provider,
     )
     .await;
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
@@ -3409,7 +3409,7 @@ async fn run_worker_expect_crash_before_completion_commit(
     endpoint: &str,
     mode: &str,
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
-    provider: &ProviderProcess,
+    provider: &mut ProviderProcess,
 ) {
     let commit_proxy = PostgresCommitFaultProxy::start(&database.database_url)
         .await
@@ -3464,6 +3464,20 @@ async fn run_worker_expect_crash_before_completion_commit(
         retained, 0,
         "pre-completion-commit process loss must leave no wallet completion"
     );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if provider
+                .active_leases()
+                .expect("read provider leases after pre-commit process loss")
+                == 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("drain provider lease after pre-commit process loss");
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
 }
 
