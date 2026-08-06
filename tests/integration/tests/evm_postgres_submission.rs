@@ -116,8 +116,9 @@ use zeroize::Zeroizing;
 
 use mfm_values::MfmValue;
 use mfm_wallet_authority_provider_test_support::{
-    ProviderCheckpointAuthority, ProviderDeploymentAssemblyPolicy, ProviderProcess,
-    ProviderProcessConfig, ProviderRpcInventoryTarget,
+    postgres_proxy::{CommitFault, PostgresCommitFaultProxy}, ProviderCheckpointAuthority,
+    ProviderDeploymentAssemblyPolicy, ProviderProcess, ProviderProcessConfig,
+    ProviderRpcInventoryTarget,
 };
 
 const WORKER_MODE_ENV: &str = "MFM_EVM_POSTGRES_SUBMISSION_MODE";
@@ -382,6 +383,16 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
 
     run_worker_expect_crash_after_finality(
+        &database,
+        rpc.endpoint(),
+        PHASE_PRODUCTION_RESUME,
+        &activation,
+        &provider,
+    )
+    .await;
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+
+    run_worker_expect_crash_before_completion_commit(
         &database,
         rpc.endpoint(),
         PHASE_PRODUCTION_RESUME,
@@ -3383,6 +3394,64 @@ async fn run_worker_expect_crash_after_finality(
     assert_injected_worker_crash(output, mode, "finality");
 }
 
+async fn run_worker_expect_crash_before_completion_commit(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let commit_proxy = PostgresCommitFaultProxy::start(&database.database_url)
+        .await
+        .expect("start completion commit-fault proxy");
+    let proxy_nonce_url = database_url_with_login(
+        commit_proxy.database_url(),
+        &database.nonce_application_url(),
+    );
+    let intercept_target = commit_proxy
+        .arm(CommitFault::HoldTransactionBeforeCommit, 1)
+        .expect("arm completion pre-commit process-loss fault");
+    let mut child = worker_command(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        None,
+        Some(&proxy_nonce_url),
+    )
+    .spawn()
+    .expect("spawn completion pre-commit worker");
+    commit_proxy
+        .wait_for_intercepts(intercept_target)
+        .await;
+    child.start_kill().expect("kill completion pre-commit worker");
+    commit_proxy.release_held_transactions();
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("wait for killed completion pre-commit worker");
+    assert_canaries_absent("pre-completion-crash stdout", &output.stdout);
+    assert_canaries_absent("pre-completion-crash stderr", &output.stderr);
+    assert!(
+        !output.status.success(),
+        "completion pre-commit worker unexpectedly succeeded"
+    );
+    let wallet_pool = database.wallet_pool().await;
+    let retained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM wallet_nonce_completions",
+    )
+    .fetch_one(&wallet_pool)
+    .await
+    .expect("count completion rows after pre-commit process loss");
+    wallet_pool.close().await;
+    assert_eq!(
+        retained, 0,
+        "pre-completion-commit process loss must leave no wallet completion"
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
 async fn run_worker_expect_crash_after_completion(
     database: &TestDatabase,
     endpoint: &str,
@@ -3433,8 +3502,34 @@ async fn run_worker_process(
     provider: &ProviderProcess,
     crash_boundary: Option<InjectedCrashBoundary>,
 ) -> Output {
+    worker_command(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        crash_boundary,
+        None,
+    )
+    .output()
+    .await
+    .expect("run EVM PostgreSQL worker")
+}
+
+fn worker_command(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+    crash_boundary: Option<InjectedCrashBoundary>,
+    nonce_application_url: Option<&str>,
+) -> tokio::process::Command {
     let mut command =
         tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+    let nonce_url = nonce_application_url
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| database.nonce_application_url());
     command
         .arg("--exact")
         .arg("evm_postgres_submission_worker")
@@ -3473,6 +3568,10 @@ async fn run_worker_process(
                 .history_config_writer_login
                 .database_url(&database.database_url),
         )
+        .env(
+            NONCE_APPLICATION_DATABASE_URL_ENV,
+            nonce_url,
+        )
         .env(WORKER_MODE_ENV, mode)
         .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string());
     for variable in [
@@ -3496,10 +3595,8 @@ async fn run_worker_process(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .expect("run EVM PostgreSQL worker")
+        .kill_on_drop(true);
+    command
 }
 
 fn expected_access_capabilities() -> BTreeSet<ContentRef> {
@@ -4020,6 +4117,18 @@ async fn isolated_pool(database_url: &str, schema: &str) -> PgPool {
 fn scoped_database_url(base_url: &str, schema: &str) -> String {
     let separator = if base_url.contains('?') { '&' } else { '?' };
     format!("{base_url}{separator}options=-csearch_path%3D{schema}")
+}
+
+fn database_url_with_login(database_url: &str, login_database_url: &str) -> String {
+    let login = PgConnectOptions::from_str(login_database_url)
+        .expect("parse role-specific PostgreSQL URL")
+        .get_username()
+        .to_owned();
+    PgConnectOptions::from_str(database_url)
+        .expect("parse proxied PostgreSQL URL")
+        .username(&login)
+        .to_url_lossy()
+        .to_string()
 }
 
 fn unique_schema(kind: &str) -> String {
