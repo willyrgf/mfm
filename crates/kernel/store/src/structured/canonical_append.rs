@@ -37,7 +37,7 @@ impl std::fmt::Debug for CanonicalRunAppend {
 impl CanonicalRunAppend {
     /// Validates the complete envelope before backend dispatch.
     pub fn new(committed: CommittedBatch) -> Result<Self, StructuredStoreError> {
-        validate_batch_count(committed.records.len(), 1, MAX_BATCH_RECORDS)?;
+        validate_count(committed.records.len(), 1, MAX_BATCH_RECORDS)?;
         super::fold::verify_batch_envelope(
             &committed
                 .records
@@ -170,7 +170,7 @@ impl CanonicalConfigurationAppend {
 
 /// Validates the object closure of one already store-validated batch.
 pub fn validate_append_objects(objects: &[HistoryObject]) -> Result<(), StructuredStoreError> {
-    validate_batch_count(objects.len(), 0, MAX_BATCH_OBJECTS)?;
+    validate_count(objects.len(), 0, MAX_BATCH_OBJECTS)?;
     if objects
         .windows(2)
         .any(|pair| pair[0].content_ref >= pair[1].content_ref)
@@ -186,7 +186,7 @@ pub fn validate_append_objects(objects: &[HistoryObject]) -> Result<(), Structur
     Ok(())
 }
 
-fn validate_batch_count(
+fn validate_count(
     count: usize,
     minimum: usize,
     maximum: usize,
@@ -324,17 +324,13 @@ fn collect_nested_content_refs(
     }
     match value {
         serde_json::Value::Array(items) => {
-            if items.len() > MAX_ARRAY_ITEMS {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
+            validate_count(items.len(), 0, MAX_ARRAY_ITEMS)?;
             for item in items {
                 collect_nested_content_refs(item, depth + 1, required)?;
             }
         }
         serde_json::Value::Object(entries) => {
-            if entries.len() > MAX_OBJECT_ENTRIES {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
+            validate_count(entries.len(), 0, MAX_OBJECT_ENTRIES)?;
             if entries.contains_key("schema_id") && entries.contains_key("content_digest") {
                 if let Ok(content_ref) = serde_json::from_value::<ContentRef>(value.clone()) {
                     required.insert(content_ref);
@@ -372,8 +368,9 @@ mod tests {
     use mfm_journal::structured::HistoryObject;
 
     use super::{
-        validate_append_objects, validate_batch_count, validate_envelope_frame,
-        validate_frame_length, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES,
+        validate_append_objects, validate_count, validate_envelope_frame, validate_frame_length,
+        MAX_ARRAY_ITEMS, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_OBJECT_ENTRIES,
+        MAX_STORED_FRAME_BYTES,
     };
 
     fn canonical_string_with_bytes(byte_len: usize) -> String {
@@ -406,12 +403,16 @@ mod tests {
     }
 
     #[test]
-    fn batch_count_bounds_accept_exact_limits_and_reject_empty_or_one_over() {
-        assert!(validate_batch_count(MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS).is_ok());
-        assert!(validate_batch_count(MAX_BATCH_RECORDS + 1, 1, MAX_BATCH_RECORDS).is_err());
-        assert!(validate_batch_count(0, 1, MAX_BATCH_RECORDS).is_err());
-        assert!(validate_batch_count(MAX_BATCH_OBJECTS, 0, MAX_BATCH_OBJECTS).is_ok());
-        assert!(validate_batch_count(MAX_BATCH_OBJECTS + 1, 0, MAX_BATCH_OBJECTS).is_err());
+    fn count_bounds_accept_exact_limits_and_reject_empty_or_one_over() {
+        assert!(validate_count(MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS).is_ok());
+        assert!(validate_count(MAX_BATCH_RECORDS + 1, 1, MAX_BATCH_RECORDS).is_err());
+        assert!(validate_count(0, 1, MAX_BATCH_RECORDS).is_err());
+        assert!(validate_count(MAX_BATCH_OBJECTS, 0, MAX_BATCH_OBJECTS).is_ok());
+        assert!(validate_count(MAX_BATCH_OBJECTS + 1, 0, MAX_BATCH_OBJECTS).is_err());
+        assert!(validate_count(MAX_ARRAY_ITEMS, 0, MAX_ARRAY_ITEMS).is_ok());
+        assert!(validate_count(MAX_ARRAY_ITEMS + 1, 0, MAX_ARRAY_ITEMS).is_err());
+        assert!(validate_count(MAX_OBJECT_ENTRIES, 0, MAX_OBJECT_ENTRIES).is_ok());
+        assert!(validate_count(MAX_OBJECT_ENTRIES + 1, 0, MAX_OBJECT_ENTRIES).is_err());
     }
 
     #[test]
