@@ -161,6 +161,14 @@ idempotent replay cases, and refreshes integration assertions to the sealed
 `QueryBuilder::push` fragment. The runtime inventory and fixture tests pass;
 the broader query ownership and scale audit remains a separate residual.
 
+Its managed inventory leaf also passed on the exact source tip:
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+run id: run-2113805-1785987174287207054
+result: ok — 1 task passed in 2.42s
+```
+
 `1ef7d694` bounds configuration append ambiguity and transient configuration
 reads at eight attempts. `e7624406` removes the generic store-level snapshot
 retry introduced by that revision and keeps the bounded retry at the

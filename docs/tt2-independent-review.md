@@ -346,7 +346,8 @@ wrapper calls the removed `.frontier()` API.
 The focused SQL inventory check on `7e467952` passes both the source inventory
 and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
 generic `query_as`, checked `query_as!`, wrapped generic, and `QueryBuilder`
-fragment forms; full independent ownership/scale proof remains conditional.
+fragment forms; managed leaf `run-2113805-1785987174287207054` also passes.
+Full independent ownership/scale proof remains conditional.
 
 The purpose-isolation cutover was qualified on its exact clean tip:
 
