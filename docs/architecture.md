@@ -25,6 +25,8 @@ store purpose readers -> same fold -> purpose-sealed evidence (public/trace/audi
 
 Public and recorded-replay evidence expose only a fold-derived status tag;
 actionable frontier details remain inside the store fold and Runtime adapter.
+Offline replay receives an opaque fold summary with only recorded status and
+bounded export metadata; the full verified cursor remains store-private.
 ```
 
 Only `State` is executable. `Match` and `FanOut` are structural. Runtime performs one verified

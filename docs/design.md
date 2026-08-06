@@ -158,6 +158,11 @@ Public-read and recorded-replay purpose projections retain only the
 fold-derived `RunEvidenceStatus`; the actionable frontier and its capability,
 input, and state references remain internal to the fold and Runtime adapter.
 
+The explicit offline replay entry point consumes raw history plus concrete trust
+and returns an opaque `OfflineVerifiedRun` containing only recorded status and
+bounded export metadata. The complete verified cursor, objects, and bindings
+never cross the store boundary.
+
 Incremental mutation returns a successor produced by the same fold state. Refolding every complete
 prefix from raw persisted batches must produce an equivalent verified run.
 The private production adapter may retain at most one verified successor, including a non-mutating

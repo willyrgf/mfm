@@ -17,9 +17,9 @@ use mfm_journal::structured::{
     TenantFactFrontier,
 };
 use mfm_store::structured::{
-    export_fact_routes, recorded_evidence_from_verified, verify_offline_recorded_history,
-    ExportEncoderView, ExportRunEvidence, PhysicalTargetIdentity, ProgramVerifier,
-    PublicPhysicalBindingVerifier, RawRunHistory, RecordedRunEvidence, StructuredStoreError,
+    verify_offline_recorded_history, ExportEncoderView, ExportRunEvidence, PhysicalTargetIdentity,
+    ProgramVerifier, PublicPhysicalBindingVerifier, RawRunHistory, RecordedRunEvidence,
+    StructuredStoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -507,9 +507,7 @@ impl PortableRunExport {
             trust.physical_binding_verifier,
         )
         .map_err(classify_fold_error)?;
-        if portable_routes(&export_fact_routes(&verified).map_err(classify_fold_error)?)
-            != self.fact_routes
-        {
+        if portable_routes(verified.fact_routes()) != self.fact_routes {
             return Err(PortableExportError::Invalid);
         }
         let mut verified_sources = BTreeMap::new();
@@ -523,13 +521,11 @@ impl PortableRunExport {
                 trust.physical_binding_verifier,
             )
             .map_err(classify_fold_error)?;
-            if portable_routes(&export_fact_routes(&source).map_err(classify_fold_error)?)
-                != prefix.fact_routes
-            {
+            if portable_routes(source.fact_routes()) != prefix.fact_routes {
                 return Err(PortableExportError::Invalid);
             }
             if source.run_id() != &prefix.run_id
-                || source.admission().tenant_scope_id != self.tenant_scope_id
+                || source.tenant_scope_id() != &self.tenant_scope_id
                 || source.journal_head() != &prefix.fixation.journal_head
                 || source.semantic_head() != &prefix.fixation.semantic_head
                 || verified_sources
@@ -538,9 +534,7 @@ impl PortableRunExport {
             {
                 return Err(PortableExportError::Invalid);
             }
-            let nested = source
-                .direct_source_run_ids()
-                .map_err(classify_fold_error)?;
+            let nested = source.direct_source_run_ids().clone();
             if nested
                 .iter()
                 .any(|run_id| run_id == &self.run_id || run_id == &prefix.run_id)
@@ -549,9 +543,7 @@ impl PortableRunExport {
             }
             verified_sources.insert(prefix.run_id.clone(), nested);
         }
-        let root_sources = verified
-            .direct_source_run_ids()
-            .map_err(classify_fold_error)?;
+        let root_sources = verified.direct_source_run_ids().clone();
         if root_sources
             .iter()
             .any(|run_id| !self.source_run_ids.contains(run_id))
@@ -606,7 +598,7 @@ impl PortableRunExport {
             }
         }
         if verified.run_id() != &self.run_id
-            || verified.admission().tenant_scope_id != self.tenant_scope_id
+            || verified.tenant_scope_id() != &self.tenant_scope_id
             || verified.journal_head() != &self.fixation.journal_head
             || verified.semantic_head() != &self.fixation.semantic_head
             || reachable != self.source_run_ids.iter().cloned().collect()
@@ -637,7 +629,7 @@ impl PortableRunExport {
                 return Err(PortableExportError::Invalid);
             }
         }
-        Ok(recorded_evidence_from_verified(verified))
+        Ok(verified.into_recorded())
     }
 
     fn compute_closure_reference(&self) -> Result<ContentDigest, PortableExportError> {

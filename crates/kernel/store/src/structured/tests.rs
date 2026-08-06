@@ -38,7 +38,7 @@ use mfm_values::{
 };
 
 use super::backend::StructuredRunStore;
-use super::fold::ProgramVerifier;
+use super::fold::{ProgramVerifier, VerifiedStructuredRun};
 use super::*;
 
 #[derive(Clone)]
