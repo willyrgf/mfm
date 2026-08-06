@@ -312,6 +312,96 @@ fn decrypt_ownership_transfer_is_witnessed_on_success_and_cleanup() {
 }
 
 #[test]
+fn decrypt_authentication_failure_zeroizes_the_production_allocation() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("tampered".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    keystore
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == key_id)
+        .expect("tampered entry")
+        .encrypted_data[0] ^= 0x01;
+
+    let witness = KeyMaterialWitness::new();
+    assert!(matches!(
+        keystore.private_key_for_test_with_ownership_witness(key_id, witness.clone()),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
+    assert!(witness.observed_cleanup());
+    assert!(!witness.observed_transfer());
+}
+
+#[test]
+fn decrypt_wrong_length_rejects_before_allocating_plaintext() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("truncated".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    keystore
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == key_id)
+        .expect("truncated entry")
+        .encrypted_data
+        .truncate(31);
+
+    let witness = KeyMaterialWitness::new();
+    assert!(matches!(
+        keystore.private_key_for_test_with_ownership_witness(key_id, witness.clone()),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
+    assert!(!witness.observed_cleanup());
+    assert!(!witness.observed_transfer());
+}
+
+#[test]
+fn decrypt_unwind_zeroizes_the_production_allocation() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("unwind".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    let entry = keystore
+        .entries
+        .iter()
+        .find(|entry| entry.id == key_id)
+        .expect("unwind entry");
+    let master_key = keystore.master_key.as_ref().expect("unlocked master key");
+    let witness = KeyMaterialWitness::new();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = keystore.decrypt_data_with_witness_and_unwind(
+            master_key,
+            &entry.nonce,
+            &entry.encrypted_data,
+            entry.id.as_bytes(),
+            &witness,
+        );
+    }));
+    assert!(result.is_err());
+    assert!(witness.observed_cleanup());
+    assert!(!witness.observed_transfer());
+}
+
+#[test]
 fn decrypt_missing_entry_fails_closed_without_secret_output() {
     let (_temp_dir, mut keystore) = test_keystore();
     keystore.unlock("test_password").unwrap();

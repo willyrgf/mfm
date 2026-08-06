@@ -1,6 +1,61 @@
 use super::secure_key::{HeapKeyBytes, ProtectedBytes};
 use super::*;
 use crate::signer::ReadAttestationKeyAccess;
+use zeroize::Zeroize;
+
+trait DecryptAllocationObserver {
+    fn allocated(&self, _address: usize) {}
+
+    fn cleaned(&self, _zeroized: bool) {}
+}
+
+struct NoopDecryptAllocationObserver;
+
+impl DecryptAllocationObserver for NoopDecryptAllocationObserver {}
+
+#[cfg(test)]
+impl DecryptAllocationObserver for super::secure_key::KeyMaterialWitness {
+    fn allocated(&self, address: usize) {
+        self.record_source(address);
+    }
+
+    fn cleaned(&self, zeroized: bool) {
+        self.record_cleanup(zeroized);
+    }
+}
+
+struct DecryptAllocationGuard<'a> {
+    plaintext: Option<ProtectedBytes>,
+    observer: &'a dyn DecryptAllocationObserver,
+    armed: bool,
+}
+
+impl Drop for DecryptAllocationGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            if let Some(plaintext) = self.plaintext.as_mut() {
+                plaintext.zeroize();
+                self.observer
+                    .cleaned(plaintext.iter().all(|byte| *byte == 0));
+            }
+        }
+    }
+}
+
+impl<'a> DecryptAllocationGuard<'a> {
+    fn new(plaintext: ProtectedBytes, observer: &'a dyn DecryptAllocationObserver) -> Self {
+        Self {
+            plaintext: Some(plaintext),
+            observer,
+            armed: true,
+        }
+    }
+
+    fn into_plaintext(mut self) -> ProtectedBytes {
+        self.armed = false;
+        self.plaintext.take().expect("armed plaintext allocation")
+    }
+}
 
 impl std::fmt::Debug for Keystore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -297,6 +352,63 @@ impl Keystore {
         encrypted_data: &[u8],
         additional_data: &[u8],
     ) -> Result<ProtectedBytes, KeystoreError> {
+        self.decrypt_data_with_observer(
+            master_key,
+            nonce,
+            encrypted_data,
+            additional_data,
+            &NoopDecryptAllocationObserver,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn decrypt_data_with_witness(
+        &self,
+        master_key: &[u8; 32],
+        nonce: &[u8; 12],
+        encrypted_data: &[u8],
+        additional_data: &[u8],
+        witness: &super::secure_key::KeyMaterialWitness,
+    ) -> Result<ProtectedBytes, KeystoreError> {
+        self.decrypt_data_with_observer(
+            master_key,
+            nonce,
+            encrypted_data,
+            additional_data,
+            witness,
+            false,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn decrypt_data_with_witness_and_unwind(
+        &self,
+        master_key: &[u8; 32],
+        nonce: &[u8; 12],
+        encrypted_data: &[u8],
+        additional_data: &[u8],
+        witness: &super::secure_key::KeyMaterialWitness,
+    ) -> Result<ProtectedBytes, KeystoreError> {
+        self.decrypt_data_with_observer(
+            master_key,
+            nonce,
+            encrypted_data,
+            additional_data,
+            witness,
+            true,
+        )
+    }
+
+    fn decrypt_data_with_observer(
+        &self,
+        master_key: &[u8; 32],
+        nonce: &[u8; 12],
+        encrypted_data: &[u8],
+        additional_data: &[u8],
+        observer: &dyn DecryptAllocationObserver,
+        _panic_after_copy: bool,
+    ) -> Result<ProtectedBytes, KeystoreError> {
         let key = Key::<Aes256Gcm>::from_slice(master_key);
         let cipher = Aes256Gcm::new(key);
         let nonce = Nonce::from_slice(nonce);
@@ -306,13 +418,43 @@ impl Keystore {
             return Err(KeystoreError::InvalidPrivateKey);
         }
         let (ciphertext, tag_bytes) = encrypted_data.split_at(32);
-        let mut plaintext = Zeroizing::new(HeapKeyBytes::zeroed());
-        plaintext.as_mut().as_mut().copy_from_slice(ciphertext);
+        let mut plaintext =
+            DecryptAllocationGuard::new(Zeroizing::new(HeapKeyBytes::zeroed()), observer);
+        observer.allocated(
+            plaintext
+                .plaintext
+                .as_ref()
+                .expect("plaintext allocation")
+                .as_ref()
+                .as_ref()
+                .as_ptr() as usize,
+        );
+        plaintext
+            .plaintext
+            .as_mut()
+            .expect("plaintext allocation")
+            .as_mut()
+            .as_mut()
+            .copy_from_slice(ciphertext);
+        #[cfg(test)]
+        if _panic_after_copy {
+            panic!("test decrypt unwind");
+        }
         let tag = Tag::from_slice(tag_bytes);
         cipher
-            .decrypt_in_place_detached(nonce, additional_data, plaintext.as_mut().as_mut(), tag)
+            .decrypt_in_place_detached(
+                nonce,
+                additional_data,
+                plaintext
+                    .plaintext
+                    .as_mut()
+                    .expect("plaintext allocation")
+                    .as_mut()
+                    .as_mut(),
+                tag,
+            )
             .map_err(|_| KeystoreError::InvalidPrivateKey)?;
-        Ok(plaintext)
+        Ok(plaintext.into_plaintext())
     }
 
     pub(super) fn ensure_unlocked_for_read(&self) -> Result<(), KeystoreError> {
