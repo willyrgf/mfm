@@ -37,9 +37,7 @@ impl std::fmt::Debug for CanonicalRunAppend {
 impl CanonicalRunAppend {
     /// Validates the complete envelope before backend dispatch.
     pub fn new(committed: CommittedBatch) -> Result<Self, StructuredStoreError> {
-        if committed.records.is_empty() || committed.records.len() > MAX_BATCH_RECORDS {
-            return Err(StructuredStoreError::InvalidHistory);
-        }
+        validate_batch_count(committed.records.len(), 1, MAX_BATCH_RECORDS)?;
         super::fold::verify_batch_envelope(
             &committed
                 .records
@@ -172,9 +170,7 @@ impl CanonicalConfigurationAppend {
 
 /// Validates the object closure of one already store-validated batch.
 pub fn validate_append_objects(objects: &[HistoryObject]) -> Result<(), StructuredStoreError> {
-    if objects.len() > MAX_BATCH_OBJECTS {
-        return Err(StructuredStoreError::InvalidHistory);
-    }
+    validate_batch_count(objects.len(), 0, MAX_BATCH_OBJECTS)?;
     if objects
         .windows(2)
         .any(|pair| pair[0].content_ref >= pair[1].content_ref)
@@ -186,6 +182,17 @@ pub fn validate_append_objects(objects: &[HistoryObject]) -> Result<(), Structur
         object
             .validate()
             .map_err(|_| StructuredStoreError::InvalidHistory)?;
+    }
+    Ok(())
+}
+
+fn validate_batch_count(
+    count: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<(), StructuredStoreError> {
+    if count < minimum || count > maximum {
+        return Err(StructuredStoreError::InvalidHistory);
     }
     Ok(())
 }
@@ -365,8 +372,8 @@ mod tests {
     use mfm_journal::structured::HistoryObject;
 
     use super::{
-        validate_append_objects, validate_envelope_frame, validate_frame_length, MAX_BATCH_OBJECTS,
-        MAX_STORED_FRAME_BYTES,
+        validate_append_objects, validate_batch_count, validate_envelope_frame,
+        validate_frame_length, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES,
     };
 
     fn canonical_string_with_bytes(byte_len: usize) -> String {
@@ -396,6 +403,15 @@ mod tests {
             mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES
         );
         assert_eq!(MAX_BATCH_OBJECTS, 65_536);
+    }
+
+    #[test]
+    fn batch_count_bounds_accept_exact_limits_and_reject_empty_or_one_over() {
+        assert!(validate_batch_count(MAX_BATCH_RECORDS, 1, MAX_BATCH_RECORDS).is_ok());
+        assert!(validate_batch_count(MAX_BATCH_RECORDS + 1, 1, MAX_BATCH_RECORDS).is_err());
+        assert!(validate_batch_count(0, 1, MAX_BATCH_RECORDS).is_err());
+        assert!(validate_batch_count(MAX_BATCH_OBJECTS, 0, MAX_BATCH_OBJECTS).is_ok());
+        assert!(validate_batch_count(MAX_BATCH_OBJECTS + 1, 0, MAX_BATCH_OBJECTS).is_err());
     }
 
     #[test]
