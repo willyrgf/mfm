@@ -64,7 +64,7 @@ authority qualification, replay reproduction removal, semantic/audit suffix hand
 byte budgets, purpose-bound projections, key-cleanup witnesses, and recursive export closure now
 have implementation and focused regression coverage. The current evidence ledger records those
 scopes as closed or conditional, with remaining work including deployment trust,
-cross-process/fault matrices, complete generated/hostile/high-scale corpus breadth, live application multi-hop and
+cross-process/fault matrices, complete generated/boundary/escape/hostile/large-scale corpus breadth, live application multi-hop and
 production evidence, independent provider/public-result verification, external
 termination/OOM/resource-failure coverage, and the full simplicity/isolation acceptance matrix.
 
@@ -298,7 +298,7 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 | TT2-STORE-02 | High | Conditional | Snapshot/head validation passes, but cross-process acknowledgement and fault matrices remain | STORE-03, STORE-04 |
 | TT2-STORE-03 | High | Closed | Full-history loads verify the indexed head inside the same backend snapshot | STORE-03 |
 | TT2-STORE-04 | High | Closed | Contention classification rolls back before bounded identity reconciliation | STORE-01 |
-| TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; bounded shape and sequential-scale corpus passes, while the complete generated/hostile/high-scale corpus remains unverified | STORE-04 |
+| TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; bounded shape/UTF-8 and 32-revision sequential corpus passes, while the complete generated/boundary/escape/hostile/large-scale corpus remains unverified | STORE-04 |
 | TT2-STORE-06 | Medium | Conditional | AST inventory covers generic and builder forms; complete ownership/scale audit remains | STORE-05 |
 | TT2-STORE-07 | High | Closed | Prior-fact verification loads each required producer prefix once per scan | STORE-06 |
 | TT2-EVM-01 | High | Closed | The production path drives a fresh semantic intent through the qualified keystore signer | EVM-01, VERIFY-01 |
@@ -670,9 +670,10 @@ Current implementation and evidence:
   ingress decision.
 - Managed `run-2138056-1785988778488975922` from clean source tip `0a4b02e1` passes 18
   structured-history tests, including a memory/PostgreSQL corpus for positive, exact-limit,
-  one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON shape, and 32
-  sequential-successor outcomes. Numeric ordering of loaded PostgreSQL prefixes is fixed at
-  the same source tip; the complete generated/hostile/high-scale corpus remains unverified.
+  one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON shape values
+  (including UTF-8), and a 32-revision sequential stream. Numeric ordering of loaded PostgreSQL
+  prefixes is fixed at the same source tip; the complete generated/boundary/escape/hostile/
+  large-scale acceptance matrix remains unverified.
 
 Consequence:
 

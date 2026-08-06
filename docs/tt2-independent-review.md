@@ -75,9 +75,10 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - The shared configuration append boundary now rejects an oversized serialized
   revision before backend dispatch. Managed qualification covers positive,
   exact-limit, one-byte-over, stale-predecessor, idempotent-replay, 32
-  deterministic JSON shape, and 32 sequential-successor vectors against
-  memory and PostgreSQL; the complete generated, hostile, and high-scale
-  corpus remains unverified.
+  deterministic JSON shape values (including UTF-8), and a 32-revision
+  sequential stream against memory and PostgreSQL; the complete generated,
+  boundary/escape, hostile, and large-scale acceptance matrix remains
+  unverified.
 
 ## Candidate and review scope
 
@@ -574,7 +575,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; cross-process acknowledgement and fault injection remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
-| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic JSON shapes, and 32 sequential successors across memory/PostgreSQL; the complete generated, hostile, and high-scale corpus remains unverified. |
+| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic shape values (including UTF-8), and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, boundary/escape, hostile, and large-scale acceptance matrix remains unverified. |
 | TT2-STORE-06 | Conditional | The syntax inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments (focused inventory tests 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | Dense publication routes use bounded unique producer-prefix verification. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |

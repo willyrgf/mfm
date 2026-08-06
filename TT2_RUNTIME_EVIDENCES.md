@@ -49,8 +49,9 @@ implemented and the focused candidate checks are green, but the plan's strict
   revision before backend dispatch. The clean managed 18-test PostgreSQL
   qualification compares memory and PostgreSQL on positive, exact-limit,
   one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON
-  shape, and 32 sequential-successor vectors; the complete generated,
-  hostile, and high-scale corpus remains unverified.
+  shape values (including UTF-8), and a 32-revision sequential stream; the
+  complete generated, boundary/escape, hostile, and large-scale acceptance
+  matrix remains unverified.
 
 ## Ordered implementation revisions
 
@@ -366,7 +367,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks and recoverability races pass with one bounded eight-attempt PostgreSQL checkpoint-read owner; deterministic cross-process acknowledgement/fault matrix is absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic JSON shapes, and 32 sequential successors; the complete generated, hostile, and high-scale corpus remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic shape values (including UTF-8), and a 32-revision sequential stream; the complete generated, boundary/escape, hostile, and large-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
