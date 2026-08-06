@@ -477,10 +477,14 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         .values()
         .all(|outcome| matches!(outcome, ObservationOutcome::Returned { .. })));
     let original_audit = HistoryAudit::from_batches(&original_batches);
-    assert!(original_audit
-        .observations
-        .values()
-        .any(|outcome| { matches!(outcome, ObservationOutcome::EntryUnknown { .. }) }));
+    assert!(
+        !original_audit.closed,
+        "the pre-completion process-loss run must remain parked for recovery"
+    );
+    assert!(
+        original_audit.authorizations.len() > original_audit.observations.len(),
+        "the parked run must retain an unmatched completion authorization"
+    );
     let mut audited_capabilities = original_audit.capability_refs.clone();
     audited_capabilities.extend(audit.capability_refs.iter().cloned());
     for capability in expected_access_capabilities() {
