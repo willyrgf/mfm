@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `a3ad0e9a`; the historical gate remains
+The current implementation tip is `2fea7802`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `a3ad0e9a`, which includes the bounded
+The focused follow-up candidate is `2fea7802`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -116,8 +116,13 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `a3ad0e9a` (`expand configuration acceptance
-  corpus`), including `2ac67ec9` (`tighten bounded wallet query
+- Focused follow-up candidate: `2fea7802` (`restore SQL inventory builder scope`),
+  including `836e9c31` (`harden SQL inventory scope collection`),
+  `018a946a` (`collect SQL inventory imports before traversal`),
+  `1edcf7bb` (`close unchecked SQL inventory aliases`), and
+  `40051076` (`cover unchecked SQL query macros`), and
+  `a3ad0e9a` (`expand configuration acceptance corpus`),
+  `2ac67ec9` (`tighten bounded wallet query
   proof`), `afec8457` (`prove closure-alone
   multi-candidate reload`), `50c8cac1` (closure-only rehydration and
   public projection), `4fd1e757` (AAD identity cleanup witness), `61bf2091`
@@ -126,8 +131,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `dec2f0c4` (completion closure reload), and `9390503c` (production decrypt
   allocation witness), `d2a39d7a` (post-decrypt invalid-key cleanup), and
   `8b2e64ba` (failure-path handoff-pointer witness), and `2fc4afa8`
-  (purpose-isolation compile-fail cases), followed by `a3ad0e9a`
-  (expanded configuration acceptance corpus).
+  (purpose-isolation compile-fail cases), and the SQL inventory sequence
+  `40051076`/`1edcf7bb`/`018a946a`/`836e9c31`/`2fea7802` (unchecked macro,
+  import, and scope coverage).
 - Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
   in replay corpus`), which adds the exact store-shaped observed-read bytes,
   generator acceptance/rejection vectors, and an offline parity branch in the
@@ -184,6 +190,13 @@ both the closed implementation work and the remaining proof/deployment gaps.
   canonical depth-limit append, and rejects one-level-over depth, float,
   duplicate-key, and malformed values before dispatch; managed run
   `run-2223304-1785999851634604306` passes 24/24 tests.
+- SQL inventory revisions: `40051076` adds the pinned SQLx
+  `query_unchecked!`, `query_as_unchecked!`, and `query_scalar_unchecked!`
+  macro forms; `1edcf7bb` corrects SQL argument indexing and covers direct,
+  renamed-alias, and glob imports; `018a946a` pre-collects after-use
+  file/module imports; `836e9c31` pre-collects block imports and restores
+  nested import state; and `2fea7802` restores `QueryBuilder` binding state.
+  The source inventory and syntax fixture tests remain 2/2.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -599,6 +612,23 @@ run id: run-2223304-1785999851634604306
 result: ok — 24 structured-history tests passed, 0 failed in 38.75s
 ```
 
+Independent review of exact `2fea7802` passes the current STORE-06 inventory
+scope. The AST visitor recognizes checked and `_unchecked` SQLx query macros,
+uses SQLx's correct typed argument positions, recognizes direct/renamed/glob
+imports and after-use declarations in file/module/block scopes, and restores
+import and `QueryBuilder` binding state on scope exit; the source and syntax
+fixture tests remain 2/2. The broader independent ownership and scale audit
+remains conditional.
+
+The final scoped SQL inventory check ran from clean source tip `2fea7802`:
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+source: 2fea7802
+run id: run-2232004-1786000886918900083
+result: ok — 2 inventory tests passed, 0 failed in 1.95s
+```
+
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
 
@@ -614,10 +644,13 @@ run id: run-2144669-1785989584718916467
 result: 10 replay corpus tests passed, 0 failed in 21.14s
 ```
 
-The focused SQL inventory check on `7e467952` passes both the source inventory
-and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
-generic `query_as`, checked `query_as!`, wrapped generic, and `QueryBuilder`
-fragment forms; managed leaf `run-2113805-1785987174287207054` also passes.
+The focused SQL inventory check on `7e467952`, `40051076`, `1edcf7bb`,
+`018a946a`, `836e9c31`, and `2fea7802` passes both the source inventory and
+syntax-fixture tests (2/2). Its AST visitor exercises generic scalar, generic
+`query_as`, checked and `_unchecked` query macros, direct/renamed/glob and
+after-use imports, nested scope restoration, wrapped generic, and
+`QueryBuilder` fragment forms; the broader ownership and scale audit remains
+conditional.
 Full independent ownership/scale proof remains conditional.
 
 The purpose-isolation cutover was qualified on its exact clean tip:
@@ -849,7 +882,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed run `run-2223304-1785999851634604306` covers positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, 64 deterministic shape values, a 64-revision stream, and an exact depth-limit value across memory/PostgreSQL; one-level-over depth, float, duplicate-key, and malformed values reject before dispatch. The complete generated, hostile, and large-scale acceptance matrix remains unverified. |
-| TT2-STORE-06 | Conditional | The syntax inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments (focused inventory tests 2/2); a full independent query ownership/scale audit remains. |
+| TT2-STORE-06 | Conditional | Revisions `40051076` through `2fea7802` extend the AST inventory to checked and `_unchecked` SQLx query macros, correct typed SQL-argument positions, direct/renamed/glob and after-use imports, nested file/module/block scope restoration, aliases, generic forms, wrapped helpers, and QueryBuilder fragments (independent review and managed inventory run `run-2232004-1786000886918900083` pass 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded byte/work/session limits remain enforced. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
 | TT2-EVM-02 | Closed | Recovery observes chain state before broadcasting a retained candidate. |
