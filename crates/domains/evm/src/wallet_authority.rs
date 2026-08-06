@@ -190,11 +190,7 @@ fn encode_completed_recovery(
         serde_json::to_string(closure).map_err(|_| WalletAuthorityContractError::Canonical)?;
     let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
         .map_err(|_| WalletAuthorityContractError::Canonical)?;
-    if canonical.as_bytes().len() > MAX_COMPLETION_RECOVERY_BYTES {
-        return Err(WalletAuthorityContractError::BoundExceeded(
-            "completion_recovery",
-        ));
-    }
+    validate_completion_recovery_bytes(canonical.as_bytes())?;
     String::from_utf8(canonical.as_bytes().to_vec())
         .map_err(|_| WalletAuthorityContractError::Canonical)
 }
@@ -204,13 +200,33 @@ fn decode_completed_recovery(
 ) -> Result<CompletedRecoveryClosure, WalletAuthorityContractError> {
     let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
         .map_err(|_| WalletAuthorityContractError::Canonical)?;
-    if canonical.as_bytes().len() > MAX_COMPLETION_RECOVERY_BYTES {
+    validate_completion_recovery_bytes(canonical.as_bytes())?;
+    serde_json::from_slice(canonical.as_bytes())
+        .map_err(|_| WalletAuthorityContractError::Canonical)
+}
+
+fn validate_completion_recovery_bytes(bytes: &[u8]) -> Result<(), WalletAuthorityContractError> {
+    if bytes.len() > MAX_COMPLETION_RECOVERY_BYTES {
         return Err(WalletAuthorityContractError::BoundExceeded(
             "completion_recovery",
         ));
     }
-    serde_json::from_slice(canonical.as_bytes())
-        .map_err(|_| WalletAuthorityContractError::Canonical)
+    Ok(())
+}
+
+#[cfg(test)]
+mod completion_recovery_limit_tests {
+    use super::{validate_completion_recovery_bytes, MAX_COMPLETION_RECOVERY_BYTES};
+
+    #[test]
+    fn completion_recovery_accepts_exact_budget_and_rejects_one_byte_over() {
+        let exact = vec![b'x'; MAX_COMPLETION_RECOVERY_BYTES];
+        validate_completion_recovery_bytes(&exact)
+            .expect("exact completion-recovery budget is accepted");
+
+        let one_byte_over = vec![b'x'; MAX_COMPLETION_RECOVERY_BYTES + 1];
+        assert!(validate_completion_recovery_bytes(&one_byte_over).is_err());
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
