@@ -46,10 +46,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   External termination, OOM, and other resource-failure behavior remains
   outside package-level witness coverage.
 - The shared configuration append boundary now rejects an oversized serialized
-  revision before backend dispatch. A managed 18-test PostgreSQL qualification
-  compares memory and PostgreSQL on positive, exact-limit, one-byte-over,
-  stale-predecessor, and idempotent-replay vectors; the broader generated and
-  scale corpus remains unverified.
+  revision before backend dispatch. The clean managed 18-test PostgreSQL
+  qualification compares memory and PostgreSQL on positive, exact-limit,
+  one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON
+  shape, and 32 sequential-successor vectors; the complete generated,
+  hostile, and high-scale corpus remains unverified.
 
 ## Ordered implementation revisions
 
@@ -119,6 +120,8 @@ Post-step-12 implementation and proof revisions:
 | `c832e5d8` | cover matching public key identity witness |
 | `624af5b2` | align configuration parity with sealed run status |
 | `7e467952` | expand sql inventory syntax fixtures |
+| `b0e1de8f` | expand configuration parity corpus |
+| `0a4b02e1` | fix numeric ordering for configuration history rows |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -248,7 +251,7 @@ their own exact revisions.
 | workspace nextest and doctests | pass |
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
-| configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2114883-1785987374603393785`, 18/18 structured-history tests |
+| configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2138056-1785988778488975922`, 18/18 structured-history tests |
 | PostgreSQL SQL inventory syntax fixtures | pass; `mfm-storage-postgres` inventory tests 2/2 |
 | wallet-nonce PostgreSQL storage qualification | pass |
 | structured EVM submission qualification | pass |
@@ -334,19 +337,21 @@ fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
 `82e474ca`.
 
 The current managed PostgreSQL qualification ran from clean source tip
-`a2664734`:
+`0a4b02e1`:
 
 ```text
 nix run .#run -- --task recoverability-postgres-v1
-run id: run-2114883-1785987374603393785
-result: ok — 18 structured-history tests passed, 0 failed in 31.79s
+run id: run-2138056-1785988778488975922
+result: ok — 18 structured-history tests passed, 0 failed in 31.91s
 ```
 
 The new parity test exercises one positive append, an exact serialized
 `MAX_CONFIGURATION_REVISION_BYTES` revision, a one-byte-over revision, stale
-predecessor rejection, idempotent replay, and final reader parity against the
-memory backend. The same managed run also rechecked the pre-existing race and
-fresh-process/role/schema cases.
+predecessor rejection, idempotent replay, 32 deterministic JSON shape vectors,
+32 sequential successors, and final reader parity against the memory backend.
+The numeric ordering fix keeps PostgreSQL's loaded prefix in sequence order
+after the tenth successor. The same managed run also rechecked the pre-existing
+race and fresh-process/role/schema cases.
 
 ## TT2 disposition at the current candidate
 
@@ -361,7 +366,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks and recoverability races pass with one bounded eight-attempt PostgreSQL checkpoint-read owner; deterministic cross-process acknowledgement/fault matrix is absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, and idempotent replay cases; the complete generated/scale acceptance corpus remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic JSON shapes, and 32 sequential successors; the complete generated, hostile, and high-scale corpus remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
