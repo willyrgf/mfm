@@ -386,6 +386,21 @@ different successor, and acknowledge the exact prepared bytes after restart;
 test authority rather than a production deployment implementation, and a
 complete cross-process fault/serialization matrix is still unverified.
 
+The clean pre-fix source sequence also refreshed the source-local inventory and
+portable corpus leaves (the checkpoint change does not touch either surface):
+
+```text
+nix run .#run -- --task postgres-sql-inventory-check
+source: b38ae5c3
+run id: run-2141603-1785989203587902728
+result: ok — 2 inventory tests passed, 0 failed in 1.96s
+
+nix run .#run -- --task portable-replay-corpus
+source: b38ae5c3
+run id: run-2144669-1785989584718916467
+result: ok — 10 replay corpus tests passed, 0 failed in 21.14s
+```
+
 ## TT2 disposition at the current candidate
 
 “Conditional” means implementation exists but the plan-required production
