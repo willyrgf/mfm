@@ -409,6 +409,7 @@ fn decrypt_invalid_key_material_cleans_up_after_authenticated_copy() {
         secure.ethereum_address(),
         Err(KeystoreError::InvalidPrivateKey)
     ));
+    assert!(witness.observed_source_handoff());
     assert!(witness.observed_transfer());
     drop(secure);
     assert!(witness.observed_cleanup());

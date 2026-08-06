@@ -131,8 +131,9 @@ impl Keystore {
     ) -> Result<SecureKey, KeystoreError> {
         self.ensure_unlocked_for_read()?;
         let material = self.decrypt_entry_key_with_witness(id, witness.clone())?;
+        let secure_key = material.into_secure_key();
         witness.record_transfer();
-        Ok(material.into_secure_key())
+        Ok(secure_key)
     }
 
     /// List stored keys (metadata only). Requires an unlocked session.
