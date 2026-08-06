@@ -39,6 +39,7 @@ mod tests {
                 call_stack: Vec::new(),
                 query_aliases: BTreeSet::new(),
                 typed_query_aliases: BTreeSet::new(),
+                query_file_aliases: BTreeSet::new(),
                 builder_aliases: BTreeSet::new(),
                 builder_bindings: BTreeSet::new(),
                 query_glob_imported: false,
@@ -170,6 +171,41 @@ mod tests {
                 true,
             ),
             (
+                "negative_query_file_macro",
+                r#"fn f() { let _ = sqlx::query_file!("queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_as_macro",
+                r#"fn f() { let _ = sqlx::query_file_as!(i64, "queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_scalar_macro",
+                r#"fn f() { let _ = sqlx::query_file_scalar!("queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_scalar_unchecked_macro",
+                r#"fn f() { let _ = sqlx::query_file_scalar_unchecked!("queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_as_unchecked_macro",
+                r#"fn f() { let _ = sqlx::query_file_as_unchecked!(i64, "queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_unchecked_alias",
+                r#"use sqlx::query_file_unchecked as qf; fn f() { let _ = qf!("queries.sql"); }"#,
+                false,
+            ),
+            (
+                "negative_query_file_glob",
+                r#"use sqlx::*; fn f() { let _ = query_file!("queries.sql"); }"#,
+                false,
+            ),
+            (
                 "negative_dynamic_macro",
                 r#"fn f(x: &str) { let _ = sqlx::query!(concat!("SELECT ", x)); }"#,
                 false,
@@ -230,6 +266,7 @@ mod tests {
                 call_stack: Vec::new(),
                 query_aliases: BTreeSet::new(),
                 typed_query_aliases: BTreeSet::new(),
+                query_file_aliases: BTreeSet::new(),
                 builder_aliases: BTreeSet::new(),
                 builder_bindings: BTreeSet::new(),
                 query_glob_imported: false,
@@ -245,6 +282,7 @@ mod tests {
         call_stack: Vec<String>,
         query_aliases: BTreeSet<String>,
         typed_query_aliases: BTreeSet<String>,
+        query_file_aliases: BTreeSet<String>,
         builder_aliases: BTreeSet<String>,
         builder_bindings: BTreeSet<String>,
         query_glob_imported: bool,
@@ -259,6 +297,7 @@ mod tests {
         fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
             let query_aliases = self.query_aliases.clone();
             let typed_query_aliases = self.typed_query_aliases.clone();
+            let query_file_aliases = self.query_file_aliases.clone();
             let builder_aliases = self.builder_aliases.clone();
             let builder_bindings = self.builder_bindings.clone();
             let query_glob_imported = self.query_glob_imported;
@@ -268,6 +307,7 @@ mod tests {
             syn::visit::visit_item_mod(self, item);
             self.query_aliases = query_aliases;
             self.typed_query_aliases = typed_query_aliases;
+            self.query_file_aliases = query_file_aliases;
             self.builder_aliases = builder_aliases;
             self.builder_bindings = builder_bindings;
             self.query_glob_imported = query_glob_imported;
@@ -276,6 +316,7 @@ mod tests {
         fn visit_block(&mut self, block: &'ast syn::Block) {
             let query_aliases = self.query_aliases.clone();
             let typed_query_aliases = self.typed_query_aliases.clone();
+            let query_file_aliases = self.query_file_aliases.clone();
             let builder_aliases = self.builder_aliases.clone();
             let builder_bindings = self.builder_bindings.clone();
             let query_glob_imported = self.query_glob_imported;
@@ -283,6 +324,7 @@ mod tests {
             syn::visit::visit_block(self, block);
             self.query_aliases = query_aliases;
             self.typed_query_aliases = typed_query_aliases;
+            self.query_file_aliases = query_file_aliases;
             self.builder_aliases = builder_aliases;
             self.builder_bindings = builder_bindings;
             self.query_glob_imported = query_glob_imported;
@@ -429,6 +471,7 @@ mod tests {
                 &mut Vec::new(),
                 &mut self.query_aliases,
                 &mut self.typed_query_aliases,
+                &mut self.query_file_aliases,
                 &mut self.builder_aliases,
             );
             if is_sqlx_glob(&item.tree) {
@@ -447,15 +490,7 @@ mod tests {
                 || path.segments.last().is_some_and(|segment| {
                     self.query_aliases.contains(&segment.ident.to_string())
                         || (self.query_glob_imported
-                            && matches!(
-                                segment.ident.to_string().as_str(),
-                                "query"
-                                    | "query_as"
-                                    | "query_scalar"
-                                    | "query_unchecked"
-                                    | "query_as_unchecked"
-                                    | "query_scalar_unchecked"
-                            ))
+                            && is_query_macro_name(&segment.ident.to_string()))
                 })
         }
 
@@ -518,17 +553,22 @@ mod tests {
             if !self.is_query_path_path(&expression.mac.path) {
                 return false;
             }
-            let args = syn::punctuated::Punctuated::<Expr, Token![,]>::parse_terminated
-                .parse2(expression.mac.tokens.clone());
-            let Ok(args) = args else {
-                return false;
-            };
             let terminal = expression
                 .mac
                 .path
                 .segments
                 .last()
                 .map(|segment| segment.ident.to_string());
+            if terminal.as_deref().is_some_and(|name| {
+                is_query_file_macro_name(name) || self.query_file_aliases.contains(name)
+            }) {
+                return false;
+            }
+            let args = syn::punctuated::Punctuated::<Expr, Token![,]>::parse_terminated
+                .parse2(expression.mac.tokens.clone());
+            let Ok(args) = args else {
+                return false;
+            };
             let sql_index = if terminal.as_deref().is_some_and(|name| {
                 is_typed_query_macro_name(name) || self.typed_query_aliases.contains(name)
             }) {
@@ -553,6 +593,7 @@ mod tests {
         prefix: &mut Vec<String>,
         query_aliases: &mut BTreeSet<String>,
         typed_query_aliases: &mut BTreeSet<String>,
+        query_file_aliases: &mut BTreeSet<String>,
         builder_aliases: &mut BTreeSet<String>,
     ) {
         match tree {
@@ -563,6 +604,7 @@ mod tests {
                     prefix,
                     query_aliases,
                     typed_query_aliases,
+                    query_file_aliases,
                     builder_aliases,
                 );
                 prefix.pop();
@@ -575,6 +617,7 @@ mod tests {
                     name.ident.to_string(),
                     query_aliases,
                     typed_query_aliases,
+                    query_file_aliases,
                     builder_aliases,
                 );
             }
@@ -586,6 +629,7 @@ mod tests {
                     rename.rename.to_string(),
                     query_aliases,
                     typed_query_aliases,
+                    query_file_aliases,
                     builder_aliases,
                 );
             }
@@ -596,6 +640,7 @@ mod tests {
                         prefix,
                         query_aliases,
                         typed_query_aliases,
+                        query_file_aliases,
                         builder_aliases,
                     );
                 }
@@ -609,10 +654,14 @@ mod tests {
         alias: String,
         query_aliases: &mut BTreeSet<String>,
         typed_query_aliases: &mut BTreeSet<String>,
+        query_file_aliases: &mut BTreeSet<String>,
         builder_aliases: &mut BTreeSet<String>,
     ) {
         if full.len() == 2 && full[0] == "sqlx" && is_query_macro_name(&full[1]) {
             query_aliases.insert(alias.clone());
+            if is_query_file_macro_name(&full[1]) {
+                query_file_aliases.insert(alias.clone());
+            }
             if matches!(full[1].as_str(), "query_as" | "query_as_unchecked") {
                 typed_query_aliases.insert(alias.clone());
             }
@@ -638,6 +687,12 @@ mod tests {
             name,
             "query"
                 | "query_as"
+                | "query_file"
+                | "query_file_as"
+                | "query_file_scalar"
+                | "query_file_scalar_unchecked"
+                | "query_file_as_unchecked"
+                | "query_file_unchecked"
                 | "query_scalar"
                 | "query_unchecked"
                 | "query_as_unchecked"
@@ -645,8 +700,23 @@ mod tests {
         )
     }
 
+    fn is_query_file_macro_name(name: &str) -> bool {
+        matches!(
+            name,
+            "query_file"
+                | "query_file_as"
+                | "query_file_scalar"
+                | "query_file_scalar_unchecked"
+                | "query_file_as_unchecked"
+                | "query_file_unchecked"
+        )
+    }
+
     fn is_typed_query_macro_name(name: &str) -> bool {
-        matches!(name, "query_as" | "query_as_unchecked")
+        matches!(
+            name,
+            "query_as" | "query_as_unchecked" | "query_file_as" | "query_file_as_unchecked"
+        )
     }
 
     fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
