@@ -125,9 +125,42 @@ impl PostgresCommitFaultProxy {
 
     /// Arms a fault for the next `attempts` commit messages and returns the intercept target.
     pub fn arm(&self, fault: CommitFault, attempts: usize) -> Result<u64, ProviderTestError> {
+        self.arm_plan(fault, attempts, None)
+    }
+
+    /// Arms a fault for the next commit after a frontend statement contains `statement`.
+    ///
+    /// The statement gate lets tests target one semantic transaction when a client performs
+    /// several unrelated wallet mutations during recovery startup.
+    pub fn arm_after_statement(
+        &self,
+        fault: CommitFault,
+        attempts: usize,
+        statement: &str,
+    ) -> Result<u64, ProviderTestError> {
+        let statement = statement.trim();
+        if statement.is_empty() {
+            return Err(ProviderTestError::Invalid);
+        }
+        self.arm_plan(fault, attempts, Some(statement.to_ascii_lowercase()))
+    }
+
+    fn arm_plan(
+        &self,
+        fault: CommitFault,
+        attempts: usize,
+        required_statement: Option<String>,
+    ) -> Result<u64, ProviderTestError> {
         if attempts == 0 {
             return Err(ProviderTestError::Invalid);
         }
+        let statement_triggered = required_statement.as_ref().is_none_or(|needle| {
+            self.state
+                .statement_texts
+                .lock()
+                .map(|texts| texts.iter().any(|statement| statement.contains(needle)))
+                .unwrap_or(false)
+        });
         let mut plan = self
             .state
             .plan
@@ -146,6 +179,8 @@ impl PostgresCommitFaultProxy {
         *plan = Some(FaultPlan {
             fault,
             remaining: attempts,
+            triggered: statement_triggered,
+            required_statement,
         });
         Ok(target)
     }
@@ -221,9 +256,30 @@ struct ProxyState {
 struct FaultPlan {
     fault: CommitFault,
     remaining: u64,
+    required_statement: Option<String>,
+    triggered: bool,
 }
 
 impl ProxyState {
+    fn record_statement(&self, statement: &str) {
+        if let Ok(mut texts) = self.statement_texts.lock() {
+            texts.push(statement.to_owned());
+        }
+        if let Ok(mut plan) = self.plan.lock() {
+            if plan.as_ref().is_some_and(|plan| {
+                !plan.triggered
+                    && plan
+                        .required_statement
+                        .as_ref()
+                        .is_some_and(|needle| statement.to_ascii_lowercase().contains(needle))
+            }) {
+                if let Some(plan) = plan.as_mut() {
+                    plan.triggered = true;
+                }
+            }
+        }
+    }
+
     fn take_fault(&self) -> io::Result<Option<CommitFault>> {
         let fault = {
             let mut retained = self
@@ -233,6 +289,9 @@ impl ProxyState {
             let Some(plan) = retained.as_mut() else {
                 return Ok(None);
             };
+            if plan.required_statement.is_some() && !plan.triggered {
+                return Ok(None);
+            }
             let fault = plan.fault;
             plan.remaining = plan.remaining.saturating_sub(1);
             if plan.remaining == 0 {
@@ -281,9 +340,7 @@ async fn proxy_connection(
                     state.executed_statements.fetch_add(1, Ordering::AcqRel);
                 }
                 if let Some(statement) = frontend.statement_text() {
-                    if let Ok(mut texts) = state.statement_texts.lock() {
-                        texts.push(statement.to_owned());
-                    }
+                    state.record_statement(statement);
                 }
                 if frontend.is_commit() {
                     match state.take_fault()? {
@@ -456,5 +513,37 @@ mod tests {
         assert!(!backend_frame(b'C', b"ROLLBACK\0").is_successful_commit_completion());
         assert!(!backend_frame(b'E', b"COMMIT\0").is_successful_commit_completion());
         assert!(!backend_frame(b'Z', b"I").is_successful_commit_completion());
+    }
+
+    #[test]
+    fn statement_gated_fault_waits_for_its_transaction_marker() {
+        let state = ProxyState::default();
+        state
+            .plan
+            .lock()
+            .expect("fault plan lock")
+            .replace(FaultPlan {
+                fault: CommitFault::HoldTransactionBeforeCommit,
+                remaining: 1,
+                required_statement: Some("insert into wallet_nonce_completions".to_owned()),
+                triggered: false,
+            });
+
+        assert_eq!(
+            state.take_fault().expect("untriggered plan"),
+            None,
+            "unrelated commits must pass before the marker"
+        );
+        state.record_statement("UPDATE wallet_nonce_domains SET current_resource_frontier_ref");
+        assert_eq!(
+            state.take_fault().expect("unrelated statement"),
+            None,
+            "unrelated statements must not arm the fault"
+        );
+        state.record_statement("INSERT INTO wallet_nonce_completions (...)");
+        assert_eq!(
+            state.take_fault().expect("triggered plan"),
+            Some(CommitFault::HoldTransactionBeforeCommit)
+        );
     }
 }
