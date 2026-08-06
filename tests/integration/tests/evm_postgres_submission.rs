@@ -3439,9 +3439,7 @@ async fn run_worker_expect_crash_before_completion_commit(
     .spawn()
     .expect("spawn completion pre-commit worker");
     if wait_for_worker_ready(&ready_path).await.is_err() {
-        child
-            .start_kill()
-            .expect("kill completion pre-commit worker after readiness timeout");
+        let _ = child.start_kill();
         let output = child
             .wait_with_output()
             .await
@@ -3457,7 +3455,26 @@ async fn run_worker_expect_crash_before_completion_commit(
     let intercept_target = commit_proxy
         .arm(CommitFault::HoldTransactionBeforeCommit, 1)
         .expect("arm completion pre-commit process-loss fault");
-    commit_proxy.wait_for_intercepts(intercept_target).await;
+    if tokio::time::timeout(
+        Duration::from_secs(120),
+        commit_proxy.wait_for_intercepts(intercept_target),
+    )
+    .await
+    .is_err()
+    {
+        let _ = child.start_kill();
+        let output = child
+            .wait_with_output()
+            .await
+            .expect("wait for completion pre-commit worker after intercept timeout");
+        commit_proxy.release_held_transactions();
+        panic!(
+            "completion pre-commit worker did not reach the commit boundary (status {:?}): {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
     child
         .start_kill()
         .expect("kill completion pre-commit worker");
@@ -3533,9 +3550,7 @@ async fn run_worker_expect_completion_acknowledgement_loss(
     .spawn()
     .expect("spawn completion acknowledgement worker");
     if wait_for_worker_ready(&ready_path).await.is_err() {
-        child
-            .start_kill()
-            .expect("kill completion acknowledgement worker after readiness timeout");
+        let _ = child.start_kill();
         let output = child
             .wait_with_output()
             .await
@@ -3551,7 +3566,26 @@ async fn run_worker_expect_completion_acknowledgement_loss(
     let intercept_target = commit_proxy
         .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
         .expect("arm initial completion acknowledgement fault");
-    commit_proxy.wait_for_intercepts(intercept_target).await;
+    if tokio::time::timeout(
+        Duration::from_secs(120),
+        commit_proxy.wait_for_intercepts(intercept_target),
+    )
+    .await
+    .is_err()
+    {
+        let _ = child.start_kill();
+        let output = child
+            .wait_with_output()
+            .await
+            .expect("wait for completion acknowledgement worker after intercept timeout");
+        commit_proxy.release_held_transactions();
+        panic!(
+            "completion acknowledgement worker did not reach the commit boundary (status {:?}): {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
     let output = child
         .wait_with_output()
         .await
