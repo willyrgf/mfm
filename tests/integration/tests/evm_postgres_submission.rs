@@ -138,6 +138,7 @@ const PHASE_ADMIT_BROADCAST: &str = "admit-broadcast";
 const PHASE_RESUME_COMPLETE: &str = "resume-complete";
 const PHASE_PRODUCTION_ADMIT: &str = "production-admit";
 const PHASE_PRODUCTION_RESUME: &str = "production-resume";
+const PHASE_PRODUCTION_RECOVER: &str = "production-recover";
 const INJECTED_CRASH_AFTER_BROADCAST_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_BROADCAST";
 const INJECTED_CRASH_AFTER_RECEIPT_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_RECEIPT";
 const INJECTED_CRASH_AFTER_FINALITY_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_FINALITY";
@@ -148,6 +149,7 @@ const COMPLETION_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(600);
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
+const RECOVERY_SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000064";
 const SUBMISSION_TOKEN: &str = "integration-submission";
 const CROSS_CHAIN_SUBMISSION_TOKEN: &str = "cross-chain-submission";
 const MAX_ANNEX_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
@@ -409,7 +411,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     run_worker_expect_completion_acknowledgement_loss(
         &database,
         rpc.endpoint(),
-        PHASE_PRODUCTION_RESUME,
+        PHASE_PRODUCTION_RECOVER,
         &activation,
         &provider,
     )
@@ -419,7 +421,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     run_worker_expect_crash_after_completion(
         &database,
         rpc.endpoint(),
-        PHASE_PRODUCTION_RESUME,
+        PHASE_PRODUCTION_RECOVER,
         &activation,
         &provider,
     )
@@ -429,7 +431,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     run_worker(
         &database,
         rpc.endpoint(),
-        PHASE_PRODUCTION_RESUME,
+        PHASE_PRODUCTION_RECOVER,
         &activation,
         &provider,
     )
@@ -443,7 +445,8 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &history_store_scope_id(&database.database_url, &database.history_schema).await,
         &fixture.tenant,
         &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
-        &InvocationIdentity::new(SUBMISSION_INVOCATION).expect("submission invocation identity"),
+        &InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
+            .expect("recovery submission invocation identity"),
     );
     let batches = database.history_batches(submission_run_id).await;
     assert!(
@@ -611,7 +614,10 @@ async fn evm_postgres_submission_worker() {
         std::fs::write(path, b"wallet-authority-ready")
             .expect("publish wallet authority readiness");
     }
-    if matches!(mode, PHASE_PRODUCTION_ADMIT | PHASE_PRODUCTION_RESUME) {
+    if matches!(
+        mode,
+        PHASE_PRODUCTION_ADMIT | PHASE_PRODUCTION_RESUME | PHASE_PRODUCTION_RECOVER
+    ) {
         run_production_application_worker(
             &base_url,
             &history_schema,
@@ -1046,6 +1052,78 @@ async fn run_production_application_worker(
                 application,
                 &portfolio_run_id,
                 &submission_run_id,
+                &material.portfolio,
+                &expected_completion,
+            )
+            .await;
+        }
+        PHASE_PRODUCTION_RECOVER => {
+            drive_application_to_closed(&application, &portfolio_run_id).await;
+            let recovery_invocation = InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
+                .expect("recovery submission invocation identity");
+            let recovery_selector = EvmSubmitTransactionSelector::new(
+                material
+                    .submission
+                    .transaction_intent()
+                    .template()
+                    .target()
+                    .clone(),
+                EvmCallerSubmissionToken::new(SUBMISSION_TOKEN).expect("recovery caller token"),
+            );
+            let recovery_admission = application
+                .admit_run(
+                    credential(),
+                    admission_request(
+                        EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
+                        recovery_invocation.clone(),
+                        &recovery_selector,
+                    ),
+                )
+                .await
+                .expect("admit recovery EVM submission");
+            let recovery_run_id = response_run_id(&recovery_admission);
+            assert_eq!(
+                recovery_run_id,
+                derive_application_run_id(
+                    &store_scope_id,
+                    &fixture.tenant,
+                    &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
+                    &recovery_invocation,
+                ),
+                "recovery response must bind the derived run identity"
+            );
+            let crash_after_receipt = std::env::var_os(INJECTED_CRASH_AFTER_RECEIPT_ENV).is_some();
+            let crash_after_finality =
+                std::env::var_os(INJECTED_CRASH_AFTER_FINALITY_ENV).is_some();
+            let crash_after_completion =
+                std::env::var_os(INJECTED_CRASH_AFTER_COMPLETION_ENV).is_some();
+            if crash_after_receipt || crash_after_finality || crash_after_completion {
+                drive_application_to_closed_with_injected_crash(
+                    &application,
+                    &recovery_run_id,
+                    &history_control,
+                    crash_after_receipt,
+                    crash_after_finality,
+                    crash_after_completion,
+                )
+                .await;
+            } else {
+                drive_application_to_closed(&application, &recovery_run_id).await;
+            }
+            let wallet_pool = isolated_pool(base_url, wallet_schema).await;
+            let completion_json = sqlx::query_scalar::<_, String>(
+                "SELECT completion_json FROM wallet_nonce_completions",
+            )
+            .fetch_one(&wallet_pool)
+            .await
+            .expect("load exact recovery wallet completion");
+            wallet_pool.close().await;
+            let expected_completion: CompletedWalletNonce = serde_json::from_str(&completion_json)
+                .expect("decode exact recovery wallet completion");
+            verify_production_projections(
+                application,
+                &portfolio_run_id,
+                &recovery_run_id,
                 &material.portfolio,
                 &expected_completion,
             )
