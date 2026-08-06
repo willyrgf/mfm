@@ -2014,6 +2014,19 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         other => panic!("unexpected concurrent completion results: {other:?}"),
     };
     assert_eq!(completion, ambiguity_completion);
+    assert_eq!(completion.sealed_activated_candidates.len(), 2);
+    let rehydrated = CompletedWalletNonce::from_recovery_closure(&completion.recovery_closure)
+        .expect("rehydrate multi-candidate completion from closure alone");
+    assert_eq!(rehydrated, completion);
+    assert_eq!(
+        CompletedWalletNonce::project_public_result_from_recovery_closure(
+            &completion.recovery_closure
+        )
+        .expect("project multi-candidate public result from closure alone"),
+        completion
+            .canonical_terminal_outcome
+            .canonical_public_result
+    );
     assert!(matches!(
         authority_a.complete(&state_input, &completion_request).await,
         EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed {
