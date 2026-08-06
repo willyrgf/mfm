@@ -160,6 +160,8 @@ Post-step-12 implementation and proof revisions:
 | `70e6900e` | prove prior-run manifest byte bound |
 | `7741a07e` | prove prior-run source count bounds |
 | `17129b21` | enforce native canonical recoverability bounds |
+| `26bbb44d` | bound base64url parser ingress |
+| `6f135845` | remove unreachable signed native values |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -505,6 +507,21 @@ focused `mfm-canonical` target passes 1/1, with the full canonical integration
 targets passing 3/11/5; independent review marks this native-boundary proof
 PASS.
 
+Revision `26bbb44d` applies the generated 22,369,622-character
+`MAX_BASE64URL_CHARACTERS` budget at the untrusted `CanonicalBytes` parser before
+character scanning or decoded allocation. The exact budget decodes to 16,777,216
+bytes and one character over is rejected; the focused canonical-json target
+passes 1/1 and independent review marks the parser boundary PASS.
+
+Revision `6f135845` removes the unreachable signed variant from the native
+primitive recoverability schema and regenerates the annex, corpus, README
+metadata, and derived schema identities. The primitive codec rejects signed
+JSON numbers, and `FactScalar` no longer exposes a misleading signed constructor
+or accepts signed producer values; direct canonical and fact regressions pass.
+Full canonical targets pass 3/12/6 plus 3 doctests, the facts target passes
+14/14, and independent review marks the unsigned-native cutover PASS. Generic
+`CanonicalValue::Signed` remains available for non-primitive typed-value paths.
+
 The provider-boundary budget targets ran from the focused revisions:
 
 ```text
@@ -713,7 +730,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress bounds native canonical strings/object keys/collections, batch counts, nested collection counts, serialized configuration revisions, prior-run source manifests and counts, run frames, and retained object frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` adds a valid exact-limit retained object, `e5f8c3b0` isolates the shared object/envelope one-byte-over predicate, and `219c588b` adds exact 65,536-record/object plus empty/one-over count witnesses; `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Revision `70e6900e` adds a shared prior-run source-manifest byte predicate with exact 16,777,216-byte and one-byte-over witnesses; `7741a07e` adds exact/one-over 4,096-program, 4,096-descriptor, 1,024-rule, and 65,536-reference count witnesses plus empty-descriptor rejection; the focused journal target passes 5/5. Revision `17129b21` adds generated native string, object-key, array-item, and object-entry limits with direct exact/one-over witnesses; focused canonical targets pass 1/1, 3/11/5. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress bounds typed base64url parser input, unsigned-native canonical strings/object keys/collections, batch counts, nested collection counts, serialized configuration revisions, prior-run source manifests and counts, run frames, and retained objects before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over envelope witnesses; `78dbc354` adds a valid exact-limit retained object, `e5f8c3b0` isolates the shared object/envelope one-byte-over predicate, and `219c588b` adds exact 65,536-record/object plus empty/one-over count witnesses; `49d2e77c` extends the same predicate to exact/one-over 1,048,576-item nested arrays/objects; the focused canonical-append target passes 5/5. Revision `70e6900e` adds a shared prior-run source-manifest byte predicate with exact 16,777,216-byte and one-byte-over witnesses; `7741a07e` adds exact/one-over 4,096-program, 4,096-descriptor, 1,024-rule, and 65,536-reference count witnesses plus empty-descriptor rejection; the focused journal target passes 5/5. Revision `17129b21` adds generated native string, object-key, array-item, and object-entry limits with direct exact/one-over witnesses; `26bbb44d` adds exact/one-over generated base64url parser input bounds; `6f135845` cuts the primitive wire to unsigned-native values and rejects signed JSON numbers; focused canonical targets pass 3/12/6, and the facts target passes 14/14. Latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, all six `query_file*` forms (fail closed), wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2236542-1786001395306859242` pass 2/2. A full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
@@ -820,6 +837,8 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `70e6900e` | `prove prior-run manifest byte bound` | shared private manifest-byte validator covers history-object encode/decode; exact 16,777,216-byte and one-byte-over cases pass in the 3/3 `mfm-journal` structured target |
 | `7741a07e` | `prove prior-run source count bounds` | private validators cover rule program/descriptor counts and manifest rule/reference totals; exact generated limits and one-over cases plus empty-descriptor rejection pass in the 5/5 `mfm-journal` structured target |
 | `17129b21` | `enforce native canonical recoverability bounds` | generated annex names the canonical object-key budget; native-wire validation checks exact string, object-key, array-item, and object-entry limits before recursion; direct exact/one-over focused test passes 1/1 and canonical integration targets pass 3/11/5 |
+| `26bbb44d` | `bound base64url parser ingress` | parser enforces generated 22,369,622-character budget before scanning/decoding; exact input decodes to 16,777,216 bytes and one-over input rejects in the 1/1 canonical-json target |
+| `6f135845` | `remove unreachable signed native values` | generated primitive canonical schema removes signed variant; canonical codec rejects signed JSON numbers, `FactScalar` rejects signed producers, and affected canonical/facts targets pass 3/12/6 plus 14/14 |
 | `897ec4b8` | `record default configuration qualification` | latest default-concurrency managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests; earlier intermittent race witnesses remain provenance |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |
