@@ -25,8 +25,13 @@ implemented and the focused candidate checks are green, but the plan's strict
   acknowledgement is lost, with exact-key replay and one retained row. The
   production-shaped worker loses the process while the initial completion COMMIT
   is held before forwarding, then resumes with zero pre-resume completion rows.
-  Deployment checkpoint acknowledgement, promotion, ambiguity, cross-process,
-  replacement, and scale boundaries remain unverified.
+  The exact-gated follow-up also arms the completion fault after the executed
+  `INSERT`, clears a stale idle provider checkpoint before fresh recovery, and
+  audits the original process-loss run as parked with an unmatched
+  authorization. Its clean managed run is
+  `run-2637996-1786051539384393456` (1/1 in 2044.71s). Deployment checkpoint
+  acknowledgement, promotion, ambiguity, cross-process, replacement, and
+  scale boundaries remain unverified.
 - The application production path still has no live multi-hop export
   integration fixture. The implementation now performs kind-aware fixed-point
   discovery and retains an authenticated principal, fixed export grant, and
@@ -185,6 +190,8 @@ Post-step-12 implementation and proof revisions:
 | `a11925b7` | exercise evm completion crash boundary |
 | `e20d1a59` | exercise completion acknowledgement recovery |
 | `c5eb01ad` | exercise evm completion commit process loss |
+| `a5ee59f7` | extend evm completion recovery fault bound |
+| `64fec015` | audit parked original evm recovery run |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -748,7 +755,27 @@ persisted completion count remains one (`run-2436682-1786023975122635293`, 1/1
 in 671.13s). Revision `c5eb01ad` adds a production-shaped process loss while
 the initial completion COMMIT is held before forwarding; the child is killed,
 the wallet completion remains absent, and a later resume completes with one raw
-broadcast (`run-2446216-1786025082185171356`, 1/1 in 1811.93s).
+broadcast (`run-2446216-1786025082185171356`, 1/1 in 1811.93s). That first
+qualification attempt is historical and is superseded by the exact-gated
+follow-up below.
+
+Revisions `0cf2527e`, `c2ce2841`, `fd7b8307`, `39269de6`, `a1c26036`,
+`c45e64a9`, `d28b70f2`, `082d2c6b`, `a4597967`, `c31b6411`, `a5ee59f7`, and
+`64fec015` harden the boundary: the fault is armed only after the completion
+`INSERT` executes, idle provider recovery clears a stale prepared predecessor,
+and fresh recovery admits the retained intent without re-driving the parked
+original run. The final audit proves the original run remains open with an
+unmatched authorization while the fresh run closes, and the clean managed
+qualification passed:
+
+```text
+nix run .#run -- --task evm-postgres-submission-qualification
+run id: run-2637996-1786051539384393456
+result: ok — 1 passed, 0 failed in 2044.71s (task total 2044.71s)
+```
+
+The run proves zero completion rows before the held pre-commit resume, one
+retained completion after lost acknowledgement recovery, and one raw broadcast.
 
 The production-scale EVM leaf is therefore PASS for this repository-local
 qualification scope. Deployment-owned provider trust and the broader crash,
