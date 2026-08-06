@@ -134,8 +134,28 @@ mod tests {
                 true,
             ),
             (
+                "positive_unchecked_macro",
+                r#"fn f() { let _ = sqlx::query_unchecked!("SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_scalar_unchecked_macro",
+                r#"fn f() { let _ = sqlx::query_scalar_unchecked!(i64, "SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_query_as_unchecked_macro",
+                r#"fn f() { let _ = sqlx::query_as_unchecked!(i64, "SELECT 1"); }"#,
+                true,
+            ),
+            (
                 "negative_dynamic_macro",
                 r#"fn f(x: &str) { let _ = sqlx::query!(concat!("SELECT ", x)); }"#,
+                false,
+            ),
+            (
+                "negative_dynamic_unchecked_macro",
+                r#"fn f(x: &str) { let _ = sqlx::query_unchecked!(format!("SELECT {x}")); }"#,
                 false,
             ),
             (
@@ -274,12 +294,11 @@ mod tests {
 
         fn visit_expr_macro(&mut self, expression: &'ast ExprMacro) {
             let path = &expression.mac.path;
-            if path.segments.last().is_some_and(|segment| {
-                matches!(
-                    segment.ident.to_string().as_str(),
-                    "query" | "query_as" | "query_scalar"
-                )
-            }) && self.is_query_path_path(path)
+            if path
+                .segments
+                .last()
+                .is_some_and(|segment| is_query_macro_name(&segment.ident.to_string()))
+                && self.is_query_path_path(path)
                 && !self.static_macro_owned(expression)
             {
                 self.record(path.span());
@@ -389,7 +408,7 @@ mod tests {
                 .segments
                 .last()
                 .map(|segment| segment.ident.to_string());
-            let sql_index = if terminal.as_deref() == Some("query_as") {
+            let sql_index = if terminal.as_deref().is_some_and(is_typed_query_macro_name) {
                 1
             } else {
                 0
@@ -473,6 +492,25 @@ mod tests {
             UseTree::Path(path) => is_sqlx_glob(&path.tree),
             _ => false,
         }
+    }
+
+    fn is_query_macro_name(name: &str) -> bool {
+        matches!(
+            name,
+            "query"
+                | "query_as"
+                | "query_scalar"
+                | "query_unchecked"
+                | "query_as_unchecked"
+                | "query_scalar_unchecked"
+        )
+    }
+
+    fn is_typed_query_macro_name(name: &str) -> bool {
+        matches!(
+            name,
+            "query_as" | "query_scalar" | "query_as_unchecked" | "query_scalar_unchecked"
+        )
     }
 
     fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
