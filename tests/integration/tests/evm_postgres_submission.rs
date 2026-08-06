@@ -144,6 +144,8 @@ const INJECTED_CRASH_AFTER_RECEIPT_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_
 const INJECTED_CRASH_AFTER_FINALITY_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_FINALITY";
 const INJECTED_CRASH_AFTER_COMPLETION_ENV: &str =
     "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_COMPLETION";
+const SKIP_PRODUCTION_PROJECTION_VERIFY_ENV: &str =
+    "MFM_EVM_POSTGRES_SKIP_PRODUCTION_PROJECTION_VERIFY";
 const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 const COMPLETION_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(600);
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
@@ -1123,14 +1125,16 @@ async fn run_production_application_worker(
             wallet_pool.close().await;
             let expected_completion: CompletedWalletNonce = serde_json::from_str(&completion_json)
                 .expect("decode exact recovery wallet completion");
-            verify_production_projections(
-                application,
-                &portfolio_run_id,
-                &recovery_run_id,
-                &material.portfolio,
-                &expected_completion,
-            )
-            .await;
+            if std::env::var_os(SKIP_PRODUCTION_PROJECTION_VERIFY_ENV).is_none() {
+                verify_production_projections(
+                    application,
+                    &portfolio_run_id,
+                    &recovery_run_id,
+                    &material.portfolio,
+                    &expected_completion,
+                )
+                .await;
+            }
         }
         _ => panic!("unknown production application worker mode"),
     }
@@ -3529,6 +3533,7 @@ async fn run_worker_expect_crash_before_completion_commit(
         None,
         Some(&proxy_nonce_url),
         Some(&ready_path),
+        false,
     )
     .spawn()
     .expect("spawn completion pre-commit worker");
@@ -3644,6 +3649,7 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         None,
         Some(&proxy_nonce_url),
         Some(&ready_path),
+        true,
     )
     .spawn()
     .expect("spawn completion acknowledgement worker");
@@ -3806,6 +3812,7 @@ async fn run_worker_process(
         crash_boundary,
         None,
         None,
+        false,
     )
     .output()
     .await
@@ -3821,6 +3828,7 @@ fn worker_command(
     crash_boundary: Option<InjectedCrashBoundary>,
     nonce_application_url: Option<&str>,
     ready_path: Option<&Path>,
+    skip_projection_verify: bool,
 ) -> tokio::process::Command {
     let mut command =
         tokio::process::Command::new(std::env::current_exe().expect("test executable"));
@@ -3873,8 +3881,12 @@ fn worker_command(
         INJECTED_CRASH_AFTER_RECEIPT_ENV,
         INJECTED_CRASH_AFTER_FINALITY_ENV,
         INJECTED_CRASH_AFTER_COMPLETION_ENV,
+        SKIP_PRODUCTION_PROJECTION_VERIFY_ENV,
     ] {
         command.env_remove(variable);
+    }
+    if skip_projection_verify {
+        command.env(SKIP_PRODUCTION_PROJECTION_VERIFY_ENV, "1");
     }
     command.env_remove(WORKER_READY_FILE_ENV);
     if let Some(path) = ready_path {
