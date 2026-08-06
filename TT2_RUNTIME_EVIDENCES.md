@@ -88,6 +88,7 @@ Post-step-12 implementation and proof revisions:
 | `afec8457` | prove closure-alone multi-candidate reload |
 | `d2a39d7a` | witness post-decrypt key cleanup |
 | `8b2e64ba` | witness failed decrypt handoff address |
+| `2fc4afa8` | prove purpose information isolation |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -114,6 +115,9 @@ closure APIs against a persisted two-candidate PostgreSQL completion row.
 `d2a39d7a` adds the authenticated post-decrypt invalid-key cleanup witness;
 `8b2e64ba` adds direct source-to-`SecureKey` handoff-pointer coverage on that
 failure path and moves the test transfer witness after the ownership move.
+`2fc4afa8` adds two application trybuild cases that reject public raw-record
+enumeration and trace authorization-request access; the complete purpose
+data-isolation proof remains conditional.
 
 ## Independent review checkpoints
 
@@ -261,7 +265,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; synthesized semantic/audit suffix vectors pass strict reject/accept behavior, but no genuinely valid production later-audit artifact fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
 | REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| APP-01 | Conditional | Purpose-specific evidence types and redaction exist; complete data-isolation proof is not independent. |
+| APP-01 | Conditional | Purpose-specific evidence types and redaction exist; the 12-case application trybuild matrix now rejects public raw-record enumeration and trace authorization-request access, while a complete runtime data-isolation proof remains outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
@@ -333,6 +337,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `afec8457` | `prove closure-alone multi-candidate reload` | persisted two-candidate completion reload, closure-only rehydration, and canonical public projection; exact managed run and independent review pass |
 | `d2a39d7a` | `witness post-decrypt key cleanup` | authenticated invalid-key payload reaches post-decrypt identity rejection and zeroized cleanup; focused decrypt suite 8/8 |
 | `8b2e64ba` | `witness failed decrypt handoff address` | source-to-`SecureKey` handoff pointer equality and cleanup are directly asserted on post-decrypt rejection; full keystore and Clippy pass |
+| `2fc4afa8` | `prove purpose information isolation` | application trybuild privacy suite passes all 12 cases, including public raw-record enumeration and trace authorization-request accessor denial |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:

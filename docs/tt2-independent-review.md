@@ -8,7 +8,9 @@ The focused follow-up candidate is `afec8457`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
-below. Focused checks and the historical exact composed source gate pass. The plan requires a PASS only when every
+below. The latest APP-01 proof revision is `2fc4afa8`, which adds two
+purpose-isolation compile-fail cases. Focused checks and the historical exact
+composed source gate pass. The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
 
@@ -59,7 +61,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   observation binding), `266d6889` (bounded wallet projection scan),
   `dec2f0c4` (completion closure reload), and `9390503c` (production decrypt
   allocation witness), `d2a39d7a` (post-decrypt invalid-key cleanup), and
-  `8b2e64ba` (failure-path handoff-pointer witness).
+  `8b2e64ba` (failure-path handoff-pointer witness), and `2fc4afa8`
+  (purpose-isolation compile-fail cases).
 - Prior implementation/evidence tip: `4e11e3556348cf61d27294a2caa18f5e0dba3635`.
 - Final evidence refresh: this documentation-only commit after the exact gate;
   the candidate review was performed against the exact hash above.
@@ -235,6 +238,8 @@ nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture
 8 decrypt-focused tests passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture
 1 focused test passed
+nix develop -c cargo test -p mfm-app --test application-privacy-ui
+12 application privacy trybuild cases passed on `2fc4afa8`
 ```
 
 The wallet run started after `266d6889` and no commits were made during it,
@@ -339,7 +344,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; a complete purpose-data isolation proof is absent. |
+| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 12-case application privacy trybuild matrix rejects public raw-record enumeration and trace authorization-request access, while complete runtime data-isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
