@@ -239,7 +239,7 @@ their own exact revisions.
 | workspace nextest and doctests | pass |
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
-| configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2109539-1785986642051610798`, 18/18 structured-history tests |
+| configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2114883-1785987374603393785`, 18/18 structured-history tests |
 | PostgreSQL SQL inventory syntax fixtures | pass; `mfm-storage-postgres` inventory tests 2/2 |
 | wallet-nonce PostgreSQL storage qualification | pass |
 | structured EVM submission qualification | pass |
@@ -324,12 +324,13 @@ recovery regressions. The historical composed gate includes the source-bound
 fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
 `82e474ca`.
 
-The current managed PostgreSQL qualification ran on `624af5b2`:
+The current managed PostgreSQL qualification ran from clean source tip
+`a2664734`:
 
 ```text
 nix run .#run -- --task recoverability-postgres-v1
-run id: run-2109539-1785986642051610798
-result: ok — 18 structured-history tests passed, 0 failed in 32.00s
+run id: run-2114883-1785987374603393785
+result: ok — 18 structured-history tests passed, 0 failed in 31.79s
 ```
 
 The new parity test exercises one positive append, an exact serialized

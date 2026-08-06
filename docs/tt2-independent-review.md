@@ -321,14 +321,14 @@ review notes that the bound is per nested loop and that PostgreSQL retries the
 classified `InvalidHistory` result even when corruption is persistent; these
 are bounded resource/diagnostic residuals, not correctness failures.
 
-The configuration parity/status revision was then qualified on its exact clean
-tip:
+The configuration parity/status revision was then qualified from clean source
+tip `a2664734`:
 
 ```text
 nix run .#run -- --task recoverability-postgres-v1
-source: 624af5b2
-run id: run-2109539-1785986642051610798
-result: ok — 18 structured-history tests passed, 0 failed in 32.00s
+source: a2664734
+run id: run-2114883-1785987374603393785
+result: ok — 18 structured-history tests passed, 0 failed in 31.79s
 
 nix develop -c cargo fmt --all -- --check
 result: pass
@@ -548,7 +548,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
-| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2109539-1785986642051610798` (18/18 structured-history tests) | N/A; introduced after baseline |
+| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2114883-1785987374603393785` (18/18 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
@@ -647,7 +647,7 @@ callback-free fold validation consumes only the opaque summary.
 
 - PostgreSQL role, snapshot, checkpoint, configured-value race, retry, SQL
   inventory/offline, and managed recoverability lanes pass, including the
-  exact parity/status run `run-2109539-1785986642051610798` on `624af5b2`.
+  exact parity/status run `run-2114883-1785987374603393785` on `a2664734`.
   Cross-process acknowledgement-loss,
   serialization/deadlock, copied-target, and injected-fault matrices are not
   complete.
