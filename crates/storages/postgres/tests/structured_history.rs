@@ -544,6 +544,165 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         );
     }
 
+    let escaped_stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        tenant_scope_id.clone(),
+        operation_id.clone(),
+        StableId::new("mfm.postgres.fixture/configured-parity-escaped").expect("escaped target"),
+    );
+    let escaped_value =
+        ProposedCanonicalValue::from_json(r#"{"escaped":"quote\" slash\\ newline\n tab\t"}"#)
+            .expect("escaped JSON value");
+    let postgres_escaped = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            escaped_stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-escaped").expect("append id"),
+            contract.clone(),
+            escaped_value.clone(),
+        ))
+        .await;
+    let memory_escaped = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            escaped_stream,
+            None,
+            AppendRequestId::new("postgres-configured-parity-escaped").expect("append id"),
+            contract.clone(),
+            escaped_value,
+        ))
+        .await;
+    assert_eq!(postgres_escaped, memory_escaped);
+    assert!(postgres_escaped.is_ok(), "escaped JSON value must append");
+
+    let utf8_stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        tenant_scope_id.clone(),
+        operation_id.clone(),
+        StableId::new("mfm.postgres.fixture/configured-parity-utf8-boundary")
+            .expect("UTF-8 target"),
+    );
+    let utf8_sizing_value =
+        ProposedCanonicalValue::from_json(r#""é""#).expect("UTF-8 sizing value");
+    let postgres_utf8_sizing = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-utf8-sizing")
+                .expect("UTF-8 sizing append id"),
+            contract.clone(),
+            utf8_sizing_value.clone(),
+        ))
+        .await;
+    let memory_utf8_sizing = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-utf8-sizing")
+                .expect("UTF-8 sizing append id"),
+            contract.clone(),
+            utf8_sizing_value,
+        ))
+        .await;
+    assert_eq!(postgres_utf8_sizing, memory_utf8_sizing);
+    let utf8_sizing = postgres_utf8_sizing.expect("UTF-8 sizing append");
+    let utf8_probe_value =
+        ProposedCanonicalValue::from_json(r#""probe""#).expect("UTF-8 probe value");
+    let postgres_utf8_probe = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            Some(utf8_sizing.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-probe")
+                .expect("UTF-8 probe append id"),
+            contract.clone(),
+            utf8_probe_value.clone(),
+        ))
+        .await;
+    let memory_utf8_probe = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            Some(utf8_sizing.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-probe")
+                .expect("UTF-8 probe append id"),
+            contract.clone(),
+            utf8_probe_value,
+        ))
+        .await;
+    assert_eq!(postgres_utf8_probe, memory_utf8_probe);
+    let utf8_probe = postgres_utf8_probe.expect("UTF-8 probe append");
+    let utf8_revision_overhead = canonical_json(&utf8_probe)
+        .expect("canonical UTF-8 sizing revision")
+        .as_bytes()
+        .len()
+        .checked_sub(utf8_probe.canonical_value().len())
+        .expect("UTF-8 revision overhead");
+    let utf8_exact_value_len = MAX_CONFIGURATION_REVISION_BYTES
+        .checked_sub(utf8_revision_overhead)
+        .expect("UTF-8 configuration revision overhead fits its bound");
+    let utf8_payload_len = utf8_exact_value_len - 2;
+    let mut utf8_payload = "é".repeat(utf8_payload_len / "é".len());
+    if utf8_payload.len() < utf8_payload_len {
+        utf8_payload.push('x');
+    }
+    assert_eq!(utf8_payload.len(), utf8_payload_len);
+    let utf8_exact_value = ProposedCanonicalValue::from_json(&format!("\"{utf8_payload}\""))
+        .expect("UTF-8 exact-limit value");
+    let postgres_utf8_exact = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            Some(utf8_probe.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-exact").expect("append id"),
+            contract.clone(),
+            utf8_exact_value.clone(),
+        ))
+        .await;
+    let memory_utf8_exact = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            Some(utf8_probe.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-exact").expect("append id"),
+            contract.clone(),
+            utf8_exact_value,
+        ))
+        .await;
+    assert_eq!(postgres_utf8_exact, memory_utf8_exact);
+    let utf8_exact = postgres_utf8_exact.expect("UTF-8 exact-limit append");
+    assert_eq!(utf8_exact.canonical_value().len(), utf8_exact_value_len);
+    assert_eq!(
+        canonical_json(&utf8_exact)
+            .expect("canonical UTF-8 exact revision")
+            .as_bytes()
+            .len(),
+        MAX_CONFIGURATION_REVISION_BYTES
+    );
+
+    let mut utf8_over_payload = utf8_payload;
+    utf8_over_payload.push('x');
+    let utf8_over_value = ProposedCanonicalValue::from_json(&format!("\"{utf8_over_payload}\""))
+        .expect("UTF-8 one-byte-over value");
+    let postgres_utf8_over = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream.clone(),
+            Some(utf8_exact.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-over1").expect("append id"),
+            contract.clone(),
+            utf8_over_value.clone(),
+        ))
+        .await;
+    let memory_utf8_over = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            utf8_stream,
+            Some(utf8_exact.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-utf8-over1").expect("append id"),
+            contract.clone(),
+            utf8_over_value,
+        ))
+        .await;
+    assert_eq!(postgres_utf8_over, memory_utf8_over);
+    assert_eq!(
+        postgres_utf8_over,
+        Err(mfm_runtime::history::HistoryError::InvalidHistory)
+    );
+
     // Keep a bounded sequential run as a scale witness in addition to the separate-shape corpus.
     let scale_stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
