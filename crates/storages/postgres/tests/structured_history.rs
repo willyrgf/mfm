@@ -1562,6 +1562,120 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     database.cleanup().await;
 }
 
+#[tokio::test]
+async fn contention_failures_rollback_before_exact_retry() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/contention-retry").expect("operation id");
+    let (registry, document) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let assembled = open_structured_authoritative(
+        database.application_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify contention-retry store");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let mutation_pool = database.independent_pool().await;
+
+    install_contention_trigger(&mutation_pool, &database.schema, "40001").await;
+    let (run_id, first_failure) = runtime
+        .admit_run(admission(
+            operation_id.clone(),
+            document.clone(),
+            "postgres-contention-serialization",
+        ))
+        .await
+        .expect("serialization failure must be classified, not surfaced as backend loss");
+    assert_eq!(
+        first_failure.outcome(),
+        &mfm_runtime::history::HistoryAppendOutcome::StaleHead
+    );
+    let retained_rows =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM run_history_batches WHERE run_id = $1")
+            .bind(run_id.as_str())
+            .fetch_one(&mutation_pool)
+            .await
+            .expect("count serialization rows after rollback");
+    assert_eq!(
+        retained_rows, 0,
+        "serialization failure must roll back the batch"
+    );
+    remove_contention_trigger(&mutation_pool, &database.schema).await;
+
+    let (admitted, retry) = runtime
+        .admit_run(admission(
+            operation_id.clone(),
+            document.clone(),
+            "postgres-contention-serialization",
+        ))
+        .await
+        .expect("retry exact serialization candidate");
+    assert_eq!(admitted, run_id);
+    assert!(matches!(
+        retry.outcome(),
+        mfm_runtime::history::HistoryAppendOutcome::NewlyCommitted(_)
+    ));
+
+    install_contention_trigger(&mutation_pool, &database.schema, "40P01").await;
+    let second_command = admission_with_invocation(
+        operation_id.clone(),
+        document.clone(),
+        "00000000-0000-4000-8000-000000000002",
+        10,
+        "postgres-contention-deadlock",
+    );
+    let (second_run_id, second_failure) = runtime
+        .admit_run(second_command)
+        .await
+        .expect("deadlock failure must be classified after rollback");
+    assert_eq!(
+        second_failure.outcome(),
+        &mfm_runtime::history::HistoryAppendOutcome::StaleHead
+    );
+    let retained_batches =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM run_history_batches WHERE run_id = $1")
+            .bind(second_run_id.as_str())
+            .fetch_one(&mutation_pool)
+            .await
+            .expect("count deadlock rows after rollback");
+    assert_eq!(
+        retained_batches, 0,
+        "deadlock failure must roll back the batch"
+    );
+    remove_contention_trigger(&mutation_pool, &database.schema).await;
+
+    let (admitted_second, retry_second) = runtime
+        .admit_run(admission_with_invocation(
+            operation_id,
+            document,
+            "00000000-0000-4000-8000-000000000002",
+            10,
+            "postgres-contention-deadlock",
+        ))
+        .await
+        .expect("retry exact deadlock candidate");
+    assert_eq!(admitted_second, second_run_id);
+    assert!(matches!(
+        retry_second.outcome(),
+        mfm_runtime::history::HistoryAppendOutcome::NewlyCommitted(_)
+    ));
+    assert!(matches!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("load serialization retry")
+            .status(),
+        RunEvidenceStatus::Actionable
+    ));
+
+    mutation_pool.close().await;
+    drop(reader);
+    drop(runtime);
+    database.cleanup().await;
+}
+
 async fn update_configuration_head(
     pool: &PgPool,
     stream: &ConfigurationStreamKey,
@@ -3798,12 +3912,28 @@ fn admission(
     document: mfm_spec::structured::CertifiedProgramDocument,
     append_id: &str,
 ) -> StructuredAdmissionCommand {
-    StructuredAdmissionCommand::new(
-        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant"),
-        InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("invocation"),
+    admission_with_invocation(
         operation_id,
         document,
-        admission_material(9),
+        "00000000-0000-4000-8000-000000000001",
+        9,
+        append_id,
+    )
+}
+
+fn admission_with_invocation(
+    operation_id: StableId,
+    document: mfm_spec::structured::CertifiedProgramDocument,
+    invocation: &str,
+    material_discriminator: u8,
+    append_id: &str,
+) -> StructuredAdmissionCommand {
+    StructuredAdmissionCommand::new(
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant"),
+        InvocationIdentity::new(invocation).expect("invocation"),
+        operation_id,
+        document,
+        admission_material(material_discriminator),
         vec![ProposedCanonicalValue::from_value(&Value { value: 7 }).expect("initial value")],
         AppendRequestId::new(append_id).expect("append id"),
     )
@@ -4409,4 +4539,52 @@ fn unique_schema() -> String {
         timestamp,
         counter
     )
+}
+
+async fn install_contention_trigger(pool: &PgPool, schema: &str, sqlstate: &str) {
+    assert!(matches!(sqlstate, "40001" | "40P01"));
+    let sequence = format!("mfm_contention_{sqlstate}_once");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE SEQUENCE \"{schema}\".\"{sequence}\""
+    )))
+    .execute(pool)
+    .await
+    .expect("create contention sequence");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE FUNCTION \"{schema}\".mfm_contention_fault() \
+         RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER \
+         SET search_path = pg_catalog AS $$ \
+         BEGIN \
+           IF pg_catalog.nextval('\"{schema}\".\"{sequence}\"'::regclass) = 1 THEN \
+             RAISE EXCEPTION 'injected PostgreSQL contention' USING ERRCODE = '{sqlstate}'; \
+           END IF; \
+           RETURN NEW; \
+         END $$"
+    )))
+    .execute(pool)
+    .await
+    .expect("create contention trigger function");
+    sqlx::query(AssertSqlSafe(format!(
+        "CREATE TRIGGER mfm_contention_fault_trigger \
+         BEFORE INSERT ON \"{schema}\".run_history_batches \
+         FOR EACH ROW EXECUTE FUNCTION \"{schema}\".mfm_contention_fault()"
+    )))
+    .execute(pool)
+    .await
+    .expect("create contention trigger");
+}
+
+async fn remove_contention_trigger(pool: &PgPool, schema: &str) {
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP TRIGGER mfm_contention_fault_trigger ON \"{schema}\".run_history_batches"
+    )))
+    .execute(pool)
+    .await
+    .expect("drop contention trigger");
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP FUNCTION \"{schema}\".mfm_contention_fault()"
+    )))
+    .execute(pool)
+    .await
+    .expect("drop contention trigger function");
 }
