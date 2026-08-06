@@ -38,6 +38,7 @@ mod tests {
                 unowned: &mut unowned,
                 call_stack: Vec::new(),
                 query_aliases: BTreeSet::new(),
+                typed_query_aliases: BTreeSet::new(),
                 builder_aliases: BTreeSet::new(),
                 builder_bindings: BTreeSet::new(),
                 query_glob_imported: false,
@@ -140,12 +141,32 @@ mod tests {
             ),
             (
                 "positive_scalar_unchecked_macro",
-                r#"fn f() { let _ = sqlx::query_scalar_unchecked!(i64, "SELECT 1"); }"#,
+                r#"fn f() { let _ = sqlx::query_scalar_unchecked!("SELECT 1"); }"#,
                 true,
             ),
             (
                 "positive_query_as_unchecked_macro",
                 r#"fn f() { let _ = sqlx::query_as_unchecked!(i64, "SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_unchecked_macro_alias",
+                r#"use sqlx::query_unchecked as qu; fn f() { let _ = qu!("SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_scalar_unchecked_macro_alias",
+                r#"use sqlx::query_scalar_unchecked as qs; fn f() { let _ = qs!("SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_query_as_unchecked_macro_alias",
+                r#"use sqlx::query_as_unchecked as qa; fn f() { let _ = qa!(i64, "SELECT 1"); }"#,
+                true,
+            ),
+            (
+                "positive_unchecked_macro_glob",
+                r#"use sqlx::*; fn f() { let _ = query_unchecked!("SELECT 1"); }"#,
                 true,
             ),
             (
@@ -156,6 +177,21 @@ mod tests {
             (
                 "negative_dynamic_unchecked_macro",
                 r#"fn f(x: &str) { let _ = sqlx::query_unchecked!(format!("SELECT {x}")); }"#,
+                false,
+            ),
+            (
+                "negative_dynamic_scalar_unchecked_macro",
+                r#"fn f(x: &str) { let _ = sqlx::query_scalar_unchecked!(format!("SELECT {x}")); }"#,
+                false,
+            ),
+            (
+                "negative_dynamic_unchecked_macro_alias",
+                r#"use sqlx::query_unchecked as qu; fn f(x: &str) { let _ = qu!(format!("SELECT {x}")); }"#,
+                false,
+            ),
+            (
+                "negative_dynamic_unchecked_macro_glob",
+                r#"use sqlx::*; fn f(x: &str) { let _ = query_unchecked!(format!("SELECT {x}")); }"#,
                 false,
             ),
             (
@@ -173,6 +209,7 @@ mod tests {
                 unowned: &mut unowned,
                 call_stack: Vec::new(),
                 query_aliases: BTreeSet::new(),
+                typed_query_aliases: BTreeSet::new(),
                 builder_aliases: BTreeSet::new(),
                 builder_bindings: BTreeSet::new(),
                 query_glob_imported: false,
@@ -187,6 +224,7 @@ mod tests {
         unowned: &'a mut Vec<String>,
         call_stack: Vec<String>,
         query_aliases: BTreeSet<String>,
+        typed_query_aliases: BTreeSet<String>,
         builder_aliases: BTreeSet<String>,
         builder_bindings: BTreeSet<String>,
         query_glob_imported: bool,
@@ -198,6 +236,7 @@ mod tests {
                 &item.tree,
                 &mut Vec::new(),
                 &mut self.query_aliases,
+                &mut self.typed_query_aliases,
                 &mut self.builder_aliases,
             );
             if is_sqlx_glob(&item.tree) {
@@ -294,10 +333,13 @@ mod tests {
 
         fn visit_expr_macro(&mut self, expression: &'ast ExprMacro) {
             let path = &expression.mac.path;
-            if path
+            let terminal = path
                 .segments
                 .last()
-                .is_some_and(|segment| is_query_macro_name(&segment.ident.to_string()))
+                .map(|segment| segment.ident.to_string());
+            if terminal
+                .as_deref()
+                .is_some_and(|name| is_query_macro_name(name) || self.query_aliases.contains(name))
                 && self.is_query_path_path(path)
                 && !self.static_macro_owned(expression)
             {
@@ -327,7 +369,12 @@ mod tests {
                         || (self.query_glob_imported
                             && matches!(
                                 segment.ident.to_string().as_str(),
-                                "query" | "query_as" | "query_scalar"
+                                "query"
+                                    | "query_as"
+                                    | "query_scalar"
+                                    | "query_unchecked"
+                                    | "query_as_unchecked"
+                                    | "query_scalar_unchecked"
                             ))
                 })
         }
@@ -388,13 +435,7 @@ mod tests {
         }
 
         fn static_macro_owned(&self, expression: &ExprMacro) -> bool {
-            if expression
-                .mac
-                .path
-                .segments
-                .first()
-                .is_none_or(|segment| segment.ident != "sqlx")
-            {
+            if !self.is_query_path_path(&expression.mac.path) {
                 return false;
             }
             let args = syn::punctuated::Punctuated::<Expr, Token![,]>::parse_terminated
@@ -408,7 +449,9 @@ mod tests {
                 .segments
                 .last()
                 .map(|segment| segment.ident.to_string());
-            let sql_index = if terminal.as_deref().is_some_and(is_typed_query_macro_name) {
+            let sql_index = if terminal.as_deref().is_some_and(|name| {
+                is_typed_query_macro_name(name) || self.typed_query_aliases.contains(name)
+            }) {
                 1
             } else {
                 0
@@ -429,12 +472,19 @@ mod tests {
         tree: &UseTree,
         prefix: &mut Vec<String>,
         query_aliases: &mut BTreeSet<String>,
+        typed_query_aliases: &mut BTreeSet<String>,
         builder_aliases: &mut BTreeSet<String>,
     ) {
         match tree {
             UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                register_use_tree(&path.tree, prefix, query_aliases, builder_aliases);
+                register_use_tree(
+                    &path.tree,
+                    prefix,
+                    query_aliases,
+                    typed_query_aliases,
+                    builder_aliases,
+                );
                 prefix.pop();
             }
             UseTree::Name(name) => {
@@ -444,6 +494,7 @@ mod tests {
                     &full,
                     name.ident.to_string(),
                     query_aliases,
+                    typed_query_aliases,
                     builder_aliases,
                 );
             }
@@ -454,12 +505,19 @@ mod tests {
                     &full,
                     rename.rename.to_string(),
                     query_aliases,
+                    typed_query_aliases,
                     builder_aliases,
                 );
             }
             UseTree::Group(group) => {
                 for tree in &group.items {
-                    register_use_tree(tree, prefix, query_aliases, builder_aliases);
+                    register_use_tree(
+                        tree,
+                        prefix,
+                        query_aliases,
+                        typed_query_aliases,
+                        builder_aliases,
+                    );
                 }
             }
             UseTree::Glob(_) => {}
@@ -470,13 +528,14 @@ mod tests {
         full: &[String],
         alias: String,
         query_aliases: &mut BTreeSet<String>,
+        typed_query_aliases: &mut BTreeSet<String>,
         builder_aliases: &mut BTreeSet<String>,
     ) {
-        if full == ["sqlx", "query"]
-            || full == ["sqlx", "query_as"]
-            || full == ["sqlx", "query_scalar"]
-        {
+        if full.len() == 2 && full[0] == "sqlx" && is_query_macro_name(&full[1]) {
             query_aliases.insert(alias.clone());
+            if matches!(full[1].as_str(), "query_as" | "query_as_unchecked") {
+                typed_query_aliases.insert(alias.clone());
+            }
         }
         if full == ["sqlx", "QueryBuilder"] {
             builder_aliases.insert(alias);
@@ -507,10 +566,7 @@ mod tests {
     }
 
     fn is_typed_query_macro_name(name: &str) -> bool {
-        matches!(
-            name,
-            "query_as" | "query_scalar" | "query_as_unchecked" | "query_scalar_unchecked"
-        )
+        matches!(name, "query_as" | "query_as_unchecked")
     }
 
     fn walkdir(root: &std::path::Path) -> Vec<PathBuf> {
