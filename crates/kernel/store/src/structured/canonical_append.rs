@@ -182,12 +182,10 @@ pub fn validate_append_objects(objects: &[HistoryObject]) -> Result<(), Structur
         return Err(StructuredStoreError::InvalidHistory);
     }
     for object in objects {
-        if object.canonical_json.is_empty()
-            || object.canonical_json.len() > MAX_STORED_FRAME_BYTES
-            || object.validate().is_err()
-        {
-            return Err(StructuredStoreError::InvalidHistory);
-        }
+        validate_frame_length(object.canonical_json.len(), 1)?;
+        object
+            .validate()
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
     }
     Ok(())
 }
@@ -349,7 +347,12 @@ fn collect_nested_content_refs(
 
 /// Validates one durable envelope frame size.
 pub fn validate_envelope_frame(canonical_envelope: &str) -> Result<(), StructuredStoreError> {
-    if canonical_envelope.len() < 2 || canonical_envelope.len() > MAX_STORED_FRAME_BYTES {
+    validate_frame_length(canonical_envelope.len(), 2)
+}
+
+/// Validates the inclusive byte bounds shared by durable canonical frames.
+fn validate_frame_length(byte_len: usize, minimum: usize) -> Result<(), StructuredStoreError> {
+    if byte_len < minimum || byte_len > MAX_STORED_FRAME_BYTES {
         return Err(StructuredStoreError::InvalidHistory);
     }
     Ok(())
@@ -362,7 +365,8 @@ mod tests {
     use mfm_journal::structured::HistoryObject;
 
     use super::{
-        validate_append_objects, validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
+        validate_append_objects, validate_envelope_frame, validate_frame_length, MAX_BATCH_OBJECTS,
+        MAX_STORED_FRAME_BYTES,
     };
 
     fn canonical_string_with_bytes(byte_len: usize) -> String {
@@ -410,11 +414,10 @@ mod tests {
 
     #[test]
     fn object_frame_accepts_exact_limit_and_rejects_one_byte_over() {
-        let mut object = boundary_object();
+        let object = boundary_object();
         validate_append_objects(std::slice::from_ref(&object))
             .expect("exact stored object-frame limit is accepted");
-        object.canonical_json.push('x');
-        assert_eq!(object.canonical_json.len(), MAX_STORED_FRAME_BYTES + 1);
-        assert!(validate_append_objects(std::slice::from_ref(&object)).is_err());
+        assert!(validate_frame_length(MAX_STORED_FRAME_BYTES, 1).is_ok());
+        assert!(validate_frame_length(MAX_STORED_FRAME_BYTES + 1, 1).is_err());
     }
 }
