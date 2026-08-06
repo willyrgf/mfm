@@ -16,13 +16,14 @@ use crate::{
 const ANNEX_BYTES: &[u8] = include_bytes!("../../../../contracts/recoverability/v1/annex.json");
 use crate::limits::{
     MAX_ARRAY_ITEMS, MAX_BASE64URL_CHARACTERS, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS,
-    MAX_CANONICAL_JSON_BYTES, MAX_CANONICAL_JSON_DEPTH, MAX_COMPLETION_RECOVERY_BYTES,
-    MAX_CONFIGURATION_REVISION_BYTES, MAX_FACT_EMISSIONS, MAX_FACT_SCAN_DISTINCT_PRODUCERS,
-    MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES, MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES,
-    MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES, MAX_FACT_SCAN_RETAINED_SOURCE_BYTES,
-    MAX_FACT_SCAN_SELECTED_RESULTS, MAX_FACT_SELECTION_LIMIT, MAX_FACT_SELECTION_QUERIES,
-    MAX_OBJECT_ENTRIES, MAX_PORTABLE_BATCHES, MAX_PORTABLE_EXPORT_BYTES, MAX_PORTABLE_FACT_ROUTES,
-    MAX_PORTABLE_FRAMES, MAX_PORTABLE_FRAME_BYTES, MAX_PORTABLE_OBJECTS, MAX_PORTABLE_SOURCE_RUNS,
+    MAX_CANONICAL_JSON_BYTES, MAX_CANONICAL_JSON_DEPTH, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES,
+    MAX_COMPLETION_RECOVERY_BYTES, MAX_CONFIGURATION_REVISION_BYTES, MAX_FACT_EMISSIONS,
+    MAX_FACT_SCAN_DISTINCT_PRODUCERS, MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES,
+    MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES, MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES,
+    MAX_FACT_SCAN_RETAINED_SOURCE_BYTES, MAX_FACT_SCAN_SELECTED_RESULTS, MAX_FACT_SELECTION_LIMIT,
+    MAX_FACT_SELECTION_QUERIES, MAX_OBJECT_ENTRIES, MAX_PORTABLE_BATCHES,
+    MAX_PORTABLE_EXPORT_BYTES, MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_FRAMES,
+    MAX_PORTABLE_FRAME_BYTES, MAX_PORTABLE_OBJECTS, MAX_PORTABLE_SOURCE_RUNS,
     MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE, MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES,
     MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE, MAX_PRIOR_RUN_SOURCE_REFERENCES,
     MAX_PRIOR_RUN_SOURCE_RULES, MAX_PROVIDER_DEPLOYMENT_ROUTES,
@@ -1542,7 +1543,8 @@ fn validate_native_canonical_value(
         ));
     }
     match value {
-        Value::Null | Value::Bool(_) | Value::String(_) => Ok(()),
+        Value::Null | Value::Bool(_) => Ok(()),
+        Value::String(value) => validate_native_string_bytes(value, path),
         Value::Number(value) if value.as_u64().is_some() => Ok(()),
         Value::Number(_) => Err(value_error(
             RecoverabilityErrorCode::WrongType,
@@ -1550,18 +1552,64 @@ fn validate_native_canonical_value(
             "signed and floating JSON numbers are not native canonical values",
         )),
         Value::Array(values) => {
+            validate_native_collection_count(
+                values.len(),
+                MAX_ARRAY_ITEMS,
+                path,
+                "native canonical array exceeds its item bound",
+            )?;
             for (index, value) in values.iter().enumerate() {
                 validate_native_canonical_value(value, &format!("{path}[{index}]"), depth + 1)?;
             }
             Ok(())
         }
         Value::Object(values) => {
-            for value in values.values() {
+            validate_native_collection_count(
+                values.len(),
+                MAX_OBJECT_ENTRIES,
+                path,
+                "native canonical object exceeds its entry bound",
+            )?;
+            for (key, value) in values {
+                validate_native_collection_count(
+                    key.len(),
+                    MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES,
+                    path,
+                    "native canonical object key exceeds its UTF-8 byte bound",
+                )?;
                 validate_native_canonical_value(value, &format!("{path}.*"), depth + 1)?;
             }
             Ok(())
         }
     }
+}
+
+fn validate_native_string_bytes(
+    value: &str,
+    path: &str,
+) -> std::result::Result<(), RecoverabilityError> {
+    validate_native_collection_count(
+        value.len(),
+        MAX_STRING_UTF8_BYTES,
+        path,
+        "native canonical string exceeds its UTF-8 byte bound",
+    )
+}
+
+fn validate_native_collection_count(
+    count: usize,
+    maximum: usize,
+    path: &str,
+    message: &'static str,
+) -> std::result::Result<(), RecoverabilityError> {
+    if count > maximum {
+        return Err(value_error(
+            RecoverabilityErrorCode::OutOfBounds,
+            path,
+            message,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_reference_graph(
@@ -2373,6 +2421,7 @@ fn validate_annex_metadata(
             "max_base64url_characters",
             "max_canonical_json_bytes",
             "max_canonical_json_depth",
+            "max_canonical_object_key_utf8_bytes",
             "max_batch_objects",
             "max_batch_records",
             "max_completion_recovery_bytes",
@@ -2415,6 +2464,7 @@ fn validate_annex_metadata(
         "max_base64url_characters",
         "max_canonical_json_bytes",
         "max_canonical_json_depth",
+        "max_canonical_object_key_utf8_bytes",
         "max_batch_objects",
         "max_batch_records",
         "max_completion_recovery_bytes",
@@ -2463,6 +2513,10 @@ fn validate_annex_metadata(
         ("max_base64url_characters", MAX_BASE64URL_CHARACTERS as u64),
         ("max_canonical_json_bytes", MAX_CANONICAL_JSON_BYTES as u64),
         ("max_canonical_json_depth", MAX_CANONICAL_JSON_DEPTH as u64),
+        (
+            "max_canonical_object_key_utf8_bytes",
+            MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES as u64,
+        ),
         ("max_batch_objects", MAX_BATCH_OBJECTS as u64),
         ("max_batch_records", MAX_BATCH_RECORDS as u64),
         (
@@ -3626,5 +3680,67 @@ mod reference_path_tests {
             append_json_pointer_token("/array/0", "nested/name~suffix"),
             "/array/0/nested~1name~0suffix"
         );
+    }
+}
+
+#[cfg(test)]
+mod native_canonical_limit_tests {
+    use super::*;
+
+    fn assert_out_of_bounds(value: &Value) {
+        assert_eq!(
+            validate_native_canonical_value(value, "$", 0)
+                .expect_err("one over native bound")
+                .code(),
+            RecoverabilityErrorCode::OutOfBounds
+        );
+    }
+
+    #[test]
+    fn native_string_and_collection_budgets_accept_exact_and_reject_one_over() {
+        {
+            let exact = Value::String("x".repeat(MAX_STRING_UTF8_BYTES));
+            validate_native_canonical_value(&exact, "$", 0).expect("exact string budget");
+        }
+        let one_over = Value::String("x".repeat(MAX_STRING_UTF8_BYTES + 1));
+        assert_out_of_bounds(&one_over);
+
+        {
+            let exact = Value::Array(vec![Value::Null; MAX_ARRAY_ITEMS]);
+            validate_native_canonical_value(&exact, "$", 0).expect("exact array budget");
+        }
+        let one_over = Value::Array(vec![Value::Null; MAX_ARRAY_ITEMS + 1]);
+        assert_out_of_bounds(&one_over);
+
+        {
+            let exact = Value::Object(
+                (0..MAX_OBJECT_ENTRIES)
+                    .map(|index| (format!("{index:07}"), Value::Null))
+                    .collect(),
+            );
+            validate_native_canonical_value(&exact, "$", 0).expect("exact object budget");
+        }
+        let one_over = Value::Object(
+            (0..=MAX_OBJECT_ENTRIES)
+                .map(|index| (format!("{index:07}"), Value::Null))
+                .collect(),
+        );
+        assert_out_of_bounds(&one_over);
+
+        {
+            let exact = Value::Object(
+                std::iter::once(("x".repeat(MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES), Value::Null))
+                    .collect(),
+            );
+            validate_native_canonical_value(&exact, "$", 0).expect("exact object-key budget");
+        }
+        let one_over = Value::Object(
+            std::iter::once((
+                "x".repeat(MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES + 1),
+                Value::Null,
+            ))
+            .collect(),
+        );
+        assert_out_of_bounds(&one_over);
     }
 }

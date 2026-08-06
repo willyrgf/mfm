@@ -12,6 +12,9 @@ pub const MAX_CANONICAL_JSON_BYTES: usize = 33554432;
 /// Generated `max_canonical_json_depth` budget.
 pub const MAX_CANONICAL_JSON_DEPTH: usize = 64;
 
+/// Generated `max_canonical_object_key_utf8_bytes` budget.
+pub const MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES: usize = 1048576;
+
 /// Generated `max_object_entries` budget.
 pub const MAX_OBJECT_ENTRIES: usize = 1048576;
 

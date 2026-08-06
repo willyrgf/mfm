@@ -18,6 +18,11 @@ LIMITS: dict[str, tuple[str, int, str]] = {
     "max_base64url_characters": ("MAX_BASE64URL_CHARACTERS", 22_369_622, "usize"),
     "max_canonical_json_bytes": ("MAX_CANONICAL_JSON_BYTES", 32 * 1024 * 1024, "usize"),
     "max_canonical_json_depth": ("MAX_CANONICAL_JSON_DEPTH", 64, "usize"),
+    "max_canonical_object_key_utf8_bytes": (
+        "MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES",
+        1_048_576,
+        "usize",
+    ),
     "max_object_entries": ("MAX_OBJECT_ENTRIES", 1_048_576, "usize"),
     "max_string_utf8_bytes": ("MAX_STRING_UTF8_BYTES", 16_777_216, "usize"),
     "max_stored_frame_bytes": ("MAX_STORED_FRAME_BYTES", 32 * 1024 * 1024, "usize"),
@@ -558,7 +563,16 @@ def native_canonical_shape() -> dict[str, Any]:
             {"fields": [], "tag": "null"},
             {"fields": [field("value", {"kind": "boolean"})], "tag": "boolean"},
             {
-                "fields": [field("value", string("valid_unicode_scalar_string", 0, 16_777_216))],
+                "fields": [
+                    field(
+                        "value",
+                        string(
+                            "valid_unicode_scalar_string",
+                            0,
+                            LIMITS["max_string_utf8_bytes"][1],
+                        ),
+                    )
+                ],
                 "tag": "string",
             },
             {"fields": [field("value", unsigned(18_446_744_073_709_551_615))], "tag": "unsigned"},
@@ -572,7 +586,15 @@ def native_canonical_shape() -> dict[str, Any]:
                 "tag": "signed",
             },
             {
-                "fields": [field("items", array(reference("mfm.primitive-canonical_value.v1")))],
+                "fields": [
+                    field(
+                        "items",
+                        array(
+                            reference("mfm.primitive-canonical_value.v1"),
+                            maximum=LIMITS["max_array_items"][1],
+                        ),
+                    )
+                ],
                 "tag": "array",
             },
             {
@@ -581,6 +603,7 @@ def native_canonical_shape() -> dict[str, Any]:
                         "entries",
                         array(
                             reference("mfm.primitive-canonical_object_entry.v1"),
+                            maximum=LIMITS["max_object_entries"][1],
                             unique=True,
                             ordering="utf16_key",
                         ),
@@ -604,7 +627,14 @@ def schema_shapes() -> dict[str, tuple[list[str], dict[str, Any]]]:
             ["P-HB-01"],
             object_shape(
                 [
-                    field("key", string("valid_unicode_scalar_string", 0, 1_048_576)),
+                    field(
+                        "key",
+                        string(
+                            "valid_unicode_scalar_string",
+                            0,
+                            LIMITS["max_canonical_object_key_utf8_bytes"][1],
+                        ),
+                    ),
                     field("value", canonical_value),
                 ]
             ),
