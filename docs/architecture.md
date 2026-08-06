@@ -217,7 +217,10 @@ transaction lifecycle.
 `mfm-storage-evm-postgres` owns real SQL activation-registry and nonce-authority implementations,
 private role-specific pools, target-session checks, transaction-bound mutation permits, permanent
 operation-key idempotency, and linearizable status. It performs no JSON-RPC and cannot append run
-history.
+history. It performs no JSON-RPC and cannot append run history. The `mfm-evm` domain owns typed
+wallet recovery closures and mutation preimages; this storage crate owns the external provider
+proof envelope and its callback-free cryptographic check, followed by the explicit historical
+incarnation lookup.
 
 Qualified deployment infrastructure owns the non-exportable target key, fence issuer, session
 qualification, chain-registry and route-membership issuance, non-rollback registry head,
