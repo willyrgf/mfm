@@ -31,9 +31,9 @@ use sqlx::{PgConnection, PgPool, Row};
 
 use crate::error::{PostgresEvmWalletError, Result};
 use crate::provider::{
-    target_session_marker_lock_keys, OfflineActivationVerifier, PendingResolutionLease,
-    ProviderDisposition, ProviderMutation, ProviderTargetContext, ReadSnapshotLease,
-    WriteTransactionLease,
+    target_session_marker_lock_keys, verify_historical_incarnation, OfflineActivationVerifier,
+    PendingResolutionLease, ProviderDisposition, ProviderMutation, ProviderTargetContext,
+    ReadSnapshotLease, WriteTransactionLease,
 };
 use crate::schema::NONCE_APPLICATION_ROLE;
 use crate::support::{
@@ -3033,20 +3033,18 @@ async fn load_candidate_by_key(
         }
         let mut preimage_candidate = candidate.clone();
         preimage_candidate.provider_activation_attestation.clear();
-        activation_verifier
-            .verify_retained_mutation(
-                connection,
-                &candidate.provider_activation_attestation,
-                schema_name,
-                database_oid,
-                retained_key,
-                &ProviderMutation::CandidateActivation {
-                    request: request.clone(),
-                    candidate: preimage_candidate,
-                    state_input_ref: state_input_ref.clone(),
-                },
-            )
-            .await?;
+        let proof_context = activation_verifier.verify_persisted_mutation(
+            &candidate.provider_activation_attestation,
+            schema_name,
+            database_oid,
+            retained_key,
+            &ProviderMutation::CandidateActivation {
+                request: request.clone(),
+                candidate: preimage_candidate,
+                state_input_ref: state_input_ref.clone(),
+            },
+        )?;
+        verify_historical_incarnation(connection, &proof_context.store_incarnation).await?;
         RetainedCandidate {
             request,
             candidate,
@@ -3130,20 +3128,18 @@ async fn load_candidates(
         }
         let mut preimage_candidate = candidate.clone();
         preimage_candidate.provider_activation_attestation.clear();
-        activation_verifier
-            .verify_retained_mutation(
-                connection,
-                &candidate.provider_activation_attestation,
-                schema_name,
-                database_oid,
-                expected_key.as_str(),
-                &ProviderMutation::CandidateActivation {
-                    request: request.clone(),
-                    candidate: preimage_candidate,
-                    state_input_ref: state_input_ref.clone(),
-                },
-            )
-            .await?;
+        let proof_context = activation_verifier.verify_persisted_mutation(
+            &candidate.provider_activation_attestation,
+            schema_name,
+            database_oid,
+            expected_key.as_str(),
+            &ProviderMutation::CandidateActivation {
+                request: request.clone(),
+                candidate: preimage_candidate,
+                state_input_ref: state_input_ref.clone(),
+            },
+        )?;
+        verify_historical_incarnation(connection, &proof_context.store_incarnation).await?;
         candidates.push(candidate);
     }
     Ok(candidates)
@@ -3270,20 +3266,18 @@ async fn decode_completion_row(
     let completion_preimage = completion
         .provider_mutation_preimage()
         .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    activation_verifier
-        .verify_retained_mutation(
-            connection,
-            &completion.provider_completion_attestation,
-            schema_name,
-            database_oid,
-            retained_completion_key,
-            &ProviderMutation::Completion {
-                request: request.clone(),
-                completion: completion_preimage,
-                state_input_ref: state_input_ref.clone(),
-            },
-        )
-        .await?;
+    let proof_context = activation_verifier.verify_persisted_mutation(
+        &completion.provider_completion_attestation,
+        schema_name,
+        database_oid,
+        retained_completion_key,
+        &ProviderMutation::Completion {
+            request: request.clone(),
+            completion: completion_preimage,
+            state_input_ref: state_input_ref.clone(),
+        },
+    )?;
+    verify_historical_incarnation(connection, &proof_context.store_incarnation).await?;
     Ok(Some(RetainedCompletion {
         request,
         terminal_outcome,
