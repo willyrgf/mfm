@@ -195,6 +195,16 @@ mod tests {
                 false,
             ),
             (
+                "negative_dynamic_unchecked_macro_alias_after_use",
+                r#"fn f(x: &str) { let _ = qu!(format!("SELECT {x}")); } use sqlx::query_unchecked as qu;"#,
+                false,
+            ),
+            (
+                "negative_dynamic_unchecked_macro_glob_after_use",
+                r#"fn f(x: &str) { let _ = query_unchecked!(format!("SELECT {x}")); } use sqlx::*;"#,
+                false,
+            ),
+            (
                 "negative_wrapped_catalog",
                 r#"fn f() { let _ = sqlx::query(helper(crate::sql_catalog::schema_set_role("mfm_t_0123456789abcdef_qlf"))); }"#,
                 false,
@@ -231,14 +241,20 @@ mod tests {
     }
 
     impl<'ast> Visit<'ast> for SqlConstructionVisitor<'_> {
+        fn visit_file(&mut self, file: &'ast syn::File) {
+            self.register_scope_imports(&file.items);
+            syn::visit::visit_file(self, file);
+        }
+
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if let Some((_, items)) = &item.content {
+                self.register_scope_imports(items);
+            }
+            syn::visit::visit_item_mod(self, item);
+        }
+
         fn visit_item_use(&mut self, item: &'ast ItemUse) {
-            register_use_tree(
-                &item.tree,
-                &mut Vec::new(),
-                &mut self.query_aliases,
-                &mut self.typed_query_aliases,
-                &mut self.builder_aliases,
-            );
+            self.register_item_use(item);
             if is_sqlx_glob(&item.tree) {
                 self.query_glob_imported = true;
             }
@@ -356,6 +372,27 @@ mod tests {
     }
 
     impl SqlConstructionVisitor<'_> {
+        fn register_scope_imports(&mut self, items: &[syn::Item]) {
+            for item in items {
+                if let syn::Item::Use(item_use) = item {
+                    self.register_item_use(item_use);
+                    if is_sqlx_glob(&item_use.tree) {
+                        self.query_glob_imported = true;
+                    }
+                }
+            }
+        }
+
+        fn register_item_use(&mut self, item: &ItemUse) {
+            register_use_tree(
+                &item.tree,
+                &mut Vec::new(),
+                &mut self.query_aliases,
+                &mut self.typed_query_aliases,
+                &mut self.builder_aliases,
+            );
+        }
+
         fn is_query_path(&self, path: &ExprPath) -> bool {
             self.is_query_path_path(&path.path)
         }
