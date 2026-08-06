@@ -5,7 +5,7 @@ Status: **CONDITIONAL / INCOMPLETE**
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
 The historical gate remains separate from the focused follow-up evidence below.
-The latest implementation tip is `137ed63b`; the focused follow-up candidate
+The latest implementation tip is `f5815ccb`; the focused follow-up candidate
 before the public-result cutover was `f3a15978`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
@@ -90,6 +90,18 @@ is about 26.3 MiB and its RFC-required exact component-byte closure digest is
 about 97.4 MiB, beyond the generated 32 MiB canonical-document budget. This
 production-scale blocker is recorded as conditional rather than masked by a
 larger limit or a smaller wallet policy.
+
+Revision `f5815ccb` adds the independent detached EVM completion audit. The
+new audit reconstructs the wire-shaped completion mutation from persisted
+recovery-closure bytes, binds an explicit provider id, operation key, target
+context, and Ed25519 public key, recomputes the canonical payload digest, and
+checks the signed challenge without calling the storage verifier, PostgreSQL,
+or a live provider. It then projects the public result from closure bytes and
+asserts the exact `{"execution_disposition":"succeeded"}` bytes. A provider
+substitution and a closure-projection substitution are rejected; the focused
+storage package passes 11 tests (one managed-schema test remains ignored).
+The production deployment/provider-trust and production-scale leaf remain
+conditional because the canonical closure-size blocker is unchanged.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -512,10 +524,11 @@ and canonical public projection confirmed; no implementation gap
 
 The long SQL test reloads an existing completion row through both authorities
 before the assertions, so the two-candidate closure is persisted PostgreSQL
-state rather than an in-memory-only construction. The remaining EVM-09 proof
-scope is an independent offline/public-result audit, including whether the
-provider completion attestation is independently verifiable without the
-storage verifier.
+state rather than an in-memory-only construction. At this historical revision
+the remaining EVM-09 proof scope was an independent offline/public-result
+audit, including whether the provider completion attestation was independently
+verifiable without the storage verifier; revision `f5815ccb` supplies that
+repository-local detached audit.
 
 That run includes the 64 completed reserve/activate/complete reservations,
 constant status and mutation statement counts, Q/P SQL-text rejection of
@@ -922,8 +935,10 @@ result: ok — 1 task, 4 tests passed, 0 failed in 676.89s
 The long SQL scenario deletes the registered historical row, asserts the
 persisted completion fails closed, restores it, rewrites only the stored
 incarnation JSON, asserts failure again, restores the exact column value, and
-confirms status recovery. The remaining EVM-09 proof scope is deployment and
-provider trust plus an independent production offline/public-result audit.
+confirms status recovery. At this historical revision the remaining EVM-09
+scope was deployment and provider trust plus an independent production
+offline/public-result audit; `f5815ccb` now supplies the repository-local
+detached audit while the production-scale leaf remains conditional.
 
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
@@ -1263,7 +1278,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, and public-result redaction remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`. Independent deployment/provider trust and production offline/public-result matrices remain; the clean production leaf is blocked by the canonical closure-size failure recorded above. |
+| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, and the detached offline audit remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider. Production deployment/provider trust and the production-scale leaf remain conditional; the clean production leaf is blocked by the canonical closure-size failure recorded above. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
@@ -1393,6 +1408,6 @@ are green on their applicable revisions, and the exact composed gate for
 `82e474ca` is green. The strict plan acceptance condition is not met. The
 review remains **CONDITIONAL / INCOMPLETE** until the residual proof matrices,
 live app integration, production
-trust deployment, the independent EVM offline/public-result audit, remaining
+trust deployment, the production-scale EVM leaf, remaining
 keystore external termination/OOM/resource-failure witnesses, and ownership evidence are supplied or the
 normative plan is deliberately amended.
