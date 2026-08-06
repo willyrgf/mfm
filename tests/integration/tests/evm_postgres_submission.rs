@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -116,9 +117,9 @@ use zeroize::Zeroizing;
 
 use mfm_values::MfmValue;
 use mfm_wallet_authority_provider_test_support::{
-    postgres_proxy::{CommitFault, PostgresCommitFaultProxy}, ProviderCheckpointAuthority,
-    ProviderDeploymentAssemblyPolicy, ProviderProcess, ProviderProcessConfig,
-    ProviderRpcInventoryTarget,
+    postgres_proxy::{CommitFault, PostgresCommitFaultProxy},
+    ProviderCheckpointAuthority, ProviderDeploymentAssemblyPolicy, ProviderProcess,
+    ProviderProcessConfig, ProviderRpcInventoryTarget,
 };
 
 const WORKER_MODE_ENV: &str = "MFM_EVM_POSTGRES_SUBMISSION_MODE";
@@ -128,6 +129,7 @@ const RPC_ENDPOINT_ENV: &str = "MFM_EVM_POSTGRES_RPC_ENDPOINT";
 const ACTIVATION_ENV: &str = "MFM_EVM_POSTGRES_ACTIVATION_ATTESTATION";
 const PROVIDER_ENDPOINT_ENV: &str = "MFM_EVM_POSTGRES_PROVIDER_ENDPOINT";
 const PROVIDER_PUBLIC_KEY_ENV: &str = "MFM_EVM_POSTGRES_PROVIDER_PUBLIC_KEY";
+const WORKER_READY_FILE_ENV: &str = "MFM_EVM_POSTGRES_WORKER_READY_FILE";
 const ACTIVATION_ADMIN_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_ACTIVATION_ADMIN_DATABASE_URL";
 const ACTIVATION_PUBLIC_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_ACTIVATION_PUBLIC_DATABASE_URL";
 const NONCE_APPLICATION_DATABASE_URL_ENV: &str = "MFM_EVM_WALLET_NONCE_APPLICATION_DATABASE_URL";
@@ -603,6 +605,10 @@ async fn evm_postgres_submission_worker() {
     )
     .await
     .expect("open real PostgreSQL wallet authority");
+    if let Some(path) = std::env::var_os(WORKER_READY_FILE_ENV) {
+        std::fs::write(path, b"wallet-authority-ready")
+            .expect("publish wallet authority readiness");
+    }
     if matches!(mode, PHASE_PRODUCTION_ADMIT | PHASE_PRODUCTION_RESUME) {
         run_production_application_worker(
             &base_url,
@@ -3418,9 +3424,8 @@ async fn run_worker_expect_crash_before_completion_commit(
         commit_proxy.database_url(),
         &database.nonce_application_url(),
     );
-    let intercept_target = commit_proxy
-        .arm(CommitFault::HoldTransactionBeforeCommit, 1)
-        .expect("arm completion pre-commit process-loss fault");
+    let ready_directory = tempfile::tempdir().expect("create completion readiness directory");
+    let ready_path = ready_directory.path().join("wallet-authority-ready");
     let mut child = worker_command(
         database,
         endpoint,
@@ -3429,13 +3434,18 @@ async fn run_worker_expect_crash_before_completion_commit(
         provider,
         None,
         Some(&proxy_nonce_url),
+        Some(&ready_path),
     )
     .spawn()
     .expect("spawn completion pre-commit worker");
-    commit_proxy
-        .wait_for_intercepts(intercept_target)
-        .await;
-    child.start_kill().expect("kill completion pre-commit worker");
+    wait_for_worker_ready(&ready_path).await;
+    let intercept_target = commit_proxy
+        .arm(CommitFault::HoldTransactionBeforeCommit, 1)
+        .expect("arm completion pre-commit process-loss fault");
+    commit_proxy.wait_for_intercepts(intercept_target).await;
+    child
+        .start_kill()
+        .expect("kill completion pre-commit worker");
     let output = child
         .wait_with_output()
         .await
@@ -3453,12 +3463,10 @@ async fn run_worker_expect_crash_before_completion_commit(
         "completion pre-commit worker must be terminated by process loss"
     );
     let wallet_pool = database.wallet_pool().await;
-    let retained = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM wallet_nonce_completions",
-    )
-    .fetch_one(&wallet_pool)
-    .await
-    .expect("count completion rows after pre-commit process loss");
+    let retained = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wallet_nonce_completions")
+        .fetch_one(&wallet_pool)
+        .await
+        .expect("count completion rows after pre-commit process loss");
     wallet_pool.close().await;
     assert_eq!(
         retained, 0,
@@ -3495,10 +3503,9 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         commit_proxy.database_url(),
         &database.nonce_application_url(),
     );
-    let intercept_target = commit_proxy
-        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
-        .expect("arm initial completion acknowledgement fault");
-    let output = worker_command(
+    let ready_directory = tempfile::tempdir().expect("create completion readiness directory");
+    let ready_path = ready_directory.path().join("wallet-authority-ready");
+    let mut child = worker_command(
         database,
         endpoint,
         mode,
@@ -3506,13 +3513,19 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         provider,
         None,
         Some(&proxy_nonce_url),
+        Some(&ready_path),
     )
-    .output()
-    .await
-    .expect("run completion acknowledgement worker");
-    commit_proxy
-        .wait_for_intercepts(intercept_target)
-        .await;
+    .spawn()
+    .expect("spawn completion acknowledgement worker");
+    wait_for_worker_ready(&ready_path).await;
+    let intercept_target = commit_proxy
+        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
+        .expect("arm initial completion acknowledgement fault");
+    commit_proxy.wait_for_intercepts(intercept_target).await;
+    let output = child
+        .wait_with_output()
+        .await
+        .expect("run completion acknowledgement worker");
     assert_canaries_absent("completion-ack stdout", &output.stdout);
     assert_canaries_absent("completion-ack stderr", &output.stderr);
     assert!(
@@ -3522,12 +3535,10 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         String::from_utf8_lossy(&output.stderr),
     );
     let wallet_pool = database.wallet_pool().await;
-    let retained = sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM wallet_nonce_completions",
-    )
-    .fetch_one(&wallet_pool)
-    .await
-    .expect("count completion rows after initial acknowledgement loss");
+    let retained = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wallet_nonce_completions")
+        .fetch_one(&wallet_pool)
+        .await
+        .expect("count completion rows after initial acknowledgement loss");
     wallet_pool.close().await;
     assert_eq!(
         retained, 1,
@@ -3594,6 +3605,7 @@ async fn run_worker_process(
         provider,
         crash_boundary,
         None,
+        None,
     )
     .output()
     .await
@@ -3608,6 +3620,7 @@ fn worker_command(
     provider: &ProviderProcess,
     crash_boundary: Option<InjectedCrashBoundary>,
     nonce_application_url: Option<&str>,
+    ready_path: Option<&Path>,
 ) -> tokio::process::Command {
     let mut command =
         tokio::process::Command::new(std::env::current_exe().expect("test executable"));
@@ -3652,10 +3665,7 @@ fn worker_command(
                 .history_config_writer_login
                 .database_url(&database.database_url),
         )
-        .env(
-            NONCE_APPLICATION_DATABASE_URL_ENV,
-            nonce_url,
-        )
+        .env(NONCE_APPLICATION_DATABASE_URL_ENV, nonce_url)
         .env(WORKER_MODE_ENV, mode)
         .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string());
     for variable in [
@@ -3665,6 +3675,10 @@ fn worker_command(
         INJECTED_CRASH_AFTER_COMPLETION_ENV,
     ] {
         command.env_remove(variable);
+    }
+    command.env_remove(WORKER_READY_FILE_ENV);
+    if let Some(path) = ready_path {
+        command.env(WORKER_READY_FILE_ENV, path);
     }
     if let Some(boundary) = crash_boundary {
         let variable = match boundary {
@@ -3681,6 +3695,22 @@ fn worker_command(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     command
+}
+
+async fn wait_for_worker_ready(path: &Path) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if std::fs::read(path)
+                .map(|contents| contents == b"wallet-authority-ready")
+                .unwrap_or(false)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("worker did not publish wallet authority readiness");
 }
 
 fn expected_access_capabilities() -> BTreeSet<ContentRef> {
