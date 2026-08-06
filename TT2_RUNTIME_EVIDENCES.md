@@ -111,6 +111,7 @@ Post-step-12 implementation and proof revisions:
 | `eb38ea44` | prove valid later audit suffix export |
 | `1ca2f7cd` | retain observed audit artifact in replay corpus |
 | `db1b7503` | witness malformed ciphertext and wrong key identity |
+| `c832e5d8` | cover matching public key identity witness |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -470,11 +471,11 @@ nix develop -c cargo fmt --all -- --check — pass on `eb38ea44`
 nix develop -c cargo test -p mfm-replay generated_portable_artifact_corpus_round_trips -- --nocapture — pass on `1ca2f7cd`
 nix develop -c cargo test -p mfm-replay --lib — 10 passed on `1ca2f7cd`
 python3 contracts/recoverability/generate.py — deterministic regeneration pass on `1ca2f7cd`
-nix develop -c cargo test -p mfm-keystore decrypt_oversized_ciphertext_rejects_before_allocating_plaintext -- --nocapture — 1 passed on `db1b7503`
-nix develop -c cargo test -p mfm-keystore qualification_rejects_a_valid_key_with_wrong_public_and_account_identity -- --nocapture — 1 passed on `db1b7503`
-nix develop -c cargo test -p mfm-keystore — 93 unit tests + 9 doctests passed on `db1b7503`
-nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `db1b7503`
-nix develop -c cargo fmt --all -- --check — pass on `233c96cd`
+nix develop -c cargo test -p mfm-keystore decrypt_oversized_ciphertext_rejects_before_allocating_plaintext -- --nocapture — 1 passed on `c832e5d8`
+nix develop -c cargo test -p mfm-keystore qualification_rejects_a_valid_key_with_wrong_public_and_account_identity -- --nocapture — 1 passed on `c832e5d8`
+nix develop -c cargo test -p mfm-keystore — 93 unit tests + 9 doctests passed on `c832e5d8`
+nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `c832e5d8`
+nix develop -c cargo fmt --all -- --check — pass on `c832e5d8`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and

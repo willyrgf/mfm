@@ -17,10 +17,10 @@ real store-shaped later audit suffix and verifies its offline parity; the
 preceding purpose-isolation cutover `a1a78b84` keeps the full verified cursor
 and object graph inside the store while exposing only an opaque offline
 summary. Revision `1ca2f7cd` retains the observed-read audit bytes in the
-generated corpus and rebuilds them through the store fixture. Revision
-`db1b7503` adds direct witnesses for oversized ciphertext and a valid key with
-the wrong public/account identity. Its predecessor `bd98e8ca` removed the full
-actionable frontier from
+generated corpus and rebuilds them through the store fixture. Revisions
+`db1b7503` and `c832e5d8` add direct witnesses for oversized ciphertext, a wrong
+account, and a matching-account key with a valid but wrong public key. Their
+predecessor `bd98e8ca` removed the full actionable frontier from
 public and recorded-replay evidence.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
@@ -120,8 +120,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   acceptance and Semantic-rejection vectors from the single generator owner,
   and rebuilds the bytes through the real store fixture before offline parity.
 - Keystore boundary witnesses: `db1b7503` adds explicit oversized-ciphertext
-  and valid-wrong-identity tests; the full package and Clippy checks pass on
-  that exact revision.
+  and wrong-account coverage, while `c832e5d8` adds matching-account wrong-
+  public-key coverage; the full package and Clippy checks pass on the latter.
 - Current post-gate corpus/test-only revisions: `5711097b` (deterministic
   portable-vector generation, generated corpus/README, replay corpus assertion),
   `74bfa335` (generated offline-fold acceptance vector), and `6284e8d9`
@@ -424,13 +424,13 @@ nix develop -c cargo test -p mfm-keystore
 nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture
 8 decrypt-focused tests passed on `8b2e64ba`
 nix develop -c cargo test -p mfm-keystore decrypt_oversized_ciphertext_rejects_before_allocating_plaintext -- --nocapture
-1 focused test passed on `db1b7503`
+1 focused test passed on `c832e5d8`
 nix develop -c cargo test -p mfm-keystore qualification_rejects_a_valid_key_with_wrong_public_and_account_identity -- --nocapture
-1 focused test passed on `db1b7503`
+1 focused test passed on `c832e5d8`
 nix develop -c cargo test -p mfm-keystore
-93 unit tests and 9 doctests passed on `db1b7503`
+93 unit tests and 9 doctests passed on `c832e5d8`
 nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings
-pass on `db1b7503`
+pass on `c832e5d8`
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture
 1 focused test passed
 nix develop -c cargo test -p mfm-app --test application-privacy-ui
@@ -442,7 +442,7 @@ nix develop -c cargo test -p mfm-replay --lib
 python3 contracts/recoverability/generate.py
 deterministic regeneration passed on `1ca2f7cd`
 nix develop -c cargo fmt --all -- --check
-pass on `233c96cd`
+pass on `c832e5d8`
 ```
 
 The wallet run started after `266d6889` and no commits were made during it,
@@ -551,7 +551,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live matrix remains. |
 | TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
-| TT2-SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid key with the wrong public/account identity; external termination/OOM/resource-failure classes remain. |
+| TT2-SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid matching-account key with the wrong public key plus a valid wrong-account key; external termination/OOM/resource-failure classes remain. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
 | TT2-VERIFY-01 | Conditional | Broad/focused gates pass, but the plan's complete authority/fault/offline/security matrix is incomplete. |
 | TT2-PROCESS-01 | Conditional | Evidence is now revision-pinned and honest; a PASS is withheld until the residuals close. |
