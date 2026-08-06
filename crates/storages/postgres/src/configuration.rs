@@ -481,7 +481,7 @@ async fn select_rows(
               WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
                 AND entry_point_operation_id = $3 AND target_id = $4 \
                 AND append_request_id = $5 \
-              ORDER BY revision_sequence",
+              ORDER BY configuration_revisions.revision_sequence",
         )
         .bind(key.store_scope_id().as_str())
         .bind(key.tenant_scope_id().as_str())
@@ -500,7 +500,7 @@ async fn select_rows(
                FROM configuration_revisions \
               WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
                 AND entry_point_operation_id = $3 AND target_id = $4 \
-              ORDER BY revision_sequence",
+              ORDER BY configuration_revisions.revision_sequence",
         )
         .bind(key.store_scope_id().as_str())
         .bind(key.tenant_scope_id().as_str())
