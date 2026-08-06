@@ -1275,6 +1275,23 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
         .iter()
         .all(|candidate| !candidate.provider_activation_attestation.is_empty()));
 
+    let encoded = serde_json::to_vec(&completed).expect("serialize complete recovery closure");
+    let decoded: CompletedWalletNonce =
+        serde_json::from_slice(&encoded).expect("deserialize complete recovery closure");
+    assert_eq!(
+        serde_json::to_vec(&decoded).expect("re-serialize complete recovery closure"),
+        encoded,
+        "the public completion bytes must be stable across an offline closure reload"
+    );
+    decoded
+        .validate()
+        .expect("reloaded recovery closure must revalidate every preimage");
+    assert_eq!(
+        decoded.canonical_terminal_outcome.canonical_public_result,
+        completed.canonical_terminal_outcome.canonical_public_result,
+        "offline closure reload must preserve the canonical public result"
+    );
+
     let mut forged = completed.clone();
     forged.sealed_activated_candidates.clear();
     assert!(forged.validate().is_err(), "empty sealed prefix rejected");
