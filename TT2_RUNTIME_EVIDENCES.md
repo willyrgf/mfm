@@ -162,6 +162,7 @@ Post-step-12 implementation and proof revisions:
 | `17129b21` | enforce native canonical recoverability bounds |
 | `26bbb44d` | bound base64url parser ingress |
 | `6f135845` | remove unreachable signed native values |
+| `da2b41a4` | bound plain canonical json ingress |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -522,6 +523,14 @@ Full canonical targets pass 3/12/6 plus 3 doctests, the facts target passes
 14/14, and independent review marks the unsigned-native cutover PASS. Generic
 `CanonicalValue::Signed` remains available for non-primitive typed-value paths.
 
+Revision `da2b41a4` applies the generated 33,554,432-byte canonical-document
+budget to `PlainCanonicalJsonBytes` before number scanning, JSON parsing, or
+canonical allocation, and checks the canonicalized output as well. Exact input
+is accepted and one byte over is rejected in the focused canonical-json target;
+full canonical targets pass 3/13/6 plus 3 doctests, and the affected facts,
+values, journal, and store package targets remain green. Independent review
+marks the plain-parser boundary PASS.
+
 The provider-boundary budget targets ran from the focused revisions:
 
 ```text
@@ -839,6 +848,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `17129b21` | `enforce native canonical recoverability bounds` | generated annex names the canonical object-key budget; native-wire validation checks exact string, object-key, array-item, and object-entry limits before recursion; direct exact/one-over focused test passes 1/1 and canonical integration targets pass 3/11/5 |
 | `26bbb44d` | `bound base64url parser ingress` | parser enforces generated 22,369,622-character budget before scanning/decoding; exact input decodes to 16,777,216 bytes and one-over input rejects in the 1/1 canonical-json target |
 | `6f135845` | `remove unreachable signed native values` | generated primitive canonical schema removes signed variant; canonical codec rejects signed JSON numbers, `FactScalar` rejects signed producers, and affected canonical/facts targets pass 3/12/6 plus 14/14 |
+| `da2b41a4` | `bound plain canonical json ingress` | parser enforces generated 33,554,432-byte budget before scanning/parsing/allocation and rechecks canonical output; exact/one-over regression passes in canonical-json, with full canonical 3/13/6 plus 3 doctests and downstream facts/values/journal/store targets green |
 | `897ec4b8` | `record default configuration qualification` | latest default-concurrency managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests; earlier intermittent race witnesses remain provenance |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |

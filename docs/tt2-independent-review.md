@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `6f135845`; the historical gate remains
+The current implementation tip is `da2b41a4`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `6f135845`, which includes the bounded
+The focused follow-up candidate is `da2b41a4`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -20,7 +20,8 @@ proof bounds), `219c588b` (shared canonical batch-count bounds), and
 count bounds), `70e6900e` (prior-run source-manifest byte bound),
 `7741a07e` (prior-run source count bounds), and `17129b21` (native canonical
 recoverability bounds), `26bbb44d` (base64url parser ingress bound), and
-`6f135845` (unsigned-native primitive cutover). The earlier APP-01 proof
+`6f135845` (unsigned-native primitive cutover), and `da2b41a4` (plain
+canonical-document ingress bound). The earlier APP-01 proof
 revision is `2fc4afa8`, which adds two
 purpose-isolation compile-fail cases. The latest retry-boundary correction is
 `e7624406`, which removes redundant store-level snapshot retries and leaves one
@@ -134,7 +135,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `6f135845` (`remove unreachable signed native values`),
+- Focused follow-up candidate: `da2b41a4` (`bound plain canonical json ingress`),
+  including `6f135845` (`remove unreachable signed native values`),
   including `6525fad6` (`expand configuration corpus breadth`),
   including `8a902d03` (`fail closed SQL file macros`),
   including `2fea7802` (`restore SQL inventory builder scope`),
@@ -289,6 +291,13 @@ both the closed implementation work and the remaining proof/deployment gaps.
   reject positive and negative `CanonicalValue::Signed`; full canonical targets
   pass 3/12/6 plus 3 doctests and facts pass 14/14. Generic signed canonical
   values remain available outside the primitive native contract.
+- Plain canonical-document ingress: `da2b41a4` applies the generated
+  33,554,432-byte document budget before number scanning, JSON parsing, or
+  canonical allocation, and checks canonicalized output as well. Exact-limit
+  input is accepted and one byte over is rejected in the focused canonical-json
+  target (1/1); full canonical targets pass 3/13/6 plus 3 doctests, and the
+  affected facts, values, journal, and store targets remain green. Independent
+  review marks this parser boundary PASS.
 - Default-concurrency qualification: clean managed run
   `run-2246603-1786002530958490012` passes all 24 structured-history tests,
   including `configured_value_history_linearizes_same_stream_append_races`;
@@ -831,6 +840,22 @@ schema identities remain unchanged. The native codec rejects `-1` and
 `CanonicalValue::Signed` producers instead of allowing a nonnegative value to
 silently round-trip as unsigned.
 
+The plain canonical-document bound then ran from clean source tip `da2b41a4`:
+
+```text
+nix develop -c cargo test -p mfm-canonical --test canonical_json plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse -- --nocapture
+source: da2b41a4
+result: ok — 1 plain canonical-document boundary test passed, 0 failed
+
+nix develop -c cargo test -p mfm-canonical -- --nocapture
+source: da2b41a4
+result: ok — 3 unit, 13 canonical-json, 6 recoverability integration, and 3 doctests passed, 0 failed
+```
+
+The one-byte-over input is rejected before number scanning, JSON parsing, or
+canonical allocation; the exact 33,554,432-byte input remains accepted. The
+facts, values, journal, and store package targets also pass on this source tip.
+
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
 revision `9f61c39a`):
@@ -1126,6 +1151,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `canonical_json::base64url_bytes_accept_exact_character_budget_and_reject_one_over` | pass in focused `mfm-canonical` target on `26bbb44d` (1/1); generated 22,369,622-character exact input decodes to 16,777,216 bytes and one-over input rejects before decode | N/A; introduced after baseline |
 | `recoverability_v1::primitive_canonical_value_rejects_signed_json_numbers` | pass in full `mfm-canonical` target on `6f135845`; native primitive rejects `-1` and `i64::MIN`, while unsigned `1` remains accepted | N/A; introduced after baseline |
 | `facts::scalar_subject_and_predicate_are_exact_float_free_annex_values` | pass in focused `mfm-facts` target on `6f135845` (14/14); positive and negative `CanonicalValue::Signed` producers are rejected | N/A; introduced after baseline |
+| `canonical_json::plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse` | pass in focused `mfm-canonical` target on `da2b41a4` (1/1); generated 33,554,432-byte exact input is accepted and one-byte-over input rejects before parse/allocation | N/A; introduced after baseline |
 | `wallet_authority::provider_attestation_tests::provider_attestation_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `a1ad9814`; exact/one-byte-over generated provider-proof budget | N/A; introduced after baseline |
 | `provider::frame_tests::{provider_attestation_accepts_exact_budget_and_rejects_one_byte_over,finish_authorization_accepts_exact_budget_and_rejects_one_byte_over,deployment_route_count_accepts_exact_budget_and_rejects_one_route_over,deployment_route_proof_accepts_exact_budget_and_rejects_one_byte_over}` | pass in focused `mfm-storage-evm-postgres` target on `75ac74f5` (6/6 provider frame tests); valid route references and fresh matching digest isolate the route/proof and finish-authorization over-limit rejections | N/A; introduced after baseline |
 | `wallet_authority::completion_recovery_limit_tests::completion_recovery_accepts_exact_budget_and_rejects_one_byte_over` | pass in focused `mfm-evm` target on `2512ebf8` (exact/one-over generated `MAX_COMPLETION_RECOVERY_BYTES`) | N/A; introduced after baseline |
