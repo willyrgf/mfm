@@ -369,6 +369,52 @@ fn decrypt_aad_identity_mismatch_zeroizes_the_production_allocation() {
 }
 
 #[test]
+fn decrypt_invalid_key_material_cleans_up_after_authenticated_copy() {
+    use super::super::secure_key::KeyMaterialWitness;
+
+    let (_temp_dir, mut keystore) = test_keystore();
+    keystore.unlock("test_password").unwrap();
+    let key_id = keystore
+        .import_private_key(
+            Some("invalid-after-auth".to_owned()),
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        )
+        .unwrap();
+    let (nonce, entry_id) = {
+        let entry = keystore
+            .entries
+            .iter()
+            .find(|entry| entry.id == key_id)
+            .expect("authenticated entry");
+        (entry.nonce, entry.id)
+    };
+    let encrypted_invalid_key = {
+        let master_key = keystore.master_key.as_ref().expect("unlocked master key");
+        keystore
+            .encrypt_data(master_key, &nonce, &[0_u8; 32], entry_id.as_bytes())
+            .expect("encrypt invalid key material")
+    };
+    keystore
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id == key_id)
+        .expect("authenticated entry")
+        .encrypted_data = encrypted_invalid_key;
+
+    let witness = KeyMaterialWitness::new();
+    let secure = keystore
+        .private_key_for_test_with_ownership_witness(key_id, witness.clone())
+        .expect("authenticated decrypt reaches key validation");
+    assert!(matches!(
+        secure.ethereum_address(),
+        Err(KeystoreError::InvalidPrivateKey)
+    ));
+    assert!(witness.observed_transfer());
+    drop(secure);
+    assert!(witness.observed_cleanup());
+}
+
+#[test]
 fn decrypt_wrong_length_rejects_before_allocating_plaintext() {
     use super::super::secure_key::KeyMaterialWitness;
 
