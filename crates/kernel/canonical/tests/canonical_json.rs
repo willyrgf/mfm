@@ -109,6 +109,30 @@ fn base64url_bytes_accept_exact_character_budget_and_reject_one_over() {
 }
 
 #[test]
+fn plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse() {
+    {
+        let exact = format!(
+            "\"{}\"",
+            "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 2)
+        );
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&exact)
+            .expect("exact canonical JSON document budget");
+        assert_eq!(
+            canonical.as_bytes().len(),
+            mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES
+        );
+    }
+
+    let one_over = format!(
+        "\"{}\"",
+        "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 1)
+    );
+    let error = PlainCanonicalJsonBytes::from_json_str(&one_over)
+        .expect_err("one byte over the canonical JSON document budget");
+    assert!(error.message().contains("byte bound"));
+}
+
+#[test]
 fn incremental_raw_content_hashing_matches_the_one_shot_contract() {
     let contract = mfm_canonical::RecoverabilityContract::embedded()
         .expect("embedded recoverability contract");

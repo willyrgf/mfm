@@ -179,11 +179,18 @@ impl PlainCanonicalJsonBytes {
     /// Parses plain JSON text, rejects unsupported grammar, and returns
     /// canonical bytes.
     pub fn from_json_str(input: &str) -> Result<Self> {
+        if input.len() > limits::MAX_CANONICAL_JSON_BYTES {
+            return Err(CanonicalError::new("canonical JSON exceeds its byte bound"));
+        }
         validate_number_tokens(input)?;
         let value: PlainJsonValue = serde_json::from_str(input)
             .map_err(|error| CanonicalError::new(format!("invalid canonical JSON: {error}")))?;
         value.validate_depth(0)?;
-        Ok(Self::from_value(&value))
+        let canonical = Self::from_value(&value);
+        if canonical.bytes.len() > limits::MAX_CANONICAL_JSON_BYTES {
+            return Err(CanonicalError::new("canonical JSON exceeds its byte bound"));
+        }
+        Ok(canonical)
     }
 
     /// Validates that the supplied plain JSON bytes are already canonical.

@@ -91,9 +91,10 @@ component-definition bound for structured protocol and schema nodes. Exceeding a
 typed rejection and never a process-stack operation.
 
 The generated recoverability annex allows canonical JSON values and retained history frames up to
-32 MiB. These ceilings remain separate from the smaller string, portable-export, and
-provider-proof budgets: they admit the largest qualified structured-program value while keeping
-every transport and retained payload bound explicit.
+32 MiB. Plain canonical-JSON ingress applies that generated document budget before parsing and
+again to the canonicalized bytes. These ceilings remain separate from the smaller string,
+portable-export, and provider-proof budgets: they admit the largest qualified structured-program
+value while keeping every transport and retained payload bound explicit.
 Typed base64url ingress applies its generated character budget before decoding, so hostile wire
 strings are rejected before the decoded allocation; trusted byte construction remains subject to
 the enclosing canonical-value or retained-payload bound.
