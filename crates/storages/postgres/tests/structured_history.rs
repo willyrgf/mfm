@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, MAX_CANONICAL_JSON_DEPTH};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_facts::{
     CanonicalFactPredicate, FactOrdering, FactProposal, FactSelectionLimit, FactSelectionQuery,
@@ -65,6 +65,13 @@ static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const FRESH_PROCESS_SCHEMA_ENV: &str = "MFM_STRUCTURED_HISTORY_TEST_SCHEMA";
 const FRESH_PROCESS_MODE_ENV: &str = "MFM_STRUCTURED_HISTORY_TEST_MODE";
+
+fn nested_array_json(depth: usize) -> String {
+    let mut json = "[".repeat(depth);
+    json.push('0');
+    json.push_str(&"]".repeat(depth));
+    json
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -785,7 +792,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
 
     // Exercise a deterministic shape corpus through both backends. Each vector uses a separate
     // stream so one invalid value cannot hide a later acceptance decision behind a stale head.
-    for ordinal in 0_u32..32 {
+    for ordinal in 0_u32..64 {
         let json = match ordinal % 8 {
             0 => format!(r#"{{"ordinal":{ordinal}}}"#),
             1 => format!(
@@ -843,6 +850,55 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         assert!(
             postgres_vector.is_ok(),
             "generated vector {ordinal} must append"
+        );
+    }
+
+    // Exercise the shared canonical depth boundary through both backends. A
+    // value at the exact depth limit is a valid append; one level deeper and
+    // non-canonical hostile forms must be rejected before backend dispatch.
+    let depth_stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        tenant_scope_id.clone(),
+        operation_id.clone(),
+        StableId::new("mfm.postgres.fixture/configured-parity-depth").expect("depth target"),
+    );
+    let exact_depth_value =
+        ProposedCanonicalValue::from_json(&nested_array_json(MAX_CANONICAL_JSON_DEPTH))
+            .expect("exact canonical depth value");
+    let postgres_exact_depth = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            depth_stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-depth-exact")
+                .expect("exact depth append id"),
+            contract.clone(),
+            exact_depth_value.clone(),
+        ))
+        .await;
+    let memory_exact_depth = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            depth_stream,
+            None,
+            AppendRequestId::new("postgres-configured-parity-depth-exact")
+                .expect("exact depth append id"),
+            contract.clone(),
+            exact_depth_value,
+        ))
+        .await;
+    assert_eq!(postgres_exact_depth, memory_exact_depth);
+    assert!(
+        postgres_exact_depth.is_ok(),
+        "exact canonical depth must append through both backends"
+    );
+    for hostile in [
+        nested_array_json(MAX_CANONICAL_JSON_DEPTH + 1),
+        "1.0".to_owned(),
+        "{\"duplicate\":1,\"duplicate\":2}".to_owned(),
+        "{\"unterminated\":true".to_owned(),
+    ] {
+        assert!(
+            ProposedCanonicalValue::from_json(&hostile).is_err(),
+            "hostile non-canonical value must be rejected before backend dispatch: {hostile}"
         );
     }
 
@@ -1013,7 +1069,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         StableId::new("mfm.postgres.fixture/configured-parity-scale").expect("scale target"),
     );
     let mut scale_predecessor: Option<ConfigurationRevision> = None;
-    for sequence in 0_u32..32 {
+    for sequence in 0_u32..64 {
         let value = ProposedCanonicalValue::from_json(&format!(
             r#"{{"sequence":{},"payload":"scale-{sequence}"}}"#,
             sequence
