@@ -23,11 +23,15 @@ EvmSubmissionRequest
   -> sign and broadcast that exact candidate once
   -> observe transaction, receipt, finalized head, and canonical inclusion
   -> reconcile or complete the wallet authority
-  -> project EvmSubmissionOutput
+  -> project the redaction-safe EvmSubmissionOutput disposition
 ```
 
 Every step has a certified occurrence and exact failure handling. Polling, replacement,
 reconciliation, and exhaustion are bounded by the admitted expansion.
+
+`EvmSubmissionOutput` contains only the typed terminal execution disposition. The complete
+`CompletedWalletNonce` recovery closure is retained by the wallet authority for internal
+verification and is never serialized into the public run result.
 
 The managed qualification pins the content-addressed certification identity of this production
 entry program and certifies it again after reversing component registration order. Any authored,

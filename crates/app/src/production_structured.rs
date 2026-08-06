@@ -35,7 +35,7 @@ use mfm_store::structured::{
     ReplayRunReader, StructuredAdmissionMaterial, StructuredStoreError, TraceRunReader,
     VerifiedConfiguredValue,
 };
-use mfm_values::{MfmConfig, MfmValue};
+use mfm_values::{MfmConfig, MfmValue, PublicOutputDescriptor};
 use tokio::io::AsyncWriteExt;
 
 use crate::application::{
@@ -295,7 +295,8 @@ fn assemble_registry(
             planning_profile()?,
             mfm_portfolio::PortfolioSnapshotSelector::schema_id()
                 .map_err(|_| registry_invalid())?,
-            mfm_portfolio::PortfolioPublicOutputs::schema_id().map_err(|_| registry_invalid())?,
+            mfm_portfolio::PortfolioPublicOutputs::public_schema_id()
+                .map_err(|_| registry_invalid())?,
         )
         .map_err(|_| registry_invalid())?,
         EntryPointContract::new(
@@ -304,7 +305,7 @@ fn assemble_registry(
             submission_operation,
             planning_profile()?,
             mfm_evm::EvmSubmitTransactionSelector::schema_id().map_err(|_| registry_invalid())?,
-            mfm_evm::EvmSubmissionOutput::schema_id().map_err(|_| registry_invalid())?,
+            mfm_evm::EvmSubmissionOutput::public_schema_id().map_err(|_| registry_invalid())?,
         )
         .map_err(|_| registry_invalid())?,
     ];

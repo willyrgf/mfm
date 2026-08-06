@@ -413,16 +413,14 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     let outcome = audit
         .root_outcome::<EvmSubmissionOutput, EvmSubmissionFailure>(&batches)
         .expect("decode closed EVM root outcome");
-    let completion = match outcome {
-        OperationOutcome::Success(output) => output.completion,
+    match outcome {
+        OperationOutcome::Success(output) => assert_eq!(
+            output.execution_disposition,
+            ExecutionDisposition::Succeeded,
+            "public output must expose only the canonical terminal disposition"
+        ),
         OperationOutcome::Failure(failure) => panic!("submission failed: {failure:?}"),
-    };
-    assert_eq!(completion.nonce, 7);
-    assert_eq!(
-        completion.canonical_terminal_outcome.execution_disposition,
-        ExecutionDisposition::Succeeded
-    );
-
+    }
     let wallet_pool = database.wallet_pool().await;
     let completion_json =
         sqlx::query_scalar::<_, String>("SELECT completion_json FROM wallet_nonce_completions")
@@ -432,7 +430,11 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert_eq!(completion_json.len(), 1);
     let persisted: CompletedWalletNonce =
         serde_json::from_str(&completion_json[0]).expect("decode persisted completion");
-    assert_eq!(persisted, completion);
+    assert_eq!(persisted.nonce, 7);
+    assert_eq!(
+        persisted.canonical_terminal_outcome.execution_disposition,
+        ExecutionDisposition::Succeeded
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wallet_nonce_reservations")
             .fetch_one(&wallet_pool)
@@ -1474,7 +1476,17 @@ async fn verify_production_projections(
     let submission_output: EvmSubmissionOutput =
         serde_json::from_value(submission_json["outcome"]["value"].clone())
             .expect("decode exact production submission output");
-    assert_eq!(&submission_output.completion, expected_completion);
+    assert_eq!(
+        submission_output.execution_disposition,
+        expected_completion
+            .canonical_terminal_outcome
+            .execution_disposition
+    );
+    assert_eq!(
+        submission_json["outcome"]["value"],
+        serde_json::json!({"execution_disposition": "succeeded"}),
+        "public result must not carry completion evidence"
+    );
 
     let replay = application
         .replay_run(

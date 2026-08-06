@@ -43,10 +43,11 @@ use crate::{
     CompleteEvmNonceRequest, CompletedWalletNonce, EvmCallerSubmissionToken, EvmCandidateFamily,
     EvmCandidateSigner, EvmNetworkBinding, EvmRoutingCatalogDescriptor,
     EvmRoutingGenerationDescriptor, EvmSubmissionConfiguration, EvmSubmissionExpansion,
-    EvmSubmissionFailure, EvmSubmissionRequest, EvmTransactionIntent, EvmWalletFeeCandidate,
-    EvmWalletReference, TerminalWitnesses, UnsignedWalletCandidate, WalletAuthorityContractError,
-    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
-    EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION, EVM_WALLET_REPLACEMENT_LIMIT,
+    EvmSubmissionFailure, EvmSubmissionOutput, EvmSubmissionRequest, EvmTransactionIntent,
+    EvmWalletFeeCandidate, EvmWalletReference, TerminalWitnesses, UnsignedWalletCandidate,
+    WalletAuthorityContractError, WalletNonceDomainActivationAttestation,
+    WalletNonceDomainActivationRecord, WalletNonceStatus, EVM_ROUTING_CATALOG_DESCRIPTOR_VERSION,
+    EVM_WALLET_REPLACEMENT_LIMIT,
 };
 
 #[test]
@@ -889,6 +890,7 @@ fn submission_expansion_freezes_all_candidate_and_observation_occurrences() {
     assert_schema::<CompleteEvmNonceRequest>("completion request");
     assert_schema::<CompletionWork>("completion work");
     assert_schema::<CompletedProjection>("completed projection");
+    assert_schema::<EvmSubmissionOutput>("submission output");
 
     let recipe = EvmSubmissionExpansion::recipe().expect("submission expansion recipe");
     let repeated = EvmSubmissionExpansion::recipe().expect("repeated submission expansion recipe");
@@ -1356,6 +1358,51 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
     assert!(
         forged.validate().is_err(),
         "witness/outcome conflict rejected"
+    );
+}
+
+#[test]
+fn completed_projection_is_a_redaction_safe_public_output() {
+    let fixture = QualificationFixture::new().expect("qualification fixture");
+    let completed = match completed_status(&fixture) {
+        WalletNonceStatus::Completed { completion, .. } => completion,
+        _ => panic!("completed fixture"),
+    };
+
+    let projection = submission_process::project_completed(&completed);
+    let ProposedStateValue::Success(CompletedProjection::Success { output }) = projection.value()
+    else {
+        panic!("successful completion must project a public output");
+    };
+    assert_eq!(
+        output.execution_disposition,
+        crate::ExecutionDisposition::Succeeded
+    );
+
+    let encoded = serde_json::to_value(&output).expect("serialize public output");
+    assert_eq!(
+        encoded,
+        serde_json::json!({"execution_disposition": "succeeded"})
+    );
+    let encoded_text = encoded.to_string();
+    for forbidden in [
+        "provider_completion_attestation",
+        "provider_activation_attestation",
+        "recovery_closure",
+        "signature",
+    ] {
+        assert!(
+            !encoded_text.contains(forbidden),
+            "public output leaked {forbidden}"
+        );
+    }
+
+    let descriptor =
+        <EvmSubmissionOutput as mfm_values::PublicOutputDescriptor>::public_schema_descriptor()
+            .expect("public output descriptor");
+    assert_eq!(
+        descriptor.identity().schema_kind,
+        mfm_values::SchemaKind::PublicOutput
     );
 }
 

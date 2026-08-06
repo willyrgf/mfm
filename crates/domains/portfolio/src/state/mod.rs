@@ -12,7 +12,7 @@ use mfm_evm::{
     EvmBalanceAsset, EvmBalanceCollection, EvmBalanceSource, EvmChainInstanceBinding,
     EvmNetworkBinding, EvmRoutingGenerationRef,
 };
-use mfm_program_derive::MfmValue;
+use mfm_program_derive::{MfmValue, PublicOutputs};
 use mfm_values::ConfigError;
 use serde::{Deserialize, Serialize};
 
@@ -262,8 +262,8 @@ pub enum PortfolioSnapshotFailure {
     InvalidSnapshot,
 }
 
-/// Value-only public output contract for the sole product entry point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, MfmValue)]
+/// Public output contract for the sole product entry point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, MfmValue, PublicOutputs)]
 #[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.portfolio.public_outputs")]
 pub struct PortfolioPublicOutputs {
