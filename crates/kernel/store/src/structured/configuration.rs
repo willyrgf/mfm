@@ -346,6 +346,9 @@ async fn load_with_checkpoint_retry<B: ConfigurationHistoryBackend>(
         if !matches!(&loaded, Err(StructuredStoreError::InvalidHistory)) {
             return loaded;
         }
+        // Let the writer that committed the SQL prefix publish its external
+        // checkpoint successor before retrying the same snapshot.
+        yield_once().await;
         loaded = backend.load(key).await;
     }
     loaded
