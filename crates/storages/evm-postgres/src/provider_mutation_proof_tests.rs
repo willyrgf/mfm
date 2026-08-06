@@ -725,7 +725,7 @@ fn independent_detached_audit_verifies_provider_proof_and_public_projection() {
 }
 
 #[test]
-fn independent_detached_audit_rejects_provider_and_projection_substitutions() {
+fn independent_detached_audit_rejects_provider_projection_operation_and_context_substitutions() {
     let fixture = persisted_completion_fixture();
     let trust = DetachedAuditTrust {
         provider_id: fixture.provider_id.clone(),
@@ -741,6 +741,30 @@ fn independent_detached_audit_rejects_provider_and_projection_substitutions() {
     assert!(independently_verify_detached_completion(
         &fixture.completion.recovery_closure,
         &forged_proof,
+        &trust,
+    )
+    .is_err());
+
+    let mut forged_operation: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_operation.operation_key = "mfm.evm.fixture/other-operation".to_owned();
+    let forged_operation = serde_json::to_string(&forged_operation).expect("operation proof");
+    assert!(independently_verify_detached_completion(
+        &fixture.completion.recovery_closure,
+        &forged_operation,
+        &trust,
+    )
+    .is_err());
+
+    let mut forged_context: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_context.context.schema_name = "other_schema".to_owned();
+    let forged_context = serde_json::to_string(&forged_context).expect("context proof");
+    assert!(independently_verify_detached_completion(
+        &fixture.completion.recovery_closure,
+        &forged_context,
         &trust,
     )
     .is_err());
