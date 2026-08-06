@@ -1440,7 +1440,9 @@ async fn drive_application_to_closed(application: &mfm_app::Application, run_id:
         match rendered["kind"].as_str() {
             Some("closed") => return,
             Some("advanced") => {}
-            Some("waiting") => panic!("production application run parked before completion"),
+            Some("waiting") => {
+                panic!("production application run {run_id:?} parked before completion: {rendered}")
+            }
             other => panic!("unexpected production drive outcome: {other:?}"),
         }
     }
@@ -1484,7 +1486,9 @@ async fn drive_application_to_closed_with_injected_crash(
                 panic!("production application run closed before injected observation crash")
             }
             Some("advanced") => {}
-            Some("waiting") => panic!("production application run parked before completion"),
+            Some("waiting") => {
+                panic!("production application run {run_id:?} parked before completion: {rendered}")
+            }
             other => panic!("unexpected production drive outcome: {other:?}"),
         }
     }
