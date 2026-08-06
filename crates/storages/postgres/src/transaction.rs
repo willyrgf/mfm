@@ -5,7 +5,7 @@
 //! [`LockedWriteTx`] or [`LockedConfigurationWriteTx`].
 
 #[cfg(feature = "test-support")]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "test-support")]
 use std::sync::{Mutex, OnceLock};
 
@@ -21,6 +21,32 @@ use crate::session::{RoleSession, SessionKind, TargetBinding};
 
 #[cfg(feature = "test-support")]
 static COMMIT_ACKNOWLEDGEMENT_UNKNOWN: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+#[cfg(feature = "test-support")]
+static READ_PHASE_BARRIERS: OnceLock<Mutex<BTreeMap<String, ReadPhaseBarrier>>> = OnceLock::new();
+
+/// Test-only handle for coordinating an indexed-head read interleaving.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ReadPhaseBarrier {
+    reached: std::sync::Arc<tokio::sync::Notify>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "test-support")]
+impl ReadPhaseBarrier {
+    /// Waits until the PostgreSQL read has released its external fixation.
+    #[doc(hidden)]
+    pub async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// Releases the read to continue its fixed database snapshot.
+    #[doc(hidden)]
+    pub fn release(&self) {
+        self.release.notify_one();
+    }
+}
 
 /// Arms one test-only commit acknowledgement loss for a target schema.
 ///
@@ -44,6 +70,41 @@ fn consume_commit_acknowledgement_unknown(schema_name: &str) -> bool {
         .lock()
         .expect("commit acknowledgement fault mutex poisoned")
         .remove(schema_name)
+}
+
+/// Arms one test-only barrier after the indexed head query of a read.
+///
+/// The returned handle observes the point after the external fixation is released
+/// and lets the test resume the transaction while its repeatable-read snapshot is
+/// still held. This hook is unavailable without `test-support`.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn arm_read_phase_barrier(schema_name: impl Into<String>) -> ReadPhaseBarrier {
+    let schema_name = schema_name.into();
+    let barrier = ReadPhaseBarrier {
+        reached: std::sync::Arc::new(tokio::sync::Notify::new()),
+        release: std::sync::Arc::new(tokio::sync::Notify::new()),
+    };
+    READ_PHASE_BARRIERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("read phase barrier mutex poisoned")
+        .insert(schema_name, barrier.clone());
+    barrier
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) async fn await_read_phase_barrier(schema_name: &str) {
+    let barrier = READ_PHASE_BARRIERS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("read phase barrier mutex poisoned")
+        .remove(schema_name);
+    let Some(barrier) = barrier else {
+        return;
+    };
+    barrier.reached.notify_one();
+    barrier.release.notified().await;
 }
 
 /// Read-only transaction under an exact-target reader role.

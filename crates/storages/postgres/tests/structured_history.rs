@@ -41,7 +41,7 @@ use mfm_spec::structured::{
     StructuredFactDescriptor,
 };
 use mfm_storage_postgres::{
-    arm_commit_acknowledgement_unknown, open_configuration_maintenance,
+    arm_commit_acknowledgement_unknown, arm_read_phase_barrier, open_configuration_maintenance,
     open_structured_authoritative, open_structured_authoritative_with_configuration,
     open_test_application_sessions, open_test_combined_sessions, open_test_configuration_sessions,
     ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
@@ -400,6 +400,155 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
     audit_pool.close().await;
     drop(reader);
     drop(writer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/configured-snapshot").expect("operation id");
+    let (registry, _) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let (_run_history, configuration) = open_structured_authoritative_with_configuration(
+        database.combined_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify structured stores");
+    let (writer, reader) = configuration.split();
+    let stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "7".repeat(32))).expect("tenant"),
+        operation_id,
+        StableId::new("mfm.postgres.fixture/configured-snapshot-target").expect("target"),
+    );
+    let contract = admission_object(
+        ADMISSION_CONFIGURATION_OBJECT_TYPE,
+        "mfm.postgres.fixture.configured-snapshot-contract",
+        41,
+    )
+    .content_ref;
+    let first = writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-snapshot-first").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("value"),
+        ))
+        .await
+        .expect("append baseline configuration revision");
+
+    // The read fixes the old indexed head, releases its external fixation, and
+    // then waits here. The writer can commit a successor while the repeatable-
+    // read snapshot remains pinned to the old complete prefix.
+    let barrier = arm_read_phase_barrier(&database.schema);
+    let (snapshot, second) = {
+        let read_future = reader.resolve(&stream, &contract);
+        tokio::pin!(read_future);
+        tokio::select! {
+            _ = barrier.wait_until_reached() => {}
+            result = &mut read_future => panic!("snapshot read completed before barrier: {result:?}"),
+        }
+        let second = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                Some(first.revision_ref().clone()),
+                AppendRequestId::new("postgres-configured-snapshot-second").expect("append id"),
+                contract.clone(),
+                ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
+            ))
+            .await
+            .expect("append concurrent configuration successor");
+        barrier.release();
+
+        let snapshot = read_future
+            .as_mut()
+            .await
+            .expect("read old complete configuration prefix");
+        (snapshot, second)
+    };
+    assert_eq!(snapshot.revision(), &first);
+    assert_eq!(
+        reader
+            .resolve(&stream, &contract)
+            .await
+            .expect("resolve committed successor")
+            .revision(),
+        &second
+    );
+
+    drop(reader);
+    drop(writer);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn run_snapshot_keeps_one_prefix_across_a_concurrent_transition() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/run-snapshot").expect("operation id");
+    let (registry, document) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let assembled = open_structured_authoritative(
+        database.application_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify structured stores");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let store_scope = reader.store_identity().store_scope_id.clone();
+    let invocation = default_invocation();
+    let run_id = derive_run_id(&store_scope, &default_tenant(), &operation_id, &invocation);
+    let (admitted, _) = runtime
+        .admit_run(StructuredAdmissionCommand::new(
+            default_tenant(),
+            invocation,
+            operation_id,
+            document,
+            admission_material(42),
+            vec![ProposedCanonicalValue::from_value(&Value { value: 7 }).expect("initial value")],
+            AppendRequestId::new("postgres-run-snapshot-admit").expect("append id"),
+        ))
+        .await
+        .expect("append baseline admission");
+    assert_eq!(admitted, run_id);
+
+    let barrier = arm_read_phase_barrier(&database.schema);
+    let snapshot = {
+        let read_future = reader.load_public(&run_id);
+        tokio::pin!(read_future);
+        tokio::select! {
+            _ = barrier.wait_until_reached() => {}
+            result = &mut read_future => panic!("run snapshot completed before barrier: {result:?}"),
+        }
+        assert_eq!(
+            runtime
+                .drive_once(&run_id)
+                .await
+                .expect("append concurrent transition"),
+            DriveOutcome::TransitionCommitted { closed: true }
+        );
+        barrier.release();
+        read_future
+            .as_mut()
+            .await
+            .expect("read old complete run prefix")
+    };
+    assert_eq!(snapshot.status(), RunEvidenceStatus::Actionable);
+    assert_eq!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("load committed transition")
+            .status(),
+        RunEvidenceStatus::Closed
+    );
+
+    drop(reader);
+    drop(runtime);
     database.cleanup().await;
 }
 
