@@ -650,6 +650,32 @@ async fn wrong_key_identity_is_rejected_by_the_generic_contract() {
 }
 
 #[tokio::test]
+async fn qualification_rejects_a_valid_key_with_wrong_public_and_account_identity() {
+    let keystore = test_keystore();
+    let guard = TestGenerationGuard::new(GuardVerdict::Current);
+    let provider = KeystoreSignerProvider::new_with_config(
+        qualified_binding(keystore.address, 0x1c),
+        keystore.other_entry_id,
+        &keystore.keystore_path,
+        &keystore.unlock_file,
+        guard.clone(),
+        KeystoreConfig::insecure_integration_test(),
+    )
+    .expect("candidate");
+
+    let result = provider
+        .qualify(semantic_signer_id(), content_ref(0x1f))
+        .await;
+    assert!(matches!(
+        result,
+        Err(SigningError::Provider {
+            reason: SigningProviderError::BindingMismatch
+        })
+    ));
+    assert_eq!(guard.checks(), 1);
+}
+
+#[tokio::test]
 async fn unsupported_binding_algorithm_and_profile_fail_before_file_access() {
     let dir = tempfile::tempdir().expect("tempdir");
     let expected = Address::from([0x11; 20]);
