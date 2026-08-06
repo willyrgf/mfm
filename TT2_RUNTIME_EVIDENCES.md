@@ -40,6 +40,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   regenerates that artifact from the real fixture, verifies offline parity,
   and rejects the same later suffix when relabeled Semantic. Live
   Postgres/application replay remains separate evidence.
+- The keystore boundary now has direct witnesses for both truncated and
+  oversized ciphertext, authentication/tag/AAD failures, authenticated
+  invalid-key material, and a valid key with the wrong public/account identity.
+  External termination, OOM, and other resource-failure behavior remains
+  outside package-level witness coverage.
 
 ## Ordered implementation revisions
 
@@ -105,6 +110,7 @@ Post-step-12 implementation and proof revisions:
 | `a1a78b84` | seal offline replay fold boundary |
 | `eb38ea44` | prove valid later audit suffix export |
 | `1ca2f7cd` | retain observed audit artifact in replay corpus |
+| `db1b7503` | witness malformed ciphertext and wrong key identity |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -323,7 +329,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live schema/corpus matrix remains. |
 | APP-01 | Conditional | Public, recorded-replay, and offline replay products now expose only fold-derived status plus bounded export metadata; the 16-case application trybuild matrix rejects raw-record, frontier, trace authorization-request, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
-| SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
+| SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid key with the wrong public/account identity; external termination/OOM/resource-failure classes remain. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
 | VERIFY-01 | Conditional | Broad and focused gates pass, but the required complete proof matrix is not present. |
 | PROCESS-01 | Conditional | This review now preserves residuals and exact provenance; strict PASS is withheld until the residual proof/deployment work closes. |
@@ -360,10 +366,9 @@ The following are the concrete blockers to an unconditional §13 PASS:
 2. provide concrete production retained-release/checkpoint trust implementations;
 3. complete the EVM injected-kill and cross-process PostgreSQL fault/acknowledgement
    matrices;
-4. complete direct witnesses for other malformed/corrupt keystore formats and
-   a valid-but-wrong public/account identity, plus external termination and
-   resource-failure classes, while retaining the long-history cost/LOC
-   ownership evidence; and
+4. cover external termination, OOM, and resource-failure classes in the
+   keystore boundary while retaining the long-history cost/LOC ownership
+   evidence; and
 5. close the remaining STORE-05/06, EVM-07/09, APP-01, QUALITY-01, and VERIFY-01
    production proof matrices.
 
@@ -465,6 +470,11 @@ nix develop -c cargo fmt --all -- --check — pass on `eb38ea44`
 nix develop -c cargo test -p mfm-replay generated_portable_artifact_corpus_round_trips -- --nocapture — pass on `1ca2f7cd`
 nix develop -c cargo test -p mfm-replay --lib — 10 passed on `1ca2f7cd`
 python3 contracts/recoverability/generate.py — deterministic regeneration pass on `1ca2f7cd`
+nix develop -c cargo test -p mfm-keystore decrypt_oversized_ciphertext_rejects_before_allocating_plaintext -- --nocapture — 1 passed on `db1b7503`
+nix develop -c cargo test -p mfm-keystore qualification_rejects_a_valid_key_with_wrong_public_and_account_identity -- --nocapture — 1 passed on `db1b7503`
+nix develop -c cargo test -p mfm-keystore — 93 unit tests + 9 doctests passed on `db1b7503`
+nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `db1b7503`
+nix develop -c cargo fmt --all -- --check — pass on `233c96cd`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
@@ -502,9 +512,9 @@ outside this focused corpus proof.
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan
 evidence; EVM-09 still lacks the independent offline/public-result/provider
-attestation audit; SEC-01 still lacks direct witnesses for other
-malformed/corrupt formats and a valid-but-wrong public/account identity, plus
-external termination/resource-failure coverage; and the
+attestation audit; SEC-01 now has direct malformed-ciphertext and wrong-identity
+witnesses, but still lacks external termination/OOM/resource-failure coverage;
+and the
 external trust, live multi-hop export,
 cross-process/fault, quality, and complete verification residuals remain
 Conditional.
