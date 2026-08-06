@@ -243,9 +243,10 @@ ambiguity, cross-process, replacement, and scale matrices remain conditional.
 Post-qualification hardening then serializes provider lease and deployment
 assembly admission with idle checkpoint recovery (`f8d4a83a`, `da9f9028`), binds
 the statement-gated PostgreSQL fault to the marker connection (`1b984001`),
-and yields between transient checkpoint reads (`e02895ad`). These changes add
-focused concurrency and proxy regression coverage but claim no new managed EVM
-run beyond `run-2637996-1786051539384393456`.
+and yields between transient checkpoint reads (`e02895ad`). The final composed
+CI reran the managed EVM qualification on this code and passed its structured
+submission task in 2049.70s (`run-2683154-1786055156375497512`); the focused
+changes also add concurrency and proxy regression coverage.
 
 This closes the repository-local production-scale EVM leaf blocker. The
 deployment-owned provider-trust and broader crash, ambiguity, latency, and

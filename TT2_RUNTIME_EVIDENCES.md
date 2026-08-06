@@ -784,8 +784,10 @@ retained completion after lost acknowledgement recovery, and one raw broadcast.
 Post-qualification hardening serializes provider lease and deployment assembly
 admission with idle checkpoint recovery (`f8d4a83a`, `da9f9028`), binds the
 statement-gated fault to the marker connection (`1b984001`), and yields between
-transient checkpoint reads (`e02895ad`). These focused changes add concurrency,
-proxy, and retry regression coverage but claim no new managed EVM run.
+transient checkpoint reads (`e02895ad`). The final composed CI reran the managed
+EVM qualification on this code and passed its structured submission task in
+2049.70s (`run-2683154-1786051539384397512`); the focused changes also add
+concurrency, proxy, and retry regression coverage.
 
 The production-scale EVM leaf is therefore PASS for this repository-local
 qualification scope. Deployment-owned provider trust and the broader crash,
