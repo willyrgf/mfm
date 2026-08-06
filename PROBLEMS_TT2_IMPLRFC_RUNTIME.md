@@ -7,7 +7,7 @@ This document began as the handoff problem ledger for the remediation implementa
 is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- current implementation/evidence source tip: `0a4b02e1b947609bb0b9dc09be3606e8aa513ebf`;
+- current implementation/evidence source tip: `fce1edca0ac08ce5aa6b62983b80ae3f53a2ab79`;
 - current evidence/documentation head before this refresh: `886fee0941c42838705f1f29662d43cc80ee7b72`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
@@ -17,7 +17,7 @@ is the re-audit recorded below.
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The current production code being assessed is the source tree at `0a4b02e1`; the detailed finding
+The current production code being assessed is the source tree at `fce1edca`; the detailed finding
 sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
@@ -56,7 +56,7 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
-## Current re-audit at `0a4b02e1`
+## Current re-audit at `fce1edca`
 
 The later implementation revisions and focused evidence supersede the historical disposition
 above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
@@ -67,6 +67,9 @@ scopes as closed or conditional, with remaining work including deployment trust,
 cross-process/fault matrices, complete generated/boundary/escape/hostile/large-scale corpus breadth, live application multi-hop and
 production evidence, independent provider/public-result verification, external
 termination/OOM/resource-failure coverage, and the full simplicity/isolation acceptance matrix.
+The test checkpoint authority now durably retains successful Prepared single- and multi-key
+successors across fresh ledger instances and rejects unprepared acknowledgement; its sidecar is
+still a fixture rather than a production external authority.
 
 The current matrix is authoritative for this re-audit; the detailed sections below preserve the
 original finding text and line references for traceability.
@@ -295,7 +298,7 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 | TT2-AUTH-01 | Blocker | Closed | Live physical access is assembled behind Runtime-owned, marker-sealed authority | AUTH-01 |
 | TT2-AUTH-02 | Blocker | Closed | Production PostgreSQL login material is issued through an opaque deployment admission | AUTH-03 |
 | TT2-STORE-01 | Blocker | Conditional | The generic PostgreSQL target still needs concrete production external-fence integration | AUTH-04, STORE-02 |
-| TT2-STORE-02 | High | Conditional | Snapshot/head validation passes, but cross-process acknowledgement and fault matrices remain | STORE-03, STORE-04 |
+| TT2-STORE-02 | High | Conditional | Snapshot/head validation and prepared-successor restart coverage pass, but cross-process contention/acknowledgement and fault matrices remain | STORE-03, STORE-04 |
 | TT2-STORE-03 | High | Closed | Full-history loads verify the indexed head inside the same backend snapshot | STORE-03 |
 | TT2-STORE-04 | High | Closed | Contention classification rolls back before bounded identity reconciliation | STORE-01 |
 | TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; bounded shape/UTF-8 and 32-revision sequential corpus passes, while the complete generated/boundary/escape/hostile/large-scale corpus remains unverified | STORE-04 |
