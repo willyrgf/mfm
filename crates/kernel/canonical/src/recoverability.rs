@@ -1988,8 +1988,6 @@ fn string_matches_grammar(value: &str, grammar: &str) -> bool {
             crate::CanonicalBytes::from_base64url_no_pad(value).is_ok()
         }
         "valid_unicode_scalar_string" => true,
-        "-?[0-9]+ with no leading zeroes or negative zero" => is_canonical_i64(value),
-        "0|-?[1-9][0-9]{0,18}" => is_canonical_i64(value),
         "0|[1-9][0-9]{0,19}" => is_canonical_u64(value),
         "dot-separated stable field segments" => {
             !value.is_empty()
@@ -2157,21 +2155,6 @@ fn contract_name_version(value: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, version))
-}
-
-fn is_canonical_i64(value: &str) -> bool {
-    if value == "0" {
-        return true;
-    }
-    if let Some(value) = value.strip_prefix('-') {
-        return !value.is_empty()
-            && !value.starts_with('0')
-            && value.bytes().all(|byte| byte.is_ascii_digit())
-            && format!("-{value}").parse::<i64>().is_ok();
-    }
-    !value.starts_with('0')
-        && value.bytes().all(|byte| byte.is_ascii_digit())
-        && value.parse::<i64>().is_ok()
 }
 
 fn value_error(code: RecoverabilityErrorCode, _path: &str, message: &str) -> RecoverabilityError {
@@ -3355,8 +3338,6 @@ fn is_supported_string_grammar(grammar: &str) -> bool {
         grammar,
         "[A-Za-z0-9_-]* with no padding"
             | "valid_unicode_scalar_string"
-            | "-?[0-9]+ with no leading zeroes or negative zero"
-            | "0|-?[1-9][0-9]{0,18}"
             | "0|[1-9][0-9]{0,19}"
             | "dot-separated stable field segments"
             | "lowercase registered media type without parameters"

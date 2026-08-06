@@ -168,6 +168,8 @@ fn descriptor_is_an_exact_journal_independent_projection() {
 fn scalar_subject_and_predicate_are_exact_float_free_annex_values() {
     let scalar = FactScalar::unsigned(42).expect("scalar");
     assert_eq!(scalar.as_bytes(), b"42");
+    assert!(FactScalar::from_canonical_value(CanonicalValue::Signed(42)).is_err());
+    assert!(FactScalar::from_canonical_value(CanonicalValue::Signed(-1)).is_err());
     let scalar_subject = FactSubject::from_scalar(&scalar).expect("subject");
     assert!(CanonicalFactPredicate::exact_subject(&scalar_subject)
         .expect("predicate")

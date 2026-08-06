@@ -255,6 +255,9 @@ descriptors. The request binds that admitted manifest, the fixed selector, the s
 complete-through-authorization-frontier mode, the other-run tenant scope, five total scan bounds,
 and the ordered queries. Exact capability, adapter, implementation, and public-certificate identity
 distinguish this Read from every general adapter.
+Fact scalar subjects use the primitive recoverability contract's unsigned-native wire: booleans,
+strings, and unsigned integers are admitted, while signed-number producer variants are rejected
+instead of silently round-tripping as unsigned values.
 
 The registry builder privately installs that exact capability/adapter pair as the sole kernel
 process baseline. It is retained for Runtime dispatch but excluded from entry support closures that

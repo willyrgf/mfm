@@ -579,15 +579,6 @@ def native_canonical_shape() -> dict[str, Any]:
             {
                 "fields": [
                     field(
-                        "value",
-                        string("-?[0-9]+ with no leading zeroes or negative zero", 1, 20),
-                    )
-                ],
-                "tag": "signed",
-            },
-            {
-                "fields": [
-                    field(
                         "items",
                         array(
                             reference("mfm.primitive-canonical_value.v1"),
