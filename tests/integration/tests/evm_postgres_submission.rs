@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
-use std::process::Stdio;
+use std::process::{Output, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -135,6 +135,7 @@ const PHASE_ADMIT_BROADCAST: &str = "admit-broadcast";
 const PHASE_RESUME_COMPLETE: &str = "resume-complete";
 const PHASE_PRODUCTION_ADMIT: &str = "production-admit";
 const PHASE_PRODUCTION_RESUME: &str = "production-resume";
+const INJECTED_CRASH_AFTER_BROADCAST_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_BROADCAST";
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
@@ -355,7 +356,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     // empty wallet authority. The deterministic worker is deliberately not
     // run here: doing so would pre-complete the same caller token and turn the
     // real keystore path into a read-only projection test.
-    run_worker(
+    run_worker_expect_crash_after_broadcast(
         &database,
         rpc.endpoint(),
         PHASE_PRODUCTION_ADMIT,
@@ -938,6 +939,9 @@ async fn run_production_application_worker(
                 observed_broadcast,
                 "production application did not persist the exact broadcast observation"
             );
+            if std::env::var_os(INJECTED_CRASH_AFTER_BROADCAST_ENV).is_some() {
+                std::process::exit(137);
+            }
             let portfolio_view = application
                 .read_public_run(credential(), portfolio_run_id)
                 .await
@@ -3207,7 +3211,51 @@ async fn run_worker(
     activation: &mfm_evm::WalletNonceDomainActivationAttestation,
     provider: &ProviderProcess,
 ) {
-    let output = tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+    let output = run_worker_process(database, endpoint, mode, activation, provider, false).await;
+    assert_canaries_absent("worker stdout", &output.stdout);
+    assert_canaries_absent("worker stderr", &output.stderr);
+    assert!(
+        output.status.success(),
+        "EVM PostgreSQL worker {mode} failed with status {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
+async fn run_worker_expect_crash_after_broadcast(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let output = run_worker_process(database, endpoint, mode, activation, provider, true).await;
+    assert_canaries_absent("crashed worker stdout", &output.stdout);
+    assert_canaries_absent("crashed worker stderr", &output.stderr);
+    assert!(
+        !output.status.success(),
+        "injected EVM PostgreSQL worker crash unexpectedly succeeded"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(137),
+        "injected EVM PostgreSQL worker did not exit at the crash boundary"
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
+async fn run_worker_process(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+    crash_after_broadcast: bool,
+) -> Output {
+    let mut command =
+        tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+    command
         .arg("--exact")
         .arg("evm_postgres_submission_worker")
         .arg("--nocapture")
@@ -3246,23 +3294,20 @@ async fn run_worker(
                 .database_url(&database.database_url),
         )
         .env(WORKER_MODE_ENV, mode)
-        .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string())
+        .env("RUST_MIN_STACK", WORKER_STACK_BYTES.to_string());
+    if crash_after_broadcast {
+        command.env(INJECTED_CRASH_AFTER_BROADCAST_ENV, "1");
+    } else {
+        command.env_remove(INJECTED_CRASH_AFTER_BROADCAST_ENV);
+    }
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .output()
         .await
-        .expect("run EVM PostgreSQL worker");
-    assert_canaries_absent("worker stdout", &output.stdout);
-    assert_canaries_absent("worker stderr", &output.stderr);
-    assert!(
-        output.status.success(),
-        "EVM PostgreSQL worker {mode} failed with status {:?}: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        .expect("run EVM PostgreSQL worker")
 }
 
 fn expected_access_capabilities() -> BTreeSet<ContentRef> {
