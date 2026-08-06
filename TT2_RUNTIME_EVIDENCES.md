@@ -127,6 +127,7 @@ Post-step-12 implementation and proof revisions:
 | `27edd8c6` | harden checkpoint sidecar arbitration |
 | `cf74053f` | expand configuration boundary corpus |
 | `77a06884` | exercise configuration acknowledgement recovery |
+| `df61d1b9` | prove postgres snapshot interleavings |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -441,6 +442,23 @@ committed SQL prefix and its external acknowledgement cannot be misclassified
 as a permanent stale result. The broader serialization/deadlock, promotion,
 and production-authority matrix remains unverified.
 
+The snapshot interleaving follow-up was then qualified from clean source tip
+`df61d1b9`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: df61d1b9
+run id: run-2177250-1785993122646524325
+result: ok — 21 structured-history tests passed, 0 failed in 32.49s
+```
+
+The new run and configuration barriers release the external fixation, append a
+successor while the reader transaction remains repeatable-read, and assert that
+the reader returns the old complete prefix. The subsequent read observes the
+committed successor. This closes the deterministic snapshot-interleaving proof;
+the broader serialization/deadlock, promotion, and production-authority matrix
+remains unverified.
+
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
 
@@ -466,7 +484,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | AUTH-01 | Closed | Runtime/physical access is marker-sealed and API-surface tests reject ordinary implementations. |
 | AUTH-02 | Closed | PostgreSQL session issuance is bound to the external deployment authority and private credentials. |
 | STORE-01 | Conditional | External target/checkpoint trust is explicit and exercised by fakes; concrete production trust integration is absent. |
-| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, and one committed-but-unknown acknowledgement recovery pass, while injected serialization/deadlock, promotion, and production-authority matrices remain absent. |
+| STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, and one committed-but-unknown acknowledgement recovery pass; injected serialization/deadlock, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
