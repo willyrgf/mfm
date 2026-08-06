@@ -792,8 +792,8 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
 
     // Exercise a deterministic shape corpus through both backends. Each vector uses a separate
     // stream so one invalid value cannot hide a later acceptance decision behind a stale head.
-    for ordinal in 0_u32..64 {
-        let json = match ordinal % 8 {
+    for ordinal in 0_u32..128 {
+        let json = match ordinal % 16 {
             0 => format!(r#"{{"ordinal":{ordinal}}}"#),
             1 => format!(
                 r#"{{"enabled":{},"label":"vector-{ordinal}"}}"#,
@@ -813,7 +813,15 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
             ),
             5 => format!(r#"{{"unicode":"café-{ordinal}","ordinal":{ordinal}}}"#),
             6 => format!(r#"{{"nested":{{"ordinal":{ordinal},"ok":true}}}}"#),
-            _ => format!(r#"[true,false,null,"vector-{ordinal}"]"#),
+            7 => format!(r#"[true,false,null,"vector-{ordinal}"]"#),
+            8 => "null".to_owned(),
+            9 => format!(r#"{{"negative":-{},"zero":0}}"#, ordinal + 1),
+            10 => "[]".to_owned(),
+            11 => "{}".to_owned(),
+            12 => format!(r#"{{"escaped":"quote\"-{ordinal}"}}"#),
+            13 => format!(r#"{{"layers":[[{{"ordinal":{ordinal}}}]]}}"#),
+            14 => format!(r#"{{"payload":"{}"}}"#, "x".repeat((ordinal % 11) as usize)),
+            _ => format!(r#"{{"z":{ordinal},"a":{}}}"#, ordinal + 1),
         };
         let vector_stream = ConfigurationStreamKey::new(
             database.store_scope_id().await,
@@ -1069,7 +1077,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         StableId::new("mfm.postgres.fixture/configured-parity-scale").expect("scale target"),
     );
     let mut scale_predecessor: Option<ConfigurationRevision> = None;
-    for sequence in 0_u32..64 {
+    for sequence in 0_u32..128 {
         let value = ProposedCanonicalValue::from_json(&format!(
             r#"{{"sequence":{},"payload":"scale-{sequence}"}}"#,
             sequence
