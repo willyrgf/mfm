@@ -312,7 +312,9 @@ Each revision binds a one-based sequence, predecessor, configured-value contract
 value reference, value bytes, and append request identity. Deployment receives configuration
 append authority. Normal application assembly receives resolve-only authority and admits the exact
 resolved revision as immutable run material. Configuration revisions are not a sixth RunHistory
-record family.
+record family. The shared canonical append boundary rejects any serialized revision larger than
+`MAX_CONFIGURATION_REVISION_BYTES` before dispatching to memory or PostgreSQL; the configured value
+itself remains subject to its schema byte bound.
 
 PostgreSQL retains an independent exact `configuration_heads` compare-and-append row for each
 stream. That local head detects removal, rollback, or divergence while the database remains under

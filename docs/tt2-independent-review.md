@@ -21,7 +21,10 @@ generated corpus and rebuilds them through the store fixture. Revisions
 `db1b7503` and `c832e5d8` add direct witnesses for oversized ciphertext, a wrong
 account, and a matching-account key with a valid but wrong public key. Their
 predecessor `bd98e8ca` removed the full actionable frontier from
-public and recorded-replay evidence.
+public and recorded-replay evidence. Revision `624af5b2` moves the serialized
+configuration-revision bound into shared canonical ingress and adds a managed
+memory/PostgreSQL parity corpus; all remaining conclusions below stay
+conditional where the broader corpus or deployment proof is absent.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -69,6 +72,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `RawRunHistory` and concrete trust. The complete cursor/object graph remains
   store-private; the broader runtime/audit/replay/export matrix is still not
   independently reproduced.
+- The shared configuration append boundary now rejects an oversized serialized
+  revision before backend dispatch. Managed qualification covers positive,
+  exact-limit, one-byte-over, stale-predecessor, and idempotent-replay vectors
+  against memory and PostgreSQL; the complete generated/scale corpus remains
+  unverified.
 
 ## Candidate and review scope
 
@@ -97,6 +105,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   reader retry and identical append ambiguity recovery, with focused tests and
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
+- Current parity/status revision: `624af5b2` (shared serialized configuration
+  bound, managed memory/PostgreSQL acceptance vectors, and stale purpose-status
+  assertions after the frontier cutover).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
   ambiguity retries at eight attempts, and `e7624406` removes the redundant
   generic store snapshot retry so PostgreSQL owns the single bounded
@@ -308,6 +319,28 @@ review notes that the bound is per nested loop and that PostgreSQL retries the
 classified `InvalidHistory` result even when corruption is persistent; these
 are bounded resource/diagnostic residuals, not correctness failures.
 
+The configuration parity/status revision was then qualified on its exact clean
+tip:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: 624af5b2
+run id: run-2109539-1785986642051610798
+result: ok — 18 structured-history tests passed, 0 failed in 32.00s
+
+nix develop -c cargo fmt --all -- --check
+result: pass
+
+nix develop -c cargo clippy -p mfm-store --lib -- -D warnings
+result: pass
+```
+
+The managed test includes positive, exact serialized
+`MAX_CONFIGURATION_REVISION_BYTES`, one-byte-over, stale-predecessor, and
+idempotent replay vectors with final reader parity. It also recompiles the
+PostgreSQL integration assertions against `RunEvidenceStatus`; no purpose
+wrapper calls the removed `.frontier()` API.
+
 The purpose-isolation cutover was qualified on its exact clean tip:
 
 ```text
@@ -507,6 +540,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
+| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2109539-1785986642051610798` (18/18 structured-history tests) | N/A; introduced after baseline |
 | `current_wallet_projection_uses_bounded_primary_key_lookup` | pass in focused PostgreSQL qualification | N/A; introduced after baseline |
 | `real_sql_authority_preserves_activation_nonce_and_role_boundaries` (including long-history plan/row proof and persisted two-candidate closure-only projection) | pass in `run-2003174-1785978540996350273` | N/A; introduced after baseline |
 | `completed_wallet_nonce_retains_rehashable_public_recovery_closure` (serialized closure reload) | pass in focused `mfm-evm` test | N/A; introduced after baseline |
@@ -529,7 +563,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; cross-process acknowledgement and fault injection remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
-| TT2-STORE-05 | Conditional | Canonical ingress is shared; a complete memory/PostgreSQL acceptance corpus is not independently reproduced. |
+| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, and idempotent replay across memory/PostgreSQL; the complete generated/scale acceptance corpus remains unverified. |
 | TT2-STORE-06 | Conditional | The syntax inventory now covers generic calls, aliases, SQLx macros, and `QueryBuilder` (focused inventory and SQLx-offline leaves pass); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | Dense publication routes use bounded unique producer-prefix verification. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
@@ -605,7 +639,8 @@ callback-free fold validation consumes only the opaque summary.
 
 - PostgreSQL role, snapshot, checkpoint, configured-value race, retry, SQL
   inventory/offline, and managed recoverability lanes pass, including the
-  exact post-correction run on `e7624406`. Cross-process acknowledgement-loss,
+  exact parity/status run `run-2109539-1785986642051610798` on `624af5b2`.
+  Cross-process acknowledgement-loss,
   serialization/deadlock, copied-target, and injected-fault matrices are not
   complete.
 - EVM domain and storage tests plus the current managed release qualification

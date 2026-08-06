@@ -45,6 +45,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   invalid-key material, and a valid key with the wrong public/account identity.
   External termination, OOM, and other resource-failure behavior remains
   outside package-level witness coverage.
+- The shared configuration append boundary now rejects an oversized serialized
+  revision before backend dispatch. A managed 18-test PostgreSQL qualification
+  compares memory and PostgreSQL on positive, exact-limit, one-byte-over,
+  stale-predecessor, and idempotent-replay vectors; the broader generated and
+  scale corpus remains unverified.
 
 ## Ordered implementation revisions
 
@@ -112,6 +117,7 @@ Post-step-12 implementation and proof revisions:
 | `1ca2f7cd` | retain observed audit artifact in replay corpus |
 | `db1b7503` | witness malformed ciphertext and wrong key identity |
 | `c832e5d8` | cover matching public key identity witness |
+| `624af5b2` | align configuration parity with sealed run status |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -141,6 +147,13 @@ failure path and moves the test transfer witness after the ownership move.
 `2fc4afa8` adds two application trybuild cases that reject public raw-record
 enumeration and trace authorization-request access; the complete purpose
 data-isolation proof remains conditional.
+
+`624af5b2` moves the serialized configuration-revision byte bound into the
+shared canonical append constructor, so memory and PostgreSQL cannot diverge at
+backend dispatch. Its managed qualification adds exact and one-byte-over
+serialized-revision vectors alongside positive, stale-predecessor, and
+idempotent replay cases, and refreshes integration assertions to the sealed
+`RunEvidenceStatus` API after the frontier cutover.
 
 `1ef7d694` bounds configuration append ambiguity and transient configuration
 reads at eight attempts. `e7624406` removes the generic store-level snapshot
@@ -212,6 +225,7 @@ their own exact revisions.
 | workspace nextest and doctests | pass |
 | PostgreSQL SQLx check | pass |
 | recoverability PostgreSQL v1 | pass |
+| configuration memory/PostgreSQL parity | pass; managed recoverability task `run-2109539-1785986642051610798`, 18/18 structured-history tests |
 | wallet-nonce PostgreSQL storage qualification | pass |
 | structured EVM submission qualification | pass |
 | Bitcoin parity | pass |
@@ -295,6 +309,20 @@ recovery regressions. The historical composed gate includes the source-bound
 fix in `d67a3bc3`; the current run's closing-source-revision leaf observed
 `82e474ca`.
 
+The current managed PostgreSQL qualification ran on `624af5b2`:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+run id: run-2109539-1785986642051610798
+result: ok — 18 structured-history tests passed, 0 failed in 32.00s
+```
+
+The new parity test exercises one positive append, an exact serialized
+`MAX_CONFIGURATION_REVISION_BYTES` revision, a one-byte-over revision, stale
+predecessor rejection, idempotent replay, and final reader parity against the
+memory backend. The same managed run also rechecked the pre-existing race and
+fresh-process/role/schema cases.
+
 ## TT2 disposition at the current candidate
 
 “Conditional” means implementation exists but the plan-required production
@@ -308,7 +336,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks and recoverability races pass with one bounded eight-attempt PostgreSQL checkpoint-read owner; deterministic cross-process acknowledgement/fault matrix is absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress exists; a complete exact memory/PostgreSQL acceptance corpus is not independently reproduced. |
+| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, and idempotent replay cases; the complete generated/scale acceptance corpus remains unverified. |
 | STORE-06 | Conditional | SQL inventory and bounded producer-prefix path exist; generic/builder query inventory and long-history bound proof remain. |
 | STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
