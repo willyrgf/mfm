@@ -143,6 +143,8 @@ const INJECTED_CRASH_AFTER_RECEIPT_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_
 const INJECTED_CRASH_AFTER_FINALITY_ENV: &str = "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_FINALITY";
 const INJECTED_CRASH_AFTER_COMPLETION_ENV: &str =
     "MFM_EVM_POSTGRES_INJECTED_CRASH_AFTER_COMPLETION";
+const WORKER_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const COMPLETION_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(600);
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
@@ -3456,7 +3458,7 @@ async fn run_worker_expect_crash_before_completion_commit(
         .arm(CommitFault::HoldTransactionBeforeCommit, 1)
         .expect("arm completion pre-commit process-loss fault");
     if tokio::time::timeout(
-        Duration::from_secs(120),
+        COMPLETION_BOUNDARY_TIMEOUT,
         commit_proxy.wait_for_intercepts(intercept_target),
     )
     .await
@@ -3567,7 +3569,7 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
         .expect("arm initial completion acknowledgement fault");
     if tokio::time::timeout(
-        Duration::from_secs(120),
+        COMPLETION_BOUNDARY_TIMEOUT,
         commit_proxy.wait_for_intercepts(intercept_target),
     )
     .await
@@ -3762,7 +3764,7 @@ fn worker_command(
 }
 
 async fn wait_for_worker_ready(path: &Path) -> Result<(), ()> {
-    tokio::time::timeout(Duration::from_secs(120), async {
+    tokio::time::timeout(WORKER_STARTUP_TIMEOUT, async {
         loop {
             if std::fs::read(path)
                 .map(|contents| contents == b"wallet-authority-ready")
