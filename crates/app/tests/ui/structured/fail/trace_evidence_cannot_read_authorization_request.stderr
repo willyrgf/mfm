@@ -1,0 +1,5 @@
+error[E0599]: no method named `request` found for struct `TraceTransitionEntry` in the current scope
+ --> tests/ui/structured/fail/trace_evidence_cannot_read_authorization_request.rs:4:35
+  |
+4 |     let _ = evidence.records()[0].request();
+  |                                   ^^^^^^^ method not found in `TraceTransitionEntry`
