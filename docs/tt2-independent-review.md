@@ -5,8 +5,10 @@ Status: **CONDITIONAL / INCOMPLETE**
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
 The historical gate remains separate from the focused follow-up evidence below.
-The latest implementation tip is `88af683d`; the focused follow-up candidate
-before the public-result cutover was `f3a15978`, which includes the bounded
+The latest implementation tip is `923fce06`; the focused follow-up sequence
+includes `88af683d`, which adds the detached hostile wire and cryptographic
+corpus below, and its preceding binding and projection proofs. The earlier
+focused candidate before the public-result cutover was `f3a15978`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -133,6 +135,12 @@ now rejects forged payload digests, signatures, trust keys, malformed and
 wrong-length challenges, and reordered JSON with exact branch-level errors;
 the full storage target passes 12 tests with one managed-schema test ignored.
 
+Revision `923fce06` adds independent context and parser-boundary witnesses.
+Zero/invalid database and backend identities, missing transactions, snapshots,
+bad application markers, invalid store epochs, empty/non-ASCII/oversized proofs,
+and unknown proof fields are rejected at their exact callback-free branches; the
+full storage target passes 13 tests with one managed-schema test ignored.
+
 Revision `bc469cc8` makes the managed production qualification inject an
 explicit status-137 child-process exit after the broadcast observation has
 committed. The fresh resume worker closes the same run and the test asserts
@@ -221,7 +229,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `88af683d` (`strengthen detached audit hostile corpus`),
+- Focused follow-up candidate: `923fce06` (`cover detached audit context boundaries`),
+  following `88af683d` (`strengthen detached audit hostile corpus`),
   following `60554999` (`expand detached audit binding proofs`),
   following `bc469cc8` (`exercise evm crash recovery boundary`),
   following `64517b46` (`strengthen detached audit substitution proof`),
@@ -1335,7 +1344,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed production leaf passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials; `88af683d` adds independent payload, signature/key, challenge, and canonical-wire substitution denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
+| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed production leaf passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials; `88af683d` adds independent payload, signature/key, challenge, and canonical-wire substitution denials; `923fce06` adds independent context-bound, store-incarnation, proof-size, and unknown-field denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation; the resumed managed qualification closes the run and proves exactly one raw broadcast (`run-2394128-1786018130470251941`, 1/1). Receipt, finality, promotion, completion, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
