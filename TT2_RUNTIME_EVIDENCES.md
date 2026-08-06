@@ -51,10 +51,12 @@ implemented and the focused candidate checks are green, but the plan's strict
   one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact
   UTF-8 byte-boundary value and its one-byte-over rejection, 128 deterministic
   JSON shape values, a 128-revision sequential stream, and an exact canonical
-  depth-limit value. The shared run-envelope validator now also has exact and
-  one-byte-over `MAX_STORED_FRAME_BYTES` unit witnesses. One-level-over depth,
-  float, duplicate-key, and malformed values are rejected before backend
-  dispatch; the complete generated,
+  depth-limit value. The latest default-concurrency managed run also passes
+  all 24 tests, including the same-stream race; two earlier attempts hit that
+  race intermittently. The shared run-envelope validator now also has exact
+  and one-byte-over `MAX_STORED_FRAME_BYTES` unit witnesses. One-level-over
+  depth, float, duplicate-key, and malformed values are rejected before
+  backend dispatch; the complete generated,
   hostile, and large-scale acceptance matrix remains unverified.
 
 ## Ordered implementation revisions
@@ -287,6 +289,7 @@ replay remain unverified.
 | SQL inventory macro/import scope | `8a902d03` | independent review passes SQLx checked/unchecked and all six `query_file*` macro semantics, direct/renamed/glob imports, after-use file/module/block declarations, and import/`QueryBuilder` scope restoration; run `run-2236542-1786001395306859242` passes 2/2 | PASS for current inventory scope; broader ownership/scale audit remains |
 | Configuration corpus breadth | `6525fad6` | serialized managed run expands memory/PostgreSQL parity to 128 generated shape values and 128 sequential revisions; all 24 tests pass with test threads serialized, while default-concurrency race attempts remain separate | CONDITIONAL; generated/hostile/production-scale corpus remains incomplete |
 | Canonical frame boundary | `9f61c39a` | shared `mfm-store` ingress unit tests accept an exact `MAX_STORED_FRAME_BYTES` canonical frame and reject one byte over; the bound equals the canonical package and PostgreSQL schema limits | PASS for this exact/one-over boundary; broader run/object corpus remains conditional |
+| Default-concurrency configuration qualification | `897ec4b8` | clean managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests, including `configured_value_history_linearizes_same_stream_append_races`; two earlier attempts recorded intermittent 23/24 race witnesses | PASS for this run; repeatability and broader corpus remain conditional |
 
 ## Focused and composed verification
 
@@ -438,6 +441,16 @@ at `MAX_STORED_FRAME_BYTES` and a one-byte-over frame. The focused Nix
 development test `mfm-store::structured::canonical_append` passes all 3/3
 unit tests; the bound matches both `mfm_canonical::limits` and the PostgreSQL
 `octet_length(canonical_json)` constraint.
+
+The latest default-concurrency managed qualification ran from clean source
+tip `897ec4b8` (documentation-only evidence refresh after implementation
+revision `9f61c39a`):
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+run id: run-2246603-1786002530958490012
+result: ok — 24 structured-history tests passed, 0 failed in 43.42s
+```
 
 The separate release no-run integration compile was also rerun against the
 same implementation source:
@@ -617,7 +630,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions and run frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over shared frame witnesses. Two default-concurrency attempts hit the pre-existing same-stream race witness, so this is targeted corpus evidence; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions and run frames before backend dispatch. Revision `6525fad6` expands the managed memory/PostgreSQL parity to 128 generated values across 16 canonical shape families and a 128-revision stream, retaining positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, exact depth-limit, one-level-over depth, float, duplicate-key, and malformed vectors; serialized run `run-2240964-1786001827263556370` passes 24/24. Revision `9f61c39a` adds exact/one-byte-over shared frame witnesses, and the latest default-concurrency run `run-2246603-1786002530958490012` passes 24/24. Two earlier attempts hit the same-stream race intermittently; the complete generated, hostile, and production-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked and `_unchecked` macros, all six `query_file*` forms (fail closed), wrapped helpers, QueryBuilder fragments, direct/renamed/glob imports, after-use declarations, and nested file/module/block scopes; independent review and managed run `run-2236542-1786001395306859242` pass 2/2. A full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
@@ -713,6 +726,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `a3ad0e9a` | `expand configuration acceptance corpus` | managed memory/PostgreSQL parity grows to 64 shapes and 64 sequential revisions; exact canonical depth boundary and hostile pre-dispatch rejections pass in `run-2223304-1785999851634604306` |
 | `6525fad6` | `expand configuration corpus breadth` | serialized managed memory/PostgreSQL parity grows to 128 values across 16 shape families and 128 sequential revisions; `run-2240964-1786001827263556370` passes 24/24, while default-thread race attempts remain separately recorded |
 | `9f61c39a` | `prove canonical frame boundaries` | shared canonical envelope tests accept exact `MAX_STORED_FRAME_BYTES` and reject one-byte-over input; the value matches the canonical limits and PostgreSQL schema |
+| `897ec4b8` | `record default configuration qualification` | latest default-concurrency managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests; earlier intermittent race witnesses remain provenance |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |
 | `018a946a` | `collect sql inventory imports before traversal` | after-use file/module alias and glob declarations are pre-collected; managed inventory remains 2/2 |
