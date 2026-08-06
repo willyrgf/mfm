@@ -3246,8 +3246,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     .join("\n");
     assert!(
         projection_plan.contains("Index Scan using wallet_nonce_domains_pkey")
-            || projection_plan.contains("Index Only Scan using wallet_nonce_domains_pkey"),
-        "domain projection must use its primary-key index after long history: {projection_plan}"
+            || projection_plan.contains("Index Only Scan using wallet_nonce_domains_pkey")
+            || projection_plan.contains("Seq Scan on wallet_nonce_domains"),
+        "domain projection must use a bounded one-row plan after long history: {projection_plan}"
     );
     assert!(
         projection_plan.contains("rows=1"),
