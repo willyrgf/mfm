@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `f3a15978`; the historical gate remains
-separate from the focused follow-up evidence below.
-The focused follow-up candidate is `f3a15978`, which includes the bounded
+The historical gate remains separate from the focused follow-up evidence below.
+The latest implementation tip is `137ed63b`; the focused follow-up candidate
+before the public-result cutover was `f3a15978`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -78,6 +78,18 @@ are rejected. Revision `f3a15978` adds the managed SQL omission and rewritten
 historical-incarnation-row regression; its clean wallet qualification passes
 all four tests. The full EVM-09 deployment/provider-trust and production
 offline/public-result matrix remains conditional.
+
+Revision `137ed63b` addresses the separately substantiated EVM-09/APP-01
+public-result leak. The successful `EvmSubmissionOutput` projection now carries
+only `ExecutionDisposition`, derives `PublicOutputs`, and is advertised through
+the public schema descriptor; the domain regression serializes exactly the
+disposition object and rejects completion/attestation/signature markers. The
+managed production leaf was rerun on the clean commit and still fails before
+admission with `ProductionRegistryInvalid`: the 32-candidate expanded program
+is about 26.3 MiB and its RFC-required exact component-byte closure digest is
+about 97.4 MiB, beyond the generated 32 MiB canonical-document budget. This
+production-scale blocker is recorded as conditional rather than masked by a
+larger limit or a smaller wallet policy.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -146,7 +158,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `f3a15978` (`prove managed historical incarnation lookup tamper`),
+- Focused follow-up candidate: `137ed63b` (`redact evm submission public output`),
+  following `f3a15978` (`prove managed historical incarnation lookup tamper`),
   including `6f135845` (`remove unreachable signed native values`),
   including `6525fad6` (`expand configuration corpus breadth`),
   including `8a902d03` (`fail closed SQL file macros`),
@@ -1250,7 +1263,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, and managed historical-row omission/rewriting evidence remains green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression. Independent deployment/provider trust and production offline/public-result matrices remain. |
+| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, and public-result redaction remain green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view emits only typed disposition and advertises `PublicOutputs`. Independent deployment/provider trust and production offline/public-result matrices remain; the clean production leaf is blocked by the canonical closure-size failure recorded above. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
@@ -1259,7 +1272,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; the retained store-shaped authorization/observation artifact passes Audit offline parity and Semantic rejection. Live production evidence remains. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live matrix remains. |
-| TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
+| TT2-APP-01 | Conditional | Public, recorded-replay, and offline replay products expose only fold-derived status plus bounded export metadata; the 16-case application privacy trybuild matrix rejects raw-record, frontier, and full verified-run access, and `137ed63b` adds a serialized EVM public-result redaction regression. Complete runtime/audit/replay/export isolation proof remains outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid matching-account key with the wrong public key plus a valid wrong-account key; external termination/OOM/resource-failure classes remain. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |

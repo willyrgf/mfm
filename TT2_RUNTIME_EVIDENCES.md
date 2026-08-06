@@ -167,6 +167,7 @@ Post-step-12 implementation and proof revisions:
 | `b59d820a` | add detached completion proof hostile corpus |
 | `618cadea` | isolate detached provider proof corpus |
 | `f3a15978` | prove managed historical incarnation lookup tamper |
+| `137ed63b` | redact evm submission public output |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -564,6 +565,44 @@ run id: run-2331854-1786010138076393417
 result: ok — 1 task, 4 tests passed, 0 failed in 676.89s
 ```
 
+Revision `137ed63b` closes the public-result redaction gap identified at the
+EVM/application boundary. `EvmSubmissionOutput` now derives `PublicOutputs` and
+contains only the typed terminal execution disposition; the persisted
+`CompletedWalletNonce` recovery closure and provider attestations remain
+internal. The projection unit test serializes exactly
+`{"execution_disposition":"succeeded"}` and asserts that recovery,
+attestation, and signature fields are absent. Production entry-point assembly
+now advertises the public schema descriptor for both EVM submission and
+portfolio outputs, and the integration projection assertion covers the actual
+public run view.
+
+Focused verification on the committed source passed:
+
+```text
+nix develop -c cargo fmt --all -- --check
+nix develop -c cargo test -p mfm-evm --lib — 50 passed, 0 failed
+nix develop -c cargo check -p mfm-app — pass
+nix develop -c cargo test -p mfm-integration-tests --features parity-tests --test evm_postgres_submission --no-run — pass
+```
+
+The clean managed production leaf was also rerun from `137ed63b`:
+
+```text
+nix run .#run -- --task evm-postgres-submission-qualification
+run id: run-2364396-1786013847840815123
+result: fail — 0 passed, 1 failed in 148.51s
+failure: connect_production_application returned redacted ProductionRegistryInvalid
+```
+
+The failure is before admission/worker execution. Diagnostic-only inspection
+of the same registry path (removed before the committed rerun) identified the
+bounded cause: the 32-candidate EVM expansion is about 26.3 MiB, while the
+RFC-required exact component-byte closure digest produces about 97.4 MiB of
+canonical JSON when the byte vector is encoded, exceeding the generated
+33,554,432-byte canonical-document limit. The canonical limit and 32-candidate
+wallet policy were not weakened; production-scale EVM qualification therefore
+remains conditional.
+
 The provider-boundary budget targets ran from the focused revisions:
 
 ```text
@@ -783,7 +822,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Closure/preimage, persisted reload, and managed historical-row omission/rewriting evidence remains green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression. Independent deployment/provider trust and production offline/public-result matrices remain. |
+| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, and the public-result redaction boundary remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema. Independent deployment/provider trust and production offline/public-result matrices remain; the managed production leaf is currently blocked by the canonical closure-size failure recorded above. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -792,7 +831,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; the retained store-shaped authorization/observation artifact folds as an audit export with byte-identical offline parity, while carrying it as a semantic export is rejected. Live production evidence remains. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
 | REPLAY-05 | Conditional | Generated schema vectors, a 17-vector portable artifact corpus including retained observed-read audit bytes, two nested source-graph vectors, the generated offline-fold acceptance leaf, and online/offline parity pass; the complete live schema/corpus matrix remains. |
-| APP-01 | Conditional | Public, recorded-replay, and offline replay products now expose only fold-derived status plus bounded export metadata; the 16-case application trybuild matrix rejects raw-record, frontier, trace authorization-request, and full verified-run access, while complete runtime/audit/replay/export isolation proof remains outstanding. |
+| APP-01 | Conditional | Public, recorded-replay, and offline replay products now expose only fold-derived status plus bounded export metadata; the 16-case application trybuild matrix rejects raw-record, frontier, trace authorization-request, and full verified-run access, and `137ed63b` adds a serialized EVM public-result redaction regression. Complete runtime/audit/replay/export isolation proof remains outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | The shared production decrypt guard and witnesses cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, truncated and oversized ciphertext, ciphertext/tag/AAD authentication failure, injected unwind, authenticated post-decrypt invalid-key rejection, and explicit rejection of a valid key with the wrong public/account identity; external termination/OOM/resource-failure classes remain. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
