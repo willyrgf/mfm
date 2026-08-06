@@ -431,40 +431,20 @@ impl WalletAuthorityProviderClient {
         verified
     }
 
-    async fn verify_retained_mutation_proof(
+    fn verify_persisted_mutation(
         &self,
-        verification: RetainedMutationVerification<'_>,
-    ) -> Result<()> {
-        let proof = decode_persisted_mutation_proof(verification.proof)?;
-        verify_historical_incarnation(verification.connection, &proof.context.store_incarnation)
-            .await?;
-        // Historical wallet rows survive an authorized physical promotion. The
-        // provider proof must therefore belong to this store lineage and an
-        // already qualified writer epoch, while the signed context still
-        // identifies the exact target that prepared the mutation.
-        if proof.provider_id != self.trust.provider_id.as_str()
-            || proof.operation_key != verification.expected_operation_key
-            || proof.context.schema_name != verification.expected_schema
-            || proof.context.database_oid != verification.expected_database_oid
-            || proof
-                .context
-                .store_incarnation
-                .wallet_nonce_store_lineage_id
-                != verification
-                    .expected_store_incarnation
-                    .wallet_nonce_store_lineage_id
-            || proof.context.store_incarnation.writer_epoch
-                > verification.expected_store_incarnation.writer_epoch
-        {
-            return Err(PostgresEvmWalletError::InvalidAuthority);
-        }
-        validate_persisted_mutation_context(&proof.context)?;
+        proof: &str,
+        expected_context: Option<&ProviderTargetContext>,
+        expected_operation_key: &str,
+        mutation: &ProviderMutation,
+    ) -> Result<ProviderTargetContext> {
         verify_persisted_mutation_proof(
             &self.trust.public_key,
-            &proof,
-            &proof.context,
-            verification.expected_operation_key,
-            verification.mutation,
+            self.trust.provider_id.as_str(),
+            proof,
+            expected_context,
+            expected_operation_key,
+            mutation,
         )
     }
 }
@@ -911,26 +891,28 @@ impl OfflineActivationVerifier {
         &self.provider_fence_head_ref
     }
 
-    pub(crate) async fn verify_retained_mutation(
+    pub(crate) fn verify_persisted_mutation(
         &self,
-        connection: &mut PgConnection,
         proof: &str,
         schema_name: &str,
         database_oid: u32,
         operation_key: &str,
         mutation: &ProviderMutation,
-    ) -> Result<()> {
-        self.client
-            .verify_retained_mutation_proof(RetainedMutationVerification {
-                connection,
-                proof,
-                expected_store_incarnation: &self.store_incarnation,
-                expected_schema: schema_name,
-                expected_database_oid: database_oid,
-                expected_operation_key: operation_key,
-                mutation,
-            })
-            .await
+    ) -> Result<ProviderTargetContext> {
+        let context =
+            self.client
+                .verify_persisted_mutation(proof, None, operation_key, mutation)?;
+        // Historical wallet rows survive an authorized physical promotion. The
+        // provider proof must therefore belong to this store lineage and an
+        // already qualified writer epoch, while the signed context still
+        // identifies the exact target that prepared the mutation.
+        validate_retained_mutation_target(
+            &context,
+            &self.store_incarnation,
+            schema_name,
+            database_oid,
+        )?;
+        Ok(context)
     }
 
     pub(crate) async fn begin_read(&self) -> Result<PendingReadLease> {
@@ -1045,16 +1027,6 @@ struct PersistedMutationProof {
     operation_key: String,
     payload_digest: String,
     signature: String,
-}
-
-struct RetainedMutationVerification<'a> {
-    connection: &'a mut PgConnection,
-    proof: &'a str,
-    expected_store_incarnation: &'a WalletNonceStoreIncarnation,
-    expected_schema: &'a str,
-    expected_database_oid: u32,
-    expected_operation_key: &'a str,
-    mutation: &'a ProviderMutation,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize)]
@@ -1295,17 +1267,11 @@ impl WriteTransactionLease {
             ProviderReply::MutationPrepared {
                 provider_attestation,
             } => {
-                let proof = decode_persisted_mutation_proof(&provider_attestation)?;
-                if proof.provider_id != channel.provider_id
-                    || proof.context != self.context
-                    || proof.operation_key != self.operation_key
-                {
-                    return Ok(ProviderDisposition::Integrity);
-                }
                 verify_persisted_mutation_proof(
                     &channel.public_key,
-                    &proof,
-                    &self.context,
+                    &channel.provider_id,
+                    &provider_attestation,
+                    Some(&self.context),
                     &self.operation_key,
                     mutation.as_ref(),
                 )?;
@@ -1941,7 +1907,7 @@ fn decode_persisted_mutation_proof(value: &str) -> Result<PersistedMutationProof
     Ok(proof)
 }
 
-async fn verify_historical_incarnation(
+pub(crate) async fn verify_historical_incarnation(
     connection: &mut PgConnection,
     incarnation: &WalletNonceStoreIncarnation,
 ) -> Result<()> {
@@ -1990,17 +1956,39 @@ fn validate_persisted_mutation_context(context: &ProviderTargetContext) -> Resul
         .map_err(|_| PostgresEvmWalletError::InvalidAuthority)
 }
 
-fn verify_persisted_mutation_proof(
-    public_key: &[u8; 32],
-    proof: &PersistedMutationProof,
-    expected_context: &ProviderTargetContext,
-    expected_operation_key: &str,
-    mutation: &ProviderMutation,
+fn validate_retained_mutation_target(
+    context: &ProviderTargetContext,
+    expected_store_incarnation: &WalletNonceStoreIncarnation,
+    expected_schema: &str,
+    expected_database_oid: u32,
 ) -> Result<()> {
-    if proof.context != *expected_context || proof.operation_key != expected_operation_key {
+    if context.schema_name != expected_schema
+        || context.database_oid != expected_database_oid
+        || context.store_incarnation.wallet_nonce_store_lineage_id
+            != expected_store_incarnation.wallet_nonce_store_lineage_id
+        || context.store_incarnation.writer_epoch > expected_store_incarnation.writer_epoch
+    {
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
-    validate_persisted_mutation_context(expected_context)?;
+    Ok(())
+}
+
+fn verify_persisted_mutation_proof(
+    public_key: &[u8; 32],
+    expected_provider_id: &str,
+    proof_value: &str,
+    expected_context: Option<&ProviderTargetContext>,
+    expected_operation_key: &str,
+    mutation: &ProviderMutation,
+) -> Result<ProviderTargetContext> {
+    let proof = decode_persisted_mutation_proof(proof_value)?;
+    if proof.provider_id != expected_provider_id || proof.operation_key != expected_operation_key {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    if expected_context.is_some_and(|expected| proof.context != *expected) {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    validate_persisted_mutation_context(&proof.context)?;
     let payload_digest = mfm_journal::structured::domain_content_digest(
         "mfm.wallet-authority-provider.assertion-payload.v1",
         &(&proof.context, &proof.operation_key, mutation),
@@ -2027,7 +2015,8 @@ fn verify_persisted_mutation_proof(
     signed.extend_from_slice(proof.payload_digest.as_bytes());
     UnparsedPublicKey::new(&ED25519, *public_key)
         .verify(&signed, signature.as_ref())
-        .map_err(|_| PostgresEvmWalletError::FenceRejected)
+        .map_err(|_| PostgresEvmWalletError::FenceRejected)?;
+    Ok(proof.context)
 }
 
 fn decode_signature(signature: &str) -> Result<Zeroizing<[u8; 64]>> {
