@@ -108,9 +108,12 @@ both the closed implementation work and the remaining proof/deployment gaps.
   design/architecture contract updates), followed by `4e11e3550` (durable-row
   ambiguity regression strengthening).
 - Current parity/status revision: `0a4b02e1` (numeric configuration-prefix
-ordering after the shared serialized bound and expanded managed
-memory/PostgreSQL acceptance vectors, plus stale purpose-status assertions
-after the frontier cutover).
+  ordering after the shared serialized bound and expanded managed
+  memory/PostgreSQL acceptance vectors, plus stale purpose-status assertions
+  after the frontier cutover).
+- Checkpoint durability revision: `fce1edca` persists successful `Prepared`
+  successors in the test authority, rejects unprepared acknowledgements, and
+  proves fresh single- and multi-key ledger restart recovery.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -354,6 +357,28 @@ source: 0a4b02e1
 result: pass
 ```
 
+The checkpoint preparation durability fix was then qualified on the exact
+source tip:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: fce1edca
+run id: run-2150431-1785990104705897798
+result: ok — 18 structured-history tests passed, 0 failed in 32.08s
+
+nix develop -c cargo test -p mfm-storage-postgres \
+  --features test-support checkpoint --lib
+source: fce1edca
+result: 9 checkpoint tests passed, 0 failed
+```
+
+The sidecar test authority now persists every successful prepared successor
+before returning. Fresh instances reload single- and multi-key Prepared state,
+reject a conflicting successor, and acknowledge the exact bytes after restart;
+unprepared `acknowledge_many` calls fail closed. This is repository-local test
+authority evidence, not a concrete production checkpoint deployment or a full
+cross-process contention/fault matrix.
+
 The focused SQL inventory check on `7e467952` passes both the source inventory
 and syntax-fixture tests (2/2). Its AST visitor now exercises generic scalar,
 generic `query_as`, checked `query_as!`, wrapped generic, and `QueryBuilder`
@@ -579,7 +604,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-AUTH-01 | Closed | Workspace-private authority marker and API-surface denial tests prevent ordinary external physical access. |
 | TT2-AUTH-02 | Closed | PostgreSQL session authority is externally deployed, move-only, and not a public raw-login capability. |
 | TT2-STORE-01 | Conditional | Target/checkpoint trust is explicit and testable; concrete external production fence implementation is absent. |
-| TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; cross-process acknowledgement and fault injection remain. |
+| TT2-STORE-02 | Conditional | Snapshot/head validation and race tests pass; prepared checkpoint restart/conflict coverage now passes in the test authority, while cross-process contention, acknowledgement-loss, and injected-fault matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
 | TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic shape values (including UTF-8), and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, boundary/escape, hostile, and large-scale acceptance matrix remains unverified. |
