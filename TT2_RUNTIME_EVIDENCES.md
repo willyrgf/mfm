@@ -166,6 +166,7 @@ Post-step-12 implementation and proof revisions:
 | `25dc49e7` | split detached provider proof verification from history lookup |
 | `b59d820a` | add detached completion proof hostile corpus |
 | `618cadea` | isolate detached provider proof corpus |
+| `f3a15978` | prove managed historical incarnation lookup tamper |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -546,8 +547,22 @@ closure JSON into typed request/state-input/preimage values, and verified
 without `PgConnection`. The corpus passes 3/3 and rejects signature/key,
 payload, provider/op, schema/database/lineage/epoch, challenge, canonical-JSON,
 non-ASCII, and generated proof-budget substitutions. The full EVM-09 item
-remains Conditional for independent deployment/provider trust and the broader
-historical-row tamper and production offline/public-result matrices.
+remains Conditional for independent deployment/provider trust and the
+production offline/public-result matrix.
+
+Revision `f3a15978` adds the managed SQL historical-incarnation regression.
+The wallet qualification captures the exact registered row, removes it behind
+test-only trigger suppression, and proves a persisted completion becomes an
+integrity fault; it then restores the row, rewrites only its physical target
+JSON, proves the same fault, restores the exact `incarnation_json`, and proves
+status recovery. The clean managed task passes all four wallet-authority tests.
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: f3a15978
+run id: run-2331854-1786010138076393417
+result: ok — 1 task, 4 tests passed, 0 failed in 676.89s
+```
 
 The provider-boundary budget targets ran from the focused revisions:
 
@@ -768,7 +783,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Closure/preimage and persisted reload evidence remains green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; the proof is installed in and rehydrated from the persisted closure. Independent deployment/provider trust, historical-row tamper, and production offline/public-result matrices remain. |
+| EVM-09 | Conditional | Closure/preimage, persisted reload, and managed historical-row omission/rewriting evidence remains green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression. Independent deployment/provider trust and production offline/public-result matrices remain. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |

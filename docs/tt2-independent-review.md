@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `618cadea`; the historical gate remains
+The current implementation tip is `f3a15978`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `618cadea`, which includes the bounded
+The focused follow-up candidate is `f3a15978`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -74,8 +74,10 @@ completion closure; the test rehydrates typed completion request/state-input
 and derives the provider preimage from closure bytes before verifying it
 without `PgConnection`. Signature/key, payload, provider/op, target-policy,
 challenge, canonical-JSON, non-ASCII, and generated proof-budget substitutions
-are rejected. The full EVM-09 deployment/provider-trust, historical-row tamper,
-and production offline/public-result matrix remains conditional.
+are rejected. Revision `f3a15978` adds the managed SQL omission and rewritten
+historical-incarnation-row regression; its clean wallet qualification passes
+all four tests. The full EVM-09 deployment/provider-trust and production
+offline/public-result matrix remains conditional.
 The plan requires a PASS only when every
 Blocker/High requirement has its focused proof. The review therefore records
 both the closed implementation work and the remaining proof/deployment gaps.
@@ -144,7 +146,7 @@ both the closed implementation work and the remaining proof/deployment gaps.
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `da2b41a4` (`bound plain canonical json ingress`),
+- Focused follow-up candidate: `f3a15978` (`prove managed historical incarnation lookup tamper`),
   including `6f135845` (`remove unreachable signed native values`),
   including `6525fad6` (`expand configuration corpus breadth`),
   including `8a902d03` (`fail closed SQL file macros`),
@@ -176,7 +178,9 @@ both the closed implementation work and the remaining proof/deployment gaps.
   collection count bounds), and `70e6900e` (prior-run source-manifest byte
   bound), and `7741a07e` (prior-run source count bounds), and `17129b21`
   (native canonical recoverability bounds), followed by `26bbb44d` (base64url
-  parser ingress bound) and `6f135845` (unsigned-native primitive cutover).
+  parser ingress bound) and `6f135845` (unsigned-native primitive cutover),
+  followed by `f3a15978` (managed historical-incarnation omission and rewrite
+  regression).
 - Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
   in replay corpus`), which adds the exact store-shaped observed-read bytes,
   generator acceptance/rejection vectors, and an offline parity branch in the
@@ -312,8 +316,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   The focused storage target passes 3/3 without `PgConnection`, including
   closure-derived typed request/state-input/preimage verification and hostile
   provider, context-policy, digest, signature, challenge, canonicality, and
-  budget cases. The historical-row and deployment trust portions remain
-  conditional.
+  budget cases. Revision `f3a15978` adds a clean managed 4-test historical-row
+  omission/rewriting regression; deployment trust remains conditional.
 - Default-concurrency qualification: clean managed run
   `run-2246603-1786002530958490012` passes all 24 structured-history tests,
   including `configured_value_history_linearizes_same_stream_append_races`;
@@ -889,8 +893,24 @@ proof in the completion closure, rehydrates typed request/state-input values,
 derives the provider preimage from those closure bytes, and rejects crypto,
 payload, target-policy, canonicality, challenge, non-ASCII, and generated
 budget substitutions. Reload callers perform the separate historical
-incarnation lookup; the production/deployment and historical-row tamper
-matrices remain conditional.
+incarnation lookup; deployment/provider trust and production offline/public-
+result matrices remain conditional.
+
+The managed SQL historical-incarnation regression then ran from clean source
+tip `f3a15978`:
+
+```text
+nix run .#run -- --task wallet-nonce-postgres-storage-qualification
+source: f3a15978
+run id: run-2331854-1786010138076393417
+result: ok — 1 task, 4 tests passed, 0 failed in 676.89s
+```
+
+The long SQL scenario deletes the registered historical row, asserts the
+persisted completion fails closed, restores it, rewrites only the stored
+incarnation JSON, asserts failure again, restores the exact column value, and
+confirms status recovery. The remaining EVM-09 proof scope is deployment and
+provider trust plus an independent production offline/public-result audit.
 
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
@@ -1230,7 +1250,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-EVM-06 | Closed | Historical registered incarnations support release currentness and promotion. |
 | TT2-EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` holds status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | TT2-EVM-08 | Closed | Retained signer integrity failures remain integrity failures rather than availability outcomes. |
-| TT2-EVM-09 | Conditional | Closure/preimage and persisted reload evidence remains green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; the proof is rehydrated from closure bytes before verification. Independent deployment/provider trust, historical-row tamper, and production offline/public-result matrices remain. |
+| TT2-EVM-09 | Conditional | Closure/preimage, persisted reload, and managed historical-row omission/rewriting evidence remains green. `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from SQL history lookup and pass a 3/3 persisted-closure Completion corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression. Independent deployment/provider trust and production offline/public-result matrices remain. |
 | TT2-EVM-10 | Closed | Maximum nonce is rejected before observation and persistence. |
 | TT2-EVM-11 | Closed | Pending-floor route/policy and EVM semantics are authority-qualified before mutation. |
 | TT2-EVM-12 | Conditional | Release/restart qualification passes; injected crash, ambiguity, replacement, promotion, and scale matrices remain. |
