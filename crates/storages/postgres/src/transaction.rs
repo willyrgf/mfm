@@ -4,6 +4,11 @@
 //! checks, advisory locks, and commit classification live here. DML helpers require
 //! [`LockedWriteTx`] or [`LockedConfigurationWriteTx`].
 
+#[cfg(feature = "test-support")]
+use std::collections::BTreeSet;
+#[cfg(feature = "test-support")]
+use std::sync::{Mutex, OnceLock};
+
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{ContentDigest, DigestAlgorithm};
 use mfm_store::structured::{
@@ -13,6 +18,33 @@ use sqlx::{Postgres, Row, Transaction};
 
 use crate::schema::SCHEMA_CONTRACT_VERSION;
 use crate::session::{RoleSession, SessionKind, TargetBinding};
+
+#[cfg(feature = "test-support")]
+static COMMIT_ACKNOWLEDGEMENT_UNKNOWN: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+
+/// Arms one test-only commit acknowledgement loss for a target schema.
+///
+/// The transaction is committed normally, but the next matching commit reports an
+/// unknown acknowledgement so the caller must recover through its exact idempotent
+/// append path. This hook is unavailable without the `test-support` feature.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn arm_commit_acknowledgement_unknown(schema_name: impl Into<String>) {
+    COMMIT_ACKNOWLEDGEMENT_UNKNOWN
+        .get_or_init(|| Mutex::new(BTreeSet::new()))
+        .lock()
+        .expect("commit acknowledgement fault mutex poisoned")
+        .insert(schema_name.into());
+}
+
+#[cfg(feature = "test-support")]
+fn consume_commit_acknowledgement_unknown(schema_name: &str) -> bool {
+    COMMIT_ACKNOWLEDGEMENT_UNKNOWN
+        .get_or_init(|| Mutex::new(BTreeSet::new()))
+        .lock()
+        .expect("commit acknowledgement fault mutex poisoned")
+        .remove(schema_name)
+}
 
 /// Read-only transaction under an exact-target reader role.
 pub(crate) struct ReadTx<'a> {
@@ -78,7 +110,13 @@ impl<'a> LockedWriteTx<'a> {
         // at begin/prepare must not commit under a newer fence or release.
         validate_target(&mut self.transaction, binding, false).await?;
         match self.transaction.commit().await {
-            Ok(()) => Ok(CommitOutcome::Committed),
+            Ok(()) => {
+                #[cfg(feature = "test-support")]
+                if consume_commit_acknowledgement_unknown(binding.schema_name()) {
+                    return Ok(CommitOutcome::AcknowledgementUnknown);
+                }
+                Ok(CommitOutcome::Committed)
+            }
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
         }
     }
@@ -114,7 +152,13 @@ impl<'a> LockedConfigurationWriteTx<'a> {
     ) -> Result<CommitOutcome, StructuredStoreError> {
         validate_target(&mut self.transaction, binding, false).await?;
         match self.transaction.commit().await {
-            Ok(()) => Ok(CommitOutcome::Committed),
+            Ok(()) => {
+                #[cfg(feature = "test-support")]
+                if consume_commit_acknowledgement_unknown(binding.schema_name()) {
+                    return Ok(CommitOutcome::AcknowledgementUnknown);
+                }
+                Ok(CommitOutcome::Committed)
+            }
             Err(_) => Ok(CommitOutcome::AcknowledgementUnknown),
         }
     }

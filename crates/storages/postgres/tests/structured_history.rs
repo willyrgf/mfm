@@ -41,11 +41,12 @@ use mfm_spec::structured::{
     StructuredFactDescriptor,
 };
 use mfm_storage_postgres::{
-    open_configuration_maintenance, open_structured_authoritative,
-    open_structured_authoritative_with_configuration, open_test_application_sessions,
-    open_test_combined_sessions, open_test_configuration_sessions, ApplicationTargetSessions,
-    CombinedTargetSessions, ConfigurationMaintenanceSessions, PostgresStoreError,
-    PostgresStructuredHistoryBackend, TestLoginCredential, TestTargetCredentials,
+    arm_commit_acknowledgement_unknown, open_configuration_maintenance,
+    open_structured_authoritative, open_structured_authoritative_with_configuration,
+    open_test_application_sessions, open_test_combined_sessions, open_test_configuration_sessions,
+    ApplicationTargetSessions, CombinedTargetSessions, ConfigurationMaintenanceSessions,
+    PostgresStoreError, PostgresStructuredHistoryBackend, TestLoginCredential,
+    TestTargetCredentials,
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
@@ -322,6 +323,83 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     drop(reader);
     drop(writer);
     drop(run_history);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn configuration_commit_acknowledgement_loss_retries_identical_revision() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/configured-ack-loss").expect("operation id");
+    let (registry, _) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let (_run_history, configuration) = open_structured_authoritative_with_configuration(
+        database.combined_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify structured stores");
+    let (writer, reader) = configuration.split();
+    let stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "6".repeat(32))).expect("tenant"),
+        operation_id,
+        StableId::new("mfm.postgres.fixture/configured-ack-loss-target").expect("target"),
+    );
+    let contract = admission_object(
+        ADMISSION_CONFIGURATION_OBJECT_TYPE,
+        "mfm.postgres.fixture.configured-ack-loss-contract",
+        40,
+    )
+    .content_ref;
+    let first = writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-ack-loss-first").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("value"),
+        ))
+        .await
+        .expect("append baseline configuration revision");
+
+    arm_commit_acknowledgement_unknown(&database.schema);
+    let recovered = writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(first.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-ack-loss-recovered").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
+        ))
+        .await
+        .expect("recover exact append after unknown acknowledgement");
+
+    let audit_pool = database.independent_pool().await;
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT pg_catalog.count(*)::bigint FROM configuration_revisions \
+         WHERE append_request_id = $1",
+    )
+    .bind(recovered.append_request_id().as_str())
+    .fetch_one(&audit_pool)
+    .await
+    .expect("count recovered append rows");
+    assert_eq!(
+        count, 1,
+        "unknown acknowledgement must not duplicate the row"
+    );
+    assert_eq!(
+        reader
+            .resolve(&stream, &contract)
+            .await
+            .expect("resolve recovered configuration")
+            .revision(),
+        &recovered
+    );
+
+    audit_pool.close().await;
+    drop(reader);
+    drop(writer);
     database.cleanup().await;
 }
 
