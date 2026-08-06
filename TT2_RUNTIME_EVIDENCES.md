@@ -151,6 +151,8 @@ Post-step-12 implementation and proof revisions:
 | `9f61c39a` | prove canonical frame boundaries |
 | `78dbc354` | cover exact object frame boundary |
 | `e5f8c3b0` | isolate object frame length validation |
+| `a1ad9814` | prove provider attestation byte bounds |
+| `c36e233e` | prove finish authorization byte bound |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -293,6 +295,7 @@ replay remain unverified.
 | Configuration corpus breadth | `6525fad6` | serialized managed run expands memory/PostgreSQL parity to 128 generated shape values and 128 sequential revisions; all 24 tests pass with test threads serialized, while default-concurrency race attempts remain separate | CONDITIONAL; generated/hostile/production-scale corpus remains incomplete |
 | Canonical frame boundary | `9f61c39a` | shared `mfm-store` ingress unit tests accept an exact `MAX_STORED_FRAME_BYTES` canonical frame and reject one byte over; the bound equals the canonical package and PostgreSQL schema limits | PASS for this exact/one-over boundary; broader run/object corpus remains conditional |
 | Canonical object-frame boundary | `e5f8c3b0` | `78dbc354` adds a valid exact-limit retained object; `e5f8c3b0` isolates the shared object/envelope byte predicate, whose exact and one-byte-over object checks pass in the focused 4/4 target without malformed JSON or stale-digest ambiguity | PASS for this exact/one-over object boundary; broader run/object corpus remains conditional |
+| Provider evidence byte boundaries | `c36e233e` | `a1ad9814` proves exact/one-byte-over generated `MAX_PROVIDER_PROOF_BYTES` in the EVM and PostgreSQL validators; `c36e233e` proves exact/one-byte-over `MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES` with fresh matching digests; focused targets pass 1/1 and 4/4 | PASS for these local provider bounds; independent offline/provider-attestation audit remains conditional |
 | Default-concurrency configuration qualification | `897ec4b8` | clean managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests, including `configured_value_history_linearizes_same_stream_append_races`; two earlier attempts recorded intermittent 23/24 race witnesses | PASS for this run; repeatability and broader corpus remain conditional |
 
 ## Focused and composed verification
@@ -453,6 +456,24 @@ byte-length predicate (minimum 2 for envelopes, minimum 1 for objects), so the
 one-byte-over object assertion cannot pass because of malformed JSON or a stale
 content digest. The focused `mfm-store::structured::canonical_append` target
 passes 4/4 tests, and independent review marks this boundary proof PASS.
+
+The provider-boundary budget targets ran from the focused revisions:
+
+```text
+nix develop -c cargo test -p mfm-evm --lib provider_attestation -- --nocapture
+source: a1ad9814
+result: ok — 1 provider-attestation unit test passed, 0 failed
+
+nix develop -c cargo test -p mfm-storage-evm-postgres --lib provider::frame_tests -- --nocapture
+source: c36e233e
+result: ok — 4 provider-frame tests passed, 0 failed
+```
+
+Independent review confirms the generated 4,096-byte provider-proof and
+1,024-byte finish-authorization budgets are checked before persistence or
+assertion completion; the finish-authorization over-limit test uses a fresh
+matching digest, so digest mismatch cannot explain the rejection. The broader
+offline/provider-attestation audit remains conditional.
 
 The latest default-concurrency managed qualification ran from clean source
 tip `897ec4b8` (documentation-only evidence refresh after implementation
@@ -653,7 +674,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, and persisted two-candidate closure-only reload/public projection pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
+| EVM-09 | Conditional | Completion retains and validates typed preimages, including per-candidate permits bound to the retained prefix/ordinal and reservation observation rounds; serialized outer-value roundtrip, hostile tamper tests, persisted two-candidate closure-only reload/public projection, and exact/one-byte-over provider-proof and finish-authorization budget witnesses pass. An independent offline/public-result audit remains, including provider-attestation/signature verification without the storage verifier. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -740,6 +761,8 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `9f61c39a` | `prove canonical frame boundaries` | shared canonical envelope tests accept exact `MAX_STORED_FRAME_BYTES` and reject one-byte-over input; the value matches the canonical limits and PostgreSQL schema |
 | `78dbc354` | `cover exact object frame boundary` | shared retained-object validator accepts a valid exact `MAX_STORED_FRAME_BYTES` object; the focused canonical-append target passes 4/4 before the proof-isolation follow-up |
 | `e5f8c3b0` | `isolate object frame length validation` | shared object/envelope byte predicate proves exact and one-byte-over object lengths independently of malformed JSON or stale content digests; focused canonical-append target passes 4/4 and independent review marks PASS |
+| `a1ad9814` | `prove provider attestation byte bounds` | EVM and PostgreSQL provider validators accept exact `MAX_PROVIDER_PROOF_BYTES` and reject one byte over; focused targets pass 1/1 and 1/1 |
+| `c36e233e` | `prove finish authorization byte bound` | decoded finish authorization uses one private length/digest predicate; exact `MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES` and fresh-digest one-byte-over tests pass in the 4/4 provider frame target |
 | `897ec4b8` | `record default configuration qualification` | latest default-concurrency managed run `run-2246603-1786002530958490012` passes all 24 structured-history tests; earlier intermittent race witnesses remain provenance |
 | `40051076` | `cover unchecked sql query macros` | AST inventory adds pinned SQLx checked/unchecked macro names |
 | `1edcf7bb` | `close unchecked sql inventory aliases` | SQL argument positions match SQLx 0.9; direct, renamed-alias, and glob macro paths plus dynamic rejection fixtures pass |
