@@ -76,9 +76,18 @@ impl PostgresCommitFaultProxy {
                         let Ok((client, _)) = accepted else {
                             break;
                         };
+                        let connection_id = server_state
+                            .next_connection_id
+                            .fetch_add(1, Ordering::AcqRel);
                         let connection_state = Arc::clone(&server_state);
                         connections.spawn(async move {
-                            let _ = proxy_connection(client, upstream, connection_state).await;
+                            let _ = proxy_connection(
+                                client,
+                                upstream,
+                                connection_state,
+                                connection_id,
+                            )
+                            .await;
                         });
                     }
                     _ = &mut shutdown_requested => {
@@ -132,7 +141,8 @@ impl PostgresCommitFaultProxy {
     /// Arms a fault for the next commit after a frontend statement contains `statement`.
     ///
     /// The statement gate lets tests target one semantic transaction when a client performs
-    /// several unrelated wallet mutations during recovery startup.
+    /// several unrelated wallet mutations during recovery startup. Once the marker executes,
+    /// the fault is bound to that same PostgreSQL connection.
     pub fn arm_after_statement(
         &self,
         fault: CommitFault,
@@ -155,13 +165,11 @@ impl PostgresCommitFaultProxy {
         if attempts == 0 {
             return Err(ProviderTestError::Invalid);
         }
-        let statement_triggered = required_statement.as_ref().is_none_or(|needle| {
-            self.state
-                .executed_statement_texts
-                .lock()
-                .map(|texts| texts.iter().any(|statement| statement.contains(needle)))
-                .unwrap_or(false)
-        });
+        let executed_statements = self
+            .state
+            .executed_statement_texts
+            .lock()
+            .map_err(|_| ProviderTestError::Unavailable)?;
         let mut plan = self
             .state
             .plan
@@ -177,11 +185,22 @@ impl PostgresCommitFaultProxy {
             .load(Ordering::Acquire)
             .checked_add(attempts)
             .ok_or(ProviderTestError::Invalid)?;
+        let triggering_connection = required_statement.as_ref().and_then(|needle| {
+            executed_statements
+                .iter()
+                .find_map(|(connection_id, statement)| {
+                    statement
+                        .to_ascii_lowercase()
+                        .contains(needle)
+                        .then_some(*connection_id)
+                })
+        });
         *plan = Some(FaultPlan {
             fault,
             remaining: attempts,
-            triggered: statement_triggered,
+            triggered: required_statement.is_none() || triggering_connection.is_some(),
             required_statement,
+            triggering_connection,
         });
         Ok(target)
     }
@@ -244,10 +263,11 @@ impl Drop for PostgresCommitFaultProxy {
 #[derive(Default)]
 struct ProxyState {
     plan: Mutex<Option<FaultPlan>>,
+    next_connection_id: AtomicU64,
     intercepted: AtomicU64,
     executed_statements: AtomicU64,
     statement_texts: Mutex<Vec<String>>,
-    executed_statement_texts: Mutex<Vec<String>>,
+    executed_statement_texts: Mutex<Vec<(u64, String)>>,
     intercepted_changed: Notify,
     held_lost_acknowledgements: AtomicU64,
     held_lost_acknowledgements_changed: Notify,
@@ -260,6 +280,7 @@ struct FaultPlan {
     remaining: u64,
     required_statement: Option<String>,
     triggered: bool,
+    triggering_connection: Option<u64>,
 }
 
 impl ProxyState {
@@ -269,26 +290,27 @@ impl ProxyState {
         }
     }
 
-    fn record_executed_statement(&self, statement: &str) {
+    fn record_executed_statement(&self, connection_id: u64, statement: &str) {
         if let Ok(mut texts) = self.executed_statement_texts.lock() {
-            texts.push(statement.to_owned());
-        }
-        if let Ok(mut plan) = self.plan.lock() {
-            if plan.as_ref().is_some_and(|plan| {
-                !plan.triggered
-                    && plan
-                        .required_statement
-                        .as_ref()
-                        .is_some_and(|needle| statement.to_ascii_lowercase().contains(needle))
-            }) {
-                if let Some(plan) = plan.as_mut() {
-                    plan.triggered = true;
+            texts.push((connection_id, statement.to_owned()));
+            if let Ok(mut plan) = self.plan.lock() {
+                if plan.as_ref().is_some_and(|plan| {
+                    !plan.triggered
+                        && plan
+                            .required_statement
+                            .as_ref()
+                            .is_some_and(|needle| statement.to_ascii_lowercase().contains(needle))
+                }) {
+                    if let Some(plan) = plan.as_mut() {
+                        plan.triggered = true;
+                        plan.triggering_connection = Some(connection_id);
+                    }
                 }
             }
         }
     }
 
-    fn take_fault(&self) -> io::Result<Option<CommitFault>> {
+    fn take_fault(&self, connection_id: u64) -> io::Result<Option<CommitFault>> {
         let fault = {
             let mut retained = self
                 .plan
@@ -297,7 +319,9 @@ impl ProxyState {
             let Some(plan) = retained.as_mut() else {
                 return Ok(None);
             };
-            if plan.required_statement.is_some() && !plan.triggered {
+            if plan.required_statement.is_some()
+                && (!plan.triggered || plan.triggering_connection != Some(connection_id))
+            {
                 return Ok(None);
             }
             let fault = plan.fault;
@@ -333,6 +357,7 @@ async fn proxy_connection(
     mut client: TcpStream,
     upstream: SocketAddr,
     state: Arc<ProxyState>,
+    connection_id: u64,
 ) -> io::Result<()> {
     let mut server = TcpStream::connect(upstream).await?;
     let mut startup_forwarded = false;
@@ -368,13 +393,13 @@ async fn proxy_connection(
                     _ => None,
                 };
                 if let Some(statement) = executed_statement.as_deref() {
-                    state.record_executed_statement(statement);
+                    state.record_executed_statement(connection_id, statement);
                 }
                 if executed_statement
                     .as_deref()
                     .is_some_and(is_commit_statement)
                 {
-                    match state.take_fault()? {
+                    match state.take_fault(connection_id)? {
                         Some(CommitFault::RollBackBeforeCommit) => {
                             server.shutdown().await?;
                             client.shutdown().await?;
@@ -586,29 +611,57 @@ mod tests {
                 remaining: 1,
                 required_statement: Some("insert into wallet_nonce_completions".to_owned()),
                 triggered: false,
+                triggering_connection: None,
             });
 
         assert_eq!(
-            state.take_fault().expect("untriggered plan"),
+            state.take_fault(0).expect("untriggered plan"),
             None,
             "unrelated commits must pass before the marker"
         );
         state.record_statement("UPDATE wallet_nonce_domains SET current_resource_frontier_ref");
         assert_eq!(
-            state.take_fault().expect("unrelated statement"),
+            state.take_fault(0).expect("unrelated statement"),
             None,
             "unrelated statements must not arm the fault"
         );
         state.record_statement("INSERT INTO wallet_nonce_completions (...)");
         assert_eq!(
-            state.take_fault().expect("unexecuted statement"),
+            state.take_fault(0).expect("unexecuted statement"),
             None,
             "parsing a statement must not arm the fault"
         );
-        state.record_executed_statement("INSERT INTO wallet_nonce_completions (...)");
+        state.record_executed_statement(0, "INSERT INTO wallet_nonce_completions (...)");
         assert_eq!(
-            state.take_fault().expect("triggered plan"),
+            state.take_fault(0).expect("triggered plan"),
             Some(CommitFault::HoldTransactionBeforeCommit)
+        );
+    }
+
+    #[test]
+    fn statement_gate_binds_the_fault_to_the_marker_connection() {
+        let state = ProxyState::default();
+        state
+            .plan
+            .lock()
+            .expect("fault plan lock")
+            .replace(FaultPlan {
+                fault: CommitFault::CommitAndLoseAcknowledgement,
+                remaining: 1,
+                required_statement: Some("insert into wallet_nonce_completions".to_owned()),
+                triggered: false,
+                triggering_connection: None,
+            });
+
+        state.record_executed_statement(7, "INSERT INTO wallet_nonce_completions (...)");
+        assert_eq!(
+            state.take_fault(8).expect("foreign connection commit"),
+            None,
+            "a marker on one connection must not fault another transaction"
+        );
+        assert_eq!(
+            state.take_fault(7).expect("marker connection commit"),
+            Some(CommitFault::CommitAndLoseAcknowledgement)
         );
     }
 
