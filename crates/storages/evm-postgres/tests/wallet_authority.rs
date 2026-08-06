@@ -5385,6 +5385,15 @@ async fn assert_historical_incarnation_row_required(
     .fetch_one(&mut *admin)
     .await
     .expect("capture historical incarnation row");
+    let original_incarnation_json = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "SELECT incarnation_json FROM {schema}.wallet_store_incarnations \
+         WHERE wallet_nonce_store_lineage_id = $1 AND writer_epoch = $2::numeric"
+    )))
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .fetch_one(&mut *admin)
+    .await
+    .expect("capture historical incarnation JSON");
 
     set_replication_role(admin, "replica").await;
     let deleted = sqlx::query(AssertSqlSafe(format!(
@@ -5446,15 +5455,16 @@ async fn assert_historical_incarnation_row_required(
     )))
     .bind(&incarnation.wallet_nonce_store_lineage_id)
     .bind(incarnation.writer_epoch.to_string())
-    .bind(original_row)
+    .bind(original_incarnation_json)
     .execute(&mut *admin)
     .await
     .expect("restore historical incarnation row after rewrite probe");
     set_replication_role(admin, "origin").await;
-    assert!(matches!(
-        authority.read_status(state_input, status_request).await,
-        ReadAdapterCompletion::Returned(_)
-    ));
+    let restored_status = authority.read_status(state_input, status_request).await;
+    assert!(
+        matches!(restored_status, ReadAdapterCompletion::Returned(_)),
+        "historical incarnation restoration did not recover status: {restored_status:?}"
+    );
 }
 
 async fn restore_candidate_prefix_semantically(
