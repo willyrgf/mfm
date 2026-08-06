@@ -357,11 +357,32 @@ pub fn validate_envelope_frame(canonical_envelope: &str) -> Result<(), Structure
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES};
+    use mfm_canonical::sha256_digest_bytes;
+    use mfm_ids::{DigestAlgorithm, SchemaId, StableId};
+    use mfm_journal::structured::HistoryObject;
+
+    use super::{
+        validate_append_objects, validate_envelope_frame, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
+    };
 
     fn canonical_string_with_bytes(byte_len: usize) -> String {
         assert!(byte_len >= 2);
         format!("\"{}\"", "x".repeat(byte_len - 2))
+    }
+
+    fn boundary_object() -> HistoryObject {
+        HistoryObject::new(
+            StableId::new("structured.boundary-object").expect("object type"),
+            SchemaId::new(
+                "mfm.store.boundary-object",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"structured-boundary-object"),
+            )
+            .expect("object schema"),
+            canonical_string_with_bytes(MAX_STORED_FRAME_BYTES),
+        )
+        .expect("exact object frame")
     }
 
     #[test]
@@ -385,5 +406,15 @@ mod tests {
         let frame = canonical_string_with_bytes(MAX_STORED_FRAME_BYTES + 1);
         assert_eq!(frame.len(), MAX_STORED_FRAME_BYTES + 1);
         assert!(validate_envelope_frame(&frame).is_err());
+    }
+
+    #[test]
+    fn object_frame_accepts_exact_limit_and_rejects_one_byte_over() {
+        let mut object = boundary_object();
+        validate_append_objects(std::slice::from_ref(&object))
+            .expect("exact stored object-frame limit is accepted");
+        object.canonical_json.push('x');
+        assert_eq!(object.canonical_json.len(), MAX_STORED_FRAME_BYTES + 1);
+        assert!(validate_append_objects(std::slice::from_ref(&object)).is_err());
     }
 }
