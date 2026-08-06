@@ -169,6 +169,7 @@ Post-step-12 implementation and proof revisions:
 | `f3a15978` | prove managed historical incarnation lookup tamper |
 | `137ed63b` | redact evm submission public output |
 | `f5815ccb` | audit detached evm completion proofs |
+| `6cd74eef` | fix certified closure digest encoding |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -621,20 +622,48 @@ nix develop -c cargo check -p mfm-storage-evm-postgres
 result: ok
 ```
 
-The independent repository-local offline/public-result audit is now green;
-the production deployment/provider-trust matrix and production-scale leaf
-remain conditional. The production leaf still fails before admission because
-the 32-candidate expansion produces an approximately 97.4 MiB closure digest
-JSON value against the generated 32 MiB canonical-document bound.
+At revision `f5815ccb`, the independent repository-local offline/public-result
+audit was green, while the production deployment/provider-trust matrix and
+production-scale leaf remained conditional. The production leaf failure at
+that revision was before admission because the 32-candidate expansion
+produced an approximately 97.4 MiB closure-digest JSON value against the
+generated 32 MiB canonical-document bound.
 
-The failure is before admission/worker execution. Diagnostic-only inspection
+That historical failure was before admission/worker execution. Diagnostic-only inspection
 of the same registry path (removed before the committed rerun) identified the
 bounded cause: the 32-candidate EVM expansion is about 26.3 MiB, while the
 RFC-required exact component-byte closure digest produces about 97.4 MiB of
 canonical JSON when the byte vector is encoded, exceeding the generated
 33,554,432-byte canonical-document limit. The canonical limit and 32-candidate
 wallet policy were not weakened; production-scale EVM qualification therefore
-remains conditional.
+remained conditional at that revision.
+
+Revision `6cd74eef` closes that repository-local production-scale blocker. The
+certified-program closure digest now inserts each already-canonical component
+value as raw JSON inside the enclosing canonical preimage. This preserves the
+exact component bytes and the generated 33,554,432-byte canonical-document
+bound; it does not change the 32-candidate policy. The focused certification
+golden and full structured-certification target pass, and the managed
+production leaf completes the real PostgreSQL/provider/application path:
+
+```text
+nix develop -c cargo fmt --all -- --check
+result: ok
+
+nix develop -c cargo test -p mfm-certify --test structured-certification --no-fail-fast
+result: ok — 38 passed, 0 failed
+
+nix develop -c cargo check -p mfm-certify
+result: ok
+
+nix run .#run -- --task evm-postgres-submission-qualification
+run id: run-2375667-1786015092059379426
+result: ok — 1 passed, 0 failed in 1208.51s (task total 1208.99s)
+```
+
+The production-scale EVM leaf is therefore PASS for this repository-local
+qualification scope. Deployment-owned provider trust and the broader crash,
+ambiguity, latency, and production-authority matrices remain conditional.
 
 The provider-boundary budget targets ran from the focused revisions:
 
@@ -855,7 +884,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, and the detached offline audit remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider. Production deployment/provider trust and the production-scale leaf remain conditional; the managed production leaf is blocked by the canonical closure-size failure recorded above. |
+| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed `evm-postgres-submission-qualification` passes 1/1. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | Current release/restart qualification passes; injected crash/ambiguity/replacement/scale matrices are incomplete. |
@@ -1104,8 +1133,10 @@ The follow-up narrows, but does not eliminate, the residuals above. EVM-07 now
 has exact query-shape, non-aggregate, projection-index, and 64-row scale
 evidence, but still lacks an independent production latency envelope; EVM-09
 now has the repository-local independent offline/public-result/provider
-attestation audit, while production deployment/provider trust and the
-production-scale leaf remain conditional; SEC-01 now has direct malformed-ciphertext and wrong-identity
+attestation audit and a passing repository-local production-scale leaf after
+`6cd74eef`, while production deployment/provider trust and the broader crash,
+ambiguity, latency, and production-authority matrices remain conditional;
+SEC-01 now has direct malformed-ciphertext and wrong-identity
 witnesses, but still lacks external termination/OOM/resource-failure coverage;
 and the
 external trust, live multi-hop export,
