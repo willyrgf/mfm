@@ -2418,6 +2418,20 @@ fn valid_provider_attestation(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+#[cfg(test)]
+mod provider_attestation_tests {
+    use super::{valid_provider_attestation, MAX_PROVIDER_PROOF_BYTES};
+
+    #[test]
+    fn provider_attestation_accepts_exact_budget_and_rejects_one_byte_over() {
+        let exact = "x".repeat(MAX_PROVIDER_PROOF_BYTES);
+        assert!(valid_provider_attestation(&exact));
+
+        let one_byte_over = format!("{exact}x");
+        assert!(!valid_provider_attestation(&one_byte_over));
+    }
+}
+
 /// One transactionally consistent wallet-nonce status snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
