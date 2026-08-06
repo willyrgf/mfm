@@ -892,6 +892,104 @@ fn independent_detached_audit_rejects_payload_crypto_challenge_and_wire_substitu
 }
 
 #[test]
+fn independent_detached_audit_rejects_context_and_proof_boundary_substitutions() {
+    let fixture = persisted_completion_fixture();
+    let assert_context = |mutate: fn(&mut ProviderTargetContext), expected: &'static str| {
+        let mut context = fixture.context.clone();
+        mutate(&mut context);
+        let proof = persisted_proof(
+            &context,
+            &fixture.operation_key,
+            &fixture.provider_id,
+            &fixture.mutation,
+            &SIGNING_SEED,
+        );
+        let trust = DetachedAuditTrust {
+            provider_id: fixture.provider_id.clone(),
+            public_key: public_key(&SIGNING_SEED),
+            operation_key: fixture.operation_key.clone(),
+            context: detached_audit_context(&context),
+        };
+        assert_eq!(
+            independently_verify_detached_completion(
+                &fixture.completion.recovery_closure,
+                &proof,
+                &trust,
+            ),
+            Err(expected),
+        );
+    };
+
+    assert_context(|context| context.database_oid = 0, "provider context");
+    assert_context(|context| context.backend_pid = 0, "provider context");
+    assert_context(|context| context.transaction_id = None, "provider context");
+    assert_context(
+        |context| context.snapshot_id = Some("snapshot".to_owned()),
+        "provider context",
+    );
+    assert_context(
+        |context| context.application_marker = "a".repeat(61),
+        "provider context",
+    );
+    assert_context(
+        |context| context.application_marker = "g".repeat(62),
+        "provider context",
+    );
+    assert_context(
+        |context| context.store_incarnation.writer_epoch = 0,
+        "store incarnation",
+    );
+
+    let valid = fixture.completion.provider_completion_attestation.clone();
+    for proof_value in [String::new(), "é".to_owned()] {
+        let trust = DetachedAuditTrust {
+            provider_id: fixture.provider_id.clone(),
+            public_key: public_key(&SIGNING_SEED),
+            operation_key: fixture.operation_key.clone(),
+            context: detached_audit_context(&fixture.context),
+        };
+        assert_eq!(
+            independently_verify_detached_completion(
+                &fixture.completion.recovery_closure,
+                &proof_value,
+                &trust,
+            ),
+            Err("proof bounds"),
+        );
+    }
+    let oversized = "x".repeat(MAX_PROVIDER_PROOF_BYTES + 1);
+    let trust = DetachedAuditTrust {
+        provider_id: fixture.provider_id.clone(),
+        public_key: public_key(&SIGNING_SEED),
+        operation_key: fixture.operation_key.clone(),
+        context: detached_audit_context(&fixture.context),
+    };
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &oversized,
+            &trust,
+        ),
+        Err("proof bounds"),
+    );
+
+    let mut unknown_value: serde_json::Value = serde_json::from_str(&valid).expect("valid proof");
+    unknown_value
+        .as_object_mut()
+        .expect("proof object")
+        .insert("unknown".to_owned(), serde_json::json!(true));
+    let unknown = serde_json::to_string(&unknown_value).expect("unknown proof");
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &unknown,
+            &trust,
+        ),
+        Err("proof JSON"),
+    );
+}
+
+#[test]
 fn detached_completion_proof_rejects_crypto_and_target_substitutions() {
     let fixture = completion_fixture();
     let valid = persisted_proof(
