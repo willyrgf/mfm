@@ -2097,6 +2097,42 @@ impl CompletedWalletNonce {
         })
     }
 
+    /// Rehydrates one completion wrapper from its persisted recovery closure.
+    ///
+    /// The closure is the complete recovery preimage; the public wrapper fields
+    /// are reconstructed from it and then revalidated before the value is
+    /// returned. This lets a later process recover without the original outer
+    /// value or any ambient provider/store access.
+    pub fn from_recovery_closure(
+        recovery_closure: &str,
+    ) -> Result<Self, WalletAuthorityContractError> {
+        let closure = decode_completed_recovery(recovery_closure)?;
+        let completion = Self {
+            nonce_domain: closure.reservation.nonce_domain.clone(),
+            nonce: closure.reservation.nonce,
+            semantic_reservation_key: closure.reservation.semantic_reservation_key.clone(),
+            semantic_completion_key: closure.completion_request.completion_key.clone(),
+            canonical_terminal_outcome: closure.canonical_terminal_outcome.clone(),
+            terminal_witnesses: closure.terminal_witnesses.clone(),
+            sealed_activated_candidates: closure.sealed_activated_candidates.clone(),
+            original_terminal_witnesses_ref: closure.original_terminal_witnesses_ref.clone(),
+            completion_evidence_ref: closure.completion_evidence_ref.clone(),
+            provider_completion_attestation: closure.provider_completion_attestation.clone(),
+            recovery_closure: recovery_closure.to_owned(),
+        };
+        completion.validate()?;
+        Ok(completion)
+    }
+
+    /// Projects the canonical public result from persisted closure bytes alone.
+    pub fn project_public_result_from_recovery_closure(
+        recovery_closure: &str,
+    ) -> Result<String, WalletAuthorityContractError> {
+        Ok(Self::from_recovery_closure(recovery_closure)?
+            .canonical_terminal_outcome
+            .canonical_public_result)
+    }
+
     /// Adds the provider attestation returned for the exact terminal mutation.
     ///
     /// The mutation is prepared before its SQL row is inserted, so the provider
