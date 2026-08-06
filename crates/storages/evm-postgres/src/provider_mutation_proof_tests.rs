@@ -749,6 +749,12 @@ fn independent_detached_audit_rejects_provider_and_projection_substitutions() {
         r#"\"execution_disposition\":\"succeeded\""#,
         r#"\"execution_disposition\":\"reverted\""#,
     );
+    assert!(independently_verify_detached_completion(
+        &forged_projection,
+        &fixture.completion.provider_completion_attestation,
+        &trust,
+    )
+    .is_err());
     assert!(
         CompletedWalletNonce::project_public_result_from_recovery_closure(&forged_projection)
             .is_err()
