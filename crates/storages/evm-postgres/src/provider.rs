@@ -785,13 +785,10 @@ impl PendingDeploymentAssembly {
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
         finish_authorization.zeroize();
         let finish_authorization = Zeroizing::new(decoded_finish_authorization);
-        if finish_authorization.is_empty()
-            || finish_authorization.len() > MAX_FINISH_AUTHORIZATION_BYTES
-            || mfm_canonical::sha256_digest_bytes(&finish_authorization).as_bytes()
-                != &self.finish_authorization_commitment
-        {
-            return Err(PostgresEvmWalletError::InvalidAuthority);
-        }
+        validate_finish_authorization(
+            &finish_authorization,
+            &self.finish_authorization_commitment,
+        )?;
         let provider_attestation = Zeroizing::new(provider_attestation);
         let finish_authorization_hex = Zeroizing::new(hex::encode(finish_authorization.as_slice()));
         self.client.verify_assertion(
@@ -1917,6 +1914,16 @@ fn valid_provider_attestation(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
+fn validate_finish_authorization(value: &[u8], expected_digest: &[u8; 32]) -> Result<()> {
+    if value.is_empty()
+        || value.len() > MAX_FINISH_AUTHORIZATION_BYTES
+        || mfm_canonical::sha256_digest_bytes(value).as_bytes() != expected_digest
+    {
+        return Err(PostgresEvmWalletError::InvalidAuthority);
+    }
+    Ok(())
+}
+
 fn decode_persisted_mutation_proof(value: &str) -> Result<PersistedMutationProof> {
     if !valid_provider_attestation(value) {
         return Err(PostgresEvmWalletError::InvalidAuthority);
@@ -2151,5 +2158,17 @@ mod frame_tests {
 
         let one_byte_over = format!("{exact}x");
         assert!(!valid_provider_attestation(&one_byte_over));
+    }
+
+    #[test]
+    fn finish_authorization_accepts_exact_budget_and_rejects_one_byte_over() {
+        let exact = vec![b'x'; MAX_FINISH_AUTHORIZATION_BYTES];
+        let exact_digest = *mfm_canonical::sha256_digest_bytes(&exact).as_bytes();
+        validate_finish_authorization(&exact, &exact_digest)
+            .expect("exact finish-authorization budget is accepted");
+
+        let one_byte_over = vec![b'x'; MAX_FINISH_AUTHORIZATION_BYTES + 1];
+        let one_byte_over_digest = *mfm_canonical::sha256_digest_bytes(&one_byte_over).as_bytes();
+        assert!(validate_finish_authorization(&one_byte_over, &one_byte_over_digest).is_err());
     }
 }
