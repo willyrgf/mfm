@@ -3068,6 +3068,15 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             ..
         }) if retained_completion == &successor_completion
     ));
+    assert_historical_incarnation_row_required(
+        &mut admin_connection,
+        &schema,
+        &fixture.next_incarnation,
+        &successor_authority,
+        &state_input,
+        &successor_status_request,
+    )
+    .await;
     let original_candidate_json = corrupt_candidate_prefix_semantically(
         &mut admin_connection,
         &schema,
@@ -5357,6 +5366,95 @@ async fn restore_completion_provider_attestation(
             .rows_affected(),
         1
     );
+}
+
+async fn assert_historical_incarnation_row_required(
+    admin: &mut PgConnection,
+    schema: &str,
+    incarnation: &WalletNonceStoreIncarnation,
+    authority: &PostgresWalletNonceAuthority,
+    state_input: &LexicalValueRef,
+    status_request: &ReadEvmWalletNonceStatusRequest,
+) {
+    let original_row = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "SELECT to_jsonb(i)::text FROM {schema}.wallet_store_incarnations AS i \
+         WHERE wallet_nonce_store_lineage_id = $1 AND writer_epoch = $2::numeric"
+    )))
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .fetch_one(&mut *admin)
+    .await
+    .expect("capture historical incarnation row");
+
+    set_replication_role(admin, "replica").await;
+    let deleted = sqlx::query(AssertSqlSafe(format!(
+        "DELETE FROM {schema}.wallet_store_incarnations \
+         WHERE wallet_nonce_store_lineage_id = $1 AND writer_epoch = $2::numeric"
+    )))
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .execute(&mut *admin)
+    .await
+    .expect("remove historical incarnation row for lookup probe");
+    set_replication_role(admin, "origin").await;
+    assert_eq!(deleted.rows_affected(), 1);
+    assert!(matches!(
+        authority.read_status(state_input, status_request).await,
+        ReadAdapterCompletion::IntegrityFault(_)
+    ));
+
+    set_replication_role(admin, "replica").await;
+    sqlx::query(AssertSqlSafe(format!(
+        "INSERT INTO {schema}.wallet_store_incarnations \
+         SELECT * FROM jsonb_populate_record(NULL::{schema}.wallet_store_incarnations, $1::jsonb)"
+    )))
+    .bind(&original_row)
+    .execute(&mut *admin)
+    .await
+    .expect("restore historical incarnation row after omission probe");
+    set_replication_role(admin, "origin").await;
+
+    let mut rewritten = incarnation.clone();
+    rewritten.physical_target_instance_id = "mfm.evm.test/rewritten-target".to_owned();
+    rewritten.validate().expect("rewritten incarnation shape");
+    let rewritten_json = canonical_json(&rewritten)
+        .expect("canonical rewritten incarnation")
+        .as_str()
+        .to_owned();
+    set_replication_role(admin, "replica").await;
+    let updated = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_store_incarnations SET incarnation_json = $3 \
+         WHERE wallet_nonce_store_lineage_id = $1 AND writer_epoch = $2::numeric"
+    )))
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .bind(rewritten_json)
+    .execute(&mut *admin)
+    .await
+    .expect("rewrite historical incarnation row for lookup probe");
+    set_replication_role(admin, "origin").await;
+    assert_eq!(updated.rows_affected(), 1);
+    assert!(matches!(
+        authority.read_status(state_input, status_request).await,
+        ReadAdapterCompletion::IntegrityFault(_)
+    ));
+
+    set_replication_role(admin, "replica").await;
+    sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_store_incarnations SET incarnation_json = $3 \
+         WHERE wallet_nonce_store_lineage_id = $1 AND writer_epoch = $2::numeric"
+    )))
+    .bind(&incarnation.wallet_nonce_store_lineage_id)
+    .bind(incarnation.writer_epoch.to_string())
+    .bind(original_row)
+    .execute(&mut *admin)
+    .await
+    .expect("restore historical incarnation row after rewrite probe");
+    set_replication_role(admin, "origin").await;
+    assert!(matches!(
+        authority.read_status(state_input, status_request).await,
+        ReadAdapterCompletion::Returned(_)
+    ));
 }
 
 async fn restore_candidate_prefix_semantically(
