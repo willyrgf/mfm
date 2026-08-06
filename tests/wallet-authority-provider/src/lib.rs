@@ -2292,7 +2292,7 @@ impl ProviderState {
         retained.is_ok_and(|retained| !retained)
     }
 
-    fn acquire_lease(
+    async fn acquire_lease(
         self: &Arc<Self>,
         expected_incarnation: &WalletNonceStoreIncarnation,
         expected_provider_head: &EvmWalletReference,
@@ -2300,10 +2300,7 @@ impl ProviderState {
         // Keep checkpoint recovery from observing idle state while this lease
         // is being admitted; the guard is held until the active-lease count is
         // incremented.
-        let _observation = self
-            .checkpoint_observation
-            .try_lock()
-            .map_err(|_| ProviderTestError::Unavailable)?;
+        let _observation = self.checkpoint_observation.lock().await;
         let mut state = self
             .mutable
             .lock()
@@ -2321,7 +2318,7 @@ impl ProviderState {
         })
     }
 
-    fn acquire_issuance_lease(
+    async fn acquire_issuance_lease(
         self: &Arc<Self>,
         expected_incarnation: &WalletNonceStoreIncarnation,
         expected_provider_head: &EvmWalletReference,
@@ -2331,10 +2328,7 @@ impl ProviderState {
         // Keep checkpoint recovery from observing idle state while this lease
         // is being admitted; the guard is held until the active-lease count is
         // incremented.
-        let _observation = self
-            .checkpoint_observation
-            .try_lock()
-            .map_err(|_| ProviderTestError::Unavailable)?;
+        let _observation = self.checkpoint_observation.lock().await;
         let mut state = self
             .mutable
             .lock()
@@ -2745,6 +2739,7 @@ async fn serve_connection(
                 ),
             )?;
             let inserted = {
+                let _observation = state.checkpoint_observation.lock().await;
                 let mut retained = state
                     .mutable
                     .lock()
@@ -2797,6 +2792,7 @@ async fn serve_connection(
             proofs,
         } => {
             let pending = {
+                let _observation = state.checkpoint_observation.lock().await;
                 let mut retained = state
                     .mutable
                     .lock()
@@ -3200,7 +3196,7 @@ async fn handle_read(
         channel.send(&ProviderReply::Rejected).await?;
         return Ok(());
     }
-    let _lease = match state.acquire_lease(&incarnation, &provider_head) {
+    let _lease = match state.acquire_lease(&incarnation, &provider_head).await {
         Ok(lease) => lease,
         Err(_) => {
             send_superseded_or_unavailable(channel, &state).await?;
@@ -3273,7 +3269,7 @@ async fn handle_write(
         channel.send(&ProviderReply::Rejected).await?;
         return Ok(());
     }
-    let _lease = match state.acquire_lease(&incarnation, &provider_head) {
+    let _lease = match state.acquire_lease(&incarnation, &provider_head).await {
         Ok(lease) => lease,
         Err(_) => {
             send_superseded_or_unavailable(channel, &state).await?;
@@ -3558,7 +3554,10 @@ async fn handle_issuance(
     let _lease = if confirmed_replay {
         None
     } else {
-        match state.acquire_issuance_lease(&incarnation, &provider_head) {
+        match state
+            .acquire_issuance_lease(&incarnation, &provider_head)
+            .await
+        {
             Ok(lease) => Some(lease),
             Err(_) => {
                 channel.send(&ProviderReply::Rejected).await?;
