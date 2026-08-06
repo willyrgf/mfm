@@ -699,6 +699,9 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
             {
                 let state = CheckpointState::Prepared { successor };
                 states.insert(stream, state.clone());
+                drop(states);
+                drop(heads);
+                self.persist();
                 Ok(state)
             }
             Some(_) => Err(CheckpointError::Conflict),
@@ -708,6 +711,9 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
                 }
                 let state = CheckpointState::Prepared { successor };
                 states.insert(stream, state.clone());
+                drop(states);
+                drop(heads);
+                self.persist();
                 Ok(state)
             }
         }
@@ -962,6 +968,9 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
         for (mutation, state) in ordered.iter().zip(states.iter()) {
             guard.insert(StreamIdentity::from(&mutation.key), state.clone());
         }
+        drop(guard);
+        drop(heads);
+        self.persist();
         Ok(states)
     }
 
@@ -1048,10 +1057,6 @@ impl ExternalCheckpointAuthority for ExternalCheckpointLedger {
                         return Err(CheckpointError::Conflict);
                     }
                 }
-                Some(CheckpointState::Acknowledged { successor: prior })
-                    if current_head == Some(prior)
-                        && mutation.key.predecessor.as_ref() == Some(prior) => {}
-                None if current_head == mutation.key.predecessor.as_ref() => {}
                 _ => return Err(CheckpointError::NotPrepared),
             }
         }
@@ -1135,6 +1140,28 @@ mod tests {
         ledger
     }
 
+    fn persisted_registered(label: &str) -> (String, ExternalCheckpointLedger) {
+        let schema_name = format!(
+            "checkpoint_{label}_{}_{}",
+            std::process::id(),
+            NEXT_PERSIST_TEMP.fetch_add(1, Ordering::Relaxed)
+        );
+        let ledger = ExternalCheckpointLedger::for_test(&schema_name);
+        let target = target();
+        ledger
+            .register_target(
+                &target.store_scope_id,
+                target.store_epoch,
+                &target.target_key,
+                target.database_oid,
+                &target.schema_name,
+                target.fence_generation,
+                target.release_epoch,
+            )
+            .expect("register persisted target");
+        (schema_name, ledger)
+    }
+
     #[test]
     fn sequential_successors_replace_the_stable_state_slot() {
         let ledger = registered();
@@ -1158,22 +1185,34 @@ mod tests {
 
     #[test]
     fn prepared_sql_successor_can_be_acknowledged_after_restart() {
-        let ledger = registered();
+        let (schema_name, ledger) = persisted_registered("single");
         let first = mutation(None, b"first");
         ledger.prepare(&first).expect("prepare first");
-        ledger.acknowledge(&first).expect("ack first");
-        let first_head = checkpoint_digest(b"first");
-        let second = mutation(Some(first_head.clone()), b"second");
-        ledger.prepare(&second).expect("prepare second");
-        assert_eq!(ledger.current_head(&key(None)), Some(first_head));
-        ledger.acknowledge(&second).expect("ack prepared successor");
-        ledger
-            .acknowledge(&second)
+        let reopened = ExternalCheckpointLedger::for_test(&schema_name);
+        assert_eq!(
+            reopened.state(&first.key),
+            Some(CheckpointState::Prepared {
+                successor: checkpoint_digest(b"first"),
+            })
+        );
+        let conflicting = mutation(None, b"different");
+        assert_eq!(
+            reopened.prepare(&conflicting),
+            Err(CheckpointError::Conflict)
+        );
+        reopened
+            .acknowledge(&first)
+            .expect("ack prepared successor after restart");
+        reopened
+            .acknowledge(&first)
             .expect("idempotent acknowledgement");
         assert_eq!(
-            ledger.current_head(&key(None)),
-            Some(checkpoint_digest(b"second"))
+            reopened.current_head(&key(None)),
+            Some(checkpoint_digest(b"first"))
         );
+        drop(reopened);
+        drop(ledger);
+        let _ = fs::remove_file(test_persistence_path(&schema_name));
     }
 
     #[test]
@@ -1203,6 +1242,63 @@ mod tests {
         assert_eq!(
             ledger.current_head(&second.key),
             Some(checkpoint_digest(b"second"))
+        );
+    }
+
+    #[test]
+    fn prepared_multi_key_successor_survives_fresh_ledger_restart() {
+        let (schema_name, ledger) = persisted_registered("multi");
+        let first = mutation(None, b"first");
+        let mut second = mutation(None, b"second");
+        second.key.stream_id = "run-b".to_owned();
+        ledger
+            .prepare_many(&[first.clone(), second.clone()])
+            .expect("prepare multi-key successor");
+
+        let reopened = ExternalCheckpointLedger::for_test(&schema_name);
+        assert_eq!(
+            reopened.state(&first.key),
+            Some(CheckpointState::Prepared {
+                successor: checkpoint_digest(b"first"),
+            })
+        );
+        assert_eq!(
+            reopened.state(&second.key),
+            Some(CheckpointState::Prepared {
+                successor: checkpoint_digest(b"second"),
+            })
+        );
+        reopened
+            .acknowledge_many(&[first.clone(), second.clone()])
+            .expect("acknowledge prepared multi-key successor after restart");
+        assert_eq!(
+            reopened.current_head(&first.key),
+            Some(checkpoint_digest(b"first"))
+        );
+        assert_eq!(
+            reopened.current_head(&second.key),
+            Some(checkpoint_digest(b"second"))
+        );
+        drop(reopened);
+        drop(ledger);
+        let _ = fs::remove_file(test_persistence_path(&schema_name));
+    }
+
+    #[test]
+    fn acknowledge_many_rejects_unprepared_successors() {
+        let ledger = registered();
+        let first = mutation(None, b"first");
+        assert_eq!(
+            ledger.acknowledge_many(std::slice::from_ref(&first)),
+            Err(CheckpointError::NotPrepared)
+        );
+        ledger.prepare(&first).expect("prepare first");
+        ledger.acknowledge(&first).expect("ack first");
+
+        let second = mutation(Some(checkpoint_digest(b"first")), b"second");
+        assert_eq!(
+            ledger.acknowledge_many(std::slice::from_ref(&second)),
+            Err(CheckpointError::NotPrepared)
         );
     }
 
