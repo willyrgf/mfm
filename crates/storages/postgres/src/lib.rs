@@ -50,6 +50,9 @@ pub use session::{
     PostgresConfigurationSessions as ConfigurationMaintenanceSessions,
 };
 pub use structured::PostgresStructuredHistoryBackend;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use transaction::arm_commit_acknowledgement_unknown;
 
 #[cfg(all(test, feature = "parity-tests"))]
 mod tests {

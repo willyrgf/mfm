@@ -320,6 +320,20 @@ pub struct ConfigurationHistoryWriter<B: ConfigurationHistoryBackend> {
 
 const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 8;
 
+async fn yield_once() {
+    let mut yielded = false;
+    std::future::poll_fn(|context| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+}
+
 async fn load_with_checkpoint_retry<B: ConfigurationHistoryBackend>(
     backend: &B,
     key: &ConfigurationStreamKey,
@@ -389,6 +403,9 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                     }
                 }
             }
+            // SQL commit and external acknowledgement are separate operations. Give the
+            // winner a bounded scheduling window before the next recovery attempt.
+            yield_once().await;
         }
         Err(StructuredStoreError::AcknowledgementUnknown)
     }
@@ -488,6 +505,9 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                             }
                         }
                     }
+                    // SQL commit and external acknowledgement are separate operations. Give the
+                    // winner a bounded scheduling window before the next classification attempt.
+                    yield_once().await;
                 }
                 Err(StructuredStoreError::StaleHead)
             }
