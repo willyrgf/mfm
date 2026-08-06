@@ -2143,4 +2143,13 @@ mod frame_tests {
             writer.await.expect("hostile writer");
         }
     }
+
+    #[test]
+    fn provider_attestation_accepts_exact_budget_and_rejects_one_byte_over() {
+        let exact = "x".repeat(MAX_DEPLOYMENT_PROOF_BYTES);
+        assert!(valid_provider_attestation(&exact));
+
+        let one_byte_over = format!("{exact}x");
+        assert!(!valid_provider_attestation(&one_byte_over));
+    }
 }
