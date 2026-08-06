@@ -48,10 +48,10 @@ implemented and the focused candidate checks are green, but the plan's strict
 - The shared configuration append boundary now rejects an oversized serialized
   revision before backend dispatch. The clean managed 18-test PostgreSQL
   qualification compares memory and PostgreSQL on positive, exact-limit,
-  one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON
-  shape values (including UTF-8), and a 32-revision sequential stream; the
-  complete generated, boundary/escape, hostile, and large-scale acceptance
-  matrix remains unverified.
+  one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact
+  UTF-8 byte-boundary value and its one-byte-over rejection, 32 deterministic
+  JSON shape values, and a 32-revision sequential stream; the complete
+  generated, hostile, and large-scale acceptance matrix remains unverified.
 
 ## Ordered implementation revisions
 
@@ -125,6 +125,7 @@ Post-step-12 implementation and proof revisions:
 | `0a4b02e1` | fix numeric ordering for configuration history rows |
 | `fce1edca` | fix checkpoint preparation durability |
 | `27edd8c6` | harden checkpoint sidecar arbitration |
+| `cf74053f` | expand configuration boundary corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -406,6 +407,22 @@ successor instead of overwriting the durable slot. A complete injected
 serialization/deadlock, acknowledgement-loss, promotion, and production
 authority matrix remains unverified.
 
+The configuration boundary corpus was then expanded and qualified on the clean
+source tip `cf74053f`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: cf74053f
+run id: run-2162922-1785991603848871458
+result: ok — 18 structured-history tests passed, 0 failed in 31.72s
+```
+
+The new vectors compare memory and PostgreSQL on escaped JSON, an exact
+UTF-8-sized serialized revision, and a one-byte-over UTF-8 revision. The same
+qualification retains the existing positive/exact/one-over, stale,
+idempotent, 32-shape, 32-successor, race, and fresh-process cases; broader
+generated, hostile, and large-scale coverage remains conditional.
+
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
 
@@ -434,7 +451,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared restart, strict acknowledgement, and stale-worker sidecar arbitration now pass, while injected serialization/deadlock, acknowledgement-loss, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic shape values (including UTF-8), and a 32-revision sequential stream; the complete generated, boundary/escape, hostile, and large-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | Prior fact routes use a unique producer-prefix verification and bounded discovery. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |

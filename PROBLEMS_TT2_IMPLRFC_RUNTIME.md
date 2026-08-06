@@ -7,8 +7,8 @@ This document began as the handoff problem ledger for the remediation implementa
 is the re-audit recorded below.
 
 - branch: `refact-runtime`;
-- current implementation/evidence source tip: `27edd8c6e1cfcad7d9aad2ec1ee7e3ec41098d4f`;
-- current evidence/documentation head before this refresh: `886fee0941c42838705f1f29662d43cc80ee7b72`;
+- current implementation/evidence source tip: `cf74053f37a28acec395046c1f30211d021d5d6e`;
+- current evidence/documentation head before this refresh: `f3230093f`;
 - normative proposal: [RFC_RUNTIME_HISTORY_CHOKE_POINT.md](RFC_RUNTIME_HISTORY_CHOKE_POINT.md);
 - first implementation problem ledger:
   [PROBLEMS_TT1_IMPLRFC_RUNTIME.md](PROBLEMS_TT1_IMPLRFC_RUNTIME.md);
@@ -17,7 +17,7 @@ is the re-audit recorded below.
 - implementation review record:
   [TT1_RUNTIME_REMEDIATION_REVIEW.md](TT1_RUNTIME_REMEDIATION_REVIEW.md).
 
-The current production code being assessed is the source tree at `27edd8c6`; the detailed finding
+The current production code being assessed is the source tree at `cf74053f`; the detailed finding
 sections below retain the original `a4dada89` observations as historical traceability.
 
 The implementation was reviewed for the three properties required of this platform core:
@@ -56,7 +56,7 @@ chain-state reobservation, replacement eligibility is not producer-bound, the
 required fresh production keystore signing/broadcast proof was not exercised, and portable source
 relationships cannot be verified offline.
 
-## Current re-audit at `27edd8c6`
+## Current re-audit at `cf74053f`
 
 The later implementation revisions and focused evidence supersede the historical disposition
 above. Runtime access, PostgreSQL snapshot/head fixation, contention recovery, EVM recovery and
@@ -64,13 +64,16 @@ authority qualification, replay reproduction removal, semantic/audit suffix hand
 byte budgets, purpose-bound projections, key-cleanup witnesses, and recursive export closure now
 have implementation and focused regression coverage. The current evidence ledger records those
 scopes as closed or conditional, with remaining work including deployment trust,
-cross-process/fault matrices, complete generated/boundary/escape/hostile/large-scale corpus breadth, live application multi-hop and
+cross-process/fault matrices, complete generated/hostile/large-scale corpus breadth, live application multi-hop and
 production evidence, independent provider/public-result verification, external
 termination/OOM/resource-failure coverage, and the full simplicity/isolation acceptance matrix.
 The test checkpoint authority now durably retains successful Prepared single- and multi-key
 successors across fresh ledger instances, rejects unprepared acknowledgement, and arbitrates
 stale independently loaded workers with an OS-locked sidecar; it remains a fixture rather than a
 production external authority.
+The configuration parity corpus additionally covers escaped JSON and exact UTF-8 byte-boundary
+acceptance with a matching one-byte-over rejection; the complete generated, hostile, and
+large-scale matrix remains conditional.
 
 The current matrix is authoritative for this re-audit; the detailed sections below preserve the
 original finding text and line references for traceability.
@@ -302,7 +305,7 @@ nested-frame budget, and prove compositional limits plus bounded preallocation b
 | TT2-STORE-02 | High | Conditional | Snapshot/head validation, prepared-successor restart, and stale-worker sidecar arbitration pass, but injected contention/acknowledgement-loss and production fault matrices remain | STORE-03, STORE-04 |
 | TT2-STORE-03 | High | Closed | Full-history loads verify the indexed head inside the same backend snapshot | STORE-03 |
 | TT2-STORE-04 | High | Closed | Contention classification rolls back before bounded identity reconciliation | STORE-01 |
-| TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; bounded shape/UTF-8 and 32-revision sequential corpus passes, while the complete generated/boundary/escape/hostile/large-scale corpus remains unverified | STORE-04 |
+| TT2-STORE-05 | Medium | Conditional | Shared canonical ingress aligns bounded memory/PostgreSQL inputs; escaped JSON, exact UTF-8 byte-boundary/one-byte-over, 32-shape, and 32-revision sequential vectors pass, while the complete generated/hostile/large-scale corpus remains unverified | STORE-04 |
 | TT2-STORE-06 | Medium | Conditional | AST inventory covers generic and builder forms; complete ownership/scale audit remains | STORE-05 |
 | TT2-STORE-07 | High | Closed | Prior-fact verification loads each required producer prefix once per scan | STORE-06 |
 | TT2-EVM-01 | High | Closed | The production path drives a fresh semantic intent through the qualified keystore signer | EVM-01, VERIFY-01 |
@@ -672,12 +675,13 @@ Current implementation and evidence:
 - `CanonicalConfigurationAppend` now canonicalizes and bounds the complete serialized revision
   at `MAX_CONFIGURATION_REVISION_BYTES` before dispatch, so memory and PostgreSQL share the same
   ingress decision.
-- Managed `run-2138056-1785988778488975922` from clean source tip `0a4b02e1` passes 18
+- Managed `run-2162922-1785991603848871458` from clean source tip `cf74053f` passes 18
   structured-history tests, including a memory/PostgreSQL corpus for positive, exact-limit,
-  one-byte-over, stale-predecessor, idempotent-replay, 32 deterministic JSON shape values
-  (including UTF-8), and a 32-revision sequential stream. Numeric ordering of loaded PostgreSQL
-  prefixes is fixed at the same source tip; the complete generated/boundary/escape/hostile/
-  large-scale acceptance matrix remains unverified.
+  one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact UTF-8
+  byte-boundary value with one-byte-over rejection, 32 deterministic JSON shape values, and a
+  32-revision sequential stream. Numeric ordering of loaded PostgreSQL prefixes is fixed at the
+  preceding source tip; the complete generated, hostile, and large-scale acceptance matrix
+  remains unverified.
 
 Consequence:
 
