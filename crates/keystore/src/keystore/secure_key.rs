@@ -297,6 +297,16 @@ impl KeyMaterialWitness {
         self.cleaned.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    pub(super) fn observed_source_handoff(&self) -> bool {
+        let source = self
+            .source_address
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let handoff = self
+            .handoff_address
+            .load(std::sync::atomic::Ordering::SeqCst);
+        source != 0 && source == handoff
+    }
+
     pub(super) fn observed_same_allocation(&self) -> bool {
         let source = self
             .source_address
