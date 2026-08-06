@@ -1058,7 +1058,10 @@ async fn run_production_application_worker(
             .await;
         }
         PHASE_PRODUCTION_RECOVER => {
-            drive_application_to_closed(&application, &portfolio_run_id).await;
+            // The portfolio run was closed before submission recovery began. The
+            // original submission run may remain parked at the possible-entry
+            // boundary after process loss, so recovery must admit a fresh run
+            // against the retained wallet intent instead of re-driving that run.
             let recovery_invocation = InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
                 .expect("recovery submission invocation identity");
             let recovery_selector = EvmSubmitTransactionSelector::new(
