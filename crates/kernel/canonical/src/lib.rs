@@ -36,6 +36,8 @@ use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use ring::digest::{digest, Context, SHA256};
 use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
 
+use crate::limits::MAX_BASE64URL_CHARACTERS;
+
 mod recoverability;
 
 /// Generated recoverability budgets shared by all bounded codecs.
@@ -920,6 +922,11 @@ fn encode_base64url_no_pad(bytes: &[u8]) -> String {
 }
 
 fn validate_base64url_no_pad(value: &str) -> Result<()> {
+    if value.len() > MAX_BASE64URL_CHARACTERS {
+        return Err(CanonicalError::new(
+            "base64url bytes exceed their character bound",
+        ));
+    }
     if value.contains('=') {
         return Err(CanonicalError::new(
             "base64url bytes must not contain padding",

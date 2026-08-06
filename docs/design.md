@@ -94,6 +94,9 @@ The generated recoverability annex allows canonical JSON values and retained his
 32 MiB. These ceilings remain separate from the smaller string, portable-export, and
 provider-proof budgets: they admit the largest qualified structured-program value while keeping
 every transport and retained payload bound explicit.
+Typed base64url ingress applies its generated character budget before decoding, so hostile wire
+strings are rejected before the decoded allocation; trusted byte construction remains subject to
+the enclosing canonical-value or retained-payload bound.
 Native canonical values additionally enforce the generated UTF-8 string, object-key, array-item,
 and object-entry limits at the native-wire validation seam before recursive traversal.
 
