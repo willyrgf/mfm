@@ -2077,6 +2077,34 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             completion: ref replayed,
         }) if replayed == &completion
     ));
+    let committed_completion_ack_target = commit_proxy
+        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
+        .expect("arm present completion acknowledgement fault");
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            ambiguity_authority.complete(&state_input, &completion_request),
+        )
+        .await
+        .expect("bounded present completion acknowledgement resolution"),
+        EffectAdapterCompletion::Returned(CompleteWalletNonceResponse::Completed {
+            completion: ref replayed,
+        }) if replayed == &completion
+    ));
+    commit_proxy
+        .wait_for_intercepts(committed_completion_ack_target)
+        .await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM wallet_nonce_completions WHERE semantic_completion_key = $1",
+        )
+        .bind(completion_request.completion_key.as_str())
+        .fetch_one(&probe_pool)
+        .await
+        .expect("count retained completion after lost acknowledgement"),
+        1,
+        "lost completion acknowledgement must not duplicate the retained row"
+    );
     let retained_completion: (String, String) = sqlx::query_as(
         "SELECT request_json, completion_json \
          FROM wallet_nonce_completions \
