@@ -89,6 +89,8 @@ Post-step-12 implementation and proof revisions:
 | `d2a39d7a` | witness post-decrypt key cleanup |
 | `8b2e64ba` | witness failed decrypt handoff address |
 | `2fc4afa8` | prove purpose information isolation |
+| `1ef7d694` | retry transient structured history loads |
+| `e7624406` | bound postgres snapshot retries |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -119,6 +121,15 @@ failure path and moves the test transfer witness after the ownership move.
 enumeration and trace authorization-request access; the complete purpose
 data-isolation proof remains conditional.
 
+`1ef7d694` bounds configuration append ambiguity and transient configuration
+reads at eight attempts. `e7624406` removes the generic store-level snapshot
+retry introduced by that revision and keeps the bounded retry at the
+PostgreSQL checkpoint-read boundary, avoiding nested retry multiplication while
+preserving fail-closed persistent-history behavior. The focused configuration
+library suite passes 7/7 and the exact managed recoverability task passes after
+the cutover; cross-process acknowledgement-loss and injected-fault proof remain
+conditional.
+
 ## Independent review checkpoints
 
 | Checkpoint | Candidate | Review evidence | Result |
@@ -131,6 +142,7 @@ data-isolation proof remains conditional.
 | Generated portable graph candidate | `6284e8d926e2ff866eae94c714420050cfe29643` | independent implementation and post-gate evidence review completed on this exact revision; superseded by the bounded projection cutover below | CONDITIONAL; residuals below |
 | Bounded wallet projection candidate | `82e474caf83bea3338da116e5735f06367f80742` | independent implementation review and exact composed gate below cover this revision | CONDITIONAL; residuals below |
 | Closure/decrypt focused candidate | `afec8457` | focused decrypt cleanup, closure-only rehydration, and persisted two-candidate managed qualification reviewed on exact revision | CONDITIONAL; offline/public-result and broader fault residuals below |
+| Retry-boundary correction | `e7624406` | exact configuration/recoverability checks and independent review confirm one bounded PostgreSQL snapshot-retry owner | PASS for retry scope; global residuals below |
 
 ## Focused and composed verification
 
@@ -242,7 +254,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | AUTH-01 | Closed | Runtime/physical access is marker-sealed and API-surface tests reject ordinary implementations. |
 | AUTH-02 | Closed | PostgreSQL session issuance is bound to the external deployment authority and private credentials. |
 | STORE-01 | Conditional | External target/checkpoint trust is explicit and exercised by fakes; concrete production trust integration is absent. |
-| STORE-02 | Conditional | Snapshot/head checks and race tests pass; deterministic cross-process acknowledgement/fault matrix is absent. |
+| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass with one bounded eight-attempt PostgreSQL checkpoint-read owner; deterministic cross-process acknowledgement/fault matrix is absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress exists; a complete exact memory/PostgreSQL acceptance corpus is not independently reproduced. |
@@ -389,6 +401,10 @@ nix develop -c cargo test -p mfm-keystore decrypt_ -- --nocapture — 8 passed o
 nix develop -c cargo test -p mfm-evm completed_wallet_nonce_retains_rehashable_public_recovery_closure -- --nocapture — 1 passed
 nix develop -c cargo test -p mfm-evm — 47 unit tests + signing UI trybuild + 2 doctests passed on `50c8cac1`
 nix develop -c cargo clippy -p mfm-keystore --all-targets -- -D warnings — pass on `8b2e64ba`
+nix develop -c cargo fmt --all -- --check — pass on `e7624406`
+nix develop -c cargo test -p mfm-store --lib configuration -- --nocapture — 7 passed on `e7624406`
+nix develop -c cargo test -p mfm-store --lib — 33 passed on `e7624406`
+nix run .#run -- --task recoverability-postgres-v1 — run id `run-2046822-1785981827251476177`, 1/1 passed on `e7624406`
 ```
 
 Independent review of exact `ed7b341e` confirmed the permit/ordinal and
@@ -396,6 +412,13 @@ reservation observation-round bindings, and found no implementation gap in
 the closure cutover. The later exact `afec8457` review closes the
 persisted-closure-alone/later-run and multi-candidate reload evidence. Its
 remaining proof scope is the independent offline/public-result audit.
+
+Independent review of exact `e7624406` confirms that snapshot retry ownership
+is singular and finite: the generic store wrapper is deleted and PostgreSQL's
+checkpoint-read helper is the sole eight-attempt owner. The configuration
+bound remains finite and fail-closed, although its eight attempts are per
+nested loop and PostgreSQL retries persistent `InvalidHistory` until
+exhaustion; these remain bounded resource/diagnostic residuals.
 
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan
