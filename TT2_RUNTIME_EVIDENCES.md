@@ -46,12 +46,14 @@ implemented and the focused candidate checks are green, but the plan's strict
   External termination, OOM, and other resource-failure behavior remains
   outside package-level witness coverage.
 - The shared configuration append boundary now rejects an oversized serialized
-  revision before backend dispatch. The clean managed 19-test PostgreSQL
+  revision before backend dispatch. The clean managed 24-test PostgreSQL
   qualification compares memory and PostgreSQL on positive, exact-limit,
   one-byte-over, stale-predecessor, idempotent-replay, escaped JSON, an exact
-  UTF-8 byte-boundary value and its one-byte-over rejection, 32 deterministic
-  JSON shape values, and a 32-revision sequential stream; the complete
-  generated, hostile, and large-scale acceptance matrix remains unverified.
+  UTF-8 byte-boundary value and its one-byte-over rejection, 64 deterministic
+  JSON shape values, a 64-revision sequential stream, and an exact canonical
+  depth-limit value. One-level-over depth, float, duplicate-key, and malformed
+  values are rejected before backend dispatch; the complete generated,
+  hostile, and large-scale acceptance matrix remains unverified.
 
 ## Ordered implementation revisions
 
@@ -133,6 +135,7 @@ Post-step-12 implementation and proof revisions:
 | `5f4be506` | measure fact producer fold bounds |
 | `bb002b19` | scope fact scan counters |
 | `2ac67ec9` | tighten bounded wallet query proof |
+| `a3ad0e9a` | expand configuration acceptance corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -365,6 +368,22 @@ The numeric ordering fix keeps PostgreSQL's loaded prefix in sequence order
 after the tenth successor. The same managed run also rechecked the pre-existing
 race and fresh-process/role/schema cases.
 
+The latest configuration corpus expansion ran from clean source tip
+`a3ad0e9a`:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: a3ad0e9a
+run id: run-2223304-1785999851634604306
+result: ok — 24 structured-history tests passed, 0 failed in 38.75s
+```
+
+The parity fixture now covers 64 deterministic shape values and 64 sequential
+successors across memory/PostgreSQL, plus an exact canonical JSON depth-limit
+append. One-level-over depth, float, duplicate-key, and malformed inputs are
+rejected by the shared canonical constructor before either backend receives an
+append.
+
 The separate release no-run integration compile was also rerun against the
 same implementation source:
 
@@ -543,7 +562,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
-| STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
+| STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed run `run-2223304-1785999851634604306` compares memory/PostgreSQL on positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, 64 deterministic shape values, a 64-revision stream, and an exact depth-limit value; one-level-over depth, float, duplicate-key, and malformed values are rejected before dispatch. The complete generated, hostile, and large-scale acceptance matrix remains unverified. |
 | STORE-06 | Conditional | The AST inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments with 2/2 focused tests; a full independent query ownership/scale audit remains. |
 | STORE-07 | Closed | A managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded discovery/session limits remain enforced. |
 | EVM-01 | Closed | Fresh production keystore signing/broadcast qualification passed in the current composed gate. |
@@ -636,6 +655,7 @@ checks do not retroactively turn that gate into a gate for the later tree.
 | `8b2e64ba` | `witness failed decrypt handoff address` | source-to-`SecureKey` handoff pointer equality and cleanup are directly asserted on post-decrypt rejection; full keystore and Clippy pass |
 | `2fc4afa8` | `prove purpose information isolation` | application trybuild privacy suite passes all 12 cases, including public raw-record enumeration and trace authorization-request accessor denial |
 | `2ac67ec9` | `tighten bounded wallet query proof` | managed 64-reservation history keeps Q/E counts constant; exact wallet-history query predicates, lifetime-aggregate rejection, and strict projection-index availability pass in `run-2218000-1785998748489917662` |
+| `a3ad0e9a` | `expand configuration acceptance corpus` | managed memory/PostgreSQL parity grows to 64 shapes and 64 sequential revisions; exact canonical depth boundary and hostile pre-dispatch rejections pass in `run-2223304-1785999851634604306` |
 
 The corrected exact managed leaf ran after `266d6889` with no intervening
 commits:

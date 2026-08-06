@@ -4,9 +4,9 @@ Status: **CONDITIONAL / INCOMPLETE**
 
 This is a skeptical review of the implementation candidate whose exact
 composed source gate is pinned to `82e474caf83bea3338da116e5735f06367f80742`.
-The current implementation tip is `2ac67ec9`; the historical gate remains
+The current implementation tip is `a3ad0e9a`; the historical gate remains
 separate from the focused follow-up evidence below.
-The focused follow-up candidate is `2ac67ec9`, which includes the bounded
+The focused follow-up candidate is `a3ad0e9a`, which includes the bounded
 wallet plan checks, completion-closure reload proof, protected-key allocation
 continuity and failure cleanup proofs, completion-closure permit/observation
 binding proof, and persisted multi-candidate closure-only rehydration proof
@@ -106,16 +106,19 @@ both the closed implementation work and the remaining proof/deployment gaps.
 - The shared configuration append boundary now rejects an oversized serialized
   revision before backend dispatch. Managed qualification covers positive,
   exact-limit, one-byte-over, stale-predecessor, idempotent-replay, escaped
-  JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32
-  deterministic JSON shape values, and a 32-revision sequential stream against
-  memory and PostgreSQL; the complete generated, hostile, and large-scale
+  JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 64
+  deterministic JSON shape values, a 64-revision sequential stream, and an
+  exact canonical depth-limit value against memory and PostgreSQL. One-level-
+  over depth, float, duplicate-key, and malformed values are rejected before
+  backend dispatch; the complete generated, hostile, and large-scale
   acceptance matrix remains unverified.
 
 ## Candidate and review scope
 
 - Implementation candidate: `82e474caf83bea3338da116e5735f06367f80742`
-- Focused follow-up candidate: `2ac67ec9` (`tighten bounded wallet query
-  proof`), including `afec8457` (`prove closure-alone
+- Focused follow-up candidate: `a3ad0e9a` (`expand configuration acceptance
+  corpus`), including `2ac67ec9` (`tighten bounded wallet query
+  proof`), `afec8457` (`prove closure-alone
   multi-candidate reload`), `50c8cac1` (closure-only rehydration and
   public projection), `4fd1e757` (AAD identity cleanup witness), `61bf2091`
   (shared decrypt failure cleanup), `ed7b341e` (completion closure permit and
@@ -123,7 +126,8 @@ both the closed implementation work and the remaining proof/deployment gaps.
   `dec2f0c4` (completion closure reload), and `9390503c` (production decrypt
   allocation witness), `d2a39d7a` (post-decrypt invalid-key cleanup), and
   `8b2e64ba` (failure-path handoff-pointer witness), and `2fc4afa8`
-  (purpose-isolation compile-fail cases).
+  (purpose-isolation compile-fail cases), followed by `a3ad0e9a`
+  (expanded configuration acceptance corpus).
 - Retained later-audit artifact: `1ca2f7cd` (`retain observed audit artifact
   in replay corpus`), which adds the exact store-shaped observed-read bytes,
   generator acceptance/rejection vectors, and an offline parity branch in the
@@ -175,6 +179,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   constant-query witness, and checks the domain primary-key path with
   sequential scans disabled; managed run `run-2218000-1785998748489917662`
   passes 4/4 tests.
+- Configuration corpus revision: `a3ad0e9a` expands memory/PostgreSQL parity
+  to 64 deterministic shape values and 64 sequential successors, adds an exact
+  canonical depth-limit append, and rejects one-level-over depth, float,
+  duplicate-key, and malformed values before dispatch; managed run
+  `run-2223304-1785999851634604306` passes 24/24 tests.
 - SQL-inventory fixture revision: `7e467952` (generic scalar/query-as calls,
   checked macro, wrapped helper, and QueryBuilder fragment coverage).
 - Retry-boundary correction: `1ef7d694` bounds configuration append/load
@@ -573,6 +582,23 @@ strict projection check witnesses index-path availability. They do not prove a
 default planner choice, multi-domain scale, or production latency; EVM-07
 therefore remains conditional for that envelope.
 
+Independent review of exact `a3ad0e9a` passes this STORE-05 slice. Canonical
+depth 64 is accepted through both backends while depth 65, float, duplicate-key,
+and malformed JSON reject at shared ingress before an append can be built; the
+64-shape and 64-revision parity vectors pass in the clean 24-test run. The
+review confirms that hostile forms are intentionally parser-only and that the
+finite corpus does not establish production-scale acceptance.
+
+The configuration corpus expansion was independently rerun from clean source
+tip `a3ad0e9a`:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: a3ad0e9a
+run id: run-2223304-1785999851634604306
+result: ok — 24 structured-history tests passed, 0 failed in 38.75s
+```
+
 The clean source sequence immediately before this checkpoint-only change also
 refreshed the source-local inventory and portable corpus leaves:
 
@@ -793,7 +819,7 @@ also pass. The exact composed run independently passes all 13 leaves.
 | `application::tests::denied_dependency_export_emits_no_bytes` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::reader_retries_bounded_transient_checkpoint_mismatch` | pass | N/A; introduced after baseline |
 | `structured::configuration::tests::writer_retries_identical_append_after_unknown_acknowledgement` | pass | N/A; introduced after baseline |
-| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2162922-1785991603848871458` (18/18 structured-history tests) | N/A; introduced after baseline |
+| `configuration_acceptance_vectors_match_memory_and_postgres` | pass in `run-2223304-1785999851634604306` (24/24 structured-history tests, including 64-shape/64-revision and depth/hostile vectors) | N/A; introduced after baseline |
 | `configuration_commit_acknowledgement_loss_retries_identical_revision` | pass in `run-2167617-1785992166392324915` (19/19 structured-history tests) | N/A; introduced after baseline |
 | `configuration_load_keeps_one_snapshot_across_a_concurrent_append` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
 | `run_snapshot_keeps_one_prefix_across_a_concurrent_transition` | pass in `run-2190510-1785994272280747833` (22/22 structured-history tests) | N/A; introduced after baseline |
@@ -822,7 +848,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-STORE-02 | Conditional | Snapshot/head validation, deterministic run/configuration interleavings, prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain. |
 | TT2-STORE-03 | Closed | Fresh loads verify indexed run/configuration heads against the folded prefix. |
 | TT2-STORE-04 | Closed | Contention classification leaves the aborted transaction; bounded retries reconcile raced identities and unknown configuration acknowledgements with identical bytes. |
-| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream across memory/PostgreSQL; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
+| TT2-STORE-05 | Conditional | Shared canonical ingress bounds serialized configuration revisions before backend dispatch. Managed run `run-2223304-1785999851634604306` covers positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, exact UTF-8 boundary, 64 deterministic shape values, a 64-revision stream, and an exact depth-limit value across memory/PostgreSQL; one-level-over depth, float, duplicate-key, and malformed values reject before dispatch. The complete generated, hostile, and large-scale acceptance matrix remains unverified. |
 | TT2-STORE-06 | Conditional | The syntax inventory covers runtime calls, aliases, generic scalar/query-as forms, checked macros, wrapped helpers, and QueryBuilder fragments (focused inventory tests 2/2); a full independent query ownership/scale audit remains. |
 | TT2-STORE-07 | Closed | The managed two-publication same-producer witness asserts one dense page, one producer-prefix load, and three folded producer batches per scan invocation; store-scoped counters prevent isolated parallel schemas from contaminating the proof, and bounded byte/work/session limits remain enforced. |
 | TT2-EVM-01 | Closed | Fresh production keystore signing/broadcast path exercised by the current release qualification. |
