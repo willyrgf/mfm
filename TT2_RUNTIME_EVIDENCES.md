@@ -129,6 +129,7 @@ Post-step-12 implementation and proof revisions:
 | `77a06884` | exercise configuration acknowledgement recovery |
 | `df61d1b9` | prove postgres snapshot interleavings |
 | `dcb72608` | exercise postgres contention rollback |
+| `f4fd9a9b` | exercise run acknowledgement recovery |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -477,6 +478,21 @@ same append request after the injected fault is removed. Cross-process
 acknowledgement, promotion, and production-authority matrices remain
 conditional.
 
+The run acknowledgement-recovery follow-up was then qualified from clean
+source tip `f4fd9a9b`:
+
+```text
+RUST_TEST_THREADS=1 nix run .#run -- --task recoverability-postgres-v1
+source: f4fd9a9b
+run id: run-2194313-1785994645494655426
+result: ok — 23 structured-history tests passed, 0 failed in 32.33s
+```
+
+The run append path commits one batch while returning
+`AcknowledgementUnknown`, retries the exact candidate, and resolves it as
+`ExistingSame` with one durable row. Cross-process acknowledgement and
+promotion matrices remain conditional.
+
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
 
@@ -502,7 +518,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | AUTH-01 | Closed | Runtime/physical access is marker-sealed and API-surface tests reject ordinary implementations. |
 | AUTH-02 | Closed | PostgreSQL session issuance is bound to the external deployment authority and private credentials. |
 | STORE-01 | Conditional | External target/checkpoint trust is explicit and exercised by fakes; concrete production trust integration is absent. |
-| STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, one committed-but-unknown acknowledgement recovery pass, and injected `40001`/`40P01` rollback classification pass; broader acknowledgement-loss, promotion, and production-authority matrices remain absent. |
+| STORE-02 | Conditional | Snapshot/head checks, deterministic run/configuration interleavings, Prepared restart, strict acknowledgement, stale-worker sidecar arbitration, run/configuration committed-but-unknown acknowledgement recovery, and injected `40001`/`40P01` rollback classification pass; cross-process acknowledgement, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, escaped JSON, an exact UTF-8 byte-boundary value with one-byte-over rejection, 32 deterministic shape values, and a 32-revision sequential stream; the complete generated, hostile, and large-scale acceptance matrix remains unverified. |
