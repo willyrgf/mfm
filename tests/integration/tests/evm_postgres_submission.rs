@@ -402,6 +402,16 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     .await;
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
 
+    run_worker_expect_completion_acknowledgement_loss(
+        &database,
+        rpc.endpoint(),
+        PHASE_PRODUCTION_RESUME,
+        &activation,
+        &provider,
+    )
+    .await;
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+
     run_worker_expect_crash_after_completion(
         &database,
         rpc.endpoint(),
@@ -3426,16 +3436,21 @@ async fn run_worker_expect_crash_before_completion_commit(
         .wait_for_intercepts(intercept_target)
         .await;
     child.start_kill().expect("kill completion pre-commit worker");
-    commit_proxy.release_held_transactions();
     let output = child
         .wait_with_output()
         .await
         .expect("wait for killed completion pre-commit worker");
+    commit_proxy.release_held_transactions();
     assert_canaries_absent("pre-completion-crash stdout", &output.stdout);
     assert_canaries_absent("pre-completion-crash stderr", &output.stderr);
     assert!(
         !output.status.success(),
         "completion pre-commit worker unexpectedly succeeded"
+    );
+    assert_eq!(
+        output.status.code(),
+        None,
+        "completion pre-commit worker must be terminated by process loss"
     );
     let wallet_pool = database.wallet_pool().await;
     let retained = sqlx::query_scalar::<_, i64>(
@@ -3448,6 +3463,61 @@ async fn run_worker_expect_crash_before_completion_commit(
     assert_eq!(
         retained, 0,
         "pre-completion-commit process loss must leave no wallet completion"
+    );
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+}
+
+async fn run_worker_expect_completion_acknowledgement_loss(
+    database: &TestDatabase,
+    endpoint: &str,
+    mode: &str,
+    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
+    provider: &ProviderProcess,
+) {
+    let commit_proxy = PostgresCommitFaultProxy::start(&database.database_url)
+        .await
+        .expect("start completion acknowledgement proxy");
+    let proxy_nonce_url = database_url_with_login(
+        commit_proxy.database_url(),
+        &database.nonce_application_url(),
+    );
+    let intercept_target = commit_proxy
+        .arm(CommitFault::CommitAndLoseAcknowledgement, 1)
+        .expect("arm initial completion acknowledgement fault");
+    let output = worker_command(
+        database,
+        endpoint,
+        mode,
+        activation,
+        provider,
+        None,
+        Some(&proxy_nonce_url),
+    )
+    .output()
+    .await
+    .expect("run completion acknowledgement worker");
+    commit_proxy
+        .wait_for_intercepts(intercept_target)
+        .await;
+    assert_canaries_absent("completion-ack stdout", &output.stdout);
+    assert_canaries_absent("completion-ack stderr", &output.stderr);
+    assert!(
+        output.status.success(),
+        "completion acknowledgement worker failed with status {:?}: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let wallet_pool = database.wallet_pool().await;
+    let retained = sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM wallet_nonce_completions",
+    )
+    .fetch_one(&wallet_pool)
+    .await
+    .expect("count completion rows after initial acknowledgement loss");
+    wallet_pool.close().await;
+    assert_eq!(
+        retained, 1,
+        "initial completion acknowledgement loss must retain exactly one row"
     );
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
 }
