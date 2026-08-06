@@ -63,8 +63,8 @@ pub use purpose::{
     expand_export_source_closure, export_fact_routes, AuditAccessEntry, AuditObservation,
     AuditRunEvidence, AuditRunReader, ExportEncoderSource, ExportEncoderView, ExportFactRoute,
     ExportRunEvidence, ExportRunReader, ExportSourceClosureError, PublicRunEvidence,
-    PublicRunReader, RecordedRunEvidence, ReplayRunReader, TraceRunEvidence, TraceRunReader,
-    TraceTransitionEntry, MAX_PORTABLE_SOURCE_RUNS,
+    PublicRunReader, RecordedRunEvidence, ReplayRunReader, RunEvidenceStatus, TraceRunEvidence,
+    TraceRunReader, TraceTransitionEntry, MAX_PORTABLE_SOURCE_RUNS,
 };
 
 /// Converts an offline-verified fold result into sealed recorded-replay evidence.

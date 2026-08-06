@@ -332,7 +332,7 @@ pub fn project_replay_result(run: &RecordedRunEvidence) -> Result<StructuredRepl
         "journal_head": run.journal_head(),
         "semantic_head": run.semantic_head(),
         "record_count": run.record_count(),
-        "status": frontier_status(run.frontier()),
+        "status": run.status().as_str(),
     }))?;
     validate_projection("mfm.structured-replay-result.v1", result.as_bytes())?;
     Ok(result)
@@ -412,17 +412,6 @@ pub fn project_operation_outcome(
         )
         .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?,
     }))
-}
-
-fn frontier_status(frontier: &mfm_store::structured::StructuredFrontier) -> &'static str {
-    use mfm_store::structured::StructuredFrontier;
-    match frontier {
-        StructuredFrontier::Actions(_) => "actionable",
-        StructuredFrontier::WaitingReads => "waiting_reads",
-        StructuredFrontier::PossibleEntry => "possible_entry",
-        StructuredFrontier::BlockedIntegrity => "blocked_integrity",
-        StructuredFrontier::Complete => "closed",
-    }
 }
 
 fn fixed_head(

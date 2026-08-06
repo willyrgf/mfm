@@ -28,6 +28,48 @@ use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
 use super::fold::{StructuredFrontier, VerifiedStructuredRun};
 use super::{PhysicalTargetIdentity, Result};
 
+/// Fold-derived status exposed by public and recorded-replay evidence.
+///
+/// Purpose projections deliberately retain only this status and never expose
+/// the actionable cursor, capability references, or other `StructuredFrontier`
+/// details owned by the internal fold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunEvidenceStatus {
+    /// At least one executable action is ready for the next drive.
+    Actionable,
+    /// Every unresolved action is waiting for an already-authorized read.
+    WaitingReads,
+    /// An effect entry may have happened and blocks later work.
+    PossibleEntry,
+    /// Committed integrity evidence blocks semantic progress.
+    BlockedIntegrity,
+    /// The root operation has a terminal outcome.
+    Closed,
+}
+
+impl RunEvidenceStatus {
+    fn from_frontier(frontier: &StructuredFrontier) -> Self {
+        match frontier {
+            StructuredFrontier::Actions(_) => Self::Actionable,
+            StructuredFrontier::WaitingReads => Self::WaitingReads,
+            StructuredFrontier::PossibleEntry => Self::PossibleEntry,
+            StructuredFrontier::BlockedIntegrity => Self::BlockedIntegrity,
+            StructuredFrontier::Complete => Self::Closed,
+        }
+    }
+
+    /// Returns the redaction-safe transport status tag.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Actionable => "actionable",
+            Self::WaitingReads => "waiting_reads",
+            Self::PossibleEntry => "possible_entry",
+            Self::BlockedIntegrity => "blocked_integrity",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// Minimum identity header retained by every purpose projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunEvidenceHeader {
@@ -211,7 +253,7 @@ pub struct PublicRunEvidence {
     header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
-    frontier: StructuredFrontier,
+    status: RunEvidenceStatus,
     closed_outcome_ref: Option<ContentRef>,
     terminal_outcome: Option<PublicTerminalOutcome>,
 }
@@ -224,7 +266,7 @@ impl PublicRunEvidence {
             header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
-            frontier: verified.frontier().clone(),
+            status: RunEvidenceStatus::from_frontier(verified.frontier()),
             closed_outcome_ref: verified.closed_outcome_ref().cloned(),
             terminal_outcome,
         })
@@ -250,9 +292,9 @@ impl PublicRunEvidence {
         &self.semantic_head
     }
 
-    /// Returns the closed action frontier.
-    pub const fn frontier(&self) -> &StructuredFrontier {
-        &self.frontier
+    /// Returns the fold-derived status without exposing internal action details.
+    pub const fn status(&self) -> RunEvidenceStatus {
+        self.status
     }
 
     /// Returns the terminal nominal operation-outcome reference, when closed.
@@ -612,7 +654,7 @@ pub struct RecordedRunEvidence {
     header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
-    frontier: StructuredFrontier,
+    status: RunEvidenceStatus,
     record_count: usize,
 }
 
@@ -623,7 +665,7 @@ impl RecordedRunEvidence {
             header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
-            frontier: verified.frontier().clone(),
+            status: RunEvidenceStatus::from_frontier(verified.frontier()),
             record_count: verified.records().len(),
         }
     }
@@ -653,9 +695,9 @@ impl RecordedRunEvidence {
         &self.semantic_head
     }
 
-    /// Returns the closed action frontier.
-    pub const fn frontier(&self) -> &StructuredFrontier {
-        &self.frontier
+    /// Returns the fold-derived status without exposing internal action details.
+    pub const fn status(&self) -> RunEvidenceStatus {
+        self.status
     }
 
     /// Returns the number of verified records in the recorded prefix.
