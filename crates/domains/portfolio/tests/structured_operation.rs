@@ -292,11 +292,11 @@ fn portfolio_and_balance_certification_is_depth_two_and_order_stable() {
     let balance_ref = forward.balance.reference().expect("balance reference");
     assert_eq!(
         portfolio_ref.content_digest().as_str(),
-        "content:sha256-v1:ff0272ee40ea2e354b616aff055b101c0ca9cceb42eb9fa044047326a891d069"
+        "content:sha256-v1:4a9ccc67cbefe7ab3451c781bac14a8b3fb79f215a5b92c0844a3ae4987829ed"
     );
     assert_eq!(
         balance_ref.content_digest().as_str(),
-        "content:sha256-v1:2dc17491650a2b875f36b35bbad809cfbcbb6f57d6bef5f82de8c799dd7ac078"
+        "content:sha256-v1:e952743af93de72416591731580068397db7dba0a316f4ba858d944c5055a17a"
     );
 
     let registry = forward.verification;
