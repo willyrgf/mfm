@@ -786,6 +786,112 @@ fn independent_detached_audit_rejects_provider_projection_operation_and_context_
 }
 
 #[test]
+fn independent_detached_audit_rejects_payload_crypto_challenge_and_wire_substitutions() {
+    let fixture = persisted_completion_fixture();
+    let trust = DetachedAuditTrust {
+        provider_id: fixture.provider_id.clone(),
+        public_key: public_key(&SIGNING_SEED),
+        operation_key: fixture.operation_key.clone(),
+        context: detached_audit_context(&fixture.context),
+    };
+
+    let mut forged_digest: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_digest.payload_digest =
+        "sha256v1:0000000000000000000000000000000000000000000000000000000000000000".to_owned();
+    let forged_digest = serde_json::to_string(&forged_digest).expect("digest proof");
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &forged_digest,
+            &trust,
+        ),
+        Err("payload binding"),
+    );
+
+    let mut forged_signature: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_signature.signature.replace_range(0..2, "00");
+    let forged_signature = serde_json::to_string(&forged_signature).expect("signature proof");
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &forged_signature,
+            &trust,
+        ),
+        Err("provider signature"),
+    );
+
+    let wrong_key_trust = DetachedAuditTrust {
+        provider_id: fixture.provider_id.clone(),
+        public_key: public_key(&WRONG_SIGNING_SEED),
+        operation_key: fixture.operation_key.clone(),
+        context: detached_audit_context(&fixture.context),
+    };
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &fixture.completion.provider_completion_attestation,
+            &wrong_key_trust,
+        ),
+        Err("provider signature"),
+    );
+
+    for challenge in ["not-hex", "00"] {
+        let mut forged_challenge: DetachedAuditProof =
+            serde_json::from_str(&fixture.completion.provider_completion_attestation)
+                .expect("valid detached proof");
+        forged_challenge.challenge = challenge.to_owned();
+        let forged_challenge = serde_json::to_string(&forged_challenge).expect("challenge proof");
+        let expected = if challenge == "not-hex" {
+            "challenge"
+        } else {
+            "challenge length"
+        };
+        assert_eq!(
+            independently_verify_detached_completion(
+                &fixture.completion.recovery_closure,
+                &forged_challenge,
+                &trust,
+            ),
+            Err(expected),
+        );
+    }
+    let mut forged_challenge: DetachedAuditProof =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid detached proof");
+    forged_challenge.challenge = "00".repeat(33);
+    let forged_challenge = serde_json::to_string(&forged_challenge).expect("long challenge proof");
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &forged_challenge,
+            &trust,
+        ),
+        Err("challenge length"),
+    );
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fixture.completion.provider_completion_attestation)
+            .expect("valid proof JSON");
+    let reordered = serde_json::to_string(&parsed).expect("reordered proof");
+    assert_ne!(
+        reordered,
+        fixture.completion.provider_completion_attestation
+    );
+    assert_eq!(
+        independently_verify_detached_completion(
+            &fixture.completion.recovery_closure,
+            &reordered,
+            &trust,
+        ),
+        Err("proof canonicality"),
+    );
+}
+
+#[test]
 fn detached_completion_proof_rejects_crypto_and_target_substitutions() {
     let fixture = completion_fixture();
     let valid = persisted_proof(
