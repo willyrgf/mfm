@@ -3667,6 +3667,26 @@ async fn run_worker_expect_completion_acknowledgement_loss(
             String::from_utf8_lossy(&output.stderr),
         );
     }
+    if tokio::time::timeout(
+        COMPLETION_BOUNDARY_TIMEOUT,
+        commit_proxy.wait_for_intercepts(intercept_target),
+    )
+    .await
+    .is_err()
+    {
+        let _ = child.start_kill();
+        let output = child
+            .wait_with_output()
+            .await
+            .expect("wait for completion acknowledgement worker after boundary timeout");
+        commit_proxy.release_held_transactions();
+        panic!(
+            "completion acknowledgement worker did not reach the commit boundary (status {:?}): {}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
     let mut stdout_reader = child
         .stdout
         .take()
@@ -3719,21 +3739,6 @@ async fn run_worker_expect_completion_acknowledgement_loss(
     };
     assert_canaries_absent("completion-ack stdout", &output.stdout);
     assert_canaries_absent("completion-ack stderr", &output.stderr);
-    if tokio::time::timeout(
-        Duration::from_secs(30),
-        commit_proxy.wait_for_intercepts(intercept_target),
-    )
-    .await
-    .is_err()
-    {
-        commit_proxy.release_held_transactions();
-        panic!(
-            "completion acknowledgement worker did not reach the commit boundary (status {:?}): {}{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
     assert!(
         output.status.success(),
         "completion acknowledgement worker failed with status {:?}: {}",
