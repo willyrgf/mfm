@@ -11462,15 +11462,17 @@ fn component_closure_digest(
     let closure_items = closure
         .iter()
         .map(|object| {
-            Ok((
-                &object.object_type,
-                &object.content_ref,
-                object
-                    .value
-                    .canonical_json()
-                    .map_err(|error| CertifyError::Certification(error.to_string()))?
-                    .to_vec(),
-            ))
+            let canonical_value = object
+                .value
+                .canonical_json()
+                .map_err(|error| CertifyError::Certification(error.to_string()))?;
+            // Preserve the exact canonical object bytes as raw JSON in the enclosing preimage.
+            // Serializing the same bytes as `Vec<u8>` creates one JSON number per byte and can
+            // inflate a qualified production closure past the generated canonical-document cap.
+            let raw_value =
+                serde_json::value::RawValue::from_string(canonical_value.as_str().to_owned())
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?;
+            Ok((&object.object_type, &object.content_ref, raw_value))
         })
         .collect::<Result<Vec<_>>>()?;
     let canonical = canonical(&(components, closure_items))?;

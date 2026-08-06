@@ -35,7 +35,7 @@ mfm-program = { path = "../program" }
 mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
