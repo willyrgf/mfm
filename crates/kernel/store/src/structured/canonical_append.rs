@@ -7,7 +7,9 @@
 use std::collections::BTreeSet;
 
 use super::configuration::ConfigurationRevision;
-use mfm_canonical::limits::{MAX_ARRAY_ITEMS, MAX_OBJECT_ENTRIES};
+use mfm_canonical::limits::{
+    MAX_ARRAY_ITEMS, MAX_CONFIGURATION_REVISION_BYTES, MAX_OBJECT_ENTRIES,
+};
 pub use mfm_canonical::limits::{MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES};
 use mfm_canonical::MAX_CANONICAL_JSON_DEPTH;
 use mfm_ids::ContentRef;
@@ -131,7 +133,9 @@ impl CanonicalConfigurationAppend {
     /// Validates the complete configuration revision before backend dispatch.
     pub fn new(revision: ConfigurationRevision) -> Result<Self, StructuredStoreError> {
         revision.validate_for_ingress()?;
-        if revision.canonical_value().len() > MAX_STORED_FRAME_BYTES {
+        let canonical_revision =
+            canonical_json(&revision).map_err(|_| StructuredStoreError::InvalidHistory)?;
+        if canonical_revision.as_bytes().len() > MAX_CONFIGURATION_REVISION_BYTES {
             return Err(StructuredStoreError::InvalidHistory);
         }
         Ok(Self {

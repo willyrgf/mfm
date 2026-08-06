@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_facts::{
@@ -48,10 +49,11 @@ use mfm_storage_postgres::{
 };
 use mfm_store::structured::{
     assemble_in_memory_runtime, AssembledStructuredRuntime, ConfigurationAppendRequest,
-    ConfigurationRevision, ConfigurationStreamKey, ExportRunReader, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, PhysicalTargetIdentity, ProposedCanonicalValue,
-    PublicPhysicalBindingVerifier, RegistryProgramVerifier, StructuredAdmissionMaterial,
-    StructuredFrontier, StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
+    ConfigurationHistoryStore, ConfigurationRevision, ConfigurationStreamKey, ExportRunReader,
+    MemoryConfigurationHistoryBackend, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
+    RegistryProgramVerifier, RunEvidenceStatus, StructuredAdmissionMaterial,
+    StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -320,6 +322,224 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     drop(reader);
     drop(writer);
     drop(run_history);
+    database.cleanup().await;
+}
+
+#[tokio::test]
+async fn configuration_acceptance_vectors_match_memory_and_postgres() {
+    let database = TestDatabase::create().await;
+    let operation_id = stable("mfm.postgres.fixture/configured-parity").expect("operation id");
+    let (registry, _) = qualified_program(operation_id.clone());
+    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let (_run_history, configuration) = open_structured_authoritative_with_configuration(
+        database.combined_sessions().await,
+        registry,
+        physical_verifier,
+    )
+    .await
+    .expect("qualify PostgreSQL configuration store");
+    let (postgres_writer, postgres_reader) = configuration.split();
+    let (memory_writer, memory_reader) = ConfigurationHistoryStore::new(
+        MemoryConfigurationHistoryBackend::new(database.store_scope_id().await),
+    )
+    .split();
+    let stream = ConfigurationStreamKey::new(
+        database.store_scope_id().await,
+        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "9".repeat(32))).expect("tenant"),
+        operation_id,
+        StableId::new("mfm.postgres.fixture/configured-parity-target").expect("target"),
+    );
+    let contract = admission_object(
+        ADMISSION_CONFIGURATION_OBJECT_TYPE,
+        "mfm.postgres.fixture.configured-parity-contract",
+        39,
+    )
+    .content_ref;
+
+    let positive_value =
+        ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("positive value");
+    let postgres_first = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            positive_value.clone(),
+        ))
+        .await;
+    let memory_first = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            positive_value,
+        ))
+        .await;
+    assert_eq!(postgres_first, memory_first);
+    let first = postgres_first.expect("positive append");
+
+    // Derive the fixed serialized-revision overhead from a committed successor so the
+    // boundary vector remains exact even if the qualified identifiers change length.
+    let boundary_append_ids = [
+        "postgres-configured-parity-boundary-a",
+        "postgres-configured-parity-boundary-b",
+        "postgres-configured-parity-boundary-c",
+    ];
+    let sizing_value = ProposedCanonicalValue::from_json(r#""sizing""#).expect("sizing value");
+    let postgres_sizing = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(first.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[0]).expect("sizing append id"),
+            contract.clone(),
+            sizing_value.clone(),
+        ))
+        .await;
+    let memory_sizing = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(first.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[0]).expect("sizing append id"),
+            contract.clone(),
+            sizing_value,
+        ))
+        .await;
+    assert_eq!(postgres_sizing, memory_sizing);
+    let sizing = postgres_sizing.expect("sizing append");
+    let revision_overhead = canonical_json(&sizing)
+        .expect("canonical sizing revision")
+        .as_bytes()
+        .len()
+        .checked_sub(sizing.canonical_value().len())
+        .expect("revision overhead");
+    let exact_value_len = MAX_CONFIGURATION_REVISION_BYTES
+        .checked_sub(revision_overhead)
+        .expect("configuration revision overhead fits its bound");
+    assert!(
+        exact_value_len >= 2,
+        "configuration value must retain JSON quotes"
+    );
+    let exact_value =
+        ProposedCanonicalValue::from_json(&format!("\"{}\"", "x".repeat(exact_value_len - 2)))
+            .expect("exact-limit value");
+    let postgres_exact = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(sizing.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[1]).expect("exact append id"),
+            contract.clone(),
+            exact_value.clone(),
+        ))
+        .await;
+    let memory_exact = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(sizing.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[1]).expect("exact append id"),
+            contract.clone(),
+            exact_value,
+        ))
+        .await;
+    assert_eq!(postgres_exact, memory_exact);
+    let exact = postgres_exact.expect("exact-limit append");
+    assert_eq!(exact.canonical_value().len(), exact_value_len);
+    assert_eq!(
+        canonical_json(&exact)
+            .expect("canonical exact revision")
+            .as_bytes()
+            .len(),
+        MAX_CONFIGURATION_REVISION_BYTES
+    );
+
+    let one_over_value =
+        ProposedCanonicalValue::from_json(&format!("\"{}\"", "x".repeat(exact_value_len - 1)))
+            .expect("one-over value");
+    let postgres_one_over = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(exact.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[2]).expect("one-over append id"),
+            contract.clone(),
+            one_over_value.clone(),
+        ))
+        .await;
+    let memory_one_over = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(exact.revision_ref().clone()),
+            AppendRequestId::new(boundary_append_ids[2]).expect("one-over append id"),
+            contract.clone(),
+            one_over_value,
+        ))
+        .await;
+    assert_eq!(postgres_one_over, memory_one_over);
+    assert_eq!(
+        postgres_one_over,
+        Err(mfm_runtime::history::HistoryError::InvalidHistory)
+    );
+
+    let stale_value = ProposedCanonicalValue::from_json(r#"{"stale":true}"#).expect("stale value");
+    let postgres_stale = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(first.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-stale").expect("append id"),
+            contract.clone(),
+            stale_value.clone(),
+        ))
+        .await;
+    let memory_stale = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(first.revision_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-stale").expect("append id"),
+            contract.clone(),
+            stale_value,
+        ))
+        .await;
+    assert_eq!(postgres_stale, memory_stale);
+    assert_eq!(
+        postgres_stale,
+        Err(mfm_runtime::history::HistoryError::StaleHead)
+    );
+
+    let postgres_replay = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("positive replay value"),
+        ))
+        .await;
+    let memory_replay = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            None,
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("positive replay value"),
+        ))
+        .await;
+    assert_eq!(postgres_replay, memory_replay);
+    assert_eq!(postgres_replay, Ok(first.clone()));
+
+    let postgres_current = postgres_reader
+        .resolve(&stream, &contract)
+        .await
+        .expect("resolve PostgreSQL parity head");
+    let memory_current = memory_reader
+        .resolve(&stream, &contract)
+        .await
+        .expect("resolve memory parity head");
+    assert_eq!(postgres_current, memory_current);
+    assert_eq!(postgres_current.revision(), &exact);
+
+    drop(memory_reader);
+    drop(memory_writer);
+    drop(postgres_reader);
+    drop(postgres_writer);
     database.cleanup().await;
 }
 
@@ -1182,8 +1402,8 @@ async fn structured_history_fresh_process_worker() {
                     .load_public(&run_id)
                     .await
                     .expect("first-process refold")
-                    .frontier(),
-                StructuredFrontier::Actions(_)
+                    .status(),
+                RunEvidenceStatus::Actionable
             ));
         }
         "continue" => {
@@ -1191,10 +1411,7 @@ async fn structured_history_fresh_process_worker() {
                 .load_public(&run_id)
                 .await
                 .expect("second-process refold");
-            assert!(matches!(
-                verified.frontier(),
-                StructuredFrontier::Actions(_)
-            ));
+            assert!(matches!(verified.status(), RunEvidenceStatus::Actionable));
             assert_eq!(
                 runtime
                     .drive_once(&run_id)
@@ -1207,8 +1424,8 @@ async fn structured_history_fresh_process_worker() {
                     .load_public(&run_id)
                     .await
                     .expect("second-process closed refold")
-                    .frontier(),
-                StructuredFrontier::Complete
+                    .status(),
+                RunEvidenceStatus::Closed
             ));
         }
         _ => panic!("unknown structured-history worker mode"),
@@ -1314,23 +1531,23 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
             .load_public(&run_id)
             .await
             .expect("verification-process closed refold")
-            .frontier(),
-        StructuredFrontier::Complete
+            .status(),
+        RunEvidenceStatus::Closed
     ));
     assert!(matches!(
         mfm_replay::structured::verify_recorded_history(&verification_replay, &run_id)
             .await
             .expect("callback-free replay after fresh-process continuation")
-            .frontier(),
-        StructuredFrontier::Complete
+            .status(),
+        RunEvidenceStatus::Closed
     ));
     assert!(matches!(
         memory_reader
             .load_public(&run_id)
             .await
             .expect("memory parity closed refold")
-            .frontier(),
-        StructuredFrontier::Complete
+            .status(),
+        RunEvidenceStatus::Closed
     ));
     drop(verification_reader);
     drop(verification_replay);
@@ -1441,8 +1658,8 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
             .load_public(&first_run)
             .await
             .expect("reload first")
-            .frontier(),
-        StructuredFrontier::Actions(_)
+            .status(),
+        RunEvidenceStatus::Actionable
     ) {
         assert_eq!(
             runtime
@@ -1457,8 +1674,8 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
             .load_public(&second_run)
             .await
             .expect("reload second")
-            .frontier(),
-        StructuredFrontier::Actions(_)
+            .status(),
+        RunEvidenceStatus::Actionable
     ) {
         assert_eq!(
             runtime
@@ -2003,8 +2220,8 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
             .load_public(&producer_run)
             .await
             .expect("reload racing producer")
-            .frontier(),
-        StructuredFrontier::Actions(_)
+            .status(),
+        RunEvidenceStatus::Actionable
     ) {
         let retry = runtime
             .drive_once(&producer_run)
@@ -2020,8 +2237,8 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
             .load_public(&consumer_run)
             .await
             .expect("reload racing consumer")
-            .frontier(),
-        StructuredFrontier::Actions(_)
+            .status(),
+        RunEvidenceStatus::Actionable
     ) {
         let retry = runtime
             .drive_once(&consumer_run)
@@ -2041,9 +2258,8 @@ async fn fact_publication_and_selection_barrier_have_one_tenant_linearization() 
             .load_public(&consumer_run)
             .await
             .expect("poll consumer frontier")
-            .frontier()
-            .clone();
-        if matches!(frontier, StructuredFrontier::Complete) {
+            .status();
+        if matches!(frontier, RunEvidenceStatus::Closed) {
             break;
         }
         let _ = runtime.drive_once(&consumer_run).await;
@@ -2366,8 +2582,8 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
             .load_public(&run_id)
             .await
             .expect("refold eleven numeric batches")
-            .frontier(),
-        StructuredFrontier::Complete
+            .status(),
+        RunEvidenceStatus::Closed
     ));
     let audit_pool = database.independent_pool().await;
     let batches = load_normalized_batches(&audit_pool, &run_id).await;
