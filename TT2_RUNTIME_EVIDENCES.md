@@ -30,6 +30,11 @@ implemented and the focused candidate checks are green, but the plan's strict
   evidence. Offline replay does not resolve them live; the explicit trust
   snapshot binds the exact closure digest. If deployment requires independent
   decision-record resolution, that is a new authority contract.
+- The store still exposes its explicit offline fold seam (`RawRunHistory` plus
+  concrete trust) to `mfm-replay`, whose internal validation needs the full
+  verified cursor and object graph. That replay-only seam is intentionally
+  separate from production purpose readers; sealing it from every arbitrary
+  external crate would require a new replay-consumer authority contract.
 
 ## Ordered implementation revisions
 
@@ -287,7 +292,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are enforced; synthesized semantic/audit suffix vectors pass strict reject/accept behavior, but no genuinely valid production later-audit artifact fixture exists yet. |
 | REPLAY-04 | Closed | Exact frame/total limits, one-over failures, large-frame and many-small-frame paths pass. |
 | REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| APP-01 | Conditional | Public and recorded-replay products now expose only fold-derived status, and the 14-case application trybuild matrix rejects raw-record, frontier, and trace authorization-request access; complete runtime/audit/replay/export isolation proof remains outstanding. |
+| APP-01 | Conditional | Public and recorded-replay products now expose only fold-derived status, and the 14-case application trybuild matrix rejects raw-record, frontier, and trace authorization-request access; complete runtime/audit/replay/export isolation proof and the replay-only offline fold seam's arbitrary-caller boundary remain outstanding. |
 | APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and retains principal/grant/decision references; app unit tests prove root and dependency zero-byte denial, while live production multi-hop proof remains. |
 | SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | QUALITY-01 | Conditional | Duplicate runtime/replay paths were removed; core ownership/hand-written LOC remains concentrated. |
@@ -435,11 +440,12 @@ bound remains finite and fail-closed, although its eight attempts are per
 nested loop and PostgreSQL retries persistent `InvalidHistory` until
 exhaustion; these remain bounded resource/diagnostic residuals.
 
-Independent review of exact `bd98e8ca` is pending final evidence refresh; the
-implementation removes the actionable frontier from public and recorded-replay
-products and the exact compile-fail/package matrix is green. APP-01 remains
-Conditional until the complete runtime, audit, replay, and export isolation
-matrix is independently reproduced.
+Independent review of exact `bd98e8ca` confirms no direct leak or contract
+mismatch: public and recorded-replay products retain only `RunEvidenceStatus`,
+the status mapping is exhaustive and annex-exact, and the 14-case compile-fail
+and package matrix is green. APP-01 remains Conditional until the complete
+runtime, audit, replay, and export isolation matrix is independently reproduced;
+the explicit offline fold seam remains a replay-only residual described above.
 
 The follow-up narrows, but does not eliminate, the residuals above. EVM-07
 still lacks projection-index/scale, latency, and adversarial non-aggregate scan

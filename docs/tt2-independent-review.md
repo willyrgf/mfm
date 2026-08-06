@@ -54,6 +54,11 @@ both the closed implementation work and the remaining proof/deployment gaps.
   direct witnesses for every malformed/corrupt format and valid-but-wrong
   public/account identity, plus external termination/resource failures, remain
   outside the focused package evidence.
+- The store's public offline fold seam still returns a full verified run to the
+  replay crate when callers provide `RawRunHistory` and concrete trust. This is
+  intentional for callback-free replay validation, but it is not sealed by the
+  purpose evidence newtypes; making APP-01 cover arbitrary callers would need a
+  new replay-consumer authority contract.
 
 ## Candidate and review scope
 
@@ -306,8 +311,11 @@ result: ok — 1 task, 0 failed in 99.91s
 
 The cutover preserves the transport status strings while preventing callers
 from reading actionable state, capability references, input, or execution
-details through public or recorded evidence. A complete runtime/audit/replay/
-export isolation matrix remains outside this focused proof.
+details through public or recorded evidence. Independent review of exact
+`bd98e8ca` found no direct leak or contract mismatch and confirmed the
+exhaustive five-tag mapping. A complete runtime/audit/replay/export isolation
+matrix remains outside this focused proof; the explicit offline fold seam is
+the replay-only residual described in the material uncertainties.
 
 Additional focused evidence on the current tree:
 
@@ -428,7 +436,7 @@ counts; the baseline had no equivalent source-level tests to run.
 | TT2-REPLAY-03 | Conditional | Exact semantic cutoff and kind-aware authorization cutoff are implemented; synthesized suffix vectors pass strict semantic reject/audit accept behavior, but no genuinely valid later-audit-suffix artifact is retained. |
 | TT2-REPLAY-04 | Closed | Frame and total budgets accept exact limits and reject one-byte-over before allocation. |
 | TT2-REPLAY-05 | Conditional | Generated schema vectors, a 15-vector portable artifact corpus, two nested source-graph vectors, and the generated offline-fold acceptance leaf pass; a genuinely valid later-audit artifact remains. |
-| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 14-case application privacy trybuild matrix rejects public raw-record enumeration, public/recorded frontier access, and trace authorization-request access, while complete runtime data-isolation proof remains outstanding. |
+| TT2-APP-01 | Conditional | Purpose-specific projections/redaction exist; the 14-case application privacy trybuild matrix rejects public raw-record enumeration, public/recorded frontier access, and trace authorization-request access, while complete runtime data-isolation proof and the replay-only offline fold seam's arbitrary-caller boundary remain outstanding. |
 | TT2-APP-02 | Conditional | Flattened recursive closure is kind-aware, fixed-point, graph-checked, and principal/grant/decision-bound; root/dependency app unit tests prove zero-byte denial, but live production multi-hop proof remains. |
 | TT2-SEC-01 | Conditional | The shared production decrypt guard and witness cover one protected heap allocation, source-to-`SecureKey` handoff, cleanup on success, ciphertext/AAD authentication failure, bounded-length rejection, injected unwind, and authenticated post-decrypt invalid-key rejection; direct witnesses for other malformed/corrupt formats and a valid-but-wrong public/account identity remain, as do external termination/OOM/resource-failure classes. |
 | TT2-QUALITY-01 | Conditional | Superseded runtime/replay paths are deleted; ownership and hand-written LOC remain concentrated. |
