@@ -717,7 +717,7 @@ fn independent_detached_audit_verifies_provider_proof_and_public_projection() {
     assert_eq!(
         serde_json::to_value(&fixture.mutation).expect("storage mutation JSON"),
         serde_json::to_value(
-            &detached_audit_mutation_from_closure(&fixture.completion.recovery_closure)
+            detached_audit_mutation_from_closure(&fixture.completion.recovery_closure)
                 .expect("detached mutation from closure"),
         )
         .expect("detached mutation JSON"),
