@@ -175,6 +175,7 @@ Post-step-12 implementation and proof revisions:
 | `64517b46` | strengthen detached audit substitution proof |
 | `bc469cc8` | exercise evm crash recovery boundary |
 | `60554999` | expand detached audit binding proofs |
+| `88af683d` | strengthen detached audit hostile corpus |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -675,6 +676,12 @@ and target-context substitutions. Each forged proof is serialized and rejected
 by the callback-free verifier; the full storage target remains 11 passed and
 one managed-schema test ignored.
 
+Revision `88af683d` completes the independent detached-proof hostile corpus for
+the remaining wire and cryptographic substitutions. The callback-free verifier
+now rejects forged payload digests, signatures, trust keys, malformed and
+wrong-length challenges, and reordered JSON with exact branch-level errors;
+the full storage target passes 12 tests with one managed-schema test ignored.
+
 Revision `bc469cc8` makes the managed production qualification inject an
 explicit status-137 child-process exit after the broadcast observation has
 committed. The fresh resume worker then closes the same run and the test
@@ -914,7 +921,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | EVM-06 | Closed | Release currentness resolves registered historical incarnations and promotion paths. |
 | EVM-07 | Conditional | Managed run `run-2218000-1785998748489917662` keeps status and reserve/activate/complete Q/E counts constant after 64 completed reservations, rejects captured Q/P lifetime `COUNT/MAX`, requires exact key/prefix predicates for every wallet-history `SELECT`, and verifies the domain primary-key path under `enable_seqscan = off`; a production latency envelope remains. |
 | EVM-08 | Closed | Retained signer integrity failures remain integrity faults; no availability downgrade path is accepted. |
-| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed `evm-postgres-submission-qualification` passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
+| EVM-09 | Conditional | Closure/preimage, persisted reload, managed historical-row omission/rewriting, public-result redaction, detached offline audit, and the managed production-scale qualification remain green. Revisions `25dc49e7`/`b59d820a`/`618cadea` split the callback-free provider proof check from the SQL incarnation lookup and pass a 3/3 typed Completion hostile corpus without `PgConnection`; `f3a15978` adds the 4-test managed SQL regression; `137ed63b` proves the public run view serializes only the typed disposition and advertises a `PublicOutputs` schema; `f5815ccb` independently reconstructs the Completion mutation, verifies provider signature/trust/context, and asserts closure-only public bytes with no storage verifier, PostgreSQL, or live provider; `6cd74eef` encodes canonical closure values as raw JSON and the managed `evm-postgres-submission-qualification` passes 1/1; `64517b46` sends the forged projection closure through the independent verifier; `60554999` adds independent operation-key and target-context substitution denials; `88af683d` adds independent payload, signature/key, challenge, and canonical-wire substitution denials. Deployment-owned provider trust and the broader crash, ambiguity, latency, and production-authority matrices remain conditional. |
 | EVM-10 | Closed | `u64::MAX` is rejected before pending observation and persisted wallet mutation. |
 | EVM-11 | Closed | Pending-floor route/policy and configured semantics are authority-qualified before mutation. |
 | EVM-12 | Conditional | `bc469cc8` injects a status-137 worker exit after the durable broadcast observation; the resumed managed qualification closes the run and proves exactly one raw broadcast (`run-2394128-1786018130470251941`, 1/1). Receipt, finality, promotion, completion, ambiguity, cross-process, replacement, and scale matrices remain incomplete. |
