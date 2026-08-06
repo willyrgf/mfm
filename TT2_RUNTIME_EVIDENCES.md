@@ -124,6 +124,7 @@ Post-step-12 implementation and proof revisions:
 | `b0e1de8f` | expand configuration parity corpus |
 | `0a4b02e1` | fix numeric ordering for configuration history rows |
 | `fce1edca` | fix checkpoint preparation durability |
+| `27edd8c6` | harden checkpoint sidecar arbitration |
 
 `ef3e412d5` (`wording in code-quality`) was committed while the earlier gate was
 running. It changes only prose and whitespace in `docs/code-quality.md`. The
@@ -383,8 +384,27 @@ The sidecar now persists every successful `Prepared` single- or multi-key
 successor before returning. Fresh ledger instances reload that state, reject a
 different successor, and acknowledge the exact prepared bytes after restart;
 `acknowledge_many` also rejects unprepared successors. The sidecar remains a
-test authority rather than a production deployment implementation, and a
-complete cross-process fault/serialization matrix is still unverified.
+test authority rather than a production deployment implementation.
+
+The follow-up sidecar hardening was then qualified on `27edd8c6`:
+
+```text
+nix run .#run -- --task recoverability-postgres-v1
+source: 27edd8c6
+run id: run-2155505-1785990746657729092
+result: ok — 18 structured-history tests passed, 0 failed in 32.05s
+
+nix develop -c cargo test -p mfm-storage-postgres \
+  --features test-support checkpoint --lib
+source: 27edd8c6
+result: ok — 10 checkpoint tests passed, 0 failed
+```
+
+The sidecar now uses an OS file lock and reloads persisted state before every
+mutating validation; independently loaded workers reject a stale conflicting
+successor instead of overwriting the durable slot. A complete injected
+serialization/deadlock, acknowledgement-loss, promotion, and production
+authority matrix remains unverified.
 
 The clean pre-fix source sequence also refreshed the source-local inventory and
 portable corpus leaves (the checkpoint change does not touch either surface):
@@ -411,7 +431,7 @@ proof or deployment evidence is still missing; it is not a waiver.
 | AUTH-01 | Closed | Runtime/physical access is marker-sealed and API-surface tests reject ordinary implementations. |
 | AUTH-02 | Closed | PostgreSQL session issuance is bound to the external deployment authority and private credentials. |
 | STORE-01 | Conditional | External target/checkpoint trust is explicit and exercised by fakes; concrete production trust integration is absent. |
-| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared checkpoint state now survives a fresh test-authority restart and unprepared acknowledgements fail closed, while deterministic cross-process contention/acknowledgement-loss/fault matrices remain absent. |
+| STORE-02 | Conditional | Snapshot/head checks and recoverability races pass; Prepared restart, strict acknowledgement, and stale-worker sidecar arbitration now pass, while injected serialization/deadlock, acknowledgement-loss, promotion, and production-authority matrices remain absent. |
 | STORE-03 | Closed | Fresh loads compare folded prefixes with indexed heads and reject rewind/divergence. |
 | STORE-04 | Closed | Aborted-transaction classification was removed; raced append identities are retried and reconciled. |
 | STORE-05 | Conditional | Shared canonical ingress now bounds serialized configuration revisions before backend dispatch. Managed memory/PostgreSQL vectors cover positive, exact-limit, one-byte-over, stale-predecessor, idempotent replay, 32 deterministic shape values (including UTF-8), and a 32-revision sequential stream; the complete generated, boundary/escape, hostile, and large-scale acceptance matrix remains unverified. |
