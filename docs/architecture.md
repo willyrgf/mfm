@@ -262,18 +262,14 @@ and clears pending assembly leases atomically; a concurrent Finish succeeds only
 before that cutover. Lease observation, revocation drain, and promotion drain account for both
 ordinary authority leases and nonexpired assembly leases.
 
-The wallet checkpoint owner is a separate control-plane authority outside every restartable
-provider child. It retains one acknowledged prefix and at most one exact prepared transition.
-Children prepare before SQL, acknowledge only the observed exact successor prefix, and reconcile
-before readiness: predecessor retains `Prepared` for identical-only retry, successor finalizes it,
-and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. Only a test
-implementation of that authority exists in this repository.
-
-The structured run and configuration stores have no such authority. PostgreSQL is their sole
-append-only authority, and a rewound database is accepted rather than detected; see *Append-only
-authority and the absent witness* in [`design.md`](design.md). Configuration append ambiguity
-retries the identical canonical revision so the database resolves whether that exact append is
-durable, and a persistent mismatch still rejects the operation.
+No external checkpoint authority exists in either the wallet domain or the structured run and
+configuration stores. PostgreSQL is the sole append-only authority for all of them, and a rewound
+database is accepted rather than detected; see *Append-only authority and the absent witness* in
+[`design.md`](design.md). The provider child still captures the exact SQL prefix digest at
+revocation so promotion publishes verifiable supersession evidence, but that digest is read from
+the same database it describes and witnesses nothing about rollback. Configuration append
+ambiguity retries the identical canonical revision so the database resolves whether that exact
+append is durable, and a persistent mismatch still rejects the operation.
 
 ## Portfolio placement
 

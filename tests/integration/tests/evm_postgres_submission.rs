@@ -118,8 +118,8 @@ use zeroize::Zeroizing;
 use mfm_values::MfmValue;
 use mfm_wallet_authority_provider_test_support::{
     postgres_proxy::{CommitFault, PostgresCommitFaultProxy},
-    ProviderCheckpointAuthority, ProviderDeploymentAssemblyPolicy, ProviderProcess,
-    ProviderProcessConfig, ProviderRpcInventoryTarget,
+    ProviderDeploymentAssemblyPolicy, ProviderProcess, ProviderProcessConfig,
+    ProviderRpcInventoryTarget,
 };
 
 const WORKER_MODE_ENV: &str = "MFM_EVM_POSTGRES_SUBMISSION_MODE";
@@ -276,23 +276,8 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     let fixture = Fixture::new();
     let wallet_url = database.activation_admin_url();
     let provider_directory = tempfile::tempdir().expect("create provider directory");
-    let checkpoint_authority = ProviderCheckpointAuthority::start(
-        &database_url_with_active_role(&wallet_url, ACTIVATION_ADMIN_ROLE),
-        &database_url_with_active_role(
-            &database.nonce_application_url(),
-            "mfm_evm_wallet_nonce_application",
-        ),
-        &database.wallet_schema,
-        fixture.provider_fence_lineage_ref.clone(),
-        fixture.incarnation.clone(),
-        fixture.current_public_head.clone(),
-        fixture.provider_fence_head_ref.clone(),
-    )
-    .await
-    .expect("start external wallet checkpoint authority");
     let provider_config = ProviderProcessConfig::new(
         provider_directory.path().join("wallet-authority.sock"),
-        &checkpoint_authority,
         database_url_with_active_role(&wallet_url, ACTIVATION_ADMIN_ROLE),
         database_url_with_active_role(
             &database.nonce_application_url(),

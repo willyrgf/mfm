@@ -211,8 +211,8 @@ Normal status and reservation paths validate the maintained current projection, 
 exact frontier reservation, bounded candidate prefix, and optional completion; no lifetime
 reservation scan occurs on normal paths. Full historical dense-prefix/count/max integrity is
 checked during schema qualification/open-role validation. Immutable application-role history and
-schema qualification preserve wallet append-only currentness, while externally retained checkpoints
-preserve target and deployment lineage.
+schema qualification preserve wallet append-only currentness. No external witness retains that
+lineage: a restored database is accepted, as recorded in [`design.md`](design.md).
 The managed qualification also compares the wire-level statement count for one retained status read
 before and after 64 completed reservations and checks the analyzed unique-frontier index plan.
 

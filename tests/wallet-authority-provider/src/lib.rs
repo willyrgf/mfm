@@ -11,14 +11,11 @@ pub mod postgres_proxy;
 
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader as SyncBufReader, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener as SyncUnixListener, UnixStream as SyncUnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use mfm_evm::{
@@ -46,12 +43,9 @@ const PROTOCOL_VERSION: u16 = 3;
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
 const AUTHENTICATION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.authentication.v1\0";
 const ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
-const CHECKPOINT_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const LEASE_HOLD_FAULT_DURATION: Duration = Duration::from_secs(2);
 const DEPLOYMENT_ASSEMBLY_LEASE_TTL: Duration = Duration::from_secs(30);
 const MAX_DEPLOYMENT_ASSEMBLY_LEASES: usize = 64;
-
-static CHECKPOINT_SOCKET_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Redaction-safe test-provider failure.
 #[derive(Debug, thiserror::Error)]
@@ -62,16 +56,6 @@ pub enum ProviderTestError {
     /// Provider configuration or protocol data was invalid.
     #[error("wallet authority test provider contract is invalid")]
     Invalid,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckpointTarget {
-    database_oid: u32,
-    schema_name: String,
-    store_incarnation: WalletNonceStoreIncarnation,
-    current_public_lineage_head: HistoryObject,
-    provider_fence_head_ref: EvmWalletReference,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,691 +90,11 @@ enum ProviderMutation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreIncarnationCheckpointRow {
-    wallet_nonce_store_lineage_id: String,
-    writer_epoch: String,
-    incarnation_ref: String,
-    predecessor_incarnation_ref: Option<String>,
-    incarnation_json: String,
-    promotion_successor_ref: Option<String>,
-    promotion_attestation_json: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct StoreLineageHeadCheckpointRow {
-    wallet_nonce_store_lineage_id: String,
-    current_writer_epoch: String,
-    current_incarnation_ref: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ActivationCheckpointRow {
-    wallet_nonce_domain_id: String,
-    activation_record_ref: String,
-    wallet_nonce_store_lineage_id: String,
-    observed_store_incarnation_ref: String,
-    activation_record_json: String,
-    registry_issuance_ref: String,
-    activation_attestation_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DomainCheckpointRow {
-    wallet_nonce_domain_id: String,
-    activation_record_ref: String,
-    wallet_nonce_store_lineage_id: String,
-    activation_record_json: String,
-    activation_attestation_json: String,
-    local_high_water_nonce: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReservationCheckpointRow {
-    semantic_reservation_key: String,
-    wallet_nonce_domain_id: String,
-    submission_intent_id: String,
-    nonce: String,
-    transaction_intent_digest: String,
-    candidate_family_ref: String,
-    request_json: String,
-    transaction_intent_json: String,
-    candidate_family_json: String,
-    reservation_json: String,
-    state_input_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CandidateCheckpointRow {
-    semantic_candidate_operation_key: String,
-    semantic_reservation_key: String,
-    candidate_ordinal: i32,
-    request_json: String,
-    active_candidate_json: String,
-    state_input_json: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CompletionCheckpointRow {
-    semantic_completion_key: String,
-    semantic_reservation_key: String,
-    request_json: String,
-    canonical_terminal_outcome_json: String,
-    completion_json: String,
-    state_input_json: String,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct WalletCheckpointPrefix {
-    store_incarnations: BTreeMap<String, StoreIncarnationCheckpointRow>,
-    store_lineage_heads: BTreeMap<String, StoreLineageHeadCheckpointRow>,
-    domain_activations: BTreeMap<String, ActivationCheckpointRow>,
-    domains: BTreeMap<String, DomainCheckpointRow>,
-    reservations: BTreeMap<String, ReservationCheckpointRow>,
-    candidates: BTreeMap<String, CandidateCheckpointRow>,
-    completions: BTreeMap<String, CompletionCheckpointRow>,
-}
-
-impl WalletCheckpointPrefix {
-    fn digest(&self) -> Result<String, ProviderTestError> {
-        mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.checkpoint-prefix.v1",
-            self,
-        )
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|_| ProviderTestError::Invalid)
-    }
-
-    fn exact_successor(mut self, mutation: &ProviderMutation) -> Result<Self, ProviderTestError> {
-        apply_checkpoint_mutation(&mut self, mutation)?;
-        Ok(self)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PreparedCheckpoint {
-    epoch: u64,
-    predecessor_digest: String,
-    successor_digest: String,
-    operation_digest: String,
-    successor_target: Option<CheckpointTarget>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum CheckpointRequest {
-    Verify {
-        fence_lineage_ref: EvmWalletReference,
-        target: CheckpointTarget,
-        observed_prefix_digest: String,
-    },
-    Recover {
-        fence_lineage_ref: EvmWalletReference,
-        target: CheckpointTarget,
-        observed_prefix_digest: String,
-    },
-    Prepare {
-        fence_lineage_ref: EvmWalletReference,
-        target: CheckpointTarget,
-        expected_epoch: u64,
-        prepared: PreparedCheckpoint,
-    },
-    Acknowledge {
-        fence_lineage_ref: EvmWalletReference,
-        target: CheckpointTarget,
-        prepared: PreparedCheckpoint,
-        observed_prefix_digest: String,
-    },
-    Abort {
-        fence_lineage_ref: EvmWalletReference,
-        target: CheckpointTarget,
-        prepared: PreparedCheckpoint,
-        observed_prefix_digest: String,
-    },
-    Shutdown,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct AuthenticatedCheckpointRequest {
-    authentication_tag_hex: String,
-    request: CheckpointRequest,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum CheckpointReply {
-    Current { epoch: u64 },
-    Rejected,
-}
-
-struct CheckpointAuthorityState {
-    authentication_token: Zeroizing<[u8; 32]>,
-    fence_lineage_ref: EvmWalletReference,
-    target: CheckpointTarget,
-    epoch: u64,
-    acknowledged_prefix_digest: String,
-    prepared: Option<PreparedCheckpoint>,
-}
-
-/// Parent-process authority retaining the non-rollback checkpoint across child restarts.
-pub struct ProviderCheckpointAuthority {
-    endpoint: PathBuf,
-    authentication_token: Zeroizing<[u8; 32]>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl ProviderCheckpointAuthority {
-    /// Starts a target-bound monotonic checkpoint authority from the exact current SQL prefix.
-    pub async fn start(
-        activation_database_url: &str,
-        nonce_database_url: &str,
-        schema_name: &str,
-        fence_lineage_ref: EvmWalletReference,
-        store_incarnation: WalletNonceStoreIncarnation,
-        current_public_lineage_head: HistoryObject,
-        provider_fence_head_ref: EvmWalletReference,
-    ) -> Result<Self, ProviderTestError> {
-        let activation_pool = PgPool::connect(activation_database_url)
-            .await
-            .map_err(|_| ProviderTestError::Unavailable)?;
-        let nonce_pool = PgPool::connect(nonce_database_url)
-            .await
-            .map_err(|_| ProviderTestError::Unavailable)?;
-        let database_oid = current_database_oid(&activation_pool).await?;
-        if current_database_oid(&nonce_pool).await? != database_oid {
-            return Err(ProviderTestError::Invalid);
-        }
-        // Initialization happens before any provider is ready, so the role-split
-        // observation cannot straddle an admitted wallet mutation.
-        let acknowledged_prefix_digest =
-            wallet_checkpoint_prefix(&activation_pool, &nonce_pool, schema_name)
-                .await?
-                .digest()?;
-        activation_pool.close().await;
-        nonce_pool.close().await;
-        let endpoint = std::env::temp_dir().join(format!(
-            "mfm-wallet-checkpoint-{}-{}.sock",
-            std::process::id(),
-            CHECKPOINT_SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed),
-        ));
-        if endpoint.exists() {
-            return Err(ProviderTestError::Invalid);
-        }
-        let listener =
-            SyncUnixListener::bind(&endpoint).map_err(|_| ProviderTestError::Unavailable)?;
-        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600))
-            .map_err(|_| ProviderTestError::Unavailable)?;
-        let authentication_token = random_bytes::<32>()?;
-        let state = CheckpointAuthorityState {
-            authentication_token: Zeroizing::new(*authentication_token),
-            fence_lineage_ref,
-            target: CheckpointTarget {
-                database_oid,
-                schema_name: schema_name.to_owned(),
-                store_incarnation,
-                current_public_lineage_head,
-                provider_fence_head_ref,
-            },
-            epoch: 0,
-            acknowledged_prefix_digest,
-            prepared: None,
-        };
-        let thread = std::thread::Builder::new()
-            .name("wallet-checkpoint-authority".to_owned())
-            .spawn(move || run_checkpoint_authority(listener, state))
-            .map_err(|_| ProviderTestError::Unavailable)?;
-        Ok(Self {
-            endpoint,
-            authentication_token,
-            thread: Some(thread),
-        })
-    }
-
-    /// Returns the private Unix endpoint supplied to child provider processes.
-    pub fn endpoint(&self) -> &Path {
-        &self.endpoint
-    }
-}
-
-impl Drop for ProviderCheckpointAuthority {
-    fn drop(&mut self) {
-        if let Ok(mut stream) = SyncUnixStream::connect(&self.endpoint) {
-            let request = authenticate_checkpoint_request(
-                self.authentication_token.as_ref(),
-                CheckpointRequest::Shutdown,
-            );
-            if request
-                .and_then(|request| {
-                    serde_json::to_writer(&mut stream, &request)
-                        .map_err(|_| ProviderTestError::Invalid)
-                })
-                .is_ok()
-            {
-                let _ = stream.write_all(b"\n");
-                let _ = stream.flush();
-            }
-        }
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        let _ = std::fs::remove_file(&self.endpoint);
-    }
-}
-
-fn run_checkpoint_authority(listener: SyncUnixListener, mut state: CheckpointAuthorityState) {
-    for accepted in listener.incoming() {
-        let Ok(mut stream) = accepted else {
-            break;
-        };
-        let _ = stream.set_read_timeout(Some(CHECKPOINT_IO_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CHECKPOINT_IO_TIMEOUT));
-        let Ok(read_stream) = stream.try_clone() else {
-            continue;
-        };
-        let mut reader = SyncBufReader::new(read_stream);
-        let request = read_bounded_sync_frame(&mut reader, MAX_MESSAGE_BYTES)
-            .ok()
-            .and_then(|frame| serde_json::from_slice::<AuthenticatedCheckpointRequest>(&frame).ok())
-            .and_then(|envelope| authenticate_checkpoint_envelope(&state, envelope).ok());
-        if matches!(request, Some(CheckpointRequest::Shutdown)) {
-            break;
-        }
-        let reply = request
-            .and_then(|request| apply_checkpoint_request(&mut state, request).ok())
-            .unwrap_or(CheckpointReply::Rejected);
-        if serde_json::to_writer(&mut stream, &reply).is_ok() {
-            let _ = stream.write_all(b"\n");
-            let _ = stream.flush();
-        }
-    }
-}
-
-fn authenticate_checkpoint_request(
-    authentication_token: &[u8],
-    request: CheckpointRequest,
-) -> Result<AuthenticatedCheckpointRequest, ProviderTestError> {
-    let encoded = serde_json::to_vec(&request).map_err(|_| ProviderTestError::Invalid)?;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, authentication_token);
-    let authentication_tag_hex = hex::encode(hmac::sign(&key, &encoded).as_ref());
-    Ok(AuthenticatedCheckpointRequest {
-        authentication_tag_hex,
-        request,
-    })
-}
-
-fn authenticate_checkpoint_envelope(
-    state: &CheckpointAuthorityState,
-    mut envelope: AuthenticatedCheckpointRequest,
-) -> Result<CheckpointRequest, ProviderTestError> {
-    let mut tag = Zeroizing::new([0_u8; 32]);
-    hex::decode_to_slice(&envelope.authentication_tag_hex, tag.as_mut())
-        .map_err(|_| ProviderTestError::Invalid)?;
-    envelope.authentication_tag_hex.zeroize();
-    let encoded = serde_json::to_vec(&envelope.request).map_err(|_| ProviderTestError::Invalid)?;
-    let key = hmac::Key::new(hmac::HMAC_SHA256, state.authentication_token.as_ref());
-    hmac::verify(&key, &encoded, tag.as_ref()).map_err(|_| ProviderTestError::Invalid)?;
-    Ok(envelope.request)
-}
-
-fn apply_checkpoint_request(
-    state: &mut CheckpointAuthorityState,
-    request: CheckpointRequest,
-) -> Result<CheckpointReply, ProviderTestError> {
-    match request {
-        CheckpointRequest::Verify {
-            fence_lineage_ref,
-            target,
-            observed_prefix_digest,
-        } => {
-            if fence_lineage_ref != state.fence_lineage_ref {
-                return Err(ProviderTestError::Invalid);
-            }
-            if let Some(prepared) = state.prepared.clone() {
-                if observed_prefix_digest == prepared.predecessor_digest && target == state.target {
-                    // Retain the exact prepared successor. A restarted provider may only
-                    // re-prepare these same bytes or prove the predecessor and abort it.
-                } else if observed_prefix_digest == prepared.successor_digest
-                    && target
-                        == prepared
-                            .successor_target
-                            .clone()
-                            .unwrap_or_else(|| state.target.clone())
-                {
-                    state.acknowledged_prefix_digest = prepared.successor_digest;
-                    state.epoch = prepared.epoch;
-                    if let Some(successor_target) = prepared.successor_target {
-                        state.target = successor_target;
-                    }
-                    state.prepared = None;
-                } else {
-                    return Err(ProviderTestError::Invalid);
-                }
-            } else if target != state.target
-                || observed_prefix_digest != state.acknowledged_prefix_digest
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            Ok(CheckpointReply::Current { epoch: state.epoch })
-        }
-        CheckpointRequest::Recover {
-            fence_lineage_ref,
-            target,
-            observed_prefix_digest,
-        } => {
-            if fence_lineage_ref != state.fence_lineage_ref {
-                return Err(ProviderTestError::Invalid);
-            }
-            if let Some(prepared) = state.prepared.clone() {
-                if observed_prefix_digest == prepared.predecessor_digest && target == state.target {
-                    state.prepared = None;
-                } else if observed_prefix_digest == prepared.successor_digest
-                    && target
-                        == prepared
-                            .successor_target
-                            .clone()
-                            .unwrap_or_else(|| state.target.clone())
-                {
-                    state.acknowledged_prefix_digest = prepared.successor_digest;
-                    state.epoch = prepared.epoch;
-                    if let Some(successor_target) = prepared.successor_target {
-                        state.target = successor_target;
-                    }
-                    state.prepared = None;
-                } else {
-                    return Err(ProviderTestError::Invalid);
-                }
-            } else if target != state.target
-                || observed_prefix_digest != state.acknowledged_prefix_digest
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            Ok(CheckpointReply::Current { epoch: state.epoch })
-        }
-        CheckpointRequest::Prepare {
-            fence_lineage_ref,
-            target,
-            expected_epoch,
-            prepared,
-        } => {
-            validate_checkpoint_digest(&prepared.predecessor_digest)?;
-            validate_checkpoint_digest(&prepared.successor_digest)?;
-            validate_checkpoint_digest(&prepared.operation_digest)?;
-            if fence_lineage_ref != state.fence_lineage_ref
-                || target != state.target
-                || expected_epoch != state.epoch
-                || prepared.epoch
-                    != state
-                        .epoch
-                        .checked_add(1)
-                        .ok_or(ProviderTestError::Invalid)?
-                || prepared.predecessor_digest != state.acknowledged_prefix_digest
-                || prepared.successor_digest == prepared.predecessor_digest
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            match &state.prepared {
-                Some(existing) if existing == &prepared => {}
-                Some(_) => return Err(ProviderTestError::Invalid),
-                None => state.prepared = Some(prepared.clone()),
-            }
-            Ok(CheckpointReply::Current {
-                epoch: prepared.epoch,
-            })
-        }
-        CheckpointRequest::Acknowledge {
-            fence_lineage_ref,
-            target,
-            prepared,
-            observed_prefix_digest,
-        } => {
-            if fence_lineage_ref != state.fence_lineage_ref
-                || target != state.target
-                || state.prepared.as_ref() != Some(&prepared)
-                || observed_prefix_digest != prepared.successor_digest
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            state.epoch = prepared.epoch;
-            state.acknowledged_prefix_digest = prepared.successor_digest;
-            if let Some(successor_target) = prepared.successor_target {
-                state.target = successor_target;
-            }
-            state.prepared = None;
-            Ok(CheckpointReply::Current { epoch: state.epoch })
-        }
-        CheckpointRequest::Abort {
-            fence_lineage_ref,
-            target,
-            prepared,
-            observed_prefix_digest,
-        } => {
-            if fence_lineage_ref != state.fence_lineage_ref
-                || target != state.target
-                || state.prepared.as_ref() != Some(&prepared)
-                || observed_prefix_digest != prepared.predecessor_digest
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            state.prepared = None;
-            Ok(CheckpointReply::Current { epoch: state.epoch })
-        }
-        CheckpointRequest::Shutdown => Err(ProviderTestError::Invalid),
-    }
-}
-
-fn validate_checkpoint_digest(digest: &str) -> Result<(), ProviderTestError> {
-    ContentDigest::from_str(digest)
-        .map(|_| ())
-        .map_err(|_| ProviderTestError::Invalid)
-}
-
-fn valid_checkpoint_authentication_token(token_hex: &str) -> bool {
-    if token_hex.len() != 64 {
-        return false;
-    }
-    let mut token = Zeroizing::new([0_u8; 32]);
-    hex::decode_to_slice(token_hex, token.as_mut()).is_ok()
-}
-
-struct CheckpointClient {
-    endpoint: PathBuf,
-    authentication_token: Zeroizing<[u8; 32]>,
-    fence_lineage_ref: EvmWalletReference,
-    epoch: tokio::sync::Mutex<u64>,
-}
-
-impl CheckpointClient {
-    fn new(
-        endpoint: PathBuf,
-        authentication_token_hex: String,
-        fence_lineage_ref: EvmWalletReference,
-    ) -> Result<Self, ProviderTestError> {
-        let mut authentication_token = Zeroizing::new([0_u8; 32]);
-        hex::decode_to_slice(&authentication_token_hex, authentication_token.as_mut())
-            .map_err(|_| ProviderTestError::Invalid)?;
-        Ok(Self {
-            endpoint,
-            authentication_token,
-            fence_lineage_ref,
-            epoch: tokio::sync::Mutex::new(0),
-        })
-    }
-
-    async fn verify(
-        &self,
-        target: &CheckpointTarget,
-        prefix: &WalletCheckpointPrefix,
-    ) -> Result<(), ProviderTestError> {
-        let observed_prefix_digest = prefix.digest()?;
-        let reply = self
-            .request(&CheckpointRequest::Verify {
-                fence_lineage_ref: self.fence_lineage_ref.clone(),
-                target: target.clone(),
-                observed_prefix_digest,
-            })
-            .await?;
-        let CheckpointReply::Current { epoch } = reply else {
-            return Err(ProviderTestError::Invalid);
-        };
-        *self.epoch.lock().await = epoch;
-        Ok(())
-    }
-
-    async fn recover(
-        &self,
-        target: &CheckpointTarget,
-        prefix: &WalletCheckpointPrefix,
-    ) -> Result<(), ProviderTestError> {
-        let observed_prefix_digest = prefix.digest()?;
-        let reply = self
-            .request(&CheckpointRequest::Recover {
-                fence_lineage_ref: self.fence_lineage_ref.clone(),
-                target: target.clone(),
-                observed_prefix_digest,
-            })
-            .await?;
-        let CheckpointReply::Current { epoch } = reply else {
-            return Err(ProviderTestError::Invalid);
-        };
-        *self.epoch.lock().await = epoch;
-        Ok(())
-    }
-
-    async fn prepare(
-        &self,
-        target: &CheckpointTarget,
-        prefix: WalletCheckpointPrefix,
-        mutation: &ProviderMutation,
-        successor_target: Option<CheckpointTarget>,
-    ) -> Result<PreparedCheckpoint, ProviderTestError> {
-        let predecessor_digest = prefix.digest()?;
-        let successor_digest = prefix.exact_successor(mutation)?.digest()?;
-        let operation_digest = mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.checkpoint-operation.v1",
-            mutation,
-        )
-        .map_err(|_| ProviderTestError::Invalid)?
-        .as_str()
-        .to_owned();
-        let epoch = *self.epoch.lock().await;
-        let prepared = PreparedCheckpoint {
-            epoch: epoch.checked_add(1).ok_or(ProviderTestError::Invalid)?,
-            predecessor_digest,
-            successor_digest,
-            operation_digest,
-            successor_target,
-        };
-        match self
-            .request(&CheckpointRequest::Prepare {
-                fence_lineage_ref: self.fence_lineage_ref.clone(),
-                target: target.clone(),
-                expected_epoch: epoch,
-                prepared: prepared.clone(),
-            })
-            .await?
-        {
-            CheckpointReply::Current { epoch } if epoch == prepared.epoch => Ok(prepared),
-            _ => Err(ProviderTestError::Invalid),
-        }
-    }
-
-    async fn acknowledge(
-        &self,
-        target: &CheckpointTarget,
-        prefix: &WalletCheckpointPrefix,
-        prepared: PreparedCheckpoint,
-    ) -> Result<(), ProviderTestError> {
-        let observed_prefix_digest = prefix.digest()?;
-        let expected_epoch = prepared.epoch;
-        let reply = self
-            .request(&CheckpointRequest::Acknowledge {
-                fence_lineage_ref: self.fence_lineage_ref.clone(),
-                target: target.clone(),
-                prepared,
-                observed_prefix_digest,
-            })
-            .await?;
-        match reply {
-            CheckpointReply::Current { epoch } if epoch == expected_epoch => {
-                *self.epoch.lock().await = epoch;
-                Ok(())
-            }
-            _ => Err(ProviderTestError::Invalid),
-        }
-    }
-
-    async fn abort(
-        &self,
-        target: &CheckpointTarget,
-        prefix: &WalletCheckpointPrefix,
-        prepared: PreparedCheckpoint,
-    ) -> Result<(), ProviderTestError> {
-        let observed_prefix_digest = prefix.digest()?;
-        let expected_epoch = *self.epoch.lock().await;
-        let reply = self
-            .request(&CheckpointRequest::Abort {
-                fence_lineage_ref: self.fence_lineage_ref.clone(),
-                target: target.clone(),
-                prepared,
-                observed_prefix_digest,
-            })
-            .await?;
-        match reply {
-            CheckpointReply::Current { epoch } if epoch == expected_epoch => Ok(()),
-            _ => Err(ProviderTestError::Invalid),
-        }
-    }
-
-    async fn request(
-        &self,
-        request: &CheckpointRequest,
-    ) -> Result<CheckpointReply, ProviderTestError> {
-        let stream =
-            tokio::time::timeout(CHECKPOINT_IO_TIMEOUT, UnixStream::connect(&self.endpoint))
-                .await
-                .map_err(|_| ProviderTestError::Unavailable)?
-                .map_err(|_| ProviderTestError::Unavailable)?;
-        let (read, mut write) = tokio::io::split(stream);
-        let envelope =
-            authenticate_checkpoint_request(self.authentication_token.as_ref(), request.clone())?;
-        let encoded = serde_json::to_vec(&envelope).map_err(|_| ProviderTestError::Invalid)?;
-        tokio::time::timeout(CHECKPOINT_IO_TIMEOUT, async {
-            write.write_all(&encoded).await?;
-            write.write_all(b"\n").await?;
-            write.flush().await
-        })
-        .await
-        .map_err(|_| ProviderTestError::Unavailable)?
-        .map_err(|_| ProviderTestError::Unavailable)?;
-        let mut read = BufReader::new(read);
-        let reply = tokio::time::timeout(
-            CHECKPOINT_IO_TIMEOUT,
-            read_bounded_frame(&mut read, MAX_MESSAGE_BYTES),
-        )
-        .await
-        .map_err(|_| ProviderTestError::Unavailable)?
-        .map_err(|_| ProviderTestError::Unavailable)?;
-        serde_json::from_slice(&reply).map_err(|_| ProviderTestError::Invalid)
-    }
-}
-
 /// Complete private startup configuration sent over the provider's stdin.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderProcessConfig {
     socket_path: PathBuf,
-    checkpoint_socket_path: PathBuf,
-    checkpoint_authentication_token_hex: String,
     database_url: String,
     nonce_database_url: String,
     schema_name: String,
@@ -933,7 +237,6 @@ impl ProviderProcessConfig {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         socket_path: PathBuf,
-        checkpoint_authority: &ProviderCheckpointAuthority,
         database_url: String,
         nonce_database_url: String,
         schema_name: String,
@@ -953,10 +256,6 @@ impl ProviderProcessConfig {
         let signing_seed_hex = hex::encode(random_bytes::<32>()?.as_ref());
         let config = Self {
             socket_path,
-            checkpoint_socket_path: checkpoint_authority.endpoint.clone(),
-            checkpoint_authentication_token_hex: hex::encode(
-                checkpoint_authority.authentication_token.as_ref(),
-            ),
             database_url,
             nonce_database_url,
             schema_name,
@@ -1090,12 +389,6 @@ impl ProviderProcessConfig {
 
     fn validate_contract(&self) -> Result<(), ProviderTestError> {
         if self.socket_path.as_os_str().is_empty()
-            || self.checkpoint_socket_path.as_os_str().is_empty()
-            || self.checkpoint_socket_path == self.socket_path
-            || !valid_checkpoint_authentication_token(&self.checkpoint_authentication_token_hex)
-            || std::fs::metadata(&self.checkpoint_socket_path)
-                .map(|metadata| metadata.permissions().mode() & 0o077 != 0)
-                .unwrap_or(true)
             || self.schema_name.is_empty()
             || self.database_url.is_empty()
             || self.nonce_database_url.is_empty()
@@ -1543,7 +836,6 @@ pub async fn run_provider_from_stdio() -> Result<(), ProviderTestError> {
         return Err(ProviderTestError::Invalid);
     }
     let state = ProviderState::new(config, pool, nonce_pool, database_oid)?;
-    state.verify_checkpoint().await?;
     state.hydrate_issued_activations().await?;
     let state = Arc::new(state);
     let ready = serde_json::to_string(&ProviderReady {
@@ -1685,8 +977,6 @@ struct ProviderState {
     pool: PgPool,
     nonce_pool: PgPool,
     database_oid: u32,
-    checkpoint: CheckpointClient,
-    checkpoint_observation: tokio::sync::Mutex<()>,
     provider_id: String,
     fence_lineage_ref: EvmWalletReference,
     chain_registry_lineage_ref: EvmWalletReference,
@@ -1801,11 +1091,6 @@ impl ProviderState {
         database_oid: u32,
     ) -> Result<Self, ProviderTestError> {
         config.validate_contract()?;
-        let checkpoint = CheckpointClient::new(
-            config.checkpoint_socket_path.clone(),
-            config.checkpoint_authentication_token_hex.clone(),
-            config.fence_lineage_ref.clone(),
-        )?;
         let current_routing_catalog = config
             .routing_catalog_history
             .last()
@@ -1910,8 +1195,6 @@ impl ProviderState {
             pool,
             nonce_pool,
             database_oid,
-            checkpoint,
-            checkpoint_observation: tokio::sync::Mutex::new(()),
             provider_id: config.provider_id,
             fence_lineage_ref: config.fence_lineage_ref,
             chain_registry_lineage_ref: config.chain_registry_lineage_ref,
@@ -1994,117 +1277,6 @@ impl ProviderState {
         Ok(())
     }
 
-    fn checkpoint_target(&self) -> Result<CheckpointTarget, ProviderTestError> {
-        let retained = self
-            .mutable
-            .lock()
-            .map_err(|_| ProviderTestError::Unavailable)?;
-        Ok(CheckpointTarget {
-            database_oid: self.database_oid,
-            schema_name: self.schema_name.clone(),
-            store_incarnation: retained.current_incarnation.clone(),
-            current_public_lineage_head: retained.current_public_lineage_head.clone(),
-            provider_fence_head_ref: retained.provider_fence_head_ref.clone(),
-        })
-    }
-
-    async fn verify_checkpoint(&self) -> Result<(), ProviderTestError> {
-        let _observation = self.checkpoint_observation.lock().await;
-        let target = self.checkpoint_target()?;
-        let prefix =
-            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-        self.checkpoint.verify(&target, &prefix).await
-    }
-
-    async fn recover_checkpoint_if_idle(&self) -> Result<(), ProviderTestError> {
-        // Lease admission takes this same mutex, so the idle check and the
-        // recovery CAS cannot be interleaved with a new provider mutation.
-        let _observation = self.checkpoint_observation.lock().await;
-        if self.active_leases()? != 0 {
-            return Ok(());
-        }
-        let target = self.checkpoint_target()?;
-        let prefix =
-            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-        self.checkpoint.recover(&target, &prefix).await
-    }
-
-    async fn prepare_checkpoint(
-        &self,
-        mutation: &ProviderMutation,
-        successor_target: Option<CheckpointTarget>,
-    ) -> Result<PreparedCheckpoint, ProviderTestError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            let observation = self.checkpoint_observation.lock().await;
-            let target = self.checkpoint_target()?;
-            // The lock spans both role-specific reads and the external CAS. Once this
-            // returns, the external authority retains the sole Prepared successor,
-            // so no other mutation can commit between the two prefix halves.
-            let prefix =
-                wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-            // A row-level collision after another successor committed is semantic,
-            // not transient checkpoint contention; let the caller resolve it exactly.
-            prefix.clone().exact_successor(mutation)?;
-            match self
-                .checkpoint
-                .prepare(&target, prefix, mutation, successor_target.clone())
-                .await
-            {
-                Ok(prepared) => return Ok(prepared),
-                Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
-                Err(_) => {
-                    drop(observation);
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            }
-        }
-    }
-
-    async fn acknowledge_checkpoint(
-        &self,
-        prepared: PreparedCheckpoint,
-    ) -> Result<(), ProviderTestError> {
-        let _observation = self.checkpoint_observation.lock().await;
-        let target = self.checkpoint_target()?;
-        let prefix =
-            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-        self.checkpoint
-            .acknowledge(&target, &prefix, prepared)
-            .await
-    }
-
-    async fn abort_checkpoint(
-        &self,
-        prepared: PreparedCheckpoint,
-    ) -> Result<(), ProviderTestError> {
-        let _observation = self.checkpoint_observation.lock().await;
-        let target = self.checkpoint_target()?;
-        let prefix =
-            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-        self.checkpoint.abort(&target, &prefix, prepared).await
-    }
-
-    async fn reconcile_checkpoint(
-        &self,
-        prepared: PreparedCheckpoint,
-    ) -> Result<(), ProviderTestError> {
-        let _observation = self.checkpoint_observation.lock().await;
-        let target = self.checkpoint_target()?;
-        let prefix =
-            wallet_checkpoint_prefix(&self.pool, &self.nonce_pool, &self.schema_name).await?;
-        let digest = prefix.digest()?;
-        if digest == prepared.successor_digest {
-            self.checkpoint
-                .acknowledge(&target, &prefix, prepared)
-                .await
-        } else if digest == prepared.predecessor_digest {
-            self.checkpoint.abort(&target, &prefix, prepared).await
-        } else {
-            Err(ProviderTestError::Invalid)
-        }
-    }
-
     async fn revoke(&self) -> Result<(), ProviderTestError> {
         {
             let mut state = self
@@ -2142,7 +1314,6 @@ impl ProviderState {
                 return Err(ProviderTestError::Invalid);
             }
         }
-        let _observation = self.checkpoint_observation.lock().await;
         let captured_prefix_digest =
             wallet_prefix_digest(&self.pool, &self.nonce_pool, &self.schema_name).await?;
         let mut state = self
@@ -2297,10 +1468,6 @@ impl ProviderState {
         expected_incarnation: &WalletNonceStoreIncarnation,
         expected_provider_head: &EvmWalletReference,
     ) -> Result<ActiveLeaseGuard, ProviderTestError> {
-        // Keep checkpoint recovery from observing idle state while this lease
-        // is being admitted; the guard is held until the active-lease count is
-        // incremented.
-        let _observation = self.checkpoint_observation.lock().await;
         let mut state = self
             .mutable
             .lock()
@@ -2325,10 +1492,6 @@ impl ProviderState {
     ) -> Result<ActiveLeaseGuard, ProviderTestError> {
         let incarnation_ref = canonical_wallet_reference(expected_incarnation)
             .map_err(|_| ProviderTestError::Invalid)?;
-        // Keep checkpoint recovery from observing idle state while this lease
-        // is being admitted; the guard is held until the active-lease count is
-        // incremented.
-        let _observation = self.checkpoint_observation.lock().await;
         let mut state = self
             .mutable
             .lock()
@@ -2739,7 +1902,6 @@ async fn serve_connection(
                 ),
             )?;
             let inserted = {
-                let _observation = state.checkpoint_observation.lock().await;
                 let mut retained = state
                     .mutable
                     .lock()
@@ -2792,7 +1954,6 @@ async fn serve_connection(
             proofs,
         } => {
             let pending = {
-                let _observation = state.checkpoint_observation.lock().await;
                 let mut retained = state
                     .mutable
                     .lock()
@@ -2864,7 +2025,6 @@ async fn serve_connection(
             store_incarnation,
             current_public_lineage_head,
         } => {
-            state.recover_checkpoint_if_idle().await?;
             let provider_head = {
                 let retained = state
                     .mutable
@@ -3289,7 +2449,7 @@ async fn handle_write(
             database_commit_observed: false,
             operation_key: finished_key,
         } if finished_key == operation_key => {
-            finish_write(channel, &state, &context, &operation_key, false, None).await
+            finish_write(channel, &context, &operation_key, false).await
         }
         ProviderRequest::RevalidateWrite {
             context: retained_context,
@@ -3307,7 +2467,7 @@ async fn handle_write(
                         database_commit_observed: false,
                         operation_key: finished_key,
                     } if finished_key == operation_key => {
-                        finish_write(channel, &state, &context, &operation_key, false, None).await
+                        finish_write(channel, &context, &operation_key, false).await
                     }
                     _ => channel.send(&ProviderReply::EntryUnknown).await,
                 };
@@ -3320,7 +2480,7 @@ async fn handle_write(
                 })
                 .await?;
             let request = channel.receive::<ProviderRequest>().await?;
-            let (request, prepared) = match request {
+            let request = match request {
                 ProviderRequest::PrepareMutation {
                     context: retained_context,
                     operation_key: retained_key,
@@ -3337,18 +2497,6 @@ async fn handle_write(
                         mutation.as_ref(),
                         &signature,
                     )?;
-                    let checkpoint_mutation = checkpoint_mutation_with_provider_attestation(
-                        mutation.as_ref(),
-                        &provider_attestation,
-                    )?;
-                    let prepared = match state.prepare_checkpoint(&checkpoint_mutation, None).await
-                    {
-                        Ok(prepared) => prepared,
-                        Err(_) => {
-                            channel.send(&ProviderReply::Rejected).await?;
-                            return Ok(());
-                        }
-                    };
                     if channel
                         .send(&ProviderReply::MutationPrepared {
                             provider_attestation,
@@ -3356,36 +2504,27 @@ async fn handle_write(
                         .await
                         .is_err()
                     {
-                        let _ = state.abort_checkpoint(prepared).await;
                         return Ok(());
                     }
                     match channel.receive::<ProviderRequest>().await {
-                        Ok(request) => (request, Some(prepared)),
+                        Ok(request) => request,
                         Err(error) => return Err(error),
                     }
                 }
-                request => (request, None),
+                request => request,
             };
             match request {
                 ProviderRequest::FinishWrite {
                     database_commit_observed,
                     operation_key: finished_key,
                 } if finished_key == operation_key => {
-                    finish_write(
-                        channel,
-                        &state,
-                        &context,
-                        &operation_key,
-                        database_commit_observed,
-                        prepared,
-                    )
-                    .await
+                    finish_write(channel, &context, &operation_key, database_commit_observed).await
                 }
                 ProviderRequest::BeginResolution {
                     context: retained_context,
                     operation_key: retained_key,
                 } if retained_context == context && retained_key == operation_key => {
-                    handle_resolution(channel, &state, &context, &operation_key, prepared).await
+                    handle_resolution(channel, &state, &context, &operation_key).await
                 }
                 _ => channel.send(&ProviderReply::EntryUnknown).await,
             }
@@ -3396,23 +2535,10 @@ async fn handle_write(
 
 async fn finish_write(
     channel: &mut ServerChannel,
-    state: &ProviderState,
     context: &ProviderTargetContext,
     operation_key: &str,
     database_commit_observed: bool,
-    prepared: Option<PreparedCheckpoint>,
 ) -> Result<(), ProviderTestError> {
-    if let Some(prepared) = prepared {
-        let checkpoint_result = if database_commit_observed {
-            state.acknowledge_checkpoint(prepared).await
-        } else {
-            state.abort_checkpoint(prepared).await
-        };
-        if checkpoint_result.is_err() {
-            channel.send(&ProviderReply::EntryUnknown).await?;
-            return Ok(());
-        }
-    }
     let signature = channel.assertion_signature(
         "finish-write",
         &(context, operation_key, database_commit_observed),
@@ -3429,38 +2555,16 @@ async fn handle_resolution(
     state: &ProviderState,
     write_context: &ProviderTargetContext,
     operation_key: &str,
-    prepared: Option<PreparedCheckpoint>,
 ) -> Result<(), ProviderTestError> {
     if !state.write_transaction_terminated(write_context).await {
         channel.send(&ProviderReply::EntryUnknown).await?;
-        let terminated = tokio::time::timeout(Duration::from_secs(15), async {
+        let _ = tokio::time::timeout(Duration::from_secs(15), async {
             while !state.write_transaction_terminated(write_context).await {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
-        .await
-        .is_ok();
-        if terminated {
-            if let Some(prepared) = prepared {
-                if state.reconcile_checkpoint(prepared).await.is_err() {
-                    // The caller already received EntryUnknown, so no later response can
-                    // safely report a checkpoint divergence. Fence the target instead of
-                    // accepting work against an unresolved committed prefix.
-                    state
-                        .mutable
-                        .lock()
-                        .map_err(|_| ProviderTestError::Unavailable)?
-                        .accepting = false;
-                }
-            }
-        }
+        .await;
         return Ok(());
-    }
-    if let Some(prepared) = prepared {
-        if state.reconcile_checkpoint(prepared).await.is_err() {
-            channel.send(&ProviderReply::EntryUnknown).await?;
-            return Ok(());
-        }
     }
     let marker = random_marker()?;
     let signature = channel
@@ -3565,27 +2669,10 @@ async fn handle_issuance(
             }
         }
     };
-    let mutation = ProviderMutation::ActivationIssuance {
-        record: record.clone(),
-        incarnation: incarnation.clone(),
-        attestation: expected.clone(),
-    };
-    let prepared = if confirmed_replay {
-        None
-    } else {
-        match state.prepare_checkpoint(&mutation, None).await {
-            Ok(prepared) => Some(prepared),
-            Err(_) => {
-                let reply = if registry_domain_occupied(&state, &domain_id).await? {
-                    ProviderReply::Conflict
-                } else {
-                    ProviderReply::Rejected
-                };
-                channel.send(&reply).await?;
-                return Ok(());
-            }
-        }
-    };
+    if !confirmed_replay && registry_domain_occupied(&state, &domain_id).await? {
+        channel.send(&ProviderReply::Conflict).await?;
+        return Ok(());
+    }
     let signature = channel.assertion_signature(
         "prepare-issuance",
         &(
@@ -3605,9 +2692,6 @@ async fn handle_issuance(
         .await
         .is_err()
     {
-        if let Some(prepared) = prepared {
-            let _ = state.abort_checkpoint(prepared).await;
-        }
         return Ok(());
     }
     let ProviderRequest::ConfirmIssuance { attestation } = channel.receive().await? else {
@@ -3617,12 +2701,6 @@ async fn handle_issuance(
     if attestation != expected || !registry_row_matches(&state, &attestation).await? {
         channel.send(&ProviderReply::Rejected).await?;
         return Ok(());
-    }
-    if let Some(prepared) = prepared {
-        if state.acknowledge_checkpoint(prepared).await.is_err() {
-            channel.send(&ProviderReply::EntryUnknown).await?;
-            return Ok(());
-        }
     }
     let issuance_confirmed = {
         let mut retained = state
@@ -3675,7 +2753,7 @@ async fn handle_promotion(
     };
     let current_prefix_digest =
         wallet_prefix_digest(&state.pool, &state.nonce_pool, &state.schema_name).await?;
-    let (ready, confirmed_replay) = {
+    let (ready, _confirmed_replay) = {
         let retained = state
             .mutable
             .lock()
@@ -3719,31 +2797,6 @@ async fn handle_promotion(
     expected_attestation
         .validate()
         .map_err(|_| ProviderTestError::Invalid)?;
-    let successor_target = CheckpointTarget {
-        database_oid: state.database_oid,
-        schema_name: state.schema_name.clone(),
-        store_incarnation: successor.next_incarnation.clone(),
-        current_public_lineage_head: allowed.next_public_lineage_head.clone(),
-        provider_fence_head_ref: allowed.next_provider_fence_head_ref.clone(),
-    };
-    let prepared = if confirmed_replay {
-        None
-    } else {
-        let mutation = ProviderMutation::Promotion {
-            successor: successor.clone(),
-            attestation: expected_attestation.clone(),
-        };
-        match state
-            .prepare_checkpoint(&mutation, Some(successor_target))
-            .await
-        {
-            Ok(prepared) => Some(prepared),
-            Err(_) => {
-                channel.send(&ProviderReply::Rejected).await?;
-                return Ok(());
-            }
-        }
-    };
     let signature = channel.assertion_signature(
         "prepare-promotion",
         &(&successor, &context, &registry_lineage_ref, &provider_head),
@@ -3755,9 +2808,6 @@ async fn handle_promotion(
         .await
         .is_err()
     {
-        if let Some(prepared) = prepared {
-            let _ = state.abort_checkpoint(prepared).await;
-        }
         return Ok(());
     }
     let ProviderRequest::ConfirmPromotion { attestation } = channel.receive().await? else {
@@ -3774,12 +2824,6 @@ async fn handle_promotion(
     }
     if state.promotion_crash_point == Some(ProviderPromotionCrashPoint::AfterCasBeforeOpen) {
         std::process::exit(86);
-    }
-    if let Some(prepared) = prepared {
-        if state.acknowledge_checkpoint(prepared).await.is_err() {
-            channel.send(&ProviderReply::EntryUnknown).await?;
-            return Ok(());
-        }
     }
     {
         let mut retained = state
@@ -3814,33 +2858,117 @@ async fn handle_promotion(
         .await
 }
 
-async fn wallet_prefix_digest(
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreIncarnationPrefixRow {
+    wallet_nonce_store_lineage_id: String,
+    writer_epoch: String,
+    incarnation_ref: String,
+    predecessor_incarnation_ref: Option<String>,
+    incarnation_json: String,
+    promotion_successor_ref: Option<String>,
+    promotion_attestation_json: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoreLineageHeadPrefixRow {
+    wallet_nonce_store_lineage_id: String,
+    current_writer_epoch: String,
+    current_incarnation_ref: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActivationPrefixRow {
+    wallet_nonce_domain_id: String,
+    activation_record_ref: String,
+    wallet_nonce_store_lineage_id: String,
+    observed_store_incarnation_ref: String,
+    activation_record_json: String,
+    registry_issuance_ref: String,
+    activation_attestation_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DomainPrefixRow {
+    wallet_nonce_domain_id: String,
+    activation_record_ref: String,
+    wallet_nonce_store_lineage_id: String,
+    activation_record_json: String,
+    activation_attestation_json: String,
+    local_high_water_nonce: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReservationPrefixRow {
+    semantic_reservation_key: String,
+    wallet_nonce_domain_id: String,
+    submission_intent_id: String,
+    nonce: String,
+    transaction_intent_digest: String,
+    candidate_family_ref: String,
+    request_json: String,
+    transaction_intent_json: String,
+    candidate_family_json: String,
+    reservation_json: String,
+    state_input_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidatePrefixRow {
+    semantic_candidate_operation_key: String,
+    semantic_reservation_key: String,
+    candidate_ordinal: i32,
+    request_json: String,
+    active_candidate_json: String,
+    state_input_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompletionPrefixRow {
+    semantic_completion_key: String,
+    semantic_reservation_key: String,
+    request_json: String,
+    canonical_terminal_outcome_json: String,
+    completion_json: String,
+    state_input_json: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WalletSqlPrefix {
+    store_incarnations: BTreeMap<String, StoreIncarnationPrefixRow>,
+    store_lineage_heads: BTreeMap<String, StoreLineageHeadPrefixRow>,
+    domain_activations: BTreeMap<String, ActivationPrefixRow>,
+    domains: BTreeMap<String, DomainPrefixRow>,
+    reservations: BTreeMap<String, ReservationPrefixRow>,
+    candidates: BTreeMap<String, CandidatePrefixRow>,
+    completions: BTreeMap<String, CompletionPrefixRow>,
+}
+
+impl WalletSqlPrefix {
+    fn digest(&self) -> Result<String, ProviderTestError> {
+        mfm_journal::structured::domain_content_digest(
+            "mfm.wallet-authority-provider.sql-prefix.v1",
+            self,
+        )
+        .map(|digest| digest.as_str().to_owned())
+        .map_err(|_| ProviderTestError::Invalid)
+    }
+}
+
+async fn wallet_sql_prefix(
     activation_pool: &PgPool,
     nonce_pool: &PgPool,
     schema_name: &str,
-) -> Result<String, ProviderTestError> {
-    wallet_checkpoint_prefix(activation_pool, nonce_pool, schema_name)
-        .await?
-        .digest()
-}
-
-async fn current_database_oid(pool: &PgPool) -> Result<u32, ProviderTestError> {
-    let database_oid = sqlx::query_scalar::<_, i64>(
-        "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| ProviderTestError::Unavailable)?;
-    u32::try_from(database_oid).map_err(|_| ProviderTestError::Invalid)
-}
-
-async fn wallet_checkpoint_prefix(
-    activation_pool: &PgPool,
-    nonce_pool: &PgPool,
-    schema_name: &str,
-) -> Result<WalletCheckpointPrefix, ProviderTestError> {
+) -> Result<WalletSqlPrefix, ProviderTestError> {
     let schema = quoted_identifier(schema_name)?;
-    let mut prefix = WalletCheckpointPrefix::default();
+    let mut prefix = WalletSqlPrefix::default();
 
     let sql = format!(
         "SELECT wallet_nonce_store_lineage_id, writer_epoch::text AS writer_epoch, \
@@ -3853,25 +2981,19 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = StoreIncarnationCheckpointRow {
-            wallet_nonce_store_lineage_id: checkpoint_column(
-                &row,
-                "wallet_nonce_store_lineage_id",
-            )?,
-            writer_epoch: checkpoint_column(&row, "writer_epoch")?,
-            incarnation_ref: checkpoint_column(&row, "incarnation_ref")?,
-            predecessor_incarnation_ref: checkpoint_optional_column(
+        let value = StoreIncarnationPrefixRow {
+            wallet_nonce_store_lineage_id: prefix_column(&row, "wallet_nonce_store_lineage_id")?,
+            writer_epoch: prefix_column(&row, "writer_epoch")?,
+            incarnation_ref: prefix_column(&row, "incarnation_ref")?,
+            predecessor_incarnation_ref: prefix_optional_column(
                 &row,
                 "predecessor_incarnation_ref",
             )?,
-            incarnation_json: checkpoint_column(&row, "incarnation_json")?,
-            promotion_successor_ref: checkpoint_optional_column(&row, "promotion_successor_ref")?,
-            promotion_attestation_json: checkpoint_optional_column(
-                &row,
-                "promotion_attestation_json",
-            )?,
+            incarnation_json: prefix_column(&row, "incarnation_json")?,
+            promotion_successor_ref: prefix_optional_column(&row, "promotion_successor_ref")?,
+            promotion_attestation_json: prefix_optional_column(&row, "promotion_attestation_json")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.store_incarnations,
             format!(
                 "{}\0{}",
@@ -3890,15 +3012,12 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = StoreLineageHeadCheckpointRow {
-            wallet_nonce_store_lineage_id: checkpoint_column(
-                &row,
-                "wallet_nonce_store_lineage_id",
-            )?,
-            current_writer_epoch: checkpoint_column(&row, "current_writer_epoch")?,
-            current_incarnation_ref: checkpoint_column(&row, "current_incarnation_ref")?,
+        let value = StoreLineageHeadPrefixRow {
+            wallet_nonce_store_lineage_id: prefix_column(&row, "wallet_nonce_store_lineage_id")?,
+            current_writer_epoch: prefix_column(&row, "current_writer_epoch")?,
+            current_incarnation_ref: prefix_column(&row, "current_incarnation_ref")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.store_lineage_heads,
             value.wallet_nonce_store_lineage_id.clone(),
             value,
@@ -3915,22 +3034,16 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = ActivationCheckpointRow {
-            wallet_nonce_domain_id: checkpoint_column(&row, "wallet_nonce_domain_id")?,
-            activation_record_ref: checkpoint_column(&row, "activation_record_ref")?,
-            wallet_nonce_store_lineage_id: checkpoint_column(
-                &row,
-                "wallet_nonce_store_lineage_id",
-            )?,
-            observed_store_incarnation_ref: checkpoint_column(
-                &row,
-                "observed_store_incarnation_ref",
-            )?,
-            activation_record_json: checkpoint_column(&row, "activation_record_json")?,
-            registry_issuance_ref: checkpoint_column(&row, "registry_issuance_ref")?,
-            activation_attestation_json: checkpoint_column(&row, "activation_attestation_json")?,
+        let value = ActivationPrefixRow {
+            wallet_nonce_domain_id: prefix_column(&row, "wallet_nonce_domain_id")?,
+            activation_record_ref: prefix_column(&row, "activation_record_ref")?,
+            wallet_nonce_store_lineage_id: prefix_column(&row, "wallet_nonce_store_lineage_id")?,
+            observed_store_incarnation_ref: prefix_column(&row, "observed_store_incarnation_ref")?,
+            activation_record_json: prefix_column(&row, "activation_record_json")?,
+            registry_issuance_ref: prefix_column(&row, "registry_issuance_ref")?,
+            activation_attestation_json: prefix_column(&row, "activation_attestation_json")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.domain_activations,
             value.wallet_nonce_domain_id.clone(),
             value,
@@ -3948,18 +3061,15 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = DomainCheckpointRow {
-            wallet_nonce_domain_id: checkpoint_column(&row, "wallet_nonce_domain_id")?,
-            activation_record_ref: checkpoint_column(&row, "activation_record_ref")?,
-            wallet_nonce_store_lineage_id: checkpoint_column(
-                &row,
-                "wallet_nonce_store_lineage_id",
-            )?,
-            activation_record_json: checkpoint_column(&row, "activation_record_json")?,
-            activation_attestation_json: checkpoint_column(&row, "activation_attestation_json")?,
-            local_high_water_nonce: checkpoint_optional_column(&row, "local_high_water_nonce")?,
+        let value = DomainPrefixRow {
+            wallet_nonce_domain_id: prefix_column(&row, "wallet_nonce_domain_id")?,
+            activation_record_ref: prefix_column(&row, "activation_record_ref")?,
+            wallet_nonce_store_lineage_id: prefix_column(&row, "wallet_nonce_store_lineage_id")?,
+            activation_record_json: prefix_column(&row, "activation_record_json")?,
+            activation_attestation_json: prefix_column(&row, "activation_attestation_json")?,
+            local_high_water_nonce: prefix_optional_column(&row, "local_high_water_nonce")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.domains,
             value.wallet_nonce_domain_id.clone(),
             value,
@@ -3977,20 +3087,20 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = ReservationCheckpointRow {
-            semantic_reservation_key: checkpoint_column(&row, "semantic_reservation_key")?,
-            wallet_nonce_domain_id: checkpoint_column(&row, "wallet_nonce_domain_id")?,
-            submission_intent_id: checkpoint_column(&row, "submission_intent_id")?,
-            nonce: checkpoint_column(&row, "nonce")?,
-            transaction_intent_digest: checkpoint_column(&row, "transaction_intent_digest")?,
-            candidate_family_ref: checkpoint_column(&row, "candidate_family_ref")?,
-            request_json: checkpoint_column(&row, "request_json")?,
-            transaction_intent_json: checkpoint_column(&row, "transaction_intent_json")?,
-            candidate_family_json: checkpoint_column(&row, "candidate_family_json")?,
-            reservation_json: checkpoint_column(&row, "reservation_json")?,
-            state_input_json: checkpoint_column(&row, "state_input_json")?,
+        let value = ReservationPrefixRow {
+            semantic_reservation_key: prefix_column(&row, "semantic_reservation_key")?,
+            wallet_nonce_domain_id: prefix_column(&row, "wallet_nonce_domain_id")?,
+            submission_intent_id: prefix_column(&row, "submission_intent_id")?,
+            nonce: prefix_column(&row, "nonce")?,
+            transaction_intent_digest: prefix_column(&row, "transaction_intent_digest")?,
+            candidate_family_ref: prefix_column(&row, "candidate_family_ref")?,
+            request_json: prefix_column(&row, "request_json")?,
+            transaction_intent_json: prefix_column(&row, "transaction_intent_json")?,
+            candidate_family_json: prefix_column(&row, "candidate_family_json")?,
+            reservation_json: prefix_column(&row, "reservation_json")?,
+            state_input_json: prefix_column(&row, "state_input_json")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.reservations,
             value.semantic_reservation_key.clone(),
             value,
@@ -4007,20 +3117,20 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = CandidateCheckpointRow {
-            semantic_candidate_operation_key: checkpoint_column(
+        let value = CandidatePrefixRow {
+            semantic_candidate_operation_key: prefix_column(
                 &row,
                 "semantic_candidate_operation_key",
             )?,
-            semantic_reservation_key: checkpoint_column(&row, "semantic_reservation_key")?,
+            semantic_reservation_key: prefix_column(&row, "semantic_reservation_key")?,
             candidate_ordinal: row
                 .try_get("candidate_ordinal")
                 .map_err(|_| ProviderTestError::Invalid)?,
-            request_json: checkpoint_column(&row, "request_json")?,
-            active_candidate_json: checkpoint_column(&row, "active_candidate_json")?,
-            state_input_json: checkpoint_column(&row, "state_input_json")?,
+            request_json: prefix_column(&row, "request_json")?,
+            active_candidate_json: prefix_column(&row, "active_candidate_json")?,
+            state_input_json: prefix_column(&row, "state_input_json")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.candidates,
             value.semantic_candidate_operation_key.clone(),
             value,
@@ -4037,18 +3147,18 @@ async fn wallet_checkpoint_prefix(
         .await
         .map_err(|_| ProviderTestError::Unavailable)?
     {
-        let value = CompletionCheckpointRow {
-            semantic_completion_key: checkpoint_column(&row, "semantic_completion_key")?,
-            semantic_reservation_key: checkpoint_column(&row, "semantic_reservation_key")?,
-            request_json: checkpoint_column(&row, "request_json")?,
-            canonical_terminal_outcome_json: checkpoint_column(
+        let value = CompletionPrefixRow {
+            semantic_completion_key: prefix_column(&row, "semantic_completion_key")?,
+            semantic_reservation_key: prefix_column(&row, "semantic_reservation_key")?,
+            request_json: prefix_column(&row, "request_json")?,
+            canonical_terminal_outcome_json: prefix_column(
                 &row,
                 "canonical_terminal_outcome_json",
             )?,
-            completion_json: checkpoint_column(&row, "completion_json")?,
-            state_input_json: checkpoint_column(&row, "state_input_json")?,
+            completion_json: prefix_column(&row, "completion_json")?,
+            state_input_json: prefix_column(&row, "state_input_json")?,
         };
-        insert_checkpoint_row(
+        insert_prefix_row(
             &mut prefix.completions,
             value.semantic_completion_key.clone(),
             value,
@@ -4057,18 +3167,15 @@ async fn wallet_checkpoint_prefix(
     Ok(prefix)
 }
 
-fn checkpoint_column(row: &PgRow, column: &str) -> Result<String, ProviderTestError> {
+fn prefix_column(row: &PgRow, column: &str) -> Result<String, ProviderTestError> {
     row.try_get(column).map_err(|_| ProviderTestError::Invalid)
 }
 
-fn checkpoint_optional_column(
-    row: &PgRow,
-    column: &str,
-) -> Result<Option<String>, ProviderTestError> {
+fn prefix_optional_column(row: &PgRow, column: &str) -> Result<Option<String>, ProviderTestError> {
     row.try_get(column).map_err(|_| ProviderTestError::Invalid)
 }
 
-fn insert_checkpoint_row<T>(
+fn insert_prefix_row<T>(
     rows: &mut BTreeMap<String, T>,
     key: String,
     value: T,
@@ -4079,303 +3186,24 @@ fn insert_checkpoint_row<T>(
     Ok(())
 }
 
-fn apply_checkpoint_mutation(
-    prefix: &mut WalletCheckpointPrefix,
-    mutation: &ProviderMutation,
-) -> Result<(), ProviderTestError> {
-    match mutation {
-        ProviderMutation::ActivationIssuance {
-            record,
-            incarnation,
-            attestation,
-        } => {
-            record.validate().map_err(|_| ProviderTestError::Invalid)?;
-            incarnation
-                .validate()
-                .map_err(|_| ProviderTestError::Invalid)?;
-            attestation
-                .validate()
-                .map_err(|_| ProviderTestError::Invalid)?;
-            let record_ref =
-                canonical_wallet_reference(record).map_err(|_| ProviderTestError::Invalid)?;
-            let incarnation_ref =
-                canonical_wallet_reference(incarnation).map_err(|_| ProviderTestError::Invalid)?;
-            if attestation.current_schema_record != *record
-                || attestation.activation_record_ref != record_ref
-                || attestation.initial_store_incarnation_ref != incarnation_ref
-                || record.initial_store_incarnation_ref != incarnation_ref
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            let lineage = record.wallet_nonce_store_lineage_id.clone();
-            let epoch = incarnation.writer_epoch.to_string();
-            let incarnation_ref_json = canonical_json(&incarnation_ref)?;
-            match prefix.store_lineage_heads.get(&lineage) {
-                Some(head)
-                    if head.current_writer_epoch == epoch
-                        && head.current_incarnation_ref == incarnation_ref_json =>
-                {
-                    let key = format!("{lineage}\0{epoch}");
-                    let retained = prefix
-                        .store_incarnations
-                        .get(&key)
-                        .ok_or(ProviderTestError::Invalid)?;
-                    if retained.incarnation_json != canonical_json(incarnation)?
-                        || retained.incarnation_ref != incarnation_ref_json
-                    {
-                        return Err(ProviderTestError::Invalid);
-                    }
-                }
-                None if incarnation.writer_epoch == 1 => {
-                    insert_checkpoint_row(
-                        &mut prefix.store_incarnations,
-                        format!("{lineage}\0{epoch}"),
-                        StoreIncarnationCheckpointRow {
-                            wallet_nonce_store_lineage_id: lineage.clone(),
-                            writer_epoch: epoch.clone(),
-                            incarnation_ref: incarnation_ref_json.clone(),
-                            predecessor_incarnation_ref: None,
-                            incarnation_json: canonical_json(incarnation)?,
-                            promotion_successor_ref: None,
-                            promotion_attestation_json: None,
-                        },
-                    )?;
-                    insert_checkpoint_row(
-                        &mut prefix.store_lineage_heads,
-                        lineage.clone(),
-                        StoreLineageHeadCheckpointRow {
-                            wallet_nonce_store_lineage_id: lineage,
-                            current_writer_epoch: epoch,
-                            current_incarnation_ref: incarnation_ref_json,
-                        },
-                    )?;
-                }
-                _ => return Err(ProviderTestError::Invalid),
-            }
-            insert_checkpoint_row(
-                &mut prefix.domain_activations,
-                record.wallet_nonce_domain.as_str().to_owned(),
-                ActivationCheckpointRow {
-                    wallet_nonce_domain_id: record.wallet_nonce_domain.as_str().to_owned(),
-                    activation_record_ref: canonical_json(&record_ref)?,
-                    wallet_nonce_store_lineage_id: record.wallet_nonce_store_lineage_id.clone(),
-                    observed_store_incarnation_ref: canonical_json(&incarnation_ref)?,
-                    activation_record_json: canonical_json(record)?,
-                    registry_issuance_ref: canonical_json(&attestation.registry_issuance_ref)?,
-                    activation_attestation_json: canonical_json(attestation)?,
-                },
-            )
-        }
-        ProviderMutation::Reservation {
-            request,
-            reservation,
-            state_input_ref,
-        } => {
-            if reservation.nonce_domain != request.nonce_domain
-                || reservation.semantic_reservation_key != request.reservation_key
-                || reservation.submission_intent_id != request.submission_intent_id
-                || reservation.transaction_intent_digest != request.transaction_intent.digest()
-                || reservation.candidate_family_ref != request.candidate_family.digest()
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            let domain_id = request.nonce_domain.as_str().to_owned();
-            let activation = &request.domain_activation_attestation;
-            let expected_domain = DomainCheckpointRow {
-                wallet_nonce_domain_id: domain_id.clone(),
-                activation_record_ref: canonical_json(&activation.activation_record_ref)?,
-                wallet_nonce_store_lineage_id: activation
-                    .current_schema_record
-                    .wallet_nonce_store_lineage_id
-                    .clone(),
-                activation_record_json: canonical_json(&activation.current_schema_record)?,
-                activation_attestation_json: canonical_json(activation)?,
-                local_high_water_nonce: Some(reservation.nonce.to_string()),
-            };
-            if let Some(retained) = prefix.domains.get_mut(&domain_id) {
-                let mut expected_predecessor = expected_domain.clone();
-                expected_predecessor.local_high_water_nonce =
-                    retained.local_high_water_nonce.clone();
-                if *retained != expected_predecessor {
-                    return Err(ProviderTestError::Invalid);
-                }
-                retained.local_high_water_nonce = expected_domain.local_high_water_nonce;
-            } else {
-                prefix.domains.insert(domain_id.clone(), expected_domain);
-            }
-            insert_checkpoint_row(
-                &mut prefix.reservations,
-                request.reservation_key.as_str().to_owned(),
-                ReservationCheckpointRow {
-                    semantic_reservation_key: request.reservation_key.as_str().to_owned(),
-                    wallet_nonce_domain_id: domain_id,
-                    submission_intent_id: request.submission_intent_id.as_str().to_owned(),
-                    nonce: reservation.nonce.to_string(),
-                    transaction_intent_digest: request.transaction_intent.digest().to_owned(),
-                    candidate_family_ref: request.candidate_family.digest().to_owned(),
-                    request_json: canonical_json(request)?,
-                    transaction_intent_json: canonical_json(&request.transaction_intent)?,
-                    candidate_family_json: canonical_json(&request.candidate_family)?,
-                    reservation_json: canonical_json(reservation)?,
-                    state_input_json: canonical_json(state_input_ref)?,
-                },
-            )
-        }
-        ProviderMutation::CandidateActivation {
-            request,
-            candidate,
-            state_input_ref,
-        } => insert_checkpoint_row(
-            &mut prefix.candidates,
-            request.candidate_operation_key.as_str().to_owned(),
-            CandidateCheckpointRow {
-                semantic_candidate_operation_key: request
-                    .candidate_operation_key
-                    .as_str()
-                    .to_owned(),
-                semantic_reservation_key: request
-                    .next_candidate
-                    .semantic_reservation_key
-                    .as_str()
-                    .to_owned(),
-                candidate_ordinal: i32::from(request.next_candidate.candidate_ordinal),
-                request_json: canonical_json(request)?,
-                active_candidate_json: canonical_json(candidate)?,
-                state_input_json: canonical_json(state_input_ref)?,
-            },
-        ),
-        ProviderMutation::Completion {
-            request,
-            completion,
-            state_input_ref,
-        } => insert_checkpoint_row(
-            &mut prefix.completions,
-            request.completion_key.as_str().to_owned(),
-            CompletionCheckpointRow {
-                semantic_completion_key: request.completion_key.as_str().to_owned(),
-                semantic_reservation_key: request
-                    .current_reservation
-                    .semantic_reservation_key
-                    .as_str()
-                    .to_owned(),
-                request_json: canonical_json(request)?,
-                canonical_terminal_outcome_json: canonical_json(
-                    &request.canonical_terminal_outcome,
-                )?,
-                completion_json: canonical_json(completion)?,
-                state_input_json: canonical_json(state_input_ref)?,
-            },
-        ),
-        ProviderMutation::Promotion {
-            successor,
-            attestation,
-        } => {
-            successor
-                .validate()
-                .map_err(|_| ProviderTestError::Invalid)?;
-            attestation
-                .validate()
-                .map_err(|_| ProviderTestError::Invalid)?;
-            let successor_ref =
-                canonical_wallet_reference(successor).map_err(|_| ProviderTestError::Invalid)?;
-            let next_ref = canonical_wallet_reference(&successor.next_incarnation)
-                .map_err(|_| ProviderTestError::Invalid)?;
-            if attestation.successor_ref != successor_ref
-                || attestation.previous_incarnation_ref
-                    != successor.expected_current_incarnation_ref
-                || attestation.current_incarnation_ref != next_ref
-                || attestation.writer_epoch != successor.next_incarnation.writer_epoch
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            let lineage = successor.wallet_nonce_store_lineage_id.clone();
-            let head = prefix
-                .store_lineage_heads
-                .get_mut(&lineage)
-                .ok_or(ProviderTestError::Invalid)?;
-            if head.current_incarnation_ref
-                != canonical_json(&successor.expected_current_incarnation_ref)?
-                || head
-                    .current_writer_epoch
-                    .parse::<u64>()
-                    .ok()
-                    .and_then(|value| value.checked_add(1))
-                    != Some(successor.next_incarnation.writer_epoch)
-            {
-                return Err(ProviderTestError::Invalid);
-            }
-            let epoch = successor.next_incarnation.writer_epoch.to_string();
-            let next_ref_json = canonical_json(&next_ref)?;
-            insert_checkpoint_row(
-                &mut prefix.store_incarnations,
-                format!("{lineage}\0{epoch}"),
-                StoreIncarnationCheckpointRow {
-                    wallet_nonce_store_lineage_id: lineage.clone(),
-                    writer_epoch: epoch.clone(),
-                    incarnation_ref: next_ref_json.clone(),
-                    predecessor_incarnation_ref: Some(canonical_json(
-                        &successor.expected_current_incarnation_ref,
-                    )?),
-                    incarnation_json: canonical_json(&successor.next_incarnation)?,
-                    promotion_successor_ref: Some(canonical_json(&successor_ref)?),
-                    promotion_attestation_json: Some(canonical_json(attestation)?),
-                },
-            )?;
-            head.current_writer_epoch = epoch;
-            head.current_incarnation_ref = next_ref_json;
-            Ok(())
-        }
-    }
+async fn wallet_prefix_digest(
+    activation_pool: &PgPool,
+    nonce_pool: &PgPool,
+    schema_name: &str,
+) -> Result<String, ProviderTestError> {
+    wallet_sql_prefix(activation_pool, nonce_pool, schema_name)
+        .await?
+        .digest()
 }
 
-fn checkpoint_mutation_with_provider_attestation(
-    mutation: &ProviderMutation,
-    provider_attestation: &str,
-) -> Result<ProviderMutation, ProviderTestError> {
-    if provider_attestation.is_empty()
-        || provider_attestation.len() > 4_096
-        || !provider_attestation
-            .bytes()
-            .all(|byte| byte.is_ascii_graphic())
-    {
-        return Err(ProviderTestError::Invalid);
-    }
-    match mutation {
-        ProviderMutation::CandidateActivation {
-            request,
-            candidate,
-            state_input_ref,
-        } => {
-            let mut candidate = candidate.clone();
-            if !candidate.provider_activation_attestation.is_empty() {
-                return Err(ProviderTestError::Invalid);
-            }
-            candidate.provider_activation_attestation = provider_attestation.to_owned();
-            Ok(ProviderMutation::CandidateActivation {
-                request: request.clone(),
-                candidate,
-                state_input_ref: state_input_ref.clone(),
-            })
-        }
-        ProviderMutation::Completion {
-            request,
-            completion,
-            state_input_ref,
-        } => {
-            let completion = completion
-                .clone()
-                .with_provider_completion_attestation(provider_attestation.to_owned())
-                .map_err(|_| ProviderTestError::Invalid)?;
-            Ok(ProviderMutation::Completion {
-                request: request.clone(),
-                completion,
-                state_input_ref: state_input_ref.clone(),
-            })
-        }
-        ProviderMutation::ActivationIssuance { .. }
-        | ProviderMutation::Reservation { .. }
-        | ProviderMutation::Promotion { .. } => Ok(mutation.clone()),
-    }
+async fn current_database_oid(pool: &PgPool) -> Result<u32, ProviderTestError> {
+    let database_oid = sqlx::query_scalar::<_, i64>(
+        "SELECT oid::bigint FROM pg_catalog.pg_database WHERE datname = current_database()",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ProviderTestError::Unavailable)?;
+    u32::try_from(database_oid).map_err(|_| ProviderTestError::Invalid)
 }
 
 fn issued_reference_matches(
@@ -4787,159 +3615,6 @@ mod frame_tests {
     }
 
     #[test]
-    fn checkpoint_authentication_rejects_forged_shutdown_and_prepare() {
-        let authentication_token = Zeroizing::new([0x41_u8; 32]);
-        let target = checkpoint_target();
-        let digest = checkpoint_digest(0x51);
-        let state = CheckpointAuthorityState {
-            authentication_token,
-            fence_lineage_ref: checkpoint_reference(0x52),
-            target: target.clone(),
-            epoch: 0,
-            acknowledged_prefix_digest: digest.clone(),
-            prepared: None,
-        };
-        let prepared = PreparedCheckpoint {
-            epoch: 1,
-            predecessor_digest: digest,
-            successor_digest: checkpoint_digest(0x53),
-            operation_digest: checkpoint_digest(0x54),
-            successor_target: None,
-        };
-        for request in [
-            CheckpointRequest::Shutdown,
-            CheckpointRequest::Prepare {
-                fence_lineage_ref: state.fence_lineage_ref.clone(),
-                target,
-                expected_epoch: 0,
-                prepared,
-            },
-        ] {
-            let forged = authenticate_checkpoint_request(&[0x42; 32], request)
-                .expect("construct forged checkpoint envelope");
-            assert!(authenticate_checkpoint_envelope(&state, forged).is_err());
-        }
-    }
-
-    #[test]
-    fn prepared_predecessor_restart_retains_only_the_identical_successor() {
-        let target = checkpoint_target();
-        let predecessor = checkpoint_digest(0x61);
-        let prepared = PreparedCheckpoint {
-            epoch: 1,
-            predecessor_digest: predecessor.clone(),
-            successor_digest: checkpoint_digest(0x62),
-            operation_digest: checkpoint_digest(0x63),
-            successor_target: None,
-        };
-        let mut state = CheckpointAuthorityState {
-            authentication_token: Zeroizing::new([0x64; 32]),
-            fence_lineage_ref: checkpoint_reference(0x65),
-            target: target.clone(),
-            epoch: 0,
-            acknowledged_prefix_digest: predecessor.clone(),
-            prepared: Some(prepared.clone()),
-        };
-        assert!(matches!(
-            apply_checkpoint_request(
-                &mut state,
-                CheckpointRequest::Verify {
-                    fence_lineage_ref: checkpoint_reference(0x65),
-                    target: target.clone(),
-                    observed_prefix_digest: predecessor,
-                },
-            ),
-            Ok(CheckpointReply::Current { epoch: 0 })
-        ));
-        assert_eq!(state.prepared, Some(prepared.clone()));
-        assert!(apply_checkpoint_request(
-            &mut state,
-            CheckpointRequest::Prepare {
-                fence_lineage_ref: checkpoint_reference(0x65),
-                target: target.clone(),
-                expected_epoch: 0,
-                prepared: prepared.clone(),
-            },
-        )
-        .is_ok());
-        let mut competing = prepared;
-        competing.successor_digest = checkpoint_digest(0x66);
-        assert!(apply_checkpoint_request(
-            &mut state,
-            CheckpointRequest::Prepare {
-                fence_lineage_ref: checkpoint_reference(0x65),
-                target: target.clone(),
-                expected_epoch: 0,
-                prepared: competing,
-            },
-        )
-        .is_err());
-        let mut foreign_target = target;
-        foreign_target.database_oid += 1;
-        let acknowledged = state.acknowledged_prefix_digest.clone();
-        assert!(apply_checkpoint_request(
-            &mut state,
-            CheckpointRequest::Verify {
-                fence_lineage_ref: checkpoint_reference(0x65),
-                target: foreign_target,
-                observed_prefix_digest: acknowledged,
-            },
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn idle_recovery_aborts_prepared_predecessor_before_a_fresh_mutation() {
-        let target = checkpoint_target();
-        let predecessor = checkpoint_digest(0x67);
-        let prepared = PreparedCheckpoint {
-            epoch: 1,
-            predecessor_digest: predecessor.clone(),
-            successor_digest: checkpoint_digest(0x68),
-            operation_digest: checkpoint_digest(0x69),
-            successor_target: None,
-        };
-        let mut state = CheckpointAuthorityState {
-            authentication_token: Zeroizing::new([0x6a; 32]),
-            fence_lineage_ref: checkpoint_reference(0x6b),
-            target: target.clone(),
-            epoch: 0,
-            acknowledged_prefix_digest: predecessor.clone(),
-            prepared: Some(prepared),
-        };
-        assert!(matches!(
-            apply_checkpoint_request(
-                &mut state,
-                CheckpointRequest::Recover {
-                    fence_lineage_ref: checkpoint_reference(0x6b),
-                    target: target.clone(),
-                    observed_prefix_digest: predecessor.clone(),
-                },
-            ),
-            Ok(CheckpointReply::Current { epoch: 0 })
-        ));
-        assert!(state.prepared.is_none());
-
-        let replacement = PreparedCheckpoint {
-            epoch: 1,
-            predecessor_digest: predecessor,
-            successor_digest: checkpoint_digest(0x6c),
-            operation_digest: checkpoint_digest(0x6d),
-            successor_target: None,
-        };
-        assert!(apply_checkpoint_request(
-            &mut state,
-            CheckpointRequest::Prepare {
-                fence_lineage_ref: checkpoint_reference(0x6b),
-                target,
-                expected_epoch: 0,
-                prepared: replacement,
-            },
-        )
-        .is_ok());
-    }
-
-    #[test]
     fn deployment_policy_rejects_every_field_substitution() {
         let reference = |byte| {
             checkpoint_reference(byte)
@@ -5078,31 +3753,6 @@ mod frame_tests {
         assert_eq!(wire["provider_attestation"], "provider-attestation");
     }
 
-    fn checkpoint_target() -> CheckpointTarget {
-        let object_type = StableId::new("mfm.test/checkpoint-head").expect("object type");
-        let schema = SchemaId::new(
-            "mfm.test.checkpoint-head",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            mfm_canonical::sha256_digest_bytes(b"mfm.test.checkpoint-head.v1"),
-        )
-        .expect("history schema");
-        CheckpointTarget {
-            database_oid: 1,
-            schema_name: "wallet_checkpoint_test".to_owned(),
-            store_incarnation: WalletNonceStoreIncarnation {
-                wallet_nonce_store_lineage_id: "mfm.test/checkpoint-lineage".to_owned(),
-                writer_epoch: 1,
-                physical_target_instance_id: "mfm.test/checkpoint-target".to_owned(),
-                non_exportable_target_public_key_ref: checkpoint_reference(0x55),
-                target_attestation_contract_ref: checkpoint_reference(0x56),
-            },
-            current_public_lineage_head: HistoryObject::new(object_type, schema, "{}")
-                .expect("history object"),
-            provider_fence_head_ref: checkpoint_reference(0x57),
-        }
-    }
-
     fn checkpoint_reference(discriminator: u8) -> EvmWalletReference {
         let schema = SchemaId::new(
             "mfm.test.checkpoint-reference",
@@ -5121,14 +3771,5 @@ mod frame_tests {
             )
             .expect("content reference"),
         )
-    }
-
-    fn checkpoint_digest(discriminator: u8) -> String {
-        ContentDigest::from_digest(
-            DigestAlgorithm::Sha256V1,
-            mfm_canonical::sha256_digest_bytes(&[discriminator]),
-        )
-        .as_str()
-        .to_owned()
     }
 }

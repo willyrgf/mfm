@@ -47,9 +47,9 @@ use mfm_storage_evm_postgres::{
 };
 use mfm_wallet_authority_provider_test_support::{
     postgres_proxy::{CommitFault, PostgresCommitFaultProxy},
-    AllowedPromotion, ProviderCheckpointAuthority, ProviderDeploymentAssemblyPolicy,
-    ProviderProcess, ProviderProcessConfig, ProviderPromotionCrashPoint,
-    ProviderRpcInventoryTarget, ProviderStartupState, SupersessionConfig,
+    AllowedPromotion, ProviderDeploymentAssemblyPolicy, ProviderProcess, ProviderProcessConfig,
+    ProviderPromotionCrashPoint, ProviderRpcInventoryTarget, ProviderStartupState,
+    SupersessionConfig,
 };
 use ring::hmac;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
@@ -322,22 +322,7 @@ async fn deployment_assembly_protocol_rejects_every_hostile_affine_cutover_inner
     let role_urls_b = WalletRoleDatabaseUrls::for_schema(&schema_b);
     configure_wallet_login_principals(&mut admin, &role_urls_a).await;
 
-    let checkpoint_a = ProviderCheckpointAuthority::start(
-        &database_url_with_active_role(&role_urls_a.activation_admin, ACTIVATION_ADMIN_ROLE),
-        &database_url_with_active_role(
-            &role_urls_a.nonce_application,
-            "mfm_evm_wallet_nonce_application",
-        ),
-        &schema_a,
-        fixture.provider_fence_lineage_ref.clone(),
-        fixture.incarnation.clone(),
-        fixture.current_public_head.clone(),
-        fixture.provider_fence_head_ref.clone(),
-    )
-    .await
-    .expect("start deployment protocol checkpoint A");
     let base_config_a = deployment_protocol_provider_config(
-        &checkpoint_a,
         &role_urls_a,
         &schema_a,
         fixture.provider_id.clone(),
@@ -621,22 +606,7 @@ async fn deployment_assembly_protocol_rejects_every_hostile_affine_cutover_inner
     drop(provider_a);
 
     let provider_b_id = stable("mfm.evm.test/wallet-authority-provider-b");
-    let checkpoint_b = ProviderCheckpointAuthority::start(
-        &database_url_with_active_role(&role_urls_b.activation_admin, ACTIVATION_ADMIN_ROLE),
-        &database_url_with_active_role(
-            &role_urls_b.nonce_application,
-            "mfm_evm_wallet_nonce_application",
-        ),
-        &schema_b,
-        fixture.provider_fence_lineage_ref.clone(),
-        fixture.incarnation.clone(),
-        fixture.current_public_head.clone(),
-        fixture.provider_fence_head_ref.clone(),
-    )
-    .await
-    .expect("start deployment protocol checkpoint B");
     let config_b = deployment_protocol_provider_config(
-        &checkpoint_b,
         &role_urls_b,
         &schema_b,
         provider_b_id.clone(),
@@ -689,8 +659,6 @@ async fn deployment_assembly_protocol_rejects_every_hostile_affine_cutover_inner
     assert_provider_has_no_partial_deployment(&mut provider_b, 0);
     drop(provider_a);
     drop(provider_b);
-    drop(checkpoint_a);
-    drop(checkpoint_b);
 
     assert_wallet_nonce_schema_empty(&role_urls_a.nonce_application, &schema_a).await;
     assert_wallet_nonce_schema_empty(&role_urls_b.nonce_application, &schema_b).await;
@@ -703,7 +671,6 @@ async fn deployment_assembly_protocol_rejects_every_hostile_affine_cutover_inner
 }
 
 fn deployment_protocol_provider_config(
-    checkpoint: &ProviderCheckpointAuthority,
     role_urls: &WalletRoleDatabaseUrls,
     schema: &str,
     provider_id: StableId,
@@ -713,7 +680,6 @@ fn deployment_protocol_provider_config(
 ) -> ProviderProcessConfig {
     ProviderProcessConfig::new(
         unique_provider_socket_path(),
-        checkpoint,
         database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
         database_url_with_active_role(
             &role_urls.nonce_application,
@@ -1026,23 +992,8 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         sibling_record_a.initial_store_incarnation_ref,
         sibling_record_b.initial_store_incarnation_ref
     );
-    let checkpoint_authority = ProviderCheckpointAuthority::start(
-        &database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
-        &database_url_with_active_role(
-            &role_urls.nonce_application,
-            "mfm_evm_wallet_nonce_application",
-        ),
-        &schema,
-        fixture.provider_fence_lineage_ref.clone(),
-        fixture.incarnation.clone(),
-        fixture.current_public_head.clone(),
-        fixture.provider_fence_head_ref.clone(),
-    )
-    .await
-    .expect("start external wallet checkpoint authority");
     let provider_config = ProviderProcessConfig::new(
         std::env::temp_dir().join(format!("{schema}.sock")),
-        &checkpoint_authority,
         database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
         database_url_with_active_role(
             &role_urls.nonce_application,
@@ -1097,7 +1048,6 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         &role_urls.nonce_application,
         &schema,
         &fixture,
-        &checkpoint_authority,
     );
     let mut provider = ProviderProcess::spawn(
         env!("CARGO_BIN_EXE_mfm-storage-wallet-authority-provider"),
@@ -2627,46 +2577,11 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         Some(fixture.incarnation.clone())
     );
 
-    let crash_restore_completion_key = "mfm.evm.test/crash-restored-completion-key";
-    set_replication_role(&mut admin_connection, "replica").await;
-    let crash_tamper = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {schema}.wallet_nonce_completions \
-         SET semantic_completion_key = $2 WHERE semantic_completion_key = $1"
-    )))
-    .bind(completion.semantic_completion_key.as_str())
-    .bind(crash_restore_completion_key)
-    .execute(&mut admin_connection)
-    .await
-    .expect("tamper the closed prefix after the provider process crashed");
-    assert_eq!(crash_tamper.rows_affected(), 1);
-    set_replication_role(&mut admin_connection, "origin").await;
-    let tampered_restart_config = provider_config
-        .clone()
-        .with_startup_state(ProviderStartupState::FencedPromotionReady {
-            captured_prefix_digest: captured_prefix_digest.clone(),
-        })
-        .expect("restart from the externally retained fenced prefix");
-    assert!(
-        ProviderProcess::spawn(
-            env!("CARGO_BIN_EXE_mfm-storage-wallet-authority-provider"),
-            tampered_restart_config,
-        )
-        .is_err(),
-        "checkpoint divergence must reject the child before readiness"
-    );
-    set_replication_role(&mut admin_connection, "replica").await;
-    let crash_restore = sqlx::query(AssertSqlSafe(format!(
-        "UPDATE {schema}.wallet_nonce_completions \
-         SET semantic_completion_key = $2 WHERE semantic_completion_key = $1"
-    )))
-    .bind(crash_restore_completion_key)
-    .bind(completion.semantic_completion_key.as_str())
-    .execute(&mut admin_connection)
-    .await
-    .expect("restore the closed prefix after crash-tamper rejection");
-    assert_eq!(crash_restore.rows_affected(), 1);
-    set_replication_role(&mut admin_connection, "origin").await;
-
+    // A prefix tampered with after the crash is no longer refused here. The
+    // check that refused it consulted an external authority that no longer
+    // exists; the promotion path still compares the captured digest it was
+    // configured with, but nothing rejects a rewound database at startup. See
+    // docs/known-gaps.md.
     let post_cas_crash_config = provider_config
         .clone()
         .with_startup_state(ProviderStartupState::FencedPromotionReady {
@@ -3468,7 +3383,6 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
 
     let successor_provider_config = ProviderProcessConfig::new(
         std::env::temp_dir().join(format!("{schema}-2.sock")),
-        &checkpoint_authority,
         database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
         database_url_with_active_role(
             &role_urls.nonce_application,
@@ -3672,23 +3586,8 @@ async fn authorized_promotion_serializes_against_activation_issuance() {
         EvmWalletReference::from_content_ref(current_public_head.content_ref.clone());
     let next_provider_fence_head_ref =
         EvmWalletReference::from_content_ref(next_public_head.content_ref.clone());
-    let checkpoint_authority = ProviderCheckpointAuthority::start(
-        &database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
-        &database_url_with_active_role(
-            &role_urls.nonce_application,
-            "mfm_evm_wallet_nonce_application",
-        ),
-        &schema,
-        fixture.provider_fence_lineage_ref.clone(),
-        current_incarnation.clone(),
-        current_public_head.clone(),
-        current_provider_fence_head_ref.clone(),
-    )
-    .await
-    .expect("start promotion-race checkpoint authority");
     let provider_config = ProviderProcessConfig::new(
         std::env::temp_dir().join(format!("{schema}.sock")),
-        &checkpoint_authority,
         database_url_with_active_role(&role_urls.activation_admin, ACTIVATION_ADMIN_ROLE),
         database_url_with_active_role(
             &role_urls.nonce_application,
@@ -4299,7 +4198,6 @@ fn assert_activation_requires_issued_chain_and_exact_route(
     nonce_database_url: &str,
     schema: &str,
     fixture: &Fixture,
-    checkpoint_authority: &ProviderCheckpointAuthority,
 ) {
     let mut wrong_route = fixture.activation_record.clone();
     wrong_route.initial_route_generation_ref = fixture.redundant_route_generation_ref.clone();
@@ -4348,7 +4246,6 @@ fn assert_activation_requires_issued_chain_and_exact_route(
     ] {
         let config = ProviderProcessConfig::new(
             std::env::temp_dir().join(format!("{schema}-{case}.sock")),
-            checkpoint_authority,
             database_url.to_owned(),
             nonce_database_url.to_owned(),
             schema.to_owned(),
