@@ -30,7 +30,7 @@ use mfm_program::structured::{
 use mfm_program_derive::MfmValue;
 use mfm_replay::portable::{
     AuthorizedExportClosure, ExportKind, PortableFixation, PortableRunExport, ReplayTrustSnapshot,
-    RetainedPhysicalReleaseTrust, StoreCheckpointTrust,
+    RetainedPhysicalReleaseTrust, StoreLineageTrust,
 };
 use mfm_replay::structured::project_replay_result;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
@@ -184,11 +184,11 @@ impl RetainedPhysicalReleaseTrust for AcceptRetainedRelease {
     }
 }
 
-struct AcceptStoreCheckpoint;
+struct AcceptStoreLineage;
 
-impl mfm_authority_seal::StoreCheckpointTrustSeal for AcceptStoreCheckpoint {}
+impl mfm_authority_seal::StoreLineageTrustSeal for AcceptStoreLineage {}
 
-impl StoreCheckpointTrust for AcceptStoreCheckpoint {
+impl StoreLineageTrust for AcceptStoreLineage {
     fn verify(
         &self,
         _fixation: &PortableFixation,
@@ -1855,8 +1855,14 @@ async fn insert_configuration_head(
     .expect("insert configuration head as owner");
 }
 
+// A coordinated owner rollback leaves an internally consistent database: the
+// head row and revision chain agree at the earlier revision. Without a witness
+// outside the database's restore domain there is nothing left to compare it
+// against, so the store accepts the rewound state and continues from it. This
+// test pins that accepted limitation; see the append-only authority note in
+// `docs/design.md`.
 #[tokio::test]
-async fn coordinated_configuration_rollback_is_visible_to_fresh_sessions() {
+async fn coordinated_configuration_rollback_is_accepted_without_an_external_witness() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-rollback").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
@@ -1927,7 +1933,7 @@ async fn coordinated_configuration_rollback_is_visible_to_fresh_sessions() {
         physical_verifier,
     )
     .await
-    .expect("fresh sessions still open against the retained target authority");
+    .expect("fresh sessions open against the rewound database");
     drop(local);
     database.cleanup().await;
 }
@@ -2678,9 +2684,9 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         .await
         .expect("load online recorded replay");
     let release = AcceptRetainedRelease;
-    let checkpoint = AcceptStoreCheckpoint;
+    let lineage = AcceptStoreLineage;
     let trust = ReplayTrustSnapshot::new(&*offline_program_verifier, &NoPhysicalBindings)
-        .with_authorized_closure(portable.closure_reference(), &release, &checkpoint);
+        .with_authorized_closure(portable.closure_reference(), &release, &lineage);
     let offline = PortableRunExport::verify_offline(&portable_bytes, &trust)
         .expect("fold recursively authorized portable export offline");
     let online = project_replay_result(&recorded).expect("project online recorded replay");

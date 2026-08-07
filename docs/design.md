@@ -49,7 +49,7 @@ structural values; they are not instructions.
   `drive_once` call. Callers never supply a trusted run digest for admission; the store derives
   `RunId` from the annex `mfm.run-id-preimage.v1`.
 - Authority-bearing integration traits (`RuntimeHistoryPort`, physical-binding verification,
-  wallet authority, checkpoint authority, and deployment credential issuance) require a
+  wallet authority, and deployment credential issuance) require a
   workspace-private marker. Downstream callers can consume the completed products but cannot
   implement a look-alike authority from the visible method set.
 - Every external operation is authorized durably before possible entry. One committed
@@ -298,8 +298,8 @@ source under the sealed export purpose and only then serializes exact committed-
 source relationships, and semantic/physical fixation with the exact target key, database identity,
 fence generation, release epoch, and current-incarnation reference with a closure reference; denied or incomplete
 source closures emit zero bytes. Offline verification uses only bundle bytes and an explicit trust
-snapshot against the store's read-only fold entry. The program, retained-release, and external
-checkpoint verifiers used by that snapshot are workspace-sealed deployment authorities; an
+snapshot against the store's read-only fold entry. The program, retained-release, and store
+lineage verifiers used by that snapshot are workspace-sealed deployment authorities; an
 ordinary consumer cannot substitute callbacks that accept forged fixations. Current portable exports use a bounded
 newline-delimited frame stream with media type
 `application/vnd.mfm.structured-run-export-stream.v2`; each canonical frame carries an ordinal,
@@ -429,35 +429,57 @@ transaction, store lineage, and writer epoch. Deployment infrastructure owns tar
 revocation, promotion, and sender-path fencing. Repository production assembly requires that
 provider and has no fallback or self-attestation path.
 
-The provider child never owns the non-rollback checkpoint. A distinct external checkpoint
-authority retains the exact physical target, fence lineage, epoch, acknowledged database-prefix
-digest, and at most one prepared successor across child crashes. `Prepared` records the exact
-predecessor, successor, operation, and optional successor target before SQL mutation;
-`Acknowledged` advances only after the database exposes that exact successor prefix. Startup at a
-prepared predecessor retains the preparation and permits only its byte-identical retry; startup at
-the prepared successor acknowledges it. Rollback, database-ahead state, a competing successor,
-or any target/incarnation/public-head mismatch rejects readiness without repair or fallback.
+The provider child never owns the wallet non-rollback checkpoint. That checkpoint is a
+deployment-provided authority: it retains the exact physical target, fence lineage, epoch,
+acknowledged database-prefix digest, and at most one prepared successor across child crashes.
+`Prepared` records the exact predecessor, successor, operation, and optional successor target
+before SQL mutation; `Acknowledged` advances only after the database exposes that exact successor
+prefix. Startup at a prepared predecessor retains the preparation and permits only its
+byte-identical retry; startup at the prepared successor acknowledges it. Rollback,
+database-ahead state, a competing successor, or any target/incarnation/public-head mismatch
+rejects readiness without repair or fallback.
+
+This repository contains only a test implementation of that authority. Its guarantee therefore
+depends on a deployment component that does not exist here, and it carries the same restore-domain
+requirement described under *Append-only authority and the absent witness* below: a witness that
+is restored alongside the database it witnesses proves nothing.
 An exact append retry whose batch is already durable may return `ExistingSame` after later
-successors have advanced the stream: reconciliation must match the external run and fact heads to
-the indexed current heads and must never rewind them to the retried predecessor.
-Because SQL commit precedes external acknowledgement, a concurrent read may briefly observe a
-valid indexed prefix one checkpoint step ahead; PostgreSQL run and configuration read paths retry
-that exact transient `InvalidHistory` observation a fixed number of times and still fail closed
-with the final error. A configuration append whose SQL commit or checkpoint acknowledgement is
-ambiguous reconnects through the append authority and retries only the identical canonical
-revision; a durable prepared successor is acknowledged, while divergence remains an ambiguity or
-integrity failure.
+successors have advanced the stream: reconciliation must match the retried candidate to the
+indexed current heads and must never rewind them to the retried predecessor. A configuration
+append whose SQL commit acknowledgement is ambiguous retries only the identical canonical
+revision, so the database resolves whether that exact append is already durable; divergence
+remains an ambiguity or integrity failure.
+
+### Append-only authority and the absent witness
+
+PostgreSQL is currently the sole authority for append-only history. There is no witness process
+outside the database that retains an independent record of a stream's head.
+
+This is a deliberate, documented limitation rather than an oversight. A rolled-back database is a
+valid earlier state of itself: heads chain, digests verify, and the fold is consistent at the
+earlier revision. No predicate over the current state distinguishes "state at time T" from "state
+at time T that was later restored", so detecting a rollback requires memory of a later head held
+somewhere that did not roll back with it. Nothing in this repository holds that memory today.
+
+The consequence is explicit: if a deployment restores the database from a backup, or otherwise
+rewinds committed history, MFM will accept the rewound state and append onto it. The resulting
+history verifies internally and cannot be distinguished from history that was never rolled back.
+Detection of that class of failure is a deployment responsibility outside this repository.
+
+Because that guarantee is absent, the invariant that must hold without exception is the one MFM
+does enforce: no external effect may occur that was not durably journaled first. Every external
+access is authorized by a committed record before invocation, and the runtime mints invocation
+authority only after re-reading that exact committed authorization. Any change that lets an
+effect run ahead of its journal record removes the last property this design still guarantees.
 
 ## Snapshot, export, and authorization boundaries
 
-The indexed checkpoint head is the first decision-bearing query in every PostgreSQL snapshot. A
-repeatable-read transaction then loads the selected prefix and validates its exact external target
-and checkpoint successor before commit. A bounded retry covers only the commit-before-acknowledgement
-window; persistent mismatch remains an integrity failure. Configuration and run stream identities
-are stable across successors; predecessor digests are compare-and-append preconditions only.
-Configuration resolution uses the same bounded load classification as append preparation, so the
-application admission path cannot turn a transient checkpoint race into a false missing or
-malformed configuration result.
+The indexed head is the first decision-bearing query in every PostgreSQL snapshot, so it
+establishes the repeatable-read snapshot before any dependent query. The transaction then loads
+the selected prefix, folds it, and requires the folded head to equal the indexed head it read in
+that same snapshot; it revalidates its exact target before commit. Configuration and run stream
+identities are stable across successors; predecessor digests are compare-and-append preconditions
+only.
 
 Store ingress rejects any record that names an absent content-addressed object. Structural path
 references and other semantic identities are not falsely treated as standalone objects; object

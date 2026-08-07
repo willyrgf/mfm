@@ -19,17 +19,14 @@ pub trait ProgramVerifierSeal: Send + Sync {}
 /// Marker required by offline replay's retained-release trust.
 pub trait RetainedPhysicalReleaseTrustSeal: Send + Sync {}
 
-/// Marker required by offline replay's external checkpoint trust.
-pub trait StoreCheckpointTrustSeal: Send + Sync {}
+/// Marker required by offline replay's external store-lineage trust.
+pub trait StoreLineageTrustSeal: Send + Sync {}
 
 /// Marker required by the portable encoder consumer.
 pub trait ExportEncoderConsumerSeal: Send + Sync {}
 
 /// Marker required by the EVM wallet authority.
 pub trait WalletNonceAuthoritySeal: Send + Sync {}
-
-/// Marker required by the PostgreSQL checkpoint authority.
-pub trait ExternalCheckpointAuthoritySeal: Send + Sync {}
 
 /// Marker required by the deployment credential sink.
 pub trait DeploymentCredentialSinkSeal {}

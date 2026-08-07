@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
-use std::future::Future;
 
-use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId,
     SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
@@ -19,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 
-use crate::checkpoint::{CheckpointKey, CheckpointMutation, CheckpointStream, ReadFixationGuard};
 use crate::session::{PostgresApplicationSessions, RoleSession, TargetBinding};
 use crate::sql_catalog::StructuredBatchQuery;
 #[cfg(feature = "test-support")]
@@ -30,39 +27,6 @@ use crate::transaction::{
 };
 
 const OBJECT_INSERT_CHUNK_SIZE: usize = 8_192;
-const MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS: usize = 8;
-
-// SQL commits precede external checkpoint acknowledgement. A concurrent read
-// may therefore observe a valid indexed prefix one acknowledgement step ahead;
-// retry that bounded race, while returning the final integrity error unchanged.
-async fn retry_transient_checkpoint_read<T, F, Fut>(
-    mut operation: F,
-) -> Result<T, StructuredStoreError>
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<T, StructuredStoreError>>,
-{
-    let mut result = operation().await;
-    for _ in 1..MAX_TRANSIENT_CHECKPOINT_READ_ATTEMPTS {
-        if !matches!(&result, Err(StructuredStoreError::InvalidHistory)) {
-            return result;
-        }
-        result = operation().await;
-    }
-    result
-}
-
-fn checkpoint_mutation(
-    target: &TargetBinding,
-    key: CheckpointKey,
-    successor_bytes: Vec<u8>,
-) -> CheckpointMutation {
-    CheckpointMutation {
-        key,
-        target: target.checkpoint_target(),
-        successor_bytes,
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -76,29 +40,6 @@ struct StoredBatchEnvelope {
     records: Vec<AssignedRecord>,
     object_count: u32,
     head: JournalHead,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(deny_unknown_fields)]
-struct TenantFactCheckpointSuccessor {
-    frontier: TenantFactFrontier,
-    transition_ref: RecordRef,
-    predecessor_order: u64,
-}
-
-fn checkpoint_digest(bytes: &[u8]) -> ContentDigest {
-    ContentDigest::from_digest(
-        mfm_ids::DigestAlgorithm::Sha256V1,
-        sha256_digest_bytes(bytes),
-    )
-}
-
-fn canonical_checkpoint_digest<T: Serialize>(
-    value: &T,
-) -> Result<ContentDigest, StructuredStoreError> {
-    let bytes = canonical_json(value)
-        .map_err(|_| invalid("structured PostgreSQL checkpoint value is not canonical"))?;
-    Ok(checkpoint_digest(bytes.as_bytes()))
 }
 
 impl StoredBatchEnvelope {
@@ -282,61 +223,6 @@ fn decode_tenant_publication(
     })
 }
 
-fn tenant_publication_checkpoint_digest(
-    publication: &TenantFactPublication,
-) -> Result<ContentDigest, StructuredStoreError> {
-    let predecessor_order = publication
-        .frontier
-        .fact_order
-        .checked_sub(1)
-        .ok_or_else(|| invalid("structured PostgreSQL publication order is zero"))?;
-    canonical_checkpoint_digest(&TenantFactCheckpointSuccessor {
-        frontier: publication.frontier.clone(),
-        transition_ref: publication.transition_ref.clone(),
-        predecessor_order,
-    })
-}
-
-async fn load_tenant_publication_checkpoint_digest(
-    transaction: &mut Transaction<'_, Postgres>,
-    store_scope_id: &StoreScopeId,
-    store_epoch: StoreEpoch,
-    tenant_scope_id: &TenantScopeId,
-    indexed_order: u64,
-) -> Result<Option<ContentDigest>, StructuredStoreError> {
-    let row = sqlx::query(
-        "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
-                fact_order::text AS fact_order, run_id, run_sequence::text AS run_sequence, \
-                transition_ordinal, transition_record_hash \
-           FROM tenant_fact_publications \
-          WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
-            AND tenant_scope_id = $3 \
-          ORDER BY fact_order DESC LIMIT 1",
-    )
-    .bind(store_scope_id.as_str())
-    .bind(store_epoch.get().to_string())
-    .bind(tenant_scope_id.as_str())
-    .fetch_optional(&mut **transaction)
-    .await
-    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    let Some(row) = row else {
-        if indexed_order == 0 {
-            return Ok(None);
-        }
-        return Err(invalid(
-            "structured PostgreSQL tenant fact head has no latest publication",
-        ));
-    };
-    let publication =
-        decode_tenant_publication(&row, store_scope_id, store_epoch, tenant_scope_id)?;
-    if publication.frontier.fact_order != indexed_order {
-        return Err(invalid(
-            "structured PostgreSQL tenant fact head differs from latest publication",
-        ));
-    }
-    tenant_publication_checkpoint_digest(&publication).map(Some)
-}
-
 /// Real PostgreSQL implementation of the shared structured-history backend seam.
 pub struct PostgresStructuredHistoryBackend {
     run_reader: RoleSession,
@@ -392,56 +278,6 @@ impl PostgresStructuredHistoryBackend {
         let write = begin_run_write(&self.run_writer, &self.target).await?;
         lock_run_and_tenant(write, run_id, tenant_key).await
     }
-
-    async fn indexed_run_checkpoint_digest(
-        &self,
-        run_id: &RunId,
-    ) -> Result<Option<ContentDigest>, StructuredStoreError> {
-        let fixation = self
-            .target
-            .checkpoint()
-            .fixate_read(&CheckpointKey {
-                store_scope_id: self.identity.store_scope_id.clone(),
-                store_epoch: self.identity.store_epoch,
-                target_key: self.target.target_key().as_str().to_owned(),
-                stream: CheckpointStream::Run,
-                stream_id: run_id.as_str().to_owned(),
-                predecessor: None,
-            })
-            .map_err(|_| StructuredStoreError::StaleHead)?;
-        let fixation_guard = ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
-        let mut transaction = self.begin_read().await?;
-        let row = sqlx::query(
-            "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-               FROM run_history_heads WHERE run_id = $1",
-        )
-        .bind(run_id.as_str())
-        .fetch_optional(&mut **transaction.conn())
-        .await
-        .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-        let head = row
-            .map(|row| {
-                Ok(JournalHead {
-                    run_sequence: required_sequence(&row, "head_sequence")?,
-                    commit_digest: JournalCommitDigest::parse(&required_text(
-                        &row,
-                        "head_commit_digest",
-                    )?)
-                    .map_err(|_| invalid("structured PostgreSQL checkpoint head is invalid"))?,
-                })
-            })
-            .transpose()?;
-        transaction.validate_target(&self.target).await?;
-        let indexed_digest = head.as_ref().map(canonical_checkpoint_digest).transpose()?;
-        if indexed_digest != fixation.successor().cloned() {
-            return Err(StructuredStoreError::StaleHead);
-        }
-        fixation_guard
-            .release()
-            .map_err(|_| StructuredStoreError::StaleHead)?;
-        transaction.commit_checked(&self.target).await?;
-        Ok(indexed_digest)
-    }
 }
 
 impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
@@ -450,21 +286,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
     }
 
     fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Run,
-                    stream_id: run_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             let head_row = sqlx::query(
                 "SELECT head_sequence::text AS head_sequence, head_commit_digest \
@@ -488,18 +310,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     })
                 })
                 .transpose()?;
-            let indexed_digest = indexed_head
-                .as_ref()
-                .map(canonical_checkpoint_digest)
-                .transpose()?;
-            if indexed_digest != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL load head differs from external checkpoint",
-                ));
-            }
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
             await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
@@ -543,28 +353,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id: run_id.clone(),
                 batches,
             }))
-        }))
+        })
     }
 
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, mfm_store::structured::StructuredRunSnapshot> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Run,
-                    stream_id: run_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             // The indexed head is deliberately the first decision-bearing query. All subsequent
             // batch/object reads belong to this same repeatable snapshot.
@@ -590,15 +386,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     })
                 })
                 .transpose()?;
-            let head_digest = head.as_ref().map(canonical_checkpoint_digest).transpose()?;
-            if head_digest != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL snapshot head differs from external checkpoint",
-                ));
-            }
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
             await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
@@ -644,28 +431,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
             transaction.commit_checked(&self.target).await?;
             Ok(mfm_store::structured::StructuredRunSnapshot { history, head })
-        }))
+        })
     }
 
     fn current_head<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Run,
-                    stream_id: run_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             let row = sqlx::query(
                 "SELECT head_sequence::text AS head_sequence, head_commit_digest \
@@ -687,19 +460,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     })
                 })
                 .transpose()?;
-            let digest = head.as_ref().map(canonical_checkpoint_digest).transpose()?;
-            if digest != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL current head differs from external checkpoint",
-                ));
-            }
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             transaction.validate_target(&self.target).await?;
             transaction.commit_checked(&self.target).await?;
             Ok(head)
-        }))
+        })
     }
 
     fn load_prefix<'a>(
@@ -707,26 +471,12 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         run_id: &'a RunId,
         through_sequence: u64,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
+        Box::pin(async move {
             if through_sequence == 0 {
                 return Err(invalid(
                     "structured PostgreSQL prefix sequence must be positive",
                 ));
             }
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Run,
-                    stream_id: run_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
             let mut transaction = self.begin_read().await?;
             // Establish the repeatable-read snapshot with the indexed head before
             // reading the requested prefix or its objects.
@@ -752,18 +502,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     })
                 })
                 .transpose()?;
-            let indexed_digest = indexed_head
-                .as_ref()
-                .map(canonical_checkpoint_digest)
-                .transpose()?;
-            if indexed_digest != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL prefix head differs from external checkpoint",
-                ));
-            }
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
             await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
@@ -786,11 +524,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             #[cfg(feature = "test-support")]
             await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
             if rows.is_empty() {
-                if indexed_head.is_none() && fixation.successor().is_some() {
-                    return Err(invalid(
-                        "structured PostgreSQL prefix has no rows for an admitted head",
-                    ));
-                }
                 transaction.commit_checked(&self.target).await?;
                 return Ok(None);
             }
@@ -840,28 +573,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id: run_id.clone(),
                 batches,
             }))
-        }))
+        })
     }
 
     fn tenant_fact_frontier<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
     ) -> StructuredBackendFuture<'a, TenantFactFrontier> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::TenantFacts,
-                    stream_id: tenant_scope_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             let rows = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, \
@@ -911,22 +630,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 }
             };
             transaction.validate_target(&self.target).await?;
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let indexed_successor = load_tenant_publication_checkpoint_digest(
-                transaction.conn(),
-                &self.identity.store_scope_id,
-                self.identity.store_epoch,
-                tenant_scope_id,
-                fact_order,
-            )
-            .await?;
-            if indexed_successor != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL tenant fact head differs from external checkpoint",
-                ));
-            }
             transaction.commit_checked(&self.target).await?;
             Ok(TenantFactFrontier::new(
                 self.identity.store_scope_id.clone(),
@@ -934,7 +637,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 tenant_scope_id.clone(),
                 fact_order,
             ))
-        }))
+        })
     }
 
     fn scan_fact_publications<'a>(
@@ -944,7 +647,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         through_order: u64,
         maximum_items: u32,
     ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
+        Box::pin(async move {
             if first_order == 0 || maximum_items == 0 || maximum_items > 1_024 {
                 return Err(invalid(
                     "structured PostgreSQL tenant fact page is outside the fixed bounds",
@@ -953,20 +656,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             if first_order > through_order {
                 return Ok(Vec::new());
             }
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.target.store_epoch(),
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::TenantFacts,
-                    stream_id: tenant_scope_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
             let mut transaction = self.begin_read().await?;
             let indexed_head = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
@@ -1013,35 +702,11 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     Ok(order)
                 })
                 .transpose()?;
-            let Some(indexed_order) = indexed_order else {
-                if fixation.successor().is_some() {
-                    return Err(invalid(
-                        "structured PostgreSQL tenant publication head differs from external checkpoint",
-                    ));
-                }
-                fixation_guard
-                    .release()
-                    .map_err(|_| StructuredStoreError::StaleHead)?;
+            let Some(_indexed_order) = indexed_order else {
                 let rows = Vec::new();
                 transaction.commit_checked(&self.target).await?;
                 return Ok(rows);
             };
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let indexed_successor = load_tenant_publication_checkpoint_digest(
-                transaction.conn(),
-                &self.identity.store_scope_id,
-                self.identity.store_epoch,
-                tenant_scope_id,
-                indexed_order,
-            )
-            .await?;
-            if indexed_successor != fixation.successor().cloned() {
-                return Err(invalid(
-                    "structured PostgreSQL tenant publication head differs from external checkpoint",
-                ));
-            }
             let rows = sqlx::query(
                 "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
                         fact_order::text AS fact_order, run_id, \
@@ -1073,7 +738,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
             transaction.commit_checked(&self.target).await?;
             Ok(publications)
-        }))
+        })
     }
 
     fn append<'a>(
@@ -1316,84 +981,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .predecessor
                 .as_ref()
                 .map(|head| head.commit_digest.as_str());
-            let successor_bytes = canonical_json(&committed.head)
-                .map_err(|_| {
-                    invalid("structured PostgreSQL checkpoint successor is not canonical")
-                })?
-                .as_bytes()
-                .to_vec();
-            let run_base = CheckpointKey {
-                store_scope_id: self.identity.store_scope_id.clone(),
-                store_epoch: self.identity.store_epoch,
-                target_key: self.target.target_key().as_str().to_owned(),
-                stream: CheckpointStream::Run,
-                stream_id: run_id.as_str().to_owned(),
-                predecessor: None,
-            };
-            let expected_run_predecessor = committed
-                .predecessor
-                .as_ref()
-                .map(canonical_checkpoint_digest)
-                .transpose()?;
-            if self.target.checkpoint().current_head(&run_base) != expected_run_predecessor {
-                transaction.rollback().await?;
-                return Ok(BackendAppendOutcome::StaleHead);
-            }
-            let run_checkpoint = CheckpointKey {
-                predecessor: expected_run_predecessor,
-                ..run_base
-            };
-            let mut checkpoint_mutations = vec![checkpoint_mutation(
-                &self.target,
-                run_checkpoint,
-                successor_bytes.clone(),
-            )];
-            if let Some(publication) = pending_tenant_publication.as_ref() {
-                let tenant_successor = canonical_json(&TenantFactCheckpointSuccessor {
-                    frontier: publication.frontier.clone(),
-                    transition_ref: publication.transition_ref.clone(),
-                    predecessor_order: publication.predecessor_order,
-                })
-                .map_err(|_| invalid("structured PostgreSQL tenant checkpoint is not canonical"))?
-                .as_bytes()
-                .to_vec();
-                let tenant_key_base = CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::TenantFacts,
-                    stream_id: publication.frontier.tenant_scope_id.as_str().to_owned(),
-                    predecessor: None,
-                };
-                let indexed_tenant_predecessor = load_tenant_publication_checkpoint_digest(
-                    transaction.conn(),
-                    &self.identity.store_scope_id,
-                    self.identity.store_epoch,
-                    &publication.frontier.tenant_scope_id,
-                    publication.predecessor_order,
-                )
-                .await?;
-                let external_tenant_predecessor =
-                    self.target.checkpoint().current_head(&tenant_key_base);
-                if external_tenant_predecessor != indexed_tenant_predecessor {
-                    transaction.rollback().await?;
-                    return Ok(BackendAppendOutcome::StaleHead);
-                }
-                checkpoint_mutations.push(checkpoint_mutation(
-                    &self.target,
-                    CheckpointKey {
-                        predecessor: indexed_tenant_predecessor,
-                        ..tenant_key_base
-                    },
-                    tenant_successor,
-                ));
-            }
-            checkpoint_mutations.sort_by(|left, right| left.key.cmp(&right.key));
             transaction.validate_target(&self.target).await?;
-            self.target
-                .checkpoint()
-                .prepare_many(&checkpoint_mutations)
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             let batch_insert = sqlx::query(
                 "INSERT INTO run_history_batches ( \
                     run_id, run_sequence, append_request_id, candidate_digest, \
@@ -1531,16 +1119,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
             match transaction.commit_outcome(&self.target).await? {
                 crate::transaction::CommitOutcome::Committed => {
-                    if self
-                        .target
-                        .checkpoint()
-                        .acknowledge_many(&checkpoint_mutations)
-                        .is_err()
-                    {
-                        Ok(BackendAppendOutcome::AcknowledgementUnknown)
-                    } else {
-                        Ok(BackendAppendOutcome::NewlyCommitted(committed))
-                    }
+                    Ok(BackendAppendOutcome::NewlyCommitted(committed))
                 }
                 crate::transaction::CommitOutcome::AcknowledgementUnknown => {
                     Ok(BackendAppendOutcome::AcknowledgementUnknown)
@@ -1555,21 +1134,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         append_request_id: &'a AppendRequestId,
         candidate_digest: &'a ContentDigest,
     ) -> StructuredBackendFuture<'a, Option<CommittedBatch>> {
-        Box::pin(retry_transient_checkpoint_read(move || async move {
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.identity.store_scope_id.clone(),
-                    store_epoch: self.identity.store_epoch,
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Run,
-                    stream_id: run_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
+        Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             let head_row = sqlx::query(
                 "SELECT head_sequence::text AS head_sequence, head_commit_digest \
@@ -1579,27 +1144,10 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .fetch_optional(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let head = head_row
-                .map(|row| {
-                    Ok(JournalHead {
-                        run_sequence: required_sequence(&row, "head_sequence")?,
-                        commit_digest: JournalCommitDigest::parse(&required_text(
-                            &row,
-                            "head_commit_digest",
-                        )?)
-                        .map_err(|_| {
-                            invalid("structured PostgreSQL resolution head digest is invalid")
-                        })?,
-                    })
-                })
-                .transpose()?;
-            let head_digest = head.as_ref().map(canonical_checkpoint_digest).transpose()?;
-            if head_digest != fixation.successor().cloned() {
-                return Err(StructuredStoreError::StaleHead);
-            }
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
+            // The head row is read first so it establishes this repeatable-read
+            // snapshot before the append-request lookup below; the resolution
+            // itself is keyed by append request, not by head.
+            drop(head_row);
             transaction.validate_target(&self.target).await?;
             let rows = select_batch_rows(
                 transaction.conn(),
@@ -1631,9 +1179,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 return Err(StructuredStoreError::AppendConflict);
             }
             transaction.commit_checked(&self.target).await?;
-            self.acknowledge_batch_checkpoints(&batch).await?;
             Ok(Some(batch))
-        }))
+        })
     }
 }
 
@@ -1984,172 +1531,6 @@ fn is_contention_sqlstate(error: &sqlx::Error) -> bool {
 }
 
 impl PostgresStructuredHistoryBackend {
-    async fn checkpoint_mutations_for_batch(
-        &self,
-        batch: &CommittedBatch,
-    ) -> Result<Vec<CheckpointMutation>, StructuredStoreError> {
-        let run_base = CheckpointKey {
-            store_scope_id: self.identity.store_scope_id.clone(),
-            store_epoch: self.identity.store_epoch,
-            target_key: self.target.target_key().as_str().to_owned(),
-            stream: CheckpointStream::Run,
-            stream_id: batch
-                .records
-                .first()
-                .ok_or_else(|| invalid("structured PostgreSQL batch has no record"))?
-                .record_ref
-                .run_id
-                .as_str()
-                .to_owned(),
-            predecessor: None,
-        };
-        let run_successor = canonical_json(&batch.head)
-            .map_err(|_| invalid("structured PostgreSQL checkpoint successor is not canonical"))?
-            .as_bytes()
-            .to_vec();
-        let checkpoint = self.target.checkpoint();
-        let mut mutations = Vec::new();
-        let run_digest = checkpoint_digest(&run_successor);
-        let expected_run_predecessor = batch
-            .predecessor
-            .as_ref()
-            .map(canonical_checkpoint_digest)
-            .transpose()?;
-        let current_run_head = checkpoint.current_head(&run_base);
-        let mut run_checkpoint_already_advanced = false;
-        if current_run_head.as_ref() != Some(&run_digest)
-            && current_run_head != expected_run_predecessor
-        {
-            let run_id = RunId::parse(&run_base.stream_id)
-                .map_err(|_| invalid("structured PostgreSQL checkpoint run id is invalid"))?;
-            if current_run_head != self.indexed_run_checkpoint_digest(&run_id).await? {
-                return Err(StructuredStoreError::StaleHead);
-            }
-            run_checkpoint_already_advanced = true;
-        }
-        if current_run_head.as_ref() != Some(&run_digest) && !run_checkpoint_already_advanced {
-            mutations.push(checkpoint_mutation(
-                &self.target,
-                CheckpointKey {
-                    predecessor: expected_run_predecessor,
-                    ..run_base
-                },
-                run_successor,
-            ));
-        }
-        if let TenantFactCoordinate::FactPublication { frontier } = &batch.tenant_fact_coordinate {
-            let transition_ref = batch
-                .records
-                .first()
-                .ok_or_else(|| invalid("structured PostgreSQL publication has no transition"))?
-                .record_ref
-                .clone();
-            let predecessor_order = frontier
-                .fact_order
-                .checked_sub(1)
-                .ok_or_else(|| invalid("structured PostgreSQL publication order is zero"))?;
-            let tenant_base = CheckpointKey {
-                store_scope_id: self.identity.store_scope_id.clone(),
-                store_epoch: self.identity.store_epoch,
-                target_key: self.target.target_key().as_str().to_owned(),
-                stream: CheckpointStream::TenantFacts,
-                stream_id: frontier.tenant_scope_id.as_str().to_owned(),
-                predecessor: None,
-            };
-            let tenant_successor = canonical_json(&TenantFactCheckpointSuccessor {
-                frontier: frontier.clone(),
-                transition_ref,
-                predecessor_order,
-            })
-            .map_err(|_| invalid("structured PostgreSQL tenant checkpoint is not canonical"))?
-            .as_bytes()
-            .to_vec();
-            let tenant_digest = checkpoint_digest(&tenant_successor);
-            let external_predecessor = checkpoint.current_head(&tenant_base);
-            let mut predecessor_transaction = self.begin_read().await?;
-            let indexed_predecessor = load_tenant_publication_checkpoint_digest(
-                predecessor_transaction.conn(),
-                &self.identity.store_scope_id,
-                self.identity.store_epoch,
-                &frontier.tenant_scope_id,
-                predecessor_order,
-            )
-            .await?;
-            let current_order = sqlx::query(
-                "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
-                        fact_order::text AS fact_order \
-                   FROM tenant_fact_heads WHERE tenant_scope_id = $1",
-            )
-            .bind(frontier.tenant_scope_id.as_str())
-            .fetch_optional(&mut **predecessor_transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?
-            .map(|row| {
-                if required_text(&row, "store_scope_id")? != self.identity.store_scope_id.as_str()
-                    || required_text(&row, "store_epoch")?
-                        != self.identity.store_epoch.get().to_string()
-                    || required_text(&row, "tenant_scope_id")? != frontier.tenant_scope_id.as_str()
-                {
-                    return Err(invalid(
-                        "structured PostgreSQL tenant fact head changed identity",
-                    ));
-                }
-                parse_fact_order(&required_text(&row, "fact_order")?, true)
-            })
-            .transpose()?
-            .unwrap_or(0);
-            let indexed_current = load_tenant_publication_checkpoint_digest(
-                predecessor_transaction.conn(),
-                &self.identity.store_scope_id,
-                self.identity.store_epoch,
-                &frontier.tenant_scope_id,
-                current_order,
-            )
-            .await?;
-            predecessor_transaction
-                .validate_target(&self.target)
-                .await?;
-            predecessor_transaction.commit_checked(&self.target).await?;
-            let tenant_checkpoint_already_advanced = external_predecessor != indexed_predecessor
-                && external_predecessor == indexed_current;
-            if external_predecessor != indexed_predecessor && !tenant_checkpoint_already_advanced {
-                return Err(StructuredStoreError::StaleHead);
-            }
-            if !tenant_checkpoint_already_advanced
-                && external_predecessor.as_ref() != Some(&tenant_digest)
-            {
-                mutations.push(checkpoint_mutation(
-                    &self.target,
-                    CheckpointKey {
-                        predecessor: external_predecessor,
-                        ..tenant_base
-                    },
-                    tenant_successor,
-                ));
-            }
-        }
-        mutations.sort_by(|left, right| left.key.cmp(&right.key));
-        Ok(mutations)
-    }
-
-    async fn acknowledge_batch_checkpoints(
-        &self,
-        batch: &CommittedBatch,
-    ) -> Result<(), StructuredStoreError> {
-        let mutations = self.checkpoint_mutations_for_batch(batch).await?;
-        if mutations.is_empty() {
-            return Ok(());
-        }
-        self.target
-            .checkpoint()
-            .prepare_many(&mutations)
-            .map_err(|_| StructuredStoreError::AcknowledgementUnknown)?;
-        self.target
-            .checkpoint()
-            .acknowledge_many(&mutations)
-            .map_err(|_| StructuredStoreError::AcknowledgementUnknown)
-    }
-
     async fn classify_existing_after_contention(
         &self,
         run_id: &RunId,
@@ -2188,7 +1569,6 @@ impl PostgresStructuredHistoryBackend {
                     Ok(BackendAppendOutcome::AcknowledgementUnknown)
                 }
                 crate::transaction::CommitOutcome::Committed if existing == *committed => {
-                    self.acknowledge_batch_checkpoints(&existing).await?;
                     Ok(BackendAppendOutcome::ExistingSame(existing))
                 }
                 crate::transaction::CommitOutcome::Committed => {

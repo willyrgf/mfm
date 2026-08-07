@@ -313,45 +313,15 @@ impl ConfigurationAppendRequest {
     }
 }
 
+/// Bounded retries for a SQL commit whose acknowledgement was lost. The
+/// database either retained the identical append or it did not; retrying the
+/// exact canonical revision resolves which, and the bound keeps an
+/// unreachable backend from looping forever.
+const MAX_CONFIGURATION_APPEND_RETRIES: usize = 8;
+
 /// Non-cloneable deployment authority for configured-value appends.
 pub struct ConfigurationHistoryWriter<B: ConfigurationHistoryBackend> {
     backend: Arc<B>,
-}
-
-const MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS: usize = 8;
-
-async fn yield_once() {
-    let mut yielded = false;
-    std::future::poll_fn(|context| {
-        if yielded {
-            std::task::Poll::Ready(())
-        } else {
-            yielded = true;
-            context.waker().wake_by_ref();
-            std::task::Poll::Pending
-        }
-    })
-    .await;
-}
-
-async fn load_with_checkpoint_retry<B: ConfigurationHistoryBackend>(
-    backend: &B,
-    key: &ConfigurationStreamKey,
-) -> Result<Option<RawConfigurationHistory>, StructuredStoreError> {
-    // SQL commits precede external checkpoint acknowledgement. A concurrent
-    // PostgreSQL read can therefore observe one durable prefix before its
-    // checkpoint successor; retry only that bounded InvalidHistory window.
-    let mut loaded = backend.load(key).await;
-    for _ in 1..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
-        if !matches!(&loaded, Err(StructuredStoreError::InvalidHistory)) {
-            return loaded;
-        }
-        // Let the writer that committed the SQL prefix publish its external
-        // checkpoint successor before retrying the same snapshot.
-        yield_once().await;
-        loaded = backend.load(key).await;
-    }
-    loaded
 }
 
 impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
@@ -359,14 +329,14 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
         &self,
         key: &ConfigurationStreamKey,
     ) -> Result<Option<RawConfigurationHistory>, StructuredStoreError> {
-        load_with_checkpoint_retry(self.backend.as_ref(), key).await
+        self.backend.load(key).await
     }
 
     async fn retry_ambiguous_append(
         &self,
         revision: &ConfigurationRevision,
     ) -> Result<ConfigurationRevision, StructuredStoreError> {
-        for _ in 0..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
+        for _ in 0..MAX_CONFIGURATION_APPEND_RETRIES {
             let outcome = self
                 .backend
                 .append(CanonicalConfigurationAppend::from_store_verified(
@@ -406,9 +376,6 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                     }
                 }
             }
-            // SQL commit and external acknowledgement are separate operations. Give the
-            // winner a bounded scheduling window before the next recovery attempt.
-            yield_once().await;
         }
         Err(StructuredStoreError::AcknowledgementUnknown)
     }
@@ -473,7 +440,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // Reclassify the unchanged identity from a fresh read so a
                 // race cannot turn an append conflict into an unrelated stale
                 // predecessor result.
-                for _ in 0..MAX_CONFIGURATION_APPEND_LOAD_ATTEMPTS {
+                for _ in 0..MAX_CONFIGURATION_APPEND_RETRIES {
                     let resolved = self.load_for_append(revision.key()).await?;
                     match resolved.as_ref().and_then(|history| {
                         history_append_identity(
@@ -510,7 +477,6 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                     }
                     // SQL commit and external acknowledgement are separate operations. Give the
                     // winner a bounded scheduling window before the next classification attempt.
-                    yield_once().await;
                 }
                 Err(StructuredStoreError::StaleHead)
             }
@@ -540,7 +506,9 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryReader<B> {
         expected_value_contract_ref: &ContentRef,
     ) -> Result<VerifiedConfiguredValue, StructuredStoreError> {
         require_store(self.backend.as_ref(), key)?;
-        let history = load_with_checkpoint_retry(self.backend.as_ref(), key)
+        let history = self
+            .backend
+            .load(key)
             .await?
             .ok_or(StructuredStoreError::RunNotFound)?;
         let verified = verify_configuration_history(history)?;
@@ -978,39 +946,6 @@ mod tests {
             ))
             .await;
         assert_eq!(stale, Err(StructuredStoreError::StaleHead));
-    }
-
-    #[tokio::test]
-    async fn reader_retries_bounded_transient_checkpoint_mismatch() {
-        let inner = MemoryConfigurationHistoryBackend::new(store_scope());
-        let stream = key('9');
-        let (writer, _) = ConfigurationHistoryStore::new(inner.clone()).split();
-        let expected = writer
-            .append(ConfigurationAppendRequest::new(
-                stream.clone(),
-                None,
-                AppendRequestId::new("configured-reader-retry").expect("append id"),
-                contract(),
-                ProposedCanonicalValue::from_json(r#"{"retry":true}"#).expect("value"),
-            ))
-            .await
-            .expect("revision");
-
-        let flaky = flaky_backend(inner, 2, false);
-        let (_, reader) = ConfigurationHistoryStore::new(flaky.clone()).split();
-        assert_eq!(
-            reader
-                .resolve(&stream, &contract())
-                .await
-                .expect("reader retries transient mismatch")
-                .revision(),
-            &expected
-        );
-        assert_eq!(
-            flaky.transient_loads.load(Ordering::Acquire),
-            0,
-            "all transient load failures must be consumed by the bounded retry"
-        );
     }
 
     #[tokio::test]

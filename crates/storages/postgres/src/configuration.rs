@@ -1,6 +1,5 @@
 use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
-use mfm_canonical::sha256_digest_bytes;
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StoreScopeId};
+use mfm_ids::{ContentRef, StoreScopeId};
 use mfm_journal::structured::canonical_json;
 use mfm_store::structured::{
     verify_configuration_history, CanonicalConfigurationAppend, ConfigurationBackendAppendOutcome,
@@ -10,7 +9,6 @@ use mfm_store::structured::{
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
 
-use crate::checkpoint::{CheckpointKey, CheckpointMutation, CheckpointStream, ReadFixationGuard};
 use crate::session::{RoleSession, TargetBinding};
 #[cfg(feature = "test-support")]
 use crate::transaction::await_read_phase_barrier;
@@ -18,55 +16,6 @@ use crate::transaction::{
     begin_configuration_read, begin_configuration_write_locked, CommitOutcome,
     LockedConfigurationWriteTx, ReadTx,
 };
-
-fn checkpoint_mutation(
-    target: &TargetBinding,
-    key: CheckpointKey,
-    successor_bytes: Vec<u8>,
-) -> CheckpointMutation {
-    CheckpointMutation {
-        key,
-        target: target.checkpoint_target(),
-        successor_bytes,
-    }
-}
-
-fn checkpoint_digest(bytes: &[u8]) -> ContentDigest {
-    ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(bytes))
-}
-
-fn sql_checkpoint_head(
-    history: Option<&RawConfigurationHistory>,
-) -> Result<Option<ContentDigest>, StructuredStoreError> {
-    history
-        .and_then(|history| history.revisions.last())
-        .map(|revision| {
-            canonical_json(revision)
-                .map(|canonical| checkpoint_digest(canonical.as_bytes()))
-                .map_err(|_| invalid("configuration checkpoint predecessor is not canonical"))
-        })
-        .transpose()
-}
-
-// Checkpoint heads hash canonical serialized revisions, whereas a revision's
-// content reference hashes its domain payload. Idempotent replay must use the
-// former for the predecessor mutation or it will reject an otherwise valid
-// already-committed append as stale.
-fn sql_checkpoint_predecessor(
-    history: &RawConfigurationHistory,
-) -> Result<Option<ContentDigest>, StructuredStoreError> {
-    history
-        .revisions
-        .iter()
-        .rev()
-        .nth(1)
-        .map(|revision| {
-            canonical_json(revision)
-                .map(|canonical| checkpoint_digest(canonical.as_bytes()))
-                .map_err(|_| invalid("configuration checkpoint predecessor is not canonical"))
-        })
-        .transpose()
-}
 
 struct StoredConfigurationRow {
     revision_sequence: u64,
@@ -252,27 +201,8 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
         key: &'a ConfigurationStreamKey,
     ) -> ConfigurationBackendFuture<'a, Option<RawConfigurationHistory>> {
         Box::pin(async move {
-            let stream_id = canonical_json(key)
-                .map_err(|_| invalid("configuration checkpoint key is not canonical"))?;
-            let fixation = self
-                .target
-                .checkpoint()
-                .fixate_read(&CheckpointKey {
-                    store_scope_id: self.store_scope_id.clone(),
-                    store_epoch: self.target.store_epoch(),
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Configuration,
-                    stream_id: stream_id.as_str().to_owned(),
-                    predecessor: None,
-                })
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-            let fixation_guard =
-                ReadFixationGuard::new(self.target.checkpoint().as_ref(), &fixation);
             let mut transaction = self.begin_read().await?;
             let head = select_head(transaction.conn(), key).await?;
-            fixation_guard
-                .release()
-                .map_err(|_| StructuredStoreError::StaleHead)?;
             #[cfg(feature = "test-support")]
             await_read_phase_barrier(self.target.schema_name(), "after_head").await;
             transaction.validate_target(&self.target).await?;
@@ -281,24 +211,8 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
             let history = reconstruct_history(key, rows, head)?;
             if let Some(history) = history.as_ref() {
                 // The indexed head is part of the same durable snapshot as the
-                // revisions.  Validate it before comparing the external
-                // fixation; otherwise a copied or rewound head row could be
-                // replaced by the last revision in memory and accepted.
+                // revisions; validate the chain before returning it.
                 verify_configuration_history(history.clone())?;
-                let canonical = history
-                    .revisions
-                    .last()
-                    .and_then(|revision| canonical_json(revision).ok())
-                    .map(|value| checkpoint_digest(value.as_bytes()));
-                if canonical != fixation.successor().cloned() {
-                    return Err(invalid(
-                        "configuration head differs from external checkpoint",
-                    ));
-                }
-            } else if fixation.successor().is_some() {
-                return Err(invalid(
-                    "configuration head differs from external checkpoint",
-                ));
             }
             Ok(history)
         })
@@ -339,65 +253,13 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                     .find(|existing| existing.append_request_id() == revision.append_request_id())
             }) {
                 let existing = existing.clone();
-                let sql_head = sql_checkpoint_head(history.as_ref())?;
-                let checkpoint_base = CheckpointKey {
-                    store_scope_id: self.store_scope_id.clone(),
-                    store_epoch: self.target.store_epoch(),
-                    target_key: self.target.target_key().as_str().to_owned(),
-                    stream: CheckpointStream::Configuration,
-                    stream_id: canonical_json(revision.key())
-                        .map_err(|_| invalid("configuration checkpoint key is not canonical"))?
-                        .as_str()
-                        .to_owned(),
-                    predecessor: None,
-                };
                 let outcome = transaction.commit_outcome(&self.target).await?;
                 return match outcome {
                     CommitOutcome::AcknowledgementUnknown => {
                         Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown)
                     }
                     CommitOutcome::Committed if existing == revision => {
-                        let successor = canonical_json(&existing)
-                            .map_err(|_| {
-                                invalid("configuration checkpoint successor is not canonical")
-                            })?
-                            .as_bytes()
-                            .to_vec();
-                        let successor_digest = checkpoint_digest(&successor);
-                        let external_head = self.target.checkpoint().current_head(&checkpoint_base);
-                        if sql_head != Some(successor_digest.clone()) {
-                            return if external_head == sql_head {
-                                Ok(ConfigurationBackendAppendOutcome::ExistingSame(existing))
-                            } else {
-                                Ok(ConfigurationBackendAppendOutcome::StaleHead)
-                            };
-                        }
-                        let predecessor = sql_checkpoint_predecessor(
-                            history
-                                .as_ref()
-                                .ok_or_else(|| invalid("configuration history is absent"))?,
-                        )?;
-                        if external_head != predecessor && external_head != Some(successor_digest) {
-                            return Ok(ConfigurationBackendAppendOutcome::StaleHead);
-                        }
-                        let mutation = checkpoint_mutation(
-                            &self.target,
-                            CheckpointKey {
-                                predecessor,
-                                ..checkpoint_base
-                            },
-                            successor,
-                        );
-                        if self
-                            .target
-                            .checkpoint()
-                            .acknowledge_many(&[mutation])
-                            .is_err()
-                        {
-                            Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown)
-                        } else {
-                            Ok(ConfigurationBackendAppendOutcome::ExistingSame(existing))
-                        }
+                        Ok(ConfigurationBackendAppendOutcome::ExistingSame(existing))
                     }
                     CommitOutcome::Committed => Err(StructuredStoreError::AppendConflict),
                 };
@@ -414,35 +276,7 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
 
-            let checkpoint_base = CheckpointKey {
-                store_scope_id: self.store_scope_id.clone(),
-                store_epoch: self.target.store_epoch(),
-                target_key: self.target.target_key().as_str().to_owned(),
-                stream: CheckpointStream::Configuration,
-                stream_id: lock_key.as_str().to_owned(),
-                predecessor: None,
-            };
-            let checkpoint_mutations = vec![checkpoint_mutation(
-                &self.target,
-                CheckpointKey {
-                    predecessor: {
-                        let sql_head = sql_checkpoint_head(history.as_ref())?;
-                        if self.target.checkpoint().current_head(&checkpoint_base) != sql_head {
-                            transaction.rollback().await?;
-                            return Ok(ConfigurationBackendAppendOutcome::StaleHead);
-                        }
-                        sql_head
-                    },
-                    ..checkpoint_base
-                },
-                canonical_revision.as_bytes().to_vec(),
-            )];
             transaction.validate_target(&self.target).await?;
-            self.target
-                .checkpoint()
-                .prepare_many(&checkpoint_mutations)
-                .map_err(|_| StructuredStoreError::StaleHead)?;
-
             insert_revision(transaction.conn(), &revision, canonical_revision.as_str()).await?;
             if !advance_head(transaction.conn(), &revision, current).await? {
                 transaction.rollback().await?;
@@ -450,16 +284,7 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
             }
             match transaction.commit_outcome(&self.target).await? {
                 CommitOutcome::Committed => {
-                    if self
-                        .target
-                        .checkpoint()
-                        .acknowledge_many(&checkpoint_mutations)
-                        .is_err()
-                    {
-                        Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown)
-                    } else {
-                        Ok(ConfigurationBackendAppendOutcome::NewlyCommitted(revision))
-                    }
+                    Ok(ConfigurationBackendAppendOutcome::NewlyCommitted(revision))
                 }
                 CommitOutcome::AcknowledgementUnknown => {
                     Ok(ConfigurationBackendAppendOutcome::AcknowledgementUnknown)
