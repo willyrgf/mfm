@@ -43,8 +43,74 @@ Recovery is not generic. `DriveOutcome::PossibleEntry` is terminal in the
 runtime and surfaces as an operational block in `mfm-app`; the run parks
 indefinitely. Only the EVM domain resolves it, by re-observing chain state on a
 fresh run. A new domain with external effects inherits the safety property and
-strands runs on crash, and nothing in the type system requires it to supply a
-re-observation procedure.
+strands runs on crash, and nothing in the type system requires it to declare
+whether recovery is possible at all.
+
+The fold reaches the terminal frontier without consulting any per-capability
+property. A capability whose external system would absorb a repeat of the exact
+committed request is folded identically to one that would duplicate, because
+there is nothing for either to declare.
+
+The EVM resolution is not portable as written, and neither is the axis that
+makes it work. `Refreshable<E>` with `RefreshableBinding<Resource>` names an
+exclusive resource lineage and a non-entry evidence type, and the store verifies
+that negative callback-free against the retained release history — but declaring
+it requires a `RuntimeResourceAuthority`, a resource lineage contract, a public
+lineage head, and store-side supersession verification. A table with a unique
+index has none of those and needs none of them.
+
+Two things are also absent that any recovery mechanism would need. The fold
+computes the full identity of the parked occurrence and then discards it:
+`StructuredFrontier::PossibleEntry` and `DriveOutcome::PossibleEntry` are unit
+variants, so the operator is told that a run is blocked and not which occurrence
+blocked it, though the access-audit projection retains every field. And the run
+cannot be found at all without its run id; see *No way to find a parked run*.
+
+See [`effect-entry-resolution.md`](effect-entry-resolution.md) for the proposed
+per-capability contract, which declares absorption rather than a slot. It is a
+proposal whose central trade — replacing structural one-entry-per-occurrence
+with a bounded, declared maximum — is not yet accepted. It is not an implemented
+guarantee.
+
+## No way to find a parked run
+
+Every application entry point is per-`RunId`, and there is no listing surface.
+An operator who does not already hold the run id of a parked run cannot
+discover it, so parks are found late or by accident.
+
+This is independent of how a park is resolved. Every recovery design assumes a
+caller who already knows which run to fix, and nothing produces that caller.
+
+It is also load-bearing for any absorption-based recovery, because discovery
+latency is the whole exposure where absorption is backed by a retention window
+rather than durable state: a park found in minutes re-asserts inside any
+plausible window, and a park found weeks later re-asserts outside it and
+duplicates.
+
+## A crashed Read attempt strands its run
+
+The same crash boundary strands a `Read` occurrence. An authorization with no
+observation folds to `WaitingReads`, and the fold's per-occurrence
+single-outstanding-attempt rule forbids a second attempt, so nothing can
+discharge it. `drive_once` reports the frontier without acting and the run never
+progresses. The public projection labels it `retryable_evidence_gap`; nothing
+retries it.
+
+Unlike the Effect case there is no safety obstacle. A Read is already defined as
+not consuming externally meaningful state, so a second attempt is sound by
+construction. The restriction is uniform rather than required.
+
+That definition is prose, not a certification obligation. Nothing checks that a
+capability declared `Read` consumes nothing, and any recovery that reissues a
+Read makes the definition load-bearing where it currently is not.
+
+`fresh_folds_resume_every_runtime_crash_boundary` in `mfm-store` covers this
+boundary only because the test still holds the in-process authorization handle
+that a real crash destroys.
+
+[`effect-entry-resolution.md`](effect-entry-resolution.md) resolves this gap
+with the same leaf it proposes for the Effect case; a Read needs no
+declaration because a repeat absorbs vacuously.
 
 ## Verification residuals
 
