@@ -59,6 +59,7 @@ libraries and inject a qualified application.
 - [Portfolio snapshot](docs/portfolio-snapshot.md)
 - [Persisted/public surfaces](docs/persisted-public-surfaces.md)
 - [Build and verification](docs/build-and-verification.md)
+- [Known gaps](docs/known-gaps.md)
 - [CLI](bin/cli/README.md) and [REST API](bin/rest-api/README.md)
 
 ## Development
