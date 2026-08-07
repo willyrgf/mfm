@@ -526,12 +526,12 @@ mod tests {
             // A direct literal is reviewed fixed SQL. Any computed SQL, including
             // a wrapper around a literal or a value alias, must go through the
             // private catalog path below.
-            // The retry wrapper owns the same fixed SQL body as the direct
-            // pinned future; both remain reviewed static-query boundaries.
+            // The pinned future owns a fixed SQL body and remains a reviewed
+            // static-query boundary.
             if !self
                 .call_stack
                 .iter()
-                .all(|parent| matches!(parent.as_str(), "pin" | "retry_transient_checkpoint_read"))
+                .all(|parent| matches!(parent.as_str(), "pin"))
             {
                 return false;
             }

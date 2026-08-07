@@ -5,7 +5,6 @@
 //! application code never receives a pool, URL, connection option, raw fence, or
 //! DML transaction handle.
 
-mod checkpoint;
 mod configuration;
 mod error;
 mod qualification;
@@ -18,12 +17,6 @@ mod sql_inventory;
 mod structured;
 mod transaction;
 
-#[cfg(feature = "test-support")]
-pub use checkpoint::ExternalCheckpointLedger;
-pub use checkpoint::{
-    CheckpointError, CheckpointKey, CheckpointMutation, CheckpointReadFixation, CheckpointState,
-    CheckpointStream, ExternalCheckpointAuthority,
-};
 pub use configuration::PostgresConfigurationHistoryBackend;
 pub use error::{PostgresStoreError, Result};
 pub use qualification::{

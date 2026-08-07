@@ -484,12 +484,12 @@ impl PortableRunExport {
         let Some(retained_release_trust) = trust.retained_release_trust else {
             return Err(PortableExportError::Invalid);
         };
-        let Some(store_checkpoint_trust) = trust.store_checkpoint_trust else {
+        let Some(store_lineage_trust) = trust.store_lineage_trust else {
             return Err(PortableExportError::Invalid);
         };
         for fixation in self.run_fixations() {
             if !retained_release_trust.verify(&fixation.fixation, self.kind)
-                || !store_checkpoint_trust.verify(
+                || !store_lineage_trust.verify(
                     &fixation.fixation,
                     self.kind,
                     &self.closure_reference,
@@ -902,8 +902,8 @@ pub trait RetainedPhysicalReleaseTrust:
     fn verify(&self, fixation: &PortableFixation, kind: ExportKind) -> bool;
 }
 
-/// Explicit external store/checkpoint trust for one portable closure.
-pub trait StoreCheckpointTrust: mfm_authority_seal::StoreCheckpointTrustSeal + Send + Sync {
+/// Explicit external store-lineage trust for one portable closure.
+pub trait StoreLineageTrust: mfm_authority_seal::StoreLineageTrustSeal + Send + Sync {
     /// Verifies target lineage, writer epoch, and exact authorized closure.
     fn verify(
         &self,
@@ -923,8 +923,8 @@ pub struct ReplayTrustSnapshot<'a> {
     physical_binding_verifier: &'a dyn PublicPhysicalBindingVerifier,
     /// Optional retained-release lineage verifier.
     retained_release_trust: Option<&'a dyn RetainedPhysicalReleaseTrust>,
-    /// Optional external store/checkpoint verifier.
-    store_checkpoint_trust: Option<&'a dyn StoreCheckpointTrust>,
+    /// Optional external store-lineage verifier.
+    store_lineage_trust: Option<&'a dyn StoreLineageTrust>,
     /// Exact authorized closure reference, when one was captured.
     authorized_closure_reference: Option<&'a ContentDigest>,
 }
@@ -939,7 +939,7 @@ impl<'a> ReplayTrustSnapshot<'a> {
             program_verifier,
             physical_binding_verifier,
             retained_release_trust: None,
-            store_checkpoint_trust: None,
+            store_lineage_trust: None,
             authorized_closure_reference: None,
         }
     }
@@ -950,11 +950,11 @@ impl<'a> ReplayTrustSnapshot<'a> {
         mut self,
         closure_reference: &'a ContentDigest,
         retained_release_trust: &'a dyn RetainedPhysicalReleaseTrust,
-        store_checkpoint_trust: &'a dyn StoreCheckpointTrust,
+        store_lineage_trust: &'a dyn StoreLineageTrust,
     ) -> Self {
         self.authorized_closure_reference = Some(closure_reference);
         self.retained_release_trust = Some(retained_release_trust);
-        self.store_checkpoint_trust = Some(store_checkpoint_trust);
+        self.store_lineage_trust = Some(store_lineage_trust);
         self
     }
 }
@@ -1578,7 +1578,7 @@ mod tests {
     use super::{
         AuthorizedExportClosure, ExportKind, PortableAuthorizationDecision, PortableExportError,
         PortableFactRoute, PortableFixation, PortableRunExport, PortableRunPrefix,
-        ReplayTrustSnapshot, RetainedPhysicalReleaseTrust, StoreCheckpointTrust,
+        ReplayTrustSnapshot, RetainedPhysicalReleaseTrust, StoreLineageTrust,
         MAX_PORTABLE_EXPORT_BYTES, MAX_PORTABLE_FRAME_BYTES, PORTABLE_EXPORT_GRANT,
     };
 
@@ -1630,11 +1630,11 @@ mod tests {
         }
     }
 
-    struct AcceptCheckpoint;
+    struct AcceptStoreLineage;
 
-    impl mfm_authority_seal::StoreCheckpointTrustSeal for AcceptCheckpoint {}
+    impl mfm_authority_seal::StoreLineageTrustSeal for AcceptStoreLineage {}
 
-    impl StoreCheckpointTrust for AcceptCheckpoint {
+    impl StoreLineageTrust for AcceptStoreLineage {
         fn verify(
             &self,
             _fixation: &PortableFixation,
@@ -1661,9 +1661,9 @@ mod tests {
         tenant_scope_id: TenantScopeId,
     }
 
-    impl mfm_authority_seal::StoreCheckpointTrustSeal for ExpectedTenant {}
+    impl mfm_authority_seal::StoreLineageTrustSeal for ExpectedTenant {}
 
-    impl StoreCheckpointTrust for ExpectedTenant {
+    impl StoreLineageTrust for ExpectedTenant {
         fn verify(
             &self,
             fixation: &PortableFixation,
@@ -1820,9 +1820,9 @@ mod tests {
         let reject_program = RejectProgram;
         let reject_physical = RejectPhysical;
         let release = AcceptRelease;
-        let checkpoint = AcceptCheckpoint;
+        let lineage = AcceptStoreLineage;
         let trust = ReplayTrustSnapshot::new(&reject_program, &reject_physical)
-            .with_authorized_closure(export.closure_reference(), &release, &checkpoint);
+            .with_authorized_closure(export.closure_reference(), &release, &lineage);
         assert_eq!(
             PortableRunExport::verify_offline(&bytes, &trust),
             Err(PortableExportError::Invalid)
@@ -1943,10 +1943,10 @@ mod tests {
         let reject_program = RejectProgram;
         let reject_physical = RejectPhysical;
         let release = AcceptRelease;
-        let checkpoint = AcceptCheckpoint;
+        let lineage = AcceptStoreLineage;
         let trusted_golden = golden_export();
         let trusted_original = ReplayTrustSnapshot::new(&reject_program, &reject_physical)
-            .with_authorized_closure(trusted_golden.closure_reference(), &release, &checkpoint);
+            .with_authorized_closure(trusted_golden.closure_reference(), &release, &lineage);
         assert_eq!(
             PortableRunExport::verify_offline(&substituted_bytes, &trusted_original),
             Err(PortableExportError::Invalid)
@@ -2039,12 +2039,12 @@ mod tests {
                         == Some("rejection")
                     {
                         let release = AcceptRelease;
-                        let checkpoint = AcceptCheckpoint;
+                        let lineage = AcceptStoreLineage;
                         let trust = ReplayTrustSnapshot::new(&RejectProgram, &RejectPhysical)
                             .with_authorized_closure(
                                 export.closure_reference(),
                                 &release,
-                                &checkpoint,
+                                &lineage,
                             );
                         assert!(
                             PortableRunExport::verify_offline(&bytes, &trust).is_err(),
@@ -2087,13 +2087,13 @@ mod tests {
                             vector["id"]
                         );
                         let release = AcceptRelease;
-                        let checkpoint = AcceptCheckpoint;
+                        let lineage = AcceptStoreLineage;
                         let trust =
                             ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
                                 .with_authorized_closure(
                                     generated.closure_reference(),
                                     &release,
-                                    &checkpoint,
+                                    &lineage,
                                 );
                         let offline = PortableRunExport::verify_offline(&bytes, &trust)
                             .expect("generated offline acceptance");
@@ -2138,13 +2138,13 @@ mod tests {
                             vector["id"]
                         );
                         let release = AcceptRelease;
-                        let checkpoint = AcceptCheckpoint;
+                        let lineage = AcceptStoreLineage;
                         let trust =
                             ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
                                 .with_authorized_closure(
                                     generated.closure_reference(),
                                     &release,
-                                    &checkpoint,
+                                    &lineage,
                                 );
                         let offline = PortableRunExport::verify_offline(&bytes, &trust)
                             .expect("offline observed-read audit fixture");
@@ -2249,9 +2249,9 @@ mod tests {
             .to_canonical_bytes()
             .expect("encode canonical portable frames");
         let release = AcceptRelease;
-        let checkpoint = AcceptCheckpoint;
+        let lineage = AcceptStoreLineage;
         let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
-            .with_authorized_closure(export.closure_reference(), &release, &checkpoint);
+            .with_authorized_closure(export.closure_reference(), &release, &lineage);
 
         let online = super::project_replay_result(&fixture_recorded).expect("online projection");
         let offline =
@@ -2269,12 +2269,12 @@ mod tests {
         let expected_target = ExpectedTarget {
             target_key: expected_target,
         };
-        let accepted_checkpoint = AcceptCheckpoint;
+        let accepted_lineage = AcceptStoreLineage;
         let target_trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
             .with_authorized_closure(
                 wrong_target.closure_reference(),
                 &expected_target,
-                &accepted_checkpoint,
+                &accepted_lineage,
             );
         assert_eq!(
             PortableRunExport::verify_offline(&wrong_target_bytes, &target_trust),
@@ -2346,9 +2346,9 @@ mod tests {
             .to_canonical_bytes()
             .expect("encode later-audit frames");
         let release = AcceptRelease;
-        let checkpoint = AcceptCheckpoint;
+        let lineage = AcceptStoreLineage;
         let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
-            .with_authorized_closure(audit.closure_reference(), &release, &checkpoint);
+            .with_authorized_closure(audit.closure_reference(), &release, &lineage);
         let online = super::project_replay_result(&fixture_recorded).expect("online audit result");
         let offline = PortableRunExport::verify_offline(&audit_bytes, &trust)
             .expect("offline later-audit result");

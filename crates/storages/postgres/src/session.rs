@@ -4,15 +4,11 @@
 //! receives a `PgPool`, URL, connection option, or raw writer fence.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
 
 use mfm_ids::{StoreEpoch, StoreScopeId};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
-#[cfg(feature = "test-support")]
-use crate::checkpoint::ExternalCheckpointLedger;
-use crate::checkpoint::{CheckpointTarget, ExternalCheckpointAuthority};
 use crate::error::{PostgresStoreError, Result};
 use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 use crate::schema::{
@@ -55,7 +51,6 @@ pub struct TargetBinding {
     fence_generation: u64,
     release_epoch: u64,
     roles: TargetRoleNames,
-    checkpoint: Arc<dyn ExternalCheckpointAuthority>,
 }
 
 impl PartialEq for TargetBinding {
@@ -110,22 +105,6 @@ impl TargetBinding {
 
     pub(crate) const fn release_epoch(&self) -> u64 {
         self.release_epoch
-    }
-
-    pub(crate) fn checkpoint(&self) -> &Arc<dyn ExternalCheckpointAuthority> {
-        &self.checkpoint
-    }
-
-    pub(crate) fn checkpoint_target(&self) -> CheckpointTarget {
-        CheckpointTarget {
-            store_scope_id: self.store_scope_id.clone(),
-            store_epoch: self.store_epoch,
-            target_key: self.target_key.as_str().to_owned(),
-            database_oid: self.database_oid,
-            schema_name: self.schema_name.clone(),
-            fence_generation: self.fence_generation,
-            release_epoch: self.release_epoch,
-        }
     }
 
     pub(crate) fn roles(&self) -> &TargetRoleNames {
@@ -289,7 +268,6 @@ pub struct PostgresTargetAdmission {
     run_writer: String,
     configuration_reader: String,
     configuration_writer: Option<String>,
-    checkpoint: Arc<dyn ExternalCheckpointAuthority>,
 }
 
 impl std::fmt::Debug for PostgresTargetAdmission {
@@ -308,8 +286,7 @@ impl std::fmt::Debug for PostgresTargetAdmission {
 /// exactly once. The resulting admission remains move-only and is consumed by
 /// a session opener.
 pub trait DeploymentCredentialSink: mfm_authority_seal::DeploymentCredentialSinkSeal {
-    /// Issues one target admission from deployment-owned login material and
-    /// the deployment-owned non-rollback checkpoint authority.
+    /// Issues one target admission from deployment-owned login material.
     fn issue_target(
         &mut self,
         schema_name: String,
@@ -317,7 +294,6 @@ pub trait DeploymentCredentialSink: mfm_authority_seal::DeploymentCredentialSink
         run_writer: String,
         configuration_reader: String,
         configuration_writer: Option<String>,
-        checkpoint: Arc<dyn ExternalCheckpointAuthority>,
     ) -> Result<PostgresTargetAdmission>;
 }
 
@@ -346,7 +322,6 @@ impl DeploymentCredentialSink for AdmissionSink {
         run_writer: String,
         configuration_reader: String,
         configuration_writer: Option<String>,
-        checkpoint: Arc<dyn ExternalCheckpointAuthority>,
     ) -> Result<PostgresTargetAdmission> {
         if schema_name.is_empty()
             || run_reader.is_empty()
@@ -362,7 +337,6 @@ impl DeploymentCredentialSink for AdmissionSink {
             run_writer,
             configuration_reader,
             configuration_writer,
-            checkpoint,
         })
     }
 }
@@ -382,14 +356,12 @@ impl PostgresTargetAdmission {
         configuration_reader: String,
         configuration_writer: Option<String>,
     ) -> Self {
-        let checkpoint = Arc::new(ExternalCheckpointLedger::for_test(&schema_name));
         Self {
             schema_name,
             run_reader,
             run_writer,
             configuration_reader,
             configuration_writer,
-            checkpoint,
         }
     }
 }
@@ -477,11 +449,9 @@ pub async fn open_application_sessions(
         run_reader: run_reader_url,
         run_writer: run_writer_url,
         configuration_reader: configuration_reader_url,
-        checkpoint,
         ..
     } = admission;
-    let target =
-        load_target_from_login(&run_reader_url, &schema_name, Arc::clone(&checkpoint)).await?;
+    let target = load_target_from_login(&run_reader_url, &schema_name).await?;
     let run_reader = open_role_session(
         &run_reader_url,
         &schema_name,
@@ -503,18 +473,10 @@ pub async fn open_application_sessions(
         SessionKind::ConfigurationReader,
     )
     .await?;
-    if load_target_from_login(
-        &configuration_reader_url,
-        &schema_name,
-        Arc::clone(&checkpoint),
-    )
-    .await?
-        != target
-    {
+    if load_target_from_login(&configuration_reader_url, &schema_name).await? != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
-    let after =
-        load_target_from_login(&run_writer_url, &schema_name, Arc::clone(&checkpoint)).await?;
+    let after = load_target_from_login(&run_writer_url, &schema_name).await?;
     if after != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
@@ -534,18 +496,12 @@ pub async fn open_configuration_sessions(
         schema_name,
         configuration_reader: configuration_reader_url,
         configuration_writer: Some(configuration_writer_url),
-        checkpoint,
         ..
     } = admission
     else {
         return Err(PostgresStoreError::TargetSessionRejected);
     };
-    let target = load_target_from_login(
-        &configuration_reader_url,
-        &schema_name,
-        Arc::clone(&checkpoint),
-    )
-    .await?;
+    let target = load_target_from_login(&configuration_reader_url, &schema_name).await?;
     let configuration_reader = open_role_session(
         &configuration_reader_url,
         &schema_name,
@@ -560,12 +516,7 @@ pub async fn open_configuration_sessions(
         SessionKind::ConfigurationWriter,
     )
     .await?;
-    let after = load_target_from_login(
-        &configuration_writer_url,
-        &schema_name,
-        Arc::clone(&checkpoint),
-    )
-    .await?;
+    let after = load_target_from_login(&configuration_writer_url, &schema_name).await?;
     if after != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
@@ -586,14 +537,12 @@ pub async fn open_combined_sessions(
         run_writer: run_writer_material,
         configuration_reader: configuration_reader_material,
         configuration_writer: Some(configuration_writer_material),
-        checkpoint,
         ..
     } = admission
     else {
         return Err(PostgresStoreError::TargetSessionRejected);
     };
-    let target =
-        load_target_from_login(&run_reader_material, &schema_name, Arc::clone(&checkpoint)).await?;
+    let target = load_target_from_login(&run_reader_material, &schema_name).await?;
     let run_reader = open_role_session(
         &run_reader_material,
         &schema_name,
@@ -622,25 +571,12 @@ pub async fn open_combined_sessions(
         SessionKind::ConfigurationWriter,
     )
     .await?;
-    if load_target_from_login(
-        &configuration_reader_material,
-        &schema_name,
-        Arc::clone(&checkpoint),
-    )
-    .await?
-        != target
-        || load_target_from_login(
-            &configuration_writer_material,
-            &schema_name,
-            Arc::clone(&checkpoint),
-        )
-        .await?
-            != target
+    if load_target_from_login(&configuration_reader_material, &schema_name).await? != target
+        || load_target_from_login(&configuration_writer_material, &schema_name).await? != target
     {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
-    let after =
-        load_target_from_login(&run_writer_material, &schema_name, Arc::clone(&checkpoint)).await?;
+    let after = load_target_from_login(&run_writer_material, &schema_name).await?;
     if after != target {
         return Err(PostgresStoreError::TargetSessionRejected);
     }
@@ -656,11 +592,10 @@ pub async fn open_combined_sessions(
 async fn load_target_from_login(
     database_url: &str,
     expected_schema: &str,
-    checkpoint: Arc<dyn ExternalCheckpointAuthority>,
 ) -> Result<TargetBinding> {
     let pool = connect_login(database_url, expected_schema).await?;
     let identity = validate_authoritative_schema_at(&pool, expected_schema).await?;
-    let binding = load_target_binding(&pool, expected_schema, identity, checkpoint).await?;
+    let binding = load_target_binding(&pool, expected_schema, identity).await?;
     pool.close().await;
     Ok(binding)
 }
@@ -696,7 +631,6 @@ pub(crate) async fn load_target_binding(
     pool: &PgPool,
     expected_schema: &str,
     identity: ValidatedStoreIdentity,
-    checkpoint: Arc<dyn ExternalCheckpointAuthority>,
 ) -> Result<TargetBinding> {
     let mut transaction = pool
         .begin()
@@ -817,43 +751,6 @@ pub(crate) async fn load_target_binding(
         &row.try_get::<String, _>("release_epoch")
             .map_err(|_| PostgresStoreError::TargetSessionRejected)?,
     )?;
-    let target = CheckpointTarget {
-        store_scope_id: store_scope_id.clone(),
-        store_epoch,
-        target_key: target_key.as_str().to_owned(),
-        database_oid,
-        schema_name: expected_schema.to_owned(),
-        fence_generation,
-        release_epoch,
-    };
-    // Production admission is issued by the deployment checkpoint broker; a
-    // database session may only validate that exact external target. The
-    // in-memory ledger is intentionally self-registering only for the
-    // test-support fixture, where no broker process exists.
-    #[cfg(feature = "test-support")]
-    checkpoint
-        .register_target(
-            &target.store_scope_id,
-            target.store_epoch,
-            &target.target_key,
-            target.database_oid,
-            &target.schema_name,
-            target.fence_generation,
-            target.release_epoch,
-        )
-        .map_err(|_| PostgresStoreError::TargetSessionRejected)?;
-    #[cfg(not(feature = "test-support"))]
-    checkpoint
-        .validate_target(
-            &target.store_scope_id,
-            target.store_epoch,
-            &target.target_key,
-            target.database_oid,
-            &target.schema_name,
-            target.fence_generation,
-            target.release_epoch,
-        )
-        .map_err(|_| PostgresStoreError::TargetSessionRejected)?;
     transaction
         .commit()
         .await
@@ -870,7 +767,6 @@ pub(crate) async fn load_target_binding(
         fence_generation,
         release_epoch,
         roles,
-        checkpoint,
     })
 }
 

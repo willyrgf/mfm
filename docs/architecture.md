@@ -158,7 +158,7 @@ Prior-run fact selection keeps its pure and persisted responsibilities separate:
   complete expected entry-point identity set and rejects missing, extra, or duplicate identities.
 
 Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. The history port,
-physical-binding verifier, wallet authority, and PostgreSQL checkpoint ports all inherit
+physical-binding verifier and wallet authority ports all inherit
 workspace-private authority markers; ordinary downstream crates therefore cannot implement a
 look-alike authority by satisfying the visible methods. Production adapters and backends stay
 private to store assembly; Runtime never receives a raw backend or writer. It
@@ -262,16 +262,18 @@ and clears pending assembly leases atomically; a concurrent Finish succeeds only
 before that cutover. Lease observation, revocation drain, and promotion drain account for both
 ordinary authority leases and nonexpired assembly leases.
 
-The external checkpoint owner is a separate control-plane authority outside every restartable
+The wallet checkpoint owner is a separate control-plane authority outside every restartable
 provider child. It retains one acknowledged prefix and at most one exact prepared transition.
 Children prepare before SQL, acknowledge only the observed exact successor prefix, and reconcile
 before readiness: predecessor retains `Prepared` for identical-only retry, successor finalizes it,
-and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. PostgreSQL
-run and configuration read paths retry only the bounded commit-before-acknowledgement observation;
-configuration append ambiguity reconnects through the append authority and retries the identical
-canonical revision before returning an unresolved ambiguity. A persistent mismatch still rejects
-the operation. No child-local file, copied database, or public attestation can reset that
-checkpoint.
+and rollback, database-ahead, sibling-successor, or target mismatch rejects startup. Only a test
+implementation of that authority exists in this repository.
+
+The structured run and configuration stores have no such authority. PostgreSQL is their sole
+append-only authority, and a rewound database is accepted rather than detected; see *Append-only
+authority and the absent witness* in [`design.md`](design.md). Configuration append ambiguity
+retries the identical canonical revision so the database resolves whether that exact append is
+durable, and a persistent mismatch still rejects the operation.
 
 ## Portfolio placement
 
@@ -304,9 +306,10 @@ bindings.
 The store's canonical ingress is shared by memory and PostgreSQL. It validates the complete
 append envelope, persisted-object closure, bounded counts, canonical bytes, and exact predecessor
 before either backend performs DML. PostgreSQL loads query the indexed head before loading any
-batch, object, or revision rows and revalidate target and external-checkpoint lineage before the
-snapshot is released. Checkpoint state is keyed by the stable `(store, epoch, target, stream,
-stream-id)` identity; a predecessor is a mutation precondition, never a second stream identity.
+batch, object, or revision rows, so that query establishes the repeatable-read snapshot; the
+folded prefix must then equal that same-snapshot head, and the target is revalidated before the
+snapshot is released. A predecessor digest is a compare-and-append precondition, never a second
+stream identity.
 
 Runtime access proofs are consumed by both Read and Effect adapters. A qualified adapter must bind
 the proof's access kind, state input where applicable, and retained physical certificate before

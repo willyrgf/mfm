@@ -382,18 +382,6 @@ async fn validate_target(
     binding: &TargetBinding,
     read_only: bool,
 ) -> Result<(), StructuredStoreError> {
-    binding
-        .checkpoint()
-        .validate_target(
-            binding.store_scope_id(),
-            binding.store_epoch(),
-            binding.target_key().as_str(),
-            binding.database_oid(),
-            binding.schema_name(),
-            binding.fence_generation(),
-            binding.release_epoch(),
-        )
-        .map_err(|_| StructuredStoreError::InvalidHistory)?;
     let row = sqlx::query(
         "SELECT pg_catalog.current_database()::text AS database_name, \
                 pg_catalog.current_schema()::text AS schema_name, \
