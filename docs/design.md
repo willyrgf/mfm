@@ -429,20 +429,10 @@ transaction, store lineage, and writer epoch. Deployment infrastructure owns tar
 revocation, promotion, and sender-path fencing. Repository production assembly requires that
 provider and has no fallback or self-attestation path.
 
-The provider child never owns the wallet non-rollback checkpoint. That checkpoint is a
-deployment-provided authority: it retains the exact physical target, fence lineage, epoch,
-acknowledged database-prefix digest, and at most one prepared successor across child crashes.
-`Prepared` records the exact predecessor, successor, operation, and optional successor target
-before SQL mutation; `Acknowledged` advances only after the database exposes that exact successor
-prefix. Startup at a prepared predecessor retains the preparation and permits only its
-byte-identical retry; startup at the prepared successor acknowledges it. Rollback,
-database-ahead state, a competing successor, or any target/incarnation/public-head mismatch
-rejects readiness without repair or fallback.
-
-This repository contains only a test implementation of that authority. Its guarantee therefore
-depends on a deployment component that does not exist here, and it carries the same restore-domain
-requirement described under *Append-only authority and the absent witness* below: a witness that
-is restored alongside the database it witnesses proves nothing.
+The wallet authority has no non-rollback checkpoint either. Its append-only currentness rests on
+immutable application-role history, schema qualification, and the provider's signed mutation
+attestations, all of which live in the same database they describe. The limitation recorded under
+*Append-only authority and the absent witness* below applies to the wallet domain identically.
 An exact append retry whose batch is already durable may return `ExistingSame` after later
 successors have advanced the stream: reconciliation must match the retried candidate to the
 indexed current heads and must never rewind them to the retried predecessor. A configuration
