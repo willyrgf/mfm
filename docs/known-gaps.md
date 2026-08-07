@@ -41,10 +41,18 @@ effect is possible in any domain.
 
 Recovery is not generic. `DriveOutcome::PossibleEntry` is terminal in the
 runtime and surfaces as an operational block in `mfm-app`; the run parks
-indefinitely. Only the EVM domain resolves it, by re-observing chain state on a
-fresh run. A new domain with external effects inherits the safety property and
-strands runs on crash, and nothing in the type system requires it to declare
+indefinitely. A new domain with external effects inherits the safety property
+and strands runs on crash, and nothing in the type system requires it to declare
 whether recovery is possible at all.
+
+No domain resolves a parked run, including EVM. What EVM recovers is the
+submission *intent*, and the caller does it: `derive_submission_intent_id`
+hashes only the domain, issuer, and caller submission token, so a fresh run
+under the same token re-derives the same reservation and operation keys, finds
+the retained state, and observes the chain instead of broadcasting again. The
+nonce reservation is what makes that cross-run retry safe. The originally parked
+run stays parked forever, and every in-run reconciliation branch is settlement
+of a committed observation, so none of them is reachable from a park.
 
 The fold reaches the terminal frontier without consulting any per-capability
 property. A capability whose external system would absorb a repeat of the exact
