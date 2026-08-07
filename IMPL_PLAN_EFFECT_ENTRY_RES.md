@@ -97,6 +97,8 @@ deleted under any of these designs** — and the reason is the gap itself: EVM h
 | `CandidateSlotRoute::ObserveRetained`, `PrepareRetainedCandidateObservationState`, retained branch of `select_candidate_attempt_route` (`submission_process.rs:758-780`) | did *any* candidate in the family win the nonce race? | the candidate family | **survives** |
 | `PendingEvmSubmissionFailure::Reconcile`, `reconcile_absent`/`reconcile_reserved` (`submission_process.rs:580-602`), both `CustomFailureHandler` reconcile arms, `ReadReservationStatusAfterFailureState`, `ReadCandidateStatusAfterFailureState`, `ReadExhaustionStatusState` | has another run already reached a terminal answer for this shared reservation? | the shared reservation | **survives** |
 | `CandidateActivationDecision::Reconcile` + `MarkActivationReconcileState` + `candidate-activation-reconcile` arm + `ReadCandidateWalletNonceStatusState` | did another writer get to this nonce first? | the shared reservation | **survives**, narrower reachability |
+| the nonce reservation itself, the candidate family, and `Refreshable`/`SupersededBeforeEntry` on all four capabilities | who may occupy this nonce, and has the binding rotated? | the nonce slot | **survives** untouched; orthogonal axis |
+| `PriorEffectDisposition::NoUnresolvedPossibleEntry` (`wallet_authority.rs:976-979, 1042`) | may this domain be activated at all? | the whole domain, at activation | **survives**; a precondition, never a resolution |
 
 `ObserveRetained` reads as adoption of an abandoned run's candidate and does serve that, but
 `SubmissionWork` gives away its real purpose: `next_candidate_ordinal` is "next family ordinal to
@@ -105,11 +107,33 @@ walk" (`submission.rs:1273-1276`). The walk revisits every activated ordinal, in
 same run activated, because an older activated replacement may still win. Deleting it breaks
 candidate-family semantics.
 
+**What "only the EVM domain resolves it" actually means, because it is easy to over-read.** Nothing in
+EVM resolves the parked *run*. Every reconcile construct above is a settlement branch on a **committed
+observation** (`settle_candidate_activation`, `submission_process.rs:1045-1093`), so all of them are
+structurally unreachable from a park, which by definition has no observation. What recovers is the
+*intent*, not the run, and the caller does it: `derive_submission_intent_id`
+(`wallet_authority.rs:508-521`) hashes only the domain, issuer, and caller submission token — no run id
+— so a fresh run under the same token re-derives the same reservation key and operation keys, finds the
+retained reservation and activated candidates, and `select_candidate_attempt_route` walks
+`ObserveRetained` from ordinal 0 to read the chain instead of broadcasting again. The original parked
+run stays parked forever, today and after commit 6.
+
+Two consequences. The nonce reservation is doing the safety work in that cross-run retry, which is
+exactly why the rejected design mistook the slot for the mechanism — but the slot is what makes the
+*caller's* retry safe, and it is not what the kernel needs to make a *re-assertion* safe. And commit 6
+adds the first in-run resolution EVM has ever had; it replaces no code, only an operational procedure.
+
 `CandidateActivationDecision::Reconcile` fires on `CandidateProgressionConflict` and on
 `AlreadyRetained` (`submission_process.rs:1054-1091`). The `AlreadyRetained` branch is today reached
-partly because a parked occurrence's own earlier write is rediscovered by a fresh run. After commit 6
-the parked run resolves itself, so that reachability disappears; the genuine "another writer got here
-first" case remains.
+partly because a parked occurrence's own earlier write is rediscovered by that caller-initiated fresh
+run. After commit 6 the parked run resolves itself, so that reachability narrows; the genuine "another
+writer got here first" case remains.
+
+`PriorEffectDisposition::NoUnresolvedPossibleEntry` is a single-variant enum on the permanent
+`WalletNonceDomainActivationRecord`, so activating a wallet-nonce domain requires asserting that no
+prior possible-entry effect is outstanding. It is an operator gate, not a resolution, and it stays:
+an `EntryOnce` capability can still park, and a spent budget still parks. Commit 6 makes the assertion
+cheaper to satisfy and — with commit 2 — checkable before it is made, rather than asserted blind.
 
 **`AlreadyRetained` is also the working proof that absorption is the right axis.** It is already an
 adapter re-invocation that reaches the same key, finds its own write present, and reports it — the
