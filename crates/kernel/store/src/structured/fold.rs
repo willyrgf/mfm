@@ -1025,9 +1025,9 @@ pub(super) fn prepare_state_transition(
     )?;
     machine.transitions.insert(
         transition.occurrence_id.clone(),
-        RecordedTransition {
+        Box::new(RecordedTransition {
             record: transition.clone(),
-        },
+        }),
     );
     let mut after = machine.derive(true)?;
     transition.after_semantic_state_digest = semantic_state_digest(
@@ -1822,8 +1822,8 @@ struct FoldMachine {
     object_first_seen_sequence: BTreeMap<ContentRef, u64>,
     logical_keys: BTreeMap<RecordLogicalKey, JournalRecordHash>,
     initial_bindings: Vec<LexicalValueRef>,
-    transitions: BTreeMap<OccurrenceId, RecordedTransition>,
-    authorizations: BTreeMap<AccessAttemptId, RecordedAuthorization>,
+    transitions: BTreeMap<OccurrenceId, Box<RecordedTransition>>,
+    authorizations: BTreeMap<AccessAttemptId, Box<RecordedAuthorization>>,
     occurrence_attempts: BTreeMap<OccurrenceId, Vec<AccessAttemptId>>,
     observations: BTreeMap<AccessAttemptId, RecordedObservation>,
     semantic_head: Option<SemanticHead>,
@@ -2089,10 +2089,10 @@ impl FoldMachine {
             .push(record.access_attempt_id.clone());
         self.authorizations.insert(
             record.access_attempt_id.clone(),
-            RecordedAuthorization {
+            Box::new(RecordedAuthorization {
                 record_ref: record_ref.clone(),
                 record: record.clone(),
-            },
+            }),
         );
         self.derive(false)
     }
@@ -2154,9 +2154,9 @@ impl FoldMachine {
         }
         self.transitions.insert(
             record.occurrence_id.clone(),
-            RecordedTransition {
+            Box::new(RecordedTransition {
                 record: record.clone(),
-            },
+            }),
         );
         let after = self.derive(false)?;
         let expected_after =
@@ -2971,7 +2971,7 @@ fn resolve_failure(
 fn state_leaf(
     state: &ExpandedStateBinding,
     occurrence_attempts: &BTreeMap<OccurrenceId, Vec<AccessAttemptId>>,
-    authorizations: &BTreeMap<AccessAttemptId, RecordedAuthorization>,
+    authorizations: &BTreeMap<AccessAttemptId, Box<RecordedAuthorization>>,
     observations: &BTreeMap<AccessAttemptId, RecordedObservation>,
 ) -> super::Result<StateLeaf> {
     let Some(attempt_id) = occurrence_attempts
@@ -3956,7 +3956,7 @@ fn validate_authorization(
     objects: &BTreeMap<ContentRef, HistoryObject>,
     bindings: &BTreeMap<ContentRef, LexicalValueRef>,
     occurrence_attempts: &BTreeMap<OccurrenceId, Vec<AccessAttemptId>>,
-    authorizations: &BTreeMap<AccessAttemptId, RecordedAuthorization>,
+    authorizations: &BTreeMap<AccessAttemptId, Box<RecordedAuthorization>>,
     observations: &BTreeMap<AccessAttemptId, RecordedObservation>,
     physical_binding_verification_mode: PhysicalBindingVerificationMode,
     physical_binding_verifier: &dyn PublicPhysicalBindingVerifier,
@@ -4456,7 +4456,7 @@ fn validate_transition(
     program: &VerifiedProgramData,
     objects: &BTreeMap<ContentRef, HistoryObject>,
     bindings: &BTreeMap<ContentRef, LexicalValueRef>,
-    authorizations: &BTreeMap<AccessAttemptId, RecordedAuthorization>,
+    authorizations: &BTreeMap<AccessAttemptId, Box<RecordedAuthorization>>,
     observations: &BTreeMap<AccessAttemptId, RecordedObservation>,
 ) -> super::Result<()> {
     let expanded = program.expanded();
@@ -4769,7 +4769,7 @@ struct SemanticTransitionPreimage<'a> {
 
 fn semantic_state_digest(
     certified_program_ref: &ContentRef,
-    transitions: &BTreeMap<OccurrenceId, RecordedTransition>,
+    transitions: &BTreeMap<OccurrenceId, Box<RecordedTransition>>,
     bindings: &BTreeMap<ContentRef, LexicalValueRef>,
 ) -> super::Result<RunSemanticStateDigest> {
     let preimage = SemanticStatePreimage {
