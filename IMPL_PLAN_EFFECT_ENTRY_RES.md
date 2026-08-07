@@ -20,6 +20,46 @@ not to widen the diff.
 
 ---
 
+## No compatibility paths
+
+`docs/code-quality.md` is not advisory here, and this plan makes a frontier variant, a drive outcome, a
+replay status, a struct field, and several public reason strings unreachable. Every one of them is
+**deleted in the commit that makes it unreachable** — same commit, not a follow-up.
+
+> Do not deprecate or hide it; Git history is the archive. Never add legacy decoders or migrations,
+> compatibility shims, dual or mixed-version paths, downgrade or software-version rollback support, or
+> fallbacks. — `docs/code-quality.md`
+
+Concretely forbidden anywhere in this work:
+
+- retaining an unreachable variant, field, arm, or projection because something might still match on
+  it — if nothing produces it, it is deleted, and the compiler enumerates the match sites;
+- a feature flag, config key, or environment switch selecting old versus new park behaviour;
+- keeping both answers to a decided question. The one open decision in *Material uncertainties* — is
+  closing gated on remaining budget — is decided in commit 5, and the losing branch is not written;
+- a superseded test kept alongside its replacement, whether by `#[ignore]`, a `legacy_`/`old_` rename,
+  or a doc comment saying it covers the previous shape. Rewrite it or delete it;
+- a doc sentence describing behaviour that no longer exists, left in place as background. `docs/` is a
+  current-design document, and a stale paragraph there is superseded code with better formatting.
+
+Two things that look like exceptions and are not. **`EntryOnce` is not a legacy mode** — it is the
+honest current declaration for a capability whose external system does not absorb a repeat, and it is
+where the residual gap lives by design. **`StructuredFrontier::PossibleEntry` is not deleted** — it
+stays reachable for `EntryOnce` and for a spent budget, which is exactly the floor the design keeps.
+Neither is retained for compatibility; both are current design.
+
+And the *Rejected alternatives* section of the design doc stays. Recorded reasons a design failed are
+not superseded code; they are what stops the next revision from reproposing it. The same is true of
+historical hostile-input fixtures.
+
+**This plan deletes itself.** The previous cutover retired 14,942 lines of plan, RFC, and review
+documents into `docs/known-gaps.md` when it completed (`7fb08f33`). This file follows that pattern:
+when commit 6 lands, `IMPL_PLAN_EFFECT_ENTRY_RES.md` is deleted, what remains true of it lives in
+`docs/design.md` and `docs/effect-entry-resolution.md`, and what remains *un*true lives in
+`docs/known-gaps.md`. Do not leave it behind as a record of how the code got here.
+
+---
+
 ## Gate before commit 5
 
 Commits 1–4 are useful, additive, and reversible under any of the designs considered. Commit 5 is the
@@ -373,6 +413,13 @@ that a run is blocked. Relaxes nothing; the access-audit projection already reta
 - `crates/app/src/surface.rs` (`~754`): the `operational_block` reason gains the subject fields.
   Redaction-safe by construction — every field is already exposed by the access-audit projection.
 
+**Deletions**
+
+The unit variants themselves. Change `StructuredFrontier::PossibleEntry` and
+`DriveOutcome::PossibleEntry` in place; do **not** add a subject-carrying variant beside the unit one
+and leave both. Any construction site or match arm that assumed the unit shape is rewritten, not
+widened with a `_ =>`.
+
 **Tests**
 
 - Fold: a parked Effect reports the exact occurrence id, path, and attempt id.
@@ -404,7 +451,14 @@ which run to fix.
   scoped by nothing else — the point is to find runs nobody is looking for.
 - Each row carries commit 1's subject. That is the dependency between these two commits and the only
   one.
-- `docs/known-gaps.md`: delete the *No way to find a parked run* entry.
+- `docs/known-gaps.md`: delete the *No way to find a parked run* entry — delete it, do not annotate it
+  as resolved.
+
+**Deletions**
+
+Nothing else; this commit is purely additive to the app surface. If implementing it turns up an
+existing partial or ad-hoc listing path — a debug endpoint, a test-only scan — that path is deleted in
+this commit rather than left beside the real surface.
 
 **Tests**
 
@@ -476,11 +530,29 @@ gone, and retaining an unreachable frontier is superseded code.
           .await
   }
   ```
-- Delete the rest of the chain: `StructuredReplayStatus::WaitingReads`
-  (`replay/src/structured.rs:184`), `purpose.rs:41,54,65`, and the `retryable_evidence_gap` arm at
-  `crates/app/src/surface.rs:751`.
-- `docs/design.md`, `docs/run-execution.md`: "an unmatched Read waits" is now wrong; the `drive_once`
-  disposition list loses one entry. `docs/known-gaps.md`: delete the Read-strand entry.
+**Deletions**
+
+This commit is the largest deletion in the plan, and the deletions are the point of it — an
+unreachable frontier is superseded code. All of it goes here, in this commit:
+
+- `StructuredFrontier::WaitingReads` (`runtime/src/history/cursor.rs:114`) and its `(Read, Authorized)`
+  producer;
+- `DriveOutcome::WaitingReads` and its `drive_once` arm (`runtime/src/structured.rs:~471-474`);
+- `saw_waiting` and its trailing branch in `fan_out_frontier`;
+- `StructuredReplayStatus::WaitingReads` (`replay/src/structured.rs:184`) and the purpose projections
+  at `purpose.rs:41,54,65`;
+- the `retryable_evidence_gap` reason arm at `crates/app/src/surface.rs:751`. This is a **public
+  reason string** disappearing from `DriveResponse`; that is a breaking surface change, it is correct,
+  and it is not softened by keeping the string reachable from a dead arm;
+- `Authorized.access_kind` (`fold.rs:2987` is its sole producer, and it becomes constant here);
+- every test that asserts a Read waits. Rewrite each to the new behaviour or delete it. None is kept
+  under `#[ignore]` or a `legacy_` name;
+- `docs/design.md` and `docs/run-execution.md`: the "an unmatched Read waits" prose and the
+  `drive_once` disposition entry are removed, not marked historical;
+- the *A crashed Read attempt strands its run* entry in `docs/known-gaps.md`, deleted outright.
+
+The grep gate below is what proves this is complete: after this commit no `WaitingReads` or
+`retryable_evidence_gap` spelling survives anywhere in the repository, including docs and tests.
 
 **State explicitly in the code comment and in `docs/design.md`:** the fold cannot distinguish a
 crashed Read from a live in-flight one, because the leaf is a pure function of history and liveness is
@@ -501,7 +573,11 @@ it previously was not, and it should become a certification obligation rather th
 - Fold regression: `(Effect, Authorized)` still folds to `PossibleEntry` — unchanged by this commit.
 - Runtime: a re-driven run with a durable unobserved Read authorization invokes the registered invoker
   exactly once more and commits one observation. Assert the call count.
-- Grep-level assertion that no `WaitingReads` spelling survives anywhere.
+- Grep gate, run as part of verification rather than trusted by eye:
+
+  ```bash
+  rg -i 'waitingreads|waiting_reads|retryable_evidence_gap' && echo "SUPERSEDED" || echo clean
+  ```
 
 **Verification**
 
@@ -535,6 +611,13 @@ force lives, and it is worth landing even if the gate rejects commit 5.
   outbound reference beside the refresh evidence contract.
 - Every existing Effect capability declares `type Entry = EntryOnce;`. Mechanical, and the compiler
   enumerates the sites.
+
+**Deletions**
+
+Genuinely none — this commit only adds. The one thing to watch is the temptation to give `Entry` a
+default so existing capabilities compile untouched. Do not: a defaulted associated type is a
+compatibility path wearing a language feature, and the value of this commit is that every capability
+author states the answer explicitly. Let the compiler enumerate all of them.
 
 **Tests**
 
@@ -747,9 +830,26 @@ duplicates, and this path neither produces nor consumes it. Safety rests on a po
 external system, made once, at the capability. Do not let a later commit mint `SupersededBeforeEntry`
 from "the row isn't there".
 
-**Docs**: `docs/design.md` *Runtime access choke point*; `docs/run-execution.md` completion table;
-`docs/effect-entry-resolution.md` status becomes the current contract, with the two-leaf correction
-and the Read relaxation folded into *Behaviour*; `docs/known-gaps.md` rewritten per the entries below.
+**Docs and deletions**
+
+- `docs/design.md` *Runtime access choke point* and `docs/run-execution.md` completion table describe
+  the closing path and the re-assertion, and lose any sentence saying a possible entry is terminal in
+  general.
+- `docs/effect-entry-resolution.md`: the `Status:` line stops saying *proposed, direction not yet
+  accepted* and becomes the current contract. *Rejected alternatives* stays — see *No compatibility
+  paths*.
+- `README.md`: the doc index entry loses its `(proposed, not implemented)` parenthetical.
+- `docs/known-gaps.md`: rewrite *No generic recovery from a possible external entry* to state the
+  residual that actually remains — `EntryOnce`, spent budgets, and windowed absorption — and delete
+  every sentence describing the old blanket park. The entry shrinks; it does not acquire a "resolved
+  as of" note.
+- The losing branch of the closing-gate decision is not written. Whichever way it goes, only one path
+  exists in the code and only one is described in the docs.
+- **Not deleted:** `StructuredFrontier::PossibleEntry`, `DriveOutcome::PossibleEntry`,
+  `StateLeaf::EntryUnknown`, and `ObservationOutcome::EntryUnknown`. All four stay reachable — the
+  first three for `EntryOnce` and spent budgets, the last as both an adapter completion and the
+  synthesized closure. Deleting any of them would be over-deletion, which is the same error as
+  under-deletion in the other direction.
 
 **Tests**
 
@@ -808,9 +908,26 @@ annex change is expected, and a failure means that assumption was wrong.
 Declares `EntryAbsorbing` on the four EVM capabilities and makes their adapters re-entrant. All four
 already carry a key, so no request type changes shape.
 
-**Deletions: none.** See *What is removed from EVM* above. If the integration test shows
-`ActivateCandidateResponse::AlreadyRetained` has become unreachable, delete that settlement branch in
-this commit.
+**Deletions**
+
+No EVM expansion construct is deleted — see *What is removed from EVM* above, and note that the
+reconcile constructs answer shared-reservation questions rather than per-occurrence ones. But three
+things do go in this commit:
+
+- `docs/evm-transactions.md` (`~164`): the sentence saying `EntryUnknown` parks indefinitely is wrong
+  after this commit. Replace it; do not leave it with a caveat.
+- The operational procedure of recovering a parked EVM run by starting a fresh run under the same
+  caller submission token stops being the recovery route for absorbing capabilities. Wherever that
+  procedure is written down — runbook prose, rustdoc, `docs/evm-transactions.md` — it is rewritten to
+  describe in-run resolution. Leaving both routes described is a dual path in documentation form.
+- `ActivateCandidateResponse::AlreadyRetained`, **conditionally**: measure its reachability with the
+  integration tests. If the parked-run rediscovery was its only remaining producer, delete the
+  settlement branch and the variant. If the genuine "another writer got here first" case still reaches
+  it — the likely outcome — keep both and say so in the commit body, with the narrowed reachability
+  noted in its rustdoc.
+
+**Finally, delete this plan.** `IMPL_PLAN_EFFECT_ENTRY_RES.md` is removed in this commit, along with
+its README index entry if one was added. See *No compatibility paths*.
 
 **Scope**
 
@@ -903,6 +1020,14 @@ Run `.#ci` once on the final revision.
 - a re-assertion with any differing request field is rejected at the fold;
 - the outstanding-attempt rule is unchanged on the Effect path, and relaxed on the Read path only,
   with a regression pinning each half;
+- **nothing superseded survives.** No `WaitingReads` or `retryable_evidence_gap` spelling anywhere,
+  including docs and tests; no `Authorized.access_kind`; no unit-shaped `PossibleEntry`; no test kept
+  under `#[ignore]` or a `legacy_`/`old_` name; no feature flag or config key selecting park
+  behaviour; no doc paragraph describing behaviour that no longer exists; and no
+  `IMPL_PLAN_EFFECT_ENTRY_RES.md`;
+- nothing is **over**-deleted either: `PossibleEntry`, `EntryUnknown` in both its leaf and observation
+  forms, the design doc's *Rejected alternatives*, and every EVM reconcile construct are all still
+  present and still reachable;
 - `crates/app/src/production_structured.rs` is unmodified across the whole plan;
 - a crashed Read occurrence recovers, and no `WaitingReads` spelling survives anywhere;
 - a parked run is discoverable without prior knowledge of its run id, and names its occurrence;
