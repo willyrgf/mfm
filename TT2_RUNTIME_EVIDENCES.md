@@ -1271,3 +1271,66 @@ and the
 external trust, live multi-hop export,
 cross-process/fault, quality, and complete verification residuals remain
 Conditional.
+
+## Checkpoint removal and the current gate
+
+The external store checkpoint authority was removed at `012ccd30`
+(`remove the external store checkpoint authority`). This supersedes every
+checkpoint entry above: the acknowledged/prepared ledger, the sidecar
+arbitration and durability revisions (`fce1edca`, `27edd8c6`), the
+commit-before-acknowledgement read retries (`fcd56ab09`, `e7624406`,
+`1ef7d694`, `e02895ad`), the idempotent checkpoint predecessor classification
+(`e68aca910`), and the associated inventory ownership entry (`f99e3a84c`) now
+describe code that no longer exists. They are retained as history, not as
+current contract.
+
+Reason for removal: the guarantee required a witness held outside the
+database's restore domain, and no contract stated that obligation. The port
+required only that the head be retained "outside the database process", which a
+table in the same PostgreSQL cluster satisfies while providing no rollback
+protection. No production implementation existed. Its read-side fixation was
+also the sole source of the contention in this area: a live fixation made a
+concurrent prepare or acknowledge fail with the same `Conflict` used for a wrong
+predecessor or a copied database, and a read between SQL commit and
+acknowledgement produced an `InvalidHistory` indistinguishable from a torn
+prefix or orphaned object rows.
+
+PostgreSQL is now the sole append-only authority. A rewound database is accepted
+rather than detected; `docs/design.md` records that limitation and the
+compensating invariant under *Append-only authority and the absent witness*.
+
+The composed gate ran once on the exact merge candidate:
+
+```text
+nix run .#ci
+source: 012ccd3079fefab07688bc359ff4f3d5e3ca118f
+run id: run-2899511-1786107081079292421
+result: ok — 13 passed, 0 failed in 3205.63s
+structured EVM submission: ok in 2102.11s
+wallet-nonce PostgreSQL storage qualification: ok in 658.80s
+recoverability PostgreSQL v1: ok in 39.63s
+```
+
+The `closing-source-revision` leaf observed
+`012ccd3079fefab07688bc359ff4f3d5e3ca118f`, which equals the committed tree.
+The 24 managed structured-history tests pass without the removed retries,
+including `configured_value_history_linearizes_same_stream_append_races`,
+run and configuration acknowledgement recovery, snapshot interleaving, and
+injected `40001`/`40P01` contention rollback.
+
+Two earlier entries recorded conflicting run identifiers for the same
+pre-removal EVM task (`run-2683154-1786051539384397512` in this ledger,
+`run-2683154-1786055156375497512` in `docs/tt2-independent-review.md`). At least
+one is a transcription error; both are superseded by the gate above.
+
+### Disposition changes
+
+| Item | Previous | Now |
+| --- | --- | --- |
+| STORE-01 | Conditional on external target/checkpoint trust integration | Withdrawn. There is no external checkpoint authority to integrate. The residual is restated as the documented absent-witness limitation. |
+| STORE-02 | Conditional on cross-process acknowledgement, promotion, and production-authority matrices | Narrowed to SQL commit ambiguity, which the managed acknowledgement-recovery and contention tests cover. The checkpoint promotion and prepared-successor matrices no longer apply. |
+| REPLAY-01/03/05 | Referenced store/checkpoint trust | `StoreCheckpointTrust` verified target lineage and writer epoch rather than checkpoint heads; it is renamed `StoreLineageTrust` and retained unchanged in substance. |
+
+The EVM wallet authority retains its own separate non-rollback checkpoint,
+implemented in this repository only as a test provider. It was deliberately left
+in scope for a future decision and carries the same restore-domain requirement.

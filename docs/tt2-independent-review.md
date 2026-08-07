@@ -1597,3 +1597,45 @@ trust deployment, the remaining EVM crash/ambiguity/latency/authority
 matrices, remaining
 keystore external termination/OOM/resource-failure witnesses, and ownership evidence are supplied or the
 normative plan is deliberately amended.
+
+## Checkpoint removal supersedes the checkpoint findings
+
+At `012ccd30` the external store checkpoint authority was removed. Every
+checkpoint-dependent statement in this review — the acknowledged/prepared
+ledger, sidecar arbitration, prepared-successor restart, commit-before-
+acknowledgement retries, and the deployment checkpoint acknowledgement,
+promotion, and ambiguity matrices listed as residuals — now describes code that
+no longer exists. Those residuals are withdrawn rather than closed: the
+mechanism they qualified was deleted.
+
+It is replaced by an explicit limitation recorded in `docs/design.md`:
+PostgreSQL is the sole append-only authority, and a restored or otherwise
+rewound database is accepted rather than detected. The reasoning is that
+detecting rollback requires memory of a later head held outside the database's
+restore domain, and this repository holds no such memory. The prior design did
+not either — its port required only retention "outside the database process",
+and no production implementation existed.
+
+The invariant that remains load-bearing is that no external effect occurs
+without a prior durable journal record. An independent audit of that invariant
+on this revision found:
+
+- it is enforced generically, not per domain. `invoke_authorized`
+  (`crates/kernel/runtime/src/structured.rs`) re-verifies the exact committed
+  authorization before invocation; the store fold rejects a second
+  authorization for an occurrence with an unresolved one; and an
+  authorized-but-unobserved leaf maps to `WaitingReads` or `PossibleEntry`,
+  never to an actionable state, so the runtime cannot re-dispatch it;
+- recovery from that state is **not** generic. `DriveOutcome::PossibleEntry` is
+  terminal in the runtime and surfaces as an operational block in `mfm-app`.
+  The run parks indefinitely. Only the EVM domain reconciles it, through
+  retained-intent re-observation on a fresh run. A future domain with external
+  effects would inherit the safety property but strand runs on crash.
+
+The composed gate for the exact post-removal revision
+`012ccd3079fefab07688bc359ff4f3d5e3ca118f` passed 13/13 in 3205.63s
+(`run-2899511-1786107081079292421`), including the managed EVM submission
+qualification with its injected process-loss boundaries. The earlier
+pre-removal EVM run identifier recorded in this document
+(`run-2683154-1786055156375497512`) disagrees with the one in
+`TT2_RUNTIME_EVIDENCES.md`; both are superseded by that gate.
