@@ -213,7 +213,7 @@ fn replay(
     for (index, batch) in history.batches.iter().enumerate() {
         let finalized = replay_step(&history, &previous, batch, physical)?;
         if let super::validated_append::TenantFactProjectionPlan::Publish { publication, .. } =
-            &finalized.tenant_fact_plan
+            finalized.tenant_fact_plan()
         {
             fact_publications.push(publication.clone());
         }
@@ -262,6 +262,37 @@ pub(super) fn replay_step(
         physical,
         ObligationDischargeScope::RetainedOnly,
     )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(super) fn verify_incremental_equivalence(
+    raw: RawRunHistory,
+    programs: &ProgramVerificationRegistry,
+    physical: &dyn PhysicalObligationChecker,
+) -> super::Result<()> {
+    let history = qualify_recorded_history(raw.clone(), programs)?;
+    let mut incremental = ReducedRunState::empty(&history.context);
+    for (index, batch) in history.batches.iter().enumerate() {
+        let finalized = replay_step(&history, &incremental, batch, physical)?;
+        let full = verify_qualified(
+            RawRunHistory {
+                run_id: raw.run_id.clone(),
+                batches: raw.batches[..=index].to_vec(),
+            },
+            programs,
+            physical,
+        )?;
+        let (reduced, compiled) = finalized.into_parts();
+        let (committed, run_projection, _tenant_fact_plan, _fact_spec) = compiled.into_parts();
+        if reduced.as_ref() != full.reduced.as_ref()
+            || run_projection.successor() != &full.current_projection()
+            || committed != raw.batches[index]
+        {
+            return Err(StructuredStoreError::InvalidHistory);
+        }
+        incremental = *reduced;
+    }
+    Ok(())
 }
 
 struct SnapshotFactSource {

@@ -96,10 +96,16 @@ impl VerifiedStructuredRun {
         history: Arc<qualification::QualifiedHistory>,
         finalized: obligations::FinalizedReduction,
     ) -> Self {
-        Self {
-            history,
-            reduced: finalized.into_reduced(),
-        }
+        let (reduced, _compiled) = finalized.into_parts();
+        Self { history, reduced }
+    }
+
+    fn from_reduced(
+        history: Arc<qualification::QualifiedHistory>,
+        reduced: Box<reducer::ReducedRunState>,
+        _seal: coordinator::AppendSeal,
+    ) -> Self {
+        Self { history, reduced }
     }
 
     /// Returns the exact run identity.
@@ -109,9 +115,13 @@ impl VerifiedStructuredRun {
 
     /// Returns the exact admission record.
     pub fn admission(&self) -> &mfm_journal::structured::RunAdmitted {
-        self.reduced
-            .admission()
-            .expect("verified state always contains admission")
+        self.history
+            .records()
+            .find_map(|assigned| match &assigned.record {
+                mfm_journal::structured::RunRecord::RunAdmitted(admission) => Some(admission),
+                _ => None,
+            })
+            .expect("qualified history always contains admission")
     }
 
     /// Returns the current program cursor.
@@ -172,7 +182,18 @@ impl VerifiedStructuredRun {
         &mfm_journal::structured::RecordRef,
         &mfm_journal::structured::ExternalAccessAuthorized,
     )> {
-        self.reduced.authorization(attempt)
+        let reference = self.reduced.authorization_ref(attempt)?;
+        self.history.records().find_map(|assigned| {
+            if &assigned.record_ref != reference {
+                return None;
+            }
+            match &assigned.record {
+                mfm_journal::structured::RunRecord::ExternalAccessAuthorized(authorization) => {
+                    Some((&assigned.record_ref, authorization))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Resolves an observation and its assigned identity.
@@ -183,7 +204,18 @@ impl VerifiedStructuredRun {
         &mfm_journal::structured::RecordRef,
         &mfm_journal::structured::ExternalAccessObserved,
     )> {
-        self.reduced.observation(attempt)
+        let reference = self.reduced.observation_ref(attempt)?;
+        self.history.records().find_map(|assigned| {
+            if &assigned.record_ref != reference {
+                return None;
+            }
+            match &assigned.record {
+                mfm_journal::structured::RunRecord::ExternalAccessObserved(observation) => {
+                    Some((&assigned.record_ref, observation))
+                }
+                _ => None,
+            }
+        })
     }
 
     /// Returns every assigned record in physical order.

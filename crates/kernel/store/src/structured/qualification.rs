@@ -210,26 +210,6 @@ pub(super) struct QualifiedAdmission {
     pub(super) recorded_genesis: Option<RunSemanticStateDigest>,
 }
 
-impl QualifiedAdmission {
-    pub(super) fn record(
-        &self,
-        genesis_semantic_state_digest: RunSemanticStateDigest,
-    ) -> RunAdmitted {
-        RunAdmitted {
-            store_scope_id: self.store_scope_id.clone(),
-            store_epoch: self.store_epoch,
-            run_id: self.run_id.clone(),
-            tenant_scope_id: self.tenant_scope_id.clone(),
-            invocation_identity: self.invocation_identity.clone(),
-            entry_point_operation_id: self.entry_point_operation_id.clone(),
-            certified_program_ref: self.certified_program_ref.clone(),
-            admission_material_refs: self.admission_material_refs.clone(),
-            initial_bindings: self.initial_bindings.clone(),
-            genesis_semantic_state_digest,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) struct QualifiedRunContext {
     pub(super) program: Arc<CertifiedProgram>,

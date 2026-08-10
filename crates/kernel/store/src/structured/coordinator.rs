@@ -31,6 +31,25 @@ use super::reducer::{
 use super::validated_append::{RunCurrentProjection, ValidatedRunAppend};
 use super::VerifiedStructuredRun;
 
+pub(super) struct AppendSeal(());
+
+struct PreparedAppend {
+    command: ValidatedRunAppend,
+    proof: PreparedAppendProof,
+}
+
+struct PreparedAppendProof {
+    successor: VerifiedStructuredRun,
+    fact_read_capability_spec: Option<FactScanPermitSpec>,
+    expected_projection: Option<RunCurrentProjection>,
+}
+
+impl PreparedAppendProof {
+    fn candidate(&self) -> super::Result<&CommittedBatch> {
+        self.successor.batches().last().ok_or_else(invalid)
+    }
+}
+
 struct PreparedIntent {
     run_id: RunId,
     context: Arc<QualifiedRunContext>,
@@ -108,9 +127,9 @@ pub(super) async fn commit_event<B: StructuredHistoryBackend>(
         ObligationDischargeScope::RetainedAndCurrent,
     )
     .map_err(candidate_rejected)?;
-    let command = ValidatedRunAppend::from_finalized(&finalized);
-    let outcome = writer.backend.append(command).await?;
-    classify_backend(writer, prepared.run_id, history, finalized, outcome).await
+    let append = prepare_append(finalized, history)?;
+    let outcome = writer.backend.append(append.command).await?;
+    classify_backend(writer, prepared.run_id, append.proof, outcome).await
 }
 
 fn intent_run_id<B: StructuredHistoryBackend>(
@@ -186,7 +205,7 @@ async fn tenant_frontier<B: StructuredHistoryBackend>(
     context: &QualifiedRunContext,
     pending: &PendingSemanticStep,
 ) -> super::Result<Option<TenantFactFrontier>> {
-    match pending.tenant_fact_requirement {
+    match pending.tenant_fact_requirement() {
         TenantFactRequirement::None => Ok(None),
         TenantFactRequirement::Barrier | TenantFactRequirement::Publish => writer
             .backend
@@ -291,30 +310,41 @@ fn frontier_before(batch: &CommittedBatch) -> super::Result<Option<TenantFactFro
 async fn classify_backend<B: StructuredHistoryBackend>(
     writer: &StructuredRunHistoryWriter<B>,
     run_id: RunId,
-    history: Arc<super::qualification::QualifiedHistory>,
-    finalized: FinalizedReduction,
+    prepared: PreparedAppendProof,
     outcome: BackendAppendOutcome,
 ) -> super::Result<(RunId, StructuredAppendAttempt)> {
-    let candidate = finalized.committed.clone();
     let result = match outcome {
-        BackendAppendOutcome::NewlyCommitted(committed) if committed == candidate => {
-            let spec = finalized.fact_read_capability_spec.clone();
-            let successor = VerifiedStructuredRun::from_finalized(history, finalized);
-            let authorization =
-                mint_committed_fact_read_capability(writer, spec, &committed, &successor)?;
+        BackendAppendOutcome::NewlyCommitted(committed)
+            if prepared
+                .candidate()
+                .is_ok_and(|candidate| candidate == &committed) =>
+        {
+            let authorization = mint_committed_fact_read_capability(
+                writer,
+                prepared.fact_read_capability_spec,
+                &committed,
+                &prepared.successor,
+            )?;
             runtime_attempt(
                 committed.clone(),
                 HistoryAppendOutcome::NewlyCommitted(committed),
                 authorization,
             )
         }
-        BackendAppendOutcome::ExistingSame(committed) if committed == candidate => runtime_attempt(
-            committed.clone(),
-            HistoryAppendOutcome::ExistingSame(committed),
-            None,
-        ),
+        BackendAppendOutcome::ExistingSame(committed)
+            if prepared
+                .candidate()
+                .is_ok_and(|candidate| candidate == &committed) =>
+        {
+            runtime_attempt(
+                committed.clone(),
+                HistoryAppendOutcome::ExistingSame(committed),
+                None,
+            )
+        }
         BackendAppendOutcome::StaleHead => {
-            let expected = finalized.run_projection.expected();
+            let candidate = prepared.candidate()?.clone();
+            let expected = prepared.expected_projection.as_ref();
             match super::semantic_open::load_and_compare(
                 &writer.backend,
                 &run_id,
@@ -336,14 +366,38 @@ async fn classify_backend<B: StructuredHistoryBackend>(
                 Err(error) => return Err(error),
             }
         }
-        BackendAppendOutcome::AcknowledgementUnknown => runtime_attempt(
-            candidate,
-            HistoryAppendOutcome::AcknowledgementUnknown,
-            None,
-        ),
+        BackendAppendOutcome::AcknowledgementUnknown => {
+            let candidate = prepared.candidate()?.clone();
+            runtime_attempt(
+                candidate,
+                HistoryAppendOutcome::AcknowledgementUnknown,
+                None,
+            )
+        }
         _ => return Err(StructuredStoreError::InvalidHistory),
     };
     Ok((run_id, result))
+}
+
+fn prepare_append(
+    finalized: FinalizedReduction,
+    history: Arc<super::qualification::QualifiedHistory>,
+) -> super::Result<PreparedAppend> {
+    let (reduced, compiled) = finalized.into_parts();
+    let (committed, run_projection, tenant_fact_plan, fact_read_capability_spec) =
+        compiled.into_parts();
+    let expected_projection = run_projection.expected().cloned();
+    let successor = VerifiedStructuredRun::from_reduced(history, reduced, AppendSeal(()));
+    let command =
+        ValidatedRunAppend::seal(committed, run_projection, tenant_fact_plan, AppendSeal(()));
+    Ok(PreparedAppend {
+        command,
+        proof: PreparedAppendProof {
+            successor,
+            fact_read_capability_spec,
+            expected_projection,
+        },
+    })
 }
 
 fn candidate_rejected(error: StructuredStoreError) -> StructuredStoreError {

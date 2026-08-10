@@ -177,11 +177,16 @@ compare       -> ComparedReduction     (assertions matched)
 discharge     -> FinalizedReduction    (the only type exposing a successor)
 ```
 
-**Projection** applies the finalized result. The compiler is the sole materializer of history
-objects; obligations discharge in one closed scope (`RetainedOnly` or `RetainedAndCurrent`, retained
-always first, never current alone); and the coordinator seals a `ValidatedRunAppend` that only it can
-construct. A backend receives that value and compares and applies it mechanically — it never matches
-a record family, frontier, or access kind to choose behavior.
+**Projection** applies the finalized result. Reduction retains only semantic record and artifact
+drafts; the compiler is the sole constructor of journal payloads and materializer of history
+objects. Comparison alone owns the private token that binds the pending primary-record handle, so
+obligation code and unrelated store siblings cannot manufacture or bind a successor. Obligations
+discharge in one closed scope (`RetainedOnly` or `RetainedAndCurrent`, retained always first, never
+current alone), and only successful discharge can construct the private final stage. The coordinator
+then consumes that stage to seal one affine `ValidatedRunAppend`; sealing moves the committed batch
+instead of cloning it, and only an exact newly committed backend result releases the prepared
+successor and fact capability. A backend receives that value and compares and applies it
+mechanically — it never matches a record family, frontier, or access kind to choose behavior.
 
 Reduction derives:
 
