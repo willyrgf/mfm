@@ -11,6 +11,13 @@ derives compact semantic continuation. The compiler authors and compares records
 obligations discharge external/current checks; semantic open audits stored projections; backends
 apply sealed plans mechanically. Their completed result is one `VerifiedStructuredRun`.
 
+An individual run is openable only while it remains within 65,536 batches, 1,048,576 retained
+objects, and 512 MiB of canonical committed-batch bytes. These are working-set and retention
+ceilings for one run, not limits on store lifetime or run count. Every complete-prefix loader
+receives an explicit remaining budget and rejects over-capacity evidence before cloning it;
+candidate authoring applies the same accounting and reserves two maximum frames before external
+entry. Capacity exhaustion is distinct from malformed history.
+
 The private Runtime adapter retains at most one same-reducer verified successor after admission,
 mutation, or a non-mutating frontier. Each reuse first compares its journal head with the backend's
 indexed current head; a stale or absent entry re-reduces the complete history, so this bounded

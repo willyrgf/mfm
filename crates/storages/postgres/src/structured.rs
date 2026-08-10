@@ -10,11 +10,11 @@ use mfm_journal::structured::{
     TenantFactCoordinate, TenantFactFrontier, MAX_APPEND_OBJECTS, MAX_APPEND_RECORDS,
 };
 use mfm_store::structured::{
-    AppendAttemptLookup, BackendAppendOutcome, RawRunHistory, RunCurrentProjection,
-    StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreError,
-    StructuredStoreIdentity, StructuredStoreRunSnapshot, StructuredStoreSnapshot,
-    TenantFactProjectionPlan, TenantFactProjectionSnapshot, TenantFactPublication,
-    ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
+    AppendAttemptLookup, BackendAppendOutcome, RawHistoryLoadLimit, RawRunHistory,
+    RunCurrentProjection, StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot,
+    StructuredStoreError, StructuredStoreIdentity, StructuredStoreRunSnapshot,
+    StructuredStoreSnapshot, TenantFactProjectionPlan, TenantFactProjectionSnapshot,
+    TenantFactPublication, ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -275,6 +275,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
         Box::pin(async move {
             let mut transaction = self.begin_read().await?;
@@ -283,6 +284,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 run_id,
                 &self.identity,
                 self.target.schema_name(),
+                limit,
             )
             .await?;
             transaction.commit_checked(&self.target).await?;
@@ -319,6 +321,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
             if through.run_sequence == 0 {
@@ -327,7 +330,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 ));
             }
             let mut transaction = self.begin_read().await?;
-            let history = load_exact_prefix(transaction.conn(), run_id, through).await?;
+            let history = load_exact_prefix(transaction.conn(), run_id, through, limit).await?;
             transaction.commit_checked(&self.target).await?;
             Ok(history)
         })
@@ -354,9 +357,14 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                         commit_digest: JournalCommitDigest::parse(&row.head_commit_digest)
                             .map_err(|_| invalid("PostgreSQL append head is invalid"))?,
                     };
-                    load_exact_prefix(transaction.conn(), run_id, &through)
-                        .await?
-                        .map(|history| AppendAttemptLookup { history })
+                    load_exact_prefix(
+                        transaction.conn(),
+                        run_id,
+                        &through,
+                        RawHistoryLoadLimit::run(),
+                    )
+                    .await?
+                    .map(|history| AppendAttemptLookup { history })
                 }
                 None => None,
             };
@@ -394,6 +402,7 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                         run_id,
                         &self.identity,
                         self.target.schema_name(),
+                        RawHistoryLoadLimit::run(),
                     )
                     .await?;
                     runs.push(StructuredStoreRunSnapshot {
@@ -619,6 +628,26 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 transaction.rollback().await?;
                 return Ok(BackendAppendOutcome::StaleHead);
             }
+            let candidate_bytes = canonical_json(&committed)
+                .map_err(|_| invalid("validated PostgreSQL batch is not canonical"))?
+                .as_bytes()
+                .len();
+            let run_limit = RawHistoryLoadLimit::run();
+            let remaining_limit = RawHistoryLoadLimit::new(
+                run_limit
+                    .batches()
+                    .checked_sub(1)
+                    .ok_or(StructuredStoreError::CapacityExceeded)?,
+                run_limit
+                    .objects()
+                    .checked_sub(committed.objects.len())
+                    .ok_or(StructuredStoreError::CapacityExceeded)?,
+                run_limit
+                    .canonical_bytes()
+                    .checked_sub(candidate_bytes)
+                    .ok_or(StructuredStoreError::CapacityExceeded)?,
+            );
+            preflight_history_load(transaction.conn(), &run_id, None, remaining_limit).await?;
             match &tenant_plan {
                 TenantFactProjectionPlan::None => {}
                 TenantFactProjectionPlan::Barrier { expected_frontier }
@@ -905,6 +934,7 @@ async fn load_run_snapshot(
     run_id: &RunId,
     identity: &StructuredStoreIdentity,
     schema_name: &str,
+    limit: RawHistoryLoadLimit,
 ) -> Result<StructuredRunSnapshot, StructuredStoreError> {
     let projection_row = sqlx::query(
         "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
@@ -923,6 +953,7 @@ async fn load_run_snapshot(
     crate::transaction::await_read_phase_barrier(schema_name, "after_head").await;
     #[cfg(not(feature = "test-support"))]
     let _ = schema_name;
+    preflight_history_load(transaction, run_id, None, limit).await?;
     let rows = select_batch_rows(transaction, StructuredBatchQuery::Prefix, run_id, None).await?;
     #[cfg(feature = "test-support")]
     crate::transaction::await_read_phase_barrier(schema_name, "after_batches").await;
@@ -943,6 +974,9 @@ async fn load_run_snapshot(
             batches,
         })
     };
+    if let Some(history) = &history {
+        history.validate_load_limit(limit)?;
+    }
     Ok(StructuredRunSnapshot {
         history,
         current_projection,
@@ -953,7 +987,9 @@ async fn load_exact_prefix(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
     through: &JournalHead,
+    limit: RawHistoryLoadLimit,
 ) -> Result<Option<RawRunHistory>, StructuredStoreError> {
+    preflight_history_load(transaction, run_id, Some(through.run_sequence), limit).await?;
     let rows = sqlx::query(
         "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
                 candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
@@ -984,10 +1020,65 @@ async fn load_exact_prefix(
             "PostgreSQL prefix differs from its exact requested head",
         ));
     }
-    Ok(Some(RawRunHistory {
+    let history = RawRunHistory {
         run_id: run_id.clone(),
         batches,
-    }))
+    };
+    history.validate_load_limit(limit)?;
+    Ok(Some(history))
+}
+
+async fn preflight_history_load(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    through_sequence: Option<u64>,
+    limit: RawHistoryLoadLimit,
+) -> Result<(), StructuredStoreError> {
+    let batch_row = sqlx::query(
+        "SELECT COUNT(*)::text AS item_count, \
+                COALESCE(SUM(octet_length(batch_envelope_json)), 0)::text AS retained_bytes \
+           FROM run_history_batches \
+          WHERE run_id = $1 \
+            AND ($2::numeric IS NULL OR run_sequence <= $2::numeric)",
+    )
+    .bind(run_id.as_str())
+    .bind(through_sequence.map(|sequence| sequence.to_string()))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let object_row = sqlx::query(
+        "SELECT COUNT(*)::text AS item_count, \
+                COALESCE(SUM( \
+                    octet_length(object_type) + octet_length(content_schema_id) + \
+                    octet_length(content_digest) + octet_length(canonical_json) + 128 \
+                ), 0)::text AS retained_bytes \
+           FROM run_history_batch_objects \
+          WHERE run_id = $1 \
+            AND ($2::numeric IS NULL OR run_sequence <= $2::numeric)",
+    )
+    .bind(run_id.as_str())
+    .bind(through_sequence.map(|sequence| sequence.to_string()))
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let batch_count = parse_preflight_usize(&batch_row, "item_count")?;
+    let object_count = parse_preflight_usize(&object_row, "item_count")?;
+    let retained_bytes = parse_preflight_usize(&batch_row, "retained_bytes")?
+        .checked_add(parse_preflight_usize(&object_row, "retained_bytes")?)
+        .ok_or(StructuredStoreError::CapacityExceeded)?;
+    if batch_count > limit.batches()
+        || object_count > limit.objects()
+        || retained_bytes > limit.canonical_bytes()
+    {
+        return Err(StructuredStoreError::CapacityExceeded);
+    }
+    Ok(())
+}
+
+fn parse_preflight_usize(row: &PgRow, column: &str) -> Result<usize, StructuredStoreError> {
+    required_text(row, column)?
+        .parse::<usize>()
+        .map_err(|_| invalid("PostgreSQL history preflight count is invalid"))
 }
 
 async fn select_run_ids(

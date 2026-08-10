@@ -1561,6 +1561,7 @@ fn raw_digest(bytes: &[u8]) -> ContentDigest {
 
 fn classify_verification_error(error: StructuredStoreError) -> PortableExportError {
     match error {
+        StructuredStoreError::CapacityExceeded => PortableExportError::TooLarge,
         StructuredStoreError::RunNotFound
         | StructuredStoreError::InvalidHistory
         | StructuredStoreError::CandidateRejected

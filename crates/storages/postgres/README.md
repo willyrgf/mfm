@@ -94,6 +94,12 @@ atomically with each publication. Bounded fact scans use the primary-key cursor
 `(store_scope_id, store_epoch, tenant_scope_id, fact_order)` with a fixed `LIMIT`; they do not
 `COUNT`/`MIN`/`MAX` over lifetime history.
 
+Complete run and producer-prefix loads first count batches and objects and charge stored canonical
+octets inside the same repeatable-read transaction. A prefix outside the shared 65,536-batch,
+1,048,576-object, or 512 MiB run contract is rejected before batch/object rows are accumulated.
+The locked append path repeats the capacity preflight with the candidate's exact canonical charge,
+so direct retained growth cannot bypass the store writer's reservation rule.
+
 The SQLx offline/online checks cover migration metadata and the schema probe. Dynamic runtime
 `sqlx::query` families are inventoried by `postgres-sql-inventory-check`; documentation claims no
 broader compile-time SQL coverage than those executable owners.

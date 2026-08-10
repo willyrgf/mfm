@@ -9,8 +9,8 @@ use serde::Serialize;
 use crate::*;
 
 const REQUEST_DIGEST_GOLDEN: &str =
-    "sha256-jcs-v1:0072957a893eb0c988a55fe4aa4dfc6a20c2fe60183c448cb681681050ef69aa";
-const REQUEST_SCHEMA_GOLDEN: &str = "schema:mfm.fact.selection_request:1:sha256-jcs-v1:b1521ba162f69fe42e0fe95d6ab52844ec170b519c88ffe9ce4ce26236f4a372";
+    "sha256-jcs-v1:f9235915865b53d69812d8f74c904ac44926b1dc9a72fe78a162a0da55c78fa0";
+const REQUEST_SCHEMA_GOLDEN: &str = "schema:mfm.fact.selection_request:1:sha256-jcs-v1:723d756c46826ca54470e118d01525926777e2e4b85d803817791105b0bf130e";
 
 fn digest(seed: u64) -> DigestBytes {
     let mut bytes = [0_u8; 32];

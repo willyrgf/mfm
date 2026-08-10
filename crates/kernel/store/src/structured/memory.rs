@@ -5,10 +5,10 @@ use mfm_ids::{AppendRequestId, RunId, TenantScopeId};
 use mfm_journal::structured::{CommittedBatch, JournalHead, TenantFactFrontier};
 
 use super::backend::{
-    AppendAttemptLookup, BackendAppendOutcome, RawRunHistory, StructuredBackendFuture,
-    StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreIdentity,
-    StructuredStoreRunSnapshot, StructuredStoreSnapshot, TenantFactProjectionSnapshot,
-    TenantFactPublication,
+    AppendAttemptLookup, BackendAppendOutcome, RawHistoryLoadLimit, RawRunHistory,
+    StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot,
+    StructuredStoreIdentity, StructuredStoreRunSnapshot, StructuredStoreSnapshot,
+    TenantFactProjectionSnapshot, TenantFactPublication,
 };
 use super::qualification::StructuredStoreError;
 use super::validated_append::{RunCurrentProjection, TenantFactProjectionPlan, ValidatedRunAppend};
@@ -79,17 +79,26 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
         Box::pin(async move {
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
+            let history = state
+                .histories
+                .get(run_id)
+                .map(|batches| {
+                    limit.validate_batches(batches)?;
+                    Ok(RawRunHistory {
+                        run_id: run_id.clone(),
+                        batches: batches.clone(),
+                    })
+                })
+                .transpose()?;
             Ok(StructuredRunSnapshot {
-                history: state.histories.get(run_id).map(|batches| RawRunHistory {
-                    run_id: run_id.clone(),
-                    batches: batches.clone(),
-                }),
+                history,
                 current_projection: state.projections.get(run_id).cloned(),
             })
         })
@@ -99,18 +108,24 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            Ok(state.histories.get(run_id).and_then(|batches| {
-                let position = batches.iter().position(|batch| &batch.head == through)?;
-                Some(RawRunHistory {
-                    run_id: run_id.clone(),
-                    batches: batches[..=position].to_vec(),
-                })
+            let Some(batches) = state.histories.get(run_id) else {
+                return Ok(None);
+            };
+            let Some(position) = batches.iter().position(|batch| &batch.head == through) else {
+                return Ok(None);
+            };
+            let batches = &batches[..=position];
+            limit.validate_batches(batches)?;
+            Ok(Some(RawRunHistory {
+                run_id: run_id.clone(),
+                batches: batches.to_vec(),
             }))
         })
     }
@@ -138,16 +153,22 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            Ok(state.histories.get(run_id).and_then(|batches| {
-                let position = batches
-                    .iter()
-                    .position(|batch| &batch.append_request_id == append_request_id)?;
-                Some(AppendAttemptLookup {
-                    history: RawRunHistory {
-                        run_id: run_id.clone(),
-                        batches: batches[..=position].to_vec(),
-                    },
-                })
+            let Some(batches) = state.histories.get(run_id) else {
+                return Ok(None);
+            };
+            let Some(position) = batches
+                .iter()
+                .position(|batch| &batch.append_request_id == append_request_id)
+            else {
+                return Ok(None);
+            };
+            let batches = &batches[..=position];
+            RawHistoryLoadLimit::run().validate_batches(batches)?;
+            Ok(Some(AppendAttemptLookup {
+                history: RawRunHistory {
+                    run_id: run_id.clone(),
+                    batches: batches.to_vec(),
+                },
             }))
         })
     }
@@ -338,6 +359,14 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             {
                 return Ok(BackendAppendOutcome::StaleHead);
             }
+            RawHistoryLoadLimit::run().validate_batch_iter(
+                state
+                    .histories
+                    .get(&run_id)
+                    .into_iter()
+                    .flatten()
+                    .chain(std::iter::once(&committed)),
+            )?;
             match &tenant_plan {
                 TenantFactProjectionPlan::None => {}
                 TenantFactProjectionPlan::Barrier { expected_frontier } => {
