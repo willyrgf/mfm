@@ -754,9 +754,28 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         physical_binding_ref: certificate.content_ref,
         stable_resource_lineage_contract_ref: None,
     };
-    authorization.access_attempt_id =
-        mfm_journal::structured::derive_access_attempt_id(&run_id, &authorization)
-            .expect("access attempt identity");
+    authorization.access_attempt_id = mfm_journal::structured::derive_access_attempt_id(
+        &mfm_journal::structured::AccessAttemptIdentityPreimage {
+            run_id: &run_id,
+            occurrence_id: &authorization.occurrence_id,
+            occurrence_path_ref: &authorization.occurrence_path_ref,
+            semantic_call_id: &authorization.semantic_call_id,
+            state_input_ref: &authorization.state_input_ref,
+            attempt_ordinal: authorization.attempt_ordinal,
+            access_kind: authorization.access_kind,
+            semantic_head: &authorization.semantic_head,
+            capability_contract_ref: &authorization.capability_contract_ref,
+            capability_implementation_ref: &authorization.capability_implementation_ref,
+            adapter_contract_ref: &authorization.adapter_contract_ref,
+            adapter_implementation_ref: &authorization.adapter_implementation_ref,
+            request: &authorization.request,
+            request_digest: &authorization.request_digest,
+            physical_binding_ref: &authorization.physical_binding_ref,
+            stable_resource_lineage_contract_ref: &authorization
+                .stable_resource_lineage_contract_ref,
+        },
+    )
+    .expect("access attempt identity");
     let record = RunRecord::ExternalAccessAuthorized(authorization.clone());
     authorization_ref.record_hash =
         mfm_journal::structured::derive_record_hash(&RecordHashPreimage {
