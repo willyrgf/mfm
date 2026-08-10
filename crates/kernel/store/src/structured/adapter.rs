@@ -1,111 +1,14 @@
 //! Private production adapter implementing [`RuntimeHistoryPort`].
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-
-use mfm_certify::structured::AdmissionVerificationRegistry;
-use mfm_ids::{ContentRef, RunId, StableId};
-use mfm_journal::structured::{derive_run_id, RecordRef};
+use mfm_ids::{ContentRef, RunId};
+use mfm_journal::structured::RecordRef;
 use mfm_runtime::history::{
-    AccessAuthorizationProposal, AccessObservationProposal, HistoryError, HistoryFuture,
-    ObservationCommit, ObservationQualification, ProposedObservationOutcome, RuntimeHistoryPort,
-    StateTransitionProposal, StructuredAdmissionCommand, StructuredAppendAttempt,
+    HistoryFuture, QualifiedRuntimeIntent, RuntimeHistoryPort, StructuredAppendAttempt,
     StructuredStoreIdentity, VerifiedRunView,
 };
-use mfm_spec::structured::CertifiedProgramRoot;
-use mfm_spec::CanonicalJsonValue;
-use mfm_values::CanonicalJsonPersistedSchema;
 
 use super::backend::{StructuredHistoryBackend, StructuredRunHistoryWriter};
-use super::fold::{
-    ProgramVerifier, StructuredStoreError, VerifiedProgramData, VerifiedStructuredRun,
-};
-use super::mutation::StructuredAdmissionRequest as StoreAdmissionRequest;
-
-/// Concrete registry-backed program verifier for live assembly and offline trust snapshots.
-pub struct RegistryProgramVerifier {
-    registry: AdmissionVerificationRegistry,
-    verified_programs: Mutex<BTreeMap<ContentRef, Arc<VerifiedProgramData>>>,
-}
-
-impl mfm_authority_seal::ProgramVerifierSeal for RegistryProgramVerifier {}
-
-impl RegistryProgramVerifier {
-    /// Wraps one concrete admission-verification registry without live process authority.
-    pub fn new(registry: AdmissionVerificationRegistry) -> Self {
-        Self {
-            registry,
-            verified_programs: Mutex::new(BTreeMap::new()),
-        }
-    }
-}
-
-pub(super) fn build_program_verifier(
-    registry: AdmissionVerificationRegistry,
-) -> Arc<dyn ProgramVerifier> {
-    Arc::new(RegistryProgramVerifier::new(registry))
-}
-
-impl ProgramVerifier for RegistryProgramVerifier {
-    fn verify(
-        &self,
-        entry_point_id: &StableId,
-        root: &CertifiedProgramRoot,
-        authored: &CanonicalJsonValue,
-    ) -> std::result::Result<Arc<VerifiedProgramData>, StructuredStoreError> {
-        let program_ref = root
-            .content_ref()
-            .map_err(|_| StructuredStoreError::Certification)?;
-        if let Some(cached) = self
-            .verified_programs
-            .lock()
-            .map_err(|_| StructuredStoreError::Certification)?
-            .get(&program_ref)
-            .cloned()
-        {
-            let authored_matches = cached
-                .document()
-                .component_closure
-                .iter()
-                .find(|object| {
-                    object.content_ref == cached.document().root.components.authored_program_ref
-                })
-                .is_some_and(|object| &object.value == authored);
-            return if &cached.document().root == root
-                && cached.expanded().operation_id == *entry_point_id
-                && authored_matches
-            {
-                Ok(cached)
-            } else {
-                Err(StructuredStoreError::Certification)
-            };
-        }
-        let certified = self
-            .registry
-            .verify_root(entry_point_id, root, authored)
-            .map_err(|_| StructuredStoreError::Certification)?;
-        let (document, expanded, value_schemas) = certified.into_verification_parts();
-        // Reject substitution: expanded operation must match entry and document root.
-        if expanded.operation_id != *entry_point_id || document.root != *root {
-            return Err(StructuredStoreError::Certification);
-        }
-        let verified = Arc::new(VerifiedProgramData::new(document, expanded, value_schemas));
-        let mut cache = self
-            .verified_programs
-            .lock()
-            .map_err(|_| StructuredStoreError::Certification)?;
-        match cache.get(&program_ref) {
-            Some(existing) if existing.document().root == verified.document().root => {
-                Ok(Arc::clone(existing))
-            }
-            Some(_) => Err(StructuredStoreError::Certification),
-            None => {
-                cache.insert(program_ref, Arc::clone(&verified));
-                Ok(verified)
-            }
-        }
-    }
-}
+use super::VerifiedStructuredRun;
 
 impl VerifiedRunView for VerifiedStructuredRun {
     fn run_id(&self) -> &RunId {
@@ -150,16 +53,9 @@ impl VerifiedRunView for VerifiedStructuredRun {
     }
 }
 
-/// Production history port owning the sole fold and backend.
-///
-/// Constructible only by store assembly. The type may appear in assembled
-/// `Runtime` signatures but cannot be built or attached outside store-owned
-/// openers.
-#[doc(hidden)]
-pub struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
+/// Runtime-facing holder of the sole store mutation authority.
+pub(super) struct StoreHistoryAdapter<B: StructuredHistoryBackend> {
     writer: StructuredRunHistoryWriter<B>,
-    /// One best-effort successor keeps replay memory bounded independently of run count.
-    verified_run: Mutex<Option<VerifiedStructuredRun>>,
 }
 
 impl<B: StructuredHistoryBackend> mfm_authority_seal::RuntimeHistoryPortSeal
@@ -169,70 +65,8 @@ impl<B: StructuredHistoryBackend> mfm_authority_seal::RuntimeHistoryPortSeal
 
 impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
     pub(super) fn from_writer(writer: StructuredRunHistoryWriter<B>) -> Self {
-        Self {
-            writer,
-            verified_run: Mutex::new(None),
-        }
+        Self { writer }
     }
-
-    fn take_verified_run(&self, run_id: &RunId) -> Option<VerifiedStructuredRun> {
-        let mut retained = match self.verified_run.lock() {
-            Ok(retained) => retained,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if retained
-            .as_ref()
-            .is_some_and(|verified| verified.run_id() == run_id)
-        {
-            retained.take()
-        } else {
-            None
-        }
-    }
-
-    fn cache_verified_run(&self, verified: Option<VerifiedStructuredRun>) {
-        let Some(verified) = verified else {
-            return;
-        };
-        match self.verified_run.lock() {
-            Ok(mut retained) => {
-                *retained = Some(verified);
-            }
-            Err(poisoned) => {
-                *poisoned.into_inner() = Some(verified);
-            }
-        }
-    }
-
-    async fn load_cached_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        // The indexed-head read is the snapshot point for a retained successor. A later
-        // external append is handled by the next exact-head mutation check.
-        if let Some(verified) = self.take_verified_run(run_id) {
-            let current_head = self.writer.current_head(run_id).await?;
-            if current_head.as_ref() == Some(verified.journal_head()) {
-                return Ok(verified);
-            }
-        }
-        self.writer.load_verified(run_id).await
-    }
-}
-
-fn to_store_transition(proposal: &StateTransitionProposal) -> StateTransitionProposal {
-    proposal.clone()
-}
-
-fn to_store_authorization(proposal: &AccessAuthorizationProposal) -> AccessAuthorizationProposal {
-    proposal.clone()
-}
-
-fn to_store_observation_outcome(
-    outcome: &ProposedObservationOutcome,
-) -> ProposedObservationOutcome {
-    outcome.clone()
-}
-
-fn to_store_observation(proposal: &AccessObservationProposal) -> AccessObservationProposal {
-    proposal.clone()
 }
 
 impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> {
@@ -242,156 +76,15 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
         self.writer.store_identity()
     }
 
-    fn admit_run<'a>(
-        &'a self,
-        command: StructuredAdmissionCommand,
-    ) -> HistoryFuture<'a, (RunId, StructuredAppendAttempt)> {
-        Box::pin(async move {
-            let (
-                tenant_scope_id,
-                invocation_identity,
-                entry_point_operation_id,
-                certified_program,
-                material,
-                initial_values,
-                append_request_id,
-            ) = command.into_parts();
-            let run_id = derive_run_id(
-                &self.writer.store_identity().store_scope_id,
-                &tenant_scope_id,
-                &entry_point_operation_id,
-                &invocation_identity,
-            )
-            .map_err(|_| HistoryError::InvalidHistory)?;
-            let store_material = material;
-            let request = StoreAdmissionRequest::new(
-                run_id.clone(),
-                tenant_scope_id,
-                invocation_identity,
-                entry_point_operation_id,
-                certified_program,
-                store_material,
-                initial_values,
-                append_request_id,
-            );
-            let attempt = self.writer.admit_run(request).await?;
-            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
-            self.cache_verified_run(successor);
-            Ok((run_id, attempt))
-        })
-    }
-
     fn load_verified<'a>(&'a self, run_id: &'a RunId) -> HistoryFuture<'a, Self::VerifiedRun> {
-        Box::pin(async move { self.load_cached_verified(run_id).await })
+        Box::pin(async move { self.writer.load_verified(run_id).await })
     }
 
-    fn retain_verified<'a>(&'a self, verified: Self::VerifiedRun) -> HistoryFuture<'a, ()> {
-        Box::pin(async move {
-            self.cache_verified_run(Some(verified));
-            Ok(())
-        })
-    }
-
-    fn commit_state_transition<'a>(
+    fn commit_event<'a>(
         &'a self,
-        verified: Self::VerifiedRun,
-        proposal: &'a StateTransitionProposal,
-    ) -> HistoryFuture<'a, StructuredAppendAttempt> {
-        Box::pin(async move {
-            let store_proposal = to_store_transition(proposal);
-            let attempt = self
-                .writer
-                .commit_state_transition(verified, &store_proposal)
-                .await?;
-            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
-            self.cache_verified_run(successor);
-            Ok(attempt)
-        })
-    }
-
-    fn authorize_access<'a>(
-        &'a self,
-        verified: Self::VerifiedRun,
-        proposal: &'a AccessAuthorizationProposal,
-    ) -> HistoryFuture<'a, StructuredAppendAttempt> {
-        Box::pin(async move {
-            let store_proposal = to_store_authorization(proposal);
-            let attempt = self
-                .writer
-                .authorize_access(verified, &store_proposal)
-                .await?;
-            let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
-            self.cache_verified_run(successor);
-            Ok(attempt)
-        })
-    }
-
-    fn resolve_attempt<'a>(
-        &'a self,
-        attempt: &'a mut StructuredAppendAttempt,
-    ) -> HistoryFuture<'a, bool> {
-        Box::pin(async move {
-            let run_id = attempt
-                .candidate()
-                .records
-                .first()
-                .ok_or(HistoryError::InvalidHistory)?
-                .record_ref
-                .run_id
-                .clone();
-            let append_request_id = attempt.append_request_id().clone();
-            let candidate_digest = attempt.candidate_digest().clone();
-            let resolved = self
-                .writer
-                .resolve_append(&run_id, &append_request_id, &candidate_digest)
-                .await?;
-            match resolved {
-                Some(batch) if batch == *attempt.candidate() => {
-                    attempt.confirm_existing_same();
-                    Ok(true)
-                }
-                Some(_) => Err(HistoryError::InvalidHistory),
-                None => Ok(false),
-            }
-        })
-    }
-
-    fn qualify_observation<'a>(
-        &'a self,
-        verified: &'a Self::VerifiedRun,
-        authorization_ref: &'a RecordRef,
-        outcome: &'a ProposedObservationOutcome,
-    ) -> HistoryFuture<'a, ObservationQualification> {
-        Box::pin(async move {
-            let store_outcome = to_store_observation_outcome(outcome);
-            self.writer
-                .qualify_observation(verified, authorization_ref, &store_outcome)
-                .await
-        })
-    }
-
-    fn commit_observation<'a>(
-        &'a self,
-        verified: Self::VerifiedRun,
-        proposal: &'a AccessObservationProposal,
-    ) -> HistoryFuture<'a, ObservationCommit> {
-        Box::pin(async move {
-            let store_proposal = to_store_observation(proposal);
-            match self
-                .writer
-                .commit_observation(verified, &store_proposal)
-                .await?
-            {
-                super::mutation::ObservationCommit::ExistingSame(verified) => {
-                    self.cache_verified_run(Some(*verified));
-                    Ok(ObservationCommit::ExistingSame)
-                }
-                super::mutation::ObservationCommit::Attempt(attempt) => {
-                    let (attempt, successor) = attempt.into_runtime_attempt_with_successor();
-                    self.cache_verified_run(successor);
-                    Ok(ObservationCommit::Attempt(Box::new(attempt)))
-                }
-            }
-        })
+        previous: Option<Self::VerifiedRun>,
+        intent: QualifiedRuntimeIntent,
+    ) -> HistoryFuture<'a, (RunId, StructuredAppendAttempt)> {
+        Box::pin(async move { self.writer.commit_event(previous, intent).await })
     }
 }

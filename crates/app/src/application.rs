@@ -9,10 +9,10 @@ use mfm_journal::structured::{
 use mfm_storage_evm_postgres::QualifiedEvmRoutingCatalog;
 
 use crate::{
-    AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, DriveResponse, ErrorClass,
-    ExportRequest, ExportedRun, PageRequest, PublicError, PublicRunView, PublishedEntryPoint,
-    ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy, SecretCredential,
-    TransitionTracePage,
+    AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, ApplicationAccessGrant,
+    ApplicationAccessPolicy, DriveResponse, EffectEntryAttentionPage, ErrorClass, ExportRequest,
+    ExportedRun, PageRequest, PublicError, PublicRunView, PublishedEntryPoint, ReplayRequest,
+    ReplayResponse, SecretCredential, TransitionTracePage,
 };
 
 /// Complete public physical-release material consumed by EVM deployment assembly.
@@ -634,7 +634,7 @@ pub(crate) struct EvmWalletDeploymentParts {
 #[derive(Clone)]
 pub struct Application {
     store_scope_id: StoreScopeId,
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     entry_points: Arc<[PublishedEntryPoint]>,
     backend: Arc<dyn ApplicationBackend>,
 }
@@ -642,7 +642,7 @@ pub struct Application {
 impl Application {
     pub(crate) fn new(
         store_scope_id: StoreScopeId,
-        policy: Arc<dyn RunAccessPolicy>,
+        policy: Arc<dyn ApplicationAccessPolicy>,
         entry_points: Vec<PublishedEntryPoint>,
         backend: impl ApplicationBackend + 'static,
     ) -> Self {
@@ -691,7 +691,7 @@ impl Application {
         };
         let authorized = self
             .policy
-            .authorize(&credential, RunAccessGrant::Admit, &target)
+            .authorize(&credential, ApplicationAccessGrant::Admit, &target)
             .await?;
         let (tenant_scope_id, authenticated_principal_id, _authorization_decision_ref) =
             authorized.into_parts();
@@ -712,7 +712,7 @@ impl Application {
         run_id: RunId,
     ) -> Result<DriveResponse, PublicError> {
         let call = self
-            .authorize_run::<run_grant::Drive>(credential, RunAccessGrant::Drive, run_id)
+            .authorize_run::<run_grant::Drive>(credential, ApplicationAccessGrant::Drive, run_id)
             .await?;
         self.backend.drive_once(&call).await
     }
@@ -724,7 +724,11 @@ impl Application {
         run_id: RunId,
     ) -> Result<PublicRunView, PublicError> {
         let call = self
-            .authorize_run::<run_grant::ReadPublic>(credential, RunAccessGrant::ReadPublic, run_id)
+            .authorize_run::<run_grant::ReadPublic>(
+                credential,
+                ApplicationAccessGrant::ReadPublic,
+                run_id,
+            )
             .await?;
         self.backend.read_public_run(&call).await
     }
@@ -737,7 +741,7 @@ impl Application {
         request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError> {
         let call = self
-            .authorize_run::<run_grant::Replay>(credential, RunAccessGrant::Replay, run_id)
+            .authorize_run::<run_grant::Replay>(credential, ApplicationAccessGrant::Replay, run_id)
             .await?;
         self.backend.replay_run(&call, request).await
     }
@@ -752,11 +756,39 @@ impl Application {
         let call = self
             .authorize_run::<run_grant::InspectTrace>(
                 credential,
-                RunAccessGrant::InspectTrace,
+                ApplicationAccessGrant::InspectTrace,
                 run_id,
             )
             .await?;
         self.backend.read_transition_trace(&call, page).await
+    }
+
+    /// Authenticates, authorizes, and lists the tenant's runs that currently
+    /// require manual Effect-entry attention.
+    ///
+    /// This is a tenant inventory: it names no run up front and confers no
+    /// authority over the runs it returns. A caller that wants to act on one
+    /// must authorize that run separately.
+    pub async fn list_effect_entry_attention(
+        &self,
+        credential: SecretCredential,
+        page: PageRequest,
+    ) -> Result<EffectEntryAttentionPage, PublicError> {
+        let target = AccessTarget::TenantTarget {
+            store_scope_id: self.store_scope_id.clone(),
+        };
+        let authorized = self
+            .policy
+            .authorize(
+                &credential,
+                ApplicationAccessGrant::ListEffectEntryAttention,
+                &target,
+            )
+            .await?;
+        let (tenant_scope_id, _principal, _decision) = authorized.into_parts();
+        self.backend
+            .list_effect_entry_attention(&tenant_scope_id, page)
+            .await
     }
 
     /// Authenticates, authorizes, and reads one fixed-head safe access-audit page.
@@ -769,7 +801,7 @@ impl Application {
         let call = self
             .authorize_run::<run_grant::InspectAudit>(
                 credential,
-                RunAccessGrant::InspectAudit,
+                ApplicationAccessGrant::InspectAudit,
                 run_id,
             )
             .await?;
@@ -784,7 +816,7 @@ impl Application {
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
         let call = self
-            .authorize_run::<run_grant::Export>(credential, RunAccessGrant::Export, run_id)
+            .authorize_run::<run_grant::Export>(credential, ApplicationAccessGrant::Export, run_id)
             .await?;
         if call.authorization_decision_ref().is_none() {
             return Err(PublicError::source_run_export_denied());
@@ -795,7 +827,7 @@ impl Application {
     async fn authorize_run<G: run_grant::RunGrantMarker>(
         &self,
         credential: SecretCredential,
-        grant: RunAccessGrant,
+        grant: ApplicationAccessGrant,
         run_id: RunId,
     ) -> Result<AuthorizedRunCall<'_, G>, PublicError> {
         debug_assert_eq!(grant, G::GRANT);
@@ -857,12 +889,12 @@ fn entry_point_not_found() -> PublicError {
 
 /// Typestate markers for purpose-bound authorized run calls.
 pub(crate) mod run_grant {
-    use crate::RunAccessGrant;
+    use crate::ApplicationAccessGrant;
 
     /// Closed marker for one approved run-access grant.
     pub(crate) trait RunGrantMarker: Send + Sync + 'static {
         /// Exact grant this marker retains.
-        const GRANT: RunAccessGrant;
+        const GRANT: ApplicationAccessGrant;
     }
 
     /// Drive one legal run action.
@@ -879,35 +911,35 @@ pub(crate) mod run_grant {
     pub(crate) struct Export;
 
     impl RunGrantMarker for Drive {
-        const GRANT: RunAccessGrant = RunAccessGrant::Drive;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::Drive;
     }
     impl RunGrantMarker for ReadPublic {
-        const GRANT: RunAccessGrant = RunAccessGrant::ReadPublic;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::ReadPublic;
     }
     impl RunGrantMarker for InspectTrace {
-        const GRANT: RunAccessGrant = RunAccessGrant::InspectTrace;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::InspectTrace;
     }
     impl RunGrantMarker for InspectAudit {
-        const GRANT: RunAccessGrant = RunAccessGrant::InspectAudit;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::InspectAudit;
     }
     impl RunGrantMarker for Replay {
-        const GRANT: RunAccessGrant = RunAccessGrant::Replay;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::Replay;
     }
     impl RunGrantMarker for Export {
-        const GRANT: RunAccessGrant = RunAccessGrant::Export;
+        const GRANT: ApplicationAccessGrant = ApplicationAccessGrant::Export;
     }
 }
 
 /// Purpose-bound authorized run call that retains the exact approved grant.
 pub(crate) struct AuthorizedRunCall<'policy, G: run_grant::RunGrantMarker> {
     credential: SecretCredential,
-    policy: &'policy dyn RunAccessPolicy,
+    policy: &'policy dyn ApplicationAccessPolicy,
     store_scope_id: &'policy StoreScopeId,
     tenant_scope_id: TenantScopeId,
     authenticated_principal_id: StableId,
     authorization_decision_ref: Option<mfm_ids::ContentDigest>,
     run_id: RunId,
-    grant: RunAccessGrant,
+    grant: ApplicationAccessGrant,
     _marker: std::marker::PhantomData<G>,
 }
 
@@ -921,7 +953,7 @@ impl<G: run_grant::RunGrantMarker> AuthorizedRunCall<'_, G> {
     }
 
     /// Returns the exact approved grant retained by this call.
-    pub(crate) const fn grant(&self) -> RunAccessGrant {
+    pub(crate) const fn grant(&self) -> ApplicationAccessGrant {
         self.grant
     }
 
@@ -951,14 +983,14 @@ impl AuthorizedRunCall<'_, run_grant::Export> {
         &self,
         run_id: RunId,
     ) -> Result<AuthorizedExportDecision, PublicError> {
-        debug_assert_eq!(self.grant, RunAccessGrant::Export);
+        debug_assert_eq!(self.grant, ApplicationAccessGrant::Export);
         let target = AccessTarget::RunTarget {
             store_scope_id: self.store_scope_id.clone(),
             run_id: run_id.clone(),
         };
         let authorized = self
             .policy
-            .authorize(&self.credential, RunAccessGrant::Export, &target)
+            .authorize(&self.credential, ApplicationAccessGrant::Export, &target)
             .await
             .map_err(|_| PublicError::source_run_export_denied())?;
         if authorized.tenant_scope_id() != &self.tenant_scope_id
@@ -1051,6 +1083,12 @@ pub(crate) trait ApplicationBackend: Send + Sync {
         call: &AuthorizedRunCall<'_, run_grant::Export>,
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError>;
+
+    async fn list_effect_entry_attention(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        page: PageRequest,
+    ) -> Result<EffectEntryAttentionPage, PublicError>;
 }
 
 /// Value-only behavior available to application transport tests.
@@ -1071,7 +1109,7 @@ pub enum TestApplicationMode {
 /// Builds an application fixture without exposing backend or store authority.
 #[cfg(any(test, feature = "test-support"))]
 pub fn application_for_test(
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     entry_points: Vec<PublishedEntryPoint>,
     mode: TestApplicationMode,
 ) -> Application {
@@ -1092,7 +1130,7 @@ pub fn application_for_test(
 /// Builds a one-use streaming-export fixture without exposing the private backend trait.
 #[cfg(any(test, feature = "test-support"))]
 pub fn application_with_export_for_test(
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     content_ref: mfm_ids::ContentRef,
     reader: crate::ExportAsyncReader,
 ) -> Application {
@@ -1117,7 +1155,7 @@ pub fn application_with_export_for_test(
 /// before exposing its reader to the caller.
 #[cfg(test)]
 pub fn application_with_dependency_export_for_test(
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     dependency_run_id: RunId,
     content_ref: mfm_ids::ContentRef,
     reader: crate::ExportAsyncReader,
@@ -1224,6 +1262,14 @@ impl ApplicationBackend for TestApplicationBackend {
         Err(self.failure())
     }
 
+    async fn list_effect_entry_attention(
+        &self,
+        _tenant_scope_id: &TenantScopeId,
+        _page: PageRequest,
+    ) -> Result<EffectEntryAttentionPage, PublicError> {
+        Err(self.failure())
+    }
+
     async fn export_run(
         &self,
         call: &AuthorizedRunCall<'_, run_grant::Export>,
@@ -1251,7 +1297,7 @@ impl ApplicationBackend for TestApplicationBackend {
 /// URL, connection option, or raw fence.
 pub async fn connect_production_application(
     sessions: mfm_storage_postgres::PostgresApplicationSessions,
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     wallet: EvmWalletDeployment,
 ) -> Result<Application, PublicError> {
     crate::production::connect(sessions, policy, wallet).await
@@ -1278,8 +1324,8 @@ mod tests {
         EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial, TestApplicationMode,
     };
     use crate::{
-        AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant, RunAccessPolicy,
-        SecretCredential,
+        AccessPolicyError, AccessTarget, ApplicationAccessGrant, ApplicationAccessPolicy,
+        AuthorizedTenant, SecretCredential,
     };
     use async_trait::async_trait;
     use mfm_ids::{
@@ -1298,7 +1344,7 @@ mod tests {
     }
 
     struct FixedPolicy {
-        expected_grant: RunAccessGrant,
+        expected_grant: ApplicationAccessGrant,
         result: Result<AuthorizedTenant, AccessPolicyError>,
     }
 
@@ -1307,14 +1353,14 @@ mod tests {
     }
 
     #[async_trait]
-    impl RunAccessPolicy for RootOnlyDecisionPolicy {
+    impl ApplicationAccessPolicy for RootOnlyDecisionPolicy {
         async fn authorize(
             &self,
             _credential: &SecretCredential,
-            grant: RunAccessGrant,
+            grant: ApplicationAccessGrant,
             target: &AccessTarget,
         ) -> Result<AuthorizedTenant, AccessPolicyError> {
-            assert_eq!(grant, RunAccessGrant::Export);
+            assert_eq!(grant, ApplicationAccessGrant::Export);
             let AccessTarget::RunTarget { run_id, .. } = target else {
                 panic!("expected run export target");
             };
@@ -1328,11 +1374,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl RunAccessPolicy for FixedPolicy {
+    impl ApplicationAccessPolicy for FixedPolicy {
         async fn authorize(
             &self,
             credential: &SecretCredential,
-            grant: RunAccessGrant,
+            grant: ApplicationAccessGrant,
             _target: &AccessTarget,
         ) -> Result<AuthorizedTenant, AccessPolicyError> {
             assert_eq!(credential.expose_to_policy(), b"opaque");
@@ -1347,15 +1393,15 @@ mod tests {
     }
 
     #[async_trait]
-    impl RunAccessPolicy for ExactAdmissionTargetPolicy {
+    impl ApplicationAccessPolicy for ExactAdmissionTargetPolicy {
         async fn authorize(
             &self,
             credential: &SecretCredential,
-            grant: RunAccessGrant,
+            grant: ApplicationAccessGrant,
             target: &AccessTarget,
         ) -> Result<AuthorizedTenant, AccessPolicyError> {
             assert_eq!(credential.expose_to_policy(), b"opaque");
-            assert_eq!(grant, RunAccessGrant::Admit);
+            assert_eq!(grant, ApplicationAccessGrant::Admit);
             self.calls.fetch_add(1, Ordering::SeqCst);
             match target {
                 AccessTarget::AdmitTarget {
@@ -1371,6 +1417,7 @@ mod tests {
                 }
                 AccessTarget::AdmitTarget { .. } => Err(AccessPolicyError::GrantDenied),
                 AccessTarget::RunTarget { .. } => panic!("unexpected run target"),
+                AccessTarget::TenantTarget { .. } => panic!("unexpected tenant target"),
             }
         }
     }
@@ -1382,7 +1429,7 @@ mod tests {
         let store_scope_id = store_scope();
 
         let granted = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
+            expected_grant: ApplicationAccessGrant::Export,
             result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('1'))
                 .with_decision_ref(decision_ref('1'))),
         };
@@ -1397,7 +1444,7 @@ mod tests {
             .expect("authorized source export");
 
         let denied = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
+            expected_grant: ApplicationAccessGrant::Export,
             result: Err(AccessPolicyError::GrantDenied),
         };
         let call = authorized_export_call(
@@ -1413,7 +1460,7 @@ mod tests {
         assert_eq!(error.code(), "SourceRunExportDenied");
 
         let other_tenant = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
+            expected_grant: ApplicationAccessGrant::Export,
             result: Ok(AuthorizedTenant::new(tenant('2'), principal('1'))
                 .with_decision_ref(decision_ref('1'))),
         };
@@ -1430,7 +1477,7 @@ mod tests {
         assert_eq!(error.code(), "SourceRunExportDenied");
 
         let other_principal = FixedPolicy {
-            expected_grant: RunAccessGrant::Export,
+            expected_grant: ApplicationAccessGrant::Export,
             result: Ok(AuthorizedTenant::new(root_tenant.clone(), principal('2'))
                 .with_decision_ref(decision_ref('2'))),
         };
@@ -1467,7 +1514,7 @@ mod tests {
         let polls = Arc::new(AtomicUsize::new(0));
         let application = application_with_export_for_test(
             Arc::new(FixedPolicy {
-                expected_grant: RunAccessGrant::Export,
+                expected_grant: ApplicationAccessGrant::Export,
                 result: Ok(AuthorizedTenant::new(tenant('1'), principal('1'))),
             }),
             test_content_ref(),
@@ -1585,7 +1632,7 @@ mod tests {
     }
 
     fn authorized_export_call<'policy>(
-        policy: &'policy dyn RunAccessPolicy,
+        policy: &'policy dyn ApplicationAccessPolicy,
         store_scope_id: &'policy StoreScopeId,
         tenant_scope_id: TenantScopeId,
         run_id: RunId,
@@ -1598,7 +1645,7 @@ mod tests {
             authenticated_principal_id: principal('1'),
             authorization_decision_ref: Some(decision_ref('1')),
             run_id,
-            grant: RunAccessGrant::Export,
+            grant: ApplicationAccessGrant::Export,
             _marker: std::marker::PhantomData,
         }
     }

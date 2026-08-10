@@ -3,8 +3,8 @@
 One-action interpreter and sole production path that can request semantic run-history mutation.
 
 Runtime holds a consumer-side `RuntimeHistoryPort` and the process registry. Production adapters,
-backends, and the sole fold remain private to `mfm-store` assembly. Runtime never receives a raw
-backend, writer, pool, or proposal forge surface.
+backends, qualification, and reduction remain private to semantically opened `mfm-store`
+assembly. Runtime never receives a raw backend, writer, pool, or proposal forge surface.
 
 Runtime loads one verified cursor through the port, selects the minimum declaration-ordered
 actionable occurrence, and performs at most one transition or audited external operation. It does
@@ -14,7 +14,7 @@ For Read/Effect states, Runtime privately owns:
 
 ```text
 Prepared -> committed authorization -> affine Authorized
-  -> one registered invoker -> PendingObservation
+  -> one registered invoker -> affine pending result
   -> committed observation -> state settlement
 ```
 

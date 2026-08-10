@@ -35,9 +35,9 @@ impl SecretCredential {
 #[error("credential bytes are empty or exceed the application limit")]
 pub struct SecretCredentialError;
 
-/// Closed run-access grants understood by the application policy.
+/// Closed grants understood by the application access policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunAccessGrant {
+pub enum ApplicationAccessGrant {
     /// Admit one exact logical invocation.
     Admit,
     /// Execute at most one run action.
@@ -52,6 +52,12 @@ pub enum RunAccessGrant {
     InspectAudit,
     /// Export one portable run stream.
     Export,
+    /// List the tenant's runs that currently require manual Effect-entry
+    /// attention.
+    ///
+    /// This is a tenant-scoped inventory, not a run-scoped read: it names no run
+    /// and grants no authority over the runs it returns.
+    ListEffectEntryAttention,
 }
 
 /// Exact target supplied to the injected access policy.
@@ -74,6 +80,11 @@ pub enum AccessTarget {
         store_scope_id: StoreScopeId,
         /// Exact typed run id.
         run_id: RunId,
+    },
+    /// Whole-tenant inventory target, naming no run.
+    TenantTarget {
+        /// Store whose inventory authority will be used.
+        store_scope_id: StoreScopeId,
     },
 }
 
@@ -149,12 +160,12 @@ pub enum AccessPolicyError {
 /// protected cross-run source or export dependency. Implementations must map one credential to one
 /// immutable tenant and stable authenticated principal and must not retain an application session.
 #[async_trait]
-pub trait RunAccessPolicy: Send + Sync {
+pub trait ApplicationAccessPolicy: Send + Sync {
     /// Authenticates and authorizes one exact grant and target.
     async fn authorize(
         &self,
         credential: &SecretCredential,
-        grant: RunAccessGrant,
+        grant: ApplicationAccessGrant,
         target: &AccessTarget,
     ) -> Result<AuthorizedTenant, AccessPolicyError>;
 }

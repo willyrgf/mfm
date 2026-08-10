@@ -33,14 +33,14 @@ and the selector's bounded caller submission token. The invocation identity rema
 per-run identity. Admission performs no provider or signer IO and does not drive the run.
 
 `drive_once` performs at most one structured Runtime action. Reads, recorded replay, trace, audit,
-and export use the callback-free store fold. Replay is verification-only and has no live or
-caller-supplied comparison path.
+and export use purpose projections derived from qualified history by the same pure reducer. Replay
+is verification-only and has no live or caller-supplied comparison path.
 
 ## Production composition
 
 `connect_production_application` requires:
 
-- a deployment-supplied `RunAccessPolicy`;
+- a deployment-supplied `ApplicationAccessPolicy`;
 - a deployment-issued opaque exact-target session bundle;
 - authoritative PostgreSQL;
 - one affine `EvmWalletDeployment` produced only from

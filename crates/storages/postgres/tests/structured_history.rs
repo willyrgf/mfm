@@ -16,9 +16,9 @@ use mfm_ids::{
     StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    canonical_json, CommittedBatch, HistoryObject, ObservationOutcome,
-    PriorRunFactSelectionResponse, PriorRunFactSourceManifest, PriorRunFactSourceRule, RunRecord,
-    SemanticHead, StateOutcomeRef, TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
+    CommittedBatch, HistoryObject, ObservationOutcome, PriorRunFactSelectionResponse,
+    PriorRunFactSourceManifest, PriorRunFactSourceRule, RunRecord, SemanticHead, StateOutcomeRef,
+    TenantFactCoordinate, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
@@ -33,7 +33,7 @@ use mfm_replay::portable::{
 };
 use mfm_replay::structured::project_replay_result;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
-use mfm_runtime::structured::{DriveOutcome, Runtime, RuntimeFaultCode, RuntimeStoreFaultKind};
+use mfm_runtime::structured::{DriveOutcome, RuntimeFaultCode, RuntimeStoreFaultKind};
 use mfm_spec::structured::{
     ProposedStateOutcome, SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
     SecretFreeQualificationArtifact, StructuredComponentKind, StructuredExpansionProfile,
@@ -49,14 +49,16 @@ use mfm_storage_postgres::{
 };
 use mfm_store::structured::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_store::structured::{
-    assemble_in_memory_runtime, fact_scan_counters, reset_fact_scan_counters,
-    AssembledStructuredRuntime, ConfigurationAppendRequest, ConfigurationHistoryStore,
-    ConfigurationRevision, ConfigurationStreamKey, ExportRunReader,
-    MemoryConfigurationHistoryBackend, PhysicalBindingAuthorization, PhysicalBindingSupersession,
-    PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    RegistryProgramVerifier, RunEvidenceStatus, StructuredAdmissionMaterial,
-    StructuredHistoryBackend, StructuredStoreError, StructuredStoreIdentity,
+    fact_scan_counters, qualify_and_open_configuration_history, qualify_and_open_structured_store,
+    reset_fact_scan_counters, ConfigurationAppendRequest, ConfigurationRevisionObject,
+    ConfigurationStreamKey, ExportRunReader, MemoryConfigurationHistoryBackend,
+    OpenedStructuredStore, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    PhysicalObligationChecker, PhysicalTargetIdentity, ProgramVerificationRegistry,
+    ProposedCanonicalValue, RunEvidenceStatus, StructuredAdmissionMaterial,
+    StructuredHistoryBackend, StructuredMemoryBackend, StructuredRuntime, StructuredStoreError,
+    StructuredStoreIdentity,
 };
+use mfm_values::CanonicalJsonPersistedSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{AssertSqlSafe, ConnectOptions, PgPool, Row};
@@ -122,11 +124,12 @@ impl State for FactCopyState {
     fn fact_slots() -> mfm_program::Result<Vec<mfm_spec::CertifiedFactSlot>> {
         let contract = mfm_spec::structured::structured_value_contract::<Value>()?;
         let descriptor = fact_descriptor()?;
+        let descriptor_ref = descriptor.content_ref()?;
         Ok(vec![mfm_spec::CertifiedFactSlot::new(
             0,
             1,
             1,
-            descriptor.descriptor_ref,
+            descriptor_ref,
             contract.clone(),
             contract,
         )?])
@@ -155,8 +158,8 @@ struct NoPhysicalBindings;
 
 impl mfm_authority_seal::PhysicalBindingVerifierSeal for NoPhysicalBindings {}
 
-impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
-    fn verify_authorization(
+impl PhysicalObligationChecker for NoPhysicalBindings {
+    fn verify_retained_authorization(
         &self,
         _context: &PhysicalBindingAuthorization<'_>,
         _certificate: &HistoryObject,
@@ -164,7 +167,24 @@ impl PublicPhysicalBindingVerifier for NoPhysicalBindings {
         Err(StructuredStoreError::Certification)
     }
 
-    fn verify_supersession(
+    fn verify_current_authorization(
+        &self,
+        _context: &PhysicalBindingAuthorization<'_>,
+        _certificate: &HistoryObject,
+    ) -> std::result::Result<(), StructuredStoreError> {
+        Err(StructuredStoreError::Certification)
+    }
+
+    fn verify_retained_supersession(
+        &self,
+        _context: &PhysicalBindingSupersession<'_>,
+        _public_lineage_head: &HistoryObject,
+        _evidence: &HistoryObject,
+    ) -> std::result::Result<(), StructuredStoreError> {
+        Err(StructuredStoreError::Certification)
+    }
+
+    fn verify_current_supersession(
         &self,
         _context: &PhysicalBindingSupersession<'_>,
         _public_lineage_head: &HistoryObject,
@@ -193,7 +213,7 @@ impl StoreLineageTrust for AcceptStoreLineage {
         &self,
         _fixation: &PortableFixation,
         _kind: ExportKind,
-        _closure_reference: &ContentDigest,
+        _authorized_closure_digest: &ContentDigest,
     ) -> bool {
         true
     }
@@ -204,7 +224,7 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -212,7 +232,7 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant"),
@@ -238,7 +258,7 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
     let second = writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-second").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
@@ -251,7 +271,7 @@ async fn configured_value_history_is_durable_append_only_and_application_read_on
             .await
             .expect("resolve current configuration")
             .revision(),
-        &second
+        second.revision()
     );
 
     let audit_pool = database.independent_pool().await;
@@ -339,7 +359,7 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-ack-loss").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (_run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -347,7 +367,7 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "6".repeat(32))).expect("tenant"),
@@ -375,7 +395,7 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
     let recovered = writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-ack-loss-recovered").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
@@ -388,7 +408,7 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
         "SELECT pg_catalog.count(*)::bigint FROM configuration_revisions \
          WHERE append_request_id = $1",
     )
-    .bind(recovered.append_request_id().as_str())
+    .bind(recovered.revision().append_request_id().as_str())
     .fetch_one(&audit_pool)
     .await
     .expect("count recovered append rows");
@@ -402,7 +422,7 @@ async fn configuration_commit_acknowledgement_loss_retries_identical_revision() 
             .await
             .expect("resolve recovered configuration")
             .revision(),
-        &recovered
+        recovered.revision()
     );
 
     audit_pool.close().await;
@@ -416,7 +436,7 @@ async fn run_commit_acknowledgement_loss_retries_identical_batch() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/run-ack-loss").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -484,7 +504,7 @@ async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-snapshot").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (_run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -492,7 +512,7 @@ async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "7".repeat(32))).expect("tenant"),
@@ -530,7 +550,7 @@ async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
         let second = writer
             .append(ConfigurationAppendRequest::new(
                 stream.clone(),
-                Some(first.revision_ref().clone()),
+                Some(first.content_ref().clone()),
                 AppendRequestId::new("postgres-configured-snapshot-second").expect("append id"),
                 contract.clone(),
                 ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
@@ -545,14 +565,14 @@ async fn configuration_load_keeps_one_snapshot_across_a_concurrent_append() {
             .expect("read old complete configuration prefix");
         (snapshot, second)
     };
-    assert_eq!(snapshot.revision(), &first);
+    assert_eq!(snapshot.revision(), first.revision());
     assert_eq!(
         reader
             .resolve(&stream, &contract)
             .await
             .expect("resolve committed successor")
             .revision(),
-        &second
+        second.revision()
     );
 
     drop(reader);
@@ -565,7 +585,7 @@ async fn run_snapshot_keeps_one_prefix_across_a_concurrent_transition() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/run-snapshot").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -639,7 +659,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-parity").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (_run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -647,11 +667,13 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     )
     .await
     .expect("qualify PostgreSQL configuration store");
-    let (postgres_writer, postgres_reader) = configuration.split();
-    let (memory_writer, memory_reader) = ConfigurationHistoryStore::new(
+    let (postgres_writer, postgres_reader) = configuration.into_authorities();
+    let (memory_writer, memory_reader) = qualify_and_open_configuration_history(
         MemoryConfigurationHistoryBackend::new(database.store_scope_id().await),
     )
-    .split();
+    .await
+    .expect("qualify memory configuration store")
+    .into_authorities();
     let tenant_scope_id =
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "9".repeat(32))).expect("tenant");
     let stream = ConfigurationStreamKey::new(
@@ -701,7 +723,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_sizing = postgres_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[0]).expect("sizing append id"),
             contract.clone(),
             sizing_value.clone(),
@@ -710,7 +732,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_sizing = memory_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[0]).expect("sizing append id"),
             contract.clone(),
             sizing_value,
@@ -718,11 +740,11 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         .await;
     assert_eq!(postgres_sizing, memory_sizing);
     let sizing = postgres_sizing.expect("sizing append");
-    let revision_overhead = canonical_json(&sizing)
-        .expect("canonical sizing revision")
-        .as_bytes()
+    let revision_overhead = sizing
+        .object()
+        .canonical_json
         .len()
-        .checked_sub(sizing.canonical_value().len())
+        .checked_sub(sizing.revision().canonical_value().len())
         .expect("revision overhead");
     let exact_value_len = MAX_CONFIGURATION_REVISION_BYTES
         .checked_sub(revision_overhead)
@@ -737,7 +759,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_exact = postgres_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(sizing.revision_ref().clone()),
+            Some(sizing.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[1]).expect("exact append id"),
             contract.clone(),
             exact_value.clone(),
@@ -746,7 +768,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_exact = memory_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(sizing.revision_ref().clone()),
+            Some(sizing.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[1]).expect("exact append id"),
             contract.clone(),
             exact_value,
@@ -754,12 +776,9 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         .await;
     assert_eq!(postgres_exact, memory_exact);
     let exact = postgres_exact.expect("exact-limit append");
-    assert_eq!(exact.canonical_value().len(), exact_value_len);
+    assert_eq!(exact.revision().canonical_value().len(), exact_value_len);
     assert_eq!(
-        canonical_json(&exact)
-            .expect("canonical exact revision")
-            .as_bytes()
-            .len(),
+        exact.object().canonical_json.len(),
         MAX_CONFIGURATION_REVISION_BYTES
     );
 
@@ -769,7 +788,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_one_over = postgres_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(exact.revision_ref().clone()),
+            Some(exact.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[2]).expect("one-over append id"),
             contract.clone(),
             one_over_value.clone(),
@@ -778,7 +797,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_one_over = memory_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(exact.revision_ref().clone()),
+            Some(exact.content_ref().clone()),
             AppendRequestId::new(boundary_append_ids[2]).expect("one-over append id"),
             contract.clone(),
             one_over_value,
@@ -976,7 +995,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_utf8_probe = postgres_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream.clone(),
-            Some(utf8_sizing.revision_ref().clone()),
+            Some(utf8_sizing.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-probe")
                 .expect("UTF-8 probe append id"),
             contract.clone(),
@@ -986,7 +1005,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_utf8_probe = memory_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream.clone(),
-            Some(utf8_sizing.revision_ref().clone()),
+            Some(utf8_sizing.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-probe")
                 .expect("UTF-8 probe append id"),
             contract.clone(),
@@ -995,11 +1014,11 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         .await;
     assert_eq!(postgres_utf8_probe, memory_utf8_probe);
     let utf8_probe = postgres_utf8_probe.expect("UTF-8 probe append");
-    let utf8_revision_overhead = canonical_json(&utf8_probe)
-        .expect("canonical UTF-8 sizing revision")
-        .as_bytes()
+    let utf8_revision_overhead = utf8_probe
+        .object()
+        .canonical_json
         .len()
-        .checked_sub(utf8_probe.canonical_value().len())
+        .checked_sub(utf8_probe.revision().canonical_value().len())
         .expect("UTF-8 revision overhead");
     let utf8_exact_value_len = MAX_CONFIGURATION_REVISION_BYTES
         .checked_sub(utf8_revision_overhead)
@@ -1015,7 +1034,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_utf8_exact = postgres_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream.clone(),
-            Some(utf8_probe.revision_ref().clone()),
+            Some(utf8_probe.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-exact").expect("append id"),
             contract.clone(),
             utf8_exact_value.clone(),
@@ -1024,7 +1043,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_utf8_exact = memory_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream.clone(),
-            Some(utf8_probe.revision_ref().clone()),
+            Some(utf8_probe.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-exact").expect("append id"),
             contract.clone(),
             utf8_exact_value,
@@ -1032,12 +1051,12 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         .await;
     assert_eq!(postgres_utf8_exact, memory_utf8_exact);
     let utf8_exact = postgres_utf8_exact.expect("UTF-8 exact-limit append");
-    assert_eq!(utf8_exact.canonical_value().len(), utf8_exact_value_len);
     assert_eq!(
-        canonical_json(&utf8_exact)
-            .expect("canonical UTF-8 exact revision")
-            .as_bytes()
-            .len(),
+        utf8_exact.revision().canonical_value().len(),
+        utf8_exact_value_len
+    );
+    assert_eq!(
+        utf8_exact.object().canonical_json.len(),
         MAX_CONFIGURATION_REVISION_BYTES
     );
 
@@ -1048,7 +1067,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let postgres_utf8_over = postgres_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream.clone(),
-            Some(utf8_exact.revision_ref().clone()),
+            Some(utf8_exact.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-over1").expect("append id"),
             contract.clone(),
             utf8_over_value.clone(),
@@ -1057,7 +1076,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_utf8_over = memory_writer
         .append(ConfigurationAppendRequest::new(
             utf8_stream,
-            Some(utf8_exact.revision_ref().clone()),
+            Some(utf8_exact.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-utf8-over1").expect("append id"),
             contract.clone(),
             utf8_over_value,
@@ -1076,7 +1095,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         operation_id,
         StableId::new("mfm.postgres.fixture/configured-parity-scale").expect("scale target"),
     );
-    let mut scale_predecessor: Option<ConfigurationRevision> = None;
+    let mut scale_predecessor: Option<ConfigurationRevisionObject> = None;
     for sequence in 0_u32..128 {
         let value = ProposedCanonicalValue::from_json(&format!(
             r#"{{"sequence":{},"payload":"scale-{sequence}"}}"#,
@@ -1091,7 +1110,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
                 scale_stream.clone(),
                 scale_predecessor
                     .as_ref()
-                    .map(|revision| revision.revision_ref().clone()),
+                    .map(|revision| revision.content_ref().clone()),
                 append_id.clone(),
                 contract.clone(),
                 value.clone(),
@@ -1102,7 +1121,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
                 scale_stream.clone(),
                 scale_predecessor
                     .as_ref()
-                    .map(|revision| revision.revision_ref().clone()),
+                    .map(|revision| revision.content_ref().clone()),
                 append_id,
                 contract.clone(),
                 value,
@@ -1122,14 +1141,14 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     assert_eq!(postgres_scale_current, memory_scale_current);
     assert_eq!(
         postgres_scale_current.revision(),
-        scale_predecessor.as_ref().unwrap()
+        scale_predecessor.as_ref().unwrap().revision()
     );
 
     let stale_value = ProposedCanonicalValue::from_json(r#"{"stale":true}"#).expect("stale value");
     let postgres_stale = postgres_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-stale").expect("append id"),
             contract.clone(),
             stale_value.clone(),
@@ -1138,7 +1157,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     let memory_stale = memory_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-parity-stale").expect("append id"),
             contract.clone(),
             stale_value,
@@ -1180,7 +1199,7 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
         .await
         .expect("resolve memory parity head");
     assert_eq!(postgres_current, memory_current);
-    assert_eq!(postgres_current.revision(), &exact);
+    assert_eq!(postgres_current.revision(), exact.revision());
 
     drop(memory_reader);
     drop(memory_writer);
@@ -1217,7 +1236,7 @@ async fn maintenance_only_login_can_preflight_and_append_configuration() {
         ))
         .await
         .expect("maintenance-only preflight and append");
-    assert_eq!(revision.sequence(), 1);
+    assert_eq!(revision.revision().sequence(), 1);
 
     drop(writer);
     database.cleanup().await;
@@ -1228,7 +1247,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-race").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -1236,7 +1255,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "3".repeat(32))).expect("tenant"),
@@ -1263,14 +1282,14 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     let (left, right) = tokio::join!(
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(baseline.revision_ref().clone()),
+            Some(baseline.content_ref().clone()),
             AppendRequestId::new("postgres-configured-race-left").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"winner":"left"}"#).expect("value"),
         )),
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(baseline.revision_ref().clone()),
+            Some(baseline.content_ref().clone()),
             AppendRequestId::new("postgres-configured-race-right").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"winner":"right"}"#).expect("value"),
@@ -1287,21 +1306,21 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
             .await
             .expect("resolve different-id winner")
             .revision(),
-        &winner
+        winner.revision()
     );
 
     let same_id = "postgres-configured-race-existing-same";
     let (first_replay, second_replay) = tokio::join!(
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(winner.revision_ref().clone()),
+            Some(winner.content_ref().clone()),
             AppendRequestId::new(same_id).expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":3}"#).expect("value"),
         )),
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(winner.revision_ref().clone()),
+            Some(winner.content_ref().clone()),
             AppendRequestId::new(same_id).expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":3}"#).expect("value"),
@@ -1315,14 +1334,14 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     let (left, right) = tokio::join!(
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first_replay.revision_ref().clone()),
+            Some(first_replay.content_ref().clone()),
             AppendRequestId::new(conflicting_id).expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"conflict":"left"}"#).expect("value"),
         )),
         writer.append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first_replay.revision_ref().clone()),
+            Some(first_replay.content_ref().clone()),
             AppendRequestId::new(conflicting_id).expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"conflict":"right"}"#).expect("value"),
@@ -1341,7 +1360,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
             .await
             .expect("resolve same-id conflict winner")
             .revision(),
-        &conflict_winner
+        conflict_winner.revision()
     );
 
     let audit_pool = database.independent_pool().await;
@@ -1374,22 +1393,14 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
         )
         .await
         .expect("reopen structured stores");
-    let (reopened_writer, reopened_reader) = reopened_configuration.split();
+    let (reopened_writer, reopened_reader) = reopened_configuration.into_authorities();
     let reopened_winner = reopened_reader
         .resolve(&stream, &contract)
         .await
         .expect("resolve winning revision after reopen");
-    assert_eq!(reopened_winner.revision(), &conflict_winner);
+    assert_eq!(reopened_winner.revision(), conflict_winner.revision());
 
-    let configuration = HistoryObject::new(
-        stable(ADMISSION_CONFIGURATION_OBJECT_TYPE).expect("configuration object type"),
-        mfm_store::structured::ConfigurationRevision::schema_id()
-            .expect("configuration revision schema"),
-        canonical_json(reopened_winner.revision())
-            .expect("canonical winning configuration revision")
-            .as_str(),
-    )
-    .expect("winning configuration admission object");
+    let configuration = reopened_winner.revision_object().object().clone();
     let material = StructuredAdmissionMaterial::new(
         configuration,
         admission_object(
@@ -1398,7 +1409,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
             33,
         ),
         PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
+            .and_then(|manifest| HistoryObject::from_persisted(&manifest))
             .expect("configured-race source manifest"),
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
@@ -1429,7 +1440,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
     let successor = reopened_writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(conflict_winner.revision_ref().clone()),
+            Some(conflict_winner.content_ref().clone()),
             AppendRequestId::new("postgres-configured-race-post-admission")
                 .expect("post-admission append id"),
             contract.clone(),
@@ -1444,7 +1455,7 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
             .await
             .expect("resolve post-admission successor")
             .revision(),
-        &successor
+        successor.revision()
     );
 
     let admitted = history_reader
@@ -1469,7 +1480,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-head").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -1477,7 +1488,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let tenant =
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "7".repeat(32))).expect("tenant");
     let stream = ConfigurationStreamKey::new(
@@ -1521,7 +1532,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     let failed = writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-head-second").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
@@ -1554,7 +1565,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
             .await
             .expect("first revision remains current")
             .revision(),
-        &first
+        first.revision()
     );
     sqlx::query(
         "ALTER TABLE configuration_heads \
@@ -1567,7 +1578,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     let second = writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-head-second").expect("append id"),
             contract.clone(),
             ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
@@ -1602,11 +1613,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
     .bind(stream.tenant_scope_id().as_str())
     .bind(stream.entry_point_operation_id().as_str())
     .bind(stream.target_id().as_str())
-    .bind(
-        canonical_json(&second)
-            .expect("canonical second revision")
-            .as_str(),
-    )
+    .bind(second.object().canonical_json.as_str())
     .execute(&audit_pool)
     .await
     .expect("restore current revision");
@@ -1670,7 +1677,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
             .await
             .expect("selected target")
             .revision(),
-        &second
+        second.revision()
     );
     assert_eq!(
         reader
@@ -1678,7 +1685,7 @@ async fn configured_value_head_update_is_atomic_and_target_isolated() {
             .await
             .expect("other target")
             .revision(),
-        &other
+        other.revision()
     );
 
     audit_pool.close().await;
@@ -1693,7 +1700,7 @@ async fn contention_failures_rollback_before_exact_retry() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/contention-retry").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -1805,7 +1812,7 @@ async fn contention_failures_rollback_before_exact_retry() {
 async fn update_configuration_head(
     pool: &PgPool,
     stream: &ConfigurationStreamKey,
-    revision: &ConfigurationRevision,
+    revision: &ConfigurationRevisionObject,
 ) {
     sqlx::query(
         "UPDATE configuration_heads \
@@ -1817,9 +1824,9 @@ async fn update_configuration_head(
     .bind(stream.tenant_scope_id().as_str())
     .bind(stream.entry_point_operation_id().as_str())
     .bind(stream.target_id().as_str())
-    .bind(revision.sequence().to_string())
-    .bind(revision.revision_ref().schema_id().as_str())
-    .bind(revision.revision_ref().content_digest().as_str())
+    .bind(revision.revision().sequence().to_string())
+    .bind(revision.content_ref().schema_id().as_str())
+    .bind(revision.content_ref().content_digest().as_str())
     .execute(pool)
     .await
     .expect("update configuration head as owner");
@@ -1828,7 +1835,7 @@ async fn update_configuration_head(
 async fn insert_configuration_head(
     pool: &PgPool,
     stream: &ConfigurationStreamKey,
-    revision: &ConfigurationRevision,
+    revision: &ConfigurationRevisionObject,
 ) {
     sqlx::query(
         "INSERT INTO configuration_heads ( \
@@ -1840,9 +1847,9 @@ async fn insert_configuration_head(
     .bind(stream.tenant_scope_id().as_str())
     .bind(stream.entry_point_operation_id().as_str())
     .bind(stream.target_id().as_str())
-    .bind(revision.sequence().to_string())
-    .bind(revision.revision_ref().schema_id().as_str())
-    .bind(revision.revision_ref().content_digest().as_str())
+    .bind(revision.revision().sequence().to_string())
+    .bind(revision.content_ref().schema_id().as_str())
+    .bind(revision.content_ref().content_digest().as_str())
     .execute(pool)
     .await
     .expect("insert configuration head as owner");
@@ -1859,7 +1866,7 @@ async fn coordinated_configuration_rollback_is_accepted_without_an_external_witn
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/configured-rollback").expect("operation id");
     let (registry, _) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let (run_history, configuration) = open_structured_authoritative_with_configuration(
         database.combined_sessions().await,
         registry,
@@ -1867,7 +1874,7 @@ async fn coordinated_configuration_rollback_is_accepted_without_an_external_witn
     )
     .await
     .expect("qualify structured stores");
-    let (writer, reader) = configuration.split();
+    let (writer, reader) = configuration.into_authorities();
     let stream = ConfigurationStreamKey::new(
         database.store_scope_id().await,
         TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "8".repeat(32))).expect("tenant"),
@@ -1893,14 +1900,14 @@ async fn coordinated_configuration_rollback_is_accepted_without_an_external_witn
     let second = writer
         .append(ConfigurationAppendRequest::new(
             stream.clone(),
-            Some(first.revision_ref().clone()),
+            Some(first.content_ref().clone()),
             AppendRequestId::new("postgres-configured-rollback-second").expect("append id"),
             contract,
             ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
         ))
         .await
         .expect("second revision");
-    assert_eq!(second.sequence(), 2);
+    assert_eq!(second.revision().sequence(), 2);
     drop(reader);
     drop(writer);
     drop(run_history);
@@ -1933,7 +1940,7 @@ async fn coordinated_configuration_rollback_is_accepted_without_an_external_witn
 
 async fn qualification_attempt(
     database: &TestDatabase,
-) -> mfm_storage_postgres::Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
+) -> mfm_storage_postgres::Result<OpenedStructuredStore<PostgresStructuredHistoryBackend>> {
     let (registry, _) =
         qualified_program(stable("mfm.postgres.fixture/qualification").expect("operation id"));
     let sessions = database.try_application_sessions().await?;
@@ -2119,7 +2126,7 @@ async fn structured_history_fresh_process_worker() {
     .expect("issue worker sessions");
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(sessions, registry, physical_verifier)
         .await
         .expect("qualify fresh-process structured store");
@@ -2202,7 +2209,7 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
 
     let operation_id = stable("mfm.postgres.fixture/reopen").expect("operation id");
     let (_registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let store_scope = database.store_scope_id().await;
     let run_id = derive_run_id(
         &store_scope,
@@ -2233,24 +2240,26 @@ async fn fresh_process_refolds_and_continues_the_same_structured_run() {
 
     let (memory_registry, memory_document) = qualified_program(operation_id.clone());
     assert_eq!(memory_document, document);
-    let memory = assemble_in_memory_runtime(
-        StructuredStoreIdentity {
-            store_scope_id: postgres_admission_batch.store_scope_id.clone(),
-            store_epoch: postgres_admission_batch.store_epoch,
-            physical_target: Some(PhysicalTargetIdentity {
-                target_key: "postgres-memory-fixture-target".to_owned(),
-                database_oid: 1,
-                fence_generation: 1,
-                release_epoch: 1,
-                current_incarnation_ref: ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256V1,
-                    sha256_digest_bytes(b"postgres-memory-fixture-target"),
-                ),
-            }),
-        },
+    let memory_identity = StructuredStoreIdentity {
+        store_scope_id: postgres_admission_batch.store_scope_id.clone(),
+        store_epoch: postgres_admission_batch.store_epoch,
+        physical_target: Some(PhysicalTargetIdentity {
+            target_key: "postgres-memory-fixture-target".to_owned(),
+            database_oid: 1,
+            fence_generation: 1,
+            release_epoch: 1,
+            current_incarnation_ref: ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(b"postgres-memory-fixture-target"),
+            ),
+        }),
+    };
+    let memory = qualify_and_open_structured_store(
+        StructuredMemoryBackend::new(memory_identity),
         memory_registry,
         Arc::clone(&physical_verifier),
     )
+    .await
     .expect("runtime assembly");
     let memory_runtime = memory.runtime;
     let memory_reader = memory.public_reader;
@@ -2343,7 +2352,7 @@ async fn tenant_fact_publications_are_dense_atomic_and_exactly_routed() {
     let operation_id =
         stable("mfm.postgres.fixture/tenant-fact-publication").expect("operation id");
     let (registry, document) = qualified_fact_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -2585,7 +2594,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let postgres_fixture = qualified_fact_scan_fixture();
     let producer_operation = postgres_fixture.producer_operation.clone();
     let consumer_operation = postgres_fixture.consumer_operation.clone();
-    let offline_program_verifier = Arc::new(RegistryProgramVerifier::new(
+    let offline_program_verifier = Arc::new(ProgramVerificationRegistry::new(
         postgres_fixture.registry.admission_verification_registry(),
     ));
     let postgres_assembled = open_structured_authoritative(
@@ -2595,7 +2604,7 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     )
     .await
     .expect("qualify fact scanner store");
-    let AssembledStructuredRuntime {
+    let OpenedStructuredStore {
         runtime: postgres_runtime,
         public_reader: postgres_public_reader,
         export_reader: postgres_reader,
@@ -2678,13 +2687,17 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         .expect("load online recorded replay");
     let release = AcceptRetainedRelease;
     let lineage = AcceptStoreLineage;
-    let trust = ReplayTrustSnapshot::new(&*offline_program_verifier, &NoPhysicalBindings)
-        .with_authorized_closure(portable.closure_reference(), &release, &lineage);
+    let trust = ReplayTrustSnapshot::new(
+        Arc::clone(&offline_program_verifier),
+        Arc::new(NoPhysicalBindings),
+    )
+    .with_authorized_closure(portable.authorized_closure_digest(), &release, &lineage);
     let offline = PortableRunExport::verify_offline(
         encoded_portable.as_bytes(),
         encoded_portable.content_ref(),
         &trust,
     )
+    .await
     .expect("fold recursively authorized portable export offline");
     let online = project_replay_result(&recorded).expect("project online recorded replay");
     assert_eq!(offline.as_bytes(), online.as_bytes());
@@ -2708,13 +2721,14 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     assert_eq!(reopened_response, postgres_response);
 
     let memory_fixture = qualified_fact_scan_fixture();
-    let memory_assembled = assemble_in_memory_runtime(
-        postgres_identity,
+    let memory_assembled = qualify_and_open_structured_store(
+        StructuredMemoryBackend::new(postgres_identity),
         memory_fixture.registry,
         Arc::new(NoPhysicalBindings),
     )
+    .await
     .expect("runtime assembly");
-    let AssembledStructuredRuntime {
+    let OpenedStructuredStore {
         runtime: memory_runtime,
         export_reader: memory_reader,
         ..
@@ -2750,7 +2764,7 @@ async fn prior_run_fact_scan_folds_one_shared_producer_prefix_once() {
     )
     .await
     .expect("qualify repeated fact scanner store");
-    let AssembledStructuredRuntime {
+    let OpenedStructuredStore {
         runtime,
         export_reader,
         ..
@@ -3169,7 +3183,7 @@ async fn object_row_failure_rolls_back_batch_objects_and_head() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/object-row-rollback").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -3229,7 +3243,7 @@ async fn malformed_object_rows_fail_closed_after_qualification() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/malformed-objects").expect("operation id");
     let (registry, document) = qualified_program(operation_id.clone());
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -3383,7 +3397,7 @@ async fn numeric_batch_order_refolds_across_the_tenth_append() {
     let database = TestDatabase::create().await;
     let operation_id = stable("mfm.postgres.fixture/numeric-batch-order").expect("operation id");
     let (registry, document) = qualified_program_with_state_count(operation_id.clone(), 10);
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> = Arc::new(NoPhysicalBindings);
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> = Arc::new(NoPhysicalBindings);
     let assembled = open_structured_authoritative(
         database.application_sessions().await,
         registry,
@@ -3493,7 +3507,8 @@ fn qualified_program_with_state_count(
     assembly.register_value::<Value>().expect("value contract");
     let state_contract_ref = state_contract::<CopyState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract identity");
     let descriptor = implementation_descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3551,7 +3566,8 @@ fn qualified_fact_program(
         .expect("fact descriptor registration");
     let state_contract_ref = state_contract::<FactCopyState>()
         .expect("fact state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("fact state contract identity");
     let descriptor = implementation_descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3642,16 +3658,18 @@ fn qualified_fact_scan_fixture_with_source_operation_and_state_count(
     let consumer_operation =
         stable("mfm.postgres.fixture/fact-scan-consumer").expect("consumer operation");
     let fact_descriptor = fact_descriptor().expect("fact descriptor");
+    let fact_descriptor_ref = fact_descriptor
+        .content_ref()
+        .expect("fact descriptor identity");
     let source_manifest = PriorRunFactSourceManifest::new(vec![PriorRunFactSourceRule::new(
         source_operation.unwrap_or_else(|| producer_operation.clone()),
         Vec::new(),
-        vec![fact_descriptor.descriptor_ref.clone()],
+        vec![fact_descriptor_ref.clone()],
     )
     .expect("producer source rule")])
     .expect("source manifest");
-    let source_object = source_manifest
-        .to_history_object()
-        .expect("source manifest object");
+    let source_object =
+        HistoryObject::from_persisted(&source_manifest).expect("source manifest object");
     let request = FactSelectionRequest::new(
         source_object.content_ref.clone(),
         FactSelectionScanBounds::new(
@@ -3663,7 +3681,7 @@ fn qualified_fact_scan_fixture_with_source_operation_and_state_count(
         )
         .expect("fact scan bounds"),
         vec![FactSelectionQuery::new(
-            fact_descriptor.descriptor_ref.clone(),
+            fact_descriptor_ref,
             CanonicalFactPredicate::from_canonical_json(br#"{"value":7}"#).expect("fact predicate"),
             None,
             FactOrdering::Ascending,
@@ -3681,7 +3699,8 @@ fn qualified_fact_scan_fixture_with_source_operation_and_state_count(
         .expect("fact descriptor registration");
     let producer_state_ref = state_contract::<FactCopyState>()
         .expect("producer state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("producer state contract identity");
     let producer_descriptor = implementation_descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3709,7 +3728,8 @@ fn qualified_fact_scan_fixture_with_source_operation_and_state_count(
     let authored_request = request.clone();
     let consumer_state_ref = state_contract::<FactReadState>()
         .expect("consumer state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("consumer state contract identity");
     let consumer_descriptor = implementation_descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3801,8 +3821,8 @@ fn fact_scan_profile() -> StructuredExpansionProfile {
     clippy::too_many_arguments,
     reason = "the end-to-end fixture keeps each certified input explicit"
 )]
-async fn drive_qualified_fact_scan<B, P>(
-    runtime: Runtime<P>,
+async fn drive_qualified_fact_scan<B>(
+    runtime: StructuredRuntime<B>,
     reader: &ExportRunReader<B>,
     producer_operation: StableId,
     consumer_operation: StableId,
@@ -3813,15 +3833,11 @@ async fn drive_qualified_fact_scan<B, P>(
 ) -> String
 where
     B: StructuredHistoryBackend,
-    P: mfm_runtime::history::RuntimeHistoryPort + 'static,
 {
     // Keep each complete history fold on a Tokio worker stack; the test still drives the
     // producer and consumer sequentially, but does not inherit the small test-thread stack.
     let runtime = Arc::new(runtime);
-    let expected_publications = request
-        .scan_bounds()
-        .expect("fixture scan bounds")
-        .maximum_publications();
+    let expected_publications = request.scan_bounds().maximum_publications();
     assert!(expected_publications > 0);
     let store_scope = reader.store_identity().store_scope_id.clone();
     let producer_invocation =
@@ -3988,8 +4004,9 @@ where
         })
         .and_then(|value_ref| consumer.object(value_ref))
         .expect("consumer transition output")
-        .decode::<Value>()
-        .expect("typed consumer transition output");
+        .canonical_json
+        .as_str();
+    let output = serde_json::from_str::<Value>(output).expect("typed consumer transition output");
     assert_eq!(output, Value { value: 8 });
     response
 }
@@ -4013,7 +4030,9 @@ async fn retained_fact_response<B: StructuredHistoryBackend>(
             _ => None,
         })
         .expect("retained fact response object")
-        .decode::<FactSelectionReadResponse>()
+        .canonical_json
+        .as_str();
+    let returned = serde_json::from_str::<FactSelectionReadResponse>(returned)
         .expect("typed retained fact response");
     returned.canonical_response_json().to_owned()
 }
@@ -4106,7 +4125,7 @@ fn fact_set(subject: Value, response: Value) -> FactSet {
     FactSet::one(
         FactProposal::new(
             0,
-            descriptor.descriptor_ref,
+            descriptor.content_ref().expect("fact descriptor identity"),
             proposed_fact_value(subject),
             proposed_fact_value(response),
         )
@@ -4123,7 +4142,7 @@ fn proposed_fact_value(value: Value) -> ProposedFactValue {
         contract.schema_id().clone(),
         contract.semantic_type_id().clone(),
         contract.role().clone(),
-        contract.media_type(),
+        contract.media_type().clone(),
         contract.evidence_contract_ref().clone(),
         canonical,
     )
@@ -4276,7 +4295,7 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
             discriminator,
         ),
         mfm_journal::structured::PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
+            .and_then(|manifest| HistoryObject::from_persisted(&manifest))
             .expect("source manifest"),
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
@@ -4289,18 +4308,29 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
 }
 
 fn admission_object(object_type: &str, schema: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
-        stable(object_type).expect("object type"),
-        SchemaId::new(
-            schema,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(&[discriminator, schema.as_bytes()[0]]),
-        )
-        .expect("schema"),
-        "{\"entries\":[]}",
+    let canonical_json = "{\"entries\":[]}".to_owned();
+    let schema_id = SchemaId::new(
+        schema,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(&[discriminator, schema.as_bytes()[0]]),
     )
-    .expect("admission object")
+    .expect("schema");
+    let content_ref = mfm_ids::ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical_json.as_bytes()),
+        ),
+    )
+    .expect("admission object identity");
+    let object = HistoryObject {
+        object_type: stable(object_type).expect("object type"),
+        content_ref,
+        canonical_json,
+    };
+    object.validate().expect("admission object");
+    object
 }
 
 fn derive_run_id(

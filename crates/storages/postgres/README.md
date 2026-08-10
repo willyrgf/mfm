@@ -48,9 +48,8 @@ run and configuration DML requires the `LockedWriteTx` (or configuration) typest
 There is no always-successful production fence and no production constructor that accepts a raw
 pool. Test issuance uses deployment-private login materials only behind the `test-support` feature.
 
-Append acknowledgement is paired with an [`ExternalCheckpointAuthority`](crate::ExternalCheckpointAuthority)
-owned by deployment infrastructure. Prepared and acknowledged successor state is not read from
-the database itself, so a copied database cannot make an unacknowledged append current.
+Append acknowledgement is classified by stable lookup of the immutable committed batch. A copied
+database therefore cannot manufacture a different answer for the same append request.
 
 ## Qualification openers
 

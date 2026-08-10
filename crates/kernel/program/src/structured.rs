@@ -775,16 +775,6 @@ impl<'a, Input> StateFrame<'a, Input> {
     }
 }
 
-/// Exact state-consumable normal observation committed by Runtime.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum CommittedObservation<Returned, SafeFailure> {
-    /// One schema-valid returned value.
-    Returned(Returned),
-    /// One reviewed redaction-safe definite failure.
-    SafeFailure(SafeFailure),
-}
-
 /// Closed result of deterministic returned-value settlement.
 ///
 /// Safe-failure settlement cannot produce [`StateSettlement::InvalidEvidence`];
@@ -948,21 +938,6 @@ impl<S: State> StructuredStateCallbacks<S> {
                 Some(S::SafeFailureDisposition::into_settlement(proposal))
             }
             Self::Pure { .. } => None,
-        }
-    }
-
-    /// Settles one exact already-committed normal observation.
-    #[doc(hidden)]
-    pub fn settle_observation(
-        &self,
-        input: &S::Input,
-        observation: &CommittedObservation<S::Returned, S::SafeFailure>,
-    ) -> Option<StateSettlement<S::Output, S::Failure>> {
-        match observation {
-            CommittedObservation::Returned(returned) => self.settle_returned(input, returned),
-            CommittedObservation::SafeFailure(safe_failure) => {
-                self.settle_safe_failure(input, safe_failure)
-            }
         }
     }
 }

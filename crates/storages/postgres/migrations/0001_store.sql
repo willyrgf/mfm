@@ -87,7 +87,7 @@ CREATE TABLE store_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT store_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.structured-run-history-postgres.v6'
+        schema_contract_version = 'mfm.structured-run-history-postgres.v7'
     )
 );
 
@@ -147,7 +147,7 @@ SELECT
 FROM identity_parts;
 
 INSERT INTO store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.structured-run-history-postgres.v6');
+VALUES (TRUE, 'mfm.structured-run-history-postgres.v7');
 
 INSERT INTO target_authority (
     singleton,
@@ -174,15 +174,23 @@ SELECT
     format('mfm_t_%s_cwr', target_key)
 FROM (SELECT substr(md5(current_schema()), 1, 16) AS target_key) AS keys;
 
+-- One head row per run. `tenant_scope_id` and `has_effect_entry_attention` are
+-- the complete current route: the full attention subject is never persisted,
+-- so a historical attempt can neither consume a page nor duplicate a run.
 CREATE TABLE run_history_heads (
     run_id TEXT PRIMARY KEY,
     store_scope_id TEXT NOT NULL,
     store_epoch NUMERIC(20, 0) NOT NULL,
+    tenant_scope_id TEXT NOT NULL,
     head_sequence NUMERIC(20, 0) NOT NULL,
     head_commit_digest TEXT NOT NULL,
+    has_effect_entry_attention BOOLEAN NOT NULL,
     CONSTRAINT run_history_heads_run_id_v1 CHECK (length(run_id) BETWEEN 1 AND 512),
     CONSTRAINT run_history_heads_scope_v1 CHECK (
         store_scope_id ~ '^mfm[.]store_scope[.]v1:[0-9a-f]{32}$'
+    ),
+    CONSTRAINT run_history_heads_tenant_v1 CHECK (
+        tenant_scope_id ~ '^mfm[.]tenant_scope[.]v1:[0-9a-f]{32}$'
     ),
     CONSTRAINT run_history_heads_epoch_v1 CHECK (
         store_epoch >= 1
@@ -198,6 +206,12 @@ CREATE TABLE run_history_heads (
         length(head_commit_digest) BETWEEN 1 AND 512
     )
 );
+
+-- The one current-attention route. It is partial so its size tracks runs that
+-- currently hold manual Effect-entry attention, never retained attempts.
+CREATE INDEX run_history_heads_effect_entry_attention_v1
+    ON run_history_heads (tenant_scope_id, run_id)
+ WHERE has_effect_entry_attention;
 
 CREATE TABLE run_history_batches (
     run_id TEXT NOT NULL,
@@ -243,6 +257,11 @@ CREATE TABLE run_history_batches (
     )
 );
 
+ALTER TABLE run_history_heads
+    ADD CONSTRAINT run_history_heads_exact_batch_v1
+    FOREIGN KEY (run_id, head_sequence)
+    REFERENCES run_history_batches (run_id, run_sequence);
+
 CREATE TABLE run_history_batch_objects (
     run_id TEXT NOT NULL,
     run_sequence NUMERIC(20, 0) NOT NULL,
@@ -280,41 +299,26 @@ CREATE TABLE tenant_fact_heads (
     store_epoch NUMERIC(20, 0) NOT NULL,
     tenant_scope_id TEXT NOT NULL,
     fact_order NUMERIC(20, 0) NOT NULL,
-    publication_count NUMERIC(20, 0) NOT NULL,
-    minimum_order NUMERIC(20, 0),
-    maximum_order NUMERIC(20, 0),
-    CONSTRAINT tenant_fact_heads_primary_v3 PRIMARY KEY (
+    CONSTRAINT tenant_fact_heads_primary_v4 PRIMARY KEY (
         store_scope_id,
         store_epoch,
         tenant_scope_id
     ),
-    CONSTRAINT tenant_fact_heads_scope_v3 CHECK (
+    CONSTRAINT tenant_fact_heads_scope_v4 CHECK (
         store_scope_id ~ '^mfm[.]store_scope[.]v1:[0-9a-f]{32}$'
     ),
-    CONSTRAINT tenant_fact_heads_epoch_v3 CHECK (
+    CONSTRAINT tenant_fact_heads_epoch_v4 CHECK (
         store_epoch >= 1
         AND store_epoch <= 18446744073709551615::numeric
         AND trunc(store_epoch) = store_epoch
     ),
-    CONSTRAINT tenant_fact_heads_tenant_v3 CHECK (
+    CONSTRAINT tenant_fact_heads_tenant_v4 CHECK (
         tenant_scope_id ~ '^mfm[.]tenant_scope[.]v1:[0-9a-f]{32}$'
     ),
-    CONSTRAINT tenant_fact_heads_order_v3 CHECK (
-        fact_order >= 0
+    CONSTRAINT tenant_fact_heads_order_v4 CHECK (
+        fact_order >= 1
         AND fact_order <= 18446744073709551615::numeric
         AND trunc(fact_order) = fact_order
-        AND publication_count >= 0
-        AND publication_count <= 18446744073709551615::numeric
-        AND trunc(publication_count) = publication_count
-        AND publication_count = fact_order
-        AND (
-            (fact_order = 0 AND minimum_order IS NULL AND maximum_order IS NULL)
-            OR (
-                fact_order >= 1
-                AND minimum_order = 1
-                AND maximum_order = fact_order
-            )
-        )
     )
 );
 
@@ -372,10 +376,6 @@ CREATE TABLE configuration_revisions (
     predecessor_schema_id TEXT,
     predecessor_digest TEXT,
     append_request_id TEXT NOT NULL,
-    value_contract_schema_id TEXT NOT NULL,
-    value_contract_digest TEXT NOT NULL,
-    value_schema_id TEXT NOT NULL,
-    value_digest TEXT NOT NULL,
     revision_schema_id TEXT NOT NULL,
     revision_digest TEXT NOT NULL,
     canonical_revision_json TEXT NOT NULL,
@@ -454,12 +454,8 @@ CREATE TABLE configuration_revisions (
         octet_length(predecessor_digest) BETWEEN 1 AND 512
         OR predecessor_digest IS NULL
     ),
-    CONSTRAINT configuration_revisions_value_refs_v1 CHECK (
-        octet_length(value_contract_schema_id) BETWEEN 1 AND 512
-        AND octet_length(value_contract_digest) BETWEEN 1 AND 512
-        AND octet_length(value_schema_id) BETWEEN 1 AND 512
-        AND octet_length(value_digest) BETWEEN 1 AND 512
-        AND octet_length(revision_schema_id) BETWEEN 1 AND 512
+    CONSTRAINT configuration_revisions_object_ref_v2 CHECK (
+        octet_length(revision_schema_id) BETWEEN 1 AND 512
         AND octet_length(revision_digest) BETWEEN 1 AND 512
     ),
     CONSTRAINT configuration_revisions_json_v1 CHECK (

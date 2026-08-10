@@ -13,21 +13,19 @@ mod proofs;
 
 pub use commands::{
     AccessAuthorizationProposal, AccessObservationProposal, ProposedCanonicalValue,
-    ProposedObservationOutcome, ProposedTransitionValue, StateTransitionProposal,
-    StructuredAdmissionCommand, StructuredAdmissionMaterial,
+    ProposedObservationOutcome, ProposedTransitionValue, QualifiedRuntimeIntent,
+    StateTransitionProposal, StructuredAdmissionCommand, StructuredAdmissionMaterial,
 };
 pub use cursor::{
-    ActionableState, EffectEntrySubject, LaneCursor, ObservationQualification, ProgramCursor,
+    ActionableState, EffectEntryAttentionResolution, EffectEntrySubject, LaneCursor, ProgramCursor,
     StateLeaf, StructuredFrontier,
 };
 pub use error::HistoryError;
 pub use identity::{PhysicalTargetIdentity, StructuredStoreIdentity};
-pub use port::{
-    AppendAttemptApi, AuthorizationApi, HistoryFuture, RuntimeHistoryPort, VerifiedRunView,
-};
+pub use port::{HistoryFuture, RuntimeHistoryPort, VerifiedRunView};
 pub use proofs::{
     CertifiedAccessAuthorization, CommittedAccessAuthorization, HistoryAppendOutcome,
-    ObservationCommit, PriorRunFactScanCompletion, StructuredAppendAttempt,
+    PriorRunFactScanCompletion, StructuredAppendAttempt,
 };
 
 /// Result type for history-port operations.

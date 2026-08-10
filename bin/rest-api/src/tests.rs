@@ -8,7 +8,8 @@ use async_trait::async_trait;
 use axum::http::{Method, Request};
 use mfm_app::{
     application_for_test, application_with_export_for_test, AccessPolicyError, AccessTarget,
-    AuthorizedTenant, RunAccessGrant, RunAccessPolicy, SecretCredential, TestApplicationMode,
+    ApplicationAccessGrant, ApplicationAccessPolicy, AuthorizedTenant, SecretCredential,
+    TestApplicationMode,
 };
 use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId, TenantScopeId};
@@ -20,7 +21,7 @@ const RUN_ID: &str =
 
 struct RecordingPolicy {
     result: Result<AuthorizedTenant, AccessPolicyError>,
-    calls: Mutex<Vec<(RunAccessGrant, AccessTarget)>>,
+    calls: Mutex<Vec<(ApplicationAccessGrant, AccessTarget)>>,
 }
 
 impl RecordingPolicy {
@@ -49,17 +50,17 @@ impl RecordingPolicy {
         })
     }
 
-    fn calls(&self) -> Vec<(RunAccessGrant, AccessTarget)> {
+    fn calls(&self) -> Vec<(ApplicationAccessGrant, AccessTarget)> {
         self.calls.lock().expect("policy calls").clone()
     }
 }
 
 #[async_trait]
-impl RunAccessPolicy for RecordingPolicy {
+impl ApplicationAccessPolicy for RecordingPolicy {
     async fn authorize(
         &self,
         credential: &SecretCredential,
-        grant: RunAccessGrant,
+        grant: ApplicationAccessGrant,
         target: &AccessTarget,
     ) -> Result<AuthorizedTenant, AccessPolicyError> {
         assert_eq!(credential.expose_to_policy(), b"opaque");
@@ -467,7 +468,7 @@ async fn exact_grant_denial_is_forbidden_before_backend_access() {
     )
     .await;
     assert_eq!(policy.calls().len(), 1);
-    assert_eq!(policy.calls()[0].0, RunAccessGrant::ReadPublic);
+    assert_eq!(policy.calls()[0].0, ApplicationAccessGrant::ReadPublic);
 }
 
 #[tokio::test]
@@ -490,7 +491,7 @@ async fn replay_grant_denial_does_not_reach_the_backend() {
     )
     .await;
     assert_eq!(policy.calls().len(), 1);
-    assert_eq!(policy.calls()[0].0, RunAccessGrant::Replay);
+    assert_eq!(policy.calls()[0].0, ApplicationAccessGrant::Replay);
 }
 
 #[tokio::test]
@@ -549,7 +550,7 @@ async fn replay_authorizes_only_the_replay_grant() {
             .iter()
             .map(|(grant, _)| *grant)
             .collect::<Vec<_>>(),
-        vec![RunAccessGrant::Replay]
+        vec![ApplicationAccessGrant::Replay]
     );
 }
 
@@ -601,7 +602,7 @@ async fn export_response_is_lazy_raw_stream_with_exact_headers() {
             .iter()
             .map(|(grant, _)| *grant)
             .collect::<Vec<_>>(),
-        vec![RunAccessGrant::Export]
+        vec![ApplicationAccessGrant::Export]
     );
 }
 

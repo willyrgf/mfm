@@ -17,15 +17,15 @@ operation DSL
   -> CertifiedProgramDocument
   -> Runtime -- RuntimeHistoryPort --> private store adapter
        |                                  |
-       |                                  +-> sole callback-free fold + backend
+       |                                  +-> qualify -> reduce -> project + backend
        +-> authorized Read  -> registered invoker -> transport/scanner/status port
        +-> authorized Effect -> registered invoker -> transport/signer/resource authority
 
-store purpose readers -> same fold -> purpose-sealed evidence (public/trace/audit/replay/export)
+store purpose readers -> same qualification/reduction -> purpose-sealed evidence (public/trace/audit/replay/export)
 
-Public and recorded-replay evidence expose only a fold-derived status tag;
-actionable frontier details remain inside the store fold and Runtime adapter.
-Offline replay receives an opaque fold summary with only recorded status and
+Public and recorded-replay evidence expose only a reducer-derived status tag;
+actionable frontier details remain inside the store reducer and Runtime adapter.
+Offline replay receives an opaque reduction summary with only recorded status and
 bounded export metadata; the full verified cursor remains store-private.
 ```
 
@@ -57,13 +57,13 @@ Every workspace package declares one `package.metadata.mfm.layer`.
 | Program | Typed declaration-ordered authoring, state callback contracts, nominal values and outcomes | Persistence or ambient IO |
 | Spec/certify | Serialized structured algebra, pure expansion, bounds, failure plans, policy and implementation closure | Runtime scheduling or live IO |
 | Journal | Exactly five strict record families and assigned append identities | Persistence, callbacks, or cursor derivation |
-| Store | Atomic CAS, exact object closure, sole callback-free fold, verified cursor, purpose readers, writer fencing | Domain interpretation or destination IO |
+| Store | Hostile-input qualification, the sole reducer, projection/compilation, atomic CAS, exact object closure, purpose readers, writer fencing | Domain interpretation or destination IO |
 | Runtime | Sole history writer, admission, one cursor action, affine access bracket, callback invocation | Business policy, EVM lifecycle, or cross-run resource state |
-| Replay | Portable export format, offline verification, and callback-free projections over the store fold | Writer, callback, provider, or signer authority |
+| Replay | Portable export format, offline verification, and callback-free projections over qualified reduction | Writer, callback, provider, or signer authority |
 | State | Deterministic request authoring and returned/safe-failure interpretation | Network, filesystem, clock, store, or hidden retries |
 | Adapter | Total binding from one Runtime authorization to one explicit capability | Scheduler, persisted lifecycle, or unrecorded completion |
 | Transport | One bounded protocol exchange and checked public response | Run history, state settlement, or resource policy |
-| Resource authority | One narrow durable cross-run invariant and its permanent operation keys | Run folding, scheduling, provider calls, or terminal run meaning |
+| Resource authority | One narrow durable cross-run invariant and its permanent operation keys | Run reduction, scheduling, provider calls, or terminal run meaning |
 | App | Qualified assembly, access policy, tenant isolation, config resolution, DTO orchestration | History mutation outside Runtime or domain logic |
 | Binary | Input parsing, command/route dispatch, rendering | Lower implementation construction or secret retention |
 
@@ -77,7 +77,7 @@ canonical + ids
   -> certify
   -> journal
   -> runtime  (process authority + RuntimeHistoryPort)
-  -> store    (private adapter, sole fold, purpose readers)
+  -> store    (private adapter, qualification/reduction/compiler, purpose readers)
   -> replay
 ```
 
@@ -127,11 +127,12 @@ history. This catalog contains evidence only and confers no invocation or mutati
 `mfm-store` is the choke point for persisted legality. Its backend accepts a store-validated
 candidate, not arbitrary records. The in-memory backend is a conformance implementation. The
 PostgreSQL backend owns exact-target session capabilities, role-separated pools, per-transaction
-target permits, SQL transactions, and fence-generation enforcement but reuses the same fold.
+target permits, SQL transactions, and fence-generation enforcement but reuses the same
+qualification, reduction, compilation, and obligation rules.
 Ordinary assembly receives only opaque deployment-issued session bundles, never a pool, URL, raw
 fence, or DML transaction.
-The fold marks physical checks as retained-history replay or current-candidate qualification and
-supplies the exact prior binding plus folded minimum lineage head for refresh. A deployment
+Obligation discharge distinguishes retained-history replay from current-candidate qualification
+and supplies the exact prior binding plus reduced minimum lineage head for refresh. A deployment
 verifier can consequently retain historical releases for callback-free restart while requiring
 new Effect attempts and supersession proofs to follow one strict old-to-new release relation.
 Target-bound store identities retain the exact physical target key, database identity, fence
@@ -152,7 +153,7 @@ Prior-run fact selection keeps its pure and persisted responsibilities separate:
   publication routes in `tenant_fact_heads` and `tenant_fact_publications`.
 - `mfm-certify` owns deterministic expansion, predicates, proof construction, and the concrete
   `AdmissionVerificationRegistry`. Process/live invocation authority is held by Runtime after
-  store assembly consumes one complete `QualifiedProgramRegistry`. The reserved prior-run fact
+  store assembly consumes one complete `CertifiedProgramRegistry`. The reserved prior-run fact
   scanner remains a kernel process baseline installed during registry qualification. The source
   retains no backend, pool, writer, or generic query handle. Registry finalization requires the
   complete expected entry-point identity set and rejects missing, extra, or duplicate identities.
@@ -166,11 +167,10 @@ loads one verified prefix, selects the minimum actionable occurrence path, and p
 action. The scanner travels through the same ordinary Read
 authorization/invocation/observation/settlement protocol. Runtime passes the newly committed
 authorization proof into the sealed invoker, and every protected adapter retains that proof until
-its provider call completes. No normal live return can escape recording. The private store adapter retains at most one same-fold verified
-successor between drives and validates its journal head against the indexed backend head before
-reuse; a stale or absent entry uses the sole full fold. The indexed-head query is the snapshot point
-for a non-mutating load, while exact-head compare-and-append protects every mutation from a later
-external append.
+its provider call completes. No normal live return can escape recording. Each drive loads one
+qualified, reduced predecessor and compares its complete current projection. The indexed-head query
+is the snapshot point for a non-mutating load, while exact-head compare-and-append protects every
+mutation from a later external append.
 
 `mfm-certify` issues opaque process identities containing semantic kind, semantic contract, and
 qualified implementation contract. Runtime retains that identity on callback proposals and emits
@@ -303,7 +303,7 @@ The store's canonical ingress is shared by memory and PostgreSQL. It validates t
 append envelope, persisted-object closure, bounded counts, canonical bytes, and exact predecessor
 before either backend performs DML. PostgreSQL loads query the indexed head before loading any
 batch, object, or revision rows, so that query establishes the repeatable-read snapshot; the
-folded prefix must then equal that same-snapshot head, and the target is revalidated before the
+reduced prefix must then equal that same-snapshot head, and the target is revalidated before the
 snapshot is released. A predecessor digest is a compare-and-append precondition, never a second
 stream identity.
 
@@ -323,7 +323,7 @@ Before adding a public type, module, schema, crate, route, or task:
 
 1. Name exactly one owner row above.
 2. Confirm the dependency points toward a lower-authority contract.
-3. Confirm no second fold, scheduler, mutation writer, configuration authority, or resource
+3. Confirm no second reducer, scheduler, mutation writer, configuration authority, or resource
    lifecycle is introduced.
 4. Route ambient IO through a registered adapter/transport or narrow authority.
 5. Keep persisted structures canonical, float-free, strict, bounded, content-addressed, and

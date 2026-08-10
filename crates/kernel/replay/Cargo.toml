@@ -20,8 +20,10 @@ path = "src/lib.rs"
 [dependencies]
 mfm-authority-seal = { path = "../authority-seal" }
 mfm-canonical = { path = "../canonical" }
+mfm-certify = { path = "../certify" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
 mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }

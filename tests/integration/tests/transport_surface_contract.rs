@@ -53,6 +53,7 @@ fn rest_router_has_only_the_current_run_routes() {
         "/v1/runs/:run_id/trace",
         "/v1/runs/:run_id/audit",
         "/v1/runs/:run_id/exports",
+        "/v1/effect-entry-attention",
     ] {
         assert!(
             source.contains(&format!("\"{route}\"")),

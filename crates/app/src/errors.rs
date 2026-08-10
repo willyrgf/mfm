@@ -42,8 +42,6 @@ pub enum PublicRuntimeFaultPhase {
     AppendCandidate,
     /// Load and callback-free verify existing history.
     LoadHistory,
-    /// Resolve one unchanged ambiguous append identity.
-    ResolveAppend,
 }
 
 /// Secret-free qualified authority named by a public Runtime fault.

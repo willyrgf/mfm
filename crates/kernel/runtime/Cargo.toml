@@ -30,6 +30,7 @@ mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }

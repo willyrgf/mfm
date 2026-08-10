@@ -1,7 +1,7 @@
 # mfm-replay
 
-Callback-free projections and the sole portable export format over the `mfm-store` structured
-history fold.
+Callback-free projections and the sole portable export format over `mfm-store` qualified
+history reduction.
 
 The crate verifies recorded history through a reader and projects:
 
@@ -14,10 +14,13 @@ The crate verifies recorded history through a reader and projects:
 It owns the only portable export frame stream, chain/seal digest rules, and offline validator. It owns
 no writer, callback, scheduler, process registry, provider, transport, signer, wallet authority, or
 alternate reducer. Recorded replay is verification-only and never compares against live state.
-Offline verification uses only bundle bytes and an explicit trust snapshot against the store's
-read-only fold entry.
+Offline verification uses only bundle bytes, the caller's expected complete-stream `ContentRef`, and
+an explicit trust snapshot against the store's read-only qualification entry.
 
 The current export media type is
-`application/vnd.mfm.structured-run-export-stream.v2`. Each newline-delimited frame is bounded,
-canonical, and linked to its predecessor; the terminal seal binds the exact closure and stream
-size. Legacy monolithic JSON objects are rejected without a compatibility decoder.
+`application/vnd.mfm.structured-run-export-stream.v3`. The complete stream is the one portable
+identity: `encode()` returns the exact bytes and their `ContentRef` together, and a frame is an
+internal typed record of that one codec with no identity of its own. The terminal seal binds the
+exact closure and fixation, and deliberately restates no frame ordinal, chain digest, or byte count —
+physical line order, the expected reference, and the canonical batch predecessor chains already own
+those facts. Old bytes are rejected without a compatibility decoder.

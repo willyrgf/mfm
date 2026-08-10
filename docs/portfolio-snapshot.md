@@ -57,8 +57,8 @@ does not open transports, select live endpoints, read a database, or construct p
 
 ## Replay and output
 
-Public read, trace, audit, replay verification, and portable export use the callback-free store
-fold. They do not resolve current configuration or routing and do not call EVM. The terminal public
+Public read, trace, audit, replay verification, and portable export use purpose projections from
+qualified reduction. They do not resolve current configuration or routing and do not call EVM. The terminal public
 output is selected from the exact committed nominal root outcome and its content-addressed value.
 
 ## Verification

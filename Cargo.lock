@@ -2658,8 +2658,10 @@ version = "0.1.0"
 dependencies = [
  "mfm-authority-seal",
  "mfm-canonical",
+ "mfm-certify",
  "mfm-ids",
  "mfm-journal",
+ "mfm-program-derive",
  "mfm-spec",
  "mfm-store",
  "mfm-values",

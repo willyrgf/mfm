@@ -38,7 +38,7 @@ impl ProposedCanonicalValue {
         &self.canonical
     }
 
-    /// Store-only construction after fold-side validation of already-canonical bytes.
+    /// Store-only construction after reducer-side validation of already-canonical bytes.
     #[doc(hidden)]
     pub fn from_canonical_bytes(canonical: PlainCanonicalJsonBytes) -> Self {
         Self { canonical }
@@ -222,7 +222,7 @@ impl StructuredAdmissionCommand {
         &self.append_request_id
     }
 
-    /// Consumes the command into owned parts for store fold preparation.
+    /// Consumes the command into owned parts for store reduction preparation.
     #[doc(hidden)]
     pub fn into_parts(
         self,
@@ -381,6 +381,34 @@ pub struct AccessObservationProposal {
     append_request_id: AppendRequestId,
     authorization_ref: RecordRef,
     outcome: ProposedObservationOutcome,
+}
+
+/// One normalized event intent accepted by the sealed history mutation port.
+///
+/// The store owns qualification, reduction, compilation, comparison, and
+/// persistence. Runtime supplies only the event-specific semantic material.
+#[doc(hidden)]
+pub enum QualifiedRuntimeIntent {
+    /// Admit one new run.
+    Admission(Box<StructuredAdmissionCommand>),
+    /// Commit one deterministic state result.
+    Transition(StateTransitionProposal),
+    /// Commit one physical access authorization.
+    Authorization(Box<AccessAuthorizationProposal>),
+    /// Commit one physical access observation.
+    Observation(AccessObservationProposal),
+}
+
+impl QualifiedRuntimeIntent {
+    /// Returns the stable append identity carried by this intent.
+    pub const fn append_request_id(&self) -> &AppendRequestId {
+        match self {
+            Self::Admission(command) => command.append_request_id(),
+            Self::Transition(proposal) => proposal.append_request_id(),
+            Self::Authorization(proposal) => proposal.append_request_id(),
+            Self::Observation(proposal) => proposal.append_request_id(),
+        }
+    }
 }
 
 impl AccessObservationProposal {

@@ -5,20 +5,15 @@ use std::sync::Arc;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
-use mfm_canonical::sha256_digest_bytes;
 use mfm_certify::structured::{AdmissionCertificationRegistry, ProgramRegistryBuilder};
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity,
-    RunId, StableId, TenantScopeId,
+    AppendRequestId, ContentRef, EntryPointId, InvocationIdentity, RunId, StableId, TenantScopeId,
 };
-use mfm_journal::structured::{
-    canonical_json, AccessKind, HistoryObject, ADMISSION_CONFIGURATION_OBJECT_TYPE,
-};
+use mfm_journal::structured::{AccessKind, HistoryObject};
 use mfm_program::structured::RuntimeResourceAuthority;
 use mfm_runtime::history::{HistoryAppendOutcome, StructuredAdmissionCommand};
 use mfm_runtime::structured::{
-    Runtime, RuntimeError, RuntimeFaultCode, RuntimeFaultPhase, RuntimeFaultSubject,
-    RuntimeStoreFaultKind,
+    RuntimeError, RuntimeFaultCode, RuntimeFaultPhase, RuntimeFaultSubject, RuntimeStoreFaultKind,
 };
 use mfm_spec::structured::{
     SecretFreeExecutableIdentity, SecretFreeQualificationArtifact, StructuredExpansionProfile,
@@ -30,11 +25,11 @@ use mfm_storage_postgres::{
 };
 use mfm_store::structured::{
     expand_export_source_closure, AuditRunReader, ConfigurationHistoryReader,
-    ConfigurationStreamKey, ExportRunEvidence, ExportRunReader, ExportSourceClosureError,
-    PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,
-    ProposedCanonicalValue, PublicPhysicalBindingVerifier, PublicRunEvidence, PublicRunReader,
-    ReplayRunReader, StructuredAdmissionMaterial, StructuredStoreError, TraceRunReader,
-    VerifiedConfiguredValue,
+    ConfigurationStreamKey, EffectEntryAttentionReader, ExportRunEvidence, ExportRunReader,
+    ExportSourceClosureError, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    PhysicalObligationChecker, ProposedCanonicalValue, PublicRunEvidence, PublicRunReader,
+    ReplayRunReader, StructuredAdmissionMaterial, StructuredRuntime, StructuredStoreError,
+    TraceRunReader, VerifiedConfiguredValue,
 };
 use mfm_values::{CanonicalJsonPersistedSchema, MfmConfig, MfmValue, PublicOutputDescriptor};
 use tokio::io::AsyncWriteExt;
@@ -46,11 +41,13 @@ use crate::application::{
 use crate::stream_spool::WritableSpool;
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
-    decode_transition_trace_page_request, AccessAuditPage, AdmissionStatus, AdmitRunRequest,
-    AdmitRunResponse, Application, DriveResponse, ErrorClass, ExportRequest, ExportedRun,
+    decode_effect_entry_attention_cursor, decode_transition_trace_page_request,
+    encode_effect_entry_attention_cursor, AccessAuditPage, AdmissionStatus, AdmitRunRequest,
+    AdmitRunResponse, Application, ApplicationAccessPolicy, DriveResponse,
+    EffectEntryAttentionEntry, EffectEntryAttentionPage, ErrorClass, ExportRequest, ExportedRun,
     PageRequest, PublicError, PublicRunView, PublicRuntimeFaultAttribution,
     PublicRuntimeFaultPhase, PublicRuntimeFaultSubject, ReplayRequest, ReplayResponse,
-    RunAccessPolicy, TransitionTracePage,
+    TransitionTracePage,
 };
 
 const EXECUTABLE_ID: &str = "mfm.application/structured-runtime";
@@ -66,10 +63,11 @@ struct ProductionBackend {
     public_reader: PublicRunReader<HistoryBackend>,
     trace_reader: TraceRunReader<HistoryBackend>,
     audit_reader: AuditRunReader<HistoryBackend>,
+    effect_entry_attention_reader: EffectEntryAttentionReader<HistoryBackend>,
     replay_reader: ReplayRunReader<HistoryBackend>,
     export_reader: ExportRunReader<HistoryBackend>,
     configuration: ConfigReader,
-    runtime: Arc<Runtime<mfm_store::structured::StoreHistoryAdapter<HistoryBackend>>>,
+    runtime: Arc<StructuredRuntime<HistoryBackend>>,
     certifier: AdmissionCertificationRegistry,
     routing_manifest: mfm_portfolio::PortfolioRoutingManifest,
     routing_catalog: mfm_evm::EvmRoutingCatalogDescriptor,
@@ -91,7 +89,7 @@ struct ProductionBackend {
 
 pub(super) async fn connect(
     sessions: PostgresApplicationSessions,
-    policy: Arc<dyn RunAccessPolicy>,
+    policy: Arc<dyn ApplicationAccessPolicy>,
     wallet: EvmWalletDeployment,
 ) -> Result<Application, PublicError> {
     let EvmWalletDeploymentParts {
@@ -114,7 +112,7 @@ pub(super) async fn connect(
         Arc::clone(&balance_bindings),
         Arc::clone(&wallet_bindings),
     )?;
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> =
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> =
         Arc::new(ExactPhysicalBindingVerifier::new(
             assembly.physical_binding_purposes.clone(),
             assembly.broadcast_resource_ref.clone(),
@@ -134,6 +132,7 @@ pub(super) async fn connect(
         public_reader: assembled.public_reader,
         trace_reader: assembled.trace_reader,
         audit_reader: assembled.audit_reader,
+        effect_entry_attention_reader: assembled.effect_entry_attention_reader,
         replay_reader: assembled.replay_reader,
         export_reader: assembled.export_reader,
         configuration,
@@ -432,7 +431,7 @@ impl ApplicationBackend for ProductionBackend {
         &self,
         call: &AuthorizedRunCall<'_, run_grant::Drive>,
     ) -> Result<DriveResponse, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Drive);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::Drive);
         self.load_public_authorized(call.tenant_scope_id(), call.run_id())
             .await?;
         let outcome = self
@@ -450,7 +449,7 @@ impl ApplicationBackend for ProductionBackend {
         &self,
         call: &AuthorizedRunCall<'_, run_grant::ReadPublic>,
     ) -> Result<PublicRunView, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::ReadPublic);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::ReadPublic);
         let evidence = self
             .load_public_authorized(call.tenant_scope_id(), call.run_id())
             .await?;
@@ -462,7 +461,7 @@ impl ApplicationBackend for ProductionBackend {
         call: &AuthorizedRunCall<'_, run_grant::Replay>,
         request: ReplayRequest,
     ) -> Result<ReplayResponse, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Replay);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::Replay);
         match request {
             ReplayRequest::Verify => {
                 let evidence = self
@@ -479,7 +478,7 @@ impl ApplicationBackend for ProductionBackend {
         call: &AuthorizedRunCall<'_, run_grant::InspectTrace>,
         page: PageRequest,
     ) -> Result<TransitionTracePage, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::InspectTrace);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::InspectTrace);
         let position = decode_transition_trace_page_request(call.run_id(), &page)?;
         let evidence = self
             .load_trace_authorized(call.tenant_scope_id(), call.run_id())
@@ -499,7 +498,7 @@ impl ApplicationBackend for ProductionBackend {
         call: &AuthorizedRunCall<'_, run_grant::InspectAudit>,
         page: PageRequest,
     ) -> Result<AccessAuditPage, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::InspectAudit);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::InspectAudit);
         let position = decode_access_audit_page_request(call.run_id(), &page)?;
         let evidence = self
             .load_audit_authorized(call.tenant_scope_id(), call.run_id())
@@ -514,12 +513,49 @@ impl ApplicationBackend for ProductionBackend {
         complete_access_audit_page(page)
     }
 
+    async fn list_effect_entry_attention(
+        &self,
+        tenant_scope_id: &mfm_ids::TenantScopeId,
+        page: PageRequest,
+    ) -> Result<EffectEntryAttentionPage, PublicError> {
+        let after_run_id = page
+            .cursor()
+            .map(|cursor| decode_effect_entry_attention_cursor(cursor, tenant_scope_id))
+            .transpose()?;
+        let evidence = self
+            .effect_entry_attention_reader
+            .list_effect_entry_attention(
+                tenant_scope_id,
+                after_run_id.as_ref(),
+                u32::from(page.effective_limit()),
+            )
+            .await
+            .map_err(|_| page_invalid())?;
+        let entries = evidence
+            .entries()
+            .iter()
+            .map(|entry| {
+                EffectEntryAttentionEntry::from_reduced(
+                    entry.header().run_id().clone(),
+                    entry.journal_head().clone(),
+                    entry.subject().clone(),
+                    entry.resolution(),
+                )
+            })
+            .collect();
+        let next_cursor = evidence
+            .next_after_run_id()
+            .map(|after| encode_effect_entry_attention_cursor(tenant_scope_id, after))
+            .transpose()?;
+        Ok(EffectEntryAttentionPage::from_entries(entries, next_cursor))
+    }
+
     async fn export_run(
         &self,
         call: &AuthorizedRunCall<'_, run_grant::Export>,
         request: ExportRequest,
     ) -> Result<ExportedRun, PublicError> {
-        debug_assert_eq!(call.grant(), crate::RunAccessGrant::Export);
+        debug_assert_eq!(call.grant(), crate::ApplicationAccessGrant::Export);
         // Phase one: authorize the complete recursive source closure with zero
         // bytes emitted. Phase two serializes only after that succeeds.
         let evidence = self
@@ -581,15 +617,15 @@ impl ProductionBackend {
             &lane_inputs,
         )
         .map_err(|_| configured_value_invalid())?;
-        let certified = self
+        let document = self
             .certifier
-            .certify(operation_id, authored)
+            .certify_document(operation_id, authored)
             .map_err(|_| configured_value_invalid())?;
         let initial_values =
             vec![ProposedCanonicalValue::from_value(&portfolio_input)
                 .map_err(classify_store_error)?];
         Ok(PreparedAdmission {
-            document: certified.into_document(),
+            document,
             material: self.admission_material(&configured, Vec::new())?,
             initial_values,
         })
@@ -672,12 +708,12 @@ impl ProductionBackend {
             stable(SUBMISSION_SCOPE_ID)?,
         )
         .map_err(|_| admission_invalid())?;
-        let certified = self
+        let document = self
             .certifier
-            .certify(operation_id, authored)
+            .certify_document(operation_id, authored)
             .map_err(|_| admission_invalid())?;
         Ok(PreparedAdmission {
-            document: certified.into_document(),
+            document,
             material: self.admission_material(
                 &configured,
                 vec![
@@ -718,23 +754,8 @@ impl ProductionBackend {
         configured: &VerifiedConfiguredValue,
         stable_resource_refs: Vec<ContentRef>,
     ) -> Result<StructuredAdmissionMaterial, PublicError> {
-        let canonical =
-            canonical_json(configured.revision()).map_err(|_| configured_value_invalid())?;
-        let configuration = HistoryObject {
-            object_type: stable(ADMISSION_CONFIGURATION_OBJECT_TYPE)?,
-            content_ref: ContentRef::new(
-                mfm_store::structured::ConfigurationRevision::schema_id()
-                    .map_err(|_| configured_value_invalid())?,
-                ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256V1,
-                    sha256_digest_bytes(canonical.as_bytes()),
-                ),
-            )
-            .map_err(|_| configured_value_invalid())?,
-            canonical_json: canonical.as_str().to_owned(),
-        };
         StructuredAdmissionMaterial::new(
-            configuration,
+            configured.revision_object().object().clone(),
             self.context_manifest.clone(),
             self.prior_run_source_manifest.clone(),
             self.routing_policy.clone(),
@@ -862,10 +883,8 @@ impl ProductionBackend {
             if route.producer_transition().run_id != root_run_id {
                 required_heads
                     .entry(route.producer_transition().run_id.clone())
-                    .and_modify(|head| {
-                        *head = (*head).max(route.producer_transition().run_sequence)
-                    })
-                    .or_insert(route.producer_transition().run_sequence);
+                    .and_modify(|head| *head = (*head).max(route.producer_head().run_sequence))
+                    .or_insert(route.producer_head().run_sequence);
             }
         }
         if required_heads.len() > mfm_store::structured::MAX_PORTABLE_SOURCE_RUNS {
@@ -916,10 +935,8 @@ impl ProductionBackend {
                     nested.insert(nested_run_id.clone());
                     required_heads
                         .entry(nested_run_id)
-                        .and_modify(|head| {
-                            *head = (*head).max(route.producer_transition().run_sequence)
-                        })
-                        .or_insert(route.producer_transition().run_sequence);
+                        .and_modify(|head| *head = (*head).max(route.producer_head().run_sequence))
+                        .or_insert(route.producer_head().run_sequence);
                 }
             }
             loaded_heads.insert(source_run_id.clone(), required_head);
@@ -1057,8 +1074,8 @@ impl ExactPhysicalBindingVerifier {
     }
 }
 
-impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
-    fn verify_authorization(
+impl PhysicalObligationChecker for ExactPhysicalBindingVerifier {
+    fn verify_retained_authorization(
         &self,
         context: &PhysicalBindingAuthorization<'_>,
         certificate: &HistoryObject,
@@ -1078,10 +1095,6 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
             || context.admitted_routing_policy_ref != release.admitted_routing_policy_ref()
             || context.stable_resource_lineage_contract_ref
                 != purpose.stable_resource_lineage_contract_ref()
-            || matches!(
-                context.verification_mode,
-                PhysicalBindingVerificationMode::CurrentCandidate
-            ) && history.current().certificate() != certificate
         {
             return Err(StructuredStoreError::Certification);
         }
@@ -1101,7 +1114,24 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
         }
     }
 
-    fn verify_supersession(
+    fn verify_current_authorization(
+        &self,
+        context: &PhysicalBindingAuthorization<'_>,
+        certificate: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        let purpose = self.purpose(
+            context.access_kind,
+            context.capability_contract_ref,
+            context.adapter_contract_ref,
+            context.adapter_implementation_ref,
+        )?;
+        if purpose.release_history().current().certificate() != certificate {
+            return Err(StructuredStoreError::Certification);
+        }
+        Ok(())
+    }
+
+    fn verify_retained_supersession(
         &self,
         context: &PhysicalBindingSupersession<'_>,
         public_lineage_head: &HistoryObject,
@@ -1131,13 +1161,10 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
             || context.public_lineage_head_ref != &public_lineage_head.content_ref
             || public_lineage_head.validate().is_err()
             || evidence.validate().is_err()
-            || matches!(
-                context.verification_mode,
-                PhysicalBindingVerificationMode::CurrentCandidate
-            ) && successor.certificate() != history.current().certificate()
         {
             return Err(StructuredStoreError::Certification);
         }
+        let _ = successor;
         if context.stable_resource_lineage_contract_ref == &self.broadcast_resource_ref {
             let claim: mfm_evm::BroadcastLineageHead = evidence
                 .decode_mfm_value()
@@ -1160,6 +1187,37 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
             }
         }
         Err(StructuredStoreError::Certification)
+    }
+
+    fn verify_current_supersession(
+        &self,
+        context: &PhysicalBindingSupersession<'_>,
+        _public_lineage_head: &HistoryObject,
+        _evidence: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        let purpose = self.purpose(
+            AccessKind::Effect,
+            context.capability_contract_ref,
+            context.adapter_contract_ref,
+            context.adapter_implementation_ref,
+        )?;
+        let history = purpose.release_history();
+        let authorized_release = history
+            .release(context.authorized_binding_ref)
+            .ok_or(StructuredStoreError::Certification)?;
+        let successor = history
+            .releases()
+            .find(|release| {
+                history.is_strict_descendant(
+                    &release.certificate().content_ref,
+                    &authorized_release.certificate().content_ref,
+                ) && release.activation_lineage_head_ref() == Some(context.public_lineage_head_ref)
+            })
+            .ok_or(StructuredStoreError::Certification)?;
+        if successor.certificate() != history.current().certificate() {
+            return Err(StructuredStoreError::Certification);
+        }
+        Ok(())
     }
 }
 
@@ -1255,7 +1313,6 @@ fn public_runtime_fault_attribution(error: &RuntimeError) -> PublicRuntimeFaultA
         RuntimeFaultPhase::QualifyCandidate => PublicRuntimeFaultPhase::QualifyCandidate,
         RuntimeFaultPhase::AppendCandidate => PublicRuntimeFaultPhase::AppendCandidate,
         RuntimeFaultPhase::LoadHistory => PublicRuntimeFaultPhase::LoadHistory,
-        RuntimeFaultPhase::ResolveAppend => PublicRuntimeFaultPhase::ResolveAppend,
     };
     let subject = match error.subject() {
         RuntimeFaultSubject::Process(component) => PublicRuntimeFaultSubject::Process {
@@ -1361,7 +1418,28 @@ fn export_stream_io_error() -> PublicError {
 mod tests {
     use super::*;
     use mfm_ids::SchemaId;
-    use serde::Serialize;
+
+    /// Mirrors the store's `RetainedAndCurrent` discharge: retained first, then
+    /// current. There is no current-only path.
+    fn verify_authorization_as_current(
+        verifier: &ExactPhysicalBindingVerifier,
+        context: &PhysicalBindingAuthorization<'_>,
+        certificate: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        verifier.verify_retained_authorization(context, certificate)?;
+        verifier.verify_current_authorization(context, certificate)
+    }
+
+    /// Mirrors the store's `RetainedAndCurrent` supersession discharge.
+    fn verify_supersession_as_current(
+        verifier: &ExactPhysicalBindingVerifier,
+        context: &PhysicalBindingSupersession<'_>,
+        public_lineage_head: &HistoryObject,
+        evidence: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        verifier.verify_retained_supersession(context, public_lineage_head, evidence)?;
+        verifier.verify_current_supersession(context, public_lineage_head, evidence)
+    }
 
     #[test]
     fn route_and_certificate_refresh_survives_fresh_verifier_construction() {
@@ -1399,7 +1477,6 @@ mod tests {
         )
         .expect("old process verifier");
         let old_current = PhysicalBindingAuthorization {
-            verification_mode: PhysicalBindingVerificationMode::CurrentCandidate,
             access_kind: AccessKind::Effect,
             capability_contract_ref: &capability_ref,
             capability_implementation_ref: &implementation_ref,
@@ -1410,8 +1487,7 @@ mod tests {
             minimum_lineage_head_ref: None,
             previous_physical_binding_ref: None,
         };
-        old_process
-            .verify_authorization(&old_current, &old_certificate)
+        verify_authorization_as_current(&old_process, &old_current, &old_certificate)
             .expect("old process admits its current root release");
 
         let refreshed_history = mfm_evm_live::EvmPhysicalBindingReleaseHistory::new(vec![
@@ -1446,20 +1522,15 @@ mod tests {
         )
         .expect("fresh process verifier");
 
-        let retained_old = PhysicalBindingAuthorization {
-            verification_mode: PhysicalBindingVerificationMode::RetainedHistory,
-            ..old_current
-        };
         fresh_process
-            .verify_authorization(&retained_old, &old_certificate)
+            .verify_retained_authorization(&old_current, &old_certificate)
             .expect("fresh process replays the retained old release");
         assert_eq!(
-            fresh_process.verify_authorization(&old_current, &old_certificate),
+            verify_authorization_as_current(&fresh_process, &old_current, &old_certificate),
             Err(StructuredStoreError::Certification)
         );
 
         let refreshed_current = PhysicalBindingAuthorization {
-            verification_mode: PhysicalBindingVerificationMode::CurrentCandidate,
             access_kind: AccessKind::Effect,
             capability_contract_ref: &capability_ref,
             capability_implementation_ref: &implementation_ref,
@@ -1470,13 +1541,16 @@ mod tests {
             minimum_lineage_head_ref: Some(&public_head.content_ref),
             previous_physical_binding_ref: Some(&old_certificate.content_ref),
         };
-        fresh_process
-            .verify_authorization(&refreshed_current, &new_certificate)
+        verify_authorization_as_current(&fresh_process, &refreshed_current, &new_certificate)
             .expect("fresh process admits the exact current descendant");
         let mut forged_certificate = new_certificate.clone();
         forged_certificate.canonical_json = old_certificate.canonical_json.clone();
         assert_eq!(
-            fresh_process.verify_authorization(&refreshed_current, &forged_certificate),
+            verify_authorization_as_current(
+                &fresh_process,
+                &refreshed_current,
+                &forged_certificate
+            ),
             Err(StructuredStoreError::Certification)
         );
         let non_descendant = PhysicalBindingAuthorization {
@@ -1484,7 +1558,7 @@ mod tests {
             ..refreshed_current
         };
         assert_eq!(
-            fresh_process.verify_authorization(&non_descendant, &new_certificate),
+            verify_authorization_as_current(&fresh_process, &non_descendant, &new_certificate),
             Err(StructuredStoreError::Certification)
         );
 
@@ -1495,9 +1569,8 @@ mod tests {
                 public_head.content_ref.clone(),
             ),
         };
-        let evidence = test_encoded_object("broadcast-evidence", 11, &claim);
+        let evidence = test_encoded_object(&claim);
         let supersession = PhysicalBindingSupersession {
-            verification_mode: PhysicalBindingVerificationMode::CurrentCandidate,
             capability_contract_ref: &capability_ref,
             adapter_contract_ref: &adapter_ref,
             adapter_implementation_ref: &implementation_ref,
@@ -1505,15 +1578,14 @@ mod tests {
             stable_resource_lineage_contract_ref: &broadcast_resource_ref,
             public_lineage_head_ref: &public_head.content_ref,
         };
-        fresh_process
-            .verify_supersession(&supersession, &public_head, &evidence)
+        verify_supersession_as_current(&fresh_process, &supersession, &public_head, &evidence)
             .expect("supersession proves the retained old-to-current relation");
         let same_release = PhysicalBindingSupersession {
             authorized_binding_ref: &new_certificate.content_ref,
             ..supersession
         };
         assert_eq!(
-            fresh_process.verify_supersession(&same_release, &public_head, &evidence),
+            verify_supersession_as_current(&fresh_process, &same_release, &public_head, &evidence),
             Err(StructuredStoreError::Certification)
         );
     }
@@ -1537,58 +1609,49 @@ mod tests {
     }
 
     fn test_object(name: &str, discriminator: u8) -> HistoryObject {
-        test_history_object(
-            StableId::new(format!("mfm.app.test/{name}")).expect("test object type"),
-            SchemaId::new(
-                "mfm.app.test-object",
-                "1",
-                mfm_ids::DigestAlgorithm::Sha256JcsV1,
-                mfm_canonical::sha256_digest_bytes(b"mfm.app.test-object.v1"),
-            )
-            .expect("test object schema"),
-            format!("{{\"discriminator\":{discriminator}}}"),
+        let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&format!(
+            "{{\"discriminator\":{discriminator}}}"
+        ))
+        .expect("test object canonical JSON");
+        let schema_id = SchemaId::new(
+            "mfm.app.test-object",
+            "1",
+            mfm_ids::DigestAlgorithm::Sha256JcsV1,
+            mfm_canonical::sha256_digest_bytes(b"mfm.app.test-object.v1"),
         )
-    }
-
-    fn test_encoded_object<T: Serialize>(
-        name: &str,
-        discriminator: u8,
-        value: &T,
-    ) -> HistoryObject {
-        let schema_name = format!("mfm.app.test-encoded-{discriminator}");
-        let canonical = canonical_json(value).expect("test canonical evidence");
-        test_history_object(
-            StableId::new(format!("mfm.app.test/{name}")).expect("test object type"),
-            SchemaId::new(
-                &schema_name,
-                "1",
-                mfm_ids::DigestAlgorithm::Sha256JcsV1,
-                mfm_canonical::sha256_digest_bytes(
-                    format!("mfm.app.test-encoded-{discriminator}.v1").as_bytes(),
-                ),
-            )
-            .expect("test encoded schema"),
-            canonical.as_str(),
+        .expect("test object schema");
+        let content_ref = ContentRef::new(
+            schema_id,
+            mfm_ids::ContentDigest::from_digest(
+                mfm_ids::DigestAlgorithm::Sha256V1,
+                mfm_canonical::sha256_digest_bytes(canonical.as_bytes()),
+            ),
         )
-    }
-
-    fn test_history_object(
-        object_type: StableId,
-        schema_id: SchemaId,
-        canonical_json: impl Into<String>,
-    ) -> HistoryObject {
-        let canonical_json = canonical_json.into();
+        .expect("test object reference");
         HistoryObject {
-            object_type,
-            content_ref: ContentRef::new(
-                schema_id,
-                ContentDigest::from_digest(
-                    DigestAlgorithm::Sha256V1,
-                    sha256_digest_bytes(canonical_json.as_bytes()),
-                ),
-            )
-            .expect("test object content reference"),
-            canonical_json,
+            object_type: StableId::new(format!("mfm.app.test/{name}")).expect("test object type"),
+            content_ref,
+            canonical_json: canonical.as_str().to_owned(),
+        }
+    }
+
+    fn test_encoded_object<T: MfmValue>(value: &T) -> HistoryObject {
+        let encoded = serde_json::to_string(value).expect("test typed evidence encoding");
+        let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&encoded)
+            .expect("test typed evidence canonical JSON");
+        let content_ref = ContentRef::new(
+            T::schema_id().expect("test typed evidence schema"),
+            mfm_ids::ContentDigest::from_digest(
+                mfm_ids::DigestAlgorithm::Sha256V1,
+                mfm_canonical::sha256_digest_bytes(canonical.as_bytes()),
+            ),
+        )
+        .expect("test typed evidence reference");
+        HistoryObject {
+            object_type: StableId::new(mfm_journal::structured::TYPED_VALUE_OBJECT_TYPE)
+                .expect("typed value object type"),
+            content_ref,
+            canonical_json: canonical.as_str().to_owned(),
         }
     }
 

@@ -90,6 +90,21 @@ pub(crate) enum RunCommand {
         #[command(flatten)]
         connection: ApplicationConnectionArgs,
     },
+    /// List the tenant's runs that currently need manual Effect-entry attention.
+    ///
+    /// This names no run: it is a tenant inventory and confers no authority over
+    /// the runs it reports.
+    EffectEntryAttention {
+        /// Opaque cursor returned by the preceding page.
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Number of entries from 1 through 500.
+        #[arg(long)]
+        limit: Option<u16>,
+        /// Non-semantic process connection options.
+        #[command(flatten)]
+        connection: ApplicationConnectionArgs,
+    },
     /// Atomically write one canonical portable run export.
     Export {
         /// Exact typed run id.
@@ -189,6 +204,14 @@ impl RunCommand {
                 connection,
             } => {
                 let result = audit(ctx, connection, run_id, cursor.clone(), *limit).await;
+                handle_public_result(result, &ctx.output_format, public_text)
+            }
+            Self::EffectEntryAttention {
+                cursor,
+                limit,
+                connection,
+            } => {
+                let result = effect_entry_attention(ctx, connection, cursor.clone(), *limit).await;
                 handle_public_result(result, &ctx.output_format, public_text)
             }
             Self::Export {
@@ -343,6 +366,22 @@ async fn audit(
     application(connection)
         .await?
         .read_access_audit(credential, run_id, page)
+        .await
+}
+
+async fn effect_entry_attention(
+    ctx: &CommandContext,
+    connection: &ApplicationConnectionArgs,
+    cursor: Option<String>,
+    limit: Option<u16>,
+) -> Result<mfm_app::EffectEntryAttentionPage, PublicError> {
+    let credential = credential(ctx).await?;
+    let page = mfm_app::PageRequest::new(cursor, limit).map_err(|_| {
+        PublicError::bad_request("PageLimitInvalid", "Page limit must be between 1 and 500")
+    })?;
+    application(connection)
+        .await?
+        .list_effect_entry_attention(credential, page)
         .await
 }
 

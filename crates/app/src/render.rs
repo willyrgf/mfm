@@ -1,8 +1,8 @@
 use serde_json::{json, Value};
 
 use crate::{
-    AccessAuditPage, AdmitRunResponse, DriveResponse, PublicError, PublicRunView,
-    PublishedEntryPoint, ReplayResponse, TransitionTracePage,
+    AccessAuditPage, AdmitRunResponse, DriveResponse, EffectEntryAttentionPage, PublicError,
+    PublicRunView, PublishedEntryPoint, ReplayResponse, TransitionTracePage,
 };
 
 /// Reviewed JSON rendering implemented only for public application responses.
@@ -78,6 +78,33 @@ impl PublicJsonResponse for TransitionTracePage {
             "run_id": self.run_id(),
             "at_journal_head": self.at_journal_head(),
             "transitions": transitions,
+            "next_cursor": self.next_cursor(),
+        }))
+    }
+}
+
+impl PublicJsonResponse for EffectEntryAttentionPage {
+    fn public_json(&self) -> Result<Value, PublicError> {
+        Ok(json!({
+            "entries": self
+                .entries()
+                .iter()
+                .map(|entry| json!({
+                    "run_id": entry.run_id(),
+                    "journal_head": entry.journal_head(),
+                    "occurrence_id": entry.subject().occurrence_id,
+                    "occurrence_path_ref": entry.subject().occurrence_path_ref,
+                    "access_attempt_id": entry.subject().access_attempt_id,
+                    "capability_contract_ref": entry.subject().capability_contract_ref,
+                    "resolution": match entry.resolution() {
+                        mfm_runtime::history::EffectEntryAttentionResolution::Manual => "manual",
+                        mfm_runtime::history::EffectEntryAttentionResolution::CloseThenReassert => {
+                            "close_then_reassert"
+                        }
+                        mfm_runtime::history::EffectEntryAttentionResolution::Reassert => "reassert",
+                    },
+                }))
+                .collect::<Vec<_>>(),
             "next_cursor": self.next_cursor(),
         }))
     }

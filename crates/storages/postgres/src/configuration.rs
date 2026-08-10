@@ -1,10 +1,11 @@
-use mfm_ids::{ContentRef, StoreScopeId};
+use mfm_ids::{ContentRef, StableId, StoreScopeId};
 use mfm_journal::structured::canonical_json;
+use mfm_journal::structured::HistoryObject;
 use mfm_store::structured::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_store::structured::{
-    verify_configuration_history, CanonicalConfigurationAppend, ConfigurationBackendAppendOutcome,
-    ConfigurationBackendFuture, ConfigurationHistoryBackend, ConfigurationHistoryHead,
-    ConfigurationRevision, ConfigurationStreamKey, RawConfigurationHistory, StructuredStoreError,
+    ConfigurationBackendAppendOutcome, ConfigurationBackendFuture, ConfigurationHistoryBackend,
+    ConfigurationHistoryHead, ConfigurationRevisionObject, ConfigurationStreamKey,
+    RawConfigurationHistory, StructuredStoreError, ValidatedConfigurationAppend,
 };
 use sqlx::postgres::PgRow;
 use sqlx::{Postgres, Row, Transaction};
@@ -26,10 +27,6 @@ struct StoredConfigurationRow {
     predecessor_schema_id: Option<String>,
     predecessor_digest: Option<String>,
     append_request_id: String,
-    value_contract_schema_id: String,
-    value_contract_digest: String,
-    value_schema_id: String,
-    value_digest: String,
     revision_schema_id: String,
     revision_digest: String,
     canonical_revision_json: String,
@@ -51,7 +48,7 @@ impl StoredConfigurationHead {
     }
 
     fn reconstruct(self) -> Result<ConfigurationHistoryHead, StructuredStoreError> {
-        let revision_ref = ContentRef::new(
+        let object_ref = ContentRef::new(
             self.revision_schema_id
                 .parse()
                 .map_err(|_| invalid("PostgreSQL configuration head schema is invalid"))?,
@@ -62,7 +59,7 @@ impl StoredConfigurationHead {
         .map_err(|_| invalid("PostgreSQL configuration head reference is invalid"))?;
         Ok(ConfigurationHistoryHead::new(
             self.revision_sequence,
-            revision_ref,
+            object_ref,
         ))
     }
 }
@@ -78,17 +75,13 @@ impl StoredConfigurationRow {
             predecessor_schema_id: optional_text(row, "predecessor_schema_id")?,
             predecessor_digest: optional_text(row, "predecessor_digest")?,
             append_request_id: required_text(row, "append_request_id")?,
-            value_contract_schema_id: required_text(row, "value_contract_schema_id")?,
-            value_contract_digest: required_text(row, "value_contract_digest")?,
-            value_schema_id: required_text(row, "value_schema_id")?,
-            value_digest: required_text(row, "value_digest")?,
             revision_schema_id: required_text(row, "revision_schema_id")?,
             revision_digest: required_text(row, "revision_digest")?,
             canonical_revision_json: required_text(row, "canonical_revision_json")?,
         })
     }
 
-    fn reconstruct(self) -> Result<ConfigurationRevision, StructuredStoreError> {
+    fn reconstruct(self) -> Result<ConfigurationRevisionObject, StructuredStoreError> {
         if self.canonical_revision_json.len() < 2
             || self.canonical_revision_json.len() > MAX_CONFIGURATION_REVISION_BYTES
         {
@@ -96,13 +89,26 @@ impl StoredConfigurationRow {
                 "PostgreSQL configuration revision exceeds its byte bound",
             ));
         }
-        let revision: ConfigurationRevision =
-            serde_json::from_str(&self.canonical_revision_json)
-                .map_err(|_| invalid("PostgreSQL configuration revision cannot be decoded"))?;
-        let canonical = canonical_json(&revision)
-            .map_err(|_| invalid("PostgreSQL configuration revision cannot be canonicalized"))?;
+        let content_ref = ContentRef::new(
+            self.revision_schema_id
+                .parse()
+                .map_err(|_| invalid("PostgreSQL configuration schema is invalid"))?,
+            self.revision_digest
+                .parse()
+                .map_err(|_| invalid("PostgreSQL configuration digest is invalid"))?,
+        )
+        .map_err(|_| invalid("PostgreSQL configuration reference is invalid"))?;
+        let revision = ConfigurationRevisionObject::from_object(HistoryObject {
+            object_type: StableId::new(
+                mfm_journal::structured::ADMISSION_CONFIGURATION_OBJECT_TYPE,
+            )
+            .map_err(|_| invalid("configuration object type is invalid"))?,
+            content_ref,
+            canonical_json: self.canonical_revision_json.clone(),
+        })?;
+        let payload = revision.revision();
         let predecessor_matches = match (
-            revision.predecessor_ref(),
+            payload.predecessor_ref(),
             self.predecessor_schema_id.as_deref(),
             self.predecessor_digest.as_deref(),
         ) {
@@ -112,26 +118,15 @@ impl StoredConfigurationRow {
             }
             _ => false,
         };
-        if canonical.as_str() != self.canonical_revision_json
-            || revision.sequence() != self.revision_sequence
-            || revision.key().store_scope_id().as_str() != self.store_scope_id
-            || revision.key().tenant_scope_id().as_str() != self.tenant_scope_id
-            || revision.key().entry_point_operation_id().as_str() != self.entry_point_operation_id
-            || revision.key().target_id().as_str() != self.target_id
+        if payload.sequence() != self.revision_sequence
+            || payload.key().store_scope_id().as_str() != self.store_scope_id
+            || payload.key().tenant_scope_id().as_str() != self.tenant_scope_id
+            || payload.key().entry_point_operation_id().as_str() != self.entry_point_operation_id
+            || payload.key().target_id().as_str() != self.target_id
             || !predecessor_matches
-            || revision.append_request_id().as_str() != self.append_request_id
+            || payload.append_request_id().as_str() != self.append_request_id
             || !content_ref_matches(
-                revision.value_contract_ref(),
-                &self.value_contract_schema_id,
-                &self.value_contract_digest,
-            )
-            || !content_ref_matches(
-                revision.value_ref(),
-                &self.value_schema_id,
-                &self.value_digest,
-            )
-            || !content_ref_matches(
-                revision.revision_ref(),
+                revision.content_ref(),
                 &self.revision_schema_id,
                 &self.revision_digest,
             )
@@ -151,6 +146,8 @@ pub struct PostgresConfigurationHistoryBackend {
     target: TargetBinding,
     store_scope_id: StoreScopeId,
 }
+
+impl mfm_authority_seal::ValidatedAppendConsumerSeal for PostgresConfigurationHistoryBackend {}
 
 impl std::fmt::Debug for PostgresConfigurationHistoryBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -208,49 +205,76 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
             transaction.validate_target(&self.target).await?;
             let rows = select_rows(transaction.conn(), key, None).await?;
             transaction.commit_checked(&self.target).await?;
-            let history = reconstruct_history(key, rows, head)?;
-            if let Some(history) = history.as_ref() {
-                // The indexed head is part of the same durable snapshot as the
-                // revisions; validate the chain before returning it.
-                verify_configuration_history(history.clone())?;
+            reconstruct_history(key, rows, head)
+        })
+    }
+
+    fn load_store_snapshot(&self) -> ConfigurationBackendFuture<'_, Vec<RawConfigurationHistory>> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            let mut histories = Vec::new();
+            let mut after = None;
+            loop {
+                let page = select_stream_keys(
+                    transaction.conn(),
+                    &self.store_scope_id,
+                    after.as_ref(),
+                    256,
+                )
+                .await?;
+                for key in &page {
+                    let head = select_head(transaction.conn(), key).await?;
+                    let rows = select_rows(transaction.conn(), key, None).await?;
+                    histories.push(
+                        reconstruct_history(key, rows, head)?
+                            .ok_or_else(|| invalid("configuration snapshot key has no state"))?,
+                    );
+                }
+                after = page.last().cloned();
+                if page.len() < 256 {
+                    break;
+                }
             }
-            Ok(history)
+            transaction.commit_checked(&self.target).await?;
+            Ok(histories)
+        })
+    }
+
+    fn validate_authority(&self) -> ConfigurationBackendFuture<'_, ()> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            transaction.validate_target(&self.target).await?;
+            transaction.commit_checked(&self.target).await
         })
     }
 
     fn append<'a>(
         &'a self,
-        revision: CanonicalConfigurationAppend,
+        command: ValidatedConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
         Box::pin(async move {
-            if !revision.is_store_verified() {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-            let revision = revision.into_revision();
-            if revision.key().store_scope_id() != &self.store_scope_id {
+            // A validated append exists only after the store proved it.
+            let (revision, expected_head, successor_head) = command.into_parts(self);
+            let payload = revision.revision();
+            if payload.key().store_scope_id() != &self.store_scope_id {
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
-            let canonical_revision = canonical_json(&revision)
-                .map_err(|_| invalid("configuration revision cannot be canonicalized"))?;
-            if canonical_revision.as_bytes().len() > MAX_CONFIGURATION_REVISION_BYTES {
+            let canonical_revision = revision.object().canonical_json.as_str();
+            if canonical_revision.len() > MAX_CONFIGURATION_REVISION_BYTES {
                 return Err(invalid("configuration revision exceeds its byte bound"));
             }
 
-            let lock_key = canonical_json(revision.key())
+            let lock_key = canonical_json(payload.key())
                 .map_err(|_| invalid("configuration stream key cannot be canonicalized"))?;
             let mut transaction = self.begin_locked_write(lock_key.as_str()).await?;
 
-            let rows = select_rows(transaction.conn(), revision.key(), None).await?;
-            let head = select_head(transaction.conn(), revision.key()).await?;
-            let history = reconstruct_history(revision.key(), rows, head)?;
-            if let Some(history) = history.as_ref() {
-                verify_configuration_history(history.clone())?;
-            }
+            let rows = select_rows(transaction.conn(), payload.key(), None).await?;
+            let head = select_head(transaction.conn(), payload.key()).await?;
+            let history = reconstruct_history(payload.key(), rows, head)?;
             if let Some(existing) = history.as_ref().and_then(|history| {
-                history
-                    .revisions
-                    .iter()
-                    .find(|existing| existing.append_request_id() == revision.append_request_id())
+                history.revisions.iter().find(|existing| {
+                    existing.revision().append_request_id() == payload.append_request_id()
+                })
             }) {
                 let existing = existing.clone();
                 let outcome = transaction.commit_outcome(&self.target).await?;
@@ -266,19 +290,14 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
             }
 
             let current = history.as_ref().and_then(|history| history.head.as_ref());
-            let predecessor_matches =
-                current.map(ConfigurationHistoryHead::revision_ref) == revision.predecessor_ref();
-            let sequence_matches = current
-                .map_or(1, |current| current.sequence().saturating_add(1))
-                == revision.sequence();
-            if !predecessor_matches || !sequence_matches {
+            if current != expected_head.as_ref() {
                 transaction.rollback().await?;
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
 
             transaction.validate_target(&self.target).await?;
-            insert_revision(transaction.conn(), &revision, canonical_revision.as_str()).await?;
-            if !advance_head(transaction.conn(), &revision, current).await? {
+            insert_revision(transaction.conn(), &revision, canonical_revision).await?;
+            if !advance_head(transaction.conn(), payload.key(), &successor_head, current).await? {
                 transaction.rollback().await?;
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
@@ -294,6 +313,51 @@ impl ConfigurationHistoryBackend for PostgresConfigurationHistoryBackend {
     }
 }
 
+async fn select_stream_keys(
+    transaction: &mut Transaction<'_, Postgres>,
+    store_scope_id: &StoreScopeId,
+    after: Option<&ConfigurationStreamKey>,
+    maximum_items: u32,
+) -> Result<Vec<ConfigurationStreamKey>, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT tenant_scope_id, entry_point_operation_id, target_id FROM ( \
+             SELECT tenant_scope_id, entry_point_operation_id, target_id \
+               FROM configuration_revisions WHERE store_scope_id = $1 \
+             UNION \
+             SELECT tenant_scope_id, entry_point_operation_id, target_id \
+               FROM configuration_heads WHERE store_scope_id = $1 \
+         ) AS stream_keys \
+         WHERE ($2::text IS NULL OR (tenant_scope_id, entry_point_operation_id, target_id) \
+               > ($2::text, $3::text, $4::text)) \
+         ORDER BY tenant_scope_id, entry_point_operation_id, target_id \
+         LIMIT $5::bigint",
+    )
+    .bind(store_scope_id.as_str())
+    .bind(after.map(|key| key.tenant_scope_id().as_str()))
+    .bind(after.map(|key| key.entry_point_operation_id().as_str()))
+    .bind(after.map(|key| key.target_id().as_str()))
+    .bind(i64::from(maximum_items))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(ConfigurationStreamKey::new(
+                store_scope_id.clone(),
+                required_text(&row, "tenant_scope_id")?
+                    .parse()
+                    .map_err(|_| invalid("configuration tenant key is invalid"))?,
+                required_text(&row, "entry_point_operation_id")?
+                    .parse()
+                    .map_err(|_| invalid("configuration operation key is invalid"))?,
+                required_text(&row, "target_id")?
+                    .parse()
+                    .map_err(|_| invalid("configuration target key is invalid"))?,
+            ))
+        })
+        .collect()
+}
+
 async fn select_rows(
     transaction: &mut Transaction<'_, Postgres>,
     key: &ConfigurationStreamKey,
@@ -303,9 +367,8 @@ async fn select_rows(
         sqlx::query(
             "SELECT store_scope_id, tenant_scope_id, entry_point_operation_id, target_id, \
                     revision_sequence::text AS revision_sequence, predecessor_schema_id, \
-                    predecessor_digest, append_request_id, value_contract_schema_id, \
-                    value_contract_digest, value_schema_id, value_digest, revision_schema_id, \
-                    revision_digest, canonical_revision_json \
+                    predecessor_digest, append_request_id, revision_schema_id, revision_digest, \
+                    canonical_revision_json \
                FROM configuration_revisions \
               WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
                 AND entry_point_operation_id = $3 AND target_id = $4 \
@@ -323,9 +386,8 @@ async fn select_rows(
         sqlx::query(
             "SELECT store_scope_id, tenant_scope_id, entry_point_operation_id, target_id, \
                     revision_sequence::text AS revision_sequence, predecessor_schema_id, \
-                    predecessor_digest, append_request_id, value_contract_schema_id, \
-                    value_contract_digest, value_schema_id, value_digest, revision_schema_id, \
-                    revision_digest, canonical_revision_json \
+                    predecessor_digest, append_request_id, revision_schema_id, revision_digest, \
+                    canonical_revision_json \
                FROM configuration_revisions \
               WHERE store_scope_id = $1 AND tenant_scope_id = $2 \
                 AND entry_point_operation_id = $3 AND target_id = $4 \
@@ -385,39 +447,35 @@ fn reconstruct_history(
 
 async fn insert_revision(
     transaction: &mut Transaction<'_, Postgres>,
-    revision: &ConfigurationRevision,
+    revision: &ConfigurationRevisionObject,
     canonical_revision: &str,
 ) -> Result<(), StructuredStoreError> {
-    let predecessor_schema_id = revision
+    let payload = revision.revision();
+    let predecessor_schema_id = payload
         .predecessor_ref()
         .map(|reference| reference.schema_id().as_str());
-    let predecessor_digest = revision
+    let predecessor_digest = payload
         .predecessor_ref()
         .map(|reference| reference.content_digest().as_str());
     sqlx::query(
         "INSERT INTO configuration_revisions ( \
             store_scope_id, tenant_scope_id, entry_point_operation_id, target_id, \
             revision_sequence, predecessor_schema_id, predecessor_digest, append_request_id, \
-            value_contract_schema_id, value_contract_digest, value_schema_id, value_digest, \
             revision_schema_id, revision_digest, canonical_revision_json \
          ) VALUES ( \
-            $1, $2, $3, $4, $5::numeric, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15 \
+            $1, $2, $3, $4, $5::numeric, $6, $7, $8, $9, $10, $11 \
          )",
     )
-    .bind(revision.key().store_scope_id().as_str())
-    .bind(revision.key().tenant_scope_id().as_str())
-    .bind(revision.key().entry_point_operation_id().as_str())
-    .bind(revision.key().target_id().as_str())
-    .bind(revision.sequence().to_string())
+    .bind(payload.key().store_scope_id().as_str())
+    .bind(payload.key().tenant_scope_id().as_str())
+    .bind(payload.key().entry_point_operation_id().as_str())
+    .bind(payload.key().target_id().as_str())
+    .bind(payload.sequence().to_string())
     .bind(predecessor_schema_id)
     .bind(predecessor_digest)
-    .bind(revision.append_request_id().as_str())
-    .bind(revision.value_contract_ref().schema_id().as_str())
-    .bind(revision.value_contract_ref().content_digest().as_str())
-    .bind(revision.value_ref().schema_id().as_str())
-    .bind(revision.value_ref().content_digest().as_str())
-    .bind(revision.revision_ref().schema_id().as_str())
-    .bind(revision.revision_ref().content_digest().as_str())
+    .bind(payload.append_request_id().as_str())
+    .bind(revision.content_ref().schema_id().as_str())
+    .bind(revision.content_ref().content_digest().as_str())
     .bind(canonical_revision)
     .execute(&mut **transaction)
     .await
@@ -427,7 +485,8 @@ async fn insert_revision(
 
 async fn advance_head(
     transaction: &mut Transaction<'_, Postgres>,
-    revision: &ConfigurationRevision,
+    key: &ConfigurationStreamKey,
+    successor: &ConfigurationHistoryHead,
     current: Option<&ConfigurationHistoryHead>,
 ) -> Result<bool, StructuredStoreError> {
     let result = if let Some(current) = current {
@@ -439,16 +498,16 @@ async fn advance_head(
                 AND revision_sequence = $8::numeric \
                 AND revision_schema_id = $9 AND revision_digest = $10",
         )
-        .bind(revision.key().store_scope_id().as_str())
-        .bind(revision.key().tenant_scope_id().as_str())
-        .bind(revision.key().entry_point_operation_id().as_str())
-        .bind(revision.key().target_id().as_str())
-        .bind(revision.sequence().to_string())
-        .bind(revision.revision_ref().schema_id().as_str())
-        .bind(revision.revision_ref().content_digest().as_str())
+        .bind(key.store_scope_id().as_str())
+        .bind(key.tenant_scope_id().as_str())
+        .bind(key.entry_point_operation_id().as_str())
+        .bind(key.target_id().as_str())
+        .bind(successor.sequence().to_string())
+        .bind(successor.object_ref().schema_id().as_str())
+        .bind(successor.object_ref().content_digest().as_str())
         .bind(current.sequence().to_string())
-        .bind(current.revision_ref().schema_id().as_str())
-        .bind(current.revision_ref().content_digest().as_str())
+        .bind(current.object_ref().schema_id().as_str())
+        .bind(current.object_ref().content_digest().as_str())
         .execute(&mut **transaction)
         .await
     } else {
@@ -458,13 +517,13 @@ async fn advance_head(
                 revision_sequence, revision_schema_id, revision_digest \
              ) VALUES ($1, $2, $3, $4, $5::numeric, $6, $7)",
         )
-        .bind(revision.key().store_scope_id().as_str())
-        .bind(revision.key().tenant_scope_id().as_str())
-        .bind(revision.key().entry_point_operation_id().as_str())
-        .bind(revision.key().target_id().as_str())
-        .bind(revision.sequence().to_string())
-        .bind(revision.revision_ref().schema_id().as_str())
-        .bind(revision.revision_ref().content_digest().as_str())
+        .bind(key.store_scope_id().as_str())
+        .bind(key.tenant_scope_id().as_str())
+        .bind(key.entry_point_operation_id().as_str())
+        .bind(key.target_id().as_str())
+        .bind(successor.sequence().to_string())
+        .bind(successor.object_ref().schema_id().as_str())
+        .bind(successor.object_ref().content_digest().as_str())
         .execute(&mut **transaction)
         .await
     }
