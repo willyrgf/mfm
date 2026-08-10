@@ -129,6 +129,9 @@ candidate, not arbitrary records. The in-memory backend is a conformance impleme
 PostgreSQL backend owns exact-target session capabilities, role-separated pools, per-transaction
 target permits, SQL transactions, and fence-generation enforcement but reuses the same
 qualification, reduction, compilation, and obligation rules.
+The reducer emits semantic drafts only. Private construction fields and transition tokens make
+comparison, obligation discharge, and coordinator sealing affine compile-time boundaries; the
+compiler alone authors persisted journal records and artifacts.
 Ordinary assembly receives only opaque deployment-issued session bundles, never a pool, URL, raw
 fence, or DML transaction.
 Obligation discharge distinguishes retained-history replay from current-candidate qualification

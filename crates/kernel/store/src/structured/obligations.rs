@@ -7,13 +7,12 @@ use mfm_spec::structured::{
 };
 use mfm_values::CanonicalJsonPersistedSchema;
 
-use super::compiler::{ComparedReduction, FactScanPermitSpec};
+use super::compiler::{ComparedReduction, CompiledAppend};
 use super::qualification::{
     invalid, PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalObligationChecker,
     QualifiedRunContext, StructuredStoreError,
 };
 use super::reducer::{ReducedRunState, SemanticObligation};
-use super::validated_append::{RunProjectionPlan, TenantFactProjectionPlan};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ObligationDischargeScope {
@@ -22,18 +21,27 @@ pub(super) enum ObligationDischargeScope {
 }
 
 pub(super) struct FinalizedReduction {
-    pub(super) reduced: Box<ReducedRunState>,
-    pub(super) committed: mfm_journal::structured::CommittedBatch,
-    pub(super) run_projection: RunProjectionPlan,
-    pub(super) tenant_fact_plan: TenantFactProjectionPlan,
-    pub(super) fact_read_capability_spec: Option<FactScanPermitSpec>,
+    reduced: Box<ReducedRunState>,
+    compiled: CompiledAppend,
 }
 
 impl FinalizedReduction {
     pub(super) fn into_reduced(self) -> Box<ReducedRunState> {
         self.reduced
     }
+
+    pub(super) const fn tenant_fact_plan(
+        &self,
+    ) -> &super::validated_append::TenantFactProjectionPlan {
+        self.compiled.tenant_fact_plan()
+    }
+
+    pub(super) fn into_parts(self) -> (Box<ReducedRunState>, CompiledAppend) {
+        (self.reduced, self.compiled)
+    }
 }
+
+pub(super) struct DischargePassed(());
 
 pub(super) fn discharge(
     compared: ComparedReduction,
@@ -41,30 +49,16 @@ pub(super) fn discharge(
     checker: &dyn PhysicalObligationChecker,
     scope: ObligationDischargeScope,
 ) -> Result<FinalizedReduction, StructuredStoreError> {
-    for obligation in &compared.pending.obligations {
+    for obligation in compared.obligations() {
         discharge_obligation(obligation, context, checker, false)?;
     }
     if scope == ObligationDischargeScope::RetainedAndCurrent {
-        for obligation in &compared.pending.obligations {
+        for obligation in compared.obligations() {
             discharge_obligation(obligation, context, checker, true)?;
         }
     }
-    let assignments = compared
-        .committed
-        .records
-        .iter()
-        .map(|record| record.record_ref.clone())
-        .collect::<Vec<_>>();
-    let reduced = Box::new(
-        (*compared.pending.successor).bind(&assignments, compared.committed.head.clone())?,
-    );
-    Ok(FinalizedReduction {
-        reduced,
-        committed: compared.committed,
-        run_projection: compared.run_projection,
-        tenant_fact_plan: compared.tenant_fact_plan,
-        fact_read_capability_spec: compared.fact_read_capability_spec,
-    })
+    let (reduced, compiled) = compared.into_finalization_parts(DischargePassed(()));
+    Ok(FinalizedReduction { reduced, compiled })
 }
 
 fn discharge_obligation(

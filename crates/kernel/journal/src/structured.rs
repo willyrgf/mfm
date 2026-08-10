@@ -1534,6 +1534,23 @@ pub struct CommitDigestPreimage<'a> {
     pub object_refs: Vec<&'a ContentRef>,
 }
 
+/// One fact contribution to a compact semantic-state identity.
+#[derive(Serialize)]
+pub struct SemanticFactPreimage<'a> {
+    /// Global emission order within the transition.
+    pub emission_ordinal: u32,
+    /// Certified fact-slot ordinal.
+    pub fact_slot_ordinal: u32,
+    /// Exact fact descriptor.
+    pub descriptor_ref: &'a ContentRef,
+    /// Exact typed subject.
+    pub subject: &'a TypedValueRef,
+    /// Exact typed response.
+    pub response: &'a TypedValueRef,
+    /// Exact retained fact-claim artifact.
+    pub claim_ref: &'a ContentRef,
+}
+
 /// One transition contribution to the compact semantic-state identity.
 #[derive(Serialize)]
 pub struct SemanticTransitionPreimage<'a> {
@@ -1542,7 +1559,7 @@ pub struct SemanticTransitionPreimage<'a> {
     /// Exact nominal outcome artifact.
     pub outcome_ref: &'a ContentRef,
     /// Ordered committed facts.
-    pub facts: &'a [CommittedFactRef],
+    pub facts: Vec<SemanticFactPreimage<'a>>,
 }
 
 /// Exact journal-owned preimage of one compact semantic state.

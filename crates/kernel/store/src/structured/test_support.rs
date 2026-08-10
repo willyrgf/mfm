@@ -660,27 +660,7 @@ pub fn verify_incremental_reduction_equivalence(
     programs: &ProgramVerificationRegistry,
     physical: &dyn PhysicalObligationChecker,
 ) -> super::Result<()> {
-    let history = super::qualification::qualify_recorded_history(raw.clone(), programs)?;
-    let mut incremental = super::reducer::ReducedRunState::empty(&history.context);
-    for (index, batch) in history.batches.iter().enumerate() {
-        let finalized = super::semantic_open::replay_step(&history, &incremental, batch, physical)?;
-        let full = super::semantic_open::verify_qualified(
-            super::backend::RawRunHistory {
-                run_id: raw.run_id.clone(),
-                batches: raw.batches[..=index].to_vec(),
-            },
-            programs,
-            physical,
-        )?;
-        if finalized.reduced.as_ref() != full.reduced.as_ref()
-            || finalized.run_projection.successor() != &full.current_projection()
-            || finalized.committed != raw.batches[index]
-        {
-            return Err(StructuredStoreError::InvalidHistory);
-        }
-        incremental = *finalized.into_reduced();
-    }
-    Ok(())
+    super::semantic_open::verify_incremental_equivalence(raw, programs, physical)
 }
 
 /// One certified fixture program document.

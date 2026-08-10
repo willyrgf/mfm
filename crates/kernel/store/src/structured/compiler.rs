@@ -3,41 +3,54 @@
 use std::collections::BTreeSet;
 
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RequestDigest, SchemaId, StableId,
+    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RequestDigest, StableId,
 };
 use mfm_journal::structured::{
-    derive_candidate_digest, derive_commit_digest, derive_record_hash, AssignedRecord,
-    CommitCandidate, CommitDigestPreimage, CommittedBatch, HistoryObject, JournalHead,
-    LexicalValueRef, RecordHashPreimage, RecordRef, RunRecord, TenantFactCoordinate,
-    TenantFactFrontier, TypedValueRef,
+    derive_access_attempt_id, derive_candidate_digest, derive_commit_digest, derive_record_hash,
+    AccessAttemptIdentityPreimage, AssignedRecord, CommitCandidate, CommitDigestPreimage,
+    CommittedBatch, CommittedFactRef, ExternalAccessAuthorized, ExternalAccessObserved,
+    HistoryObject, JournalHead, LexicalValueRef, ObservationOutcome, RecordHashPreimage, RecordRef,
+    RunAdmitted, RunClosed, RunRecord, StateOutcomeRef, StateTransitionCommitted,
+    TenantFactCoordinate, TenantFactFrontier, TypedValueRef,
 };
 use mfm_program_derive::PersistedSchema;
 use mfm_spec::CanonicalJsonValue;
-use mfm_values::{CanonicalJsonPersistedSchema, PersistedObjectPayload};
+use mfm_values::PersistedObjectPayload;
 use serde::{Deserialize, Serialize};
 
 use super::backend::{StructuredStoreIdentity, TenantFactPublication};
 use super::qualification::{
     invalid, QualifiedRunContext, RecordedAssertions, StructuredStoreError,
 };
-use super::reducer::{PendingSemanticStep, RecordIntent, TenantFactRequirement};
+use super::reducer::{
+    ArtifactIntent, AuthorizationIntent, FactIntent, ObservationIntent, ObservationOutcomeIntent,
+    PendingSemanticStep, PrimaryIntent, ReducedRunState, SemanticObligation, StateOutcomeIntent,
+    TenantFactRequirement, TransitionIntent,
+};
 use super::validated_append::{RunCurrentProjection, RunProjectionPlan, TenantFactProjectionPlan};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ArtifactIntent {
-    TypedValue {
-        schema_id: SchemaId,
-        value: CanonicalJsonValue,
-    },
-    StateOutcome(StateOutcomeArtifact),
-    OperationOutcome(OperationOutcomeArtifact),
-    FactClaim(FactClaimArtifact),
-    QualifiedObject(ContentRef),
+pub(super) struct AddressedArtifactIntent {
+    reference: ContentRef,
+    payload: ArtifactIntent,
+}
+
+impl AddressedArtifactIntent {
+    pub(super) const fn content_ref(&self) -> &ContentRef {
+        &self.reference
+    }
+
+    pub(super) fn typed_value(&self) -> Option<&CanonicalJsonValue> {
+        match &self.payload {
+            ArtifactIntent::TypedValue { value, .. } => Some(value),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[mfm(schema = "mfm.structured-state-outcome", version = "1")]
-pub(super) enum StateOutcomeArtifact {
+enum StateOutcomeArtifact {
     #[serde(rename = "Success")]
     Success(LexicalValueRef),
     #[serde(rename = "Failure")]
@@ -53,7 +66,7 @@ impl PersistedObjectPayload for StateOutcomeArtifact {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[mfm(schema = "mfm.structured-operation-outcome", version = "1")]
-pub(super) enum OperationOutcomeArtifact {
+enum OperationOutcomeArtifact {
     #[serde(rename = "Success")]
     Success(LexicalValueRef),
     #[serde(rename = "Failure")]
@@ -70,10 +83,10 @@ impl PersistedObjectPayload for OperationOutcomeArtifact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 #[mfm(schema = "mfm.structured-fact-claim", version = "1")]
-pub(super) struct FactClaimArtifact {
-    pub(super) descriptor_ref: ContentRef,
-    pub(super) subject: TypedValueRef,
-    pub(super) response: TypedValueRef,
+struct FactClaimArtifact {
+    descriptor_ref: ContentRef,
+    subject: TypedValueRef,
+    response: TypedValueRef,
 }
 
 impl PersistedObjectPayload for FactClaimArtifact {
@@ -83,53 +96,60 @@ impl PersistedObjectPayload for FactClaimArtifact {
     }
 }
 
-impl ArtifactIntent {
-    pub(super) fn content_ref(&self) -> Result<ContentRef, StructuredStoreError> {
-        match self {
-            Self::TypedValue { schema_id, value } => {
-                let bytes = value.canonical_json().map_err(|_| invalid())?;
-                ContentRef::new(
-                    schema_id.clone(),
-                    ContentDigest::from_digest(
-                        DigestAlgorithm::Sha256V1,
-                        mfm_canonical::sha256_digest_bytes(bytes.as_bytes()),
-                    ),
-                )
-                .map_err(|_| invalid())
-            }
-            Self::StateOutcome(value) => value.content_ref().map_err(|_| invalid()),
-            Self::OperationOutcome(value) => value.content_ref().map_err(|_| invalid()),
-            Self::FactClaim(value) => value.content_ref().map_err(|_| invalid()),
-            Self::QualifiedObject(reference) => Ok(reference.clone()),
-        }
-    }
+pub(super) fn address_artifact(
+    payload: ArtifactIntent,
+) -> Result<AddressedArtifactIntent, StructuredStoreError> {
+    let reference = materialize_artifact(&payload)?.content_ref;
+    Ok(AddressedArtifactIntent { reference, payload })
+}
 
-    fn materialize(
-        &self,
-        context: &QualifiedRunContext,
-    ) -> Result<HistoryObject, StructuredStoreError> {
-        match self {
-            Self::TypedValue { value, .. } => Ok(HistoryObject {
+fn materialize_artifact(payload: &ArtifactIntent) -> Result<HistoryObject, StructuredStoreError> {
+    match payload {
+        ArtifactIntent::TypedValue { schema_id, value } => {
+            let canonical = value.canonical_json().map_err(|_| invalid())?;
+            let content_ref = ContentRef::new(
+                schema_id.clone(),
+                ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    mfm_canonical::sha256_digest_bytes(canonical.as_bytes()),
+                ),
+            )
+            .map_err(|_| invalid())?;
+            Ok(HistoryObject {
                 object_type: StableId::new(mfm_journal::structured::TYPED_VALUE_OBJECT_TYPE)
                     .map_err(|_| invalid())?,
-                content_ref: self.content_ref()?,
-                canonical_json: value
-                    .canonical_json()
-                    .map_err(|_| invalid())?
-                    .as_str()
-                    .to_owned(),
-            }),
-            Self::StateOutcome(value) => {
-                HistoryObject::from_persisted(value).map_err(|_| invalid())
-            }
-            Self::OperationOutcome(value) => {
-                HistoryObject::from_persisted(value).map_err(|_| invalid())
-            }
-            Self::FactClaim(value) => HistoryObject::from_persisted(value).map_err(|_| invalid()),
-            Self::QualifiedObject(reference) => {
-                context.object(reference).cloned().ok_or_else(invalid)
-            }
+                content_ref,
+                canonical_json: canonical.as_str().to_owned(),
+            })
         }
+        ArtifactIntent::StateOutcome(value) => {
+            let artifact = match value {
+                StateOutcomeIntent::Success(value) => StateOutcomeArtifact::Success(value.clone()),
+                StateOutcomeIntent::Failure(value) => StateOutcomeArtifact::Failure(value.clone()),
+            };
+            HistoryObject::from_persisted(&artifact).map_err(|_| invalid())
+        }
+        ArtifactIntent::OperationOutcome(value) => {
+            let artifact = match value {
+                StateOutcomeIntent::Success(value) => {
+                    OperationOutcomeArtifact::Success(value.clone())
+                }
+                StateOutcomeIntent::Failure(value) => {
+                    OperationOutcomeArtifact::Failure(value.clone())
+                }
+            };
+            HistoryObject::from_persisted(&artifact).map_err(|_| invalid())
+        }
+        ArtifactIntent::FactClaim {
+            descriptor_ref,
+            subject,
+            response,
+        } => HistoryObject::from_persisted(&FactClaimArtifact {
+            descriptor_ref: descriptor_ref.clone(),
+            subject: subject.clone(),
+            response: response.clone(),
+        })
+        .map_err(|_| invalid()),
     }
 }
 
@@ -143,14 +163,26 @@ pub(super) fn request_digest(
 }
 
 fn materialize_artifacts(
-    intents: &[ArtifactIntent],
+    authored: &[AddressedArtifactIntent],
+    retained_objects: &[ContentRef],
     context: &QualifiedRunContext,
     retained: &BTreeSet<ContentRef>,
 ) -> Result<Vec<HistoryObject>, StructuredStoreError> {
-    let mut objects = intents
+    let mut objects = authored
         .iter()
-        .map(|intent| intent.materialize(context))
+        .map(|intent| {
+            let object = materialize_artifact(&intent.payload)?;
+            (object.content_ref == intent.reference)
+                .then_some(object)
+                .ok_or_else(invalid)
+        })
         .collect::<Result<Vec<_>, _>>()?;
+    objects.extend(
+        retained_objects
+            .iter()
+            .map(|reference| context.object(reference).cloned().ok_or_else(invalid))
+            .collect::<Result<Vec<_>, _>>()?,
+    );
     objects.sort_by(|left, right| left.content_ref.cmp(&right.content_ref));
     let mut canonical: Vec<HistoryObject> = Vec::with_capacity(objects.len());
     for object in objects {
@@ -166,14 +198,148 @@ fn materialize_artifacts(
     Ok(canonical)
 }
 
-fn record(intent: &RecordIntent) -> RunRecord {
-    match intent {
-        RecordIntent::Admission(value) => RunRecord::RunAdmitted(value.clone()),
-        RecordIntent::Transition(value) => RunRecord::StateTransitionCommitted(value.clone()),
-        RecordIntent::Authorization(value) => RunRecord::ExternalAccessAuthorized(value.clone()),
-        RecordIntent::Observation(value) => RunRecord::ExternalAccessObserved(value.clone()),
-        RecordIntent::Closure(value) => RunRecord::RunClosed(value.clone()),
+fn materialize_fact(intent: &FactIntent) -> CommittedFactRef {
+    CommittedFactRef {
+        emission_ordinal: intent.emission_ordinal,
+        fact_slot_ordinal: intent.fact_slot_ordinal,
+        descriptor_ref: intent.descriptor_ref.clone(),
+        subject: intent.subject.clone(),
+        response: intent.response.clone(),
+        claim_ref: intent.claim_ref.clone(),
     }
+}
+
+fn materialize_state_outcome(intent: &StateOutcomeIntent) -> StateOutcomeRef {
+    match intent {
+        StateOutcomeIntent::Success(value) => StateOutcomeRef::Success(value.clone()),
+        StateOutcomeIntent::Failure(value) => StateOutcomeRef::Failure(value.clone()),
+    }
+}
+
+fn materialize_transition(intent: &TransitionIntent) -> StateTransitionCommitted {
+    StateTransitionCommitted {
+        occurrence_id: intent.occurrence_id.clone(),
+        occurrence_path_ref: intent.occurrence_path_ref.clone(),
+        semantic_call_id: intent.semantic_call_id.clone(),
+        input: intent.input.clone(),
+        consumed_observation_ref: intent.consumed_observation_ref.clone(),
+        outcome_ref: intent.outcome_ref.clone(),
+        outcome: materialize_state_outcome(&intent.outcome),
+        facts: intent.facts.iter().map(materialize_fact).collect(),
+        before_semantic_state_digest: intent.before_semantic_state_digest.clone(),
+        after_semantic_state_digest: intent.after_semantic_state_digest.clone(),
+    }
+}
+
+fn materialize_authorization(
+    run_id: &mfm_ids::RunId,
+    intent: &AuthorizationIntent,
+) -> Result<ExternalAccessAuthorized, StructuredStoreError> {
+    let authorization = ExternalAccessAuthorized {
+        access_attempt_id: intent.access_attempt_id.clone(),
+        attempt_ordinal: intent.attempt_ordinal,
+        occurrence_id: intent.occurrence_id.clone(),
+        occurrence_path_ref: intent.occurrence_path_ref.clone(),
+        semantic_call_id: intent.semantic_call_id.clone(),
+        state_input_ref: intent.state_input_ref.clone(),
+        access_kind: intent.access_kind,
+        semantic_head: intent.semantic_head.clone(),
+        store_scope_id: intent.store_scope_id.clone(),
+        store_epoch: intent.store_epoch,
+        tenant_scope_id: intent.tenant_scope_id.clone(),
+        admitted_routing_policy_ref: intent.admitted_routing_policy_ref.clone(),
+        minimum_lineage_head_ref: intent.minimum_lineage_head_ref.clone(),
+        capability_contract_ref: intent.capability_contract_ref.clone(),
+        capability_implementation_ref: intent.capability_implementation_ref.clone(),
+        adapter_contract_ref: intent.adapter_contract_ref.clone(),
+        adapter_implementation_ref: intent.adapter_implementation_ref.clone(),
+        request: intent.request.clone(),
+        request_digest: intent.request_digest.clone(),
+        physical_binding_ref: intent.physical_binding_ref.clone(),
+        stable_resource_lineage_contract_ref: intent.stable_resource_lineage_contract_ref.clone(),
+    };
+    let derived = derive_access_attempt_id(&AccessAttemptIdentityPreimage {
+        run_id,
+        occurrence_id: &authorization.occurrence_id,
+        occurrence_path_ref: &authorization.occurrence_path_ref,
+        semantic_call_id: &authorization.semantic_call_id,
+        state_input_ref: &authorization.state_input_ref,
+        attempt_ordinal: authorization.attempt_ordinal,
+        access_kind: authorization.access_kind,
+        semantic_head: &authorization.semantic_head,
+        capability_contract_ref: &authorization.capability_contract_ref,
+        capability_implementation_ref: &authorization.capability_implementation_ref,
+        adapter_contract_ref: &authorization.adapter_contract_ref,
+        adapter_implementation_ref: &authorization.adapter_implementation_ref,
+        request: &authorization.request,
+        request_digest: &authorization.request_digest,
+        physical_binding_ref: &authorization.physical_binding_ref,
+        stable_resource_lineage_contract_ref: &authorization.stable_resource_lineage_contract_ref,
+    })
+    .map_err(|_| invalid())?;
+    (derived == authorization.access_attempt_id)
+        .then_some(authorization)
+        .ok_or_else(invalid)
+}
+
+fn materialize_observation(intent: &ObservationIntent) -> ExternalAccessObserved {
+    let outcome = match &intent.outcome {
+        ObservationOutcomeIntent::Returned(value) => ObservationOutcome::Returned {
+            value: value.clone(),
+        },
+        ObservationOutcomeIntent::SafeFailure(value) => ObservationOutcome::SafeFailure {
+            value: value.clone(),
+        },
+        ObservationOutcomeIntent::SupersededBeforeEntry {
+            public_lineage_head_ref,
+            evidence_ref,
+        } => ObservationOutcome::SupersededBeforeEntry {
+            public_lineage_head_ref: public_lineage_head_ref.clone(),
+            evidence_ref: evidence_ref.clone(),
+        },
+        ObservationOutcomeIntent::EntryUnknown { fault_code } => ObservationOutcome::EntryUnknown {
+            fault_code: fault_code.clone(),
+        },
+        ObservationOutcomeIntent::IntegrityFault { fault_code } => {
+            ObservationOutcome::IntegrityFault {
+                fault_code: fault_code.clone(),
+            }
+        }
+    };
+    ExternalAccessObserved {
+        authorization_ref: intent.authorization_ref.clone(),
+        access_attempt_id: intent.access_attempt_id.clone(),
+        outcome,
+    }
+}
+
+fn materialize_primary(
+    context: &QualifiedRunContext,
+    intent: &PrimaryIntent,
+) -> Result<RunRecord, StructuredStoreError> {
+    Ok(match intent {
+        PrimaryIntent::Admission(intent) => RunRecord::RunAdmitted(RunAdmitted {
+            store_scope_id: context.admission.store_scope_id.clone(),
+            store_epoch: context.admission.store_epoch,
+            run_id: context.admission.run_id.clone(),
+            tenant_scope_id: context.admission.tenant_scope_id.clone(),
+            invocation_identity: context.admission.invocation_identity.clone(),
+            entry_point_operation_id: context.admission.entry_point_operation_id.clone(),
+            certified_program_ref: context.admission.certified_program_ref.clone(),
+            admission_material_refs: context.admission.admission_material_refs.clone(),
+            initial_bindings: context.admission.initial_bindings.clone(),
+            genesis_semantic_state_digest: intent.genesis_semantic_state_digest.clone(),
+        }),
+        PrimaryIntent::Transition(intent) => {
+            RunRecord::StateTransitionCommitted(materialize_transition(intent))
+        }
+        PrimaryIntent::Authorization(intent) => RunRecord::ExternalAccessAuthorized(
+            materialize_authorization(&context.admission.run_id, intent)?,
+        ),
+        PrimaryIntent::Observation(intent) => {
+            RunRecord::ExternalAccessObserved(materialize_observation(intent))
+        }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,8 +371,13 @@ pub(super) fn compile_preview(
     append_request_id: &AppendRequestId,
     pending: &PendingSemanticStep,
 ) -> Result<CompiledPreview, StructuredStoreError> {
-    let objects = materialize_artifacts(&pending.artifacts, context, retained_objects)?;
-    let coordinate = match (&pending.tenant_fact_requirement, tenant_frontier.as_ref()) {
+    let objects = materialize_artifacts(
+        pending.artifacts(),
+        pending.retained_objects(),
+        context,
+        retained_objects,
+    )?;
+    let coordinate = match (pending.tenant_fact_requirement(), tenant_frontier.as_ref()) {
         (TenantFactRequirement::None, None) => TenantFactCoordinate::None,
         (TenantFactRequirement::Barrier, Some(frontier)) => {
             TenantFactCoordinate::FactSelectionBarrier {
@@ -225,6 +396,12 @@ pub(super) fn compile_preview(
     }) {
         return Err(invalid());
     }
+    let mut records = vec![materialize_primary(context, pending.primary())?];
+    if let Some(outcome_ref) = pending.closure() {
+        records.push(RunRecord::RunClosed(RunClosed {
+            outcome_ref: outcome_ref.clone(),
+        }));
+    }
     let candidate = CommitCandidate {
         run_id: context.admission.run_id.clone(),
         expected_head: previous_projection
@@ -232,7 +409,7 @@ pub(super) fn compile_preview(
             .map(|projection| projection.journal_head.clone()),
         append_request_id: append_request_id.clone(),
         tenant_fact_coordinate: coordinate,
-        records: pending.records.iter().map(record).collect(),
+        records,
         objects,
     };
     let committed = assign(identity, candidate)?;
@@ -352,12 +529,41 @@ pub(super) fn assign(
     })
 }
 
+pub(super) struct ComparisonPassed(());
+
+pub(super) struct CompiledAppend {
+    committed: CommittedBatch,
+    run_projection: RunProjectionPlan,
+    tenant_fact_plan: TenantFactProjectionPlan,
+    fact_read_capability_spec: Option<FactScanPermitSpec>,
+}
+
+impl CompiledAppend {
+    pub(super) const fn tenant_fact_plan(&self) -> &TenantFactProjectionPlan {
+        &self.tenant_fact_plan
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        CommittedBatch,
+        RunProjectionPlan,
+        TenantFactProjectionPlan,
+        Option<FactScanPermitSpec>,
+    ) {
+        (
+            self.committed,
+            self.run_projection,
+            self.tenant_fact_plan,
+            self.fact_read_capability_spec,
+        )
+    }
+}
+
 pub(super) struct ComparedReduction {
-    pub(super) pending: PendingSemanticStep,
-    pub(super) committed: CommittedBatch,
-    pub(super) run_projection: RunProjectionPlan,
-    pub(super) tenant_fact_plan: TenantFactProjectionPlan,
-    pub(super) fact_read_capability_spec: Option<FactScanPermitSpec>,
+    reduced: Box<ReducedRunState>,
+    compiled: CompiledAppend,
+    obligations: Vec<SemanticObligation>,
 }
 
 impl ComparedReduction {
@@ -384,12 +590,36 @@ impl ComparedReduction {
         {
             return Err(invalid());
         }
+        let primary_assignment = qualified
+            .records
+            .first()
+            .map(|record| &record.record_ref)
+            .ok_or_else(invalid)?;
+        let (reduced, obligations) = recorded.bind_after_comparison(
+            ComparisonPassed(()),
+            primary_assignment,
+            qualified.head.clone(),
+        )?;
         Ok(Self {
-            pending: recorded,
-            committed: preview.committed,
-            run_projection: preview.run_projection,
-            tenant_fact_plan: preview.tenant_fact_plan,
-            fact_read_capability_spec: preview.fact_read_capability_spec,
+            reduced,
+            compiled: CompiledAppend {
+                committed: preview.committed,
+                run_projection: preview.run_projection,
+                tenant_fact_plan: preview.tenant_fact_plan,
+                fact_read_capability_spec: preview.fact_read_capability_spec,
+            },
+            obligations,
         })
+    }
+
+    pub(super) fn obligations(&self) -> &[SemanticObligation] {
+        &self.obligations
+    }
+
+    pub(super) fn into_finalization_parts(
+        self,
+        _passed: super::obligations::DischargePassed,
+    ) -> (Box<ReducedRunState>, CompiledAppend) {
+        (self.reduced, self.compiled)
     }
 }

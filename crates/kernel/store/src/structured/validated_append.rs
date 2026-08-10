@@ -6,7 +6,6 @@ use mfm_journal::structured::{CommittedBatch, JournalHead, TenantFactFrontier};
 use super::configuration::{
     ConfigurationHistoryHead, ConfigurationRevisionObject, MAX_CONFIGURATION_REVISION_BYTES,
 };
-use super::obligations::FinalizedReduction;
 use super::qualification::StructuredStoreError;
 
 /// Maximum bytes in one stored canonical frame.
@@ -92,11 +91,16 @@ impl std::fmt::Debug for ValidatedRunAppend {
 }
 
 impl ValidatedRunAppend {
-    pub(super) fn from_finalized(finalized: &FinalizedReduction) -> Self {
+    pub(super) fn seal(
+        committed: CommittedBatch,
+        run_projection: RunProjectionPlan,
+        tenant_fact_plan: TenantFactProjectionPlan,
+        _seal: super::coordinator::AppendSeal,
+    ) -> Self {
         Self {
-            committed: finalized.committed.clone(),
-            run_projection: finalized.run_projection.clone(),
-            tenant_fact_plan: finalized.tenant_fact_plan.clone(),
+            committed,
+            run_projection,
+            tenant_fact_plan,
         }
     }
 
