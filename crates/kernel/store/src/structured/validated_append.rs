@@ -11,10 +11,6 @@ use super::qualification::StructuredStoreError;
 
 /// Maximum bytes in one stored canonical frame.
 pub const MAX_STORED_FRAME_BYTES: usize = 33_554_432;
-/// Maximum retained objects in one atomic append.
-pub const MAX_BATCH_OBJECTS: usize = 65_536;
-/// Maximum records in one atomic append.
-pub const MAX_BATCH_RECORDS: usize = 65_536;
 
 /// One run's complete disposable current projection.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -7,14 +7,14 @@ use mfm_ids::{
 };
 use mfm_journal::structured::{
     canonical_json, AssignedRecord, CommittedBatch, HistoryObject, JournalHead, RecordRef,
-    TenantFactCoordinate, TenantFactFrontier,
+    TenantFactCoordinate, TenantFactFrontier, MAX_APPEND_OBJECTS, MAX_APPEND_RECORDS,
 };
 use mfm_store::structured::{
     AppendAttemptLookup, BackendAppendOutcome, RawRunHistory, RunCurrentProjection,
     StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreError,
     StructuredStoreIdentity, StructuredStoreRunSnapshot, StructuredStoreSnapshot,
     TenantFactProjectionPlan, TenantFactProjectionSnapshot, TenantFactPublication,
-    ValidatedRunAppend, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
+    ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -45,7 +45,7 @@ struct StoredBatchEnvelope {
 
 impl StoredBatchEnvelope {
     fn from_batch(batch: &CommittedBatch) -> Result<Self, StructuredStoreError> {
-        if batch.objects.len() > MAX_BATCH_OBJECTS {
+        if batch.objects.len() > MAX_APPEND_OBJECTS {
             return Err(StructuredStoreError::InvalidHistory);
         }
         let object_count =
@@ -68,7 +68,7 @@ impl StoredBatchEnvelope {
         objects: Vec<HistoryObject>,
     ) -> Result<CommittedBatch, StructuredStoreError> {
         if usize::try_from(self.object_count).ok() != Some(objects.len())
-            || objects.len() > MAX_BATCH_OBJECTS
+            || objects.len() > MAX_APPEND_OBJECTS
         {
             return Err(StructuredStoreError::InvalidHistory);
         }
@@ -1372,6 +1372,11 @@ fn decode_canonical_envelope(json: &str) -> Result<StoredBatchEnvelope, Structur
     let records_array = records_value
         .as_array()
         .ok_or_else(|| invalid("structured PostgreSQL batch envelope records are not an array"))?;
+    if records_array.is_empty() || records_array.len() > MAX_APPEND_RECORDS {
+        return Err(invalid(
+            "structured PostgreSQL batch envelope record count exceeds its bound",
+        ));
+    }
     let mut records = Vec::with_capacity(records_array.len());
     for record_value in records_array {
         let record_object = record_value.as_object().ok_or_else(|| {
@@ -1422,7 +1427,7 @@ fn decode_canonical_envelope(json: &str) -> Result<StoredBatchEnvelope, Structur
     };
     if usize::try_from(envelope.object_count)
         .ok()
-        .is_none_or(|count| count > MAX_BATCH_OBJECTS)
+        .is_none_or(|count| count > MAX_APPEND_OBJECTS)
     {
         return Err(invalid(
             "structured PostgreSQL batch envelope object count exceeds its bound",
@@ -1449,7 +1454,7 @@ fn validate_stored_frame(json: &str) -> Result<(), StructuredStoreError> {
 }
 
 fn decode_objects(rows: Vec<StoredObjectRow>) -> Result<Vec<HistoryObject>, StructuredStoreError> {
-    if rows.len() > MAX_BATCH_OBJECTS {
+    if rows.len() > MAX_APPEND_OBJECTS {
         return Err(invalid(
             "structured PostgreSQL batch object rows exceed their bound",
         ));

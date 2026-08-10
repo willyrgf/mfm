@@ -13,6 +13,7 @@ use mfm_journal::structured::{
     AdmissionMaterialRefs, AssignedRecord, CommitCandidate, CommitDigestPreimage, CommittedBatch,
     ExternalAccessAuthorized, ExternalAccessObserved, HistoryObject, JournalHead, LexicalValueRef,
     RecordHashPreimage, RunAdmitted, RunClosed, RunRecord, StateTransitionCommitted, TypedValueRef,
+    MAX_APPEND_OBJECTS, MAX_APPEND_RECORDS,
 };
 use mfm_runtime::history::{
     ProposedObservationOutcome, ProposedTransitionValue, QualifiedRuntimeIntent,
@@ -24,11 +25,11 @@ use mfm_spec::structured::{
     StructuredComponentKind, StructuredEffectRefreshContract, StructuredLiveComponentContract,
 };
 use mfm_spec::CanonicalJsonValue;
-use mfm_values::CanonicalJsonPersistedSchema;
+use mfm_values::{CanonicalJsonPersistedSchema, PersistedSchema};
 
 use super::backend::{RawRunHistory, StructuredStoreIdentity};
 use super::reducer::{ObservationValueIntent, QualifiedIntentEvent, TransitionValueIntent};
-use super::validated_append::{MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES};
+use super::validated_append::MAX_STORED_FRAME_BYTES;
 
 /// Stable redaction-safe structured store failure.
 pub type StructuredStoreError = mfm_runtime::history::HistoryError;
@@ -1011,7 +1012,7 @@ fn validate_record_object_closure(
     batch: &CommittedBatch,
     prior_object_refs: &BTreeSet<ContentRef>,
 ) -> Result<(), StructuredStoreError> {
-    if batch.objects.len() > MAX_BATCH_OBJECTS
+    if batch.objects.len() > MAX_APPEND_OBJECTS
         || batch
             .objects
             .windows(2)
@@ -1172,10 +1173,11 @@ pub(super) fn verify_batch_envelope(
     previous_head: Option<&JournalHead>,
     store_identity: Option<&(mfm_ids::StoreScopeId, mfm_ids::StoreEpoch)>,
 ) -> Result<(), StructuredStoreError> {
-    if batch.records.is_empty() || batch.records.len() > MAX_BATCH_RECORDS {
+    if batch.records.is_empty() || batch.records.len() > MAX_APPEND_RECORDS {
         return Err(invalid());
     }
     let envelope = mfm_journal::structured::canonical_json(batch).map_err(|_| invalid())?;
+    CommittedBatch::validate_canonical_bytes(envelope.as_bytes()).map_err(|_| invalid())?;
     if envelope.as_bytes().len() > MAX_STORED_FRAME_BYTES {
         return Err(invalid());
     }

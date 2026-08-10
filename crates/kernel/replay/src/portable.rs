@@ -24,7 +24,7 @@ use mfm_store::structured::{
     ProgramVerificationRegistry, RawRunHistory, RecordedRunEvidence, StructuredStoreError,
     TenantFactPublication,
 };
-use mfm_values::CanonicalJsonLinesPersistedSchema;
+use mfm_values::{CanonicalJsonLinesPersistedSchema, CanonicalJsonPersistedSchema};
 use serde::{Deserialize, Serialize};
 
 use crate::structured::{project_replay_result, StructuredReplayError, StructuredReplayResult};
@@ -119,10 +119,10 @@ impl AuthorizedExportClosure {
 
 /// Exact media type of the current bounded structured portable record stream.
 pub const PORTABLE_RUN_EXPORT_MEDIA_TYPE: &str =
-    "application/vnd.mfm.structured-run-export-stream.v3";
+    "application/vnd.mfm.structured-run-export-stream.v4";
 
 /// Current portable-export contract version retained in the terminal seal.
-pub const PORTABLE_EXPORT_VERSION: &str = "mfm.structured-portable-run-export-stream.v3";
+pub const PORTABLE_EXPORT_VERSION: &str = "mfm.structured-portable-run-export-stream.v4";
 
 fn portable_stream_schema_id() -> Result<SchemaId, PortableExportError> {
     PortableRecord::json_lines_schema_id().map_err(|_| PortableExportError::Invalid)
@@ -335,6 +335,7 @@ struct PortableFactRoute {
 #[serde(deny_unknown_fields)]
 struct PortableAuthorizationDecision {
     decision_ref: ContentDigest,
+    #[mfm(literal = "export")]
     grant: String,
     principal_id: StableId,
     run_id: RunId,
@@ -372,10 +373,11 @@ struct PortableSeal {
     source_run_ids: Vec<RunId>,
     store_scope_id: StoreScopeId,
     tenant_scope_id: TenantScopeId,
+    #[mfm(literal = "mfm.structured-portable-run-export-stream.v4")]
     version: String,
 }
 
-/// Exact closed record language of the complete v3 portable stream.
+/// Exact closed record language of the complete v4 portable stream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(
     tag = "kind",
@@ -383,7 +385,7 @@ struct PortableSeal {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-#[mfm(schema = "mfm.portable-run-export-record", version = "3")]
+#[mfm(schema = "mfm.portable-run-export-record", version = "4")]
 // Stream records stay inline so encoding does not allocate once per frame.
 #[allow(clippy::large_enum_variant)]
 enum PortableRecord {
@@ -393,7 +395,7 @@ enum PortableRecord {
 
 impl CanonicalJsonLinesPersistedSchema for PortableRecord {
     const STREAM_SCHEMA_NAME: &'static str = "mfm.portable-run-export-stream";
-    const STREAM_SCHEMA_VERSION: &'static str = "3";
+    const STREAM_SCHEMA_VERSION: &'static str = "4";
     const MINIMUM_RECORDS: u32 = 2;
     const MAXIMUM_RECORDS: u32 = MAX_PORTABLE_RECORDS as u32;
     const MAXIMUM_FRAMED_RECORD_BYTES: u32 = MAX_PORTABLE_RECORD_BYTES as u32;
@@ -865,7 +867,7 @@ fn derive_authorized_closure_digest(
     preimage: &ClosureDigestBody<'_>,
 ) -> Result<ContentDigest, PortableExportError> {
     let canonical = canonical_json(preimage).map_err(|_| PortableExportError::Invalid)?;
-    let mut bytes = b"mfm.portable.authorized-closure.v3\0".to_vec();
+    let mut bytes = b"mfm.portable.authorized-closure.v4\0".to_vec();
     bytes.extend_from_slice(canonical.as_bytes());
     Ok(raw_digest(&bytes))
 }
@@ -1133,8 +1135,7 @@ fn select_batches(
     let batches = evidence
         .batch_frames()
         .map(|record| {
-            serde_json::from_slice::<CommittedBatch>(record)
-                .map_err(|_| PortableExportError::Invalid)
+            CommittedBatch::decode_canonical(record).map_err(|_| PortableExportError::Invalid)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if batches.is_empty() {
@@ -1180,8 +1181,7 @@ fn portable_prefix_from_source(
     let batches = source
         .batch_frames()
         .map(|record| {
-            serde_json::from_slice::<CommittedBatch>(record)
-                .map_err(|_| PortableExportError::Invalid)
+            CommittedBatch::decode_canonical(record).map_err(|_| PortableExportError::Invalid)
         })
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -1475,8 +1475,8 @@ fn decode_records(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError
         // A record is an internal typed record of the one stream codec, so it
         // carries no identity of its own beyond the record shape already
         // enforced above.
-        let record: PortableRecord =
-            serde_json::from_slice(line).map_err(|_| PortableExportError::Invalid)?;
+        let record =
+            PortableRecord::decode_canonical(line).map_err(|_| PortableExportError::Invalid)?;
         match record {
             PortableRecord::Batch(payload) => {
                 if seal.is_some() {
@@ -1551,7 +1551,9 @@ fn decode_records(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError
 }
 
 fn encode_record(record: &PortableRecord) -> Result<Vec<u8>, PortableExportError> {
-    let canonical = canonical_json(record).map_err(|_| PortableExportError::Invalid)?;
+    let canonical = record
+        .encode_canonical()
+        .map_err(|_| PortableExportError::Invalid)?;
     if canonical.as_bytes().len().saturating_add(1) > MAX_PORTABLE_RECORD_BYTES {
         return Err(PortableExportError::TooLarge);
     }
@@ -1943,12 +1945,11 @@ mod tests {
 
     #[tokio::test]
     async fn serialized_authorization_decision_tampering_is_rejected() {
-        let mut wrong_grant = golden_export();
-        wrong_grant.export_decisions[0].grant = "read_public".to_owned();
-        wrong_grant.authorized_closure_digest = wrong_grant
-            .compute_authorized_closure_digest()
-            .expect("wrong grant closure reference");
-        let wrong_grant_bytes = super::encode_records(&wrong_grant).expect("wrong grant bytes");
+        let valid_bytes = super::encode_records(&golden_export()).expect("valid golden bytes");
+        let wrong_grant_bytes = String::from_utf8(valid_bytes)
+            .expect("portable bytes are UTF-8")
+            .replacen(r#""grant":"export""#, r#""grant":"read_public""#, 1)
+            .into_bytes();
         assert_eq!(
             PortableRunExport::strict_decode(&wrong_grant_bytes),
             Err(PortableExportError::Invalid)

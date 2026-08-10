@@ -18,7 +18,7 @@ Offline verification uses only bundle bytes, the caller's expected complete-stre
 an explicit trust snapshot against the store's read-only qualification entry.
 
 The current export media type is
-`application/vnd.mfm.structured-run-export-stream.v3`. The complete stream is the one portable
+`application/vnd.mfm.structured-run-export-stream.v4`. The complete stream is the one portable
 identity: `encode()` returns the exact bytes and their `ContentRef` together, and a frame is an
 internal typed record of that one codec with no identity of its own. The terminal seal binds the
 exact closure and fixation, and deliberately restates no frame ordinal, chain digest, or byte count —

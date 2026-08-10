@@ -362,7 +362,7 @@ retained-release, and store
 lineage verifiers used by that snapshot are workspace-sealed deployment authorities; an
 ordinary consumer cannot substitute callbacks that accept forged fixations. Current portable
 exports use one bounded newline-delimited `Batch | Seal` record stream with media type
-`application/vnd.mfm.structured-run-export-stream.v3`. The complete stream has one content identity;
+`application/vnd.mfm.structured-run-export-stream.v4`. The complete stream has one content identity;
 individual records have none. The terminal seal binds the exact closure, fixation, authenticated
 principal, fixed `export` grant, and content-addressed policy-decision references. Legacy streams
 and retired bytes are rejected.

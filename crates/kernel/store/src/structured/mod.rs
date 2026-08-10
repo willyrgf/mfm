@@ -51,8 +51,7 @@ pub use semantic_open::{
 pub use test_support::{fact_scan_counters, reset_fact_scan_counters, FactScanCounters};
 pub use validated_append::{
     RunCurrentProjection, RunProjectionPlan, TenantFactProjectionPlan,
-    ValidatedConfigurationAppend, ValidatedRunAppend, MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS,
-    MAX_STORED_FRAME_BYTES,
+    ValidatedConfigurationAppend, ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
 };
 // Semantic command types are owned by mfm-runtime; re-export for store tests and reduction.
 pub use mfm_runtime::history::CommittedAccessAuthorization;

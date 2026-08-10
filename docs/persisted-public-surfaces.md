@@ -233,7 +233,7 @@ authorizes its exact purpose and tenant/run target.
 The current media type is:
 
 ```text
-application/vnd.mfm.structured-run-export-stream.v3
+application/vnd.mfm.structured-run-export-stream.v4
 ```
 
 The complete stream is the one portable identity: `mfm-replay` owns it as a `CanonicalJsonLines`

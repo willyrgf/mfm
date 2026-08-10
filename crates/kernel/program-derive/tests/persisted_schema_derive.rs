@@ -56,6 +56,30 @@ struct ClosedContract {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.derive.test-closed", version = "1")]
+struct ChangedClosedContract {
+    #[mfm(literal = "mfm.closed.v2")]
+    contract: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.derive.test-sequence", version = "1")]
+struct BoundedSequenceContract {
+    #[mfm(persisted, minimum_items = 1, maximum_items = 2)]
+    values: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.derive.test-sequence", version = "1")]
+struct WidenedSequenceContract {
+    #[mfm(persisted, minimum_items = 0, maximum_items = 3)]
+    values: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PersistedSchema)]
 #[serde(transparent)]
 #[mfm(
     schema = "mfm.derive.test-bounded-unsigned",
@@ -151,6 +175,33 @@ fn a_literal_field_is_closed_by_the_derived_shape() {
     assert!(identity
         .validate_canonical_value(br#"{"contract":"mfm.closed.v2"}"#)
         .is_err());
+    assert_ne!(
+        ClosedContract::schema_id().expect("closed schema id"),
+        ChangedClosedContract::schema_id().expect("changed literal schema id"),
+        "changing a literal changes the persisted schema identity",
+    );
+}
+
+#[test]
+fn sequence_bounds_are_enforced_and_owned_by_the_schema_identity() {
+    let identity = BoundedSequenceContract::schema_identity().expect("bounded sequence identity");
+    identity
+        .validate_canonical_value(br#"{"values":[1]}"#)
+        .expect("lower bound");
+    identity
+        .validate_canonical_value(br#"{"values":[1,2]}"#)
+        .expect("upper bound");
+    assert!(identity
+        .validate_canonical_value(br#"{"values":[]}"#)
+        .is_err());
+    assert!(identity
+        .validate_canonical_value(br#"{"values":[1,2,3]}"#)
+        .is_err());
+    assert_ne!(
+        BoundedSequenceContract::schema_id().expect("bounded sequence schema id"),
+        WidenedSequenceContract::schema_id().expect("widened sequence schema id"),
+        "changing sequence bounds changes the persisted schema identity",
+    );
 }
 
 #[test]
