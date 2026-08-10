@@ -6,14 +6,15 @@ use std::sync::{Arc, Mutex};
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::{
-    BoundedComponentContract, BoundedComponentInvoker, CapabilityContractFault, ComponentFuture,
-    EffectAdapterCompletion, EffectAdapterInvoker, EffectCapabilityContract,
-    EffectCapabilityImplementation, ReadAdapterCompletion, ReadAdapterInvoker,
-    ReadCapabilityContract, ReadCapabilityImplementation, Refreshable, ResourceAuthorityContract,
+    AccessFaultCode, BoundedComponentContract, BoundedComponentInvoker, CapabilityContractFault,
+    ComponentFuture, EffectAdapterCompletion, EffectAdapterInvoker, EffectCapabilityContract,
+    EffectCapabilityImplementation, EntryAbsorbing, EntryKeyed, EntryOnce, ReadAdapterCompletion,
+    ReadAdapterInvoker, ReadCapabilityContract, ReadCapabilityImplementation, Refreshable,
+    ResourceAuthorityContract,
 };
 use mfm_certify::structured::{
-    CertifiedAccessAuthorization, PhysicalBindingSelection, ProgramRegistryBuilder,
-    QualifiedEffectPhysicalBinding, QualifiedEffectPhysicalBindingSource, QualifiedProgramRegistry,
+    CertifiedAccessAuthorization, CertifiedProgramRegistry, PhysicalBindingSelection,
+    ProgramRegistryBuilder, QualifiedEffectPhysicalBinding, QualifiedEffectPhysicalBindingSource,
     QualifiedReadPhysicalBinding, QualifiedReadPhysicalBindingSource,
 };
 use mfm_facts::{FactProposal, FactSet, ProposedFactValue};
@@ -22,18 +23,19 @@ use mfm_ids::{
     StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    derive_commit_digest, derive_record_hash, domain_content_digest, AssignedRecord,
-    CommitCandidate, CommittedBatch, HistoryObject, JournalHead, LexicalValueRef,
-    ObservationOutcome, PriorRunFactSourceManifest, RecordRef, RunRecord, TenantFactCoordinate,
-    TenantFactFrontier, ADMISSION_CONFIGURATION_OBJECT_TYPE,
+    derive_candidate_digest, derive_commit_digest, derive_record_hash, AssignedRecord,
+    CommitCandidate, CommitDigestPreimage, CommittedBatch, HistoryObject, JournalHead,
+    LexicalValueRef, ObservationOutcome, PriorRunFactSourceManifest, RecordHashPreimage, RecordRef,
+    RunRecord, TenantFactCoordinate, TenantFactFrontier, ADMISSION_CONFIGURATION_OBJECT_TYPE,
     ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_program::structured::{
     state_contract, AllowsExecution, ClosedSum, DefaultFailureMapper, Direct, Effect,
-    FanOutResults, Never, OperationBuilder, ProposedSuccessOutcome, Pure, Read, RefreshableBinding,
-    RuntimeEffectAdapter, RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability,
-    RuntimeResourceAuthority, SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly,
-    Sequential, State, StateFrame, StateSettlement, StructuredStateCallbacks,
+    EntryAbsorbingBinding, EntryOnceBinding, FanOutResults, Never, OperationBuilder,
+    ProposedSuccessOutcome, Pure, Read, RefreshableBinding, RuntimeEffectAdapter,
+    RuntimeEffectCapability, RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority,
+    SafeFailureMayFail, SafeFailureNotApplicable, SafeFailureSuccessOnly, Sequential, State,
+    StateFrame, StateSettlement, StructuredStateCallbacks,
 };
 use mfm_program_derive::MfmValue;
 use mfm_runtime::history::{
@@ -55,7 +57,33 @@ use mfm_store::structured::{
     StructuredHistoryBackend, StructuredMemoryBackend, StructuredRunSnapshot, StructuredStoreError,
     StructuredStoreIdentity, TenantFactPublication,
 };
-use serde::{Deserialize, Serialize};
+use mfm_values::CanonicalJsonPersistedSchema;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+
+fn decode_history_json<T: DeserializeOwned>(object: &HistoryObject) -> T {
+    object.validate().expect("valid history object");
+    serde_json::from_str(&object.canonical_json).expect("strict history object JSON")
+}
+
+fn test_history_object(
+    object_type: StableId,
+    schema_id: SchemaId,
+    canonical_json: impl Into<String>,
+) -> HistoryObject {
+    let canonical_json = canonical_json.into();
+    HistoryObject {
+        object_type,
+        content_ref: mfm_ids::ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical_json.as_bytes()),
+            ),
+        )
+        .expect("test history object reference"),
+        canonical_json,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -216,7 +244,7 @@ impl State for FactState {
             0,
             1,
             1,
-            descriptor.descriptor_ref,
+            descriptor.content_ref()?,
             contract.clone(),
             contract,
         )?])
@@ -309,13 +337,113 @@ impl EffectCapabilityContract for FixtureEffectCapability {
     type Returned = Value;
     type SafeFailure = Value;
     type Refresh = Refreshable<Value>;
+    type Entry = EntryOnce;
 }
 
 impl RuntimeEffectCapability for FixtureEffectCapability {
     type RefreshBinding = RefreshableBinding<FixtureResource>;
+    type EntryBinding = EntryOnceBinding;
 
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
         effect_capability_contract()
+    }
+}
+
+/// The absorbing sibling of [`FixtureEffectCapability`].
+///
+/// Same request, returned, failure, and refresh contracts; the entry axis is
+/// the only difference, which is what makes the two fixtures a controlled
+/// comparison of what absorption changes.
+struct AbsorbingEffectCapability;
+
+impl EffectCapabilityContract for AbsorbingEffectCapability {
+    type Request = Value;
+    type Returned = Value;
+    type SafeFailure = Value;
+    type Refresh = Refreshable<Value>;
+    type Entry = EntryAbsorbing<3>;
+}
+
+impl RuntimeEffectCapability for AbsorbingEffectCapability {
+    type RefreshBinding = RefreshableBinding<FixtureResource>;
+    type EntryBinding = EntryAbsorbingBinding<3>;
+
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        absorbing_effect_capability_contract()
+    }
+}
+
+impl EntryKeyed for Value {
+    type EntryKey = Value;
+
+    fn entry_key(&self) -> Self::EntryKey {
+        self.clone()
+    }
+}
+
+struct AbsorbingEffectCapabilityImplementation;
+
+impl EffectCapabilityImplementation<AbsorbingEffectCapability>
+    for AbsorbingEffectCapabilityImplementation
+{
+    fn validate_request(
+        &self,
+        _request: &Value,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+
+    fn validate_returned(
+        &self,
+        _returned: &Value,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+
+    fn validate_safe_failure(
+        &self,
+        _failure: &Value,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+
+    fn validate_superseded_before_entry(
+        &self,
+        _evidence: &Value,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+
+    fn validate_entry_unknown(
+        &self,
+        _fault: &AccessFaultCode,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+
+    fn validate_integrity_fault(
+        &self,
+        _fault: &AccessFaultCode,
+    ) -> std::result::Result<(), CapabilityContractFault> {
+        Ok(())
+    }
+}
+
+struct AbsorbingEffectState;
+
+impl State for AbsorbingEffectState {
+    type Input = Value;
+    type Output = Value;
+    type Failure = Never;
+    type Request = Value;
+    type Returned = Value;
+    type SafeFailure = Value;
+    type Execution = Effect<AbsorbingEffectCapability>;
+    type SafeFailureDisposition = SafeFailureSuccessOnly;
+    type Capability = Direct;
+
+    fn semantic_state_id() -> mfm_program::Result<StableId> {
+        stable("mfm.runtime.fixture/absorbing-effect-state")
     }
 }
 
@@ -441,6 +569,204 @@ impl QualifiedEffectPhysicalBinding<FixtureEffectCapability> for RotatingEffectA
         let lineage_head = self.lineage_head.clone();
         Box::pin(async move { Some(lineage_head) })
     }
+}
+
+/// Adapter for the absorbing fixture. Its completion is chosen per invocation
+/// so a test can script a crash, an ambiguity, or a successful repeat.
+struct ScriptedAbsorbingAdapter {
+    calls: Arc<AtomicUsize>,
+    completions: Mutex<Vec<AbsorbingCompletion>>,
+    certificate: HistoryObject,
+    lineage_head: HistoryObject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AbsorbingCompletion {
+    Returned,
+    EntryUnknown,
+    SupersededBeforeEntry,
+}
+
+impl EffectAdapterInvoker<AbsorbingEffectCapability> for ScriptedAbsorbingAdapter {
+    fn invoke<'a>(
+        &'a self,
+        request: &'a Value,
+    ) -> ComponentFuture<'a, EffectAdapterCompletion<Value, Value, Value>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let completion = self
+            .completions
+            .lock()
+            .expect("scripted completions")
+            .pop()
+            .unwrap_or(AbsorbingCompletion::Returned);
+        let value = request.value;
+        Box::pin(async move {
+            match completion {
+                AbsorbingCompletion::Returned => {
+                    EffectAdapterCompletion::Returned(Value { value: value + 2 })
+                }
+                AbsorbingCompletion::EntryUnknown => EffectAdapterCompletion::EntryUnknown(
+                    AccessFaultCode::new(stable("mfm.runtime.fixture/ambiguous").expect("fault")),
+                ),
+                AbsorbingCompletion::SupersededBeforeEntry => {
+                    EffectAdapterCompletion::SupersededBeforeEntry(Value { value: 99 })
+                }
+            }
+        })
+    }
+}
+
+impl RuntimeEffectAdapter<AbsorbingEffectCapability> for ScriptedAbsorbingAdapter {
+    fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+        absorbing_effect_adapter_contract()
+    }
+}
+
+impl QualifiedEffectPhysicalBinding<AbsorbingEffectCapability> for ScriptedAbsorbingAdapter {
+    fn public_certificate(&self) -> &HistoryObject {
+        &self.certificate
+    }
+
+    fn invoke_authorized<'a>(
+        &'a self,
+        request: &'a Value,
+        authorization: CertifiedAccessAuthorization,
+    ) -> ComponentFuture<'a, mfm_capabilities::EffectContractCompletion<AbsorbingEffectCapability>>
+    {
+        drop(authorization);
+        self.invoke(request)
+    }
+
+    fn supersession_head<'a>(
+        &'a self,
+        _evidence: &'a Value,
+    ) -> ComponentFuture<'a, Option<HistoryObject>> {
+        let lineage_head = self.lineage_head.clone();
+        Box::pin(async move { Some(lineage_head) })
+    }
+}
+
+struct AbsorbingBindingSource {
+    adapter: Arc<ScriptedAbsorbingAdapter>,
+}
+
+impl QualifiedEffectPhysicalBindingSource<AbsorbingEffectCapability> for AbsorbingBindingSource {
+    type Binding = ScriptedAbsorbingAdapter;
+
+    fn current_binding<'a>(
+        &'a self,
+        _selection: PhysicalBindingSelection<'a>,
+        _request: &'a Value,
+    ) -> ComponentFuture<'a, Option<Arc<Self::Binding>>> {
+        let adapter = Arc::clone(&self.adapter);
+        Box::pin(async move { Some(adapter) })
+    }
+}
+
+/// Builds the absorbing-Effect registry with a scripted adapter.
+///
+/// `completions` is consumed from the back, one per invocation.
+fn absorbing_effect_registry(
+    adapter_calls: &Arc<AtomicUsize>,
+    settlement_calls: &Arc<AtomicUsize>,
+    certificate: HistoryObject,
+    lineage_head: HistoryObject,
+    completions: Vec<AbsorbingCompletion>,
+) -> (StableId, mfm_ids::ContentRef, CertifiedProgramRegistry) {
+    let operation_id =
+        stable("mfm.runtime.fixture/absorbing-effect-operation").expect("operation id");
+    let mut assembly = ProgramRegistryBuilder::new();
+    assembly.register_value::<Value>().expect("value contract");
+
+    let settle_counter = Arc::clone(settlement_calls);
+    let state_descriptor =
+        implementation_descriptor::<AbsorbingEffectState>(&mut assembly, "absorbing-effect-state");
+    assembly
+        .register_state::<AbsorbingEffectState>(
+            state_descriptor,
+            StructuredStateCallbacks::Effect {
+                request: Arc::new(|frame: StateFrame<'_, Value>| frame.input().clone()),
+                settle_returned: Arc::new({
+                    let settle_counter = Arc::clone(&settle_counter);
+                    move |_frame, returned| {
+                        settle_counter.fetch_add(1, Ordering::SeqCst);
+                        StateSettlement::Proposed(ProposedStateOutcome::Success(returned.clone()))
+                    }
+                }),
+                settle_safe_failure: Arc::new(move |_frame, failure| {
+                    settle_counter.fetch_add(1, Ordering::SeqCst);
+                    ProposedSuccessOutcome::new(failure.clone())
+                }),
+            },
+        )
+        .expect("absorbing effect state");
+
+    let resource_ref = resource_contract()
+        .expect("resource contract")
+        .content_ref()
+        .expect("resource ref");
+    let resource_descriptor = implementation_descriptor_for_contract(
+        &mut assembly,
+        StructuredComponentKind::Resource,
+        resource_ref.clone(),
+        "absorbing-effect-resource",
+    );
+    assembly
+        .register_resource_authority::<FixtureResource, _>(
+            resource_descriptor,
+            Arc::new(FixtureResourceInvoker),
+        )
+        .expect("resource authority");
+
+    let adapter_descriptor = implementation_descriptor_for_contract(
+        &mut assembly,
+        StructuredComponentKind::Adapter,
+        absorbing_effect_adapter_contract()
+            .expect("absorbing adapter contract")
+            .content_ref()
+            .expect("absorbing adapter ref"),
+        "absorbing-effect-adapter",
+    );
+    assembly
+        .register_effect_adapter::<AbsorbingEffectCapability, _>(
+            adapter_descriptor,
+            Arc::new(AbsorbingBindingSource {
+                adapter: Arc::new(ScriptedAbsorbingAdapter {
+                    calls: Arc::clone(adapter_calls),
+                    completions: Mutex::new(completions),
+                    certificate,
+                    lineage_head,
+                }),
+            }),
+        )
+        .expect("absorbing effect adapter");
+
+    let capability_descriptor = implementation_descriptor_for_contract(
+        &mut assembly,
+        StructuredComponentKind::Capability,
+        absorbing_effect_capability_contract()
+            .expect("absorbing capability contract")
+            .content_ref()
+            .expect("absorbing capability ref"),
+        "absorbing-effect-capability",
+    );
+    assembly
+        .register_effect_capability::<AbsorbingEffectCapability, _>(
+            capability_descriptor,
+            Arc::new(AbsorbingEffectCapabilityImplementation),
+        )
+        .expect("absorbing effect capability");
+    assembly
+        .register_entry_point(
+            operation_id.clone(),
+            one_state_program::<AbsorbingEffectState>(operation_id.clone()),
+            profile(),
+        )
+        .expect("entry point");
+    let registry = assembly
+        .build(std::slice::from_ref(&operation_id))
+        .expect("qualified registry");
+    (operation_id, resource_ref, registry)
 }
 
 struct ConditionalFailureReadAdapter {
@@ -861,16 +1187,16 @@ fn conflicting_observation_batch(
         records: vec![record.clone()],
         objects: Vec::new(),
     };
-    let candidate_digest = domain_content_digest("mfm.structured-candidate.v1", &candidate)
-        .map_err(|_| StructuredStoreError::InvalidHistory)?;
+    let candidate_digest =
+        derive_candidate_digest(&candidate).map_err(|_| StructuredStoreError::InvalidHistory)?;
     let run_sequence = original.head.run_sequence;
     let ordinal = 0_u32;
-    let record_hash = derive_record_hash(&serde_json::json!({
-        "ordinal": ordinal,
-        "record": &record,
-        "run_id": &run_id,
-        "run_sequence": run_sequence,
-    }))
+    let record_hash = derive_record_hash(&RecordHashPreimage {
+        run_id: &run_id,
+        run_sequence,
+        ordinal,
+        record: &record,
+    })
     .map_err(|_| StructuredStoreError::InvalidHistory)?;
     let record_ref = RecordRef {
         run_id,
@@ -878,16 +1204,16 @@ fn conflicting_observation_batch(
         ordinal,
         record_hash,
     };
-    let commit_digest = derive_commit_digest(&serde_json::json!({
-        "append_request_id": &append_request_id,
-        "candidate_digest": &candidate_digest,
-        "object_refs": Vec::<&mfm_ids::ContentRef>::new(),
-        "predecessor": &original.predecessor,
-        "record_refs": vec![&record_ref],
-        "store_epoch": original.store_epoch,
-        "store_scope_id": &original.store_scope_id,
-        "tenant_fact_coordinate": TenantFactCoordinate::None,
-    }))
+    let commit_digest = derive_commit_digest(&CommitDigestPreimage {
+        store_scope_id: &original.store_scope_id,
+        store_epoch: original.store_epoch,
+        predecessor: &original.predecessor,
+        append_request_id: &append_request_id,
+        tenant_fact_coordinate: &TenantFactCoordinate::None,
+        candidate_digest: &candidate_digest,
+        record_refs: vec![&record_ref],
+        object_refs: Vec::new(),
+    })
     .map_err(|_| StructuredStoreError::InvalidHistory)?;
     Ok(CommittedBatch {
         store_scope_id: original.store_scope_id,
@@ -994,7 +1320,8 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
     let calls = Arc::clone(&callback_calls);
     let state_contract_ref = state_contract::<PureState>()
         .expect("Pure state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("Pure state contract reference");
     let descriptor = implementation_descriptor::<PureState>(&mut assembly, "panicking-pure");
     assembly
         .register_state::<PureState>(
@@ -1098,7 +1425,8 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
         .expect("output contract");
     let state_contract_ref = state_contract::<CodecFaultState>()
         .expect("codec state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("codec state contract reference");
     let descriptor = implementation_descriptor::<CodecFaultState>(&mut assembly, "codec-fault");
     assembly
         .register_state::<CodecFaultState>(
@@ -1419,12 +1747,12 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
     let subject: Value = verified
         .object(&fact.subject.value_ref)
         .expect("fact subject")
-        .decode()
+        .decode_mfm_value()
         .expect("fact subject value");
     let response: Value = verified
         .object(&fact.response.value_ref)
         .expect("fact response")
-        .decode()
+        .decode_mfm_value()
         .expect("fact response value");
     assert_eq!(subject, Value { value: 7 });
     assert_eq!(response, Value { value: 8 });
@@ -1559,11 +1887,8 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
     let outcome_ref = failed
         .closed_outcome_ref()
         .expect("ordinary failure must close the run");
-    let failed_outcome: serde_json::Value = failed
-        .object(outcome_ref)
-        .expect("failed outcome object")
-        .decode()
-        .expect("failed outcome");
+    let failed_outcome: serde_json::Value =
+        decode_history_json(failed.object(outcome_ref).expect("failed outcome object"));
     assert!(failed_outcome.get("Failure").is_some());
 
     assert_eq!(
@@ -1580,24 +1905,36 @@ async fn ordinary_failure_closes_without_blocking_an_unrelated_run() {
     let outcome_ref = succeeded
         .closed_outcome_ref()
         .expect("successful run must close");
-    let successful_outcome: serde_json::Value = succeeded
-        .object(outcome_ref)
-        .expect("successful outcome object")
-        .decode()
-        .expect("successful outcome");
+    let successful_outcome: serde_json::Value = decode_history_json(
+        succeeded
+            .object(outcome_ref)
+            .expect("successful outcome object"),
+    );
     assert!(successful_outcome.get("Success").is_some());
     assert_eq!(state_calls.load(Ordering::SeqCst), 2);
     assert_eq!(mapper_calls.load(Ordering::SeqCst), 1);
 }
 
-#[tokio::test]
-async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelated_run() {
+/// Complete fallible-Read fixture shared by the safe-failure and crashed-Read
+/// runtime tests.
+struct FallibleReadFixture {
+    operation_id: StableId,
+    document: mfm_spec::structured::CertifiedProgramDocument,
+    registry: CertifiedProgramRegistry,
+    certificate: mfm_journal::structured::HistoryObject,
+    request_calls: Arc<AtomicUsize>,
+    adapter_calls: Arc<AtomicUsize>,
+    settlement_calls: Arc<AtomicUsize>,
+    mapper_calls: Arc<AtomicUsize>,
+}
+
+fn fallible_read_fixture(discriminator: u8) -> FallibleReadFixture {
     let request_calls = Arc::new(AtomicUsize::new(0));
     let adapter_calls = Arc::new(AtomicUsize::new(0));
     let settlement_calls = Arc::new(AtomicUsize::new(0));
     let mapper_calls = Arc::new(AtomicUsize::new(0));
     let operation_id = stable("mfm.runtime.fixture/fallible-read-operation").expect("operation id");
-    let certificate = binding_object(52);
+    let certificate = binding_object(discriminator);
     let mut assembly = ProgramRegistryBuilder::new();
     assembly.register_value::<Value>().expect("value contract");
     assembly
@@ -1704,127 +2041,155 @@ async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelat
         .certify(fallible_read_program(operation_id.clone()))
         .expect("certified program")
         .into_document();
-    let assembled = assemble_structured_runtime(
-        StructuredMemoryBackend::new(store_identity(52)),
+    FallibleReadFixture {
+        operation_id,
+        document,
         registry,
-        Arc::new(ExactPublicBindingVerifier {
-            certificate: certificate.clone(),
-        }),
-    )
-    .expect("runtime assembly");
-    let runtime = assembled.runtime;
-    let reader = assembled.export_reader;
-    let (failed_run_id, _attempt) = runtime
-        .admit_run(admission_with_invocation(
-            operation_id.clone(),
-            document.clone(),
-            0,
-            "00000000-0000-4000-8000-000000000052",
-            "safe-failure-run-admit",
-        ))
-        .await
-        .expect("safe-failure run admission");
-    let (successful_run_id, _attempt) = runtime
-        .admit_run(admission_with_invocation(
+        certificate,
+        request_calls,
+        adapter_calls,
+        settlement_calls,
+        mapper_calls,
+    }
+}
+
+#[tokio::test]
+async fn safe_failure_closes_through_default_mapping_without_blocking_an_unrelated_run() {
+    // This fixture builds four independent runs, so its future exceeds the
+    // default test-thread stack. Heap-allocate it rather than raising the
+    // limit, which would only move the cliff.
+    Box::pin(async move {
+        let FallibleReadFixture {
             operation_id,
             document,
-            7,
-            "00000000-0000-4000-8000-000000000053",
-            "safe-failure-success-run-admit",
-        ))
-        .await
-        .expect("successful run admission");
-    request_calls.store(0, Ordering::SeqCst);
-    adapter_calls.store(0, Ordering::SeqCst);
-    settlement_calls.store(0, Ordering::SeqCst);
-    mapper_calls.store(0, Ordering::SeqCst);
+            registry,
+            certificate,
+            request_calls,
+            adapter_calls,
+            settlement_calls,
+            mapper_calls,
+        } = fallible_read_fixture(52);
+        let assembled = assemble_structured_runtime(
+            StructuredMemoryBackend::new(store_identity(52)),
+            registry,
+            Arc::new(ExactPublicBindingVerifier {
+                certificate: certificate.clone(),
+            }),
+        )
+        .expect("runtime assembly");
+        let runtime = assembled.runtime;
+        let reader = assembled.export_reader;
+        let (failed_run_id, _attempt) = runtime
+            .admit_run(admission_with_invocation(
+                operation_id.clone(),
+                document.clone(),
+                0,
+                "00000000-0000-4000-8000-000000000052",
+                "safe-failure-run-admit",
+            ))
+            .await
+            .expect("safe-failure run admission");
+        let (successful_run_id, _attempt) = runtime
+            .admit_run(admission_with_invocation(
+                operation_id,
+                document,
+                7,
+                "00000000-0000-4000-8000-000000000053",
+                "safe-failure-success-run-admit",
+            ))
+            .await
+            .expect("successful run admission");
+        request_calls.store(0, Ordering::SeqCst);
+        adapter_calls.store(0, Ordering::SeqCst);
+        settlement_calls.store(0, Ordering::SeqCst);
+        mapper_calls.store(0, Ordering::SeqCst);
 
-    assert_eq!(
-        runtime
-            .drive_once(&failed_run_id)
-            .await
-            .expect("safe-failure observation"),
-        DriveOutcome::AccessObserved
-    );
-    assert_eq!(
-        runtime
-            .drive_once(&failed_run_id)
-            .await
-            .expect("safe-failure settlement"),
-        DriveOutcome::TransitionCommitted { closed: false }
-    );
-    assert_eq!(
-        runtime
-            .drive_once(&failed_run_id)
-            .await
-            .expect("default failure mapping"),
-        DriveOutcome::TransitionCommitted { closed: true }
-    );
-    assert_eq!(
-        runtime
-            .drive_once(&successful_run_id)
-            .await
-            .expect("successful observation"),
-        DriveOutcome::AccessObserved
-    );
-    assert_eq!(
-        runtime
-            .drive_once(&successful_run_id)
-            .await
-            .expect("successful settlement"),
-        DriveOutcome::TransitionCommitted { closed: true }
-    );
+        assert_eq!(
+            runtime
+                .drive_once(&failed_run_id)
+                .await
+                .expect("safe-failure observation"),
+            DriveOutcome::AccessObserved
+        );
+        assert_eq!(
+            runtime
+                .drive_once(&failed_run_id)
+                .await
+                .expect("safe-failure settlement"),
+            DriveOutcome::TransitionCommitted { closed: false }
+        );
+        assert_eq!(
+            runtime
+                .drive_once(&failed_run_id)
+                .await
+                .expect("default failure mapping"),
+            DriveOutcome::TransitionCommitted { closed: true }
+        );
+        assert_eq!(
+            runtime
+                .drive_once(&successful_run_id)
+                .await
+                .expect("successful observation"),
+            DriveOutcome::AccessObserved
+        );
+        assert_eq!(
+            runtime
+                .drive_once(&successful_run_id)
+                .await
+                .expect("successful settlement"),
+            DriveOutcome::TransitionCommitted { closed: true }
+        );
 
-    let failed = reader
-        .load_for_export(&failed_run_id)
-        .await
-        .expect("failed run");
-    let outcome_ref = failed
-        .closed_outcome_ref()
-        .expect("safe failure must close the run");
-    let failed_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = failed
-        .object(outcome_ref)
-        .expect("failed outcome object")
-        .decode()
-        .expect("typed failed outcome");
-    let OperationOutcome::Failure(failure_ref) = failed_outcome else {
-        panic!("safe failure must retain the root Failure variant");
-    };
-    assert_eq!(
-        failed
-            .object(&failure_ref.value.value_ref)
-            .expect("root failure value")
-            .decode::<FailureValue>()
-            .expect("typed root failure value"),
-        FailureValue { code: 91 }
-    );
-    let succeeded = reader
-        .load_for_export(&successful_run_id)
-        .await
-        .expect("successful run");
-    let outcome_ref = succeeded
-        .closed_outcome_ref()
-        .expect("successful run must close");
-    let successful_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = succeeded
-        .object(outcome_ref)
-        .expect("successful outcome object")
-        .decode()
-        .expect("typed successful outcome");
-    let OperationOutcome::Success(success_ref) = successful_outcome else {
-        panic!("successful run must retain the root Success variant");
-    };
-    assert_eq!(
-        succeeded
-            .object(&success_ref.value.value_ref)
-            .expect("root success value")
-            .decode::<Value>()
-            .expect("typed root success value"),
-        Value { value: 8 }
-    );
-    assert_eq!(request_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(adapter_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(settlement_calls.load(Ordering::SeqCst), 2);
-    assert_eq!(mapper_calls.load(Ordering::SeqCst), 1);
+        let failed = reader
+            .load_for_export(&failed_run_id)
+            .await
+            .expect("failed run");
+        let outcome_ref = failed
+            .closed_outcome_ref()
+            .expect("safe failure must close the run");
+        let failed_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> =
+            decode_history_json(failed.object(outcome_ref).expect("failed outcome object"));
+        let OperationOutcome::Failure(failure_ref) = failed_outcome else {
+            panic!("safe failure must retain the root Failure variant");
+        };
+        assert_eq!(
+            failed
+                .object(&failure_ref.value.value_ref)
+                .expect("root failure value")
+                .decode_mfm_value::<FailureValue>()
+                .expect("typed root failure value"),
+            FailureValue { code: 91 }
+        );
+        let succeeded = reader
+            .load_for_export(&successful_run_id)
+            .await
+            .expect("successful run");
+        let outcome_ref = succeeded
+            .closed_outcome_ref()
+            .expect("successful run must close");
+        let successful_outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> =
+            decode_history_json(
+                succeeded
+                    .object(outcome_ref)
+                    .expect("successful outcome object"),
+            );
+        let OperationOutcome::Success(success_ref) = successful_outcome else {
+            panic!("successful run must retain the root Success variant");
+        };
+        assert_eq!(
+            succeeded
+                .object(&success_ref.value.value_ref)
+                .expect("root success value")
+                .decode_mfm_value::<Value>()
+                .expect("typed root success value"),
+            Value { value: 8 }
+        );
+        assert_eq!(request_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(adapter_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(settlement_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(mapper_calls.load(Ordering::SeqCst), 1);
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -1986,7 +2351,7 @@ async fn invalid_supersession_evidence_is_rejected_without_a_diagnostic_observat
 fn refreshable_effect_registry(
     settlement_calls: &Arc<AtomicUsize>,
     binding_source: Arc<RefreshEffectBindingSource>,
-) -> (StableId, mfm_ids::ContentRef, QualifiedProgramRegistry) {
+) -> (StableId, mfm_ids::ContentRef, CertifiedProgramRegistry) {
     let operation_id =
         stable("mfm.runtime.fixture/refreshable-effect-operation").expect("operation id");
     let mut assembly = ProgramRegistryBuilder::new();
@@ -2148,6 +2513,86 @@ async fn admission_requires_the_exact_certified_resource_lineage_set() {
 }
 
 #[tokio::test]
+async fn a_crashed_read_authorization_reasserts_and_invokes_exactly_once_more() {
+    let FallibleReadFixture {
+        operation_id,
+        document,
+        registry,
+        certificate,
+        request_calls,
+        adapter_calls,
+        settlement_calls,
+        ..
+    } = fallible_read_fixture(53);
+    let assembled = assemble_structured_runtime(
+        InjectingBackend::new(
+            store_identity(53),
+            InjectAppend::AuthorizationAcknowledgementUnknown,
+        ),
+        registry,
+        Arc::new(ExactPublicBindingVerifier { certificate }),
+    )
+    .expect("runtime assembly");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _attempt) = runtime
+        .admit_run(admission_with_invocation(
+            operation_id,
+            document,
+            7,
+            "00000000-0000-4000-8000-000000000054",
+            "crashed-read-admit",
+        ))
+        .await
+        .expect("Read run admission");
+    request_calls.store(0, Ordering::SeqCst);
+    adapter_calls.store(0, Ordering::SeqCst);
+    settlement_calls.store(0, Ordering::SeqCst);
+
+    // The authorization commits but its acknowledgement is lost, so the process
+    // ends holding no permit — the shape a crash leaves behind.
+    assert_eq!(
+        runtime
+            .drive_once(&run_id)
+            .await
+            .expect("ambiguous Read authorization"),
+        DriveOutcome::ConcurrentProgress
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("recovered Read")
+            .status(),
+        mfm_store::structured::RunEvidenceStatus::Actionable,
+        "a crashed Read authorization must not strand its run"
+    );
+
+    // The re-assertion invokes the adapter exactly once and commits exactly one
+    // observation; the unobserved predecessor is left standing.
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("re-asserted Read"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    // The request is authored once per attempt and never invoked for the
+    // crashed one: authorship is a deterministic function of the same state
+    // input, so both attempts author byte-identical bytes.
+    assert_eq!(request_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        runtime
+            .drive_once(&run_id)
+            .await
+            .expect("re-asserted Read settlement"),
+        DriveOutcome::TransitionCommitted { closed: true }
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation() {
     let adapter_calls = Arc::new(AtomicUsize::new(0));
     let settlement_calls = Arc::new(AtomicUsize::new(0));
@@ -2214,17 +2659,333 @@ async fn ambiguous_effect_authorization_parks_possible_entry_without_invocation(
             .status(),
         mfm_store::structured::RunEvidenceStatus::PossibleEntry
     );
+    let audit = assembled
+        .audit_reader
+        .load_access_audit(&run_id)
+        .await
+        .expect("access audit");
+    let [parked] = audit.records() else {
+        panic!("one parked authorization");
+    };
+    let DriveOutcome::PossibleEntry(subject) = runtime
+        .drive_once(&run_id)
+        .await
+        .expect("recovered parked Effect")
+    else {
+        panic!("parked Effect must report its subject");
+    };
+    // The barrier names exactly what the access-audit projection already retains.
+    assert_eq!(&subject.occurrence_id, parked.occurrence_id());
+    assert_eq!(&subject.occurrence_path_ref, parked.occurrence_path_ref());
+    assert_eq!(&subject.access_attempt_id, parked.access_attempt_id());
     assert_eq!(
-        runtime
-            .drive_once(&run_id)
-            .await
-            .expect("recovered parked Effect"),
-        DriveOutcome::PossibleEntry
+        &subject.capability_contract_ref,
+        parked.capability_contract_ref()
     );
     assert_eq!(adapter_calls.load(Ordering::SeqCst), 0);
     assert_eq!(binding_source.first.target_calls.load(Ordering::SeqCst), 0);
     assert_eq!(binding_source.second.target_calls.load(Ordering::SeqCst), 0);
     assert_eq!(binding_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_crashed_absorbing_effect_closes_without_an_adapter_and_re_asserts_once() {
+    let adapter_calls = Arc::new(AtomicUsize::new(0));
+    let settlement_calls = Arc::new(AtomicUsize::new(0));
+    let certificate = binding_object(60);
+    let lineage_head = lineage_head_object(61);
+    let (operation_id, resource_ref, registry) = absorbing_effect_registry(
+        &adapter_calls,
+        &settlement_calls,
+        certificate.clone(),
+        lineage_head.clone(),
+        vec![AbsorbingCompletion::Returned],
+    );
+    let document = registry
+        .certifier(&operation_id)
+        .expect("certifier")
+        .certify(one_state_program::<AbsorbingEffectState>(
+            operation_id.clone(),
+        ))
+        .expect("certified")
+        .into_document();
+    let assembled = assemble_structured_runtime(
+        InjectingBackend::new(
+            store_identity(60),
+            InjectAppend::AuthorizationAcknowledgementUnknown,
+        ),
+        registry,
+        Arc::new(RefreshBindingVerifier {
+            lineage_ref: resource_ref.clone(),
+            first_certificate: certificate.clone(),
+            second_certificate: certificate,
+            lineage_head,
+            accept_supersession: true,
+        }),
+    )
+    .expect("runtime assembly");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _attempt) = runtime
+        .admit_run(effect_admission(operation_id, document, resource_ref))
+        .await
+        .expect("absorbing Effect admission");
+
+    // The authorization commits but its acknowledgement is lost: a crash.
+    assert_eq!(
+        runtime
+            .drive_once(&run_id)
+            .await
+            .expect("ambiguous authorization"),
+        DriveOutcome::ConcurrentProgress
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 0);
+
+    // Closing reaches no adapter at all.
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("closing drive"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(
+        adapter_calls.load(Ordering::SeqCst),
+        0,
+        "closing a parked attempt invokes nothing"
+    );
+
+    // The re-assertion invokes exactly once and settles through the ordinary
+    // callbacks; total invocations for the occurrence are one, well inside the
+    // declared budget of three.
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("re-assertion"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("settlement"),
+        DriveOutcome::TransitionCommitted { closed: true }
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("resolved run")
+            .status(),
+        mfm_store::structured::RunEvidenceStatus::Closed
+    );
+
+    // The synthesized closure and an adapter-reported ambiguity are
+    // shape-identical records, so the reserved kernel fault code is the only
+    // thing that distinguishes them anywhere downstream. The audit projection
+    // must therefore be able to tell them apart.
+    let audit = assembled
+        .audit_reader
+        .load_access_audit(&run_id)
+        .await
+        .expect("access audit");
+    let [closed, reasserted] = audit.records() else {
+        panic!("one closed attempt and one re-assertion")
+    };
+    assert_eq!(closed.attempt_ordinal(), 0);
+    assert_eq!(reasserted.attempt_ordinal(), 1);
+    let Some(ObservationOutcome::EntryUnknown { fault_code }) = closed
+        .observation()
+        .map(mfm_store::structured::AuditObservation::outcome)
+    else {
+        panic!("the closing observation is an EntryUnknown")
+    };
+    assert_eq!(
+        fault_code.as_str(),
+        mfm_runtime::structured::INVOKER_AUTHORITY_LOST
+    );
+    assert!(matches!(
+        reasserted
+            .observation()
+            .map(mfm_store::structured::AuditObservation::outcome),
+        Some(ObservationOutcome::Returned { .. })
+    ));
+
+    // A resolved history replays callback-free to the same head.
+    let replayed = mfm_replay::structured::project_replay_result(
+        &assembled
+            .replay_reader
+            .load_for_recorded_verify(&run_id)
+            .await
+            .expect("recorded replay evidence"),
+    )
+    .expect("callback-free replay");
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 1);
+    let _ = replayed;
+}
+
+#[tokio::test]
+async fn total_adapter_invocations_for_one_occurrence_never_exceed_the_budget() {
+    let adapter_calls = Arc::new(AtomicUsize::new(0));
+    let settlement_calls = Arc::new(AtomicUsize::new(0));
+    let certificate = binding_object(62);
+    let lineage_head = lineage_head_object(63);
+    // Every invocation returns an ambiguity, so the run re-asserts until the
+    // budget is spent and never settles.
+    let (operation_id, resource_ref, registry) = absorbing_effect_registry(
+        &adapter_calls,
+        &settlement_calls,
+        certificate.clone(),
+        lineage_head.clone(),
+        vec![AbsorbingCompletion::EntryUnknown; 8],
+    );
+    let document = registry
+        .certifier(&operation_id)
+        .expect("certifier")
+        .certify(one_state_program::<AbsorbingEffectState>(
+            operation_id.clone(),
+        ))
+        .expect("certified")
+        .into_document();
+    let assembled = assemble_structured_runtime(
+        InjectingBackend::new(store_identity(62), InjectAppend::None),
+        registry,
+        Arc::new(RefreshBindingVerifier {
+            lineage_ref: resource_ref.clone(),
+            first_certificate: certificate.clone(),
+            second_certificate: certificate,
+            lineage_head,
+            accept_supersession: true,
+        }),
+    )
+    .expect("runtime assembly");
+    let runtime = assembled.runtime;
+    let reader = assembled.public_reader;
+    let (run_id, _attempt) = runtime
+        .admit_run(effect_admission(operation_id, document, resource_ref))
+        .await
+        .expect("absorbing Effect admission");
+
+    // Drive well past the budget. This is the bound the whole design rests on,
+    // so it is asserted by call count rather than by outcome.
+    let mut parked = None;
+    for _ in 0..8 {
+        match runtime.drive_once(&run_id).await.expect("bounded drive") {
+            DriveOutcome::PossibleEntry(subject) => {
+                parked = Some(subject);
+                break;
+            }
+            DriveOutcome::AccessObserved | DriveOutcome::ConcurrentProgress => {}
+            outcome => panic!("unexpected disposition {outcome:?}"),
+        }
+    }
+    let subject = parked.expect("a spent budget reports the parked subject");
+    assert_eq!(
+        adapter_calls.load(Ordering::SeqCst),
+        3,
+        "an occurrence reaches the external system at most MAX_ENTRIES times"
+    );
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 0);
+
+    // The terminal park still names its occurrence, as commit 1 requires.
+    let audit = assembled
+        .audit_reader
+        .load_access_audit(&run_id)
+        .await
+        .expect("access audit");
+    assert_eq!(audit.records().len(), 3);
+    assert_eq!(
+        &subject.access_attempt_id,
+        audit.records()[2].access_attempt_id()
+    );
+    assert_eq!(
+        reader
+            .load_public(&run_id)
+            .await
+            .expect("spent budget")
+            .status(),
+        mfm_store::structured::RunEvidenceStatus::PossibleEntry
+    );
+
+    // Every attempt here is adapter-reported, so each carries its terminal
+    // observation and none of them is the kernel's synthesized closure.
+    for entry in audit.records() {
+        let Some(observation) = entry.observation() else {
+            panic!("an adapter-reported ambiguity commits its observation")
+        };
+        let ObservationOutcome::EntryUnknown { fault_code } = observation.outcome() else {
+            panic!("expected an adapter-reported ambiguity")
+        };
+        assert_ne!(
+            fault_code.as_str(),
+            mfm_runtime::structured::INVOKER_AUTHORITY_LOST,
+            "the kernel closure code must be unreachable from an adapter"
+        );
+    }
+}
+
+#[tokio::test]
+async fn supersession_still_advances_the_ordinal_independently_of_the_entry_axis() {
+    let adapter_calls = Arc::new(AtomicUsize::new(0));
+    let settlement_calls = Arc::new(AtomicUsize::new(0));
+    let certificate = binding_object(64);
+    let lineage_head = lineage_head_object(65);
+    // One supersession, then an ordinary return: the refresh axis and the entry
+    // axis are independent, and a superseded attempt is not a parked one.
+    let (operation_id, resource_ref, registry) = absorbing_effect_registry(
+        &adapter_calls,
+        &settlement_calls,
+        certificate.clone(),
+        lineage_head.clone(),
+        vec![
+            AbsorbingCompletion::Returned,
+            AbsorbingCompletion::SupersededBeforeEntry,
+        ],
+    );
+    let document = registry
+        .certifier(&operation_id)
+        .expect("certifier")
+        .certify(one_state_program::<AbsorbingEffectState>(
+            operation_id.clone(),
+        ))
+        .expect("certified")
+        .into_document();
+    let assembled = assemble_structured_runtime(
+        InjectingBackend::new(store_identity(64), InjectAppend::None),
+        registry,
+        Arc::new(RefreshBindingVerifier {
+            lineage_ref: resource_ref.clone(),
+            first_certificate: certificate.clone(),
+            second_certificate: certificate,
+            lineage_head,
+            accept_supersession: true,
+        }),
+    )
+    .expect("runtime assembly");
+    let runtime = assembled.runtime;
+    let (run_id, _attempt) = runtime
+        .admit_run(effect_admission(operation_id, document, resource_ref))
+        .await
+        .expect("absorbing Effect admission");
+
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("supersession"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(adapter_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        runtime
+            .drive_once(&run_id)
+            .await
+            .expect("refreshed attempt"),
+        DriveOutcome::AccessObserved
+    );
+    assert_eq!(
+        adapter_calls.load(Ordering::SeqCst),
+        2,
+        "a superseded attempt advances the ordinal and re-invokes exactly once"
+    );
+    assert_eq!(
+        runtime.drive_once(&run_id).await.expect("settlement"),
+        DriveOutcome::TransitionCommitted { closed: true }
+    );
+    assert_eq!(settlement_calls.load(Ordering::SeqCst), 1);
 }
 
 // --- helpers ---
@@ -2314,7 +3075,7 @@ fn program_cache_registry(
     StableId,
     mfm_spec::structured::AuthoredStructuredProgram,
     mfm_spec::structured::AuthoredStructuredProgram,
-    QualifiedProgramRegistry,
+    CertifiedProgramRegistry,
 ) {
     let operation_id = stable("mfm.runtime.fixture/program-cache-operation").expect("operation id");
     let template = one_state_program_with_label::<PureState>(operation_id.clone(), "state");
@@ -2396,7 +3157,8 @@ fn implementation_descriptor<S: State>(
         StructuredComponentKind::State,
         state_contract::<S>()
             .expect("state contract")
-            .state_contract_ref,
+            .content_ref()
+            .expect("state contract reference"),
         suffix,
     )
 }
@@ -2456,7 +3218,39 @@ fn effect_capability_contract() -> mfm_program::Result<StructuredLiveComponentCo
         mfm_spec::structured::structured_value_contract_ref::<Value>()?,
         mfm_spec::structured::structured_value_contract_ref::<Value>()?,
         resource_contract()?.content_ref()?,
+        mfm_spec::structured::StructuredEffectEntryContract::EntryOnce {},
         effect_adapter_contract()?.content_ref()?,
+    )
+    .map_err(Into::into)
+}
+
+fn absorbing_effect_capability_contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+    StructuredLiveComponentContract::new_effect_capability_refreshable(
+        stable("mfm.runtime.fixture/absorbing-effect-capability")?,
+        mfm_spec::structured::structured_value_contract_ref::<Value>()?,
+        mfm_spec::structured::structured_value_contract_ref::<Value>()?,
+        mfm_spec::structured::structured_value_contract_ref::<Value>()?,
+        mfm_spec::structured::structured_value_contract_ref::<Value>()?,
+        resource_contract()?.content_ref()?,
+        mfm_spec::structured::StructuredEffectEntryContract::EntryAbsorbing {
+            entry_key_contract_ref: Box::new(
+                mfm_spec::structured::structured_value_contract_ref::<Value>()?,
+            ),
+            max_entries: std::num::NonZeroU16::new(3).expect("positive budget"),
+        },
+        absorbing_effect_adapter_contract()?.content_ref()?,
+    )
+    .map_err(Into::into)
+}
+
+fn absorbing_effect_adapter_contract() -> mfm_program::Result<StructuredLiveComponentContract> {
+    StructuredLiveComponentContract::new(
+        StructuredComponentKind::Adapter,
+        stable("mfm.runtime.fixture/absorbing-effect-adapter")?,
+        vec![StructuredComponentDependency {
+            component_kind: StructuredComponentKind::Resource,
+            contract_ref: resource_contract()?.content_ref()?,
+        }],
     )
     .map_err(Into::into)
 }
@@ -2497,7 +3291,7 @@ fn fact_set(subject: Value, response: Value) -> FactSet {
     FactSet::one(
         FactProposal::new(
             0,
-            descriptor.descriptor_ref,
+            descriptor.content_ref().expect("fact descriptor reference"),
             proposed_fact_value(subject),
             proposed_fact_value(response),
         )
@@ -2514,7 +3308,7 @@ fn proposed_fact_value(value: Value) -> ProposedFactValue {
         contract.schema_id().clone(),
         contract.semantic_type_id().clone(),
         contract.role().clone(),
-        contract.media_type(),
+        contract.media_type().clone(),
         contract.evidence_contract_ref().clone(),
         canonical,
     )
@@ -2604,9 +3398,11 @@ fn effect_admission_material(
             "mfm.runtime.fixture.effect-context",
             30,
         ),
-        PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
-            .map_err(|_| StructuredStoreError::InvalidHistory)?,
+        HistoryObject::from_persisted(
+            &PriorRunFactSourceManifest::new(Vec::new())
+                .map_err(|_| StructuredStoreError::InvalidHistory)?,
+        )
+        .map_err(|_| StructuredStoreError::InvalidHistory)?,
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             "mfm.runtime.fixture.effect-routing",
@@ -2628,9 +3424,10 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
             "mfm.runtime.fixture.context",
             discriminator,
         ),
-        PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
-            .expect("source manifest"),
+        HistoryObject::from_persisted(
+            &PriorRunFactSourceManifest::new(Vec::new()).expect("source manifest"),
+        )
+        .expect("source manifest object"),
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             "mfm.runtime.fixture.routing",
@@ -2642,7 +3439,7 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
 }
 
 fn admission_object(object_type: &str, schema: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
+    test_history_object(
         stable(object_type).expect("object type"),
         SchemaId::new(
             schema,
@@ -2653,11 +3450,10 @@ fn admission_object(object_type: &str, schema: &str, discriminator: u8) -> Histo
         .expect("schema"),
         "{\"entries\":[]}",
     )
-    .expect("admission object")
 }
 
 fn binding_object(discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
+    test_history_object(
         stable("mfm.runtime.fixture.physical-binding").expect("binding type"),
         SchemaId::new(
             "mfm.runtime.fixture.physical-binding",
@@ -2668,11 +3464,10 @@ fn binding_object(discriminator: u8) -> HistoryObject {
         .expect("binding schema"),
         format!("{{\"binding\":{discriminator}}}"),
     )
-    .expect("binding object")
 }
 
 fn lineage_head_object(discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
+    test_history_object(
         stable("mfm.runtime.fixture.lineage-head").expect("lineage head type"),
         SchemaId::new(
             "mfm.runtime.fixture.lineage-head",
@@ -2683,7 +3478,6 @@ fn lineage_head_object(discriminator: u8) -> HistoryObject {
         .expect("lineage head schema"),
         format!("{{\"head\":{discriminator}}}"),
     )
-    .expect("lineage head object")
 }
 
 fn store_identity(discriminator: u8) -> StructuredStoreIdentity {

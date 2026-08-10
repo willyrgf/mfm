@@ -20,6 +20,7 @@ path = "src/lib.rs"
 mfm-canonical = { path = "../canonical" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }

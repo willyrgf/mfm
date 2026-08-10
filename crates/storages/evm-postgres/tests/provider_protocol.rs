@@ -62,7 +62,7 @@ async fn hostile_provider_replies_fail_closed_without_leaking_wire_text() {
                 .expect("read authentication request");
             let request: serde_json::Value =
                 serde_json::from_str(&request).expect("authentication request");
-            assert_eq!(request["version"], 3);
+            assert_eq!(request["version"], 4);
             assert!(request.get("current_chain_registry_head_ref").is_some());
             assert!(request.get("minimum_chain_registry_head_ref").is_none());
             write

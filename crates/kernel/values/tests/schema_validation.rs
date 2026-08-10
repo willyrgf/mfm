@@ -59,12 +59,12 @@ fn strict_identity_codec_rejects_policy_shape_order_and_depth_tampering() {
 
     let mut wrong_width: serde_json::Value =
         serde_json::from_slice(canonical_identity.as_bytes()).expect("identity JSON");
-    wrong_width["shape"]["fields"][1]["shape"]["bits"] = serde_json::json!(7);
+    wrong_width["encoding"]["shape"]["fields"][1]["shape"]["bits"] = serde_json::json!(7);
     assert!(SchemaIdentity::strict_decode(&canonical(wrong_width)).is_err());
 
     let mut unsorted: serde_json::Value =
         serde_json::from_slice(canonical_identity.as_bytes()).expect("identity JSON");
-    unsorted["shape"]["fields"]
+    unsorted["encoding"]["shape"]["fields"]
         .as_array_mut()
         .expect("fields")
         .swap(0, 1);
@@ -80,7 +80,7 @@ fn strict_identity_codec_rejects_policy_shape_order_and_depth_tampering() {
 
     let mut unknown_shape: serde_json::Value =
         serde_json::from_slice(canonical_identity.as_bytes()).expect("identity JSON");
-    unknown_shape["shape"]
+    unknown_shape["encoding"]["shape"]
         .as_object_mut()
         .expect("shape object")
         .insert("unknown".to_owned(), serde_json::Value::Bool(true));
@@ -88,7 +88,7 @@ fn strict_identity_codec_rejects_policy_shape_order_and_depth_tampering() {
 
     let mut duplicate_field: serde_json::Value =
         serde_json::from_slice(canonical_identity.as_bytes()).expect("identity JSON");
-    let fields = duplicate_field["shape"]["fields"]
+    let fields = duplicate_field["encoding"]["shape"]["fields"]
         .as_array_mut()
         .expect("fields");
     fields.push(fields[0].clone());
@@ -111,7 +111,12 @@ fn strict_identity_codec_rejects_policy_shape_order_and_depth_tampering() {
         .validate_canonical_value(&canonical(serde_json::json!(true)))
         .expect("bounded nested value");
 
-    let too_deep = SchemaShape::Option(Box::new(at_bound.shape));
+    let too_deep = SchemaShape::Option(Box::new(
+        at_bound
+            .canonical_json_shape()
+            .expect("canonical shape")
+            .clone(),
+    ));
     assert!(SchemaIdentity::new(
         SchemaKind::Value,
         Some(semantic_id()),
@@ -136,7 +141,9 @@ fn strict_identity_codec_rejects_policy_shape_order_and_depth_tampering() {
     )
     .is_err());
     let mut oversized_identity = strict_identity;
-    oversized_identity.shape = oversized_shape;
+    oversized_identity.encoding = mfm_values::PersistedEncoding::CanonicalJson {
+        shape: oversized_shape,
+    };
     assert!(oversized_identity.canonical_json().is_err());
 }
 
@@ -329,7 +336,12 @@ fn inline_and_generic_shapes_validate_nested_values_without_a_registry() {
     let inline = SchemaShape::InlineValue {
         schema_id: nested.schema_id().expect("nested schema id"),
         semantic_type_id: nested.semantic_type_id.clone().expect("nested semantic id"),
-        serialized_shape: Box::new(nested.shape.clone()),
+        serialized_shape: Box::new(
+            nested
+                .canonical_json_shape()
+                .expect("canonical shape")
+                .clone(),
+        ),
     };
     let generic = SchemaShape::Generic {
         constructor: "mfm.test/wrapper".to_owned(),
@@ -393,7 +405,7 @@ fn descriptor_validation_rejects_enum_collisions_and_malformed_generic_metadata(
             .as_bytes(),
     )
     .expect("identity JSON");
-    let variants = duplicate_variant["shape"]["variants"]
+    let variants = duplicate_variant["encoding"]["shape"]["variants"]
         .as_array_mut()
         .expect("variants");
     variants.push(variants[0].clone());

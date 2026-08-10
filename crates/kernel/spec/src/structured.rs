@@ -6,16 +6,22 @@
 //! authority.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU16;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
-    ContentDigest, ContentRef, DigestAlgorithm, FailurePlanId, FragmentBoundaryId, OccurrenceId,
-    SchemaId, SemanticCallId, StableId,
+    ContentDigest, ContentRef, FailurePlanId, FragmentBoundaryId, OccurrenceId, SemanticCallId,
+    StableId,
 };
-use mfm_values::{component_object_evidence_contract_ref, MfmValue, RetainedValueContract};
+use mfm_program_derive::PersistedSchema;
+use mfm_values::{
+    CanonicalJsonPersistedSchema, ComponentObjectEvidence, FieldDescriptor, MediaType, MfmValue,
+    PersistedSchema as _, RetainedValueContract, SchemaIdentity, SchemaKind, SchemaShape,
+    SequenceOrdering, StringGrammar, ValueError,
+};
 use serde::{de::Error as _, ser::Error as _, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{exact_content_ref, schema_id, CanonicalJsonValue, Result, SpecError};
+use crate::{CanonicalJsonValue, Result, SpecError};
 
 /// Maximum number of executable occurrences in one expanded program.
 pub const MAX_STRUCTURED_OCCURRENCES: usize = 4_096;
@@ -39,16 +45,69 @@ pub const MAX_PROVENANCE_RESOLUTION_DEPTH: usize = MAX_STRUCTURAL_PATH_DEPTH.sat
 /// Bound is independent of process stack size.
 pub const MAX_STRUCTURED_JSON_NODES: usize = MAX_CERTIFIED_COMPONENT_OBJECTS * 8;
 
-const NEVER_CONTRACT_SCHEMA_NAME: &str = "mfm.kernel.never-failure-contract";
-const NEVER_CONTRACT_BYTES: &[u8] =
-    br#"{"kind":"never","version":"mfm.kernel.never-failure-contract.v1"}"#;
-const ACCESS_FAULT_CONTRACT_SCHEMA_NAME: &str = "mfm.kernel.access-fault-contract";
-const ACCESS_FAULT_CONTRACT_BYTES: &[u8] =
-    br#"{"kind":"access_fault","version":"mfm.kernel.access-fault-contract.v1"}"#;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.policy-proceed-program", version = "1")]
+enum PolicyProceedProgram {
+    #[serde(rename = "mfm.policy-proceed-placeholder.v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.capability-expansion-requirement", version = "1")]
+/// Exact callback-free authored recipe required to lower one capability boundary.
+pub struct CapabilityExpansionRequirement {
+    recipe_ref: ContentRef,
+}
+
+impl CapabilityExpansionRequirement {
+    /// Binds one exact callback-free authored recipe to its capability requirement.
+    pub fn new(recipe_ref: ContentRef) -> Self {
+        Self { recipe_ref }
+    }
+
+    /// Returns the exact authored recipe referenced by this requirement.
+    pub const fn recipe_ref(&self) -> &ContentRef {
+        &self.recipe_ref
+    }
+}
+
+impl mfm_values::PersistedObjectPayload for CapabilityExpansionRequirement {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.capability_requirement")
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.kernel-boundary-contract", version = "1")]
+enum KernelBoundaryContract {
+    Never { version: NeverContractVersion },
+    AccessFault { version: AccessFaultContractVersion },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.never-contract-version", version = "1")]
+enum NeverContractVersion {
+    #[serde(rename = "mfm.kernel.never-failure-contract.v1")]
+    V1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.access-fault-contract-version", version = "1")]
+enum AccessFaultContractVersion {
+    #[serde(rename = "mfm.kernel.access-fault-contract.v1")]
+    V1,
+}
 
 /// One dense, bounded durable-fact emission slot on a structured state.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.certified-fact-slot", version = "1")]
 pub struct CertifiedFactSlot {
     fact_slot_ordinal: u32,
     minimum_emissions: u32,
@@ -127,8 +186,9 @@ pub enum StructuredExecutionKind {
 }
 
 /// Exact executable state contract for local work or one registered live capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.structured-state-execution-contract", version = "1")]
 pub enum StructuredStateExecutionContract {
     /// Deterministic local computation with no live capability.
     Pure,
@@ -169,8 +229,9 @@ impl StructuredStateExecutionContract {
 }
 
 /// Exact static fallibility of a state, fragment, lane, or operation scope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.structured-failure-contract", version = "1")]
 pub enum StructuredFailureContract {
     /// The boundary has no failure value, codec, slot, or producer.
     Never,
@@ -191,9 +252,7 @@ impl StructuredFailureContract {
 
     /// Constructs an inhabited failure contract and binds its canonical identity.
     pub fn typed(contract: RetainedValueContract) -> Result<Self> {
-        let canonical = contract.canonical_json()?;
-        let contract_ref =
-            exact_content_ref(schema_id("mfm.retained-value-contract.v1")?, &canonical)?;
+        let contract_ref = contract.content_ref()?;
         Ok(Self::Typed {
             contract: Box::new(contract),
             contract_ref,
@@ -223,9 +282,7 @@ impl StructuredFailureContract {
             contract_ref,
         } = self
         {
-            let canonical = contract.canonical_json()?;
-            let expected =
-                exact_content_ref(schema_id("mfm.retained-value-contract.v1")?, &canonical)?;
+            let expected = contract.content_ref()?;
             if &expected != contract_ref {
                 return Err(SpecError::Invariant(
                     "typed failure contract reference mismatch".to_owned(),
@@ -244,18 +301,15 @@ pub fn structured_value_contract<T: MfmValue>() -> Result<RetainedValueContract>
         T::semantic_id()?,
         StableId::new("structured-value")
             .map_err(|error| SpecError::Identity(error.to_string()))?,
-        "application/json",
-        component_object_evidence_contract_ref()?,
+        MediaType::new("application/json")?,
+        ComponentObjectEvidence::current().content_ref()?,
     )
     .map_err(Into::into)
 }
 
 /// Returns the canonical identity of one retained-value contract.
 pub fn retained_value_contract_ref(contract: &RetainedValueContract) -> Result<ContentRef> {
-    exact_content_ref(
-        schema_id("mfm.retained-value-contract.v1")?,
-        &contract.canonical_json()?,
-    )
+    contract.content_ref().map_err(Into::into)
 }
 
 /// Derives the structured retained-value contract identity for an MFM value
@@ -292,62 +346,51 @@ pub fn prior_run_fact_selection_capability_contract() -> Result<StructuredLiveCo
 /// It is data, not execution authority. Ordinary child substitution rejects
 /// it, and policy-recipe qualification requires exactly one structural use.
 pub fn policy_proceed_program_ref() -> Result<ContentRef> {
-    let canonical = canonical(&"mfm.policy-proceed-placeholder.v1")?;
-    structured_content_ref("mfm.policy-proceed-placeholder", &canonical)
-}
-
-/// Derives one canonical callback-free policy-recipe identity from its main
-/// wrapper program and optional typed failure-post program.
-pub fn policy_expansion_recipe_ref<T: Serialize>(recipe: &T) -> Result<ContentRef> {
-    let canonical = canonical(recipe)?;
-    structured_content_ref("mfm.policy-expansion-recipe", &canonical)
+    PolicyProceedProgram::V1.content_ref().map_err(Into::into)
 }
 
 /// Derives the exact semantic capability requirement selected by one
 /// callback-free authored expansion recipe.
 pub fn capability_expansion_requirement_ref(recipe_ref: &ContentRef) -> Result<ContentRef> {
-    let canonical = canonical(recipe_ref)?;
-    structured_content_ref("mfm.capability-expansion-requirement", &canonical)
+    CapabilityExpansionRequirement::new(recipe_ref.clone())
+        .content_ref()
+        .map_err(Into::into)
 }
 
 /// Returns the one content identity reserved for `FailureContract::Never`.
 pub fn never_failure_contract_canonical_json() -> Result<PlainCanonicalJsonBytes> {
-    PlainCanonicalJsonBytes::from_canonical_json_slice(NEVER_CONTRACT_BYTES)
-        .map_err(|error| SpecError::Contract(error.to_string()))
+    KernelBoundaryContract::Never {
+        version: NeverContractVersion::V1,
+    }
+    .encode_canonical()
+    .map_err(Into::into)
 }
 
 /// Returns the one content identity reserved for `FailureContract::Never`.
 pub fn never_failure_contract_ref() -> Result<ContentRef> {
-    let canonical = never_failure_contract_canonical_json()?;
-    let schema_digest =
-        sha256_digest_bytes(b"mfm.structured-schema.v1:mfm.kernel.never-failure-contract:1");
-    let schema = SchemaId::new(
-        NEVER_CONTRACT_SCHEMA_NAME,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        schema_digest,
-    )?;
-    exact_content_ref(schema, &canonical)
+    KernelBoundaryContract::Never {
+        version: NeverContractVersion::V1,
+    }
+    .content_ref()
+    .map_err(Into::into)
 }
 
 /// Returns canonical bytes for the one kernel-owned access-fault contract.
 pub fn access_fault_contract_canonical_json() -> Result<PlainCanonicalJsonBytes> {
-    PlainCanonicalJsonBytes::from_canonical_json_slice(ACCESS_FAULT_CONTRACT_BYTES)
-        .map_err(|error| SpecError::Contract(error.to_string()))
+    KernelBoundaryContract::AccessFault {
+        version: AccessFaultContractVersion::V1,
+    }
+    .encode_canonical()
+    .map_err(Into::into)
 }
 
 /// Returns the one nominal contract admitted for access-integrity faults.
 pub fn access_fault_contract_ref() -> Result<ContentRef> {
-    let canonical = access_fault_contract_canonical_json()?;
-    let schema_digest =
-        sha256_digest_bytes(b"mfm.structured-schema.v1:mfm.kernel.access-fault-contract:1");
-    let schema = SchemaId::new(
-        ACCESS_FAULT_CONTRACT_SCHEMA_NAME,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        schema_digest,
-    )?;
-    exact_content_ref(schema, &canonical)
+    KernelBoundaryContract::AccessFault {
+        version: AccessFaultContractVersion::V1,
+    }
+    .content_ref()
+    .map_err(Into::into)
 }
 
 /// Derives the semantic identity of the ordinary handler injected for one
@@ -424,8 +467,9 @@ impl SemanticCallPath {
 ///
 /// Ordering is ordinal-first for declarations and lanes so diagnostic labels
 /// never reorder certified structural identity. Labels remain diagnostics only.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.structural-path-segment", version = "1")]
 pub enum StructuralPathSegment {
     /// Root lexical region of one operation.
     Root {
@@ -552,8 +596,11 @@ impl Ord for StructuralPathSegment {
 }
 
 /// Complete normalized structural path for a declaration or lexical region.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, PersistedSchema,
+)]
 #[serde(transparent)]
+#[mfm(schema = "mfm.structured-path", version = "1")]
 pub struct StructuralPath(Vec<StructuralPathSegment>);
 
 impl StructuralPath {
@@ -596,16 +643,24 @@ impl StructuralPath {
             canonical.as_bytes(),
         )))
     }
-
-    /// Returns the canonical content identity of this complete path.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.structured-path", &canonical(self)?)
-    }
 }
 
 /// Nominal role of a state or fragment result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.result-role", version = "1")]
 pub enum ResultRole {
     /// Successful output channel.
     SuccessOutput,
@@ -744,7 +799,8 @@ impl LexicalSlot {
 }
 
 /// One exact closed-sum tag and payload-contract table entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.spec.closed-sum-variant", version = "1")]
 pub struct ClosedSumVariant {
     /// Canonical variant tag.
     pub canonical_tag: String,
@@ -753,7 +809,8 @@ pub struct ClosedSumVariant {
 }
 
 /// One exact typed payload inside a closed-sum variant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.spec.closed-sum-payload", version = "1")]
 pub struct ClosedSumPayload {
     /// Canonical path within the selected variant.
     pub payload_path: Vec<StableId>,
@@ -762,31 +819,19 @@ pub struct ClosedSumPayload {
 }
 
 /// Exact canonical tag table admitted for a `Match` selector.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.closed-sum-contract", version = "1")]
 pub struct ClosedSumContract {
-    /// Canonical identity of this complete selector/tag/payload table.
-    pub closed_sum_contract_ref: ContentRef,
     /// Selector retained-value contract.
     pub selector_contract_ref: ContentRef,
     /// Declaration-ordered exhaustive variant table.
     pub variants: Vec<ClosedSumVariant>,
 }
 
-#[derive(Serialize)]
-struct ClosedSumContractPreimage<'a> {
-    selector_contract_ref: &'a ContentRef,
-    variants: &'a [ClosedSumVariant],
-}
-
 impl ClosedSumContract {
-    /// Constructs one exact closed selector table and derives its identity.
+    /// Constructs one exact closed selector table.
     pub fn new(selector_contract_ref: ContentRef, variants: Vec<ClosedSumVariant>) -> Result<Self> {
-        let canonical = canonical(&ClosedSumContractPreimage {
-            selector_contract_ref: &selector_contract_ref,
-            variants: &variants,
-        })?;
         let contract = Self {
-            closed_sum_contract_ref: structured_content_ref("mfm.closed-sum-contract", &canonical)?,
             selector_contract_ref,
             variants,
         };
@@ -794,16 +839,9 @@ impl ClosedSumContract {
         Ok(contract)
     }
 
-    fn preimage(&self) -> ClosedSumContractPreimage<'_> {
-        ClosedSumContractPreimage {
-            selector_contract_ref: &self.selector_contract_ref,
-            variants: &self.variants,
-        }
-    }
-
     /// Returns canonical bytes for the complete closed selector table.
     pub fn canonical_contract_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(&self.preimage())
+        self.encode_canonical().map_err(Into::into)
     }
 
     /// Revalidates identity, tag/path uniqueness, and the non-empty closed table.
@@ -829,20 +867,26 @@ impl ClosedSumContract {
                 }
             }
         }
-        let expected =
-            structured_content_ref("mfm.closed-sum-contract", &self.canonical_contract_json()?)?;
-        if self.closed_sum_contract_ref != expected {
-            return Err(SpecError::Invariant(
-                "closed-sum contract identity mismatch".to_owned(),
-            ));
-        }
         Ok(())
     }
 }
 
 /// Closed semantic component kind admitted by a structured program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.structured-component-kind", version = "1")]
 pub enum StructuredComponentKind {
     /// Executable expanded state contract.
     State,
@@ -857,8 +901,9 @@ pub enum StructuredComponentKind {
 }
 
 /// Exact typed dependency owned by a live semantic component contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.structured-component-dependency", version = "1")]
 pub struct StructuredComponentDependency {
     /// Required component kind.
     pub component_kind: StructuredComponentKind,
@@ -867,8 +912,9 @@ pub struct StructuredComponentDependency {
 }
 
 /// Exact refresh semantics owned by one Effect capability contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.structured-effect-refresh-contract", version = "1")]
 pub enum StructuredEffectRefreshContract {
     /// Supersession before entry is not constructible for this Effect.
     NoRefresh {},
@@ -882,9 +928,33 @@ pub enum StructuredEffectRefreshContract {
     },
 }
 
+/// Sealed re-entry discipline for one Effect capability.
+///
+/// Orthogonal to [`StructuredEffectRefreshContract`], and beside it rather than
+/// inside it: nesting the two would make absorption unreachable for a
+/// `NoRefresh` capability, which is the majority case this axis exists to serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.structured-effect-entry-contract", version = "1")]
+pub enum StructuredEffectEntryContract {
+    /// A parked attempt is terminal.
+    EntryOnce {},
+    /// A repeat of the byte-identical committed request is absorbed.
+    EntryAbsorbing {
+        /// Exact retained entry-key contract.
+        entry_key_contract_ref: Box<ContentRef>,
+        /// Maximum authorizations per occurrence, including the first.
+        max_entries: NonZeroU16,
+    },
+}
+
 /// Exact access-kind-specific protocol contracts for one capability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "access_kind", rename_all = "snake_case", deny_unknown_fields)]
+#[mfm(
+    schema = "mfm.spec.structured-capability-protocol-contract",
+    version = "1"
+)]
 pub enum StructuredCapabilityProtocolContract {
     /// One non-mutating external observation.
     Read {
@@ -909,6 +979,8 @@ pub enum StructuredCapabilityProtocolContract {
         access_fault_contract_ref: ContentRef,
         /// Exact supersession semantics.
         refresh_contract: StructuredEffectRefreshContract,
+        /// Exact re-entry discipline.
+        entry_contract: StructuredEffectEntryContract,
     },
 }
 
@@ -955,6 +1027,14 @@ impl StructuredCapabilityProtocolContract {
         }
     }
 
+    /// Returns the exact re-entry discipline of an Effect protocol.
+    pub const fn entry_contract(&self) -> Option<&StructuredEffectEntryContract> {
+        match self {
+            Self::Read { .. } => None,
+            Self::Effect { entry_contract, .. } => Some(entry_contract),
+        }
+    }
+
     /// Returns the protocol's exact kernel access-fault contract.
     pub const fn access_fault_contract_ref(&self) -> &ContentRef {
         match self {
@@ -971,8 +1051,9 @@ impl StructuredCapabilityProtocolContract {
 }
 
 /// Canonical semantic contract for a capability, adapter, signer, or resource.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-component-contract", version = "1")]
 pub struct StructuredLiveComponentContract {
     /// Closed component responsibility.
     pub component_kind: StructuredComponentKind,
@@ -1028,11 +1109,13 @@ impl StructuredLiveComponentContract {
     }
 
     /// Constructs one exact typed non-refreshable Effect capability contract.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_effect_capability_no_refresh(
         semantic_component_id: StableId,
         request_contract_ref: ContentRef,
         returned_contract_ref: ContentRef,
         safe_failure_contract_ref: ContentRef,
+        entry_contract: StructuredEffectEntryContract,
         adapter_contract_ref: ContentRef,
     ) -> Result<Self> {
         Self::new_effect_capability(
@@ -1041,6 +1124,7 @@ impl StructuredLiveComponentContract {
             returned_contract_ref,
             safe_failure_contract_ref,
             StructuredEffectRefreshContract::NoRefresh {},
+            entry_contract,
             adapter_contract_ref,
         )
     }
@@ -1054,6 +1138,7 @@ impl StructuredLiveComponentContract {
         safe_failure_contract_ref: ContentRef,
         refresh_evidence_contract_ref: ContentRef,
         resource_lineage_contract_ref: ContentRef,
+        entry_contract: StructuredEffectEntryContract,
         adapter_contract_ref: ContentRef,
     ) -> Result<Self> {
         Self::new_effect_capability(
@@ -1065,16 +1150,19 @@ impl StructuredLiveComponentContract {
                 refresh_evidence_contract_ref,
                 resource_lineage_contract_ref: Box::new(resource_lineage_contract_ref),
             },
+            entry_contract,
             adapter_contract_ref,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_effect_capability(
         semantic_component_id: StableId,
         request_contract_ref: ContentRef,
         returned_contract_ref: ContentRef,
         safe_failure_contract_ref: ContentRef,
         refresh_contract: StructuredEffectRefreshContract,
+        entry_contract: StructuredEffectEntryContract,
         adapter_contract_ref: ContentRef,
     ) -> Result<Self> {
         let contract = Self {
@@ -1086,6 +1174,7 @@ impl StructuredLiveComponentContract {
                 safe_failure_contract_ref,
                 access_fault_contract_ref: access_fault_contract_ref()?,
                 refresh_contract,
+                entry_contract,
             }),
             dependencies: vec![StructuredComponentDependency {
                 component_kind: StructuredComponentKind::Adapter,
@@ -1094,12 +1183,6 @@ impl StructuredLiveComponentContract {
         };
         contract.validate()?;
         Ok(contract)
-    }
-
-    /// Returns the exact canonical semantic contract identity.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        self.validate()?;
-        structured_content_ref(self.schema_name()?, &canonical(self)?)
     }
 
     /// Revalidates the closed dependency graph shape owned by this component kind.
@@ -1168,23 +1251,12 @@ impl StructuredLiveComponentContract {
         }
         Ok(())
     }
-
-    fn schema_name(&self) -> Result<&'static str> {
-        match self.component_kind {
-            StructuredComponentKind::Capability => Ok("mfm.structured-capability-contract"),
-            StructuredComponentKind::Adapter => Ok("mfm.structured-adapter-contract"),
-            StructuredComponentKind::Signer => Ok("mfm.structured-signer-contract"),
-            StructuredComponentKind::Resource => Ok("mfm.structured-resource-contract"),
-            StructuredComponentKind::State => Err(SpecError::Invariant(
-                "state contracts use StructuredStateContract".to_owned(),
-            )),
-        }
-    }
 }
 
 /// One logical semantic component admitted by structural first use.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.structured-component-manifest-entry", version = "1")]
 pub struct StructuredComponentManifestEntry {
     /// Exact closed component kind.
     pub component_kind: StructuredComponentKind,
@@ -1193,16 +1265,22 @@ pub struct StructuredComponentManifestEntry {
 }
 
 /// Canonical state/capability/adapter/signer/resource semantic manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-component-manifest", version = "1")]
 pub struct StateCapabilityAdapterSignerResourceManifest {
     /// First-use depth-first component order.
+    #[mfm(persisted, maximum_items = 65536)]
     pub entries: Vec<StructuredComponentManifestEntry>,
 }
 
 /// One secret-free implementation selected for an exact semantic component.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(
+    schema = "mfm.spec.secret-free-implementation-manifest-entry",
+    version = "1"
+)]
 pub struct SecretFreeImplementationManifestEntry {
     /// Exact closed component kind.
     pub component_kind: StructuredComponentKind,
@@ -1213,46 +1291,40 @@ pub struct SecretFreeImplementationManifestEntry {
 }
 
 /// Canonical implementation selection for the complete semantic component manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(
+    schema = "mfm.structured-secret-free-implementation-manifest",
+    version = "1"
+)]
 pub struct SecretFreeImplementationManifest {
     /// Entries in exact semantic-manifest order.
+    #[mfm(persisted, maximum_items = 65536)]
     pub entries: Vec<SecretFreeImplementationManifestEntry>,
 }
 
 /// Canonical secret-free identity of one executable image or package.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.secret-free-executable-identity", version = "1")]
 pub struct SecretFreeExecutableIdentity {
     /// Stable whole-executable identity selected by process qualification.
     pub executable_id: StableId,
 }
 
-impl SecretFreeExecutableIdentity {
-    /// Returns the exact canonical object reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.secret-free-executable-identity", &canonical(self)?)
-    }
-}
-
 /// Canonical secret-free evidence that one implementation was qualified.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.secret-free-qualification-artifact", version = "1")]
 pub struct SecretFreeQualificationArtifact {
     /// Stable qualification artifact identity.
     pub qualification_id: StableId,
 }
 
-impl SecretFreeQualificationArtifact {
-    /// Returns the exact canonical object reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.secret-free-qualification-artifact", &canonical(self)?)
-    }
-}
-
 /// Canonical implementation identity bound to one exact semantic component.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.secret-free-implementation", version = "1")]
 pub struct SecretFreeImplementationDescriptor {
     /// Closed component responsibility.
     pub component_kind: StructuredComponentKind,
@@ -1266,16 +1338,13 @@ pub struct SecretFreeImplementationDescriptor {
     pub qualification_artifact_ref: ContentRef,
 }
 
-impl SecretFreeImplementationDescriptor {
-    /// Returns the exact canonical implementation contract reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.secret-free-implementation", &canonical(self)?)
-    }
-}
-
 /// Closed semantic handling promised for admitted safe-failure observations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[mfm(
+    schema = "mfm.spec.structured-safe-failure-disposition-contract",
+    version = "1"
+)]
 pub enum StructuredSafeFailureDispositionContract {
     /// `Pure`; no access observation can reach this state.
     NotApplicable {},
@@ -1286,11 +1355,10 @@ pub enum StructuredSafeFailureDispositionContract {
 }
 
 /// Immutable domain fact descriptor bound to exact subject and response contracts.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-fact-descriptor", version = "1")]
 pub struct StructuredFactDescriptor {
-    /// Content-addressed descriptor identity.
-    pub descriptor_ref: ContentRef,
     /// Stable domain-owned fact kind.
     pub kind: StableId,
     /// Exact retained subject contract.
@@ -1299,29 +1367,14 @@ pub struct StructuredFactDescriptor {
     pub response_contract_ref: ContentRef,
 }
 
-#[derive(Serialize)]
-struct StructuredFactDescriptorPreimage<'a> {
-    kind: &'a StableId,
-    subject_contract_ref: &'a ContentRef,
-    response_contract_ref: &'a ContentRef,
-}
-
 impl StructuredFactDescriptor {
-    /// Constructs and content-addresses one exact fact descriptor.
+    /// Constructs one exact fact descriptor.
     pub fn new(
         kind: StableId,
         subject_contract_ref: ContentRef,
         response_contract_ref: ContentRef,
     ) -> Result<Self> {
-        let preimage = StructuredFactDescriptorPreimage {
-            kind: &kind,
-            subject_contract_ref: &subject_contract_ref,
-            response_contract_ref: &response_contract_ref,
-        };
-        let descriptor_ref =
-            structured_content_ref("mfm.structured-fact-descriptor", &canonical(&preimage)?)?;
         Ok(Self {
-            descriptor_ref,
             kind,
             subject_contract_ref,
             response_contract_ref,
@@ -1330,32 +1383,20 @@ impl StructuredFactDescriptor {
 
     /// Returns exact canonical descriptor bytes.
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(&StructuredFactDescriptorPreimage {
-            kind: &self.kind,
-            subject_contract_ref: &self.subject_contract_ref,
-            response_contract_ref: &self.response_contract_ref,
-        })
+        self.encode_canonical().map_err(Into::into)
     }
 
     /// Revalidates content identity and exact subject/response bindings.
     pub fn validate(&self) -> Result<()> {
-        let expected =
-            structured_content_ref("mfm.structured-fact-descriptor", &self.canonical_json()?)?;
-        if expected != self.descriptor_ref {
-            return Err(SpecError::Invariant(
-                "structured fact descriptor identity mismatch".to_owned(),
-            ));
-        }
         Ok(())
     }
 }
 
 /// Exact executable state contract selected by registry qualification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-state-contract", version = "1")]
 pub struct StructuredStateContract {
-    /// Stable semantic state contract identity.
-    pub state_contract_ref: ContentRef,
     /// Stable domain-owned semantic state identity.
     pub semantic_state_id: StableId,
     /// Certified local or live-capability execution contract.
@@ -1372,18 +1413,6 @@ pub struct StructuredStateContract {
     pub safe_failure_disposition: StructuredSafeFailureDispositionContract,
     /// Optional semantic capability requirement lowered before certification.
     pub capability_requirement_ref: Option<ContentRef>,
-}
-
-#[derive(Serialize)]
-struct StructuredStateContractPreimage<'a> {
-    semantic_state_id: &'a StableId,
-    execution: &'a StructuredStateExecutionContract,
-    input_contract_ref: &'a ContentRef,
-    output_contract_ref: &'a ContentRef,
-    fact_slots: &'a [crate::CertifiedFactSlot],
-    failure_contract: &'a StructuredFailureContract,
-    safe_failure_disposition: StructuredSafeFailureDispositionContract,
-    capability_requirement_ref: &'a Option<ContentRef>,
 }
 
 impl StructuredStateContract {
@@ -1421,21 +1450,7 @@ impl StructuredStateContract {
         capability_requirement_ref: Option<ContentRef>,
         fact_slots: Vec<crate::CertifiedFactSlot>,
     ) -> Result<Self> {
-        let canonical = canonical(&StructuredStateContractPreimage {
-            semantic_state_id: &semantic_state_id,
-            execution: &execution,
-            input_contract_ref: &input_contract_ref,
-            output_contract_ref: &output_contract_ref,
-            fact_slots: &fact_slots,
-            failure_contract: &failure_contract,
-            safe_failure_disposition,
-            capability_requirement_ref: &capability_requirement_ref,
-        })?;
         let contract = Self {
-            state_contract_ref: structured_content_ref(
-                "mfm.structured-state-contract",
-                &canonical,
-            )?,
             semantic_state_id,
             execution,
             input_contract_ref,
@@ -1449,29 +1464,9 @@ impl StructuredStateContract {
         Ok(contract)
     }
 
-    fn preimage(&self) -> StructuredStateContractPreimage<'_> {
-        StructuredStateContractPreimage {
-            semantic_state_id: &self.semantic_state_id,
-            execution: &self.execution,
-            input_contract_ref: &self.input_contract_ref,
-            output_contract_ref: &self.output_contract_ref,
-            fact_slots: &self.fact_slots,
-            failure_contract: &self.failure_contract,
-            safe_failure_disposition: self.safe_failure_disposition,
-            capability_requirement_ref: &self.capability_requirement_ref,
-        }
-    }
-
     /// Returns exact canonical semantic state-contract bytes.
     pub fn canonical_contract_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(&self.preimage())
-    }
-
-    fn derived_state_contract_ref(&self) -> Result<ContentRef> {
-        structured_content_ref(
-            "mfm.structured-state-contract",
-            &self.canonical_contract_json()?,
-        )
+        self.encode_canonical().map_err(Into::into)
     }
 
     /// Revalidates the complete contract relation.
@@ -1482,8 +1477,8 @@ impl StructuredStateContract {
             if usize::try_from(slot.fact_slot_ordinal()).ok() != Some(ordinal)
                 || !(1..=1024).contains(&slot.maximum_emissions())
                 || slot.minimum_emissions() > slot.maximum_emissions()
-                || slot.subject_contract().validated().is_err()
-                || slot.response_contract().validated().is_err()
+                || slot.subject_contract().validate().is_err()
+                || slot.response_contract().validate().is_err()
             {
                 return Err(SpecError::Invariant(
                     "structured state fact slots are not exact dense bounded contracts".to_owned(),
@@ -1525,11 +1520,6 @@ impl StructuredStateContract {
             return Err(SpecError::Invariant(
                 "state execution, failure contract, and safe-failure disposition mismatch"
                     .to_owned(),
-            ));
-        }
-        if self.state_contract_ref != self.derived_state_contract_ref()? {
-            return Err(SpecError::Invariant(
-                "structured state contract identity mismatch".to_owned(),
             ));
         }
         Ok(())
@@ -1775,12 +1765,7 @@ pub struct AuthoredStructuredProgram {
 impl AuthoredStructuredProgram {
     /// Returns exact canonical bytes.
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(self)
-    }
-
-    /// Returns the canonical authored-program reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.authored-structured-program", &self.canonical_json()?)
+        self.encode_canonical().map_err(Into::into)
     }
 }
 
@@ -2072,45 +2057,55 @@ pub struct ExpandedStructuredProgram {
 impl ExpandedStructuredProgram {
     /// Returns exact canonical bytes.
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(self)
+        self.encode_canonical().map_err(Into::into)
     }
 
-    /// Returns the canonical expanded-program reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.expanded-structured-program", &self.canonical_json()?)
+    /// Builds the exact lexical-slot identity index for this expanded graph.
+    ///
+    /// Certification retains this index so semantic execution never needs to
+    /// renormalize the recursive slot DAG.
+    pub fn lexical_slot_refs(&self) -> Result<BTreeMap<LexicalSlot, ContentRef>> {
+        let mut normalizer = StructuredProgramNormalizer::recording_slot_refs();
+        for slot in self.input_roots.iter().cloned() {
+            normalizer.normalize_slot(slot)?;
+        }
+        normalizer.normalize_value(
+            serde_json::to_value(&self.root)
+                .map_err(|error| SpecError::Invariant(error.to_string()))?,
+            None,
+        )?;
+        Ok(normalizer.recorded_slot_refs.unwrap_or_default())
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.expanded-structural-path-definition", version = "1")]
 struct ExpandedStructuralPathDefinition {
     path_ref: ContentRef,
     path: StructuralPath,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.expanded-lexical-slot-definition", version = "1")]
 struct ExpandedLexicalSlotDefinition {
     slot_ref: ContentRef,
     slot: ExpandedLexicalSlot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-lexical-slot", version = "1")]
 struct ExpandedLexicalSlot {
     lexical_path_ref: ContentRef,
     contract_ref: ContentRef,
     producer: ExpandedLexicalProducer,
 }
 
-impl ExpandedLexicalSlot {
-    fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.structured-lexical-slot", &canonical(self)?)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.expanded-lexical-producer", version = "1")]
 enum ExpandedLexicalProducer {
     AdmissionRoot {
         root_id: StableId,
@@ -2161,14 +2156,16 @@ enum ExpandedLexicalProducer {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.expanded-path-ref", version = "1")]
 struct ExpandedPathRef {
     path_ref: ContentRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.expanded-slot-ref", version = "1")]
 struct ExpandedSlotRef {
     slot_ref: ContentRef,
 }
@@ -2189,9 +2186,17 @@ struct NormalizedStructuredProgram {
 struct StructuredProgramNormalizer {
     structural_paths: BTreeMap<ContentRef, StructuralPath>,
     lexical_slots: BTreeMap<ContentRef, ExpandedLexicalSlot>,
+    recorded_slot_refs: Option<BTreeMap<LexicalSlot, ContentRef>>,
 }
 
 impl StructuredProgramNormalizer {
+    fn recording_slot_refs() -> Self {
+        Self {
+            recorded_slot_refs: Some(BTreeMap::new()),
+            ..Self::default()
+        }
+    }
+
     fn normalize_path(&mut self, path: StructuralPath) -> Result<ExpandedPathRef> {
         let path_ref = path.content_ref()?;
         insert_normalized_definition(
@@ -2204,6 +2209,7 @@ impl StructuredProgramNormalizer {
     }
 
     fn normalize_slot(&mut self, slot: LexicalSlot) -> Result<ExpandedSlotRef> {
+        let recorded = self.recorded_slot_refs.is_some().then(|| slot.clone());
         let lexical_path_ref = self.normalize_path(slot.lexical_path)?.path_ref;
         let producer = self.normalize_producer(slot.producer)?;
         let slot = ExpandedLexicalSlot {
@@ -2218,6 +2224,16 @@ impl StructuredProgramNormalizer {
             slot,
             "expanded lexical slot",
         )?;
+        if let (Some(index), Some(recorded)) = (&mut self.recorded_slot_refs, recorded) {
+            match index.insert(recorded, slot_ref.clone()) {
+                Some(existing) if existing != slot_ref => {
+                    return Err(SpecError::Invariant(
+                        "one lexical slot produced two identities".to_owned(),
+                    ));
+                }
+                _ => {}
+            }
+        }
         Ok(ExpandedSlotRef { slot_ref })
     }
 
@@ -3038,6 +3054,96 @@ impl<'de> Deserialize<'de> for AuthoredStructuredProgram {
     }
 }
 
+fn normalized_program_wire_shape() -> mfm_values::Result<SchemaShape> {
+    let bounded = |element, maximum_items| SchemaShape::BoundedSequence {
+        element: Box::new(element),
+        minimum_items: 0,
+        maximum_items,
+        ordering: SequenceOrdering::Preserved,
+        unique: false,
+    };
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required(
+            "failure_contract",
+            StructuredFailureContract::schema_identity()?
+                .canonical_json_shape()?
+                .clone(),
+        ),
+        FieldDescriptor::required(
+            "input_root_slot_refs",
+            bounded(
+                ExpandedSlotRef::schema_identity()?
+                    .canonical_json_shape()?
+                    .clone(),
+                MAX_STRUCTURED_DECLARATIONS as u32,
+            ),
+        ),
+        FieldDescriptor::required(
+            "lexical_slots",
+            bounded(
+                ExpandedLexicalSlotDefinition::schema_identity()?
+                    .canonical_json_shape()?
+                    .clone(),
+                MAX_CERTIFIED_COMPONENT_OBJECTS as u32,
+            ),
+        ),
+        FieldDescriptor::required(
+            "operation_id",
+            SchemaShape::identity_string(StringGrammar::StableId, 256),
+        ),
+        FieldDescriptor::required("output_contract_ref", SchemaShape::content_ref()?),
+        FieldDescriptor::required(
+            "root",
+            SchemaShape::CanonicalJsonTerminal {
+                profile: mfm_values::CanonicalJsonProfile::GeneralFloatFree,
+            },
+        ),
+        FieldDescriptor::required(
+            "structural_paths",
+            bounded(
+                ExpandedStructuralPathDefinition::schema_identity()?
+                    .canonical_json_shape()?
+                    .clone(),
+                MAX_CERTIFIED_COMPONENT_OBJECTS as u32,
+            ),
+        ),
+    ])
+}
+
+impl mfm_values::PersistedSchema for AuthoredStructuredProgram {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.authored-structured-program",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            normalized_program_wire_shape()?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        mfm_values::validate_derived_persisted_owner(self, &Self::schema_identity()?)
+    }
+}
+
+impl mfm_values::PersistedSchema for ExpandedStructuredProgram {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.expanded-structured-program",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            normalized_program_wire_shape()?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        mfm_values::validate_derived_persisted_owner(self, &Self::schema_identity()?)
+    }
+}
+
 fn insert_normalized_definition<T: PartialEq>(
     definitions: &mut BTreeMap<ContentRef, T>,
     reference: ContentRef,
@@ -3112,7 +3218,8 @@ fn is_expanded_path_reference(value: &serde_json::Value) -> bool {
 }
 
 /// One boundary-specific declarative recipe selected by an expansion policy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.spec.policy-expansion-binding", version = "1")]
 pub struct PolicyExpansionBinding {
     /// Exact semantic boundary contract eligible for this recipe.
     pub boundary_contract_ref: ContentRef,
@@ -3121,38 +3228,20 @@ pub struct PolicyExpansionBinding {
 }
 
 /// One exact policy in the frozen expansion profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.structured-expansion-policy", version = "1")]
 pub struct ExpansionPolicyContract {
-    /// Exact policy contract identity.
-    pub policy_ref: ContentRef,
     /// Exact boundary-to-recipe table in canonical profile order.
     pub boundary_recipes: Vec<PolicyExpansionBinding>,
-}
-
-#[derive(Serialize)]
-struct ExpansionPolicyContractPreimage<'a> {
-    boundary_recipes: &'a [PolicyExpansionBinding],
 }
 
 impl ExpansionPolicyContract {
     /// Constructs one exact expansion-policy contract from its closed,
     /// boundary-specific declarative recipe table.
     pub fn new(boundary_recipes: Vec<PolicyExpansionBinding>) -> Result<Self> {
-        let canonical = canonical(&ExpansionPolicyContractPreimage {
-            boundary_recipes: &boundary_recipes,
-        })?;
-        let contract = Self {
-            policy_ref: structured_content_ref("mfm.structured-expansion-policy", &canonical)?,
-            boundary_recipes,
-        };
+        let contract = Self { boundary_recipes };
         contract.validate()?;
         Ok(contract)
-    }
-
-    fn preimage(&self) -> ExpansionPolicyContractPreimage<'_> {
-        ExpansionPolicyContractPreimage {
-            boundary_recipes: &self.boundary_recipes,
-        }
     }
 
     /// Returns the exact recipe selected for one semantic boundary contract.
@@ -3165,14 +3254,7 @@ impl ExpansionPolicyContract {
 
     /// Returns the exact canonical expansion-policy contract bytes.
     pub fn canonical_contract_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(&self.preimage())
-    }
-
-    fn derived_policy_ref(&self) -> Result<ContentRef> {
-        structured_content_ref(
-            "mfm.structured-expansion-policy",
-            &self.canonical_contract_json()?,
-        )
+        self.encode_canonical().map_err(Into::into)
     }
 
     /// Revalidates the policy identity and its closed eligible-boundary set.
@@ -3187,17 +3269,13 @@ impl ExpansionPolicyContract {
                 "duplicate eligible policy boundary".to_owned(),
             ));
         }
-        if self.policy_ref != self.derived_policy_ref()? {
-            return Err(SpecError::Invariant(
-                "structured expansion-policy identity mismatch".to_owned(),
-            ));
-        }
         Ok(())
     }
 }
 
 /// Exact trusted pure expansion profile.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[mfm(schema = "mfm.structured-expansion-profile", version = "1")]
 pub struct StructuredExpansionProfile {
     /// Policies in outer-to-inner entry order.
     pub policies: Vec<ExpansionPolicyContract>,
@@ -3214,7 +3292,9 @@ pub struct StructuredExpansionProfile {
 }
 
 /// Exact hard structural limits bound directly into a certified-program root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.certified-structural-bounds", version = "1")]
 pub struct CertifiedStructuralBounds {
     /// Hard total expanded occurrence bound.
     pub max_occurrences: u32,
@@ -3240,20 +3320,10 @@ impl From<&StructuredExpansionProfile> for CertifiedStructuralBounds {
     }
 }
 
-impl StructuredExpansionProfile {
-    /// Returns exact canonical profile bytes.
-    pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        canonical(self)
-    }
-
-    /// Returns the canonical profile object reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        structured_content_ref("mfm.structured-expansion-profile", &self.canonical_json()?)
-    }
-}
-
 /// One exact policy-coverage proof entry.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.policy-coverage-entry", version = "1")]
 pub struct PolicyCoverageEntry {
     /// Protected semantic boundary identity.
     pub semantic_call_id: SemanticCallId,
@@ -3264,7 +3334,9 @@ pub struct PolicyCoverageEntry {
 }
 
 /// Deterministic expansion proof and complete policy coverage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-expansion-proof", version = "1")]
 pub struct StructuredExpansionProof {
     /// Exact authored input program.
     pub authored_program_ref: ContentRef,
@@ -3273,11 +3345,14 @@ pub struct StructuredExpansionProof {
     /// Exact expansion profile.
     pub expansion_profile_ref: ContentRef,
     /// Canonical ordered record of child/capability/policy substitutions.
+    #[mfm(persisted, maximum_items = 65536)]
     pub substitution_trace: Vec<ExpansionTraceEntry>,
 }
 
 /// Exact independently recomputed policy-coverage proof.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-policy-coverage-proof", version = "1")]
 pub struct StructuredPolicyCoverageProof {
     /// Exact authored input program.
     pub authored_program_ref: ContentRef,
@@ -3286,11 +3361,14 @@ pub struct StructuredPolicyCoverageProof {
     /// Exact qualified expansion profile.
     pub expansion_profile_ref: ContentRef,
     /// Semantic-boundary then profile-ordinal coverage entries.
+    #[mfm(persisted, maximum_items = 65536)]
     pub entries: Vec<PolicyCoverageEntry>,
 }
 
 /// One pure expansion substitution in canonical pipeline order.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.expansion-trace-entry", version = "1")]
 pub struct ExpansionTraceEntry {
     /// Pipeline stage.
     pub stage: ExpansionStage,
@@ -3303,8 +3381,9 @@ pub struct ExpansionTraceEntry {
 }
 
 /// Nominal identity of the state or fragment boundary affected by expansion.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.expansion-boundary-id", version = "1")]
 pub enum ExpansionBoundaryId {
     /// Exact executable state occurrence.
     State(OccurrenceId),
@@ -3313,8 +3392,21 @@ pub enum ExpansionBoundaryId {
 }
 
 /// Frozen pure expansion pipeline stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
 #[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.spec.expansion-stage", version = "1")]
 pub enum ExpansionStage {
     /// Authored child-operation substitution.
     ChildSubstitution,
@@ -3405,24 +3497,178 @@ impl CertifiedProgramRoot {
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
         canonical(self)
     }
+}
 
-    /// Returns the sole canonical certified-program authority reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        let canonical = self.canonical_json()?;
-        let mut preimage = b"mfm.certified-program.v1\0".to_vec();
-        preimage.extend_from_slice(canonical.as_bytes());
-        let schema_name = "mfm.certified-program";
-        ContentRef::new(
-            SchemaId::new(
-                schema_name,
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                sha256_digest_bytes(format!("mfm.structured-schema.v1:{schema_name}:1").as_bytes()),
-            )?,
-            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&preimage)),
+/// Object-type tag of the retained certified-program root.
+pub const CERTIFIED_PROGRAM_ROOT_OBJECT_TYPE: &str = "structured.certified_program_root";
+
+impl mfm_values::PersistedSchema for CertifiedProgramRoot {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.certified-program-root",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "canonical_component_closure_digest",
+                    SchemaShape::identity_string(StringGrammar::ContentDigest, 128),
+                ),
+                FieldDescriptor::required("components", certified_program_components_shape()?),
+            ])?,
         )
-        .map_err(Into::into)
     }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        mfm_values::validate_derived_persisted_owner(self, &Self::schema_identity()?)
+    }
+}
+
+impl mfm_values::PersistedObjectPayload for CertifiedProgramRoot {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(CERTIFIED_PROGRAM_ROOT_OBJECT_TYPE)
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
+macro_rules! persisted_object_payload {
+    ($owner:ty, $object_type:literal) => {
+        impl mfm_values::PersistedObjectPayload for $owner {
+            fn object_type() -> mfm_values::Result<StableId> {
+                StableId::new($object_type).map_err(|error| ValueError::Identity(error.to_string()))
+            }
+        }
+    };
+}
+
+persisted_object_payload!(ClosedSumContract, "structured.closed_sum_contract");
+persisted_object_payload!(
+    StateCapabilityAdapterSignerResourceManifest,
+    "structured.component_manifest"
+);
+persisted_object_payload!(
+    SecretFreeImplementationManifest,
+    "structured.secret_free_implementation_manifest"
+);
+persisted_object_payload!(
+    SecretFreeExecutableIdentity,
+    "structured.executable_identity"
+);
+persisted_object_payload!(
+    SecretFreeQualificationArtifact,
+    "structured.qualification_artifact"
+);
+persisted_object_payload!(
+    SecretFreeImplementationDescriptor,
+    "structured.implementation_contract"
+);
+persisted_object_payload!(StructuredFactDescriptor, "structured.fact_descriptor");
+persisted_object_payload!(StructuredStateContract, "structured.state_contract");
+persisted_object_payload!(AuthoredStructuredProgram, "structured.authored_program");
+persisted_object_payload!(ExpandedStructuredProgram, "structured.expanded_program");
+persisted_object_payload!(
+    ExpansionPolicyContract,
+    "structured.expansion_policy_contract"
+);
+persisted_object_payload!(StructuredExpansionProfile, "structured.expansion_profile");
+persisted_object_payload!(StructuredExpansionProof, "structured.expansion_proof");
+persisted_object_payload!(
+    StructuredPolicyCoverageProof,
+    "structured.policy_coverage_proof"
+);
+
+fn certified_program_components_shape() -> mfm_values::Result<SchemaShape> {
+    let reference = SchemaShape::content_ref()?;
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required("authored_program_ref", reference.clone()),
+        FieldDescriptor::required("certification_predicate_set_ref", reference.clone()),
+        FieldDescriptor::required("certified_program_contract_ref", reference.clone()),
+        FieldDescriptor::required(
+            "certified_structural_bounds",
+            certified_structural_bounds_shape()?,
+        ),
+        FieldDescriptor::required("entry_point_contract_ref", reference.clone()),
+        FieldDescriptor::required("expanded_program_ref", reference.clone()),
+        FieldDescriptor::required("expansion_profile_ref", reference.clone()),
+        FieldDescriptor::required("expansion_proof_ref", reference.clone()),
+        FieldDescriptor::required("policy_coverage_proof_ref", reference.clone()),
+        FieldDescriptor::required(
+            "public_input_output_failure_contract_refs",
+            structured_public_contract_refs_shape(&reference)?,
+        ),
+        FieldDescriptor::required(
+            "qualified_entry_point_admission_policy_ref",
+            reference.clone(),
+        ),
+        FieldDescriptor::required(
+            "secret_free_implementation_manifest_closure_ref",
+            reference.clone(),
+        ),
+        FieldDescriptor::required(
+            "state_capability_adapter_signer_resource_manifest_closure_ref",
+            reference,
+        ),
+    ])
+}
+
+fn structured_public_contract_refs_shape(
+    reference: &SchemaShape,
+) -> mfm_values::Result<SchemaShape> {
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required("failure_contract_ref", reference.clone()),
+        FieldDescriptor::required(
+            "input_contract_refs",
+            SchemaShape::BoundedSequence {
+                element: Box::new(reference.clone()),
+                minimum_items: 0,
+                maximum_items: MAX_STRUCTURED_DECLARATIONS as u32,
+                ordering: SequenceOrdering::Preserved,
+                unique: false,
+            },
+        ),
+        FieldDescriptor::required("output_contract_ref", reference.clone()),
+    ])
+}
+
+fn certified_structural_bounds_shape() -> mfm_values::Result<SchemaShape> {
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required(
+            "max_branch_depth",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u8::MAX),
+            },
+        ),
+        FieldDescriptor::required(
+            "max_declarations",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u32::MAX),
+            },
+        ),
+        FieldDescriptor::required(
+            "max_fan_out_depth",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u8::MAX),
+            },
+        ),
+        FieldDescriptor::required(
+            "max_lanes",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u32::MAX),
+            },
+        ),
+        FieldDescriptor::required(
+            "max_occurrences",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u32::MAX),
+            },
+        ),
+    ])
 }
 
 /// Canonical certified-program document persisted at admission.
@@ -3435,13 +3681,6 @@ pub struct CertifiedProgramDocument {
     pub root: CertifiedProgramRoot,
     /// Canonical first-visit depth-first component closure.
     pub component_closure: Vec<CertifiedComponentObject>,
-}
-
-impl CertifiedProgramDocument {
-    /// Returns the canonical certified-program reference.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        self.root.content_ref()
-    }
 }
 
 /// Producer-free semantic value selected by one state callback.
@@ -3591,12 +3830,81 @@ pub enum OperationOutcome<T, F> {
 }
 
 /// Derives the exact nominal contract of one structural lane outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.lane-outcome-contract", version = "1")]
+pub struct LaneOutcomeContract {
+    success_contract_ref: ContentRef,
+    failure_contract: StructuredFailureContract,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.spec.fan-out-join-contract", version = "1")]
+/// Exact nominal non-empty fan-out join contract.
+pub struct FanOutJoinContract {
+    lane_outcome_contract_ref: ContentRef,
+}
+
+impl LaneOutcomeContract {
+    /// Constructs one exact lane-outcome contract payload.
+    pub fn new(
+        success_contract_ref: ContentRef,
+        failure_contract: StructuredFailureContract,
+    ) -> Self {
+        Self {
+            success_contract_ref,
+            failure_contract,
+        }
+    }
+
+    /// Returns the exact lane success contract.
+    pub const fn success_contract_ref(&self) -> &ContentRef {
+        &self.success_contract_ref
+    }
+
+    /// Returns the exact lane failure contract.
+    pub const fn failure_contract(&self) -> &StructuredFailureContract {
+        &self.failure_contract
+    }
+}
+
+impl FanOutJoinContract {
+    /// Constructs one exact fan-out join contract payload.
+    pub fn new(lane_outcome_contract_ref: ContentRef) -> Self {
+        Self {
+            lane_outcome_contract_ref,
+        }
+    }
+
+    /// Returns the exact nominal lane-outcome contract joined by this value.
+    pub const fn lane_outcome_contract_ref(&self) -> &ContentRef {
+        &self.lane_outcome_contract_ref
+    }
+}
+
+impl mfm_values::PersistedObjectPayload for LaneOutcomeContract {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.lane_outcome_contract")
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
+impl mfm_values::PersistedObjectPayload for FanOutJoinContract {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.fan_out_join_contract")
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
+/// Derives the exact nominal contract of one structural lane outcome.
 pub fn lane_outcome_contract_ref(
     success_contract_ref: &ContentRef,
     failure_contract: &StructuredFailureContract,
 ) -> Result<ContentRef> {
-    let canonical = lane_outcome_contract_canonical_json(success_contract_ref, failure_contract)?;
-    structured_content_ref("mfm.lane-outcome-contract", &canonical)
+    LaneOutcomeContract::new(success_contract_ref.clone(), failure_contract.clone())
+        .content_ref()
+        .map_err(Into::into)
 }
 
 /// Returns the canonical preimage of one structural lane-outcome contract.
@@ -3604,7 +3912,9 @@ pub fn lane_outcome_contract_canonical_json(
     success_contract_ref: &ContentRef,
     failure_contract: &StructuredFailureContract,
 ) -> Result<PlainCanonicalJsonBytes> {
-    canonical(&(success_contract_ref, failure_contract))
+    LaneOutcomeContract::new(success_contract_ref.clone(), failure_contract.clone())
+        .encode_canonical()
+        .map_err(Into::into)
 }
 
 /// Derives the nominal non-empty head-plus-tail join contract for one fan-out
@@ -3613,8 +3923,12 @@ pub fn fan_out_join_contract_ref(
     success_contract_ref: &ContentRef,
     failure_contract: &StructuredFailureContract,
 ) -> Result<ContentRef> {
-    let canonical = fan_out_join_contract_canonical_json(success_contract_ref, failure_contract)?;
-    structured_content_ref("mfm.fan-out-join-contract", &canonical)
+    FanOutJoinContract::new(lane_outcome_contract_ref(
+        success_contract_ref,
+        failure_contract,
+    )?)
+    .content_ref()
+    .map_err(Into::into)
 }
 
 /// Returns the canonical preimage of one nominal non-empty fan-out join contract.
@@ -3622,8 +3936,12 @@ pub fn fan_out_join_contract_canonical_json(
     success_contract_ref: &ContentRef,
     failure_contract: &StructuredFailureContract,
 ) -> Result<PlainCanonicalJsonBytes> {
-    let lane_contract_ref = lane_outcome_contract_ref(success_contract_ref, failure_contract)?;
-    canonical(&lane_contract_ref)
+    FanOutJoinContract::new(lane_outcome_contract_ref(
+        success_contract_ref,
+        failure_contract,
+    )?)
+    .encode_canonical()
+    .map_err(Into::into)
 }
 
 /// One recursive structured-value algebra node for qualification closure.
@@ -3637,7 +3955,7 @@ pub fn fan_out_join_contract_canonical_json(
 pub enum StructuredValueDefinition {
     /// Exact retained MFM value schema and role contract.
     Retained {
-        /// Annex-validated retained-value contract and paired schema identity.
+        /// Owner-validated retained-value contract and paired schema identity.
         ///
         /// The payload is boxed for enum layout while `flatten` preserves the
         /// established flat persisted contract (`contract` and `schema`).
@@ -3657,7 +3975,7 @@ pub enum StructuredValueDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainedStructuredValueDefinition {
-    /// Annex-validated retained-value contract.
+    /// Owner-validated retained-value contract.
     pub contract: RetainedValueContract,
     /// Qualified schema identity paired with the retained contract.
     pub schema: mfm_values::SchemaIdentity,
@@ -3754,25 +4072,6 @@ fn domain_digest(domain: &str, canonical: &[u8]) -> mfm_ids::DigestBytes {
     bytes.push(0);
     bytes.extend_from_slice(canonical);
     sha256_digest_bytes(&bytes)
-}
-
-fn structured_content_ref(
-    schema_name: &str,
-    canonical: &PlainCanonicalJsonBytes,
-) -> Result<ContentRef> {
-    let schema_digest =
-        sha256_digest_bytes(format!("mfm.structured-schema.v1:{schema_name}:1").as_bytes());
-    let schema = SchemaId::new(
-        schema_name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        schema_digest,
-    )?;
-    let content_digest = ContentDigest::from_digest(
-        DigestAlgorithm::Sha256V1,
-        sha256_digest_bytes(canonical.as_bytes()),
-    );
-    ContentRef::new(schema, content_digest).map_err(Into::into)
 }
 
 #[cfg(test)]

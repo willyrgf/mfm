@@ -1,6 +1,6 @@
-use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_ids::{ContentRef, StoreScopeId};
 use mfm_journal::structured::canonical_json;
+use mfm_store::structured::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_store::structured::{
     verify_configuration_history, CanonicalConfigurationAppend, ConfigurationBackendAppendOutcome,
     ConfigurationBackendFuture, ConfigurationHistoryBackend, ConfigurationHistoryHead,

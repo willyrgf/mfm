@@ -1,5 +1,5 @@
 #![warn(missing_docs)]
-//! HTTP transport for the recoverability-v1 application facade.
+//! HTTP transport for the current application facade.
 //!
 //! Every protected route accepts only one `Authorization: Bearer` credential and delegates a
 //! purpose-specific call to [`mfm_app::Application`]. Entry-point discovery and health/readiness

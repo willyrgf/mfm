@@ -138,6 +138,77 @@ where
     type Evidence = E;
 }
 
+/// A request that carries the exact value the external system keys this effect on.
+///
+/// Two properties of this signature are load-bearing and must not be relaxed:
+///
+/// - `&self` is the only input, so no ambient IO and no process state can enter
+///   the derivation. The key is a pure projection of committed request bytes and
+///   outlives the process that authored them.
+/// - It is total. A request cannot carry `key: Option<K>` and implement this
+///   honestly, so declaring absorption forces the field to be mandatory in the
+///   request shape. Making it fallible would let a capability declare absorption
+///   it cannot always name, and strand at runtime — which is the autoincrement
+///   case, and it must fail to compile rather than park.
+pub trait EntryKeyed: MfmValue {
+    /// Exact value the external system keys this effect on.
+    type EntryKey: MfmValue + Eq;
+
+    /// Projects the exact retained entry key of this request.
+    fn entry_key(&self) -> Self::EntryKey;
+}
+
+/// Sealed declaration of whether a parked attempt may be re-entered.
+pub trait EffectEntryMode: private::EffectEntryModeSealed + Send + Sync + 'static {
+    /// Maximum invocations of one occurrence, including the first.
+    const MAX_ENTRIES: u16;
+}
+
+/// A repeat is not absorbed. A parked attempt is terminal.
+///
+/// This is not a legacy mode. It is the honest current declaration for a
+/// capability whose external system does not absorb a repeat — no key exists, or
+/// the response is once-only — and it is where the residual recovery gap lives
+/// by design.
+pub enum EntryOnce {}
+
+impl private::EffectEntryModeSealed for EntryOnce {}
+
+impl EffectEntryMode for EntryOnce {
+    const MAX_ENTRIES: u16 = 1;
+}
+
+/// The external system absorbs a repeat of the byte-identical committed request.
+///
+/// Naming this asserts four things the kernel cannot verify: that the external
+/// system absorbs a repeat, that the adapter transmits the entry key, that
+/// absorption is retained long enough, and that `Returned` is a function of the
+/// external system's post-state rather than of one exchange.
+pub struct EntryAbsorbing<const MAX: u16>;
+
+impl<const MAX: u16> private::EffectEntryModeSealed for EntryAbsorbing<MAX> {}
+
+impl<const MAX: u16> EffectEntryMode for EntryAbsorbing<MAX> {
+    const MAX_ENTRIES: u16 = MAX;
+}
+
+/// Framework-owned evidence that an entry mode is declarable for a request type.
+///
+/// Sealing the *parameterized* marker is what makes this an obligation rather
+/// than a suggestion. Sealing only [`EffectEntryMode`] and taking the request as
+/// a trait parameter would compile, look sealed, and not be: orphan rules permit
+/// `impl ForeignTrait<LocalType> for ForeignType`, so a downstream crate could
+/// declare absorption over an unkeyed request and it would build clean.
+pub trait EffectEntryModeFor<Req>:
+    EffectEntryMode + private::EffectEntryModeForSealed<Req>
+{
+}
+
+impl<Req, M> EffectEntryModeFor<Req> for M where
+    M: EffectEntryMode + private::EffectEntryModeForSealed<Req>
+{
+}
+
 /// Typed application-protocol contract for one external Effect capability.
 pub trait EffectCapabilityContract: Send + Sync + 'static {
     /// Immutable typed request authored by a state callback.
@@ -148,6 +219,8 @@ pub trait EffectCapabilityContract: Send + Sync + 'static {
     type SafeFailure: MfmValue;
     /// Exact resource-refresh contract for this effect.
     type Refresh: EffectRefreshMode;
+    /// Re-entry discipline, declarable as absorbing only over a keyed request.
+    type Entry: EffectEntryModeFor<Self::Request>;
 }
 
 /// Closed completion produced by one qualified Read adapter invocation.
@@ -748,11 +821,23 @@ fn invalid_set(effect: &'static str, message: &'static str) -> CapabilityError {
 
 mod private {
     use super::EffectSpec;
+    use super::{EntryAbsorbing, EntryKeyed, EntryOnce};
     use super::{ExternalMutationAuthorityRole, ReadExternalRole, SupportRole};
 
     pub trait EffectSealed {}
 
     pub trait EffectRefreshModeSealed {}
+
+    pub trait EffectEntryModeSealed {}
+
+    pub trait EffectEntryModeForSealed<Req> {}
+
+    impl<Req> EffectEntryModeForSealed<Req> for EntryOnce {}
+
+    // The obligation. Absorption is unavailable without an entry key, so a
+    // capability over a target with no such value cannot declare it at all.
+    impl<Req, const MAX: u16> EffectEntryModeForSealed<Req> for EntryAbsorbing<MAX> where Req: EntryKeyed
+    {}
 
     pub trait RoleSealed {}
 

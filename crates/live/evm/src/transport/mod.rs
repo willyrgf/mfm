@@ -33,7 +33,7 @@ pub use mfm_evm::{
     EVM_ROUTING_GENERATION_DESCRIPTOR_VERSION,
 };
 use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
-use mfm_values::{MfmValue, RetainedValueContract};
+use mfm_values::{MediaType, MfmValue, RetainedValueContract};
 use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::debug;
@@ -1278,7 +1278,7 @@ fn descriptor_support_contract(
         schema_id,
         semantic_type_id,
         role,
-        "application/json",
+        MediaType::new("application/json").map_err(|_| EvmTransportError::InvalidConfiguration)?,
         evidence_contract_ref,
     )
     .map_err(|_| EvmTransportError::InvalidConfiguration)

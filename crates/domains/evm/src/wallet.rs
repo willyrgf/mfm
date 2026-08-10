@@ -9,10 +9,13 @@ use std::str::FromStr;
 
 use alloy_eips::eip2930::{AccessList, AccessListItem};
 use alloy_primitives::{Address, Bytes, TxKind, B256, U256};
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, LocalPublicId, SchemaId};
-use mfm_program::boundary_content_ref;
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::{ContentDigest, ContentRef, LocalPublicId, SchemaId};
 use mfm_program_derive::{MfmConfig, MfmValue};
+use mfm_values::{
+    CanonicalJsonPersistedSchema, FieldDescriptor, LiteralValue, PersistedSchema, SchemaIdentity,
+    SchemaKind, SchemaShape, ValueError,
+};
 use serde::{de, Deserialize, Deserializer, Serialize};
 
 use crate::EvmBlockAnchor;
@@ -42,7 +45,6 @@ pub const EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Exact version of the selected EVM account-sequence policy descriptor.
 pub const EVM_WALLET_NONCE_POLICY_VERSION: &str = "mfm.evm.wallet-nonce-policy.v1";
 /// Exact version of the finalized-tag finality policy.
-pub const EVM_WALLET_FINALITY_POLICY_VERSION: &str = "mfm.evm.wallet-finality-policy.v1";
 /// Exact version of the terminal wallet assurance policy.
 pub const EVM_WALLET_ASSURANCE_POLICY_VERSION: &str = "mfm.evm.wallet-assurance-policy.v1";
 /// Exact version of the deterministic EVM transaction-signing profile.
@@ -175,101 +177,63 @@ impl<'de> Deserialize<'de> for EvmWalletReference {
 /// # Ok::<(), mfm_evm::EvmWalletError>(())
 /// ```
 pub fn evm_wallet_nonce_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-    wallet_descriptor_canonical(&serde_json::json!({
-        "advance_requires_prior_terminal": true,
-        "allocation": "monotonic_u64",
-        "first_sequence": "configuration.initial_nonce",
-        "fencing": "required",
-        "reassignment": false,
-        "version": EVM_WALLET_NONCE_POLICY_VERSION,
-    }))
+    EvmWalletNoncePolicyDocument::current()
+        .encode_canonical()
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the exact EVM account-sequence policy identity.
 pub fn evm_wallet_nonce_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
-    wallet_descriptor_ref(
-        "mfm.evm.wallet-nonce-policy",
-        &evm_wallet_nonce_policy_canonical()?,
-    )
+    EvmWalletNoncePolicyDocument::current()
+        .content_ref()
+        .map(EvmWalletReference::from_content_ref)
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
-/// Returns the canonical finalized-tag finality policy.
-pub fn evm_wallet_finality_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-    wallet_descriptor_canonical(&serde_json::json!({
-        "canonical_inclusion_recheck": "fresh_number_lookup",
-        "finalized_head": "fresh_finalized_tag",
-        "finalized_head_at_or_after_receipt": true,
-        "version": EVM_WALLET_FINALITY_POLICY_VERSION,
-    }))
-}
-
-/// Returns the exact finalized-tag finality-policy identity.
-pub fn evm_wallet_finality_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
-    wallet_descriptor_ref(
-        "mfm.evm.wallet-finality-policy",
-        &evm_wallet_finality_policy_canonical()?,
-    )
-}
-
 /// Returns the canonical terminal wallet assurance policy.
 pub fn evm_wallet_assurance_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-    wallet_descriptor_canonical(&serde_json::json!({
-        "candidate_lineage": "complete_through_selected_candidate",
-        "canonical_inclusion": "receipt_block_matches_fresh_number_lookup",
-        "wallet_authority_lineage_and_fence": "exact",
-        "finalized_head": "at_or_after_receipt",
-        "outcomes": ["reverted", "succeeded"],
-        "receipt": "exact_candidate_and_transaction",
-        "request": "exact",
-        "transaction": "exact_candidate",
-        "version": EVM_WALLET_ASSURANCE_POLICY_VERSION,
-    }))
+    EvmWalletAssurancePolicyDocument::current()
+        .encode_canonical()
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the exact terminal wallet assurance-policy identity.
 pub fn evm_wallet_assurance_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
-    wallet_descriptor_ref(
-        "mfm.evm.wallet-assurance-policy",
-        &evm_wallet_assurance_policy_canonical()?,
-    )
+    EvmWalletAssurancePolicyDocument::current()
+        .content_ref()
+        .map(EvmWalletReference::from_content_ref)
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the canonical RFC 6979, recoverable, low-s EVM signing profile.
 pub fn evm_deterministic_signing_profile_canonical(
 ) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-    wallet_descriptor_canonical(&serde_json::json!({
-        "algorithm": "secp256k1.keccak256.recoverable",
-        "canonical_low_s": true,
-        "deterministic_nonce": "rfc6979",
-        "recoverable": true,
-        "version": EVM_DETERMINISTIC_SIGNING_PROFILE_VERSION,
-    }))
+    EvmDeterministicSigningProfileDocument::current()
+        .encode_canonical()
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the exact deterministic EVM signing-profile identity.
 pub fn evm_deterministic_signing_profile_ref() -> Result<EvmWalletReference, EvmWalletError> {
-    wallet_descriptor_ref(
-        "mfm.evm.deterministic-signing-profile",
-        &evm_deterministic_signing_profile_canonical()?,
-    )
+    EvmDeterministicSigningProfileDocument::current()
+        .content_ref()
+        .map(EvmWalletReference::from_content_ref)
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the canonical bounded submission-expansion policy.
 pub fn evm_submission_expansion_policy_canonical() -> Result<PlainCanonicalJsonBytes, EvmWalletError>
 {
-    wallet_descriptor_canonical(&serde_json::json!({
-        "candidate_slots": EVM_WALLET_REPLACEMENT_LIMIT,
-        "expansion": "mfm.evm.expansion/submit-transaction",
-        "observation_round_limit": crate::EVM_WALLET_OBSERVATION_ROUND_LIMIT,
-        "version": EVM_SUBMISSION_EXPANSION_POLICY_VERSION,
-    }))
+    EvmSubmissionExpansionPolicyDocument::current()
+        .encode_canonical()
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Returns the exact bounded submission-expansion policy identity.
 pub fn evm_submission_expansion_policy_ref() -> Result<EvmWalletReference, EvmWalletError> {
-    wallet_descriptor_ref(
-        "mfm.evm.submission-expansion-policy",
-        &evm_submission_expansion_policy_canonical()?,
-    )
+    EvmSubmissionExpansionPolicyDocument::current()
+        .content_ref()
+        .map(EvmWalletReference::from_content_ref)
+        .map_err(|_| EvmWalletError::RequestEncoding)
 }
 
 /// Stable configured-value target selected by the public entry-point input.
@@ -1379,27 +1343,275 @@ impl<'de> Deserialize<'de> for EvmSubmissionFailure {
         }
     }
 }
-fn wallet_descriptor_canonical(
-    value: &impl Serialize,
-) -> Result<PlainCanonicalJsonBytes, EvmWalletError> {
-    let json = serde_json::to_string(value).map_err(|_| EvmWalletError::RequestEncoding)?;
-    PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| EvmWalletError::RequestEncoding)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmWalletNoncePolicyDocument {
+    advance_requires_prior_terminal: bool,
+    allocation: String,
+    first_sequence: String,
+    fencing: String,
+    reassignment: bool,
+    version: String,
 }
 
-fn wallet_descriptor_ref(
-    schema_name: &'static str,
-    canonical: &PlainCanonicalJsonBytes,
-) -> Result<EvmWalletReference, EvmWalletError> {
-    let schema = SchemaId::new(
-        schema_name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("schema:{schema_name}:1").as_bytes()),
-    )
-    .map_err(|_| EvmWalletError::RequestEncoding)?;
-    let reference =
-        boundary_content_ref(schema, canonical).map_err(|_| EvmWalletError::RequestEncoding)?;
-    Ok(EvmWalletReference::from_content_ref(reference))
+impl EvmWalletNoncePolicyDocument {
+    fn current() -> Self {
+        Self {
+            advance_requires_prior_terminal: true,
+            allocation: "monotonic_u64".to_owned(),
+            first_sequence: "configuration.initial_nonce".to_owned(),
+            fencing: "required".to_owned(),
+            reassignment: false,
+            version: EVM_WALLET_NONCE_POLICY_VERSION.to_owned(),
+        }
+    }
+}
+
+impl PersistedSchema for EvmWalletNoncePolicyDocument {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.evm.wallet-nonce-policy",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "advance_requires_prior_terminal",
+                    SchemaShape::Literal(LiteralValue::Bool(true)),
+                ),
+                FieldDescriptor::required(
+                    "allocation",
+                    SchemaShape::Literal(LiteralValue::String("monotonic_u64".to_owned())),
+                ),
+                FieldDescriptor::required(
+                    "fencing",
+                    SchemaShape::Literal(LiteralValue::String("required".to_owned())),
+                ),
+                FieldDescriptor::required(
+                    "first_sequence",
+                    SchemaShape::Literal(LiteralValue::String(
+                        "configuration.initial_nonce".to_owned(),
+                    )),
+                ),
+                FieldDescriptor::required(
+                    "reassignment",
+                    SchemaShape::Literal(LiteralValue::Bool(false)),
+                ),
+                FieldDescriptor::required(
+                    "version",
+                    SchemaShape::Literal(LiteralValue::String(
+                        EVM_WALLET_NONCE_POLICY_VERSION.to_owned(),
+                    )),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        (*self == Self::current())
+            .then_some(())
+            .ok_or(ValueError::SchemaShapeMismatch)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmWalletAssurancePolicyDocument {
+    candidate_lineage: String,
+    canonical_inclusion: String,
+    finalized_head: String,
+    outcomes: Vec<String>,
+    receipt: String,
+    request: String,
+    transaction: String,
+    version: String,
+    wallet_authority_lineage_and_fence: String,
+}
+
+impl EvmWalletAssurancePolicyDocument {
+    fn current() -> Self {
+        Self {
+            candidate_lineage: "complete_through_selected_candidate".to_owned(),
+            canonical_inclusion: "receipt_block_matches_fresh_number_lookup".to_owned(),
+            finalized_head: "at_or_after_receipt".to_owned(),
+            outcomes: vec!["reverted".to_owned(), "succeeded".to_owned()],
+            receipt: "exact_candidate_and_transaction".to_owned(),
+            request: "exact".to_owned(),
+            transaction: "exact_candidate".to_owned(),
+            version: EVM_WALLET_ASSURANCE_POLICY_VERSION.to_owned(),
+            wallet_authority_lineage_and_fence: "exact".to_owned(),
+        }
+    }
+}
+
+impl PersistedSchema for EvmWalletAssurancePolicyDocument {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        let literal = |value: &str| SchemaShape::Literal(LiteralValue::String(value.to_owned()));
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.evm.wallet-assurance-policy",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "candidate_lineage",
+                    literal("complete_through_selected_candidate"),
+                ),
+                FieldDescriptor::required(
+                    "canonical_inclusion",
+                    literal("receipt_block_matches_fresh_number_lookup"),
+                ),
+                FieldDescriptor::required("finalized_head", literal("at_or_after_receipt")),
+                FieldDescriptor::required(
+                    "outcomes",
+                    SchemaShape::Tuple(vec![literal("reverted"), literal("succeeded")]),
+                ),
+                FieldDescriptor::required("receipt", literal("exact_candidate_and_transaction")),
+                FieldDescriptor::required("request", literal("exact")),
+                FieldDescriptor::required("transaction", literal("exact_candidate")),
+                FieldDescriptor::required("version", literal(EVM_WALLET_ASSURANCE_POLICY_VERSION)),
+                FieldDescriptor::required("wallet_authority_lineage_and_fence", literal("exact")),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        (*self == Self::current())
+            .then_some(())
+            .ok_or(ValueError::SchemaShapeMismatch)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmDeterministicSigningProfileDocument {
+    algorithm: String,
+    canonical_low_s: bool,
+    deterministic_nonce: String,
+    recoverable: bool,
+    version: String,
+}
+
+impl EvmDeterministicSigningProfileDocument {
+    fn current() -> Self {
+        Self {
+            algorithm: "secp256k1.keccak256.recoverable".to_owned(),
+            canonical_low_s: true,
+            deterministic_nonce: "rfc6979".to_owned(),
+            recoverable: true,
+            version: EVM_DETERMINISTIC_SIGNING_PROFILE_VERSION.to_owned(),
+        }
+    }
+}
+
+impl PersistedSchema for EvmDeterministicSigningProfileDocument {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.evm.deterministic-signing-profile",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "algorithm",
+                    SchemaShape::Literal(LiteralValue::String(
+                        "secp256k1.keccak256.recoverable".to_owned(),
+                    )),
+                ),
+                FieldDescriptor::required(
+                    "canonical_low_s",
+                    SchemaShape::Literal(LiteralValue::Bool(true)),
+                ),
+                FieldDescriptor::required(
+                    "deterministic_nonce",
+                    SchemaShape::Literal(LiteralValue::String("rfc6979".to_owned())),
+                ),
+                FieldDescriptor::required(
+                    "recoverable",
+                    SchemaShape::Literal(LiteralValue::Bool(true)),
+                ),
+                FieldDescriptor::required(
+                    "version",
+                    SchemaShape::Literal(LiteralValue::String(
+                        EVM_DETERMINISTIC_SIGNING_PROFILE_VERSION.to_owned(),
+                    )),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        (*self == Self::current())
+            .then_some(())
+            .ok_or(ValueError::SchemaShapeMismatch)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvmSubmissionExpansionPolicyDocument {
+    candidate_slots: u64,
+    expansion: String,
+    observation_round_limit: u64,
+    version: String,
+}
+
+impl EvmSubmissionExpansionPolicyDocument {
+    fn current() -> Self {
+        Self {
+            candidate_slots: EVM_WALLET_REPLACEMENT_LIMIT as u64,
+            expansion: "mfm.evm.expansion/submit-transaction".to_owned(),
+            observation_round_limit: u64::from(crate::EVM_WALLET_OBSERVATION_ROUND_LIMIT),
+            version: EVM_SUBMISSION_EXPANSION_POLICY_VERSION.to_owned(),
+        }
+    }
+}
+
+impl PersistedSchema for EvmSubmissionExpansionPolicyDocument {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.evm.submission-expansion-policy",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "candidate_slots",
+                    SchemaShape::Literal(LiteralValue::Unsigned(
+                        EVM_WALLET_REPLACEMENT_LIMIT as u64,
+                    )),
+                ),
+                FieldDescriptor::required(
+                    "expansion",
+                    SchemaShape::Literal(LiteralValue::String(
+                        "mfm.evm.expansion/submit-transaction".to_owned(),
+                    )),
+                ),
+                FieldDescriptor::required(
+                    "observation_round_limit",
+                    SchemaShape::Literal(LiteralValue::Unsigned(u64::from(
+                        crate::EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+                    ))),
+                ),
+                FieldDescriptor::required(
+                    "version",
+                    SchemaShape::Literal(LiteralValue::String(
+                        EVM_SUBMISSION_EXPANSION_POLICY_VERSION.to_owned(),
+                    )),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        (*self == Self::current())
+            .then_some(())
+            .ok_or(ValueError::SchemaShapeMismatch)
+    }
 }
 fn validate_access_list(entries: &[EvmWalletAccessListEntry]) -> Result<(), EvmWalletError> {
     if entries.len() > EVM_WALLET_ACCESS_LIST_MAX_ENTRIES {

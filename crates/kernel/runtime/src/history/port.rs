@@ -97,7 +97,7 @@ pub trait RuntimeHistoryPort: mfm_authority_seal::RuntimeHistoryPortSeal + Send 
 
     /// Verifies and atomically admits one exact structured run.
     ///
-    /// Run identity is derived inside the adapter from the annex preimage. The
+    /// Run identity is derived inside the adapter from the owner preimage. The
     /// derived identifier is returned with the append attempt outcome via the
     /// committed admission record; callers never supply a trusted run digest.
     fn admit_run<'a>(

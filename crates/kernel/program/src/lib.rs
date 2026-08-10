@@ -38,6 +38,12 @@ impl From<mfm_spec::SpecError> for ProgramError {
     }
 }
 
+impl From<mfm_values::ValueError> for ProgramError {
+    fn from(error: mfm_values::ValueError) -> Self {
+        Self::Spec(error.to_string())
+    }
+}
+
 /// Canonicalizes one typed structured-runtime boundary value.
 pub fn encode_boundary<T: Serialize>(value: &T) -> Result<mfm_canonical::PlainCanonicalJsonBytes> {
     let json =
@@ -65,5 +71,12 @@ pub fn boundary_content_ref(
     schema_id: mfm_ids::SchemaId,
     canonical: &mfm_canonical::PlainCanonicalJsonBytes,
 ) -> Result<mfm_ids::ContentRef> {
-    mfm_spec::exact_content_ref(schema_id, canonical).map_err(Into::into)
+    mfm_ids::ContentRef::new(
+        schema_id,
+        mfm_ids::ContentDigest::from_digest(
+            mfm_ids::DigestAlgorithm::Sha256V1,
+            mfm_canonical::sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .map_err(|error| ProgramError::Codec(error.to_string()))
 }

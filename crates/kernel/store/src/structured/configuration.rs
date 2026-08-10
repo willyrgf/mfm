@@ -5,7 +5,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId, StoreScopeId,
@@ -15,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use super::canonical_append::CanonicalConfigurationAppend;
 use super::{ProposedCanonicalValue, StructuredStoreError};
+
+/// Maximum bytes in one canonical structured configuration revision.
+pub const MAX_CONFIGURATION_REVISION_BYTES: usize = 16777216;
 
 /// Immutable routing key for one tenant-scoped configured-value stream.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -87,7 +89,88 @@ pub struct ConfigurationRevision {
     revision_ref: ContentRef,
 }
 
+impl mfm_values::PersistedSchema for ConfigurationRevision {
+    fn schema_identity() -> mfm_values::Result<mfm_values::SchemaIdentity> {
+        use mfm_values::{
+            FieldDescriptor, SchemaIdentity, SchemaKind, SchemaShape, StringGrammar, ValueError,
+        };
+
+        let reference = SchemaShape::content_ref()?;
+        let stream_key = SchemaShape::named_struct(vec![
+            FieldDescriptor::required(
+                "entry_point_operation_id",
+                SchemaShape::identity_string(StringGrammar::StableId, 256),
+            ),
+            FieldDescriptor::required(
+                "store_scope_id",
+                SchemaShape::identity_string(StringGrammar::StoreScopeId, 64),
+            ),
+            FieldDescriptor::required(
+                "target_id",
+                SchemaShape::identity_string(StringGrammar::StableId, 256),
+            ),
+            FieldDescriptor::required(
+                "tenant_scope_id",
+                SchemaShape::identity_string(StringGrammar::TenantScopeId, 64),
+            ),
+        ])?;
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.structured-configuration-revision",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "append_request_id",
+                    SchemaShape::BoundedString {
+                        minimum_bytes: 1,
+                        maximum_bytes: 256,
+                        grammar: StringGrammar::UnicodeScalarText,
+                    },
+                ),
+                FieldDescriptor::required(
+                    "canonical_value",
+                    SchemaShape::BoundedString {
+                        minimum_bytes: 1,
+                        maximum_bytes: MAX_CONFIGURATION_REVISION_BYTES as u32,
+                        grammar: StringGrammar::UnicodeScalarText,
+                    },
+                ),
+                FieldDescriptor::required("key", stream_key),
+                FieldDescriptor::required(
+                    "predecessor_ref",
+                    SchemaShape::Option(Box::new(reference.clone())),
+                ),
+                FieldDescriptor::required("revision_ref", reference.clone()),
+                FieldDescriptor::required(
+                    "sequence",
+                    SchemaShape::UnsignedRange {
+                        minimum: 1,
+                        maximum: u64::MAX,
+                    },
+                ),
+                FieldDescriptor::required("value_contract_ref", reference.clone()),
+                FieldDescriptor::required("value_ref", reference),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        Ok(())
+    }
+}
+
 impl ConfigurationRevision {
+    /// Returns the one owner-derived configuration-revision schema identity.
+    ///
+    /// Admission material and the configuration store share this identity, so
+    /// the same revision bytes cannot carry two schema derivations.
+    pub fn schema_id() -> Result<SchemaId, StructuredStoreError> {
+        <Self as mfm_values::PersistedSchema>::schema_id()
+            .map_err(|_| invalid("configuration revision schema identity is invalid"))
+    }
+
     fn new(
         key: ConfigurationStreamKey,
         sequence: u64,
@@ -97,10 +180,7 @@ impl ConfigurationRevision {
         value: &ProposedCanonicalValue,
     ) -> Result<Self, StructuredStoreError> {
         let canonical_value = value.canonical().as_str().to_owned();
-        let value_ref = content_ref(
-            "mfm.structured-configured-value",
-            canonical_value.as_bytes(),
-        )?;
+        let value_ref = content_ref(configured_value_schema_id()?, canonical_value.as_bytes())?;
         let revision_ref = revision_ref(
             &key,
             sequence,
@@ -133,7 +213,7 @@ impl ConfigurationRevision {
         let canonical =
             PlainCanonicalJsonBytes::from_canonical_json_slice(self.canonical_value.as_bytes())
                 .map_err(|_| invalid("configuration value is not canonical JSON"))?;
-        if content_ref("mfm.structured-configured-value", canonical.as_bytes())? != self.value_ref
+        if content_ref(configured_value_schema_id()?, canonical.as_bytes())? != self.value_ref
             || revision_ref(
                 &self.key,
                 self.sequence,
@@ -744,20 +824,37 @@ fn revision_ref(
         value_ref,
     })
     .map_err(|_| invalid("configuration revision cannot be canonicalized"))?;
-    content_ref(
-        "mfm.structured-configuration-revision",
-        canonical.as_bytes(),
+    ContentRef::new(
+        ConfigurationRevision::schema_id()?,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
     )
+    .map_err(|_| invalid("configuration content reference is invalid"))
 }
 
-fn content_ref(name: &str, bytes: &[u8]) -> Result<ContentRef, StructuredStoreError> {
-    let schema_id = SchemaId::new(
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.structured-schema.v1:{name}:1").as_bytes()),
+/// Returns the owner-derived identity of one retained configured value.
+///
+/// A configured value is caller-authored canonical JSON, so its retained shape
+/// is the closed float-free terminal; the exact value contract is carried
+/// separately by the revision.
+fn configured_value_schema_id() -> Result<SchemaId, StructuredStoreError> {
+    mfm_values::SchemaIdentity::new(
+        mfm_values::SchemaKind::PersistedContract,
+        None,
+        "mfm.structured-configured-value",
+        mfm_ids::SchemaVersion::new("1")
+            .map_err(|_| invalid("configured value schema version is invalid"))?,
+        mfm_values::SchemaShape::CanonicalJsonTerminal {
+            profile: mfm_values::CanonicalJsonProfile::GeneralFloatFree,
+        },
     )
-    .map_err(|_| invalid("configuration schema identity is invalid"))?;
+    .and_then(|identity| identity.schema_id())
+    .map_err(|_| invalid("configured value schema identity is invalid"))
+}
+
+fn content_ref(schema_id: SchemaId, bytes: &[u8]) -> Result<ContentRef, StructuredStoreError> {
     ContentRef::new(
         schema_id,
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(bytes)),
@@ -798,7 +895,17 @@ mod tests {
     }
 
     fn contract() -> ContentRef {
-        content_ref("mfm.fixture-configured-contract", b"contract").expect("contract")
+        content_ref(
+            SchemaId::new(
+                "mfm.fixture-configured-contract",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(b"mfm.fixture-configured-contract"),
+            )
+            .expect("fixture contract schema"),
+            b"contract",
+        )
+        .expect("contract")
     }
 
     #[derive(Clone)]

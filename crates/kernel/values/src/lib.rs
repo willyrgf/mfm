@@ -22,20 +22,29 @@
 use std::collections::BTreeMap;
 
 use mfm_canonical::{
-    CanonicalBytes, CanonicalJsonBytes, CanonicalValue, DecimalString, PlainCanonicalJsonBytes,
+    CanonicalBytes, CanonicalJsonBytes, DecimalString, PlainCanonicalJsonBytes,
     MAX_CANONICAL_JSON_DEPTH,
 };
 use mfm_ids::{DigestAlgorithm, NameToken, SchemaId, SchemaVersion, SemanticTypeId};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+pub use mfm_canonical::limits::{
+    MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES, MAX_STRING_UTF8_BYTES,
+};
+
 mod generic_values;
 pub use self::generic_values::{ArtifactRef, NonEmpty};
-mod retained;
-pub use self::retained::{
-    component_object_evidence_contract_canonical, component_object_evidence_contract_ref,
-    RetainedValueContract,
+mod persisted;
+pub use self::persisted::{
+    validate_derived_persisted_owner, validate_derived_persisted_owner_prevalidated,
+    CanonicalJsonLinesPersistedSchema, CanonicalJsonPersistedSchema, CanonicalJsonProfile,
+    LiteralValue, MediaType, PersistedObjectPayload, PersistedSchema, SequenceOrdering,
+    StringGrammar, MAX_MEDIA_TYPE_BYTES,
 };
+
+mod retained;
+pub use self::retained::{ComponentObjectEvidence, RetainedValueContract};
 
 // Keep this list intentionally small and high-signal to avoid false positives on public
 // descriptive fields while still blocking common secret-bearing persisted surfaces.
@@ -61,16 +70,16 @@ const SECRET_MARKERS: &[&str] = &[
     "access_token",
     "refresh_token",
     "id_token",
-    "authorization",
     "bearer ",
 ];
 const MAX_SCHEMA_IDENTITY_BYTES: usize = 65_536;
 /// Maximum recursive depth admitted by current schema identities and values.
 ///
-/// Schema identities add two object levels around their shape, so reserve those
-/// levels from the canonical JSON budget. This keeps the advertised schema
+/// Schema identities add three object levels around their shape — the identity
+/// object, its persisted encoding, and the encoding's shape field — so reserve
+/// those levels from the canonical JSON budget. This keeps the advertised schema
 /// limit round-trippable through strict canonical decoding.
-pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 2;
+pub const MAX_SCHEMA_DEPTH: usize = MAX_CANONICAL_JSON_DEPTH - 3;
 
 /// Result type for descriptor and value-contract operations.
 pub type Result<T> = std::result::Result<T, ValueError>;
@@ -103,12 +112,9 @@ pub enum ValueError {
     /// Config validation failed.
     #[error("config error: {0}")]
     Config(String),
-    /// A retained-value contract failed exact annex validation.
+    /// A retained-value contract failed exact owner validation.
     #[error("invalid retained-value contract")]
     RetainedValueContract,
-    /// The frozen recoverability codec rejected a retained-value contract.
-    #[error(transparent)]
-    Recoverability(#[from] mfm_canonical::RecoverabilityError),
 }
 
 /// Returns `true` when `input` matches MFM's high-signal secret-marker policy.
@@ -331,14 +337,27 @@ pub struct SchemaIdentity {
     pub schema_name: NameToken,
     /// Manually assigned schema version.
     pub schema_version: SchemaVersion,
-    /// Canonical serialized shape.
-    pub shape: SchemaShape,
+    /// Closed persisted encoding, including its serialized shape.
+    pub encoding: PersistedEncoding,
     /// Canonicalization algorithm.
     pub canonicalization: DigestAlgorithm,
     /// Versioning policy.
     pub versioning: SchemaVersioningPolicy,
     /// Persisted-surface no-secret/no-float policy.
     pub persisted_surface: PersistedSurfacePolicy,
+}
+
+/// The four hashed cardinality and byte bounds of one JSON-lines stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalJsonLinesBounds {
+    /// Inclusive minimum record count.
+    pub minimum_records: u32,
+    /// Inclusive maximum record count.
+    pub maximum_records: u32,
+    /// Inclusive maximum framed bytes of one record, including its LF delimiter.
+    pub maximum_framed_record_bytes: u32,
+    /// Inclusive maximum bytes of the complete stream.
+    pub maximum_stream_bytes: u64,
 }
 
 impl SchemaIdentity {
@@ -350,7 +369,45 @@ impl SchemaIdentity {
         schema_version: SchemaVersion,
         shape: SchemaShape,
     ) -> Result<Self> {
-        let raw_schema_name = schema_name.into();
+        Self::with_encoding(
+            schema_kind,
+            semantic_type_id,
+            schema_name.into(),
+            schema_version,
+            PersistedEncoding::CanonicalJson { shape },
+        )
+    }
+
+    /// Creates a schema identity for the one bounded JSON-lines stream encoding.
+    pub fn new_canonical_json_lines(
+        schema_kind: SchemaKind,
+        schema_name: impl Into<String>,
+        schema_version: SchemaVersion,
+        record_shape: SchemaShape,
+        bounds: CanonicalJsonLinesBounds,
+    ) -> Result<Self> {
+        Self::with_encoding(
+            schema_kind,
+            None,
+            schema_name.into(),
+            schema_version,
+            PersistedEncoding::CanonicalJsonLines {
+                record_shape,
+                minimum_records: bounds.minimum_records,
+                maximum_records: bounds.maximum_records,
+                maximum_framed_record_bytes: bounds.maximum_framed_record_bytes,
+                maximum_stream_bytes: bounds.maximum_stream_bytes,
+            },
+        )
+    }
+
+    fn with_encoding(
+        schema_kind: SchemaKind,
+        semantic_type_id: Option<SemanticTypeId>,
+        raw_schema_name: String,
+        schema_version: SchemaVersion,
+        encoding: PersistedEncoding,
+    ) -> Result<Self> {
         let schema_name = NameToken::new(&raw_schema_name).map_err(|_| {
             ValueError::Descriptor(format!("invalid schema name {raw_schema_name:?}"))
         })?;
@@ -359,13 +416,92 @@ impl SchemaIdentity {
             semantic_type_id,
             schema_name,
             schema_version,
-            shape,
+            encoding,
             canonicalization: DigestAlgorithm::Sha256JcsV1,
             versioning: SchemaVersioningPolicy::ManualVersion,
             persisted_surface: PersistedSurfacePolicy::strict(),
         };
         identity.validate()?;
         Ok(identity)
+    }
+
+    /// Returns the canonical-JSON shape of this identity.
+    ///
+    /// A stream encoding has no single JSON object shape and is rejected here;
+    /// its record shape belongs to its own codec owner.
+    pub fn canonical_json_shape(&self) -> Result<&SchemaShape> {
+        match &self.encoding {
+            PersistedEncoding::CanonicalJson { shape } => Ok(shape),
+            PersistedEncoding::CanonicalJsonLines { .. } => Err(ValueError::SchemaShapeMismatch),
+        }
+    }
+
+    /// Consumes this identity and returns its canonical-JSON shape.
+    ///
+    /// This is primarily used while composing the exact shape of a concrete
+    /// outer persisted owner, where moving avoids a recursive clone of the
+    /// nested identity.
+    #[doc(hidden)]
+    pub fn into_canonical_json_shape(self) -> Result<SchemaShape> {
+        match self.encoding {
+            PersistedEncoding::CanonicalJson { shape } => Ok(shape),
+            PersistedEncoding::CanonicalJsonLines { .. } => Err(ValueError::SchemaShapeMismatch),
+        }
+    }
+
+    /// Verifies one complete bounded JSON-lines stream against this identity.
+    ///
+    /// LF delimiters, the required final LF, the declared record bounds, and
+    /// the declared record shape are all enforced here, so a stream owner does
+    /// not restate its own framing rules.
+    pub fn validate_canonical_json_lines(&self, bytes: &[u8]) -> Result<()> {
+        self.validate()?;
+        let PersistedEncoding::CanonicalJsonLines {
+            record_shape,
+            minimum_records,
+            maximum_records,
+            maximum_framed_record_bytes,
+            maximum_stream_bytes,
+        } = &self.encoding
+        else {
+            return Err(ValueError::SchemaShapeMismatch);
+        };
+        if u64::try_from(bytes.len()).map_err(|_| ValueError::SchemaShapeMismatch)?
+            > *maximum_stream_bytes
+            || bytes.last() != Some(&b'\n')
+        {
+            return Err(ValueError::SchemaShapeMismatch);
+        }
+        let mut records: u32 = 0;
+        for record in bytes
+            .split(|byte| *byte == b'\n')
+            .take_while(|record| !record.is_empty())
+        {
+            if u32::try_from(record.len().saturating_add(1))
+                .map_err(|_| ValueError::SchemaShapeMismatch)?
+                > *maximum_framed_record_bytes
+            {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(record)
+                .map_err(|_| ValueError::SchemaShapeMismatch)?;
+            let value: serde_json::Value = serde_json::from_slice(canonical.as_bytes())
+                .map_err(|_| ValueError::SchemaShapeMismatch)?;
+            record_shape
+                .validate_json_value(&value, 0)
+                .map_err(|_| ValueError::SchemaShapeMismatch)?;
+            records = records
+                .checked_add(1)
+                .ok_or(ValueError::SchemaShapeMismatch)?;
+        }
+        if records < *minimum_records
+            || records > *maximum_records
+            || usize::try_from(records).map_err(|_| ValueError::SchemaShapeMismatch)?
+                != bytes.iter().filter(|byte| **byte == b'\n').count()
+        {
+            return Err(ValueError::SchemaShapeMismatch);
+        }
+        Ok(())
     }
 
     /// Strictly decodes exact canonical schema-identity bytes.
@@ -389,7 +525,7 @@ impl SchemaIdentity {
     /// Returns exact canonical JSON for this hash-defining identity.
     pub fn canonical_json(&self) -> Result<CanonicalJsonBytes> {
         self.validate()?;
-        Ok(self.canonical_json_unchecked())
+        self.canonical_json_unchecked()
     }
 
     /// Derives the schema id from this complete identity.
@@ -407,11 +543,18 @@ impl SchemaIdentity {
     /// Verifies exact canonical value bytes against this identity's complete closed shape.
     pub fn validate_canonical_value(&self, bytes: &[u8]) -> Result<()> {
         self.validate()?;
+        self.validate_canonical_value_for_prevalidated_owner(bytes)
+    }
+
+    /// Validates value bytes against an identity already checked and retained
+    /// by its concrete Rust owner.
+    #[doc(hidden)]
+    pub fn validate_canonical_value_for_prevalidated_owner(&self, bytes: &[u8]) -> Result<()> {
         let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
             .map_err(|_| ValueError::SchemaShapeMismatch)?;
         let value: serde_json::Value = serde_json::from_slice(canonical.as_bytes())
             .map_err(|_| ValueError::SchemaShapeMismatch)?;
-        self.shape
+        self.canonical_json_shape()?
             .validate_json_value(&value, 0)
             .map_err(|_| ValueError::SchemaShapeMismatch)
     }
@@ -434,21 +577,23 @@ impl SchemaIdentity {
                 SchemaKind::PlanningConfig
                 | SchemaKind::StateInput
                 | SchemaKind::OperationOutput
-                | SchemaKind::PublicOutput,
+                | SchemaKind::PublicOutput
+                | SchemaKind::PersistedContract,
                 None,
             ) => {}
             (
                 SchemaKind::PlanningConfig
                 | SchemaKind::StateInput
                 | SchemaKind::OperationOutput
-                | SchemaKind::PublicOutput,
+                | SchemaKind::PublicOutput
+                | SchemaKind::PersistedContract,
                 Some(_),
             ) => Err(ValueError::Descriptor(
                 "non-value schema identities must not include a semantic type id".to_owned(),
             ))?,
         }
-        self.shape.validate_descriptor(0)?;
-        if self.canonical_json_unchecked().as_bytes().len() > MAX_SCHEMA_IDENTITY_BYTES {
+        self.encoding.validate_descriptor()?;
+        if self.canonical_json_unchecked()?.as_bytes().len() > MAX_SCHEMA_IDENTITY_BYTES {
             return Err(ValueError::Descriptor(
                 "schema identity exceeds the canonical byte bound".to_owned(),
             ));
@@ -456,27 +601,12 @@ impl SchemaIdentity {
         Ok(())
     }
 
-    fn canonical_json_unchecked(&self) -> CanonicalJsonBytes {
-        CanonicalJsonBytes::from_value(&self.to_canonical_value())
-    }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        canonical_object([
-            ("canonicalization", string(self.canonicalization.as_str())),
-            (
-                "persisted_surface",
-                self.persisted_surface.to_canonical_value(),
-            ),
-            ("schema_kind", string(self.schema_kind.as_str())),
-            ("schema_name", string(self.schema_name.as_str())),
-            ("schema_version", string(self.schema_version.as_str())),
-            (
-                "semantic_type_id",
-                optional_string(self.semantic_type_id.as_ref().map(SemanticTypeId::as_str)),
-            ),
-            ("shape", self.shape.to_canonical_value()),
-            ("versioning", self.versioning.to_canonical_value()),
-        ])
+    fn canonical_json_unchecked(&self) -> Result<CanonicalJsonBytes> {
+        let wire = SchemaIdentityWire::from(self);
+        let json = serde_json::to_string(&wire).map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|_| ValueError::InvalidSchemaIdentity)?;
+        Ok(CanonicalJsonBytes::from_checked_plain(canonical))
     }
 }
 
@@ -574,6 +704,9 @@ pub enum SchemaKind {
     OperationOutput,
     /// Public output surface.
     PublicOutput,
+    /// Retained history/component contract that is not a state value, config,
+    /// input, or output.
+    PersistedContract,
 }
 
 impl SchemaKind {
@@ -584,6 +717,7 @@ impl SchemaKind {
             Self::StateInput => "state_input",
             Self::OperationOutput => "operation_output",
             Self::PublicOutput => "public_output",
+            Self::PersistedContract => "persisted_contract",
         }
     }
 }
@@ -594,14 +728,6 @@ pub enum SchemaVersioningPolicy {
     /// Breaking shape or semantic changes require a manually assigned new
     /// schema version.
     ManualVersion,
-}
-
-impl SchemaVersioningPolicy {
-    fn to_canonical_value(self) -> CanonicalValue {
-        match self {
-            Self::ManualVersion => string("manual_version"),
-        }
-    }
 }
 
 /// Persisted-surface policy combining no-secret and no-float requirements.
@@ -621,13 +747,6 @@ impl PersistedSurfacePolicy {
             numbers: NumberPolicy::NoFloats,
         }
     }
-
-    fn to_canonical_value(self) -> CanonicalValue {
-        canonical_object([
-            ("numbers", self.numbers.to_canonical_value()),
-            ("secrets", self.secrets.to_canonical_value()),
-        ])
-    }
 }
 
 /// Secret policy for persisted surfaces.
@@ -637,14 +756,6 @@ pub enum SecretPolicy {
     NoSecrets,
 }
 
-impl SecretPolicy {
-    fn to_canonical_value(self) -> CanonicalValue {
-        match self {
-            Self::NoSecrets => string("no_secrets"),
-        }
-    }
-}
-
 /// Number policy for persisted surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NumberPolicy {
@@ -652,10 +763,54 @@ pub enum NumberPolicy {
     NoFloats,
 }
 
-impl NumberPolicy {
-    fn to_canonical_value(self) -> CanonicalValue {
+/// Closed persisted encoding of one retained owner type.
+///
+/// The encoding is part of the hashed schema identity, so changing a framing
+/// rule or a stream bound changes the derived `SchemaId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PersistedEncoding {
+    /// One canonical JSON value.
+    CanonicalJson {
+        /// Complete serialized shape of that value.
+        shape: SchemaShape,
+    },
+    /// A bounded newline-delimited stream of canonical JSON records.
+    ///
+    /// LF delimiters and a required final LF are fixed by this encoding; they
+    /// are not configurable flags.
+    CanonicalJsonLines {
+        /// Complete serialized shape of one framed record.
+        record_shape: SchemaShape,
+        /// Inclusive minimum record count.
+        minimum_records: u32,
+        /// Inclusive maximum record count.
+        maximum_records: u32,
+        /// Inclusive maximum framed bytes of one record, excluding its delimiter.
+        maximum_framed_record_bytes: u32,
+        /// Inclusive maximum bytes of the complete stream.
+        maximum_stream_bytes: u64,
+    },
+}
+
+impl PersistedEncoding {
+    fn validate_descriptor(&self) -> Result<()> {
         match self {
-            Self::NoFloats => string("no_floats"),
+            Self::CanonicalJson { shape } => shape.validate_descriptor(0),
+            Self::CanonicalJsonLines {
+                record_shape,
+                minimum_records,
+                maximum_records,
+                maximum_framed_record_bytes,
+                maximum_stream_bytes,
+            } => {
+                require_descriptor(
+                    minimum_records <= maximum_records
+                        && *maximum_framed_record_bytes > 0
+                        && *maximum_stream_bytes > 0,
+                    "canonical JSON-lines bounds are inverted or empty",
+                )?;
+                record_shape.validate_descriptor(0)
+            }
         }
     }
 }
@@ -729,6 +884,71 @@ pub enum SchemaShape {
         /// Serialized representation of the constructed value.
         serialized_shape: Box<SchemaShape>,
     },
+    /// UTF-8 string with inclusive byte bounds and a closed grammar.
+    BoundedString {
+        /// Inclusive minimum UTF-8 byte length.
+        minimum_bytes: u32,
+        /// Inclusive maximum UTF-8 byte length.
+        maximum_bytes: u32,
+        /// Closed grammar identifier enforced by the checked owner.
+        grammar: StringGrammar,
+    },
+    /// Base64url-without-padding bytes with inclusive decoded byte bounds.
+    BoundedBytes {
+        /// Inclusive minimum decoded byte length.
+        minimum_decoded_bytes: u32,
+        /// Inclusive maximum decoded byte length.
+        maximum_decoded_bytes: u32,
+    },
+    /// Unsigned integer restricted to an inclusive range.
+    UnsignedRange {
+        /// Inclusive minimum.
+        minimum: u64,
+        /// Inclusive maximum.
+        maximum: u64,
+    },
+    /// Signed integer restricted to an inclusive range.
+    SignedRange {
+        /// Inclusive minimum.
+        minimum: i64,
+        /// Inclusive maximum.
+        maximum: i64,
+    },
+    /// Exact scalar literal.
+    Literal(LiteralValue),
+    /// Sequence with element shape, cardinality bounds, ordering, and uniqueness.
+    BoundedSequence {
+        /// Element shape.
+        element: Box<SchemaShape>,
+        /// Inclusive minimum cardinality.
+        minimum_items: u32,
+        /// Inclusive maximum cardinality.
+        maximum_items: u32,
+        /// Declared element ordering.
+        ordering: SequenceOrdering,
+        /// Whether elements must be pairwise distinct.
+        unique: bool,
+    },
+    /// String-keyed map with key grammar/bounds, value shape, and entry bounds.
+    BoundedStringMap {
+        /// Closed key grammar.
+        key_grammar: StringGrammar,
+        /// Inclusive minimum key byte length.
+        key_minimum_bytes: u32,
+        /// Inclusive maximum key byte length.
+        key_maximum_bytes: u32,
+        /// Value shape.
+        value: Box<SchemaShape>,
+        /// Inclusive minimum entry count.
+        minimum_entries: u32,
+        /// Inclusive maximum entry count.
+        maximum_entries: u32,
+    },
+    /// Bounded canonical-JSON terminal with an explicit number profile.
+    CanonicalJsonTerminal {
+        /// Closed number profile.
+        profile: CanonicalJsonProfile,
+    },
 }
 
 impl SchemaShape {
@@ -746,8 +966,37 @@ impl SchemaShape {
         Ok(Self::InlineValue {
             schema_id,
             semantic_type_id,
-            serialized_shape: Box::new(descriptor.identity.shape.clone()),
+            serialized_shape: Box::new(descriptor.identity.canonical_json_shape()?.clone()),
         })
+    }
+
+    /// Builds a bounded string shape for one checked identity grammar.
+    ///
+    /// Persisted owners describe checked identity fields through this helper so
+    /// the grammar is named once and enforced by its checked Rust owner.
+    pub fn identity_string(grammar: StringGrammar, maximum_bytes: u32) -> Self {
+        Self::BoundedString {
+            minimum_bytes: 1,
+            maximum_bytes,
+            grammar,
+        }
+    }
+
+    /// Builds the exact serialized shape of one `ContentRef`.
+    ///
+    /// `ContentRef` is the most common nested persisted field, so its shape is
+    /// framework-owned rather than restated by every retained owner.
+    pub fn content_ref() -> Result<Self> {
+        Self::named_struct(vec![
+            FieldDescriptor::required(
+                "content_digest",
+                Self::identity_string(StringGrammar::ContentDigest, 128),
+            ),
+            FieldDescriptor::required(
+                "schema_id",
+                Self::identity_string(StringGrammar::SchemaId, 512),
+            ),
+        ])
     }
 
     /// Builds a named struct shape, rejecting duplicate field names.
@@ -883,6 +1132,54 @@ impl SchemaShape {
                 }
                 serialized_shape.validate_descriptor(depth + 1)
             }
+            Self::BoundedString {
+                minimum_bytes,
+                maximum_bytes,
+                ..
+            } => require_descriptor(
+                minimum_bytes <= maximum_bytes,
+                "bounded string bounds are inverted",
+            ),
+            Self::BoundedBytes {
+                minimum_decoded_bytes,
+                maximum_decoded_bytes,
+            } => require_descriptor(
+                minimum_decoded_bytes <= maximum_decoded_bytes,
+                "bounded byte bounds are inverted",
+            ),
+            Self::UnsignedRange { minimum, maximum } => {
+                require_descriptor(minimum <= maximum, "unsigned range is inverted")
+            }
+            Self::SignedRange { minimum, maximum } => {
+                require_descriptor(minimum <= maximum, "signed range is inverted")
+            }
+            Self::Literal(_) | Self::CanonicalJsonTerminal { .. } => Ok(()),
+            Self::BoundedSequence {
+                element,
+                minimum_items,
+                maximum_items,
+                ..
+            } => {
+                require_descriptor(
+                    minimum_items <= maximum_items,
+                    "bounded sequence cardinality is inverted",
+                )?;
+                element.validate_descriptor(depth + 1)
+            }
+            Self::BoundedStringMap {
+                key_minimum_bytes,
+                key_maximum_bytes,
+                value,
+                minimum_entries,
+                maximum_entries,
+                ..
+            } => {
+                require_descriptor(
+                    key_minimum_bytes <= key_maximum_bytes && minimum_entries <= maximum_entries,
+                    "bounded string-map bounds are inverted",
+                )?;
+                value.validate_descriptor(depth + 1)
+            }
         }
     }
 
@@ -983,104 +1280,115 @@ impl SchemaShape {
             | Self::Generic {
                 serialized_shape, ..
             } => serialized_shape.validate_json_value(value, depth + 1),
-        }
-    }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        match self {
-            Self::Unit => kind_only("unit"),
-            Self::Bool => kind_only("bool"),
-            Self::String => kind_only("string"),
-            Self::Bytes => kind_only("bytes"),
-            Self::SignedInteger { bits } => canonical_object([
-                ("bits", CanonicalValue::Unsigned(u64::from(*bits))),
-                ("kind", string("signed_integer")),
-            ]),
-            Self::UnsignedInteger { bits } => canonical_object([
-                ("bits", CanonicalValue::Unsigned(u64::from(*bits))),
-                ("kind", string("unsigned_integer")),
-            ]),
-            Self::DecimalString { scale } => canonical_object([
-                ("kind", string("decimal_string")),
-                ("scale", scale.to_canonical_value()),
-            ]),
-            Self::Option(value) => canonical_object([
-                ("element", value.to_canonical_value()),
-                ("kind", string("option")),
-            ]),
-            Self::Vec(value) => canonical_object([
-                ("element", value.to_canonical_value()),
-                ("kind", string("vec")),
-            ]),
-            Self::NonEmptyVec(value) => canonical_object([
-                ("element", value.to_canonical_value()),
-                ("kind", string("non_empty_vec")),
-            ]),
-            Self::Tuple(values) => canonical_object([
-                (
-                    "elements",
-                    CanonicalValue::Array(values.iter().map(Self::to_canonical_value).collect()),
-                ),
-                ("kind", string("tuple")),
-            ]),
-            Self::Struct { fields } => canonical_object([
-                (
-                    "fields",
-                    CanonicalValue::Array(
-                        fields
-                            .iter()
-                            .map(FieldDescriptor::to_canonical_value)
-                            .collect(),
-                    ),
-                ),
-                ("kind", string("struct")),
-            ]),
-            Self::Enum { tagging, variants } => canonical_object([
-                ("kind", string("enum")),
-                ("tagging", tagging.to_canonical_value()),
-                (
-                    "variants",
-                    CanonicalValue::Array(
-                        variants
-                            .iter()
-                            .map(EnumVariantDescriptor::to_canonical_value)
-                            .collect(),
-                    ),
-                ),
-            ]),
-            Self::BTreeMapString { value } => canonical_object([
-                ("key", string("string")),
-                ("kind", string("btree_map")),
-                ("value", value.to_canonical_value()),
-            ]),
-            Self::InlineValue {
-                schema_id,
-                semantic_type_id,
-                serialized_shape,
-            } => canonical_object([
-                ("kind", string("inline_value")),
-                ("schema_id", string(schema_id.as_str())),
-                ("semantic_type_id", string(semantic_type_id.as_str())),
-                ("serialized_shape", serialized_shape.to_canonical_value()),
-            ]),
-            Self::Generic {
-                constructor,
-                arguments,
-                serialized_shape,
-            } => canonical_object([
-                (
-                    "arguments",
-                    CanonicalValue::Array(
-                        arguments
-                            .iter()
-                            .map(GenericArgumentDescriptor::to_canonical_value)
-                            .collect(),
-                    ),
-                ),
-                ("constructor", string(constructor)),
-                ("kind", string("generic")),
-                ("serialized_shape", serialized_shape.to_canonical_value()),
-            ]),
+            Self::BoundedString {
+                minimum_bytes,
+                maximum_bytes,
+                grammar,
+            } => {
+                let Some(text) = value.as_str() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                require(
+                    !string_contains_secret_marker(text)
+                        && text.len() >= *minimum_bytes as usize
+                        && text.len() <= *maximum_bytes as usize
+                        && grammar_admits(*grammar, text),
+                )
+            }
+            Self::BoundedBytes {
+                minimum_decoded_bytes,
+                maximum_decoded_bytes,
+            } => {
+                let Some(text) = value.as_str() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                let Ok(bytes) = CanonicalBytes::from_base64url_no_pad(text.to_owned()) else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                let length = bytes.as_bytes().len();
+                require(
+                    length >= *minimum_decoded_bytes as usize
+                        && length <= *maximum_decoded_bytes as usize,
+                )
+            }
+            Self::UnsignedRange { minimum, maximum } => {
+                let Some(value) = value.as_u64() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                require(value >= *minimum && value <= *maximum)
+            }
+            Self::SignedRange { minimum, maximum } => {
+                let Some(value) = value.as_i64() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                require(value >= *minimum && value <= *maximum)
+            }
+            Self::Literal(literal) => require(literal_matches(literal, value)),
+            Self::BoundedSequence {
+                element,
+                minimum_items,
+                maximum_items,
+                ordering,
+                unique,
+            } => {
+                let Some(values) = value.as_array() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                if values.len() < *minimum_items as usize || values.len() > *maximum_items as usize
+                {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                for value in values {
+                    element.validate_json_value(value, depth + 1)?;
+                }
+                let encoded = values
+                    .iter()
+                    .map(|value| serde_json::to_string(value).unwrap_or_default())
+                    .collect::<Vec<_>>();
+                if *unique {
+                    let distinct = encoded.iter().collect::<std::collections::BTreeSet<_>>();
+                    if distinct.len() != encoded.len() {
+                        return Err(ValueError::SchemaShapeMismatch);
+                    }
+                }
+                match ordering {
+                    SequenceOrdering::Preserved => Ok(()),
+                    SequenceOrdering::CanonicalAscending | SequenceOrdering::Utf16Key => {
+                        require(encoded.windows(2).all(|pair| pair[0] <= pair[1]))
+                    }
+                }
+            }
+            Self::BoundedStringMap {
+                key_grammar,
+                key_minimum_bytes,
+                key_maximum_bytes,
+                value: element,
+                minimum_entries,
+                maximum_entries,
+            } => {
+                let Some(object) = value.as_object() else {
+                    return Err(ValueError::SchemaShapeMismatch);
+                };
+                if object.len() < *minimum_entries as usize
+                    || object.len() > *maximum_entries as usize
+                {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                for (key, value) in object {
+                    if string_contains_secret_marker(key)
+                        || key.len() < *key_minimum_bytes as usize
+                        || key.len() > *key_maximum_bytes as usize
+                        || !grammar_admits(*key_grammar, key)
+                    {
+                        return Err(ValueError::SchemaShapeMismatch);
+                    }
+                    element.validate_json_value(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::CanonicalJsonTerminal { profile } => {
+                validate_canonical_json_terminal(*profile, value)
+            }
         }
     }
 }
@@ -1092,18 +1400,6 @@ pub enum DecimalScale {
     Variable,
     /// Fixed scale.
     Fixed(u16),
-}
-
-impl DecimalScale {
-    fn to_canonical_value(self) -> CanonicalValue {
-        match self {
-            Self::Variable => canonical_object([("kind", string("variable"))]),
-            Self::Fixed(scale) => canonical_object([
-                ("kind", string("fixed")),
-                ("scale", CanonicalValue::Unsigned(u64::from(scale))),
-            ]),
-        }
-    }
 }
 
 /// Field descriptor for named structs.
@@ -1127,6 +1423,15 @@ impl FieldDescriptor {
         }
     }
 
+    /// Creates a field descriptor that is absent rather than null when unset.
+    pub fn optional_absent(name: impl Into<String>, shape: SchemaShape) -> Self {
+        Self {
+            name: name.into(),
+            shape,
+            default: FieldDefaultPolicy::OptionalAbsent,
+        }
+    }
+
     /// Creates a field descriptor with framework-recognized default behavior.
     pub fn with_default(name: impl Into<String>, shape: SchemaShape) -> Self {
         Self {
@@ -1134,14 +1439,6 @@ impl FieldDescriptor {
             shape,
             default: FieldDefaultPolicy::MfmDefault,
         }
-    }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        canonical_object([
-            ("default", self.default.to_canonical_value()),
-            ("name", string(&self.name)),
-            ("shape", self.shape.to_canonical_value()),
-        ])
     }
 }
 
@@ -1152,15 +1449,11 @@ pub enum FieldDefaultPolicy {
     Required,
     /// Field may use `MfmDefault`.
     MfmDefault,
-}
-
-impl FieldDefaultPolicy {
-    fn to_canonical_value(self) -> CanonicalValue {
-        match self {
-            Self::Required => string("required"),
-            Self::MfmDefault => string("mfm_default"),
-        }
-    }
+    /// Field is absent rather than null when it carries no value.
+    ///
+    /// This is deliberately distinct from an `Option` shape: an absent field and
+    /// an explicit `null` are different retained bytes.
+    OptionalAbsent,
 }
 
 /// Enum variant descriptor.
@@ -1179,13 +1472,6 @@ impl EnumVariantDescriptor {
             name: name.into(),
             shape,
         }
-    }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        canonical_object([
-            ("name", string(&self.name)),
-            ("shape", self.shape.to_canonical_value()),
-        ])
     }
 }
 
@@ -1232,20 +1518,6 @@ impl EnumTagging {
             }
         }
     }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        match self {
-            Self::External => canonical_object([("kind", string("external"))]),
-            Self::Internal { tag } => {
-                canonical_object([("kind", string("internal")), ("tag", string(tag))])
-            }
-            Self::Adjacent { tag, content } => canonical_object([
-                ("content", string(content)),
-                ("kind", string("adjacent")),
-                ("tag", string(tag)),
-            ]),
-        }
-    }
 }
 
 fn validate_struct_value(
@@ -1263,7 +1535,10 @@ fn validate_struct_value(
     for field in fields {
         match object.get(&field.name) {
             Some(value) => field.shape.validate_json_value(value, depth)?,
-            None if field.default == FieldDefaultPolicy::MfmDefault => {}
+            None if matches!(
+                field.default,
+                FieldDefaultPolicy::MfmDefault | FieldDefaultPolicy::OptionalAbsent
+            ) => {}
             None => return Err(ValueError::SchemaShapeMismatch),
         }
     }
@@ -1381,6 +1656,138 @@ fn require(condition: bool) -> Result<()> {
     }
 }
 
+fn require_descriptor(condition: bool, message: &'static str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(ValueError::Descriptor(message.to_owned()))
+    }
+}
+
+fn literal_matches(literal: &LiteralValue, value: &serde_json::Value) -> bool {
+    match literal {
+        LiteralValue::Null => value.is_null(),
+        LiteralValue::Bool(expected) => value.as_bool() == Some(*expected),
+        LiteralValue::Unsigned(expected) => value.as_u64() == Some(*expected),
+        LiteralValue::Signed(expected) => value.as_i64() == Some(*expected),
+        LiteralValue::String(expected) => value.as_str() == Some(expected.as_str()),
+    }
+}
+
+/// Applies the closed grammar named by a descriptor.
+///
+/// Each arm delegates to the one checked Rust owner of that rule, so the
+/// descriptor never carries regular-expression text and the grammar has exactly
+/// one implementation.
+fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
+    use mfm_ids::{
+        ContentDigest, InvocationIdentity, OccurrenceId, RunId, SchemaId, SemanticDigest,
+        SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
+    };
+
+    match grammar {
+        StringGrammar::UnicodeScalarText => !value.chars().any(|ch| ch.is_control()),
+        StringGrammar::ContentDigest => ContentDigest::parse(value).is_ok(),
+        StringGrammar::SemanticDigest => SemanticDigest::parse(value).is_ok(),
+        StringGrammar::RunId => RunId::parse(value).is_ok(),
+        StringGrammar::OccurrenceId => OccurrenceId::parse(value).is_ok(),
+        StringGrammar::SemanticCallId => mfm_ids::SemanticCallId::parse(value).is_ok(),
+        StringGrammar::FragmentBoundaryId => mfm_ids::FragmentBoundaryId::parse(value).is_ok(),
+        StringGrammar::FailurePlanId => mfm_ids::FailurePlanId::parse(value).is_ok(),
+        StringGrammar::AccessAttemptId => mfm_ids::AccessAttemptId::parse(value).is_ok(),
+        StringGrammar::ArtifactId => mfm_ids::ArtifactId::parse(value).is_ok(),
+        StringGrammar::SchemaId => SchemaId::parse(value).is_ok(),
+        StringGrammar::SemanticTypeId => SemanticTypeId::parse(value).is_ok(),
+        StringGrammar::EntryPointId => mfm_ids::EntryPointId::new(value).is_ok(),
+        StringGrammar::StableId => StableId::new(value).is_ok(),
+        StringGrammar::StoreScopeId => StoreScopeId::new(value).is_ok(),
+        StringGrammar::TenantScopeId => TenantScopeId::new(value).is_ok(),
+        StringGrammar::UuidV4 => InvocationIdentity::new(value).is_ok(),
+        StringGrammar::CanonicalUnsignedText => {
+            value == "0"
+                || (value.len() <= 20
+                    && !value.starts_with('0')
+                    && value.bytes().all(|byte| byte.is_ascii_digit()))
+        }
+        StringGrammar::LowerPathToken => {
+            value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'.' | b'_' | b'/' | b'-')
+                })
+        }
+        StringGrammar::MediaType => MediaType::new(value).is_ok(),
+    }
+}
+
+/// Validates one bounded canonical-JSON terminal against its number profile.
+///
+/// The global canonical byte, depth, string, key, array, and object limits are
+/// enforced separately by `mfm-canonical` when the value is canonicalized. This
+/// walk enforces the closed number profile and per-container bounds.
+fn validate_canonical_json_terminal(
+    profile: CanonicalJsonProfile,
+    value: &serde_json::Value,
+) -> Result<()> {
+    use mfm_canonical::limits::{
+        MAX_ARRAY_ITEMS, MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES, MAX_OBJECT_ENTRIES,
+        MAX_STRING_UTF8_BYTES,
+    };
+
+    match value {
+        serde_json::Value::Null | serde_json::Value::Bool(_) => Ok(()),
+        serde_json::Value::Number(number) => {
+            if number.is_f64() {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            match profile {
+                CanonicalJsonProfile::GeneralFloatFree => {
+                    require(number.is_u64() || number.is_i64())
+                }
+                CanonicalJsonProfile::UnsignedNative => require(number.is_u64()),
+            }
+        }
+        serde_json::Value::String(text) => {
+            if text.len() > MAX_STRING_UTF8_BYTES || string_contains_secret_marker(text) {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(values) => {
+            if values.len() > MAX_ARRAY_ITEMS {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            values
+                .iter()
+                .try_for_each(|value| validate_canonical_json_terminal(profile, value))
+        }
+        serde_json::Value::Object(entries) => {
+            if entries.len() > MAX_OBJECT_ENTRIES {
+                return Err(ValueError::SchemaShapeMismatch);
+            }
+            for (key, value) in entries {
+                // A key is a structural name, judged as a declared struct
+                // field name is rather than scanned for secret markers. Secret
+                // material is a value, and every value below is still scanned,
+                // so a structural name such as `authorization_ref` is admitted
+                // while a `"Bearer …"` value is not.
+                if key.is_empty()
+                    || key.len() > MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES
+                    || key.chars().any(char::is_control)
+                {
+                    return Err(ValueError::SchemaShapeMismatch);
+                }
+                validate_canonical_json_terminal(profile, value)?;
+            }
+            Ok(())
+        }
+    }
+}
+
 fn valid_wire_name(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
 }
@@ -1421,13 +1828,6 @@ impl GenericArgumentDescriptor {
             semantic_type_id: T::semantic_id()?,
         })
     }
-
-    fn to_canonical_value(&self) -> CanonicalValue {
-        canonical_object([
-            ("schema_id", string(self.schema_id.as_str())),
-            ("semantic_type_id", string(self.semantic_type_id.as_str())),
-        ])
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1438,8 +1838,8 @@ struct SchemaIdentityWire {
     schema_kind: String,
     schema_name: String,
     schema_version: String,
+    encoding: PersistedEncodingWire,
     semantic_type_id: Option<String>,
-    shape: SchemaShapeWire,
     versioning: String,
 }
 
@@ -1448,6 +1848,69 @@ struct SchemaIdentityWire {
 struct PersistedSurfaceWire {
     numbers: String,
     secrets: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum PersistedEncodingWire {
+    CanonicalJson {
+        shape: SchemaShapeWire,
+    },
+    CanonicalJsonLines {
+        maximum_framed_record_bytes: u32,
+        maximum_records: u32,
+        maximum_stream_bytes: u64,
+        minimum_records: u32,
+        record_shape: SchemaShapeWire,
+    },
+}
+
+impl From<&PersistedEncoding> for PersistedEncodingWire {
+    fn from(encoding: &PersistedEncoding) -> Self {
+        match encoding {
+            PersistedEncoding::CanonicalJson { shape } => Self::CanonicalJson {
+                shape: SchemaShapeWire::from(shape),
+            },
+            PersistedEncoding::CanonicalJsonLines {
+                record_shape,
+                minimum_records,
+                maximum_records,
+                maximum_framed_record_bytes,
+                maximum_stream_bytes,
+            } => Self::CanonicalJsonLines {
+                maximum_framed_record_bytes: *maximum_framed_record_bytes,
+                maximum_records: *maximum_records,
+                maximum_stream_bytes: *maximum_stream_bytes,
+                minimum_records: *minimum_records,
+                record_shape: SchemaShapeWire::from(record_shape),
+            },
+        }
+    }
+}
+
+impl TryFrom<PersistedEncodingWire> for PersistedEncoding {
+    type Error = ValueError;
+
+    fn try_from(wire: PersistedEncodingWire) -> Result<Self> {
+        Ok(match wire {
+            PersistedEncodingWire::CanonicalJson { shape } => Self::CanonicalJson {
+                shape: SchemaShape::try_from(shape)?,
+            },
+            PersistedEncodingWire::CanonicalJsonLines {
+                maximum_framed_record_bytes,
+                maximum_records,
+                maximum_stream_bytes,
+                minimum_records,
+                record_shape,
+            } => Self::CanonicalJsonLines {
+                record_shape: SchemaShape::try_from(record_shape)?,
+                minimum_records,
+                maximum_records,
+                maximum_framed_record_bytes,
+                maximum_stream_bytes,
+            },
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1500,6 +1963,129 @@ enum SchemaShapeWire {
         constructor: String,
         serialized_shape: Box<SchemaShapeWire>,
     },
+    BoundedString {
+        grammar: String,
+        maximum_bytes: u32,
+        minimum_bytes: u32,
+    },
+    BoundedBytes {
+        maximum_decoded_bytes: u32,
+        minimum_decoded_bytes: u32,
+    },
+    UnsignedRange {
+        maximum: u64,
+        minimum: u64,
+    },
+    SignedRange {
+        maximum: i64,
+        minimum: i64,
+    },
+    Literal {
+        value: LiteralValueWire,
+    },
+    BoundedSequence {
+        element: Box<SchemaShapeWire>,
+        maximum_items: u32,
+        minimum_items: u32,
+        ordering: String,
+        unique: bool,
+    },
+    BoundedStringMap {
+        key_grammar: String,
+        key_maximum_bytes: u32,
+        key_minimum_bytes: u32,
+        maximum_entries: u32,
+        minimum_entries: u32,
+        value: Box<SchemaShapeWire>,
+    },
+    CanonicalJsonTerminal {
+        profile: String,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum LiteralValueWire {
+    Null,
+    Bool { value: bool },
+    Unsigned { value: u64 },
+    Signed { value: i64 },
+    String { value: String },
+}
+
+impl From<&LiteralValue> for LiteralValueWire {
+    fn from(value: &LiteralValue) -> Self {
+        match value {
+            LiteralValue::Null => Self::Null,
+            LiteralValue::Bool(value) => Self::Bool { value: *value },
+            LiteralValue::Unsigned(value) => Self::Unsigned { value: *value },
+            LiteralValue::Signed(value) => Self::Signed { value: *value },
+            LiteralValue::String(value) => Self::String {
+                value: value.clone(),
+            },
+        }
+    }
+}
+
+impl From<LiteralValueWire> for LiteralValue {
+    fn from(value: LiteralValueWire) -> Self {
+        match value {
+            LiteralValueWire::Null => Self::Null,
+            LiteralValueWire::Bool { value } => Self::Bool(value),
+            LiteralValueWire::Unsigned { value } => Self::Unsigned(value),
+            LiteralValueWire::Signed { value } => Self::Signed(value),
+            LiteralValueWire::String { value } => Self::String(value),
+        }
+    }
+}
+
+fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
+    [
+        StringGrammar::UnicodeScalarText,
+        StringGrammar::ContentDigest,
+        StringGrammar::SemanticDigest,
+        StringGrammar::RunId,
+        StringGrammar::OccurrenceId,
+        StringGrammar::SemanticCallId,
+        StringGrammar::FragmentBoundaryId,
+        StringGrammar::FailurePlanId,
+        StringGrammar::AccessAttemptId,
+        StringGrammar::ArtifactId,
+        StringGrammar::SchemaId,
+        StringGrammar::SemanticTypeId,
+        StringGrammar::EntryPointId,
+        StringGrammar::StableId,
+        StringGrammar::StoreScopeId,
+        StringGrammar::TenantScopeId,
+        StringGrammar::UuidV4,
+        StringGrammar::CanonicalUnsignedText,
+        StringGrammar::LowerPathToken,
+        StringGrammar::MediaType,
+    ]
+    .into_iter()
+    .find(|grammar| grammar.as_str() == value)
+    .ok_or(ValueError::InvalidSchemaIdentity)
+}
+
+fn parse_sequence_ordering(value: &str) -> Result<SequenceOrdering> {
+    [
+        SequenceOrdering::Preserved,
+        SequenceOrdering::Utf16Key,
+        SequenceOrdering::CanonicalAscending,
+    ]
+    .into_iter()
+    .find(|ordering| ordering.as_str() == value)
+    .ok_or(ValueError::InvalidSchemaIdentity)
+}
+
+fn parse_canonical_json_profile(value: &str) -> Result<CanonicalJsonProfile> {
+    [
+        CanonicalJsonProfile::GeneralFloatFree,
+        CanonicalJsonProfile::UnsignedNative,
+    ]
+    .into_iter()
+    .find(|profile| profile.as_str() == value)
+    .ok_or(ValueError::InvalidSchemaIdentity)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1575,7 +2161,7 @@ impl From<&SchemaIdentity> for SchemaIdentityWire {
             schema_name: identity.schema_name.as_str().to_owned(),
             schema_version: identity.schema_version.as_str().to_owned(),
             semantic_type_id: identity.semantic_type_id.as_ref().map(ToString::to_string),
-            shape: SchemaShapeWire::from(&identity.shape),
+            encoding: PersistedEncodingWire::from(&identity.encoding),
             versioning: match identity.versioning {
                 SchemaVersioningPolicy::ManualVersion => "manual_version".to_owned(),
             },
@@ -1600,6 +2186,7 @@ impl TryFrom<SchemaIdentityWire> for SchemaIdentity {
             "state_input" => SchemaKind::StateInput,
             "operation_output" => SchemaKind::OperationOutput,
             "public_output" => SchemaKind::PublicOutput,
+            "persisted_contract" => SchemaKind::PersistedContract,
             _ => return Err(ValueError::InvalidSchemaIdentity),
         };
         let semantic_type_id = wire
@@ -1613,7 +2200,7 @@ impl TryFrom<SchemaIdentityWire> for SchemaIdentity {
                 .map_err(|_| ValueError::InvalidSchemaIdentity)?,
             schema_version: SchemaVersion::new(&wire.schema_version)
                 .map_err(|_| ValueError::InvalidSchemaIdentity)?,
-            shape: SchemaShape::try_from(wire.shape)?,
+            encoding: PersistedEncoding::try_from(wire.encoding)?,
             canonicalization: DigestAlgorithm::Sha256JcsV1,
             versioning: SchemaVersioningPolicy::ManualVersion,
             persisted_surface: PersistedSurfacePolicy::strict(),
@@ -1683,6 +2270,64 @@ impl From<&SchemaShape> for SchemaShapeWire {
                     .collect(),
                 constructor: constructor.clone(),
                 serialized_shape: Box::new(Self::from(serialized_shape.as_ref())),
+            },
+            SchemaShape::BoundedString {
+                minimum_bytes,
+                maximum_bytes,
+                grammar,
+            } => Self::BoundedString {
+                grammar: grammar.as_str().to_owned(),
+                maximum_bytes: *maximum_bytes,
+                minimum_bytes: *minimum_bytes,
+            },
+            SchemaShape::BoundedBytes {
+                minimum_decoded_bytes,
+                maximum_decoded_bytes,
+            } => Self::BoundedBytes {
+                maximum_decoded_bytes: *maximum_decoded_bytes,
+                minimum_decoded_bytes: *minimum_decoded_bytes,
+            },
+            SchemaShape::UnsignedRange { minimum, maximum } => Self::UnsignedRange {
+                maximum: *maximum,
+                minimum: *minimum,
+            },
+            SchemaShape::SignedRange { minimum, maximum } => Self::SignedRange {
+                maximum: *maximum,
+                minimum: *minimum,
+            },
+            SchemaShape::Literal(value) => Self::Literal {
+                value: LiteralValueWire::from(value),
+            },
+            SchemaShape::BoundedSequence {
+                element,
+                minimum_items,
+                maximum_items,
+                ordering,
+                unique,
+            } => Self::BoundedSequence {
+                element: Box::new(Self::from(element.as_ref())),
+                maximum_items: *maximum_items,
+                minimum_items: *minimum_items,
+                ordering: ordering.as_str().to_owned(),
+                unique: *unique,
+            },
+            SchemaShape::BoundedStringMap {
+                key_grammar,
+                key_minimum_bytes,
+                key_maximum_bytes,
+                value,
+                minimum_entries,
+                maximum_entries,
+            } => Self::BoundedStringMap {
+                key_grammar: key_grammar.as_str().to_owned(),
+                key_maximum_bytes: *key_maximum_bytes,
+                key_minimum_bytes: *key_minimum_bytes,
+                maximum_entries: *maximum_entries,
+                minimum_entries: *minimum_entries,
+                value: Box::new(Self::from(value.as_ref())),
+            },
+            SchemaShape::CanonicalJsonTerminal { profile } => Self::CanonicalJsonTerminal {
+                profile: profile.as_str().to_owned(),
             },
         }
     }
@@ -1761,6 +2406,60 @@ impl TryFrom<SchemaShapeWire> for SchemaShape {
                     .collect::<Result<_>>()?,
                 serialized_shape: Box::new(Self::try_from(*serialized_shape)?),
             },
+            SchemaShapeWire::BoundedString {
+                grammar,
+                maximum_bytes,
+                minimum_bytes,
+            } => Self::BoundedString {
+                minimum_bytes,
+                maximum_bytes,
+                grammar: parse_string_grammar(&grammar)?,
+            },
+            SchemaShapeWire::BoundedBytes {
+                maximum_decoded_bytes,
+                minimum_decoded_bytes,
+            } => Self::BoundedBytes {
+                minimum_decoded_bytes,
+                maximum_decoded_bytes,
+            },
+            SchemaShapeWire::UnsignedRange { maximum, minimum } => {
+                Self::UnsignedRange { minimum, maximum }
+            }
+            SchemaShapeWire::SignedRange { maximum, minimum } => {
+                Self::SignedRange { minimum, maximum }
+            }
+            SchemaShapeWire::Literal { value } => Self::Literal(LiteralValue::from(value)),
+            SchemaShapeWire::BoundedSequence {
+                element,
+                maximum_items,
+                minimum_items,
+                ordering,
+                unique,
+            } => Self::BoundedSequence {
+                element: Box::new(Self::try_from(*element)?),
+                minimum_items,
+                maximum_items,
+                ordering: parse_sequence_ordering(&ordering)?,
+                unique,
+            },
+            SchemaShapeWire::BoundedStringMap {
+                key_grammar,
+                key_maximum_bytes,
+                key_minimum_bytes,
+                maximum_entries,
+                minimum_entries,
+                value,
+            } => Self::BoundedStringMap {
+                key_grammar: parse_string_grammar(&key_grammar)?,
+                key_minimum_bytes,
+                key_maximum_bytes,
+                value: Box::new(Self::try_from(*value)?),
+                minimum_entries,
+                maximum_entries,
+            },
+            SchemaShapeWire::CanonicalJsonTerminal { profile } => Self::CanonicalJsonTerminal {
+                profile: parse_canonical_json_profile(&profile)?,
+            },
         })
     }
 }
@@ -1789,6 +2488,7 @@ impl From<&FieldDescriptor> for FieldDescriptorWire {
             default: match field.default {
                 FieldDefaultPolicy::Required => "required".to_owned(),
                 FieldDefaultPolicy::MfmDefault => "mfm_default".to_owned(),
+                FieldDefaultPolicy::OptionalAbsent => "optional_absent".to_owned(),
             },
             name: field.name.clone(),
             shape: SchemaShapeWire::from(&field.shape),
@@ -1803,6 +2503,7 @@ impl TryFrom<FieldDescriptorWire> for FieldDescriptor {
         let default = match field.default.as_str() {
             "required" => FieldDefaultPolicy::Required,
             "mfm_default" => FieldDefaultPolicy::MfmDefault,
+            "optional_absent" => FieldDefaultPolicy::OptionalAbsent,
             _ => return Err(ValueError::InvalidSchemaIdentity),
         };
         Ok(Self {
@@ -1946,22 +2647,4 @@ fn reject_duplicate_names<'a>(
         }
     }
     Ok(())
-}
-
-fn kind_only(kind: &'static str) -> CanonicalValue {
-    canonical_object([("kind", string(kind))])
-}
-
-fn string(value: &str) -> CanonicalValue {
-    CanonicalValue::String(value.to_owned())
-}
-
-fn optional_string(value: Option<&str>) -> CanonicalValue {
-    value.map_or(CanonicalValue::Null, string)
-}
-
-fn canonical_object<const N: usize>(
-    entries: [(&'static str, CanonicalValue); N],
-) -> CanonicalValue {
-    CanonicalValue::object(entries).expect("static descriptor object keys are unique")
 }

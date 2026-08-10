@@ -3,8 +3,8 @@
 Status: authoritative structured-runtime design contract
 
 This document defines the one current runtime, history, storage, replay, and application design.
-The exact recoverability encodings live in `contracts/recoverability/v1/annex.json` and
-`contracts/recoverability/v1/corpus.json`; those generated contracts are authoritative for bytes.
+Each persisted type derives its own schema identity from the exact shape its Rust owner declares;
+that owner is authoritative for bytes.
 
 ## Material uncertainties
 
@@ -46,8 +46,11 @@ structural values; they are not instructions.
 - Runtime owns the only production path that can request semantic run-history mutation through
   `RuntimeHistoryPort`. The store's private adapter owns the sole fold and append authority.
   Runtime performs at most one semantic transition or one audited external-access operation per
-  `drive_once` call. Callers never supply a trusted run digest for admission; the store derives
-  `RunId` from the annex `mfm.run-id-preimage.v1`.
+  `drive_once` call. Callers never supply a trusted run digest for admission; the journal owns the
+  one `derive_run_id` rule over the store scope, tenant scope, entry-point operation, and
+  invocation identity. Qualification re-derives that identity from the admitted coordinates, so a
+  history whose envelope and `RunAdmitted.run_id` agree with each other but disagree with their
+  preimage is rejected.
 - Authority-bearing integration traits (`RuntimeHistoryPort`, physical-binding verification,
   wallet authority, and deployment credential issuance) require a
   workspace-private marker. Downstream callers can consume the completed products but cannot
@@ -90,8 +93,8 @@ certification, decoding, and replay; the JSON-node limit is an eightfold envelop
 component-definition bound for structured protocol and schema nodes. Exceeding any bound is a
 typed rejection and never a process-stack operation.
 
-The generated recoverability annex allows canonical JSON values and retained history frames up to
-32 MiB. Plain canonical-JSON ingress applies that generated document budget before parsing and
+Canonical JSON values and retained history frames are bounded at 32 MiB. Plain canonical-JSON
+ingress applies that document budget before parsing and
 again to the canonicalized bytes. These ceilings remain separate from the smaller string,
 portable-export, and provider-proof budgets: they admit the largest qualified structured-program
 value while keeping every transport and retained payload bound explicit.
@@ -143,8 +146,9 @@ choice is derived from the committed selector value; it is never authored into h
 independently of payload bytes. Structural path ordering is ordinal-first; labels are diagnostic.
 The certified profile bounds lanes, occurrences, declarations, branch depth, and fan-out depth.
 The production portfolio uses depth two: portfolio network lanes contain EVM-owned read lanes.
-A waiting Read may expose a later lane; an unresolved barrier stops further scanning. Joins retain
-declaration order independent of physical completion order.
+An unresolved barrier stops further scanning, and a re-assertable Read keeps its own lane as the
+minimum action rather than exposing a later one. Joins retain declaration order independent of
+physical completion order.
 
 ## Run history and fold
 
@@ -160,7 +164,7 @@ The fold derives:
 - declaration-ordered actionable occurrences and active fan-out lanes;
 - outstanding Read and Effect access;
 - semantic and physical journal heads;
-- waiting, possible-entry, integrity-blocked, and closed status;
+- possible-entry, integrity-blocked, and closed status;
 - the exact terminal root outcome; and
 - complete records and append heads in physical chronology.
 
@@ -231,7 +235,39 @@ success-only disposition, admits only a success proposal for every inhabited val
 no `InvalidEvidence`, and no author-selected sample corpus. An ordinary typed failure follows its
 certified handler and may close the run as failed. `SupersededBeforeEntry` is Effect-only and,
 after purpose-limited physical-lineage verification, creates exactly the next attempt ordinal.
-`EntryUnknown` parks possible entry. Committed `IntegrityFault` blocks. An unmatched Read waits.
+Every Effect capability additionally declares a sealed re-entry discipline, orthogonal to refresh
+and certified beside it. `EntryOnce` states that a repeat is not absorbed; `EntryAbsorbing<MAX>`
+states that the external system absorbs a repeat of the byte-identical committed request, and is
+declarable only over a request that names its exact entry key. Declaring absorption asserts four
+things the kernel cannot verify — that the external system absorbs a repeat, that the adapter
+transmits the key, that absorption is retained long enough, and that `Returned` and `SafeFailure`
+are functions of the external system's post-state rather than of one exchange. The last is the
+sharpest: `RowsAffected(1)` violates it and `InsertOutcome { key, row }` satisfies it. All four are
+certification obligations discharged by review, and naming `EntryAbsorbing` is where an author
+takes them on.
+
+The possible-entry frontier names its blocked `EffectEntrySubject` — occurrence identity, normalized
+occurrence path, unresolved access attempt, and semantic capability contract. Every one of those
+fields is already exposed by the access-audit projection, so carrying the subject past the barrier
+is redaction-safe by construction.
+
+`EntryUnknown` parks possible entry unless the capability declares `EntryAbsorbing` with budget
+remaining, in which case the occurrence is re-assertable at the next ordinal. A crashed Effect
+attempt under the same declaration is first *closed*: Runtime commits an `EntryUnknown` observation
+against the dead attempt carrying one reserved kernel fault code, reaching no adapter and authoring
+nothing. That closure asserts nothing about the external system — only that the invoker authority
+for the attempt is lost — and it is what keeps the single-outstanding-attempt rule unchanged on the
+Effect path. A re-assertion must carry byte-identical `occurrence_id`, `state_input_ref`, request
+contract, and request digest, which the fold verifies. The reserved code is the only thing
+distinguishing a synthesized closure from an adapter-reported ambiguity downstream, and no domain
+may reuse it. Committed `IntegrityFault` blocks. A Read authorization with
+no observation is re-assertable at the next ordinal: a Read is defined as consuming no externally
+meaningful state, so reissuing it is sound by construction. That makes the definition load-bearing
+and a certification obligation rather than prose — the fold cannot distinguish a crashed Read from
+a live in-flight one, because the leaf is a pure function of history and liveness is per-process, so
+two workers may invoke the same Read concurrently. This is the single-outstanding-attempt rule's
+only relaxation and it is written as an access-kind-conditional branch; the Effect path keeps the
+rule verbatim.
 None of these statuses blocks an unrelated run id. Adapter unavailability may leave an attempt
 uncommitted; it cannot be recorded as a semantic failure by settlement.
 
@@ -264,7 +300,7 @@ descriptors. The request binds that admitted manifest, the fixed selector, the s
 complete-through-authorization-frontier mode, the other-run tenant scope, five total scan bounds,
 and the ordered queries. Exact capability, adapter, implementation, and public-certificate identity
 distinguish this Read from every general adapter.
-Fact scalar subjects use the primitive recoverability contract's unsigned-native wire: booleans,
+Fact scalar subjects use the fact owner's unsigned-native canonical profile: booleans,
 strings, and unsigned integers are admitted, while signed-number producer variants are rejected
 instead of silently round-tripping as unsigned values.
 

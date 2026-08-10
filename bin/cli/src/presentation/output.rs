@@ -395,14 +395,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_error_json_uses_the_frozen_transport_envelope() {
-        let bytes = corpus_vector_bytes("schema/mfm.error-response.v1/runtime-store-fault");
-        mfm_canonical::RecoverabilityContract::embedded()
-            .expect("recoverability annex")
-            .strict_decode("mfm.error-response.v1", &bytes)
-            .expect("frozen error envelope");
+    fn runtime_error_json_uses_the_exact_transport_envelope() {
+        let bytes = RUNTIME_STORE_FAULT_ERROR_RESPONSE_WIRE.as_bytes();
         let expected: serde_json::Value =
-            serde_json::from_slice(&bytes).expect("frozen error response JSON");
+            serde_json::from_slice(bytes).expect("error response JSON");
         let error: PublicError =
             serde_json::from_value(expected["error"].clone()).expect("frozen public Runtime error");
         let response = ErrorResponse::new(error.clone());
@@ -419,36 +415,15 @@ mod tests {
         assert!(!encoded.contains("diagnostic"));
     }
 
-    fn corpus_vector_bytes(id: &str) -> Vec<u8> {
-        let corpus: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
-        )))
-        .expect("recoverability corpus");
-        let encoded = corpus["positive_vectors"]
-            .as_array()
-            .expect("positive vectors")
-            .iter()
-            .find(|vector| vector["id"] == id)
-            .and_then(|vector| vector["input_hex"].as_str())
-            .expect("error response corpus vector");
-        decode_hex(encoded)
-    }
-
-    fn decode_hex(encoded: &str) -> Vec<u8> {
-        assert_eq!(encoded.len() % 2, 0, "hex length");
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
-            .collect()
-    }
-
-    fn hex_nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => panic!("corpus contains non-lowercase-hex input"),
-        }
-    }
+    /// One complete error response carrying a store fault attribution.
+    const RUNTIME_STORE_FAULT_ERROR_RESPONSE_WIRE: &str = concat!(
+        r#"{"error":{"code":"ReplayVerificationFailed","#,
+        r#""message":"Recorded run evidence failed verification","#,
+        r#""runtime_fault":{"occurrence_id":null,"phase":"load_history","#,
+        r#""pre_fault_head":null,"run_id":"run:sha256-jcs-v1:"#,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        r#"","subject":{"kind":"store","store_epoch":"7","#,
+        r#""store_scope_id":"mfm.store_scope.v1:77777777777777777777777777777777"}}},"#,
+        r#""status":"error"}"#,
+    );
 }

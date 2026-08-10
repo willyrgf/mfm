@@ -3,10 +3,9 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_certify::structured::AdmissionVerificationRegistry;
-use mfm_ids::{ContentRef, InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
-use mfm_journal::structured::RecordRef;
+use mfm_ids::{ContentRef, RunId, StableId};
+use mfm_journal::structured::{derive_run_id, RecordRef};
 use mfm_runtime::history::{
     AccessAuthorizationProposal, AccessObservationProposal, HistoryError, HistoryFuture,
     ObservationCommit, ObservationQualification, ProposedObservationOutcome, RuntimeHistoryPort,
@@ -15,6 +14,7 @@ use mfm_runtime::history::{
 };
 use mfm_spec::structured::CertifiedProgramRoot;
 use mfm_spec::CanonicalJsonValue;
+use mfm_values::CanonicalJsonPersistedSchema;
 
 use super::backend::{StructuredHistoryBackend, StructuredRunHistoryWriter};
 use super::fold::{
@@ -217,40 +217,6 @@ impl<B: StructuredHistoryBackend> StoreHistoryAdapter<B> {
     }
 }
 
-fn derive_run_id(
-    store_scope_id: &StoreScopeId,
-    tenant_scope_id: &TenantScopeId,
-    entry_point_operation_id: &StableId,
-    invocation_identity: &InvocationIdentity,
-) -> Result<RunId, HistoryError> {
-    let preimage = CanonicalValue::object([
-        (
-            "store_scope_id",
-            CanonicalValue::String(store_scope_id.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            CanonicalValue::String(entry_point_operation_id.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            CanonicalValue::String(invocation_identity.as_str().to_owned()),
-        ),
-    ])
-    .map_err(|_| HistoryError::InvalidHistory)?;
-    let contract = RecoverabilityContract::embedded().map_err(|_| HistoryError::InvalidHistory)?;
-    let validated = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .map_err(|_| HistoryError::InvalidHistory)?;
-    contract
-        .derive_run_id(&validated)
-        .map_err(|_| HistoryError::InvalidHistory)
-}
-
 fn to_store_transition(proposal: &StateTransitionProposal) -> StateTransitionProposal {
     proposal.clone()
 }
@@ -295,7 +261,8 @@ impl<B: StructuredHistoryBackend> RuntimeHistoryPort for StoreHistoryAdapter<B> 
                 &tenant_scope_id,
                 &entry_point_operation_id,
                 &invocation_identity,
-            )?;
+            )
+            .map_err(|_| HistoryError::InvalidHistory)?;
             let store_material = material;
             let request = StoreAdmissionRequest::new(
                 run_id.clone(),

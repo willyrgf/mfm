@@ -1,36 +1,67 @@
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContract, ValidatedCanonicalValue};
 use mfm_ids::{ContentRef, SchemaId, SemanticTypeId, StableId};
-use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
-use crate::{Result, ValueError};
+use crate::{
+    CanonicalJsonPersistedSchema, FieldDescriptor, MediaType, PersistedSchema, Result,
+    SchemaIdentity, SchemaKind, SchemaShape, StringGrammar, ValueError, MAX_MEDIA_TYPE_BYTES,
+};
 
-const RETAINED_VALUE_CONTRACT_SCHEMA: &str = "mfm.retained-value-contract.v1";
 const COMPONENT_OBJECT_EVIDENCE_CONTRACT_SCHEMA: &str = "mfm.component-object-evidence-contract.v1";
-const COMPONENT_OBJECT_EVIDENCE_CONTRACT_BYTES: &[u8] =
-    br#"{"version":"mfm.component-object-evidence-contract.v1"}"#;
 
-/// Returns the exact canonical component-object-evidence contract.
+/// One retained component-object-evidence contract.
 ///
-/// This self-describing value is the common evidence contract for framework
-/// retained values whose evidence shape is fixed by the product qualification
-/// boundary.
-pub fn component_object_evidence_contract_canonical() -> Result<PlainCanonicalJsonBytes> {
-    PlainCanonicalJsonBytes::from_canonical_json_slice(COMPONENT_OBJECT_EVIDENCE_CONTRACT_BYTES)
-        .map_err(|_| ValueError::RetainedValueContract)
+/// The document is one exact literal, so its persisted shape is a closed literal
+/// rather than an open string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentObjectEvidence {
+    version: ComponentObjectEvidenceVersion,
 }
 
-/// Returns the annex-derived identity of the common component-object-evidence contract.
-pub fn component_object_evidence_contract_ref() -> Result<ContentRef> {
-    let canonical = component_object_evidence_contract_canonical()?;
-    let recoverability = RecoverabilityContract::embedded()?;
-    ContentRef::new(
-        recoverability
-            .schema_id(COMPONENT_OBJECT_EVIDENCE_CONTRACT_SCHEMA)?
-            .clone(),
-        recoverability.raw_content_digest(canonical.as_bytes()),
-    )
-    .map_err(|error| ValueError::Identity(error.to_string()))
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum ComponentObjectEvidenceVersion {
+    #[serde(rename = "mfm.component-object-evidence-contract.v1")]
+    V1,
+}
+
+impl PersistedSchema for ComponentObjectEvidence {
+    fn schema_identity() -> Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.component-object-evidence-contract",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![FieldDescriptor::required(
+                "version",
+                SchemaShape::Literal(crate::LiteralValue::String(
+                    COMPONENT_OBJECT_EVIDENCE_CONTRACT_SCHEMA.to_owned(),
+                )),
+            )])?,
+        )
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self.version {
+            ComponentObjectEvidenceVersion::V1 => Ok(()),
+        }
+    }
+}
+
+impl ComponentObjectEvidence {
+    /// Returns the one current literal evidence payload.
+    pub const fn current() -> Self {
+        Self {
+            version: ComponentObjectEvidenceVersion::V1,
+        }
+    }
+}
+
+impl crate::PersistedObjectPayload for ComponentObjectEvidence {
+    fn object_type() -> Result<StableId> {
+        StableId::new("structured.data_contract")
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
 }
 
 /// Exact producer-independent metadata for one retained value.
@@ -46,48 +77,82 @@ pub fn component_object_evidence_contract_ref() -> Result<ContentRef> {
 ///     contract.role().as_str()
 /// }
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RetainedValueContract {
     schema_id: SchemaId,
     semantic_type_id: SemanticTypeId,
     role: StableId,
-    media_type: String,
+    media_type: MediaType,
     evidence_contract_ref: ContentRef,
 }
 
+impl PersistedSchema for RetainedValueContract {
+    fn schema_identity() -> Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.retained-value-contract",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required("evidence_contract_ref", SchemaShape::content_ref()?),
+                FieldDescriptor::required(
+                    "media_type",
+                    SchemaShape::BoundedString {
+                        minimum_bytes: 1,
+                        maximum_bytes: MAX_MEDIA_TYPE_BYTES as u32,
+                        grammar: StringGrammar::MediaType,
+                    },
+                ),
+                FieldDescriptor::required(
+                    "role",
+                    SchemaShape::identity_string(StringGrammar::StableId, 256),
+                ),
+                FieldDescriptor::required(
+                    "schema_id",
+                    SchemaShape::identity_string(StringGrammar::SchemaId, 512),
+                ),
+                FieldDescriptor::required(
+                    "semantic_type_id",
+                    SchemaShape::identity_string(StringGrammar::SemanticTypeId, 512),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> Result<()> {
+        MediaType::new(self.media_type.as_str()).map(drop)
+    }
+}
+
+impl crate::PersistedObjectPayload for RetainedValueContract {
+    fn object_type() -> Result<StableId> {
+        StableId::new("structured.data_contract")
+            .map_err(|error| ValueError::Identity(error.to_string()))
+    }
+}
+
 impl RetainedValueContract {
-    /// Constructs and annex-validates one exact retained-value contract.
+    /// Constructs and validates one exact retained-value contract.
     pub fn new(
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         role: StableId,
-        media_type: impl Into<String>,
+        media_type: MediaType,
         evidence_contract_ref: ContentRef,
     ) -> Result<Self> {
         let contract = Self {
             schema_id,
             semantic_type_id,
             role,
-            media_type: media_type.into(),
+            media_type,
             evidence_contract_ref,
         };
-        contract.validated()?;
+        contract
+            .encode_canonical()
+            .map_err(|_| ValueError::RetainedValueContract)?;
         Ok(contract)
-    }
-
-    /// Strictly decodes exact canonical JSON under the frozen annex.
-    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-        let validated = RecoverabilityContract::embedded()?
-            .strict_decode(RETAINED_VALUE_CONTRACT_SCHEMA, bytes)?;
-        Self::from_validated(validated)
-    }
-
-    /// Reconstructs this contract from exact annex-validated authority.
-    pub fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
-        if validated.schema_contract() != RETAINED_VALUE_CONTRACT_SCHEMA {
-            return Err(ValueError::RetainedValueContract);
-        }
-        serde_json::from_slice(validated.as_bytes()).map_err(|_| ValueError::RetainedValueContract)
     }
 
     /// Returns the only admitted schema for the retained bytes.
@@ -106,56 +171,12 @@ impl RetainedValueContract {
     }
 
     /// Returns the exact lowercase registered media type.
-    pub fn media_type(&self) -> &str {
+    pub const fn media_type(&self) -> &MediaType {
         &self.media_type
     }
 
     /// Returns the exact object-evidence contract.
     pub const fn evidence_contract_ref(&self) -> &ContentRef {
         &self.evidence_contract_ref
-    }
-
-    /// Returns the exact canonical JSON validated by the frozen annex.
-    pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
-        let validated = self.validated()?;
-        PlainCanonicalJsonBytes::from_canonical_json_slice(validated.as_bytes())
-            .map_err(|_| ValueError::RetainedValueContract)
-    }
-
-    /// Returns exact annex-validated authority for canonical embedding.
-    pub fn validated(&self) -> Result<ValidatedCanonicalValue> {
-        let json = serde_json::to_string(self).map_err(|_| ValueError::RetainedValueContract)?;
-        let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
-            .map_err(|_| ValueError::RetainedValueContract)?;
-        RecoverabilityContract::embedded()?
-            .strict_decode(RETAINED_VALUE_CONTRACT_SCHEMA, canonical.as_bytes())
-            .map_err(Into::into)
-    }
-}
-
-impl<'de> Deserialize<'de> for RetainedValueContract {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            schema_id: SchemaId,
-            semantic_type_id: SemanticTypeId,
-            role: StableId,
-            media_type: String,
-            evidence_contract_ref: ContentRef,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(
-            wire.schema_id,
-            wire.semantic_type_id,
-            wire.role,
-            wire.media_type,
-            wire.evidence_contract_ref,
-        )
-        .map_err(de::Error::custom)
     }
 }

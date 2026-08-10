@@ -44,6 +44,7 @@ use mfm_signing::QualifiedReadSigningProvider;
 use mfm_spec::structured::{
     SecretFreeImplementationDescriptor, StructuredComponentKind, StructuredLiveComponentContract,
 };
+use mfm_values::CanonicalJsonPersistedSchema;
 
 use crate::transport::{EvmJsonRpcTransport, WalletBroadcastResponse, WalletRpcFailure};
 use crate::{EvmPhysicalBindingPurpose, EvmPhysicalBindingReleaseHistory};
@@ -457,7 +458,39 @@ impl EvmStructuredLiveBindings {
                 EffectAdapterCompletion::SafeFailure(EvmSubmissionFailure::DestinationRejected)
             }
             Err(WalletRpcFailure::ResponseLost | WalletRpcFailure::InvalidResponse) => {
-                EffectAdapterCompletion::EntryUnknown(self.entry_unknown_fault.clone())
+                // The submission itself is ambiguous, and this capability
+                // declares absorption, so a re-assertion reaches here after the
+                // first attempt may already have landed. Read the chain: the
+                // attested transaction hash is the entry key, and a node that
+                // holds that transaction is a positive claim that it entered.
+                //
+                // Without this read a repeat could only observe that the
+                // candidate is still activated — exactly the state a broadcast
+                // parks in *without* entering — and a proof synthesized from the
+                // attested candidate would be a well-typed claim about an event
+                // that never happened. An absent transaction keeps the ambiguity
+                // and never becomes a non-entry claim: a node may simply not
+                // hold it yet.
+                match self
+                    .transport
+                    .transaction_by_hash_authorized(
+                        origin,
+                        &route,
+                        &self.chain_instance,
+                        transaction_hash,
+                    )
+                    .await
+                {
+                    Ok(Some(_)) => self.submitted_proof(
+                        request,
+                        transaction_hash,
+                        signer_generation_ref,
+                        signing_contract_ref,
+                    ),
+                    Ok(None) | Err(_) => {
+                        EffectAdapterCompletion::EntryUnknown(self.entry_unknown_fault.clone())
+                    }
+                }
             }
         }
     }

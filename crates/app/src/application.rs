@@ -9,10 +9,10 @@ use mfm_journal::structured::{
 use mfm_storage_evm_postgres::QualifiedEvmRoutingCatalog;
 
 use crate::{
-    AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, DriveResponse,
-    EntryPointContract, ErrorClass, ExportRequest, ExportedRun, PageRequest, PublicError,
-    PublicRunView, ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy,
-    SecretCredential, TransitionTracePage,
+    AccessAuditPage, AccessTarget, AdmitRunRequest, AdmitRunResponse, DriveResponse, ErrorClass,
+    ExportRequest, ExportedRun, PageRequest, PublicError, PublicRunView, PublishedEntryPoint,
+    ReplayRequest, ReplayResponse, RunAccessGrant, RunAccessPolicy, SecretCredential,
+    TransitionTracePage,
 };
 
 /// Complete public physical-release material consumed by EVM deployment assembly.
@@ -235,7 +235,9 @@ impl EvmWalletDeploymentAssemblyInput {
         if routing_policy.validate().is_err()
             || routing_policy.object_type.as_str() != ADMISSION_ROUTING_POLICY_OBJECT_TYPE
             || context_manifest.validate().is_err()
-            || PriorRunFactSourceManifest::from_history_object(&prior_run_source_manifest).is_err()
+            || prior_run_source_manifest
+                .decode_persisted::<PriorRunFactSourceManifest>()
+                .is_err()
             || context_manifest.object_type.as_str() != ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE
             || !route_matches
             || !manifest_matches
@@ -633,7 +635,7 @@ pub(crate) struct EvmWalletDeploymentParts {
 pub struct Application {
     store_scope_id: StoreScopeId,
     policy: Arc<dyn RunAccessPolicy>,
-    entry_points: Arc<[EntryPointContract]>,
+    entry_points: Arc<[PublishedEntryPoint]>,
     backend: Arc<dyn ApplicationBackend>,
 }
 
@@ -641,7 +643,7 @@ impl Application {
     pub(crate) fn new(
         store_scope_id: StoreScopeId,
         policy: Arc<dyn RunAccessPolicy>,
-        entry_points: Vec<EntryPointContract>,
+        entry_points: Vec<PublishedEntryPoint>,
         backend: impl ApplicationBackend + 'static,
     ) -> Self {
         Self {
@@ -656,7 +658,7 @@ impl Application {
     ///
     /// Discovery is intentionally unauthenticated. The returned contracts contain no deployment
     /// secrets or caller-specific state.
-    pub fn entry_points(&self) -> &[EntryPointContract] {
+    pub fn entry_points(&self) -> &[PublishedEntryPoint] {
         &self.entry_points
     }
 
@@ -819,7 +821,7 @@ impl Application {
 }
 
 fn selected_admission_target(
-    entry_point: &EntryPointContract,
+    entry_point: &PublishedEntryPoint,
     request: &AdmitRunRequest,
 ) -> Result<StableId, PublicError> {
     if entry_point.entry_point_id().as_str() == mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID {
@@ -1012,7 +1014,7 @@ pub(crate) trait ApplicationBackend: Send + Sync {
     async fn admit_run(
         &self,
         call: &AuthorizedAdmissionCall,
-        entry_point: EntryPointContract,
+        entry_point: PublishedEntryPoint,
         request: AdmitRunRequest,
     ) -> Result<AdmitRunResponse, PublicError>;
 
@@ -1070,7 +1072,7 @@ pub enum TestApplicationMode {
 #[cfg(any(test, feature = "test-support"))]
 pub fn application_for_test(
     policy: Arc<dyn RunAccessPolicy>,
-    entry_points: Vec<EntryPointContract>,
+    entry_points: Vec<PublishedEntryPoint>,
     mode: TestApplicationMode,
 ) -> Application {
     let store_scope_id = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
@@ -1175,7 +1177,7 @@ impl ApplicationBackend for TestApplicationBackend {
     async fn admit_run(
         &self,
         _call: &AuthorizedAdmissionCall,
-        _entry_point: EntryPointContract,
+        _entry_point: PublishedEntryPoint,
         _request: AdmitRunRequest,
     ) -> Result<AdmitRunResponse, PublicError> {
         Err(self.failure())
@@ -1284,7 +1286,7 @@ mod tests {
         ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId,
         SchemaId, StableId, StoreScopeId, TenantScopeId,
     };
-    use mfm_spec::{CanonicalJsonValue, EntryPointContract, PlanningProfile};
+    use mfm_spec::{CanonicalJsonValue, PlanningProfile, PublishedEntryPoint};
     use mfm_values::MfmValue as _;
     use tokio::io::{AsyncRead, ReadBuf};
 
@@ -1565,12 +1567,12 @@ mod tests {
         .expect("admission request")
     }
 
-    fn evm_entry_point() -> EntryPointContract {
+    fn evm_entry_point() -> PublishedEntryPoint {
         let planning_profile = PlanningProfile::from_canonical_json(
             br#"{"canonical_profile_parameters":{},"framework_policy_refs":[],"planner_contract_ref":{"content_digest":"content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111","schema_id":"schema:mfm.test.component:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"planner_implementation_ref":{"content_digest":"content:sha256-v1:2222222222222222222222222222222222222222222222222222222222222222","schema_id":"schema:mfm.test.component:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"version":"mfm.planning-profile.v1"}"#,
         )
         .expect("planning profile");
-        EntryPointContract::new(
+        PublishedEntryPoint::new(
             EntryPointId::new(mfm_evm::EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
                 .expect("entry point"),
             StableId::new(mfm_evm::EVM_SUBMIT_TRANSACTION_OPERATION_ID).expect("operation"),

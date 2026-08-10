@@ -1,0 +1,28 @@
+error[E0277]: the trait bound `AutoincrementInsertRequest: EntryKeyed` is not satisfied
+  --> tests/ui/structured/fail/downstream_absorbing_entry_mode.rs:11:57
+   |
+11 | impl EffectEntryModeFor<AutoincrementInsertRequest> for EntryAbsorbing<3> {}
+   |                                                         ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `EntryKeyed` is not implemented for `AutoincrementInsertRequest`
+  --> tests/ui/structured/fail/../support.rs
+   |
+   | pub struct AutoincrementInsertRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: the trait `EntryKeyed` is implemented for `KeyedInsertRequest`
+  --> tests/ui/structured/fail/../support.rs
+   |
+   | impl EntryKeyed for KeyedInsertRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `mfm_capabilities::EntryAbsorbing<3>` to implement `mfm_capabilities::private::EffectEntryModeForSealed<AutoincrementInsertRequest>`
+note: required by a bound in `EffectEntryModeFor`
+  --> $WORKSPACE/crates/kernel/capabilities/src/lib.rs
+   |
+   | pub trait EffectEntryModeFor<Req>:
+   |           ------------------ required by a bound in this trait
+   |     EffectEntryMode + private::EffectEntryModeForSealed<Req>
+   |                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectEntryModeFor`
+   = note: `EffectEntryModeFor` is a "sealed trait", because to implement it you also need to implement `mfm_capabilities::private::EffectEntryModeForSealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             mfm_capabilities::EntryOnce
+             mfm_capabilities::EntryAbsorbing<MAX>

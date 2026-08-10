@@ -44,7 +44,6 @@ fn transaction_nonce_rejects_u64_max_and_has_checked_successor() {
 fn wallet_policy_descriptors_are_distinct_and_current() {
     let refs = [
         evm_wallet_nonce_policy_ref().expect("nonce policy"),
-        evm_wallet_finality_policy_ref().expect("finality policy"),
         evm_wallet_assurance_policy_ref().expect("assurance policy"),
     ];
     assert_eq!(

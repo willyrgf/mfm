@@ -1,16 +1,36 @@
-pub use mfm_canonical::limits::{
-    MAX_FACT_SCAN_DISTINCT_PRODUCERS, MAX_FACT_SCAN_FACTS, MAX_FACT_SCAN_PAGES,
-    MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES, MAX_FACT_SCAN_PUBLICATIONS, MAX_FACT_SCAN_RESPONSE_BYTES,
-    MAX_FACT_SCAN_RETAINED_SOURCE_BYTES, MAX_FACT_SCAN_SELECTED_RESULTS,
-};
 use mfm_canonical::CanonicalBytes;
-use mfm_program_derive::MfmValue;
+use mfm_program_derive::{MfmValue, PersistedSchema};
+use mfm_values::{FieldDescriptor, SchemaIdentity, SchemaKind, SchemaShape, ValueError};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::{FactError, Result};
 
+/// Maximum publications one prior-run fact scan may traverse.
+pub const MAX_FACT_SCAN_PUBLICATIONS: u64 = 1000000;
+
+/// Maximum facts one prior-run fact scan may traverse.
+pub const MAX_FACT_SCAN_FACTS: u64 = 16000000;
+
+/// Maximum retained source bytes one prior-run fact scan may read.
+pub const MAX_FACT_SCAN_RETAINED_SOURCE_BYTES: u64 = 536870912;
+
+/// Maximum results one prior-run fact scan may select.
+pub const MAX_FACT_SCAN_SELECTED_RESULTS: u64 = 16384;
+
+/// Maximum response bytes one prior-run fact scan may return.
+pub const MAX_FACT_SCAN_RESPONSE_BYTES: u64 = 16777216;
+
+/// Maximum distinct producers one prior-run fact scan may span.
+pub const MAX_FACT_SCAN_DISTINCT_PRODUCERS: u64 = 4096;
+
+/// Maximum producer fold batches one prior-run fact scan may replay.
+pub const MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES: u64 = 16000000;
+
+/// Maximum pages one prior-run fact scan may return.
+pub const MAX_FACT_SCAN_PAGES: u64 = 1000000;
+
 /// Sole completeness mode supported by the prior-run fact scanner.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue, PersistedSchema)]
 #[serde(rename_all = "snake_case")]
 #[mfm(
     namespace = "mfm.fact",
@@ -186,6 +206,54 @@ impl FactSelectionScanBounds {
             ));
         }
         Ok(())
+    }
+}
+
+impl mfm_values::PersistedSchema for FactSelectionScanBounds {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        let bounded = |maximum| SchemaShape::UnsignedRange {
+            minimum: 1,
+            maximum,
+        };
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.fact-selection-scan-bounds",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "maximum_publications",
+                    bounded(MAX_FACT_SCAN_PUBLICATIONS),
+                ),
+                FieldDescriptor::required("maximum_facts", bounded(MAX_FACT_SCAN_FACTS)),
+                FieldDescriptor::required(
+                    "maximum_retained_source_bytes",
+                    bounded(MAX_FACT_SCAN_RETAINED_SOURCE_BYTES),
+                ),
+                FieldDescriptor::required(
+                    "maximum_selected_results",
+                    bounded(MAX_FACT_SCAN_SELECTED_RESULTS),
+                ),
+                FieldDescriptor::required(
+                    "maximum_response_bytes",
+                    bounded(MAX_FACT_SCAN_RESPONSE_BYTES),
+                ),
+                FieldDescriptor::required(
+                    "maximum_distinct_producers",
+                    bounded(MAX_FACT_SCAN_DISTINCT_PRODUCERS),
+                ),
+                FieldDescriptor::required(
+                    "maximum_producer_fold_batches",
+                    bounded(MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES),
+                ),
+                FieldDescriptor::required("maximum_pages", bounded(MAX_FACT_SCAN_PAGES)),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        FactSelectionScanBounds::validate(self).map_err(|_| ValueError::SchemaShapeMismatch)
     }
 }
 

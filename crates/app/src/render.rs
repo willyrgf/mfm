@@ -1,13 +1,13 @@
 use serde_json::{json, Value};
 
 use crate::{
-    AccessAuditPage, AdmitRunResponse, DriveResponse, EntryPointContract, PublicError,
-    PublicRunView, ReplayResponse, TransitionTracePage,
+    AccessAuditPage, AdmitRunResponse, DriveResponse, PublicError, PublicRunView,
+    PublishedEntryPoint, ReplayResponse, TransitionTracePage,
 };
 
 /// Reviewed JSON rendering implemented only for public application responses.
 ///
-/// Annex-owned values are rendered from their already validated canonical bytes. This trait does
+/// Owner-validated values are rendered from their already validated canonical bytes. This trait does
 /// not create semantic, store, object, or access authority.
 pub trait PublicJsonResponse {
     /// Returns the reviewed JSON value for a transport success payload.
@@ -42,7 +42,7 @@ canonical_response_json!(
     ReplayResponse,
 );
 
-impl PublicJsonResponse for [EntryPointContract] {
+impl PublicJsonResponse for [PublishedEntryPoint] {
     fn public_json(&self) -> Result<Value, PublicError> {
         self.iter()
             .map(|entry| {
@@ -50,7 +50,7 @@ impl PublicJsonResponse for [EntryPointContract] {
                     .canonical_json()
                     .map_err(|_| {
                         PublicError::internal(
-                            "EntryPointContractInvalid",
+                            "PublishedEntryPointInvalid",
                             "The compiled entry-point contract is invalid",
                         )
                     })
@@ -61,7 +61,7 @@ impl PublicJsonResponse for [EntryPointContract] {
     }
 }
 
-impl PublicJsonResponse for Vec<EntryPointContract> {
+impl PublicJsonResponse for Vec<PublishedEntryPoint> {
     fn public_json(&self) -> Result<Value, PublicError> {
         self.as_slice().public_json()
     }

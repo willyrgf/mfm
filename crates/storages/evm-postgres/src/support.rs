@@ -2,9 +2,8 @@
 
 use std::str::FromStr;
 
-use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_evm::EvmWalletReference;
-use mfm_ids::{ContentRef, DigestAlgorithm, SchemaId};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use sqlx::postgres::PgPoolOptions;
@@ -33,24 +32,6 @@ pub(crate) fn reference_text(reference: &EvmWalletReference) -> Result<String> {
 
 pub(crate) fn parse_reference_text(value: &str) -> Result<EvmWalletReference> {
     decode_canonical(value)
-}
-
-pub(crate) fn evidence_reference<T: Serialize>(
-    domain: &str,
-    value: &T,
-) -> Result<EvmWalletReference> {
-    let digest = mfm_journal::structured::domain_content_digest(domain, value)
-        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    let schema = SchemaId::new(
-        "mfm.evm.wallet-storage-evidence",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(b"mfm.structured-schema.v1:mfm.evm.wallet-storage-evidence:1"),
-    )
-    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    let reference =
-        ContentRef::new(schema, digest).map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    Ok(EvmWalletReference::from_content_ref(reference))
 }
 
 pub(crate) async fn open_role_pool(

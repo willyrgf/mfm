@@ -4,9 +4,9 @@ use mfm_ids::{
     SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    AccessKind, AdmissionMaterialRefs, CertifiedProgramAuditRefs, ExternalAccessAuthorized,
-    ExternalAccessObserved, LexicalValueRef, ObservationOutcome, RecordRef, RunAdmitted, RunClosed,
-    RunRecord, SemanticHead, StateOutcomeRef, StateTransitionCommitted, TypedValueRef,
+    AccessKind, AdmissionMaterialRefs, ExternalAccessAuthorized, ExternalAccessObserved,
+    LexicalValueRef, ObservationOutcome, RecordRef, RunAdmitted, RunClosed, RunRecord,
+    SemanticHead, StateOutcomeRef, StateTransitionCommitted, TypedValueRef,
 };
 
 fn digest(byte: u8) -> DigestBytes {
@@ -63,7 +63,6 @@ fn semantic_head() -> SemanticHead {
 }
 
 fn admitted() -> RunRecord {
-    let audit_ref = content_ref(4);
     RunRecord::RunAdmitted(RunAdmitted {
         store_scope_id: StoreScopeId::new("mfm.store_scope.v1:00000000000000000000000000000000")
             .expect("store scope"),
@@ -75,17 +74,6 @@ fn admitted() -> RunRecord {
             .expect("invocation"),
         entry_point_operation_id: StableId::new("mfm.test/operation").expect("operation"),
         certified_program_ref: content_ref(5),
-        certified_program_root_ref: content_ref(6),
-        qualified_entry_point_admission_policy_ref: content_ref(7),
-        audit_refs: CertifiedProgramAuditRefs {
-            authored_program_ref: audit_ref.clone(),
-            expanded_program_ref: audit_ref.clone(),
-            expansion_profile_ref: audit_ref.clone(),
-            expansion_proof_ref: audit_ref.clone(),
-            policy_coverage_proof_ref: audit_ref.clone(),
-            component_manifest_ref: audit_ref.clone(),
-            implementation_manifest_ref: audit_ref,
-        },
         admission_material_refs: AdmissionMaterialRefs {
             configuration_ref: content_ref(8),
             context_manifest_ref: content_ref(9),

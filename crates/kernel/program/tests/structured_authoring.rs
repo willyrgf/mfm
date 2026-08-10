@@ -5,6 +5,7 @@ use mfm_program::structured::{
 };
 use mfm_program_derive::MfmValue;
 use mfm_spec::structured::AuthoredDeclaration;
+use mfm_values::CanonicalJsonPersistedSchema;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]

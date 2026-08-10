@@ -12,16 +12,16 @@ use mfm_ids::{
     StableId,
 };
 use mfm_journal::structured::{
-    canonical_json, derive_access_attempt_id, derive_commit_digest, derive_record_hash,
-    domain_content_digest, AccessKind, AdmissionMaterialRefs, AssignedRecord,
-    CertifiedProgramAuditRefs, CommitCandidate, CommittedBatch, CommittedFactRef,
+    canonical_json, derive_access_attempt_id, derive_candidate_digest, derive_commit_digest,
+    derive_record_hash, derive_run_id, AccessKind, AdmissionMaterialRefs, AssignedRecord,
+    CommitCandidate, CommitDigestPreimage, CommittedBatch, CommittedFactRef,
     ExternalAccessAuthorized, ExternalAccessObserved, HistoryObject, JournalHead, LexicalValueRef,
     ObservationOutcome, PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse,
-    PriorRunFactSourceManifest, RecordLogicalKey, RecordRef, RunAdmitted, RunClosed, RunRecord,
-    SemanticHead, StateOutcomeRef, StateTransitionCommitted, StructuralValueOrigin,
-    TenantFactCoordinate, TypedValueRef, ADMISSION_CONFIGURATION_OBJECT_TYPE,
-    ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE, ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE,
-    ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
+    PriorRunFactSourceManifest, RecordHashPreimage, RecordLogicalKey, RecordRef, RunAdmitted,
+    RunClosed, RunRecord, SemanticHead, StateOutcomeRef, StateTransitionCommitted,
+    StructuralValueOrigin, TenantFactCoordinate, TypedValueRef,
+    ADMISSION_CONFIGURATION_OBJECT_TYPE, ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
+    ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
 };
 use mfm_spec::structured::{
     fan_out_join_contract_ref, lane_outcome_contract_ref, prior_run_fact_scanner_adapter_contract,
@@ -30,11 +30,14 @@ use mfm_spec::structured::{
     ExpandedFanOut, ExpandedFragment, ExpandedMatch, ExpandedStateBinding,
     ExpandedStructuredProgram, FailurePlan, HandlerContinuation, LexicalProducer, LexicalSlot,
     SecretFreeImplementationManifest, StateCapabilityAdapterSignerResourceManifest, StructuralPath,
-    StructuredCapabilityProtocolContract, StructuredComponentKind, StructuredEffectRefreshContract,
-    StructuredExecutionKind, StructuredFailureContract, StructuredLiveComponentContract,
+    StructuredCapabilityProtocolContract, StructuredComponentKind, StructuredEffectEntryContract,
+    StructuredEffectRefreshContract, StructuredExecutionKind, StructuredFailureContract,
+    StructuredLiveComponentContract,
 };
 use mfm_spec::CanonicalJsonValue;
-use mfm_values::{RetainedValueContract, SchemaIdentity};
+use mfm_values::{
+    CanonicalJsonPersistedSchema, PersistedObjectPayload, RetainedValueContract, SchemaIdentity,
+};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -123,8 +126,8 @@ pub trait ProgramVerifier: mfm_authority_seal::ProgramVerifierSeal + Send + Sync
 }
 
 pub use mfm_runtime::history::{
-    ActionableState, LaneCursor, ObservationQualification, ProgramCursor, StateLeaf,
-    StructuredFrontier,
+    ActionableState, EffectEntrySubject, LaneCursor, ObservationQualification, ProgramCursor,
+    StateLeaf, StructuredFrontier,
 };
 
 /// One complete callback-free verified structured run view.
@@ -330,7 +333,7 @@ impl VerifiedStructuredRun {
                 return Err(invalid("fact response object is absent"));
             };
             let returned = object
-                .decode::<FactSelectionReadResponse>()
+                .decode_mfm_value::<FactSelectionReadResponse>()
                 .map_err(|_| invalid("fact response object is invalid"))?;
             let response = serde_json::from_str::<PriorRunFactSelectionResponse>(
                 returned.canonical_response_json(),
@@ -469,6 +472,22 @@ fn fold_recorded_history(
     if admission.run_id != run_id {
         return Err(invalid("admission run identity differs from its envelope"));
     }
+    // The envelope and the admitted record agreeing with each other proves
+    // nothing: both are attacker-supplied. Re-derive the identity from the
+    // admission coordinates through the one shared owner rule.
+    if derive_run_id(
+        &admission.store_scope_id,
+        &admission.tenant_scope_id,
+        &admission.entry_point_operation_id,
+        &admission.invocation_identity,
+    )
+    .map_err(|_| invalid("admission run identity cannot be derived"))?
+        != run_id
+    {
+        return Err(invalid(
+            "admission run identity differs from its derived coordinates",
+        ));
+    }
 
     let mut machine =
         FoldMachine::new(run_id, admission.clone(), first_assigned.record_ref.clone());
@@ -480,14 +499,16 @@ fn fold_recorded_history(
     machine.admit_objects(first_batch.objects.clone())?;
     let root_object = machine
         .objects
-        .get(&admission.certified_program_root_ref)
+        .get(&admission.certified_program_ref)
         .ok_or_else(|| invalid("certified program root object is missing"))?;
     if root_object.object_type.as_str() != CERTIFIED_ROOT_OBJECT_TYPE {
         return Err(invalid("certified program root object type differs"));
     }
     let root: mfm_spec::structured::CertifiedProgramRoot = root_object
-        .decode()
+        .decode_persisted()
         .map_err(|_| invalid("certified program root object cannot be strictly decoded"))?;
+    // The object's own content addressing already binds these bytes to this
+    // reference; re-deriving proves the retained schema identity is the owner's.
     if root
         .content_ref()
         .map_err(|_| StructuredStoreError::Certification)?
@@ -501,9 +522,9 @@ fn fold_recorded_history(
         .objects
         .get(&root.components.authored_program_ref)
         .ok_or_else(|| invalid("certified authored program object is missing"))?;
-    let authored: CanonicalJsonValue = authored_object
-        .decode()
-        .map_err(|_| invalid("certified authored program object cannot be decoded"))?;
+    let authored =
+        CanonicalJsonValue::from_canonical_json(authored_object.canonical_json.as_bytes())
+            .map_err(|_| invalid("certified authored program object cannot be decoded"))?;
     let program = program_verifier
         .verify(&admission.entry_point_operation_id, &root, &authored)
         .map_err(|_| StructuredStoreError::Certification)?;
@@ -514,7 +535,6 @@ fn fold_recorded_history(
             "qualified program verifier returned different data",
         ));
     }
-    validate_admission_audit_refs(admission, program.document())?;
     require_component_object_closure(&machine.objects, program.document())?;
     machine.initialize_program(program)?;
     let mut derived = machine.verify_admission_batch(&first_batch)?;
@@ -565,7 +585,7 @@ fn validate_batch_object_closure(
     for assigned in records {
         match &assigned.record {
             RunRecord::RunAdmitted(admission) => {
-                required.insert(admission.certified_program_root_ref.clone());
+                required.insert(admission.certified_program_ref.clone());
                 required.extend(
                     machine
                         .program()?
@@ -778,31 +798,30 @@ pub(super) fn prepare_admission(
 
     let document = request.certified_program;
     let certified_program_ref = document
+        .root
         .content_ref()
         .map_err(|_| StructuredStoreError::Certification)?;
-    let root_canonical = document
-        .root
-        .canonical_json()
-        .map_err(|_| StructuredStoreError::Certification)?;
-    let root_object = HistoryObject::new(
-        StableId::new(CERTIFIED_ROOT_OBJECT_TYPE)
-            .map_err(|_| invalid("certified root object type is invalid"))?,
-        framework_schema_id("mfm.structured-certified-program-root")?,
-        root_canonical.as_str(),
-    )
-    .map_err(|_| invalid("certified root object cannot be constructed"))?;
+    let root_object = HistoryObject::from_persisted(&document.root)
+        .map_err(|_| invalid("certified root object cannot be constructed"))?;
+    if root_object.content_ref != certified_program_ref {
+        return Err(invalid(
+            "certified root object identity differs from its program reference",
+        ));
+    }
     let mut objects = vec![root_object.clone()];
     for component in &document.component_closure {
         let canonical = component
             .value
             .canonical_json()
             .map_err(|_| StructuredStoreError::Certification)?;
-        let object = HistoryObject::new(
-            component.object_type.clone(),
-            component.content_ref.schema_id().clone(),
-            canonical.as_str(),
-        )
-        .map_err(|_| StructuredStoreError::Certification)?;
+        let object = HistoryObject {
+            object_type: component.object_type.clone(),
+            content_ref: component.content_ref.clone(),
+            canonical_json: canonical.as_str().to_owned(),
+        };
+        object
+            .validate()
+            .map_err(|_| StructuredStoreError::Certification)?;
         if object.content_ref != component.content_ref {
             return Err(invalid("certified component object identity differs"));
         }
@@ -842,7 +861,6 @@ pub(super) fn prepare_admission(
         });
     }
 
-    let components = &document.root.components;
     let mut admission = RunAdmitted {
         store_scope_id: identity.store_scope_id.clone(),
         store_epoch: identity.store_epoch,
@@ -851,23 +869,6 @@ pub(super) fn prepare_admission(
         invocation_identity: request.invocation_identity,
         entry_point_operation_id: request.entry_point_operation_id,
         certified_program_ref: certified_program_ref.clone(),
-        certified_program_root_ref: root_object.content_ref,
-        qualified_entry_point_admission_policy_ref: components
-            .qualified_entry_point_admission_policy_ref
-            .clone(),
-        audit_refs: CertifiedProgramAuditRefs {
-            authored_program_ref: components.authored_program_ref.clone(),
-            expanded_program_ref: components.expanded_program_ref.clone(),
-            expansion_profile_ref: components.expansion_profile_ref.clone(),
-            expansion_proof_ref: components.expansion_proof_ref.clone(),
-            policy_coverage_proof_ref: components.policy_coverage_proof_ref.clone(),
-            component_manifest_ref: components
-                .state_capability_adapter_signer_resource_manifest_closure_ref
-                .clone(),
-            implementation_manifest_ref: components
-                .secret_free_implementation_manifest_closure_ref
-                .clone(),
-        },
         admission_material_refs,
         initial_bindings,
         genesis_semantic_state_digest: placeholder_semantic_digest(),
@@ -975,15 +976,10 @@ pub(super) fn prepare_state_transition(
             )
         }
     };
-    let outcome_json = match &outcome {
-        StateOutcomeRef::Success(value) => serde_json::json!({ "Success": value }),
-        StateOutcomeRef::Failure(value) => serde_json::json!({ "Failure": value }),
-    };
-    let outcome_object = framework_object(
-        STATE_OUTCOME_OBJECT_TYPE,
-        "mfm.structured-state-outcome",
-        &outcome_json,
-    )?;
+    let outcome_object = HistoryObject::from_persisted(
+        &framework_schemas::StateOutcomeObject::from_outcome(&outcome),
+    )
+    .map_err(|_| invalid("state outcome object cannot be constructed"))?;
     let outcome_ref = outcome_object.content_ref.clone();
     objects.push(outcome_object);
     canonicalize_objects(&mut objects)?;
@@ -1157,12 +1153,21 @@ pub(super) fn prepare_authorization(
             capability_contract_ref,
         } => (AccessKind::Effect, capability_contract_ref),
     };
-    let attempt_ordinal = match &actionable.leaf {
-        StateLeaf::Ready => 0,
-        StateLeaf::Refreshable {
-            next_attempt_ordinal,
-            ..
-        } if access_kind == AccessKind::Effect => *next_attempt_ordinal,
+    let attempt_ordinal = match (&actionable.leaf, access_kind) {
+        (StateLeaf::Ready, _) => 0,
+        (
+            StateLeaf::Refreshable {
+                next_attempt_ordinal,
+                ..
+            },
+            AccessKind::Effect,
+        )
+        | (
+            StateLeaf::Reassertable {
+                next_attempt_ordinal,
+            },
+            _,
+        ) => *next_attempt_ordinal,
         _ => return Err(invalid("current state leaf cannot authorize access")),
     };
     let capability: StructuredLiveComponentContract =
@@ -1262,25 +1267,9 @@ pub(super) fn prepare_authorization(
         physical_binding_ref: proposal.physical_binding_certificate().content_ref.clone(),
         stable_resource_lineage_contract_ref,
     };
-    authorization.access_attempt_id = derive_access_attempt_id(&AccessAttemptPreimage {
-        run_id: verified.run_id(),
-        occurrence_id: &authorization.occurrence_id,
-        occurrence_path_ref: &authorization.occurrence_path_ref,
-        semantic_call_id: &authorization.semantic_call_id,
-        state_input_ref: &authorization.state_input_ref,
-        attempt_ordinal: authorization.attempt_ordinal,
-        access_kind: authorization.access_kind,
-        semantic_head: &authorization.semantic_head,
-        capability_contract_ref: &authorization.capability_contract_ref,
-        capability_implementation_ref: &authorization.capability_implementation_ref,
-        adapter_contract_ref: &authorization.adapter_contract_ref,
-        adapter_implementation_ref: &authorization.adapter_implementation_ref,
-        request: &authorization.request,
-        request_digest: &authorization.request_digest,
-        physical_binding_ref: &authorization.physical_binding_ref,
-        stable_resource_lineage_contract_ref: &authorization.stable_resource_lineage_contract_ref,
-    })
-    .map_err(|_| invalid("authorization access identity cannot be derived"))?;
+    authorization.access_attempt_id =
+        derive_access_attempt_id(verified.run_id(), &authorization)
+            .map_err(|_| invalid("authorization access identity cannot be derived"))?;
     let mut objects = vec![
         request_object,
         proposal.physical_binding_certificate().clone(),
@@ -1311,7 +1300,8 @@ pub(super) fn authorization_requires_fact_selection_barrier(
         return Ok(false);
     };
     let expected = prior_run_fact_selection_capability_contract()
-        .and_then(|contract| contract.content_ref())
+        .map_err(|_| invalid("prior-run fact selection contract cannot be derived"))?
+        .content_ref()
         .map_err(|_| invalid("prior-run fact selection contract cannot be derived"))?;
     Ok(capability_contract_ref == &expected)
 }
@@ -1537,7 +1527,7 @@ pub(super) fn assign_candidate(
             .ok_or_else(|| invalid("candidate sequence overflowed"))?,
         None => 1,
     };
-    let candidate_digest = domain_content_digest("mfm.structured-candidate.v1", &candidate)
+    let candidate_digest = derive_candidate_digest(&candidate)
         .map_err(|_| invalid("candidate digest cannot be derived"))?;
     let records = candidate
         .records
@@ -1546,7 +1536,7 @@ pub(super) fn assign_candidate(
         .map(|(ordinal, record)| {
             let ordinal = u32::try_from(ordinal)
                 .map_err(|_| invalid("candidate record ordinal exceeds u32"))?;
-            let record_hash = derive_record_hash(&AssignedRecordHashPreimage {
+            let record_hash = derive_record_hash(&RecordHashPreimage {
                 run_id: &candidate.run_id,
                 run_sequence,
                 ordinal,
@@ -1564,7 +1554,7 @@ pub(super) fn assign_candidate(
             })
         })
         .collect::<super::Result<Vec<_>>>()?;
-    let commit_digest = derive_commit_digest(&AssignedCommitDigestPreimage {
+    let commit_digest = derive_commit_digest(&CommitDigestPreimage {
         store_scope_id: &identity.store_scope_id,
         store_epoch: identity.store_epoch,
         predecessor: &candidate.expected_head,
@@ -1668,19 +1658,19 @@ pub(super) fn verify_batch_envelope(
             .validate()
             .map_err(|_| invalid("batch object bytes are not exact canonical content"))?;
     }
-    let candidate = BorrowedCommitCandidate {
-        run_id,
-        expected_head: &batch.predecessor,
-        append_request_id: &batch.append_request_id,
-        tenant_fact_coordinate: &batch.tenant_fact_coordinate,
+    let candidate = CommitCandidate {
+        run_id: run_id.clone(),
+        expected_head: batch.predecessor.clone(),
+        append_request_id: batch.append_request_id.clone(),
+        tenant_fact_coordinate: batch.tenant_fact_coordinate.clone(),
         records: batch
             .records
             .iter()
-            .map(|assigned| &assigned.record)
+            .map(|assigned| assigned.record.clone())
             .collect(),
-        objects: batch.objects.iter().collect(),
+        objects: batch.objects.clone(),
     };
-    let candidate_digest = domain_content_digest("mfm.structured-candidate.v1", &candidate)
+    let candidate_digest = derive_candidate_digest(&candidate)
         .map_err(|_| invalid("batch candidate digest cannot be recomputed"))?;
     if candidate_digest != batch.candidate_digest {
         return Err(invalid("batch candidate digest differs"));
@@ -1694,7 +1684,7 @@ pub(super) fn verify_batch_envelope(
         {
             return Err(invalid("assigned record coordinate differs from its batch"));
         }
-        let expected_hash = derive_record_hash(&AssignedRecordHashPreimage {
+        let expected_hash = derive_record_hash(&RecordHashPreimage {
             run_id,
             run_sequence: expected_sequence,
             ordinal,
@@ -1705,7 +1695,7 @@ pub(super) fn verify_batch_envelope(
             return Err(invalid("assigned record hash differs"));
         }
     }
-    let expected_commit = derive_commit_digest(&AssignedCommitDigestPreimage {
+    let expected_commit = derive_commit_digest(&CommitDigestPreimage {
         store_scope_id: &batch.store_scope_id,
         store_epoch: batch.store_epoch,
         predecessor: &batch.predecessor,
@@ -1749,31 +1739,6 @@ pub(super) fn validate_resolved_batch(
         batch.predecessor.as_ref(),
         Some(&(identity.store_scope_id.clone(), identity.store_epoch)),
     )
-}
-
-fn validate_admission_audit_refs(
-    admission: &RunAdmitted,
-    document: &CertifiedProgramDocument,
-) -> super::Result<()> {
-    let components = &document.root.components;
-    let audit = &admission.audit_refs;
-    if admission.qualified_entry_point_admission_policy_ref
-        != components.qualified_entry_point_admission_policy_ref
-        || audit.authored_program_ref != components.authored_program_ref
-        || audit.expanded_program_ref != components.expanded_program_ref
-        || audit.expansion_profile_ref != components.expansion_profile_ref
-        || audit.expansion_proof_ref != components.expansion_proof_ref
-        || audit.policy_coverage_proof_ref != components.policy_coverage_proof_ref
-        || audit.component_manifest_ref
-            != components.state_capability_adapter_signer_resource_manifest_closure_ref
-        || audit.implementation_manifest_ref
-            != components.secret_free_implementation_manifest_closure_ref
-    {
-        return Err(invalid(
-            "admission audit projections differ from certified root",
-        ));
-    }
-    Ok(())
 }
 
 fn require_component_object_closure(
@@ -2320,11 +2285,9 @@ fn derive_program(machine: &FoldMachine, allow_generate: bool) -> super::Result<
                 serde_json::to_value(&value.reference)
                     .map_err(|_| invalid("operation outcome reference cannot be encoded"))?,
             );
-            let outcome_ref = engine.framework_object_ref(
-                OPERATION_OUTCOME_OBJECT_TYPE,
-                "mfm.structured-operation-outcome",
-                &outcome,
-            )?;
+            let outcome = framework_schemas::OperationOutcomeObject::from_json(&outcome)
+                .map_err(|_| invalid("operation outcome cannot be strictly decoded"))?;
+            let outcome_ref = engine.persisted_object_ref(&outcome)?;
             ProgramCursor::Closed { outcome_ref }
         }
     };
@@ -2351,7 +2314,9 @@ impl DerivationEngine<'_> {
             .object(&value.value_ref)
             .ok_or_else(|| invalid("typed value object is absent"))?;
         object
-            .decode()
+            .validate()
+            .map_err(|_| invalid("typed value object cannot be strictly decoded"))?;
+        serde_json::from_str(&object.canonical_json)
             .map_err(|_| invalid("typed value object cannot be strictly decoded"))
     }
 
@@ -2416,13 +2381,7 @@ impl DerivationEngine<'_> {
         let schema_id = typed_value_schema_id(self.machine.program()?, &slot.contract_ref)?;
         let canonical =
             canonical_json(&value).map_err(|_| invalid("derived typed value is not canonical"))?;
-        let object = HistoryObject::new(
-            StableId::new(TYPED_VALUE_OBJECT_TYPE)
-                .map_err(|_| invalid("typed value object type is invalid"))?,
-            schema_id,
-            canonical.as_str(),
-        )
-        .map_err(|_| invalid("derived typed value object cannot be constructed"))?;
+        let object = typed_value_object(schema_id, canonical.as_str())?;
         let value_ref = object.content_ref.clone();
         self.required_object_refs.insert(value_ref.clone());
         match self.machine.objects.get(&value_ref) {
@@ -2450,20 +2409,12 @@ impl DerivationEngine<'_> {
         })
     }
 
-    fn framework_object_ref(
+    fn persisted_object_ref<T: PersistedObjectPayload>(
         &mut self,
-        object_type: &str,
-        schema_name: &str,
-        value: &Value,
+        value: &T,
     ) -> super::Result<ContentRef> {
-        let canonical = canonical_json(value)
-            .map_err(|_| invalid("derived structural object is not canonical"))?;
-        let object = HistoryObject::new(
-            StableId::new(object_type).map_err(|_| invalid("derived object type is invalid"))?,
-            framework_schema_id(schema_name)?,
-            canonical.as_str(),
-        )
-        .map_err(|_| invalid("derived structural object cannot be constructed"))?;
+        let object = HistoryObject::from_persisted(value)
+            .map_err(|_| invalid("derived structural object cannot be constructed"))?;
         self.required_object_refs.insert(object.content_ref.clone());
         match self.machine.objects.get(&object.content_ref) {
             Some(existing) if existing == &object => {}
@@ -2617,11 +2568,9 @@ fn walk_state(
             StateOutcomeRef::Success(value) => serde_json::json!({ "Success": value }),
             StateOutcomeRef::Failure(value) => serde_json::json!({ "Failure": value }),
         };
-        let outcome_ref = engine.framework_object_ref(
-            STATE_OUTCOME_OBJECT_TYPE,
-            "mfm.structured-state-outcome",
-            &expected_outcome,
-        )?;
+        let expected_outcome = framework_schemas::StateOutcomeObject::from_json(&expected_outcome)
+            .map_err(|_| invalid("state outcome cannot be strictly decoded"))?;
+        let outcome_ref = engine.persisted_object_ref(&expected_outcome)?;
         if outcome_ref != transition.record.outcome_ref {
             return Err(invalid("state outcome object differs from transition"));
         }
@@ -2648,8 +2597,10 @@ fn walk_state(
             }
         };
     }
+    let protocol = state_capability_protocol(engine.machine.program()?, state)?;
     let leaf = state_leaf(
         state,
+        state_effect_entry_contract(protocol.as_ref()),
         &engine.machine.occurrence_attempts,
         &engine.machine.authorizations,
         &engine.machine.observations,
@@ -2659,12 +2610,15 @@ fn walk_state(
             occurrence_id: state.occurrence_id.clone(),
             occurrence_path: state.occurrence_path.clone(),
             semantic_call_id: state.semantic_call_id.clone(),
-            state_contract_ref: state.contract.state_contract_ref.clone(),
+            state_contract_ref: state
+                .contract
+                .content_ref()
+                .map_err(|_| invalid("state contract reference cannot be derived"))?,
             input: input.reference,
             capability_contract_ref: state.contract.execution.capability_contract_ref().cloned(),
             stable_resource_lineage_contract_ref: state_stable_resource_lineage_contract_ref(
-                engine.machine.program()?,
                 state,
+                protocol.as_ref(),
             )?,
             execution_kind: state.contract.execution.kind(),
             leaf,
@@ -2968,8 +2922,57 @@ fn resolve_failure(
     }
 }
 
+/// Derives the leaf of an Effect occurrence whose entry is unresolved.
+///
+/// Both park shapes route through here and they land on different leaves,
+/// because they are not interchangeable: a crashed attempt has no committed
+/// observation, and a leaf that already says *re-assert* would give Runtime no
+/// instruction to close it first.
+fn parked_effect_leaf(
+    entry: Option<&StructuredEffectEntryContract>,
+    attempt_id: &AccessAttemptId,
+    attempt_ordinal: u64,
+    observed_entry_unknown: bool,
+) -> super::Result<StateLeaf> {
+    // Ordinals are dense per occurrence, so the ordinal is the attempt count and
+    // the budget needs no extra folded state.
+    let budget_remaining = match entry {
+        Some(StructuredEffectEntryContract::EntryAbsorbing { max_entries, .. }) => {
+            attempt_ordinal.saturating_add(1) < u64::from(max_entries.get())
+        }
+        Some(StructuredEffectEntryContract::EntryOnce {}) | None => false,
+    };
+    if !budget_remaining {
+        // No declared absorption, or the budget is spent: the occurrence parks
+        // exactly as it always has. This is the floor, not a failure.
+        return Ok(if observed_entry_unknown {
+            StateLeaf::EntryUnknown {
+                access_attempt_id: attempt_id.clone(),
+            }
+        } else {
+            StateLeaf::Authorized {
+                access_attempt_id: attempt_id.clone(),
+            }
+        });
+    }
+    Ok(if observed_entry_unknown {
+        StateLeaf::Reassertable {
+            next_attempt_ordinal: attempt_ordinal
+                .checked_add(1)
+                .ok_or_else(|| invalid("access attempt ordinal overflowed"))?,
+        }
+    } else {
+        // Authorized and unobserved: the invoker authority is lost and the
+        // attempt must be closed before anything re-asserts.
+        StateLeaf::EntryClosable {
+            access_attempt_id: attempt_id.clone(),
+        }
+    })
+}
+
 fn state_leaf(
     state: &ExpandedStateBinding,
+    entry: Option<&StructuredEffectEntryContract>,
     occurrence_attempts: &BTreeMap<OccurrenceId, Vec<AccessAttemptId>>,
     authorizations: &BTreeMap<AccessAttemptId, Box<RecordedAuthorization>>,
     observations: &BTreeMap<AccessAttemptId, RecordedObservation>,
@@ -2984,9 +2987,27 @@ fn state_leaf(
         .get(attempt_id)
         .ok_or_else(|| invalid("occurrence attempt has no authorization"))?;
     let Some(observation) = observations.get(attempt_id) else {
-        return Ok(StateLeaf::Authorized {
-            access_kind: authorization.record.access_kind,
-            access_attempt_id: attempt_id.clone(),
+        return Ok(match authorization.record.access_kind {
+            // A Read consumes no externally meaningful state, so a lost invoker
+            // authority may be reissued at the next ordinal with the unobserved
+            // predecessor standing. The fold cannot tell a crashed attempt from
+            // a live in-flight one — the leaf is a pure function of history and
+            // liveness is per-process — so two workers may invoke the same Read
+            // concurrently. That is admissible only because a Read consumes
+            // nothing, which makes the Read purity definition load-bearing here.
+            AccessKind::Read => StateLeaf::Reassertable {
+                next_attempt_ordinal: authorization
+                    .record
+                    .attempt_ordinal
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("access attempt ordinal overflowed"))?,
+            },
+            AccessKind::Effect => parked_effect_leaf(
+                entry,
+                attempt_id,
+                authorization.record.attempt_ordinal,
+                false,
+            )?,
         });
     };
     match &observation.record.outcome {
@@ -3007,9 +3028,12 @@ fn state_leaf(
                 .ok_or_else(|| invalid("access attempt ordinal overflowed"))?,
             public_lineage_head_ref: public_lineage_head_ref.clone(),
         }),
-        ObservationOutcome::EntryUnknown { .. } => Ok(StateLeaf::EntryUnknown {
-            access_attempt_id: attempt_id.clone(),
-        }),
+        ObservationOutcome::EntryUnknown { .. } => parked_effect_leaf(
+            entry,
+            attempt_id,
+            authorization.record.attempt_ordinal,
+            true,
+        ),
         ObservationOutcome::IntegrityFault { .. } => Ok(StateLeaf::BlockedIntegrity {
             observation_ref: observation.record_ref.clone(),
         }),
@@ -3037,21 +3061,48 @@ fn state_frontier(state: &ActionableState) -> super::Result<StructuredFrontier> 
         (StructuredExecutionKind::Read, StateLeaf::Refreshable { .. }) => {
             return Err(invalid("Read state cannot have a refreshable access leaf"));
         }
-        (StructuredExecutionKind::Read, StateLeaf::Authorized { .. }) => {
-            StructuredFrontier::WaitingReads
+        (
+            StructuredExecutionKind::Read | StructuredExecutionKind::Effect,
+            StateLeaf::Reassertable { .. },
+        )
+        | (StructuredExecutionKind::Effect, StateLeaf::EntryClosable { .. }) => {
+            StructuredFrontier::Actions(vec![state.clone()])
         }
-        (StructuredExecutionKind::Effect, StateLeaf::Authorized { .. })
-        | (StructuredExecutionKind::Effect, StateLeaf::EntryUnknown { .. }) => {
-            StructuredFrontier::PossibleEntry
+        (StructuredExecutionKind::Read, StateLeaf::EntryClosable { .. }) => {
+            return Err(invalid("Read state cannot be entry-closable"));
         }
+        (
+            StructuredExecutionKind::Effect,
+            StateLeaf::Authorized { access_attempt_id }
+            | StateLeaf::EntryUnknown { access_attempt_id },
+        ) => StructuredFrontier::PossibleEntry(effect_entry_subject(state, access_attempt_id)?),
         (_, StateLeaf::BlockedIntegrity { .. }) => StructuredFrontier::BlockedIntegrity,
         _ => StructuredFrontier::BlockedIntegrity,
     };
     Ok(frontier)
 }
 
+/// Projects the exact identity an operator needs to act on a parked occurrence.
+fn effect_entry_subject(
+    state: &ActionableState,
+    access_attempt_id: &AccessAttemptId,
+) -> super::Result<Box<EffectEntrySubject>> {
+    let capability_contract_ref = state
+        .capability_contract_ref
+        .clone()
+        .ok_or_else(|| invalid("Effect state has no capability contract"))?;
+    Ok(Box::new(EffectEntrySubject {
+        occurrence_id: state.occurrence_id.clone(),
+        occurrence_path_ref: state
+            .occurrence_path
+            .content_ref()
+            .map_err(|_| invalid("occurrence path reference cannot be derived"))?,
+        access_attempt_id: access_attempt_id.clone(),
+        capability_contract_ref,
+    }))
+}
+
 fn fan_out_frontier(lanes: &[LaneCursor]) -> super::Result<StructuredFrontier> {
-    let mut saw_waiting = false;
     for lane in lanes {
         let frontier = match lane {
             LaneCursor::AtState(state) => {
@@ -3065,12 +3116,11 @@ fn fan_out_frontier(lanes: &[LaneCursor]) -> super::Result<StructuredFrontier> {
         };
         match frontier {
             StructuredFrontier::Complete => {}
-            StructuredFrontier::WaitingReads => saw_waiting = true,
             StructuredFrontier::Actions(mut actions) => {
                 actions.sort_by(|left, right| left.occurrence_path.cmp(&right.occurrence_path));
                 return Ok(StructuredFrontier::Actions(actions));
             }
-            StructuredFrontier::PossibleEntry => {
+            StructuredFrontier::PossibleEntry(_) => {
                 return Err(invalid(
                     "possible-entry barrier cannot appear inside fan-out",
                 ));
@@ -3080,11 +3130,7 @@ fn fan_out_frontier(lanes: &[LaneCursor]) -> super::Result<StructuredFrontier> {
             }
         }
     }
-    if saw_waiting {
-        Ok(StructuredFrontier::WaitingReads)
-    } else {
-        Ok(StructuredFrontier::Complete)
-    }
+    Ok(StructuredFrontier::Complete)
 }
 
 fn minimum_action(frontier: &StructuredFrontier) -> super::Result<&ActionableState> {
@@ -3097,29 +3143,177 @@ fn minimum_action(frontier: &StructuredFrontier) -> super::Result<&ActionableSta
         .ok_or_else(|| invalid("action frontier is empty"))
 }
 
-fn framework_schema_id(name: &str) -> super::Result<SchemaId> {
-    SchemaId::new(
-        name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.structured-schema.v1:{name}:1").as_bytes()),
-    )
-    .map_err(|_| invalid("framework schema identity cannot be derived"))
+/// Persisted contracts for the three compiler-authored framework objects.
+///
+/// Each object has one owner-derived shape-hashed identity; there is no
+/// name-seeded schema and no stringly schema selection.
+mod framework_schemas {
+    use mfm_ids::{ContentRef, StableId};
+    use mfm_journal::structured::{
+        lexical_value_ref_shape, typed_value_ref_shape, LexicalValueRef, StateOutcomeRef,
+        TypedValueRef,
+    };
+    use mfm_values::{
+        EnumVariantDescriptor, FieldDescriptor, PersistedObjectPayload, PersistedSchema,
+        SchemaIdentity, SchemaKind, SchemaShape, ValueError,
+    };
+    use serde::{Deserialize, Serialize};
+
+    fn identity(name: &str, shape: SchemaShape) -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            name,
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            shape,
+        )
+    }
+
+    fn outcome_shape() -> mfm_values::Result<SchemaShape> {
+        let binding = lexical_value_ref_shape()?;
+        SchemaShape::external_enum(vec![
+            EnumVariantDescriptor::new("Failure", binding.clone()),
+            EnumVariantDescriptor::new("Success", binding),
+        ])
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    enum NominalOutcome {
+        Failure(LexicalValueRef),
+        Success(LexicalValueRef),
+    }
+
+    /// Nominal outcome of one committed state occurrence.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct StateOutcomeObject(NominalOutcome);
+
+    impl StateOutcomeObject {
+        pub fn from_outcome(outcome: &StateOutcomeRef) -> Self {
+            Self(match outcome {
+                StateOutcomeRef::Failure(value) => NominalOutcome::Failure(value.clone()),
+                StateOutcomeRef::Success(value) => NominalOutcome::Success(value.clone()),
+            })
+        }
+
+        pub fn from_json(value: &serde_json::Value) -> mfm_values::Result<Self> {
+            serde_json::from_value(value.clone()).map_err(|_| ValueError::SchemaShapeMismatch)
+        }
+    }
+
+    impl PersistedSchema for StateOutcomeObject {
+        fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+            identity("mfm.structured-state-outcome", outcome_shape()?)
+        }
+
+        fn validate(&self) -> mfm_values::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PersistedObjectPayload for StateOutcomeObject {
+        fn object_type() -> mfm_values::Result<StableId> {
+            StableId::new(super::STATE_OUTCOME_OBJECT_TYPE)
+                .map_err(|error| ValueError::Identity(error.to_string()))
+        }
+    }
+
+    /// Nominal terminal outcome of one run.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct OperationOutcomeObject(NominalOutcome);
+
+    impl OperationOutcomeObject {
+        pub fn from_json(value: &serde_json::Value) -> mfm_values::Result<Self> {
+            serde_json::from_value(value.clone()).map_err(|_| ValueError::SchemaShapeMismatch)
+        }
+    }
+
+    impl PersistedSchema for OperationOutcomeObject {
+        fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+            identity("mfm.structured-operation-outcome", outcome_shape()?)
+        }
+
+        fn validate(&self) -> mfm_values::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PersistedObjectPayload for OperationOutcomeObject {
+        fn object_type() -> mfm_values::Result<StableId> {
+            StableId::new(super::OPERATION_OUTCOME_OBJECT_TYPE)
+                .map_err(|error| ValueError::Identity(error.to_string()))
+        }
+    }
+
+    /// Content-addressed claim binding descriptor, subject, and response.
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct FactClaimObject {
+        descriptor_ref: ContentRef,
+        response: TypedValueRef,
+        subject: TypedValueRef,
+    }
+
+    impl FactClaimObject {
+        pub fn new(
+            descriptor_ref: &ContentRef,
+            subject: &TypedValueRef,
+            response: &TypedValueRef,
+        ) -> Self {
+            Self {
+                descriptor_ref: descriptor_ref.clone(),
+                response: response.clone(),
+                subject: subject.clone(),
+            }
+        }
+    }
+
+    impl PersistedSchema for FactClaimObject {
+        fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+            let typed = typed_value_ref_shape()?;
+            identity(
+                "mfm.structured-fact-claim",
+                SchemaShape::named_struct(vec![
+                    FieldDescriptor::required("descriptor_ref", SchemaShape::content_ref()?),
+                    FieldDescriptor::required("response", typed.clone()),
+                    FieldDescriptor::required("subject", typed),
+                ])?,
+            )
+        }
+
+        fn validate(&self) -> mfm_values::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl PersistedObjectPayload for FactClaimObject {
+        fn object_type() -> mfm_values::Result<StableId> {
+            StableId::new(super::FACT_CLAIM_OBJECT_TYPE)
+                .map_err(|error| ValueError::Identity(error.to_string()))
+        }
+    }
 }
 
-fn framework_object(
-    object_type: &str,
-    schema_name: &str,
-    value: &impl Serialize,
-) -> super::Result<HistoryObject> {
-    let canonical =
-        canonical_json(value).map_err(|_| invalid("framework object cannot be canonicalized"))?;
-    HistoryObject::new(
-        StableId::new(object_type).map_err(|_| invalid("framework object type is invalid"))?,
-        framework_schema_id(schema_name)?,
-        canonical.as_str(),
-    )
-    .map_err(|_| invalid("framework object cannot be constructed"))
+fn typed_value_object(schema_id: SchemaId, canonical: &str) -> super::Result<HistoryObject> {
+    let object = HistoryObject {
+        object_type: StableId::new(TYPED_VALUE_OBJECT_TYPE)
+            .map_err(|_| invalid("typed value object type is invalid"))?,
+        content_ref: ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical.as_bytes()),
+            ),
+        )
+        .map_err(|_| invalid("typed value content reference cannot be constructed"))?,
+        canonical_json: canonical.to_owned(),
+    };
+    object
+        .validate()
+        .map_err(|_| invalid("typed value object cannot be constructed"))?;
+    Ok(object)
 }
 
 fn proposed_typed_object(
@@ -3128,13 +3322,7 @@ fn proposed_typed_object(
     program: &VerifiedProgramData,
 ) -> super::Result<(HistoryObject, TypedValueRef)> {
     let contract: RetainedValueContract = decode_component(program.document(), contract_ref)?;
-    let object = HistoryObject::new(
-        StableId::new(TYPED_VALUE_OBJECT_TYPE)
-            .map_err(|_| invalid("typed value object type is invalid"))?,
-        contract.schema_id().clone(),
-        value.canonical().as_str(),
-    )
-    .map_err(|_| invalid("proposed typed value object cannot be constructed"))?;
+    let object = typed_value_object(contract.schema_id().clone(), value.canonical().as_str())?;
     let typed = TypedValueRef {
         contract_ref: contract_ref.clone(),
         value_ref: object.content_ref.clone(),
@@ -3187,13 +3375,13 @@ fn prepare_fact_proposals(
                 program,
             )?;
             objects.extend([subject_object, response_object]);
-            let claim = StructuredFactClaimPreimage {
-                descriptor_ref: proposal.descriptor_ref(),
-                subject: &subject,
-                response: &response,
-            };
-            let claim_object =
-                framework_object(FACT_CLAIM_OBJECT_TYPE, "mfm.structured-fact-claim", &claim)?;
+            let claim = framework_schemas::FactClaimObject::new(
+                proposal.descriptor_ref(),
+                &subject,
+                &response,
+            );
+            let claim_object = HistoryObject::from_persisted(&claim)
+                .map_err(|_| invalid("fact claim object cannot be constructed"))?;
             let emission_ordinal = u32::try_from(committed.len())
                 .map_err(|_| invalid("fact emission ordinal exceeds u32"))?;
             committed.push(CommittedFactRef {
@@ -3235,13 +3423,7 @@ fn proposed_fact_component(
             "proposed fact component differs from certified contract",
         ));
     }
-    let object = HistoryObject::new(
-        StableId::new(TYPED_VALUE_OBJECT_TYPE)
-            .map_err(|_| invalid("fact value object type is invalid"))?,
-        contract.schema_id().clone(),
-        proposed.canonical().as_str(),
-    )
-    .map_err(|_| invalid("fact value object cannot be constructed"))?;
+    let object = typed_value_object(contract.schema_id().clone(), proposed.canonical().as_str())?;
     if &object.content_ref != proposed.content_ref() {
         return Err(invalid(
             "proposed fact content identity differs from exact bytes",
@@ -3371,8 +3553,7 @@ fn validate_typed_value_object(
     {
         return Err(invalid("typed value object identity differs"));
     }
-    let json: Value = object
-        .decode()
+    let json: Value = serde_json::from_str(&object.canonical_json)
         .map_err(|_| invalid("typed value object cannot be strictly decoded"))?;
     if typed_value_contains_secret_marker(value, &json)? {
         return Err(invalid("typed value contains a forbidden secret marker"));
@@ -3601,7 +3782,7 @@ fn validate_program_value_schemas(program: &VerifiedProgramData) -> super::Resul
             .value
             .canonical_json()
             .map_err(|_| invalid("certified component value is not canonical"))?;
-        let Ok(contract) = RetainedValueContract::strict_decode(canonical.as_bytes()) else {
+        let Ok(contract) = RetainedValueContract::decode_canonical(canonical.as_bytes()) else {
             continue;
         };
         let contract_ref = mfm_spec::structured::retained_value_contract_ref(&contract)
@@ -3667,7 +3848,8 @@ fn validate_admission_material_refs(
     let source_manifest = objects
         .get(&material.prior_run_source_manifest_ref)
         .ok_or_else(|| invalid("admission prior-run source manifest is absent"))?;
-    PriorRunFactSourceManifest::from_history_object(source_manifest)
+    source_manifest
+        .decode_persisted::<PriorRunFactSourceManifest>()
         .map_err(|_| invalid("admission prior-run source manifest contract differs"))?;
     validate_admission_material_object(
         &material.routing_policy_ref,
@@ -3746,7 +3928,9 @@ fn collect_state_resource_lineages(
     state: &ExpandedStateBinding,
     lineage_refs: &mut BTreeSet<ContentRef>,
 ) -> super::Result<()> {
-    if let Some(lineage_ref) = state_stable_resource_lineage_contract_ref(program, state)? {
+    let protocol = state_capability_protocol(program, state)?;
+    if let Some(lineage_ref) = state_stable_resource_lineage_contract_ref(state, protocol.as_ref())?
+    {
         lineage_refs.insert(lineage_ref);
     }
     collect_failure_boundary_resource_lineages(program, &state.failure_boundary, lineage_refs)
@@ -3789,10 +3973,14 @@ fn collect_failure_boundary_resource_lineages(
     Ok(())
 }
 
-fn state_stable_resource_lineage_contract_ref(
+/// Decodes and identity-checks the certified capability protocol of one state.
+///
+/// Every consumer of a state's certified protocol reads it through here. A
+/// second copy of this walk would be a second chance to skip the identity check.
+fn state_capability_protocol(
     program: &VerifiedProgramData,
     state: &ExpandedStateBinding,
-) -> super::Result<Option<ContentRef>> {
+) -> super::Result<Option<StructuredCapabilityProtocolContract>> {
     let Some(capability_ref) = state.contract.execution.capability_contract_ref() else {
         return Ok(None);
     };
@@ -3809,10 +3997,31 @@ fn state_stable_resource_lineage_contract_ref(
     {
         return Err(invalid("certified capability object identity differs"));
     }
-    let protocol = capability
+    capability
         .capability_protocol
-        .as_ref()
-        .ok_or_else(|| invalid("certified capability protocol is absent"))?;
+        .ok_or_else(|| invalid("certified capability protocol is absent"))
+        .map(Some)
+}
+
+/// Reads the certified re-entry discipline of an Effect state.
+fn state_effect_entry_contract(
+    protocol: Option<&StructuredCapabilityProtocolContract>,
+) -> Option<&StructuredEffectEntryContract> {
+    match protocol {
+        Some(StructuredCapabilityProtocolContract::Effect { entry_contract, .. }) => {
+            Some(entry_contract)
+        }
+        _ => None,
+    }
+}
+
+fn state_stable_resource_lineage_contract_ref(
+    state: &ExpandedStateBinding,
+    protocol: Option<&StructuredCapabilityProtocolContract>,
+) -> super::Result<Option<ContentRef>> {
+    let Some(protocol) = protocol else {
+        return Ok(None);
+    };
     match (state.contract.execution.kind(), protocol) {
         (StructuredExecutionKind::Read, StructuredCapabilityProtocolContract::Read { .. })
         | (
@@ -3903,8 +4112,7 @@ fn validate_admission_material_object(
     if object.object_type.as_str() != expected_type {
         return Err(invalid("admission material object type differs"));
     }
-    let value: Value = object
-        .decode()
+    let value: Value = serde_json::from_str(&object.canonical_json)
         .map_err(|_| invalid("admission material object cannot be strictly decoded"))?;
     if contains_secret_marker(&value) {
         return Err(invalid(
@@ -3943,6 +4151,34 @@ struct AccessAttemptPreimage<'a> {
     request_digest: &'a RequestDigest,
     physical_binding_ref: &'a ContentRef,
     stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
+}
+
+/// Verifies that a re-assertion carries byte-identical committed request bytes.
+///
+/// `author_request` is already a deterministic function of state input with no
+/// ambient IO, and the re-asserting attempt has the same `state_input_ref`, so
+/// Runtime re-authors and gets identical bytes with no new request path. This
+/// turns that determinism invariant into a verified property exactly where a
+/// violation would be a duplicate effect with different content. Each field
+/// carries its own rejection, because each names a different way the repeat
+/// could have stopped being a repeat.
+fn validate_reasserted_request(
+    record: &ExternalAccessAuthorized,
+    predecessor: &ExternalAccessAuthorized,
+) -> super::Result<()> {
+    if record.occurrence_id != predecessor.occurrence_id {
+        return Err(invalid("re-assertion targets a different occurrence"));
+    }
+    if record.state_input_ref != predecessor.state_input_ref {
+        return Err(invalid("re-assertion consumes a different state input"));
+    }
+    if record.request.contract_ref != predecessor.request.contract_ref {
+        return Err(invalid("re-assertion carries a different request contract"));
+    }
+    if record.request_digest != predecessor.request_digest {
+        return Err(invalid("re-assertion carries different request bytes"));
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4003,6 +4239,9 @@ fn validate_authorization(
         StateLeaf::Refreshable {
             next_attempt_ordinal,
             ..
+        }
+        | StateLeaf::Reassertable {
+            next_attempt_ordinal,
         } => *next_attempt_ordinal,
         _ => {
             return Err(invalid(
@@ -4015,6 +4254,14 @@ fn validate_authorization(
             "authorization attempt ordinal differs from folded ordinal",
         ));
     }
+    if let StateLeaf::Reassertable { .. } = &state.leaf {
+        let predecessor = occurrence_attempts
+            .get(&record.occurrence_id)
+            .and_then(|attempts| attempts.last())
+            .and_then(|attempt| authorizations.get(attempt))
+            .ok_or_else(|| invalid("re-assertion has no preceding attempt"))?;
+        validate_reasserted_request(record, &predecessor.record)?;
+    }
     if occurrence_attempts
         .get(&record.occurrence_id)
         .is_some_and(|attempts| {
@@ -4023,9 +4270,25 @@ fn validate_authorization(
             })
         })
     {
-        return Err(invalid(
-            "occurrence already has an unresolved authorization",
-        ));
+        // This is the one relaxation of the single-outstanding-attempt rule, and
+        // it is scoped to Read by an explicit access-kind branch rather than a
+        // widened predicate. A Read consumes nothing, so its successor is sound
+        // with an unobserved predecessor standing. For an Effect the same
+        // admission is exactly what must never happen: an unobserved predecessor
+        // may already have entered.
+        match (record.access_kind, &state.leaf) {
+            (AccessKind::Read, StateLeaf::Reassertable { .. }) => {}
+            (AccessKind::Read, _) => {
+                return Err(invalid(
+                    "Read occurrence already has an unresolved authorization",
+                ));
+            }
+            (AccessKind::Effect, _) => {
+                return Err(invalid(
+                    "Effect occurrence already has an unresolved authorization",
+                ));
+            }
+        }
     }
     let capability_ref = state_binding
         .contract
@@ -4188,25 +4451,8 @@ fn validate_authorization(
             binding_object,
         )?;
     }
-    let expected_attempt = derive_access_attempt_id(&AccessAttemptPreimage {
-        run_id,
-        occurrence_id: &record.occurrence_id,
-        occurrence_path_ref: &record.occurrence_path_ref,
-        semantic_call_id: &record.semantic_call_id,
-        state_input_ref: &record.state_input_ref,
-        attempt_ordinal: record.attempt_ordinal,
-        access_kind: record.access_kind,
-        semantic_head: &record.semantic_head,
-        capability_contract_ref: &record.capability_contract_ref,
-        capability_implementation_ref: &record.capability_implementation_ref,
-        adapter_contract_ref: &record.adapter_contract_ref,
-        adapter_implementation_ref: &record.adapter_implementation_ref,
-        request: &record.request,
-        request_digest: &record.request_digest,
-        physical_binding_ref: &record.physical_binding_ref,
-        stable_resource_lineage_contract_ref: &record.stable_resource_lineage_contract_ref,
-    })
-    .map_err(|_| invalid("access attempt identity cannot be derived"))?;
+    let expected_attempt = derive_access_attempt_id(run_id, record)
+        .map_err(|_| invalid("access attempt identity cannot be derived"))?;
     if record.access_attempt_id != expected_attempt {
         return Err(invalid("authorization access attempt identity differs"));
     }
@@ -4238,7 +4484,8 @@ fn validate_prior_run_fact_selection_authorization(
         return Ok(false);
     }
     let expected_adapter_ref = prior_run_fact_scanner_adapter_contract()
-        .and_then(|contract| contract.content_ref())
+        .map_err(|_| invalid("prior-run fact scanner identity cannot be derived"))?
+        .content_ref()
         .map_err(|_| invalid("prior-run fact scanner identity cannot be derived"))?;
     if record.access_kind != AccessKind::Read
         || capability != &expected_capability
@@ -4250,25 +4497,22 @@ fn validate_prior_run_fact_selection_authorization(
         ));
     }
     let request: FactSelectionRequest = request_object
-        .decode()
+        .decode_mfm_value()
         .map_err(|_| invalid("prior-run fact selection request cannot be decoded"))?;
-    if request
-        .admitted_source_manifest_ref()
-        .map_err(|_| invalid("prior-run fact selection source cannot be decoded"))?
-        != admission
+    if request.admitted_source_manifest_ref()
+        != &admission
             .admission_material_refs
             .prior_run_source_manifest_ref
-        || request
-            .selector_contract_ref()
-            .map_err(|_| invalid("prior-run fact selection selector cannot be decoded"))?
-            != prior_run_fact_selector_contract_ref()
+        || request.selector_contract_ref()
+            != &prior_run_fact_selector_contract_ref()
                 .map_err(|_| invalid("prior-run fact selector identity cannot be derived"))?
     {
         return Err(invalid(
             "prior-run fact selection request exceeds admitted authority",
         ));
     }
-    let certificate = PriorRunFactScannerBindingCertificate::from_history_object(binding_object)
+    let certificate = binding_object
+        .decode_persisted::<PriorRunFactScannerBindingCertificate>()
         .map_err(|_| invalid("prior-run fact scanner binding certificate is invalid"))?;
     if certificate.store_scope_id() != &admission.store_scope_id
         || certificate.store_epoch() != admission.store_epoch
@@ -4570,13 +4814,6 @@ fn validate_transition_shape(
     Ok(())
 }
 
-#[derive(Serialize)]
-struct StructuredFactClaimPreimage<'a> {
-    descriptor_ref: &'a ContentRef,
-    subject: &'a TypedValueRef,
-    response: &'a TypedValueRef,
-}
-
 fn validate_committed_facts(
     record: &StateTransitionCommitted,
     state: &ExpandedStateBinding,
@@ -4620,20 +4857,13 @@ fn validate_committed_facts(
             }
             validate_typed_value(&fact.subject, objects, program)?;
             validate_typed_value(&fact.response, objects, program)?;
-            let claim_value = StructuredFactClaimPreimage {
-                descriptor_ref: &fact.descriptor_ref,
-                subject: &fact.subject,
-                response: &fact.response,
-            };
-            let canonical = canonical_json(&claim_value)
-                .map_err(|_| invalid("fact claim cannot be canonicalized"))?;
-            let expected = HistoryObject::new(
-                StableId::new(FACT_CLAIM_OBJECT_TYPE)
-                    .map_err(|_| invalid("fact claim object type is invalid"))?,
-                framework_schema_id("mfm.structured-fact-claim")?,
-                canonical.as_str(),
-            )
-            .map_err(|_| invalid("fact claim object cannot be constructed"))?;
+            let claim = framework_schemas::FactClaimObject::new(
+                &fact.descriptor_ref,
+                &fact.subject,
+                &fact.response,
+            );
+            let expected = HistoryObject::from_persisted(&claim)
+                .map_err(|_| invalid("fact claim object cannot be constructed"))?;
             if expected.content_ref != fact.claim_ref
                 || objects.get(&fact.claim_ref) != Some(&expected)
             {

@@ -4,21 +4,34 @@
 //! Successor legality, cursor derivation, object closure, and atomic append
 //! authority belong to `mfm-store`.
 
-use mfm_canonical::limits::{
-    MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE, MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES,
-    MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE, MAX_PRIOR_RUN_SOURCE_REFERENCES,
-    MAX_PRIOR_RUN_SOURCE_RULES,
-};
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{
     AccessAttemptId, AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm,
     FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest, InvocationIdentity,
     JournalCommitDigest, JournalRecordHash, OccurrenceId, RequestDigest, RunId,
-    RunSemanticStateDigest, SchemaId, SemanticCallId, StableId, StoreEpoch, StoreScopeId,
-    TenantScopeId,
+    RunSemanticStateDigest, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
-use serde::de::DeserializeOwned;
+use mfm_program_derive::PersistedSchema;
+use mfm_values::{
+    FieldDescriptor, LiteralValue, MfmValue, PersistedObjectPayload, PersistedSchema,
+    SchemaIdentity, SchemaKind, SchemaShape, SequenceOrdering, StringGrammar,
+};
 use serde::{Deserialize, Serialize};
+
+/// Maximum rules in one prior-run source contract.
+pub const MAX_PRIOR_RUN_SOURCE_RULES: usize = 1024;
+
+/// Maximum certified programs named by one prior-run source rule.
+pub const MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE: usize = 4096;
+
+/// Maximum fact descriptors named by one prior-run source rule.
+pub const MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE: usize = 4096;
+
+/// Maximum total references in one prior-run source contract.
+pub const MAX_PRIOR_RUN_SOURCE_REFERENCES: usize = 65536;
+
+/// Maximum bytes in one canonical prior-run source manifest.
+pub const MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES: usize = 16777216;
 
 /// Object-type tag for the immutable admitted configuration root.
 pub const ADMISSION_CONFIGURATION_OBJECT_TYPE: &str = "structured.admission_configuration";
@@ -29,13 +42,11 @@ pub const ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE: &str =
     "structured.admission_prior_run_source_manifest";
 /// Object-type tag for the immutable admitted routing policy.
 pub const ADMISSION_ROUTING_POLICY_OBJECT_TYPE: &str = "structured.admission_routing_policy";
+/// Object-type tag for a canonical value owned by one exact [`MfmValue`] schema.
+pub const TYPED_VALUE_OBJECT_TYPE: &str = "structured.typed_value";
 const PRIOR_RUN_SOURCE_MANIFEST_VERSION: &str = "mfm.prior-run-fact-source-manifest.v1";
-const PRIOR_RUN_SOURCE_MANIFEST_SCHEMA_SEED: &[u8] =
-    b"mfm.prior-run-fact-source-manifest.schema.v1";
 const PRIOR_RUN_FACT_SCANNER_BINDING_OBJECT_TYPE: &str =
     "structured.prior_run_fact_scanner_binding";
-const PRIOR_RUN_FACT_SCANNER_BINDING_SCHEMA_SEED: &[u8] =
-    b"mfm.prior-run-fact-scanner-binding.schema.v1";
 
 /// Result type for structured journal contract construction.
 pub type Result<T> = std::result::Result<T, StructuredJournalError>;
@@ -55,7 +66,7 @@ pub enum StructuredJournalError {
 }
 
 /// One exact content-addressed canonical object admitted with a history append.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryObject {
     /// Registered public object-type tag.
@@ -67,29 +78,6 @@ pub struct HistoryObject {
 }
 
 impl HistoryObject {
-    /// Constructs an object and proves that its bytes match its content reference.
-    pub fn new(
-        object_type: StableId,
-        schema_id: SchemaId,
-        canonical_json: impl AsRef<str>,
-    ) -> Result<Self> {
-        let canonical = PlainCanonicalJsonBytes::from_json_str(canonical_json.as_ref())
-            .map_err(|_| StructuredJournalError::Canonical)?;
-        let content_ref = ContentRef::new(
-            schema_id,
-            ContentDigest::from_digest(
-                DigestAlgorithm::Sha256V1,
-                sha256_digest_bytes(canonical.as_bytes()),
-            ),
-        )
-        .map_err(|_| StructuredJournalError::Identity)?;
-        Ok(Self {
-            object_type,
-            content_ref,
-            canonical_json: canonical.as_str().to_owned(),
-        })
-    }
-
     /// Revalidates exact canonical bytes and content addressing.
     pub fn validate(&self) -> Result<()> {
         let canonical =
@@ -111,10 +99,72 @@ impl HistoryObject {
         Ok(())
     }
 
-    /// Strictly decodes the exact canonical object value.
-    pub fn decode<T: DeserializeOwned>(&self) -> Result<T> {
+    /// Builds one history object from its typed owner.
+    ///
+    /// The owner supplies both the object type and the schema identity, so a
+    /// caller cannot pair typed bytes with a foreign object kind or a schema
+    /// identity that does not describe them.
+    pub fn from_persisted<T: PersistedObjectPayload>(value: &T) -> Result<Self> {
+        let canonical = value
+            .encode_canonical()
+            .map_err(|_| StructuredJournalError::Canonical)?;
+        let content_ref = value
+            .content_ref()
+            .map_err(|_| StructuredJournalError::Identity)?;
+        Ok(Self {
+            object_type: T::object_type().map_err(|_| StructuredJournalError::Identity)?,
+            content_ref,
+            canonical_json: canonical.as_str().to_owned(),
+        })
+    }
+
+    /// Strictly decodes this object as one typed owner.
+    ///
+    /// Both the retained object type and the retained schema identity must
+    /// match the owner before its bytes are decoded.
+    pub fn decode_persisted<T: PersistedObjectPayload>(&self) -> Result<T> {
         self.validate()?;
-        serde_json::from_str(&self.canonical_json).map_err(|_| StructuredJournalError::Canonical)
+        let object_type = T::object_type().map_err(|_| StructuredJournalError::Identity)?;
+        let schema_id = T::schema_id().map_err(|_| StructuredJournalError::Identity)?;
+        if self.object_type != object_type || self.content_ref.schema_id() != &schema_id {
+            return Err(StructuredJournalError::Invariant(
+                "object type or schema identity differs from the requested owner",
+            ));
+        }
+        T::decode_canonical(self.canonical_json.as_bytes())
+            .map_err(|_| StructuredJournalError::Canonical)
+    }
+
+    /// Decodes a stored Runtime value through its exact concrete value owner.
+    pub fn decode_mfm_value<T: MfmValue>(&self) -> Result<T> {
+        self.validate()?;
+        let object_type =
+            StableId::new(TYPED_VALUE_OBJECT_TYPE).map_err(|_| StructuredJournalError::Identity)?;
+        let descriptor = T::schema_descriptor().map_err(|_| StructuredJournalError::Canonical)?;
+        let schema_id = descriptor
+            .schema_id()
+            .map_err(|_| StructuredJournalError::Canonical)?;
+        if self.object_type != object_type || self.content_ref.schema_id() != &schema_id {
+            return Err(StructuredJournalError::Invariant(
+                "typed value owner does not match object identity",
+            ));
+        }
+        descriptor
+            .identity
+            .validate_canonical_value(self.canonical_json.as_bytes())
+            .map_err(|_| StructuredJournalError::Canonical)?;
+        let value: T = serde_json::from_str(&self.canonical_json)
+            .map_err(|_| StructuredJournalError::Canonical)?;
+        let encoded =
+            serde_json::to_string(&value).map_err(|_| StructuredJournalError::Canonical)?;
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&encoded)
+            .map_err(|_| StructuredJournalError::Canonical)?;
+        if canonical.as_str() != self.canonical_json {
+            return Err(StructuredJournalError::Invariant(
+                "typed value is not the owner's exact encoding",
+            ));
+        }
+        Ok(value)
     }
 }
 
@@ -226,38 +276,6 @@ impl PriorRunFactSourceManifest {
         &self.rules
     }
 
-    /// Encodes this manifest as the sole accepted admission history object.
-    pub fn to_history_object(&self) -> Result<HistoryObject> {
-        self.validate()?;
-        let canonical = canonical_json(self)?;
-        validate_prior_run_source_manifest_bytes(canonical.as_bytes())?;
-        HistoryObject::new(
-            StableId::new(ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE)
-                .map_err(|_| StructuredJournalError::Identity)?,
-            prior_run_fact_source_manifest_schema_id()?,
-            canonical.as_str(),
-        )
-    }
-
-    /// Strictly decodes and validates one admitted source-manifest object.
-    pub fn from_history_object(object: &HistoryObject) -> Result<Self> {
-        validate_prior_run_source_manifest_bytes(object.canonical_json.as_bytes())?;
-        object.validate()?;
-        if object.object_type.as_str() != ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE
-            || object.content_ref.schema_id() != &prior_run_fact_source_manifest_schema_id()?
-        {
-            return Err(StructuredJournalError::Invariant(
-                "admitted prior-run source manifest has the wrong exact contract",
-            ));
-        }
-        let manifest: Self = object.decode()?;
-        manifest.validate()?;
-        if canonical_json(&manifest)?.as_str() != object.canonical_json {
-            return Err(StructuredJournalError::Canonical);
-        }
-        Ok(manifest)
-    }
-
     /// Returns whether one verified fact producer is admitted by this manifest.
     pub fn permits(&self, admission: &RunAdmitted, descriptor_ref: &ContentRef) -> bool {
         self.rules
@@ -270,6 +288,8 @@ impl PriorRunFactSourceManifest {
     }
 
     fn validate(&self) -> Result<()> {
+        let encoded = serde_json::to_vec(self).map_err(|_| StructuredJournalError::Canonical)?;
+        validate_prior_run_source_manifest_bytes(&encoded)?;
         let reference_count = self.rules.iter().try_fold(0_usize, |total, rule| {
             total
                 .checked_add(rule.certified_program_refs.len())
@@ -421,19 +441,154 @@ mod prior_run_source_count_limit_tests {
     }
 }
 
-/// Returns the exact schema identity of the sole admitted source manifest.
-pub fn prior_run_fact_source_manifest_schema_id() -> Result<SchemaId> {
-    SchemaId::new(
-        "mfm.prior-run-fact-source-manifest",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(PRIOR_RUN_SOURCE_MANIFEST_SCHEMA_SEED),
-    )
-    .map_err(|_| StructuredJournalError::Identity)
+impl PersistedSchema for PriorRunFactSourceManifest {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        let reference = SchemaShape::content_ref()?;
+        let rule = SchemaShape::named_struct(vec![
+            FieldDescriptor::required(
+                "certified_program_refs",
+                bounded_reference_sequence(
+                    &reference,
+                    MAX_PRIOR_RUN_SOURCE_PROGRAMS_PER_RULE as u32,
+                ),
+            ),
+            FieldDescriptor::required(
+                "entry_point_operation_id",
+                SchemaShape::identity_string(StringGrammar::StableId, 256),
+            ),
+            FieldDescriptor::required(
+                "fact_descriptor_refs",
+                bounded_reference_sequence(
+                    &reference,
+                    MAX_PRIOR_RUN_SOURCE_DESCRIPTORS_PER_RULE as u32,
+                ),
+            ),
+        ])?;
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.prior-run-fact-source-manifest",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "rules",
+                    SchemaShape::BoundedSequence {
+                        element: Box::new(rule),
+                        minimum_items: 0,
+                        maximum_items: MAX_PRIOR_RUN_SOURCE_RULES as u32,
+                        ordering: SequenceOrdering::CanonicalAscending,
+                        unique: true,
+                    },
+                ),
+                FieldDescriptor::required(
+                    "version",
+                    SchemaShape::Literal(LiteralValue::String(
+                        PRIOR_RUN_SOURCE_MANIFEST_VERSION.to_owned(),
+                    )),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        PriorRunFactSourceManifest::validate(self)
+            .map_err(|error| mfm_values::ValueError::Descriptor(error.to_string()))
+    }
+}
+
+impl PersistedObjectPayload for PriorRunFactSourceManifest {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+/// Returns the exact serialized shape of one [`TypedValueRef`].
+pub fn typed_value_ref_shape() -> mfm_values::Result<SchemaShape> {
+    let reference = SchemaShape::content_ref()?;
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required("contract_ref", reference.clone()),
+        FieldDescriptor::required("value_ref", reference),
+    ])
+}
+
+/// Returns the exact serialized shape of one [`LexicalValueRef`].
+///
+/// The typed value is flattened into the binding object and the structural
+/// origin is absent rather than null when it carries no value, so the shape
+/// describes the retained bytes rather than the Rust field layout.
+pub fn lexical_value_ref_shape() -> mfm_values::Result<SchemaShape> {
+    let reference = SchemaShape::content_ref()?;
+    let source = vec![
+        FieldDescriptor::required("arm_key", stable_id_shape()),
+        FieldDescriptor::required("source_slot_ref", reference.clone()),
+        FieldDescriptor::required("source_value_ref", reference.clone()),
+        FieldDescriptor::required("value_contract_ref", reference.clone()),
+    ];
+    let match_arm = SchemaShape::named_struct(
+        [
+            vec![
+                FieldDescriptor::required(
+                    "arm_ordinal",
+                    SchemaShape::UnsignedRange {
+                        minimum: 0,
+                        maximum: u64::from(u32::MAX),
+                    },
+                ),
+                FieldDescriptor::required("match_path_ref", reference.clone()),
+            ],
+            source,
+        ]
+        .concat(),
+    )?;
+    let fan_out_lane = SchemaShape::named_struct(vec![
+        FieldDescriptor::required("group_path_ref", reference.clone()),
+        FieldDescriptor::required("lane_key", stable_id_shape()),
+        FieldDescriptor::required(
+            "lane_ordinal",
+            SchemaShape::UnsignedRange {
+                minimum: 0,
+                maximum: u64::from(u32::MAX),
+            },
+        ),
+        FieldDescriptor::required("outcome_contract_ref", reference.clone()),
+        FieldDescriptor::required("source_slot_ref", reference.clone()),
+        FieldDescriptor::required("source_value_ref", reference.clone()),
+    ])?;
+    let structural_origin = SchemaShape::tagged_enum(
+        mfm_values::EnumTagging::Internal {
+            tag: "kind".to_owned(),
+        },
+        vec![
+            mfm_values::EnumVariantDescriptor::new("fan_out_lane", fan_out_lane),
+            mfm_values::EnumVariantDescriptor::new("match_arm", match_arm),
+        ],
+    )?;
+    SchemaShape::named_struct(vec![
+        FieldDescriptor::required("contract_ref", reference.clone()),
+        FieldDescriptor::optional_absent("structural_origin", structural_origin),
+        FieldDescriptor::required("slot_ref", reference.clone()),
+        FieldDescriptor::required("value_ref", reference),
+    ])
+}
+
+fn stable_id_shape() -> SchemaShape {
+    SchemaShape::identity_string(StringGrammar::StableId, 256)
+}
+
+fn bounded_reference_sequence(reference: &SchemaShape, maximum_items: u32) -> SchemaShape {
+    SchemaShape::BoundedSequence {
+        element: Box::new(reference.clone()),
+        minimum_items: 0,
+        maximum_items,
+        ordering: SequenceOrdering::CanonicalAscending,
+        unique: true,
+    }
 }
 
 /// Store-qualified dense fact-publication frontier for one tenant.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TenantFactFrontier {
     /// Qualified store lineage containing the publication sequence.
@@ -480,7 +635,7 @@ impl TenantFactFrontier {
 }
 
 /// Closed tenant-fact coordinate attached to every append candidate.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TenantFactCoordinate {
     /// The append neither publishes nor authorizes a prior-run fact read.
@@ -552,33 +707,6 @@ impl PriorRunFactScannerBindingCertificate {
         }
     }
 
-    /// Encodes this certificate as its fixed content-addressed history object.
-    pub fn to_history_object(&self) -> Result<HistoryObject> {
-        HistoryObject::new(
-            StableId::new(PRIOR_RUN_FACT_SCANNER_BINDING_OBJECT_TYPE)
-                .map_err(|_| StructuredJournalError::Identity)?,
-            prior_run_fact_scanner_binding_schema_id()?,
-            canonical_json(self)?.as_str(),
-        )
-    }
-
-    /// Strictly decodes one exact scanner binding certificate object.
-    pub fn from_history_object(object: &HistoryObject) -> Result<Self> {
-        object.validate()?;
-        if object.object_type.as_str() != PRIOR_RUN_FACT_SCANNER_BINDING_OBJECT_TYPE
-            || object.content_ref.schema_id() != &prior_run_fact_scanner_binding_schema_id()?
-        {
-            return Err(StructuredJournalError::Invariant(
-                "prior-run fact scanner binding has the wrong exact contract",
-            ));
-        }
-        let certificate: Self = object.decode()?;
-        if canonical_json(&certificate)?.as_str() != object.canonical_json {
-            return Err(StructuredJournalError::Canonical);
-        }
-        Ok(certificate)
-    }
-
     /// Returns the exact store lineage.
     pub const fn store_scope_id(&self) -> &StoreScopeId {
         &self.store_scope_id
@@ -625,19 +753,52 @@ impl PriorRunFactScannerBindingCertificate {
     }
 }
 
-/// Returns the fixed schema identity of scanner binding certificates.
-pub fn prior_run_fact_scanner_binding_schema_id() -> Result<SchemaId> {
-    SchemaId::new(
-        "mfm.prior-run-fact-scanner-binding",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(PRIOR_RUN_FACT_SCANNER_BINDING_SCHEMA_SEED),
-    )
-    .map_err(|_| StructuredJournalError::Identity)
+impl PersistedSchema for PriorRunFactScannerBindingCertificate {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        let reference = SchemaShape::content_ref()?;
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.prior-run-fact-scanner-binding",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required("adapter_contract_ref", reference.clone()),
+                FieldDescriptor::required("adapter_implementation_ref", reference.clone()),
+                FieldDescriptor::required("admitted_source_manifest_ref", reference.clone()),
+                FieldDescriptor::required("capability_contract_ref", reference.clone()),
+                FieldDescriptor::required("capability_implementation_ref", reference.clone()),
+                FieldDescriptor::required("selector_contract_ref", reference),
+                FieldDescriptor::required(
+                    "store_epoch",
+                    SchemaShape::identity_string(StringGrammar::CanonicalUnsignedText, 20),
+                ),
+                FieldDescriptor::required(
+                    "store_scope_id",
+                    SchemaShape::identity_string(StringGrammar::StoreScopeId, 64),
+                ),
+                FieldDescriptor::required(
+                    "tenant_scope_id",
+                    SchemaShape::identity_string(StringGrammar::TenantScopeId, 64),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        mfm_values::validate_derived_persisted_owner(self, &Self::schema_identity()?)
+    }
+}
+
+impl PersistedObjectPayload for PriorRunFactScannerBindingCertificate {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(PRIOR_RUN_FACT_SCANNER_BINDING_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
 }
 
 /// Sole positive completeness statement carried by a selected-fact response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PriorRunFactCompletenessMode {
     /// Every dense publication through the authorization barrier was verified.
@@ -645,7 +806,7 @@ pub enum PriorRunFactCompletenessMode {
 }
 
 /// Exact authorization and store barrier attested by one completed fact scan.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PriorRunFactScanAttestation {
     /// Exact immutable store/epoch/tenant frontier reached by the scan.
@@ -661,7 +822,7 @@ pub struct PriorRunFactScanAttestation {
 }
 
 /// One fully verified source fact retained in a query result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SelectedPriorRunFact {
     /// Dense tenant publication containing this fact.
@@ -695,7 +856,7 @@ pub struct SelectedPriorRunFact {
 }
 
 /// Final deterministic selection for one authored query.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PriorRunFactQueryResult {
     /// Zero-based query ordinal in the exact request.
@@ -707,7 +868,7 @@ pub struct PriorRunFactQueryResult {
 }
 
 /// One self-contained complete prior-run fact-selection result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PriorRunFactSelectionResponse {
     /// Sole current response contract version.
@@ -730,7 +891,7 @@ impl PriorRunFactSelectionResponse {
 }
 
 /// Exact producer-independent typed retained value.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TypedValueRef {
     /// Exact retained-value contract required by that slot.
@@ -745,16 +906,14 @@ pub struct TypedValueRef {
 /// produced by Match-arm merge or fan-out-lane completion, [`structural_origin`]
 /// binds the selected arm/lane independently of payload equality so two
 /// byte-identical products remain distinguishable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LexicalValueRef {
     /// Canonical identity of the certified lexical slot recipe.
     pub slot_ref: ContentRef,
     /// Exact typed retained value.
-    #[serde(flatten)]
     pub value: TypedValueRef,
     /// Selected Match-arm or fan-out-lane producer identity, when applicable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structural_origin: Option<StructuralValueOrigin>,
 }
 
@@ -787,7 +946,7 @@ impl LexicalValueRef {
 /// Fields are independent of payload bytes so identical values from distinct
 /// arms or lanes remain distinguishable by group path, key, ordinal, contract,
 /// and source reference.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StructuralValueOrigin {
     /// Selected arm of an exhaustive Match merge.
@@ -823,7 +982,7 @@ pub enum StructuralValueOrigin {
 }
 
 /// One state-produced durable fact with its complete certified claim closure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommittedFactRef {
     /// Dense emission ordinal inside this transition.
@@ -841,7 +1000,7 @@ pub struct CommittedFactRef {
 }
 
 /// Exact reference to one assigned record in a run prefix.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RecordRef {
     /// Run containing the record.
@@ -854,8 +1013,25 @@ pub struct RecordRef {
     pub record_hash: JournalRecordHash,
 }
 
+impl RecordRef {
+    /// Constructs one exact assigned-record reference.
+    pub fn new(
+        run_id: RunId,
+        run_sequence: u64,
+        ordinal: u32,
+        record_hash: JournalRecordHash,
+    ) -> Self {
+        Self {
+            run_id,
+            run_sequence,
+            ordinal,
+            record_hash,
+        }
+    }
+}
+
 /// Exact per-run physical journal head.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct JournalHead {
     /// One-based atomic append sequence.
@@ -865,7 +1041,7 @@ pub struct JournalHead {
 }
 
 /// Fold-derived semantic head, independent of intervening audit records.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SemanticHead {
     /// Admission-root semantic genesis.
@@ -901,7 +1077,9 @@ impl SemanticHead {
 }
 
 /// Closed external-access kind recorded by Runtime.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, PersistedSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessKind {
     /// Non-mutating bounded external observation.
@@ -910,28 +1088,8 @@ pub enum AccessKind {
     Effect,
 }
 
-/// Exact audit projections bound to one certified program authority.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CertifiedProgramAuditRefs {
-    /// Canonical authored program.
-    pub authored_program_ref: ContentRef,
-    /// Canonical fully expanded program.
-    pub expanded_program_ref: ContentRef,
-    /// Exact trusted expansion profile.
-    pub expansion_profile_ref: ContentRef,
-    /// Exact expansion proof.
-    pub expansion_proof_ref: ContentRef,
-    /// Exact policy coverage proof.
-    pub policy_coverage_proof_ref: ContentRef,
-    /// Exact semantic component manifest.
-    pub component_manifest_ref: ContentRef,
-    /// Exact secret-free implementation manifest.
-    pub implementation_manifest_ref: ContentRef,
-}
-
 /// Exact immutable non-secret admission roots outside the certified program.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionMaterialRefs {
     /// Canonical deployment-selected configuration object.
@@ -947,7 +1105,7 @@ pub struct AdmissionMaterialRefs {
 }
 
 /// Sole immutable root record of one admitted structured run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunAdmitted {
     /// Qualified store lineage that owns this run.
@@ -963,13 +1121,12 @@ pub struct RunAdmitted {
     /// Exact qualified entry-point operation.
     pub entry_point_operation_id: StableId,
     /// Sole certified-program authority reference.
+    ///
+    /// This is simultaneously the program identity, the retained root-object
+    /// key, the prior-run authorization identity, and the export identity. The
+    /// admission policy and audit projections are not restated here: they are
+    /// exactly `root.components` behind this one reference.
     pub certified_program_ref: ContentRef,
-    /// Content-addressed certified-program root stored separately from its component closure.
-    pub certified_program_root_ref: ContentRef,
-    /// Exact registry-selected admission policy.
-    pub qualified_entry_point_admission_policy_ref: ContentRef,
-    /// Reviewed audit projections that must equal the certified root.
-    pub audit_refs: CertifiedProgramAuditRefs,
     /// Exact immutable configuration, context, source, routing, and lineage roots.
     pub admission_material_refs: AdmissionMaterialRefs,
     /// Declaration-ordered exact admission root values.
@@ -979,7 +1136,7 @@ pub struct RunAdmitted {
 }
 
 /// One nominal state outcome accepted by the store.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum StateOutcomeRef {
     /// Exact successful state-output binding.
@@ -989,7 +1146,7 @@ pub enum StateOutcomeRef {
 }
 
 /// Complete semantic transition of one exact executable state occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct StateTransitionCommitted {
     /// Exact executable occurrence.
@@ -1015,7 +1172,7 @@ pub struct StateTransitionCommitted {
 }
 
 /// Durable authorization of exactly one current structured access occurrence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalAccessAuthorized {
     /// Kernel-derived immutable attempt identity.
@@ -1063,7 +1220,7 @@ pub struct ExternalAccessAuthorized {
 }
 
 /// Closed observed completion of one authorized access.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ObservationOutcome {
     /// Schema-valid typed returned value.
@@ -1096,7 +1253,7 @@ pub enum ObservationOutcome {
 }
 
 /// Durable observation linked to one exact authorization.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ExternalAccessObserved {
     /// Exact authorization being resolved.
@@ -1108,7 +1265,7 @@ pub struct ExternalAccessObserved {
 }
 
 /// Sole terminal record of one structured run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RunClosed {
     /// Exact content-addressed nominal `OperationOutcome` object.
@@ -1119,7 +1276,7 @@ pub struct RunClosed {
 // Append batches are strictly bounded; keeping the closed payloads inline
 // avoids a separate heap allocation for every append, fold, and replay record.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(
     tag = "kind",
     content = "payload",
@@ -1140,7 +1297,7 @@ pub enum RunRecord {
 }
 
 /// Closed logical identity used for exact-content idempotency.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, PersistedSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RecordLogicalKey {
     /// Sole admission for one run.
@@ -1194,7 +1351,7 @@ impl RunRecord {
 }
 
 /// One exact unassigned atomic append proposal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommitCandidate {
     /// Target run.
@@ -1212,7 +1369,7 @@ pub struct CommitCandidate {
 }
 
 /// One record after sequence, ordinal, and hash assignment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssignedRecord {
     /// Exact assigned record reference.
@@ -1222,7 +1379,7 @@ pub struct AssignedRecord {
 }
 
 /// One complete assigned atomic append envelope.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CommittedBatch {
     /// Qualified store lineage.
@@ -1251,11 +1408,190 @@ pub fn canonical_json<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes
     PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| StructuredJournalError::Canonical)
 }
 
-/// Returns a domain-separated raw content digest for canonical structured data.
-pub fn domain_content_digest<T: Serialize>(domain: &str, value: &T) -> Result<ContentDigest> {
-    let canonical = canonical_json(value)?;
-    let mut preimage = domain.as_bytes().to_vec();
-    preimage.push(0);
+#[derive(Serialize)]
+struct RunIdHashDocument<'a> {
+    domain: &'static str,
+    value: RunIdPreimage<'a>,
+}
+
+#[derive(Serialize)]
+struct FactContentIdentityHashDocument<'a> {
+    domain: &'static str,
+    value: FactContentIdentityPreimage<'a>,
+}
+
+#[derive(Serialize)]
+struct FactLogicalIdentityHashDocument<'a> {
+    domain: &'static str,
+    value: FactLogicalIdentityPreimage<'a>,
+}
+
+#[derive(Serialize)]
+struct RunIdPreimage<'a> {
+    entry_point_operation_id: &'a str,
+    invocation_identity: &'a str,
+    store_scope_id: &'a str,
+    tenant_scope_id: &'a str,
+}
+
+#[derive(Serialize)]
+struct FactContentIdentityPreimage<'a> {
+    fact_descriptor_ref: &'a ContentRef,
+    response_ref: &'a TypedValueRef,
+    subject_ref: &'a TypedValueRef,
+}
+
+#[derive(Serialize)]
+struct FactLogicalIdentityPreimage<'a> {
+    emission_ordinal: u32,
+    fact_content_identity: &'a FactContentIdentityDigest,
+    transition_ref: &'a RecordRef,
+}
+
+/// Exact journal-owned preimage of one immutable access-attempt identity.
+#[derive(Serialize)]
+struct AccessAttemptPreimage<'a> {
+    run_id: &'a RunId,
+    occurrence_id: &'a OccurrenceId,
+    occurrence_path_ref: &'a ContentRef,
+    semantic_call_id: &'a SemanticCallId,
+    state_input_ref: &'a LexicalValueRef,
+    attempt_ordinal: u64,
+    access_kind: AccessKind,
+    semantic_head: &'a SemanticHead,
+    capability_contract_ref: &'a ContentRef,
+    capability_implementation_ref: &'a ContentRef,
+    adapter_contract_ref: &'a ContentRef,
+    adapter_implementation_ref: &'a ContentRef,
+    request: &'a TypedValueRef,
+    request_digest: &'a RequestDigest,
+    physical_binding_ref: &'a ContentRef,
+    stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
+}
+
+/// Exact journal-owned preimage of one assigned-record hash.
+#[derive(Serialize)]
+pub struct RecordHashPreimage<'a> {
+    /// Target run.
+    pub run_id: &'a RunId,
+    /// Assigned run sequence.
+    pub run_sequence: u64,
+    /// Assigned ordinal within the batch.
+    pub ordinal: u32,
+    /// Closed record payload.
+    pub record: &'a RunRecord,
+}
+
+/// Exact journal-owned preimage of one atomic-append commit digest.
+#[derive(Serialize)]
+pub struct CommitDigestPreimage<'a> {
+    /// Qualified store scope.
+    pub store_scope_id: &'a StoreScopeId,
+    /// Qualified writer epoch.
+    pub store_epoch: StoreEpoch,
+    /// Exact predecessor.
+    pub predecessor: &'a Option<JournalHead>,
+    /// Stable append request identity.
+    pub append_request_id: &'a AppendRequestId,
+    /// Tenant fact plan coordinate.
+    pub tenant_fact_coordinate: &'a TenantFactCoordinate,
+    /// Unassigned candidate digest.
+    pub candidate_digest: &'a ContentDigest,
+    /// Assigned record references in ordinal order.
+    pub record_refs: Vec<&'a RecordRef>,
+    /// Newly reachable object references in canonical order.
+    pub object_refs: Vec<&'a ContentRef>,
+}
+
+/// One transition contribution to the compact semantic-state identity.
+#[derive(Serialize)]
+pub struct SemanticTransitionPreimage<'a> {
+    /// Executed occurrence.
+    pub occurrence_id: &'a OccurrenceId,
+    /// Exact nominal outcome artifact.
+    pub outcome_ref: &'a ContentRef,
+    /// Ordered committed facts.
+    pub facts: &'a [CommittedFactRef],
+}
+
+/// Exact journal-owned preimage of one compact semantic state.
+#[derive(Serialize)]
+pub struct SemanticStatePreimage<'a> {
+    /// Certified program authority.
+    pub certified_program_ref: &'a ContentRef,
+    /// Transitions in deterministic occurrence order.
+    pub transitions: Vec<SemanticTransitionPreimage<'a>>,
+    /// Live bindings in deterministic slot-reference order.
+    pub live_bindings: Vec<&'a LexicalValueRef>,
+}
+
+/// Derives the frozen identity of one run from its complete admission
+/// coordinates.
+///
+/// This is the sole run-identity rule. Admission and hostile genesis
+/// qualification call it with the same four inputs, so a history whose envelope
+/// and `RunAdmitted.run_id` agree with each other but disagree with these
+/// coordinates is rejected.
+pub fn derive_run_id(
+    store_scope_id: &StoreScopeId,
+    tenant_scope_id: &TenantScopeId,
+    entry_point_operation_id: &StableId,
+    invocation_identity: &InvocationIdentity,
+) -> Result<RunId> {
+    let canonical = canonical_json(&RunIdHashDocument {
+        domain: "mfm.run-id.v1",
+        value: RunIdPreimage {
+            entry_point_operation_id: entry_point_operation_id.as_str(),
+            invocation_identity: invocation_identity.as_str(),
+            store_scope_id: store_scope_id.as_str(),
+            tenant_scope_id: tenant_scope_id.as_str(),
+        },
+    })?;
+    let digest = sha256_digest_bytes(canonical.as_bytes());
+    Ok(RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest))
+}
+
+/// Derives the producer-independent content identity of one retained fact.
+pub fn derive_fact_content_identity(fact: &CommittedFactRef) -> Result<FactContentIdentityDigest> {
+    let canonical = canonical_json(&FactContentIdentityHashDocument {
+        domain: "mfm.fact-content-identity.v1",
+        value: FactContentIdentityPreimage {
+            fact_descriptor_ref: &fact.descriptor_ref,
+            response_ref: &fact.response,
+            subject_ref: &fact.subject,
+        },
+    })?;
+    let digest = sha256_digest_bytes(canonical.as_bytes());
+    Ok(FactContentIdentityDigest::from_digest(digest))
+}
+
+/// Derives the producer-transition-bound logical identity of one emitted fact.
+///
+/// The emission ordinal and content identity are read from the fact itself, so a
+/// caller cannot pair a foreign ordinal or content digest with this transition.
+pub fn derive_fact_logical_identity(
+    producer_transition_ref: &RecordRef,
+    fact: &CommittedFactRef,
+) -> Result<FactLogicalIdentityDigest> {
+    let fact_content_identity = derive_fact_content_identity(fact)?;
+    let canonical = canonical_json(&FactLogicalIdentityHashDocument {
+        domain: "mfm.fact-logical-identity.v1",
+        value: FactLogicalIdentityPreimage {
+            emission_ordinal: fact.emission_ordinal,
+            fact_content_identity: &fact_content_identity,
+            transition_ref: producer_transition_ref,
+        },
+    })?;
+    let digest = sha256_digest_bytes(canonical.as_bytes());
+    Ok(FactLogicalIdentityDigest::from_digest(digest))
+}
+
+/// Derives the exact digest of one candidate append before record assignment.
+///
+/// The exact candidate owner fixes the complete preimage shape.
+pub fn derive_candidate_digest(candidate: &CommitCandidate) -> Result<ContentDigest> {
+    let canonical = canonical_json(candidate)?;
+    let mut preimage = b"mfm.structured-candidate.v1\0".to_vec();
     preimage.extend_from_slice(canonical.as_bytes());
     Ok(ContentDigest::from_digest(
         DigestAlgorithm::Sha256V1,
@@ -1263,16 +1599,36 @@ pub fn domain_content_digest<T: Serialize>(domain: &str, value: &T) -> Result<Co
     ))
 }
 
-/// Derives one immutable access-attempt identity from its complete preimage.
-pub fn derive_access_attempt_id<T: Serialize>(preimage: &T) -> Result<AccessAttemptId> {
-    let canonical = canonical_json(preimage)?;
+/// Derives one immutable access-attempt identity from its exact record owner.
+pub fn derive_access_attempt_id(
+    run_id: &RunId,
+    authorization: &ExternalAccessAuthorized,
+) -> Result<AccessAttemptId> {
+    let canonical = canonical_json(&AccessAttemptPreimage {
+        run_id,
+        occurrence_id: &authorization.occurrence_id,
+        occurrence_path_ref: &authorization.occurrence_path_ref,
+        semantic_call_id: &authorization.semantic_call_id,
+        state_input_ref: &authorization.state_input_ref,
+        attempt_ordinal: authorization.attempt_ordinal,
+        access_kind: authorization.access_kind,
+        semantic_head: &authorization.semantic_head,
+        capability_contract_ref: &authorization.capability_contract_ref,
+        capability_implementation_ref: &authorization.capability_implementation_ref,
+        adapter_contract_ref: &authorization.adapter_contract_ref,
+        adapter_implementation_ref: &authorization.adapter_implementation_ref,
+        request: &authorization.request,
+        request_digest: &authorization.request_digest,
+        physical_binding_ref: &authorization.physical_binding_ref,
+        stable_resource_lineage_contract_ref: &authorization.stable_resource_lineage_contract_ref,
+    })?;
     let mut bytes = b"mfm.structured-access-attempt.v1\0".to_vec();
     bytes.extend_from_slice(canonical.as_bytes());
     Ok(AccessAttemptId::from_digest(sha256_digest_bytes(&bytes)))
 }
 
 /// Derives the exact hash of an assigned record.
-pub fn derive_record_hash<T: Serialize>(preimage: &T) -> Result<JournalRecordHash> {
+pub fn derive_record_hash(preimage: &RecordHashPreimage<'_>) -> Result<JournalRecordHash> {
     let canonical = canonical_json(preimage)?;
     let mut bytes = b"mfm.structured-record.v1\0".to_vec();
     bytes.extend_from_slice(canonical.as_bytes());
@@ -1280,11 +1636,23 @@ pub fn derive_record_hash<T: Serialize>(preimage: &T) -> Result<JournalRecordHas
 }
 
 /// Derives the exact digest of an assigned atomic append.
-pub fn derive_commit_digest<T: Serialize>(preimage: &T) -> Result<JournalCommitDigest> {
+pub fn derive_commit_digest(preimage: &CommitDigestPreimage<'_>) -> Result<JournalCommitDigest> {
     let canonical = canonical_json(preimage)?;
     let mut bytes = b"mfm.structured-commit.v1\0".to_vec();
     bytes.extend_from_slice(canonical.as_bytes());
     Ok(JournalCommitDigest::from_digest(sha256_digest_bytes(
+        &bytes,
+    )))
+}
+
+/// Derives one compact semantic-state digest from its exact named preimage.
+pub fn derive_semantic_state_digest(
+    preimage: &SemanticStatePreimage<'_>,
+) -> Result<RunSemanticStateDigest> {
+    let canonical = canonical_json(preimage)?;
+    let mut bytes = b"mfm.structured-semantic-state.v1\0".to_vec();
+    bytes.extend_from_slice(canonical.as_bytes());
+    Ok(RunSemanticStateDigest::from_digest(sha256_digest_bytes(
         &bytes,
     )))
 }

@@ -38,7 +38,7 @@ pub use configuration::{
     ConfigurationBackendFuture, ConfigurationHistoryBackend, ConfigurationHistoryHead,
     ConfigurationHistoryReader, ConfigurationHistoryStore, ConfigurationHistoryWriter,
     ConfigurationRevision, ConfigurationStreamKey, MemoryConfigurationHistoryBackend,
-    RawConfigurationHistory, VerifiedConfiguredValue,
+    RawConfigurationHistory, VerifiedConfiguredValue, MAX_CONFIGURATION_REVISION_BYTES,
 };
 #[doc(hidden)]
 pub use fact_scan::PriorRunFactScanCompletion;
@@ -46,9 +46,9 @@ pub use fact_scan::PriorRunFactScanCompletion;
 #[doc(hidden)]
 pub use fact_scan::{fact_scan_counters, reset_fact_scan_counters, FactScanCounters};
 pub use fold::{
-    verify_offline_recorded_history, ActionableState, LaneCursor, ObservationQualification,
-    ProgramCursor, ProgramVerifier, StateLeaf, StructuredFrontier, StructuredStoreError,
-    VerifiedProgramData,
+    verify_offline_recorded_history, ActionableState, EffectEntrySubject, LaneCursor,
+    ObservationQualification, ProgramCursor, ProgramVerifier, StateLeaf, StructuredFrontier,
+    StructuredStoreError, VerifiedProgramData,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::{assemble_in_memory_runtime, StructuredMemoryBackend};
@@ -67,7 +67,7 @@ pub use purpose::{
     AuditRunReader, ExportEncoderSource, ExportEncoderView, ExportFactRoute, ExportRunEvidence,
     ExportRunReader, ExportSourceClosureError, OfflineVerifiedRun, PublicRunEvidence,
     PublicRunReader, RecordedRunEvidence, ReplayRunReader, RunEvidenceStatus, TraceRunEvidence,
-    TraceRunReader, TraceTransitionEntry, MAX_PORTABLE_SOURCE_RUNS,
+    TraceRunReader, TraceTransitionEntry, MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_SOURCE_RUNS,
 };
 pub use qualification::{
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalBindingVerificationMode,

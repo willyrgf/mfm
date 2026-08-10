@@ -24,6 +24,7 @@ use mfm_ids::{ContentRef, StableId};
 use mfm_journal::structured::{AccessKind, HistoryObject};
 use mfm_program::structured::{RuntimeReadAdapter, RuntimeReadCapability};
 use mfm_spec::structured::{SecretFreeImplementationDescriptor, StructuredComponentKind};
+use mfm_values::CanonicalJsonPersistedSchema;
 
 use crate::structured::AuthorizedProviderCall;
 use crate::transport::{EvmJsonRpcTransport, EvmTransportOutcome};

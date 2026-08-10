@@ -34,8 +34,8 @@ impl From<mfm_spec::SpecError> for CertifyError {
     }
 }
 
-impl From<mfm_canonical::RecoverabilityError> for CertifyError {
-    fn from(error: mfm_canonical::RecoverabilityError) -> Self {
-        Self::Specification(error.to_string())
+impl From<mfm_values::ValueError> for CertifyError {
+    fn from(error: mfm_values::ValueError) -> Self {
+        Self::Certification(error.to_string())
     }
 }

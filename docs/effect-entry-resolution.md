@@ -1,9 +1,13 @@
 # Effect entry resolution
 
-Status: proposed design contract, not implemented, direction not yet accepted
+Status: current design contract
 
-An Effect occurrence parks forever when a process dies between committing an authorization and
-committing an observation. This document proposes the mechanism that resolves it.
+An Effect occurrence parked forever when a process died between committing an authorization and
+committing an observation. This document is the mechanism that resolves it.
+
+The trade below was accepted before the behavioural cutover was written: one entry per occurrence
+is no longer structural, and the bound is `MAX_ENTRIES` per capability. See *What this traded away*
+for exactly what was given up.
 
 Two earlier revisions are recorded in *Rejected alternatives* with the reasons they failed, and one
 adjacent design is recorded there as deferred rather than failed. All are plausible enough to be
@@ -11,12 +15,12 @@ reproposed otherwise.
 
 ## Material uncertainties
 
-- **The uniqueness trade is unresolved and is not a technical question.** Today "an Effect occurrence
-  reaches the external system at most once, ever, regardless of adapter correctness" is structural,
-  enforced callback-free on every refold. This design replaces it with "at most `MAX` times, and
-  repeats absorb by declaration". Whether that trade is acceptable is a deployment judgment. The
-  alternative that keeps the structural guarantee is *Authored recovery routes*, below; *Positive
-  adoption by read* also keeps it, and recovers only the entered half of the park space.
+- **The uniqueness trade is accepted, and it was not a technical question.** "An Effect occurrence
+  reaches the external system at most once, ever, regardless of adapter correctness" was structural,
+  enforced callback-free on every refold. It is now "at most `MAX` times, and repeats absorb by
+  declaration". The alternative that would have kept the structural guarantee is *Authored recovery
+  routes*, below; *Positive adoption by read* also keeps it, and recovers only the entered half of
+  the park space. Either remains available if a deployment judges the bound unacceptable.
 - **The fold has no clock and cannot have one.** Much real-world absorption is time-bounded: an
   idempotency key expires, a dedup window closes. The budget bounds the number of attempts, never
   the interval between them, and the fold cannot be made to — a wall-clock-conditioned fold breaks
@@ -272,10 +276,6 @@ grants the Effect path the relaxation whose failure mode is recorded above.
 So Read and Effect recovery share one leaf and one re-assertion path, and differ in two ways, not one:
 whether the parked attempt must first be closed, and which rule admits its successor.
 
-`StructuredFrontier::WaitingReads` dies with it: `(Read, Authorized)` is its only producer. The
-frontier variant, the drive outcome, the replay status, the purpose projection, and the
-`retryable_evidence_gap` app arm are all unreachable afterwards and must be deleted, not retained.
-
 The fold cannot distinguish a crashed attempt from a live in-flight one — the leaf is a pure function
 of history and liveness is per-process. Two workers may therefore invoke concurrently. That is what
 absorption asserts is harmless, and it is the same collapse, not a different one. It also makes the
@@ -298,7 +298,15 @@ the settlement callback, so every state using the capability branches on whether
 crashed — reproducing the per-site obligation this design removes, and making a resolved occurrence
 distinguishable downstream from one that never parked.
 
-Nothing checks this rule. It is checkable by review, not by types.
+Nothing checks this rule. It is checkable by review, not by types, and it is therefore a
+certification obligation: naming `EntryAbsorbing` on a capability asserts it, and each capability's
+rustdoc must state what absorbs and why its `Returned` is a function of authority post-state. The
+kernel test corpus keeps a worked counter-example — an insert whose `Returned` is a row count —
+declared `EntryOnce` for exactly this reason.
+
+The Read purity definition is a certification obligation on the same footing. Recovery reissues an
+unobserved Read, so "a Read consumes no externally meaningful state" became load-bearing where it
+was previously prose; nothing checks that either.
 
 ## What can never be resolved
 
@@ -351,18 +359,19 @@ rejected ones: **nothing asserts non-entry.** `SupersededBeforeEntry` is the onl
 wrongness silently duplicates, and this path neither produces nor consumes it. Safety rests on a
 positive claim about the external system, made once, at the capability.
 
-## What this trades away
+## What this traded away
 
-Stated plainly, because it is the decision this design asks for.
+Stated plainly, because it is the decision this design asked for and got.
 
-Today, one entry per occurrence is **structural**: the legal ordinal is derived from the leaf and any
-authorization while an unobserved one exists is rejected, so an Effect occurrence reaches the
-external system at most once, ever, in any deployment, regardless of adapter correctness. That is one
-of the few properties this repository still enforces rather than assumes.
+One entry per occurrence used to be **structural**: the legal ordinal was derived from the leaf and
+any authorization while an unobserved one existed was rejected, so an Effect occurrence reached the
+external system at most once, ever, in any deployment, regardless of adapter correctness. That was
+one of the few properties this repository enforced rather than assumed.
 
-After this change the bound is `MAX_ENTRIES`, and containment of the extra `MAX − 1` entries moves
-out of the fold and into a declaration nobody can check. The kernel still bounds; it stops
-guaranteeing uniqueness.
+The bound is now `MAX_ENTRIES`, and containment of the extra `MAX − 1` entries lives in a
+declaration nothing can check. The kernel still bounds — the count is asserted by call count in the
+runtime tests — but it no longer guarantees uniqueness. An `EntryOnce` capability keeps the original
+property in full, and that is the default every capability has to move off deliberately.
 
 ## Required alongside the mechanism
 
@@ -385,6 +394,29 @@ minutes re-asserts inside any plausible retention window; a park found by accide
 re-asserts outside it and duplicates. Without a listing surface, parks are found late by
 construction, so the mechanism's trigger condition selects for exactly the parks whose absorption
 has expired.
+
+## What EVM needed, and what it did not
+
+Declaring `EntryAbsorbing<3>` on the four EVM Effect capabilities required **no change to the three
+wallet adapters**. They were already written re-entrant, because a caller's retry under the same
+submission token already reached them that way: each begins its write, reads its own operation key
+under the unique constraint, and returns its own retained response — `Reserved`, `AlreadyRetained`,
+`Completed` — when it finds it. A row present with conflicting content is an integrity fault, an
+absent row under a fenced writer lease is `SupersededBeforeEntry`, and an absent row under an
+unfenced or unavailable authority is `EntryUnknown`. That mapping is the absorption contract, and
+it was already implemented and already tested.
+
+That is the strongest available evidence that absorption is the right axis: the behaviour the
+declaration names is behaviour the domain had already written, without a lineage head, an exclusive
+slot, or a negative read.
+
+The broadcast adapter did need one change, and it is the one the design predicted. A repeat submits
+the byte-identical signed transaction, and a node that already holds it answers `already known` —
+but a node whose answer is lost or malformed answers nothing usable. Before, that stayed
+`EntryUnknown` and the run parked, which was correct because nothing would re-assert. Now something
+does, so the adapter reads the chain for the attested transaction hash and reports the proof when
+the chain holds it. An absent transaction keeps the ambiguity: `READ COMMITTED` and mempool
+propagation both make absence temporary, so absence is never a non-entry claim.
 
 ## Rejected alternatives
 

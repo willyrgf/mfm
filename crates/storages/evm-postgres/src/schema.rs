@@ -7,7 +7,7 @@ use crate::error::{PostgresEvmWalletError, Result};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.evm.wallet-authority-postgres.v1";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.evm.wallet-authority-postgres.v2";
 pub(crate) const ACTIVATION_ADMIN_ROLE: &str = "mfm_evm_wallet_activation_admin";
 pub(crate) const ACTIVATION_PUBLIC_ROLE: &str = "mfm_evm_wallet_activation_public";
 pub(crate) const NONCE_APPLICATION_ROLE: &str = "mfm_evm_wallet_nonce_application";
@@ -44,8 +44,10 @@ const REQUIRED_TABLES: &[&str] = &[
 // owner, or column therefore cannot pass qualification.
 const COLUMN_MANIFEST_SHA256: &str =
     "76046146c524688624a9fc4f6de132ced37fa3daa25f0df70aec164afc2e81f9";
+// Regenerated for the v2 wallet baseline: the schema-contract version literal is
+// part of a CHECK definition, so bumping it changes this manifest and nothing else.
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "f75b9182717023cd7927e050423cb1629d2d206bc72623204ccdb4d875eec353";
+    "244b88b8c6878bbfe876a8859a0a066251cbdbd00edda1f70f5743b8c6e5c91f";
 const TRIGGER_MANIFEST_SHA256: &str =
     "e19f09ad27003b64c8aa75c0a0ba0c3450414e9ca5a3f3487a227c4f0c3c1b22";
 const FUNCTION_MANIFEST_SHA256: &str =
@@ -103,7 +105,6 @@ pub(crate) async fn validate_wallet_schema(
     validate_roles_and_privileges(connection, expected_role, &session).await?;
     validate_closed_acls(connection).await?;
     validate_metadata(connection).await?;
-    validate_prefix_integrity(connection, expected_role).await?;
     transaction
         .commit()
         .await
@@ -879,222 +880,6 @@ async fn validate_metadata(connection: &mut PgConnection) -> Result<()> {
     if row.try_get::<i64, _>("metadata_count").ok() != Some(1)
         || text(&row, "schema_contract_version")? != SCHEMA_CONTRACT_VERSION
     {
-        return Err(PostgresEvmWalletError::InvalidAuthority);
-    }
-    Ok(())
-}
-
-async fn validate_prefix_integrity(
-    connection: &mut PgConnection,
-    expected_role: &str,
-) -> Result<()> {
-    match expected_role {
-        ACTIVATION_ADMIN_ROLE | ACTIVATION_PUBLIC_ROLE => {
-            validate_registry_prefix_integrity(connection).await
-        }
-        NONCE_APPLICATION_ROLE => validate_nonce_prefix_integrity(connection).await,
-        _ => Err(PostgresEvmWalletError::InvalidAuthority),
-    }
-}
-
-async fn validate_registry_prefix_integrity(connection: &mut PgConnection) -> Result<()> {
-    let invalid = sqlx::query_scalar::<_, i64>(
-        "WITH ordered_incarnations AS ( \
-             SELECT incarnation.*, \
-                    row_number() OVER ( \
-                        PARTITION BY wallet_nonce_store_lineage_id ORDER BY writer_epoch \
-                    )::numeric AS dense_epoch, \
-                    lag(incarnation_ref) OVER ( \
-                        PARTITION BY wallet_nonce_store_lineage_id ORDER BY writer_epoch \
-                    ) AS prior_ref \
-             FROM wallet_store_incarnations AS incarnation \
-         ), invalid_incarnations AS ( \
-             SELECT 1 FROM ordered_incarnations \
-             WHERE writer_epoch <> dense_epoch \
-                OR predecessor_incarnation_ref IS DISTINCT FROM prior_ref \
-                OR (writer_epoch = 1 AND promotion_successor_ref IS NOT NULL) \
-                OR (writer_epoch > 1 AND promotion_successor_ref IS NULL) \
-                OR (writer_epoch > 1 AND ( \
-                    promotion_attestation_json::jsonb -> 'previous_incarnation_ref' \
-                        <> predecessor_incarnation_ref::jsonb \
-                    OR promotion_attestation_json::jsonb -> 'current_incarnation_ref' \
-                        <> incarnation_ref::jsonb \
-                    OR promotion_attestation_json::jsonb -> 'successor_ref' \
-                        <> promotion_successor_ref::jsonb \
-                    OR promotion_attestation_json::jsonb ->> 'writer_epoch' \
-                        <> writer_epoch::text \
-                )) \
-         ), invalid_heads AS ( \
-             SELECT 1 FROM wallet_store_lineage_heads AS head \
-             LEFT JOIN LATERAL ( \
-                 SELECT wallet_nonce_store_lineage_id, writer_epoch, incarnation_ref \
-                 FROM wallet_store_incarnations \
-                 WHERE wallet_nonce_store_lineage_id = head.wallet_nonce_store_lineage_id \
-                 ORDER BY writer_epoch DESC LIMIT 1 \
-             ) AS last_incarnation ON TRUE \
-             WHERE last_incarnation.wallet_nonce_store_lineage_id IS NULL \
-                OR head.current_writer_epoch <> last_incarnation.writer_epoch \
-                OR head.current_incarnation_ref <> last_incarnation.incarnation_ref \
-         ), orphan_lineages AS ( \
-             SELECT 1 FROM wallet_store_incarnations AS incarnation \
-             LEFT JOIN wallet_store_lineage_heads AS head USING (wallet_nonce_store_lineage_id) \
-             WHERE head.wallet_nonce_store_lineage_id IS NULL \
-         ), invalid_activations AS ( \
-             SELECT 1 FROM wallet_domain_activations AS activation \
-             LEFT JOIN wallet_store_lineage_heads AS head USING (wallet_nonce_store_lineage_id) \
-             WHERE head.wallet_nonce_store_lineage_id IS NULL \
-                OR activation.activation_record_json::jsonb \
-                       #>> '{wallet_nonce_domain,digest}' <> activation.wallet_nonce_domain_id \
-                OR activation.activation_record_json::jsonb \
-                       ->> 'wallet_nonce_store_lineage_id' <> activation.wallet_nonce_store_lineage_id \
-                OR activation.activation_attestation_json::jsonb \
-                       -> 'current_schema_record' <> activation.activation_record_json::jsonb \
-                OR activation.activation_attestation_json::jsonb \
-                       -> 'activation_record_ref' <> activation.activation_record_ref::jsonb \
-                OR activation.activation_attestation_json::jsonb \
-                       -> 'observed_store_incarnation_ref' \
-                       <> activation.observed_store_incarnation_ref::jsonb \
-                OR activation.activation_attestation_json::jsonb \
-                       -> 'registry_issuance_ref' <> activation.registry_issuance_ref::jsonb \
-         ) \
-         SELECT (SELECT count(*) FROM invalid_incarnations) \
-              + (SELECT count(*) FROM invalid_heads) \
-              + (SELECT count(*) FROM orphan_lineages) \
-              + (SELECT count(*) FROM invalid_activations)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    if invalid != 0 {
-        return Err(PostgresEvmWalletError::InvalidAuthority);
-    }
-    Ok(())
-}
-
-async fn validate_nonce_prefix_integrity(connection: &mut PgConnection) -> Result<()> {
-    let invalid = sqlx::query_scalar::<_, i64>(
-        "WITH ordered_reservations AS ( \
-             SELECT reservation.*, \
-                    row_number() OVER ( \
-                        PARTITION BY wallet_nonce_domain_id ORDER BY nonce \
-                    )::numeric AS dense_offset, \
-                    count(*) OVER (PARTITION BY wallet_nonce_domain_id) AS reservation_count \
-             FROM wallet_nonce_reservations AS reservation \
-         ), invalid_domains AS ( \
-             SELECT 1 FROM wallet_nonce_domains AS domain \
-             LEFT JOIN LATERAL ( \
-                 SELECT count(*)::numeric AS retained_count, max(nonce) AS maximum_nonce \
-                 FROM wallet_nonce_reservations \
-                 WHERE wallet_nonce_domain_id = domain.wallet_nonce_domain_id \
-             ) AS reservations ON TRUE \
-             LEFT JOIN LATERAL ( \
-                 SELECT semantic_reservation_key AS chain_head \
-                 FROM wallet_nonce_reservations \
-                 WHERE wallet_nonce_domain_id = domain.wallet_nonce_domain_id \
-                 ORDER BY nonce DESC LIMIT 1 \
-             ) AS chain ON TRUE \
-             WHERE domain.activation_record_json::jsonb \
-                       #>> '{wallet_nonce_domain,digest}' <> domain.wallet_nonce_domain_id \
-                OR domain.activation_record_json::jsonb \
-                       ->> 'wallet_nonce_store_lineage_id' <> domain.wallet_nonce_store_lineage_id \
-                OR domain.activation_attestation_json::jsonb \
-                       -> 'current_schema_record' <> domain.activation_record_json::jsonb \
-                OR domain.activation_attestation_json::jsonb \
-                       -> 'activation_record_ref' <> domain.activation_record_ref::jsonb \
-                OR (reservations.retained_count = 0 AND domain.local_high_water_nonce IS NOT NULL) \
-                OR (reservations.retained_count > 0 \
-                    AND domain.local_high_water_nonce IS DISTINCT FROM reservations.maximum_nonce) \
-                OR domain.retained_reservation_count IS DISTINCT FROM reservations.retained_count \
-                OR domain.retained_reservation_chain_head_ref IS DISTINCT FROM chain.chain_head \
-         ), invalid_reservations AS ( \
-             SELECT 1 FROM ordered_reservations AS reservation \
-             JOIN wallet_nonce_domains AS domain USING (wallet_nonce_domain_id) \
-             WHERE reservation.nonce <> \
-                   (domain.activation_record_json::jsonb \
-                        ->> 'finalized_sender_nonce_floor')::numeric \
-                   + reservation.dense_offset - 1 \
-                OR reservation.request_json::jsonb \
-                       #>> '{nonce_domain,digest}' <> reservation.wallet_nonce_domain_id \
-                OR reservation.request_json::jsonb \
-                       #> '{domain_activation_attestation,activation_record_ref}' \
-                       <> domain.activation_record_ref::jsonb \
-                OR reservation.request_json::jsonb \
-                       #>> '{submission_intent_id,digest}' \
-                       <> reservation.submission_intent_id \
-                OR reservation.request_json::jsonb \
-                       #>> '{reservation_key,digest}' \
-                       <> reservation.semantic_reservation_key \
-                OR reservation.transaction_intent_json::jsonb \
-                       ->> 'digest' <> reservation.transaction_intent_digest \
-                OR reservation.candidate_family_json::jsonb \
-                       ->> 'digest' <> reservation.candidate_family_ref \
-                OR reservation.reservation_json::jsonb \
-                       #>> '{nonce_domain,digest}' <> reservation.wallet_nonce_domain_id \
-                OR reservation.reservation_json::jsonb \
-                       #>> '{semantic_reservation_key,digest}' \
-                       <> reservation.semantic_reservation_key \
-                OR reservation.reservation_json::jsonb \
-                       #>> '{submission_intent_id,digest}' \
-                       <> reservation.submission_intent_id \
-                OR reservation.reservation_json::jsonb \
-                       ->> 'transaction_intent_digest' <> reservation.transaction_intent_digest \
-                OR reservation.reservation_json::jsonb \
-                       ->> 'candidate_family_ref' <> reservation.candidate_family_ref \
-                OR reservation.reservation_json::jsonb \
-                       ->> 'nonce' <> reservation.nonce::text \
-         ), invalid_candidates AS ( \
-             SELECT 1 FROM ( \
-                 SELECT candidate.*, row_number() OVER ( \
-                     PARTITION BY semantic_reservation_key ORDER BY candidate_ordinal \
-                 ) - 1 AS dense_ordinal \
-                 FROM wallet_nonce_candidates AS candidate \
-             ) AS candidate \
-             WHERE candidate.candidate_ordinal <> candidate.dense_ordinal \
-                OR candidate.request_json::jsonb \
-                       #>> '{candidate_operation_key,digest}' \
-                       <> candidate.semantic_candidate_operation_key \
-                OR candidate.request_json::jsonb \
-                       #>> '{next_candidate,semantic_reservation_key,digest}' \
-                       <> candidate.semantic_reservation_key \
-                OR candidate.active_candidate_json::jsonb \
-                       #>> '{attested_candidate,semantic_reservation_key,digest}' \
-                       <> candidate.semantic_reservation_key \
-                OR (candidate.active_candidate_json::jsonb \
-                       #>> '{attested_candidate,candidate_ordinal}')::integer \
-                       <> candidate.candidate_ordinal \
-         ), invalid_completions AS ( \
-            SELECT 1 FROM wallet_nonce_completions AS completion \
-            WHERE completion.completion_json::jsonb \
-                       #>> '{semantic_completion_key,digest}' \
-                       <> completion.semantic_completion_key \
-                OR completion.completion_json::jsonb \
-                       #>> '{semantic_reservation_key,digest}' \
-                       <> completion.semantic_reservation_key \
-                OR completion.request_json::jsonb \
-                       #>> '{completion_key,digest}' \
-                       <> completion.semantic_completion_key \
-                OR completion.request_json::jsonb \
-                       #>> '{current_reservation,semantic_reservation_key,digest}' \
-                       <> completion.semantic_reservation_key \
-                OR completion.canonical_terminal_outcome_json::jsonb \
-                       <> completion.request_json::jsonb -> 'canonical_terminal_outcome' \
-         ), invalid_incomplete AS ( \
-             SELECT 1 FROM ordered_reservations AS reservation \
-             LEFT JOIN wallet_nonce_completions AS completion \
-               USING (semantic_reservation_key) \
-             WHERE completion.semantic_reservation_key IS NULL \
-               AND reservation.dense_offset <> reservation.reservation_count \
-         ) \
-         SELECT (SELECT count(*) FROM invalid_domains) \
-              + (SELECT count(*) FROM invalid_reservations) \
-              + (SELECT count(*) FROM invalid_candidates) \
-              + (SELECT count(*) FROM invalid_completions) \
-              + (SELECT count(*) FROM invalid_incomplete)",
-    )
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-    if invalid != 0 {
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
     Ok(())

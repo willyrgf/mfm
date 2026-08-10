@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mfm_canonical::limits::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes, MAX_CANONICAL_JSON_DEPTH};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_facts::{
@@ -48,6 +47,7 @@ use mfm_storage_postgres::{
     PostgresStoreError, PostgresStructuredHistoryBackend, TestLoginCredential,
     TestTargetCredentials,
 };
+use mfm_store::structured::MAX_CONFIGURATION_REVISION_BYTES;
 use mfm_store::structured::{
     assemble_in_memory_runtime, fact_scan_counters, reset_fact_scan_counters,
     AssembledStructuredRuntime, ConfigurationAppendRequest, ConfigurationHistoryStore,
@@ -1383,15 +1383,8 @@ async fn configured_value_history_linearizes_same_stream_append_races() {
 
     let configuration = HistoryObject::new(
         stable(ADMISSION_CONFIGURATION_OBJECT_TYPE).expect("configuration object type"),
-        SchemaId::new(
-            "mfm.structured-configuration-revision",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(
-                b"mfm.structured-schema.v1:mfm.structured-configuration-revision:1",
-            ),
-        )
-        .expect("configuration revision schema"),
+        mfm_store::structured::ConfigurationRevision::schema_id()
+            .expect("configuration revision schema"),
         canonical_json(reopened_winner.revision())
             .expect("canonical winning configuration revision")
             .as_str(),
@@ -2676,8 +2669,8 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
         PortableRunExport::from_authorized_export_closure(&consumer_closure, ExportKind::Semantic)
             .expect("encode recursively authorized portable export");
     assert_eq!(portable.source_run_count(), 1);
-    let portable_bytes = portable
-        .to_canonical_bytes()
+    let encoded_portable = portable
+        .encode()
         .expect("encode recursively authorized portable frames");
     let recorded = postgres_replay_reader
         .load_for_recorded_verify(&portable_consumer_run)
@@ -2687,11 +2680,14 @@ async fn prior_run_fact_scan_survives_reopen_and_matches_memory_bytes() {
     let lineage = AcceptStoreLineage;
     let trust = ReplayTrustSnapshot::new(&*offline_program_verifier, &NoPhysicalBindings)
         .with_authorized_closure(portable.closure_reference(), &release, &lineage);
-    let offline = PortableRunExport::verify_offline(&portable_bytes, &trust)
-        .expect("fold recursively authorized portable export offline");
+    let offline = PortableRunExport::verify_offline(
+        encoded_portable.as_bytes(),
+        encoded_portable.content_ref(),
+        &trust,
+    )
+    .expect("fold recursively authorized portable export offline");
     let online = project_replay_result(&recorded).expect("project online recorded replay");
     assert_eq!(offline.as_bytes(), online.as_bytes());
-    assert_eq!(offline.schema_id(), online.schema_id());
 
     let reopened_fixture = qualified_fact_scan_fixture();
     let consumer_run = derive_run_id(
@@ -3480,7 +3476,7 @@ async fn run_fresh_process_worker(database: &TestDatabase, mode: &str) {
 fn qualified_program(
     operation_id: StableId,
 ) -> (
-    mfm_certify::structured::QualifiedProgramRegistry,
+    mfm_certify::structured::CertifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     qualified_program_with_state_count(operation_id, 1)
@@ -3490,7 +3486,7 @@ fn qualified_program_with_state_count(
     operation_id: StableId,
     state_count: usize,
 ) -> (
-    mfm_certify::structured::QualifiedProgramRegistry,
+    mfm_certify::structured::CertifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     let mut assembly = ProgramRegistryBuilder::new();
@@ -3544,7 +3540,7 @@ fn qualified_program_with_state_count(
 fn qualified_fact_program(
     operation_id: StableId,
 ) -> (
-    mfm_certify::structured::QualifiedProgramRegistry,
+    mfm_certify::structured::CertifiedProgramRegistry,
     mfm_spec::structured::CertifiedProgramDocument,
 ) {
     let mut assembly = ProgramRegistryBuilder::new();
@@ -3611,7 +3607,7 @@ struct QualifiedFactScanFixture {
     consumer_operation: StableId,
     producer_document: mfm_spec::structured::CertifiedProgramDocument,
     consumer_document: mfm_spec::structured::CertifiedProgramDocument,
-    registry: mfm_certify::structured::QualifiedProgramRegistry,
+    registry: mfm_certify::structured::CertifiedProgramRegistry,
     source_object: HistoryObject,
     request: FactSelectionRequest,
 }
@@ -4313,30 +4309,13 @@ fn derive_run_id(
     entry_point_operation_id: &StableId,
     invocation_identity: &InvocationIdentity,
 ) -> RunId {
-    let preimage = mfm_canonical::CanonicalValue::object([
-        (
-            "store_scope_id",
-            mfm_canonical::CanonicalValue::String(store_scope_id.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            mfm_canonical::CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            mfm_canonical::CanonicalValue::String(entry_point_operation_id.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            mfm_canonical::CanonicalValue::String(invocation_identity.as_str().to_owned()),
-        ),
-    ])
-    .expect("run-id preimage");
-    let contract = mfm_canonical::RecoverabilityContract::embedded().expect("annex");
-    let validated = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .expect("validated run-id preimage");
-    contract.derive_run_id(&validated).expect("derive run id")
+    mfm_journal::structured::derive_run_id(
+        store_scope_id,
+        tenant_scope_id,
+        entry_point_operation_id,
+        invocation_identity,
+    )
+    .expect("derive run id")
 }
 
 fn default_tenant() -> TenantScopeId {

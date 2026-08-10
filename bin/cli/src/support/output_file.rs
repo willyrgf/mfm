@@ -527,14 +527,17 @@ mod tests {
         let export = directory.path().join("run.export");
         let sidecar = directory.path().join("run.export.ref");
         let bytes = b"\x1e{\"kind\":\"end\"}\n".to_vec();
-        let contract =
-            mfm_canonical::RecoverabilityContract::embedded().expect("recoverability contract");
+        // This suite publishes bytes and a sidecar reference; the portable
+        // stream identity itself is owned and tested by `mfm-replay`.
         let content_ref = mfm_ids::ContentRef::new(
-            contract
-                .schema_id("mfm.portable-run-export-stream.v1")
-                .expect("stream schema")
-                .clone(),
-            contract.raw_content_digest(&bytes),
+            mfm_ids::SchemaId::new(
+                "mfm.test.export-stream",
+                "1",
+                mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                mfm_canonical::sha256_digest_bytes(b"mfm.test.export-stream"),
+            )
+            .expect("stream schema"),
+            mfm_canonical::raw_content_digest(&bytes),
         )
         .expect("content ref");
         let sidecar_bytes = serde_json::to_vec(&content_ref).expect("canonical sidecar");
@@ -557,14 +560,9 @@ mod tests {
         );
         assert_eq!(
             published_ref.content_digest(),
-            &contract.raw_content_digest(&published)
+            &mfm_canonical::raw_content_digest(&published)
         );
-        assert_eq!(
-            published_ref.schema_id(),
-            contract
-                .schema_id("mfm.portable-run-export-stream.v1")
-                .expect("stream schema")
-        );
+        assert_eq!(published_ref.schema_id(), content_ref.schema_id());
     }
 
     #[test]

@@ -85,4 +85,4 @@ objects, outputs, traces, exports, and logs exclude passwords, mnemonics, privat
 database URLs, provider text, signatures, and signed transaction bytes.
 
 The exact DTO contract is documented in
-[docs/recoverability-app-surface-v1.md](../../docs/recoverability-app-surface-v1.md).
+[docs/persisted-public-surfaces.md](../../docs/persisted-public-surfaces.md).

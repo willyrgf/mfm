@@ -8,8 +8,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use mfm_canonical::limits::MAX_PORTABLE_FACT_ROUTES;
-pub use mfm_canonical::limits::MAX_PORTABLE_SOURCE_RUNS;
 use mfm_ids::{
     AccessAttemptId, ContentRef, InvocationIdentity, OccurrenceId, RequestDigest, RunId,
     RunSemanticStateDigest, SemanticCallId, TenantScopeId,
@@ -28,6 +26,12 @@ use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
 use super::fold::{StructuredFrontier, VerifiedStructuredRun};
 use super::{PhysicalTargetIdentity, Result};
 
+/// Maximum recursively authorized source runs in one export closure.
+pub const MAX_PORTABLE_SOURCE_RUNS: usize = 4096;
+
+/// Maximum fact routes carried by one export closure.
+pub const MAX_PORTABLE_FACT_ROUTES: usize = 1048576;
+
 /// Fold-derived status exposed by public and recorded-replay evidence.
 ///
 /// Purpose projections deliberately retain only this status and never expose
@@ -37,8 +41,6 @@ use super::{PhysicalTargetIdentity, Result};
 pub enum RunEvidenceStatus {
     /// At least one executable action is ready for the next drive.
     Actionable,
-    /// Every unresolved action is waiting for an already-authorized read.
-    WaitingReads,
     /// An effect entry may have happened and blocks later work.
     PossibleEntry,
     /// Committed integrity evidence blocks semantic progress.
@@ -51,8 +53,7 @@ impl RunEvidenceStatus {
     fn from_frontier(frontier: &StructuredFrontier) -> Self {
         match frontier {
             StructuredFrontier::Actions(_) => Self::Actionable,
-            StructuredFrontier::WaitingReads => Self::WaitingReads,
-            StructuredFrontier::PossibleEntry => Self::PossibleEntry,
+            StructuredFrontier::PossibleEntry(_) => Self::PossibleEntry,
             StructuredFrontier::BlockedIntegrity => Self::BlockedIntegrity,
             StructuredFrontier::Complete => Self::Closed,
         }
@@ -62,7 +63,6 @@ impl RunEvidenceStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Actionable => "actionable",
-            Self::WaitingReads => "waiting_reads",
             Self::PossibleEntry => "possible_entry",
             Self::BlockedIntegrity => "blocked_integrity",
             Self::Closed => "closed",
@@ -1336,7 +1336,7 @@ fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<ExportFact
             .object(&value.value_ref)
             .ok_or(super::StructuredStoreError::InvalidHistory)?;
         let returned: mfm_facts::FactSelectionReadResponse = object
-            .decode()
+            .decode_mfm_value()
             .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
         let response = serde_json::from_str::<PriorRunFactSelectionResponse>(
             returned.canonical_response_json(),
@@ -1372,9 +1372,12 @@ fn terminal_public_outcome(
     let outcome_object = verified
         .object(outcome_ref)
         .ok_or(super::StructuredStoreError::InvalidHistory)?;
-    let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> = outcome_object
-        .decode()
+    outcome_object
+        .validate()
         .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
+    let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> =
+        serde_json::from_str(&outcome_object.canonical_json)
+            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
     let (kind, value) = match outcome {
         OperationOutcome::Success(value) => ("success", value),
         OperationOutcome::Failure(value) => ("failure", value),

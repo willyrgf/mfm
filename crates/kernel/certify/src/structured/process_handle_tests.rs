@@ -6,13 +6,13 @@ use std::task::{Context, Poll, Waker};
 use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     BoundedComponentContract, BoundedComponentInvoker, CapabilityContractFault,
-    EffectAdapterInvoker, EffectCapabilityContract, NoRefresh, NoRefreshEvidence,
+    EffectAdapterInvoker, EffectCapabilityContract, EntryOnce, NoRefresh, NoRefreshEvidence,
     ReadAdapterInvoker, ReadCapabilityContract, ReadCapabilityImplementation, Refreshable,
     ResourceAuthorityContract,
 };
 use mfm_ids::{
     AccessAttemptId, DigestAlgorithm, JournalRecordHash, OccurrenceId, RunId,
-    RunSemanticStateDigest, SchemaId, SemanticCallId, StoreEpoch, StoreScopeId, TenantScopeId,
+    RunSemanticStateDigest, SemanticCallId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     ExternalAccessAuthorized, HistoryObject, LexicalValueRef, RecordRef, RunRecord, SemanticHead,
@@ -20,12 +20,14 @@ use mfm_journal::structured::{
 };
 use mfm_program::structured::{
     AllowsExecution, AuthoringPolicy, ChildOperation, ClosedSum, CustomFailureHandler,
-    DefaultFailureMapper, Direct, Effect, FanOutResults, Never, OperationBuilder,
+    DefaultFailureMapper, Direct, Effect, EntryOnceBinding, FanOutResults, Never, OperationBuilder,
     PolicyExpansionRecipe, PolicyFailurePostBuilder, PolicyRecipeBuilder, ProposedSuccessOutcome,
     Pure, Read, RecoveryRouteBuilder, RefreshableBinding, Sequential, StateFrame, StateSettlement,
 };
-use mfm_program_derive::MfmValue;
-use mfm_spec::structured::{ProposedStateOutcome, StructuredComponentDependency};
+use mfm_program_derive::{MfmValue, PersistedSchema};
+use mfm_spec::structured::{
+    ProposedStateOutcome, StructuredComponentDependency, StructuredEffectEntryContract,
+};
 use serde::{Deserialize, Serialize};
 
 struct TestAssemblyConsumer;
@@ -171,28 +173,36 @@ fn sid(value: &str) -> StableId {
 }
 
 trait FixtureRegistryBuildExt {
-    fn build_fixture(self) -> Result<QualifiedProgramRegistry>;
+    fn build_fixture(self) -> Result<CertifiedProgramRegistry>;
 }
 
 impl FixtureRegistryBuildExt for ProgramRegistryBuilder {
-    fn build_fixture(self) -> Result<QualifiedProgramRegistry> {
+    fn build_fixture(self) -> Result<CertifiedProgramRegistry> {
         let expected = self.entry_points.keys().cloned().collect::<Vec<_>>();
         self.build(&expected)
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.certify.test-history-object", version = "1")]
+struct TestHistoryObject {
+    domain: String,
+    discriminator: u8,
+}
+
+impl PersistedObjectPayload for TestHistoryObject {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.test_history_object")
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
 fn test_history_object(kind: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
-        sid(kind),
-        SchemaId::new(
-            kind,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(&[discriminator, kind.as_bytes()[0]]),
-        )
-        .expect("test physical schema"),
-        format!("{{\"value\":{discriminator}}}"),
-    )
+    HistoryObject::from_persisted(&TestHistoryObject {
+        domain: kind.to_owned(),
+        discriminator,
+    })
     .expect("test physical object")
 }
 
@@ -353,7 +363,8 @@ fn kernel_fact_scanner_baseline_is_retained_but_excluded_from_unrelated_entry_cl
         .expect("value contract");
     let state_ref = state_contract::<ProcessIdentityState>()
         .expect("identity state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -464,7 +475,8 @@ fn nonbaseline_unused_process_bindings_still_reject_registry_build() {
         .expect("failure contract");
     let state_ref = state_contract::<ProcessIdentityState>()
         .expect("identity state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -606,7 +618,8 @@ fn identity_entry_registry(entry_points: &[StableId]) -> ProgramRegistryBuilder 
         .expect("value contract");
     let state_ref = state_contract::<ProcessIdentityState>()
         .expect("identity state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -742,29 +755,11 @@ fn expected_authorization_rejects_a_substituted_state_input_ref() {
         stable_resource_lineage_contract_ref: None,
     };
     authorization.access_attempt_id =
-        mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
-            run_id: &run_id,
-            occurrence_id: &authorization.occurrence_id,
-            occurrence_path_ref: &authorization.occurrence_path_ref,
-            semantic_call_id: &authorization.semantic_call_id,
-            state_input_ref: &authorization.state_input_ref,
-            attempt_ordinal: authorization.attempt_ordinal,
-            access_kind: authorization.access_kind,
-            semantic_head: &authorization.semantic_head,
-            capability_contract_ref: &authorization.capability_contract_ref,
-            capability_implementation_ref: &authorization.capability_implementation_ref,
-            adapter_contract_ref: &authorization.adapter_contract_ref,
-            adapter_implementation_ref: &authorization.adapter_implementation_ref,
-            request: &authorization.request,
-            request_digest: &authorization.request_digest,
-            physical_binding_ref: &authorization.physical_binding_ref,
-            stable_resource_lineage_contract_ref: &authorization
-                .stable_resource_lineage_contract_ref,
-        })
-        .expect("access attempt identity");
+        mfm_journal::structured::derive_access_attempt_id(&run_id, &authorization)
+            .expect("access attempt identity");
     let record = RunRecord::ExternalAccessAuthorized(authorization.clone());
     authorization_ref.record_hash =
-        mfm_journal::structured::derive_record_hash(&ExpectedRecordHashPreimage {
+        mfm_journal::structured::derive_record_hash(&RecordHashPreimage {
             run_id: &authorization_ref.run_id,
             run_sequence: authorization_ref.run_sequence,
             ordinal: authorization_ref.ordinal,
@@ -1138,10 +1133,12 @@ impl EffectCapabilityContract for ProcessEffectCapability {
     type Returned = ProcessValue;
     type SafeFailure = ProcessFailure;
     type Refresh = Refreshable<RefreshEvidence>;
+    type Entry = EntryOnce;
 }
 
 impl RuntimeEffectCapability for ProcessEffectCapability {
     type RefreshBinding = RefreshableBinding<ProcessResource>;
+    type EntryBinding = EntryOnceBinding;
 
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
         let resource_ref = ProcessResource::contract()?.content_ref()?;
@@ -1152,6 +1149,7 @@ impl RuntimeEffectCapability for ProcessEffectCapability {
             mfm_spec::structured::structured_value_contract_ref::<ProcessFailure>()?,
             mfm_spec::structured::structured_value_contract_ref::<RefreshEvidence>()?,
             resource_ref,
+            StructuredEffectEntryContract::EntryOnce {},
             <ProcessEffectAdapter as RuntimeEffectAdapter<ProcessEffectCapability>>::contract()?
                 .content_ref()?,
         )
@@ -1203,10 +1201,12 @@ impl EffectCapabilityContract for NoRefreshProcessEffectCapability {
     type Returned = ProcessValue;
     type SafeFailure = ProcessFailure;
     type Refresh = NoRefresh;
+    type Entry = EntryOnce;
 }
 
 impl RuntimeEffectCapability for NoRefreshProcessEffectCapability {
     type RefreshBinding = mfm_program::structured::NoRefreshBinding;
+    type EntryBinding = EntryOnceBinding;
 
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
         StructuredLiveComponentContract::new_effect_capability_no_refresh(
@@ -1214,6 +1214,7 @@ impl RuntimeEffectCapability for NoRefreshProcessEffectCapability {
             mfm_spec::structured::structured_value_contract_ref::<ProcessValue>()?,
             mfm_spec::structured::structured_value_contract_ref::<ProcessValue>()?,
             mfm_spec::structured::structured_value_contract_ref::<ProcessFailure>()?,
+            StructuredEffectEntryContract::EntryOnce {},
             <NoRefreshProcessEffectAdapter as RuntimeEffectAdapter<
                 NoRefreshProcessEffectCapability,
             >>::contract()?
@@ -1249,10 +1250,12 @@ impl EffectCapabilityContract for AlternateProcessEffectCapability {
     type Returned = ProcessValue;
     type SafeFailure = ProcessFailure;
     type Refresh = Refreshable<RefreshEvidence>;
+    type Entry = EntryOnce;
 }
 
 impl RuntimeEffectCapability for AlternateProcessEffectCapability {
     type RefreshBinding = RefreshableBinding<ProcessResource>;
+    type EntryBinding = EntryOnceBinding;
 
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
         ProcessEffectCapability::contract()
@@ -2309,7 +2312,8 @@ fn register_process_failure_mapper(assembly: &mut ProgramRegistryBuilder) {
         .expect("failure route contract");
     let mapper_ref = state_contract::<ProcessFailureMapperState>()
         .expect("failure mapper state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let mapper_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2446,7 +2450,7 @@ where
 
     let state_ref = state_contract::<S>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -2497,7 +2501,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let choice_ref = state_contract::<ProcessChoiceState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let choice_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2517,7 +2521,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let conversion_ref = state_contract::<ProcessFailureToValueState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let conversion_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2537,7 +2541,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let recovery_ref = state_contract::<ProcessRecoveryHandlerState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let recovery_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2559,7 +2563,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let identity_ref = state_contract::<ProcessIdentityState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let identity_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2575,7 +2579,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let aggregate_ref = state_contract::<ProcessDepthAggregateState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let aggregate_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2595,7 +2599,7 @@ fn register_hidden_boundary_fixtures(assembly: &mut ProgramRegistryBuilder) -> R
 
     let effect_state_ref = state_contract::<InfallibleEffectProcessState>()
         .map_err(|error| CertifyError::Certification(error.to_string()))?
-        .state_contract_ref;
+        .content_ref()?;
     let effect_state_descriptor = descriptor(
         assembly,
         StructuredComponentKind::State,
@@ -2732,7 +2736,8 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
             .expect("failure contract");
         let state_ref = state_contract::<ReadProcessState>()
             .expect("state contract")
-            .state_contract_ref;
+            .content_ref()
+            .expect("state contract ref");
         let descriptor = descriptor(
             &mut assembly,
             if hostile == "kind" {
@@ -2741,8 +2746,11 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
                 StructuredComponentKind::State
             },
             if hostile == "semantic" {
-                typed_content_ref("mfm.process-graph-hostile", &"foreign-state")
-                    .expect("foreign state ref")
+                fixture_content_ref(
+                    test_fixture_schema_id("mfm.process-graph-hostile"),
+                    &"foreign-state",
+                )
+                .expect("foreign state ref")
             } else {
                 state_ref
             },
@@ -2765,8 +2773,10 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
     )
     .expect("fallible success-only Read contract is independently valid");
     assert_ne!(
-        exact.state_contract_ref,
-        disposition_substitution.state_contract_ref
+        exact.content_ref().expect("exact state contract ref"),
+        disposition_substitution
+            .content_ref()
+            .expect("substituted state contract ref")
     );
     let mut assembly = ProgramRegistryBuilder::new();
     assembly
@@ -2778,7 +2788,9 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
     let disposition_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
-        disposition_substitution.state_contract_ref,
+        disposition_substitution
+            .content_ref()
+            .expect("substituted state contract ref"),
         "mfm.test/read-state-disposition-substitution",
     );
     assembly
@@ -2794,7 +2806,8 @@ fn state_registration_rejects_descriptor_and_access_kind_substitution() {
         .expect("failure contract");
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3127,7 +3140,8 @@ fn may_fail_safe_failure_settlement_is_total_over_arbitrary_valid_values() {
 
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let callbacks = registry
         .process_components
         .iter()
@@ -3150,14 +3164,10 @@ fn may_fail_safe_failure_settlement_is_total_over_arbitrary_valid_values() {
     ];
     for (code, expected_kind) in cases {
         let input = encode_process_value(&ProcessValue { value: code }).expect("input");
-        let observation = encode_process_value(
-            &CommittedObservation::<ProcessValue, ProcessFailure>::SafeFailure(ProcessFailure {
-                code,
-            }),
-        )
-        .expect("observation");
+        let observation =
+            encode_process_value(&ProcessFailure { code }).expect("safe-failure value");
         let settlement = callbacks
-            .settle_observation(&input, &observation)
+            .settle_safe_failure(&input, &observation)
             .expect("every inhabited safe failure settles");
         let kind = settlement
             .as_json()
@@ -3198,7 +3208,8 @@ fn returned_value_settlement_retains_full_invalid_evidence_behavior() {
 
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let callbacks = registry
         .process_components
         .iter()
@@ -3212,12 +3223,9 @@ fn returned_value_settlement_retains_full_invalid_evidence_behavior() {
     };
 
     let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
-    let returned = encode_process_value(
-        &CommittedObservation::<ProcessValue, ProcessFailure>::Returned(ProcessValue { value: 2 }),
-    )
-    .expect("returned observation");
+    let returned = encode_process_value(&ProcessValue { value: 2 }).expect("returned value");
     let settlement = callbacks
-        .settle_observation(&input, &returned)
+        .settle_returned(&input, &returned)
         .expect("returned settlement");
     assert_eq!(
         settlement,
@@ -3225,12 +3233,9 @@ fn returned_value_settlement_retains_full_invalid_evidence_behavior() {
             .expect("invalid evidence")
     );
 
-    let consistent = encode_process_value(
-        &CommittedObservation::<ProcessValue, ProcessFailure>::Returned(ProcessValue { value: 1 }),
-    )
-    .expect("consistent returned");
+    let consistent = encode_process_value(&ProcessValue { value: 1 }).expect("consistent returned");
     let settlement = callbacks
-        .settle_observation(&input, &consistent)
+        .settle_returned(&input, &consistent)
         .expect("consistent returned settlement");
     assert_eq!(
         settlement
@@ -3259,7 +3264,8 @@ fn fallible_success_only_safe_failure_always_settles_success() {
 
     let state_ref = state_contract::<FallibleSuccessOnlyReadState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let callbacks = registry
         .process_components
         .iter()
@@ -3274,14 +3280,10 @@ fn fallible_success_only_safe_failure_always_settles_success() {
 
     for code in [0u64, 1, 2, 41, 99, 1_000_000] {
         let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
-        let observation = encode_process_value(
-            &CommittedObservation::<ProcessValue, ProcessFailure>::SafeFailure(ProcessFailure {
-                code,
-            }),
-        )
-        .expect("safe-failure observation");
+        let observation =
+            encode_process_value(&ProcessFailure { code }).expect("safe-failure value");
         let settlement = callbacks
-            .settle_observation(&input, &observation)
+            .settle_safe_failure(&input, &observation)
             .expect("every inhabited safe failure settles successfully");
         let outcome = settlement
             .as_json()
@@ -3305,13 +3307,10 @@ fn fallible_success_only_safe_failure_always_settles_success() {
 
     let before_malformed = settlement_calls.load(Ordering::SeqCst);
     let input = encode_process_value(&ProcessValue { value: 1 }).expect("input");
-    let malformed = CanonicalJsonValue::new(serde_json::json!({
-        "kind": "safe_failure",
-        "value": {"code": "not-an-integer"},
-    }))
-    .expect("canonical but schema-invalid observation");
+    let malformed = CanonicalJsonValue::new(serde_json::json!({"code": "not-an-integer"}))
+        .expect("canonical but schema-invalid observation");
     callbacks
-        .settle_observation(&input, &malformed)
+        .settle_safe_failure(&input, &malformed)
         .expect_err("schema-invalid evidence must fail before callback invocation");
     assert_eq!(settlement_calls.load(Ordering::SeqCst), before_malformed);
 }
@@ -3748,7 +3747,8 @@ fn fan_out_rejects_hidden_effect_and_depth_through_every_structural_route() {
             ExpansionPolicyContract::new(vec![mfm_spec::structured::PolicyExpansionBinding {
                 boundary_contract_ref: state_contract::<ReadProcessState>()
                     .expect("Read state contract")
-                    .state_contract_ref,
+                    .content_ref()
+                    .expect("state contract ref"),
                 recipe_ref: recipe.content_ref().expect("policy recipe ref"),
             }])
             .expect("failure-post policy");
@@ -3891,7 +3891,8 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
     };
     let state_ref = state_contract::<ReadProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -3968,8 +3969,9 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
             else {
                 panic!("Read protocol")
             };
-            let foreign = typed_content_ref("mfm.process-graph-hostile", &field)
-                .expect("foreign evidence contract");
+            let foreign =
+                fixture_content_ref(test_fixture_schema_id("mfm.process-graph-hostile"), &field)
+                    .expect("foreign evidence contract");
             match field {
                 "request" => *request_contract_ref = foreign,
                 "returned" => *returned_contract_ref = foreign,
@@ -3999,6 +4001,7 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
             safe_failure_contract_ref,
             access_fault_contract_ref,
             refresh_contract: StructuredEffectRefreshContract::NoRefresh {},
+            entry_contract: StructuredEffectEntryContract::EntryOnce {},
         });
     });
     let read_capability_ref = capability_ref.clone();
@@ -4107,15 +4110,10 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
                 mfm_spec::structured::StructuredExecutionKind::Read => {
                     let request = callbacks.author_request(&input).expect("authored request");
                     assert_eq!(request, input);
-                    let observation = encode_process_value(&CommittedObservation::<
-                        ProcessValue,
-                        ProcessFailure,
-                    >::Returned(
-                        ProcessValue { value: 8 }
-                    ))
-                    .expect("observation");
+                    let observation =
+                        encode_process_value(&ProcessValue { value: 8 }).expect("returned value");
                     let settlement = callbacks
-                        .settle_observation(&input, &observation)
+                        .settle_returned(&input, &observation)
                         .expect("settlement");
                     let expected = encode_process_value(&StateSettlement::<
                         ProcessValue,
@@ -4126,15 +4124,10 @@ fn read_process_handles_are_retained_callable_and_never_used_by_certification() 
                     .expect("expected settlement");
                     assert_eq!(settlement, expected);
 
-                    let observation = encode_process_value(&CommittedObservation::<
-                        ProcessValue,
-                        ProcessFailure,
-                    >::SafeFailure(
-                        ProcessFailure { code: 41 }
-                    ))
-                    .expect("safe-failure observation");
+                    let observation = encode_process_value(&ProcessFailure { code: 41 })
+                        .expect("safe-failure value");
                     let settlement = callbacks
-                        .settle_observation(&input, &observation)
+                        .settle_safe_failure(&input, &observation)
                         .expect("safe-failure settlement");
                     let expected = encode_process_value(&StateSettlement::<
                         ProcessValue,
@@ -4292,7 +4285,8 @@ fn infallible_no_refresh_effect_settles_reviewed_safe_failure_as_success() {
 
     let state_ref = state_contract::<InfallibleEffectProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -4436,7 +4430,8 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
     let settle_calls = callback_calls.clone();
     let state_ref = state_contract::<EffectProcessState>()
         .expect("state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let state_descriptor = descriptor(
         &mut assembly,
         StructuredComponentKind::State,
@@ -4563,9 +4558,11 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
             .iter_mut()
             .find(|dependency| dependency.component_kind == StructuredComponentKind::Resource)
             .expect("Resource lineage");
-        resource.contract_ref =
-            typed_content_ref("mfm.process-graph-hostile", &"foreign-resource-lineage")
-                .expect("foreign resource lineage");
+        resource.contract_ref = fixture_content_ref(
+            test_fixture_schema_id("mfm.process-graph-hostile"),
+            &"foreign-resource-lineage",
+        )
+        .expect("foreign resource lineage");
     });
     let effect_adapter_ref = adapter_ref.clone();
     assert_process_graph_rejected(&assembly, move |_, process_components| {
@@ -4649,15 +4646,10 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
                         callbacks.author_request(&input).expect("effect request"),
                         input
                     );
-                    let returned = encode_process_value(&CommittedObservation::<
-                        ProcessValue,
-                        ProcessFailure,
-                    >::Returned(
-                        ProcessValue { value: 10 }
-                    ))
-                    .expect("returned observation");
+                    let returned =
+                        encode_process_value(&ProcessValue { value: 10 }).expect("returned value");
                     let returned_settlement = callbacks
-                        .settle_observation(&input, &returned)
+                        .settle_returned(&input, &returned)
                         .expect("returned settlement");
                     let expected_returned = encode_process_value(&StateSettlement::<
                         ProcessValue,
@@ -4668,15 +4660,10 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
                     .expect("expected returned settlement");
                     assert_eq!(returned_settlement, expected_returned);
 
-                    let safe_failure = encode_process_value(&CommittedObservation::<
-                        ProcessValue,
-                        ProcessFailure,
-                    >::SafeFailure(
-                        ProcessFailure { code: 42 }
-                    ))
-                    .expect("safe-failure observation");
+                    let safe_failure = encode_process_value(&ProcessFailure { code: 42 })
+                        .expect("safe-failure value");
                     let failure_settlement = callbacks
-                        .settle_observation(&input, &safe_failure)
+                        .settle_safe_failure(&input, &safe_failure)
                         .expect("safe-failure settlement");
                     let expected_failure = encode_process_value(&StateSettlement::<
                         ProcessValue,
@@ -4818,4 +4805,15 @@ fn refreshable_effect_process_preserves_all_five_dispositions() {
     assert_eq!(validation_counts.superseded.load(Ordering::SeqCst), 2);
     assert_eq!(validation_counts.entry_unknown.load(Ordering::SeqCst), 2);
     assert_eq!(validation_counts.integrity.load(Ordering::SeqCst), 2);
+}
+
+/// Test-only arbitrary identity; production never constructs one.
+fn test_fixture_schema_id(name: &'static str) -> super::Result<mfm_ids::SchemaId> {
+    mfm_ids::SchemaId::new(
+        name,
+        "1",
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(name.as_bytes()),
+    )
+    .map_err(|error| super::CertifyError::Certification(error.to_string()))
 }

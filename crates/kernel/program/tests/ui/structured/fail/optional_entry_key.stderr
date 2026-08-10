@@ -1,0 +1,14 @@
+error[E0308]: mismatched types
+  --> tests/ui/structured/fail/optional_entry_key.rs:27:9
+   |
+26 |     fn entry_key(&self) -> Self::EntryKey {
+   |                            -------------- expected `InsertKey` because of return type
+27 |         self.key.clone()
+   |         ^^^^^^^^^^^^^^^^ expected `InsertKey`, found `Option<InsertKey>`
+   |
+   = note: expected struct `InsertKey`
+                found enum `std::option::Option<InsertKey>`
+help: consider using `Option::expect` to unwrap the `std::option::Option<InsertKey>` value, panicking if the value is an `Option::None`
+   |
+27 |         self.key.clone().expect("REASON")
+   |                         +++++++++++++++++

@@ -267,7 +267,7 @@ impl From<crate::AccessPolicyError> for PublicError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_canonical::{sha256_digest_bytes, RecoverabilityContract};
+    use mfm_canonical::sha256_digest_bytes;
     use mfm_ids::{DigestAlgorithm, StoreEpoch};
 
     #[test]
@@ -302,34 +302,46 @@ mod tests {
         .expect_err("oversized public error message must be rejected");
     }
 
+    /// The minimum wire form and one process attribution decode exactly.
     #[test]
-    fn public_error_runtime_vectors_match_the_frozen_corpus_and_annex() {
-        let contract = RecoverabilityContract::embedded().expect("recoverability annex");
-        for id in [
-            "schema/mfm.public-error.v1/minimum",
-            "schema/mfm.public-error.v1/runtime-process-fault",
-        ] {
-            let bytes = corpus_vector_bytes(id);
-            contract
-                .strict_decode("mfm.public-error.v1", &bytes)
-                .expect("frozen public error vector");
+    fn public_error_wire_forms_round_trip_their_typed_owner() {
+        for wire in [MINIMUM_PUBLIC_ERROR_WIRE, PROCESS_FAULT_PUBLIC_ERROR_WIRE] {
             let error: PublicError =
-                serde_json::from_slice(&bytes).expect("decode frozen public error vector");
+                serde_json::from_str(wire).expect("decode public error wire form");
             assert_eq!(
                 serde_json::to_value(&error).expect("public error JSON"),
-                serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .expect("frozen public error JSON")
+                serde_json::from_str::<serde_json::Value>(wire).expect("public error wire JSON")
             );
         }
-        let process: PublicError = serde_json::from_slice(&corpus_vector_bytes(
-            "schema/mfm.public-error.v1/runtime-process-fault",
-        ))
-        .expect("decode process attribution");
+        let process: PublicError = serde_json::from_str(PROCESS_FAULT_PUBLIC_ERROR_WIRE)
+            .expect("decode process attribution");
         assert!(matches!(
             process.runtime_fault().map(|fault| &fault.subject),
             Some(PublicRuntimeFaultSubject::Process { .. })
         ));
     }
+
+    /// The smallest complete public error wire form.
+    const MINIMUM_PUBLIC_ERROR_WIRE: &str =
+        r#"{"code":"AuthenticationRequired","message":"Authentication is required"}"#;
+
+    /// One complete public error carrying a process fault attribution.
+    const PROCESS_FAULT_PUBLIC_ERROR_WIRE: &str = concat!(
+        r#"{"code":"StructuredRuntimeCallbackFault","#,
+        r#""message":"A qualified Runtime callback failed","#,
+        r#""runtime_fault":{"occurrence_id":"occurrence:sha256-jcs-v1:"#,
+        "2222222222222222222222222222222222222222222222222222222222222222",
+        r#"","phase":"invoke_pure","pre_fault_head":{"commit_digest":"sha256-jcs-v1:"#,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        r#"","run_sequence":1},"run_id":"run:sha256-jcs-v1:"#,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        r#"","subject":{"component_kind":"state","kind":"process","#,
+        r#""semantic_contract_ref":{"content_digest":"content:sha256-v1:"#,
+        "1111111111111111111111111111111111111111111111111111111111111111",
+        r#"","schema_id":"schema:mfm.test.fact:1:sha256-jcs-v1:"#,
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        r#""}}}}"#,
+    );
 
     #[test]
     fn runtime_fault_wire_is_exact_and_omits_private_implementation_identity() {
@@ -383,38 +395,5 @@ mod tests {
             serde_json::Value::String("private".to_owned());
         serde_json::from_value::<PublicError>(hostile)
             .expect_err("private implementation identity is not a public wire field");
-    }
-
-    fn corpus_vector_bytes(id: &str) -> Vec<u8> {
-        let corpus: serde_json::Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
-        )))
-        .expect("recoverability corpus");
-        let encoded = corpus["positive_vectors"]
-            .as_array()
-            .expect("positive vectors")
-            .iter()
-            .find(|vector| vector["id"] == id)
-            .and_then(|vector| vector["input_hex"].as_str())
-            .expect("public error corpus vector");
-        decode_hex(encoded)
-    }
-
-    fn decode_hex(encoded: &str) -> Vec<u8> {
-        assert_eq!(encoded.len() % 2, 0, "hex length");
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]))
-            .collect()
-    }
-
-    fn hex_nibble(byte: u8) -> u8 {
-        match byte {
-            b'0'..=b'9' => byte - b'0',
-            b'a'..=b'f' => byte - b'a' + 10,
-            _ => panic!("corpus contains non-lowercase-hex input"),
-        }
     }
 }

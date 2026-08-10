@@ -39,7 +39,7 @@ fn application_facade_keeps_only_the_exact_run_surface() {
 }
 
 #[test]
-fn rest_router_has_only_the_recoverability_run_routes() {
+fn rest_router_has_only_the_current_run_routes() {
     let source = read("bin/rest-api/src/lib.rs");
 
     for route in [

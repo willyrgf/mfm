@@ -24,9 +24,10 @@ use mfm_ids::{
     RequestDigest, RunId, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    derive_record_hash, AccessKind, ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
-    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordRef, RunRecord,
-    SemanticHead, TypedValueRef,
+    derive_access_attempt_id, derive_record_hash, AccessKind, ExternalAccessAuthorized,
+    HistoryObject, LexicalValueRef, PriorRunFactScannerBindingCertificate,
+    PriorRunFactSelectionResponse, RecordHashPreimage, RecordRef, RunRecord, SemanticHead,
+    TypedValueRef,
 };
 use mfm_program::structured::{
     closed_sum_contract, runtime_effect_capability_contract, runtime_read_capability_contract,
@@ -35,44 +36,44 @@ use mfm_program::structured::{
     RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner, State,
     StateSettlement, StructuredStateCallbacks,
 };
+use mfm_program_derive::PersistedSchema;
 use mfm_spec::structured::{
     access_fault_contract_canonical_json, access_fault_contract_ref,
     capability_expansion_requirement_ref, expansion_support_semantic_call_id,
-    failure_handler_semantic_call_id, fan_out_join_contract_canonical_json,
-    fan_out_join_contract_ref, lane_outcome_contract_canonical_json, lane_outcome_contract_ref,
+    failure_handler_semantic_call_id, fan_out_join_contract_ref, lane_outcome_contract_ref,
     never_failure_contract_canonical_json, never_failure_contract_ref, policy_proceed_program_ref,
     prior_run_fact_scanner_adapter_contract, prior_run_fact_selection_capability_contract,
     retained_value_contract_ref, structured_value_contract, AuthoredBlock, AuthoredDeclaration,
     AuthoredFailureDirective, AuthoredFanOut, AuthoredMatch, AuthoredOperationCall,
-    AuthoredStateCall, AuthoredStructuredProgram, BlockTail, CertifiedComponentObject,
-    CertifiedFailureBoundary, CertifiedProgramComponents, CertifiedProgramDocument,
-    CertifiedProgramRoot, CertifiedStructuralBounds, ClosedSumContract, ComponentObjectReference,
-    ExpandedBlock, ExpandedDeclaration, ExpandedFanOut, ExpandedFanOutLane, ExpandedFragment,
-    ExpandedMatch, ExpandedMatchArm, ExpandedStateBinding, ExpandedStructuredProgram,
-    ExpansionBoundaryId, ExpansionPolicyContract, ExpansionStage, ExpansionTraceEntry,
-    FailureMapperRegistration, FailureMappingLink, FailurePlan, FailurePlanIdentity,
-    FailureScopeBinding, FragmentInputBinding, HandlerContinuation, LexicalProducer, LexicalSlot,
-    NoFailureBoundary, PolicyCoverageEntry, ProposedStateValue, ResultRole,
-    SecretFreeExecutableIdentity, SecretFreeImplementationDescriptor,
-    SecretFreeImplementationManifest, SecretFreeImplementationManifestEntry,
-    SecretFreeQualificationArtifact, SemanticCallPath, SemanticPathSegment,
-    StateCapabilityAdapterSignerResourceManifest, StructuralPath, StructuralPathSegment,
-    StructuredCapabilityProtocolContract, StructuredComponentKind,
-    StructuredComponentManifestEntry, StructuredEffectRefreshContract, StructuredExecutionKind,
-    StructuredExpansionProfile, StructuredExpansionProof, StructuredFactDescriptor,
-    StructuredFailureContract, StructuredLiveComponentContract, StructuredPolicyCoverageProof,
-    StructuredPublicContractRefs, StructuredSafeFailureDispositionContract,
-    StructuredStateContract, StructuredStateExecutionContract, MAX_CERTIFIED_COMPONENT_OBJECTS,
-    MAX_FAN_OUT_DEPTH, MAX_STRUCTURED_DECLARATIONS, MAX_STRUCTURED_LANES,
-    MAX_STRUCTURED_OCCURRENCES,
+    AuthoredStateCall, AuthoredStructuredProgram, BlockTail, CapabilityExpansionRequirement,
+    CertifiedComponentObject, CertifiedFailureBoundary, CertifiedProgramComponents,
+    CertifiedProgramDocument, CertifiedProgramRoot, CertifiedStructuralBounds, ClosedSumContract,
+    ComponentObjectReference, ExpandedBlock, ExpandedDeclaration, ExpandedFanOut,
+    ExpandedFanOutLane, ExpandedFragment, ExpandedMatch, ExpandedMatchArm, ExpandedStateBinding,
+    ExpandedStructuredProgram, ExpansionBoundaryId, ExpansionPolicyContract, ExpansionStage,
+    ExpansionTraceEntry, FailureMapperRegistration, FailureMappingLink, FailurePlan,
+    FailurePlanIdentity, FailureScopeBinding, FanOutJoinContract, FragmentInputBinding,
+    HandlerContinuation, LaneOutcomeContract, LexicalProducer, LexicalSlot, NoFailureBoundary,
+    PolicyCoverageEntry, ProposedStateValue, ResultRole, SecretFreeExecutableIdentity,
+    SecretFreeImplementationDescriptor, SecretFreeImplementationManifest,
+    SecretFreeImplementationManifestEntry, SecretFreeQualificationArtifact, SemanticCallPath,
+    SemanticPathSegment, StateCapabilityAdapterSignerResourceManifest, StructuralPath,
+    StructuralPathSegment, StructuredCapabilityProtocolContract, StructuredComponentKind,
+    StructuredComponentManifestEntry, StructuredEffectEntryContract,
+    StructuredEffectRefreshContract, StructuredExecutionKind, StructuredExpansionProfile,
+    StructuredExpansionProof, StructuredFactDescriptor, StructuredFailureContract,
+    StructuredLiveComponentContract, StructuredPolicyCoverageProof, StructuredPublicContractRefs,
+    StructuredSafeFailureDispositionContract, StructuredStateContract,
+    StructuredStateExecutionContract, MAX_CERTIFIED_COMPONENT_OBJECTS, MAX_FAN_OUT_DEPTH,
+    MAX_STRUCTURED_DECLARATIONS, MAX_STRUCTURED_LANES, MAX_STRUCTURED_OCCURRENCES,
 };
-use mfm_spec::{exact_content_ref, CanonicalJsonValue};
+use mfm_spec::CanonicalJsonValue;
 use mfm_values::{
-    component_object_evidence_contract_canonical, component_object_evidence_contract_ref, MfmValue,
-    RetainedValueContract, SchemaIdentity,
+    CanonicalJsonPersistedSchema, ComponentObjectEvidence, MfmValue, PersistedObjectPayload,
+    PersistedSchema as _, RetainedValueContract, SchemaIdentity,
 };
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{CertifyError, Result};
 
@@ -110,6 +111,102 @@ const KERNEL_FACT_CAPABILITY_IMPLEMENTATION_ID: &str =
     "mfm.kernel/prior-run-fact-selection-capability-implementation";
 const KERNEL_FACT_ADAPTER_IMPLEMENTATION_ID: &str =
     "mfm.kernel/prior-run-fact-scanner-adapter-implementation";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-entry-point-contract", version = "1")]
+struct StructuredEntryPointContract {
+    entry_point_id: StableId,
+    #[mfm(persisted, maximum_items = 8192)]
+    input_contract_refs: Vec<ContentRef>,
+    output_contract_ref: ContentRef,
+    failure_contract_ref: ContentRef,
+}
+
+impl PersistedObjectPayload for StructuredEntryPointContract {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(ENTRY_POINT_CONTRACT_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    schema = "mfm.structured-certified-program-kernel-contract",
+    version = "1"
+)]
+enum CertifiedProgramKernelContract {
+    #[serde(rename = "mfm.certified-program-contract.v1")]
+    V1,
+}
+
+impl PersistedObjectPayload for CertifiedProgramKernelContract {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(CERTIFIED_PROGRAM_CONTRACT_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    schema = "mfm.structured-policy-coverage-kernel-contract",
+    version = "1"
+)]
+enum PolicyCoverageKernelContract {
+    #[serde(rename = "mfm.policy-coverage-proof-contract.v1")]
+    V1,
+}
+
+impl PersistedObjectPayload for PolicyCoverageKernelContract {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(POLICY_COVERAGE_CONTRACT_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(
+    schema = "mfm.structured-certification-predicate-version",
+    version = "1"
+)]
+enum CertificationPredicateVersion {
+    V1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.structured-certification-predicate-set", version = "1")]
+struct StructuredCertificationPredicateSet {
+    authored_structure: CertificationPredicateVersion,
+    declarative_expansion: CertificationPredicateVersion,
+    expanded_structure: CertificationPredicateVersion,
+    exact_policy_coverage: CertificationPredicateVersion,
+    structural_first_use_manifest: CertificationPredicateVersion,
+    canonical_component_closure: CertificationPredicateVersion,
+}
+
+impl StructuredCertificationPredicateSet {
+    const fn current() -> Self {
+        Self {
+            authored_structure: CertificationPredicateVersion::V1,
+            declarative_expansion: CertificationPredicateVersion::V1,
+            expanded_structure: CertificationPredicateVersion::V1,
+            exact_policy_coverage: CertificationPredicateVersion::V1,
+            structural_first_use_manifest: CertificationPredicateVersion::V1,
+            canonical_component_closure: CertificationPredicateVersion::V1,
+        }
+    }
+}
+
+impl PersistedObjectPayload for StructuredCertificationPredicateSet {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(PREDICATE_SET_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegisteredComponentObject {
@@ -209,14 +306,14 @@ impl CertifiedAccessAuthorization {
 }
 
 /// Exact qualified entry-point policy selected by process assembly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.qualified-structured-entry-point-policy", version = "1")]
 struct QualifiedStructuredEntryPointPolicy {
     /// Stable operation identity selected by this entry point.
     operation_id: StableId,
     /// Exact public entry-point contract object.
     entry_point_contract_ref: ContentRef,
-    /// Exact admission-policy object.
-    admission_policy_ref: ContentRef,
     /// Exact certified-program contract.
     certified_program_contract_ref: ContentRef,
     /// Exact certification predicate set.
@@ -226,6 +323,7 @@ struct QualifiedStructuredEntryPointPolicy {
     /// Exact policy-coverage obligation contract.
     policy_coverage_contract_ref: ContentRef,
     /// Public admission-input contracts in declared root order.
+    #[mfm(persisted, maximum_items = 8192)]
     public_input_contract_refs: Vec<ContentRef>,
     /// Exact public successful-output contract.
     public_output_contract_ref: ContentRef,
@@ -233,21 +331,8 @@ struct QualifiedStructuredEntryPointPolicy {
     public_failure_contract_ref: ContentRef,
 }
 
-#[derive(Serialize)]
-struct QualifiedPolicyPreimage<'a> {
-    operation_id: &'a StableId,
-    entry_point_contract_ref: &'a ContentRef,
-    certified_program_contract_ref: &'a ContentRef,
-    certification_predicate_set_ref: &'a ContentRef,
-    expansion_profile_ref: &'a ContentRef,
-    policy_coverage_contract_ref: &'a ContentRef,
-    public_input_contract_refs: &'a [ContentRef],
-    public_output_contract_ref: &'a ContentRef,
-    public_failure_contract_ref: &'a ContentRef,
-}
-
 impl QualifiedStructuredEntryPointPolicy {
-    /// Constructs one qualified policy and derives its exact canonical identity.
+    /// Constructs one qualified policy payload.
     #[allow(clippy::too_many_arguments)]
     fn new(
         operation_id: StableId,
@@ -260,24 +345,9 @@ impl QualifiedStructuredEntryPointPolicy {
         public_output_contract_ref: ContentRef,
         public_failure_contract_ref: ContentRef,
     ) -> Result<Self> {
-        let admission_policy_ref = typed_content_ref(
-            "mfm.qualified-structured-entry-point-policy",
-            &QualifiedPolicyPreimage {
-                operation_id: &operation_id,
-                entry_point_contract_ref: &entry_point_contract_ref,
-                certified_program_contract_ref: &certified_program_contract_ref,
-                certification_predicate_set_ref: &certification_predicate_set_ref,
-                expansion_profile_ref: &expansion_profile_ref,
-                policy_coverage_contract_ref: &policy_coverage_contract_ref,
-                public_input_contract_refs: &public_input_contract_refs,
-                public_output_contract_ref: &public_output_contract_ref,
-                public_failure_contract_ref: &public_failure_contract_ref,
-            },
-        )?;
-        Ok(Self {
+        let policy = Self {
             operation_id,
             entry_point_contract_ref,
-            admission_policy_ref,
             certified_program_contract_ref,
             certification_predicate_set_ref,
             expansion_profile_ref,
@@ -285,28 +355,16 @@ impl QualifiedStructuredEntryPointPolicy {
             public_input_contract_refs,
             public_output_contract_ref,
             public_failure_contract_ref,
-        })
+        };
+        policy.validate()?;
+        Ok(policy)
     }
+}
 
-    fn preimage(&self) -> QualifiedPolicyPreimage<'_> {
-        QualifiedPolicyPreimage {
-            operation_id: &self.operation_id,
-            entry_point_contract_ref: &self.entry_point_contract_ref,
-            certified_program_contract_ref: &self.certified_program_contract_ref,
-            certification_predicate_set_ref: &self.certification_predicate_set_ref,
-            expansion_profile_ref: &self.expansion_profile_ref,
-            policy_coverage_contract_ref: &self.policy_coverage_contract_ref,
-            public_input_contract_refs: &self.public_input_contract_refs,
-            public_output_contract_ref: &self.public_output_contract_ref,
-            public_failure_contract_ref: &self.public_failure_contract_ref,
-        }
-    }
-
-    fn derived_admission_policy_ref(&self) -> Result<ContentRef> {
-        typed_content_ref(
-            "mfm.qualified-structured-entry-point-policy",
-            &self.preimage(),
-        )
+impl PersistedObjectPayload for QualifiedStructuredEntryPointPolicy {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(POLICY_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
     }
 }
 
@@ -319,6 +377,7 @@ impl QualifiedStructuredEntryPointPolicy {
 ///     let _second = program.clone();
 /// }
 /// ```
+#[derive(PartialEq, Eq)]
 pub struct CertifiedProgram {
     authored: AuthoredStructuredProgram,
     expanded: ExpandedStructuredProgram,
@@ -327,6 +386,7 @@ pub struct CertifiedProgram {
     coverage: StructuredPolicyCoverageProof,
     document: CertifiedProgramDocument,
     value_schemas: BTreeMap<ContentRef, SchemaIdentity>,
+    lexical_slot_refs: BTreeMap<mfm_spec::structured::LexicalSlot, ContentRef>,
 }
 
 impl std::fmt::Debug for CertifiedProgram {
@@ -376,9 +436,25 @@ impl CertifiedProgram {
         &self.value_schemas
     }
 
+    /// Returns the exact pure schema identity qualified for one retained-value
+    /// contract in this certified program.
+    pub fn value_schema(&self, contract_ref: &ContentRef) -> Option<&SchemaIdentity> {
+        self.value_schemas.get(contract_ref)
+    }
+
+    /// Returns the certification-owned identity of one exact expanded lexical
+    /// slot.
+    pub fn lexical_slot_ref(
+        &self,
+        slot: &mfm_spec::structured::LexicalSlot,
+    ) -> Option<&ContentRef> {
+        self.lexical_slot_refs.get(slot)
+    }
+
     /// Returns the sole canonical certified-program reference.
     pub fn reference(&self) -> Result<ContentRef> {
         self.document
+            .root
             .content_ref()
             .map_err(|error| CertifyError::Certification(error.to_string()))
     }
@@ -1288,10 +1364,15 @@ trait ErasedStateCallbacks: Send + Sync {
     fn semantic_contract_ref(&self) -> Result<ContentRef>;
     fn invoke_pure(&self, input: &CanonicalJsonValue) -> Result<CanonicalJsonValue>;
     fn author_request(&self, input: &CanonicalJsonValue) -> Result<CanonicalJsonValue>;
-    fn settle_observation(
+    fn settle_returned(
         &self,
         input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
+    ) -> Result<CanonicalJsonValue>;
+    fn settle_safe_failure(
+        &self,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
     ) -> Result<CanonicalJsonValue>;
     fn invoke_pure_runtime(
         &self,
@@ -1301,10 +1382,15 @@ trait ErasedStateCallbacks: Send + Sync {
         &self,
         input: &CanonicalJsonValue,
     ) -> RuntimeProcessResult<CanonicalJsonValue>;
-    fn settle_observation_runtime(
+    fn settle_returned_runtime(
         &self,
         input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
+    ) -> RuntimeProcessResult<RuntimeStateSettlement>;
+    fn settle_safe_failure_runtime(
+        &self,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
     ) -> RuntimeProcessResult<RuntimeStateSettlement>;
 }
 
@@ -1324,8 +1410,9 @@ impl<S: State> ErasedStateCallbacks for TypedStateCallbacks<S> {
 
     fn semantic_contract_ref(&self) -> Result<ContentRef> {
         state_contract::<S>()
-            .map(|contract| contract.state_contract_ref)
-            .map_err(|error| CertifyError::Certification(error.to_string()))
+            .map_err(|error| CertifyError::Certification(error.to_string()))?
+            .content_ref()
+            .map_err(Into::into)
     }
 
     fn invoke_pure(&self, input: &CanonicalJsonValue) -> Result<CanonicalJsonValue> {
@@ -1356,16 +1443,36 @@ impl<S: State> ErasedStateCallbacks for TypedStateCallbacks<S> {
         encode_process_value(&request)
     }
 
-    fn settle_observation(
+    fn settle_returned(
         &self,
         input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
     ) -> Result<CanonicalJsonValue> {
         let input = decode_process_value::<S::Input>(input)?;
-        let observation =
-            decode_process_value::<CommittedObservation<S::Returned, S::SafeFailure>>(observation)?;
+        let returned = decode_process_value::<S::Returned>(returned)?;
         let settlement = catch_unwind(AssertUnwindSafe(|| {
-            self.callbacks.settle_observation(&input, &observation)
+            self.callbacks.settle_returned(&input, &returned)
+        }))
+        .map_err(|_| {
+            CertifyError::Certification("qualified settlement callback panicked".to_owned())
+        })?
+        .ok_or_else(|| {
+            CertifyError::Certification(
+                "registered state callback has no observation settlement".to_owned(),
+            )
+        })?;
+        encode_process_value(&settlement)
+    }
+
+    fn settle_safe_failure(
+        &self,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
+    ) -> Result<CanonicalJsonValue> {
+        let input = decode_process_value::<S::Input>(input)?;
+        let safe_failure = decode_process_value::<S::SafeFailure>(safe_failure)?;
+        let settlement = catch_unwind(AssertUnwindSafe(|| {
+            self.callbacks.settle_safe_failure(&input, &safe_failure)
         }))
         .map_err(|_| {
             CertifyError::Certification("qualified settlement callback panicked".to_owned())
@@ -1400,17 +1507,35 @@ impl<S: State> ErasedStateCallbacks for TypedStateCallbacks<S> {
         encode_runtime_process_value(&request)
     }
 
-    fn settle_observation_runtime(
+    fn settle_returned_runtime(
         &self,
         input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
     ) -> RuntimeProcessResult<RuntimeStateSettlement> {
         let input = decode_runtime_process_value::<S::Input>(input)?;
-        let observation = decode_runtime_process_value::<
-            CommittedObservation<S::Returned, S::SafeFailure>,
-        >(observation)?;
+        let returned = decode_runtime_process_value::<S::Returned>(returned)?;
         let settlement = catch_unwind(AssertUnwindSafe(|| {
-            self.callbacks.settle_observation(&input, &observation)
+            self.callbacks.settle_returned(&input, &returned)
+        }))
+        .map_err(|_| RuntimeProcessFaultCode::Callback)?
+        .ok_or(RuntimeProcessFaultCode::Contract)?;
+        match settlement {
+            StateSettlement::Proposed(proposal) => {
+                erase_runtime_state_proposal(proposal).map(RuntimeStateSettlement::Proposed)
+            }
+            StateSettlement::InvalidEvidence => Ok(RuntimeStateSettlement::InvalidEvidence),
+        }
+    }
+
+    fn settle_safe_failure_runtime(
+        &self,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
+    ) -> RuntimeProcessResult<RuntimeStateSettlement> {
+        let input = decode_runtime_process_value::<S::Input>(input)?;
+        let safe_failure = decode_runtime_process_value::<S::SafeFailure>(safe_failure)?;
+        let settlement = catch_unwind(AssertUnwindSafe(|| {
+            self.callbacks.settle_safe_failure(&input, &safe_failure)
         }))
         .map_err(|_| RuntimeProcessFaultCode::Callback)?
         .ok_or(RuntimeProcessFaultCode::Contract)?;
@@ -1532,13 +1657,8 @@ impl ReadCapabilityImplementation<PriorRunFactSelectionCapability>
         &self,
         request: &mfm_facts::FactSelectionRequest,
     ) -> std::result::Result<(), CapabilityContractFault> {
-        let selector = request.selector_contract_ref();
         let expected_selector = mfm_facts::prior_run_fact_selector_contract_ref();
-        if request.admitted_source_manifest_ref().is_err()
-            || request.scan_bounds().is_err()
-            || request.queries().is_err()
-            || !matches!((selector, expected_selector), (Ok(left), Ok(right)) if left == right)
-        {
+        if expected_selector.as_ref() != Ok(request.selector_contract_ref()) {
             return Err(CapabilityContractFault::new(self.fault_code.clone()));
         }
         Ok(())
@@ -1758,7 +1878,7 @@ impl ExpectedAuthorization {
     ) -> bool {
         let record = RunRecord::ExternalAccessAuthorized(authorization.clone());
         let record_hash_matches = authorization_ref.run_sequence > 0
-            && derive_record_hash(&ExpectedRecordHashPreimage {
+            && derive_record_hash(&RecordHashPreimage {
                 run_id: &authorization_ref.run_id,
                 run_sequence: authorization_ref.run_sequence,
                 ordinal: authorization_ref.ordinal,
@@ -1766,26 +1886,7 @@ impl ExpectedAuthorization {
             })
             .ok()
             .is_some_and(|expected| expected == authorization_ref.record_hash);
-        let access_attempt_matches =
-            mfm_journal::structured::derive_access_attempt_id(&ExpectedAccessAttemptPreimage {
-                run_id: &self.run_id,
-                occurrence_id: &authorization.occurrence_id,
-                occurrence_path_ref: &authorization.occurrence_path_ref,
-                semantic_call_id: &authorization.semantic_call_id,
-                state_input_ref: &authorization.state_input_ref,
-                attempt_ordinal: authorization.attempt_ordinal,
-                access_kind: authorization.access_kind,
-                semantic_head: &authorization.semantic_head,
-                capability_contract_ref: &authorization.capability_contract_ref,
-                capability_implementation_ref: &authorization.capability_implementation_ref,
-                adapter_contract_ref: &authorization.adapter_contract_ref,
-                adapter_implementation_ref: &authorization.adapter_implementation_ref,
-                request: &authorization.request,
-                request_digest: &authorization.request_digest,
-                physical_binding_ref: &authorization.physical_binding_ref,
-                stable_resource_lineage_contract_ref: &authorization
-                    .stable_resource_lineage_contract_ref,
-            })
+        let access_attempt_matches = derive_access_attempt_id(&self.run_id, authorization)
             .ok()
             .is_some_and(|expected| expected == authorization.access_attempt_id);
         authorization_ref.run_id == self.run_id
@@ -1818,34 +1919,6 @@ impl ExpectedAuthorization {
                 == self.stable_resource_lineage_contract_ref
             && access_attempt_matches
     }
-}
-
-#[derive(Serialize)]
-struct ExpectedRecordHashPreimage<'a> {
-    run_id: &'a RunId,
-    run_sequence: u64,
-    ordinal: u32,
-    record: &'a RunRecord,
-}
-
-#[derive(Serialize)]
-struct ExpectedAccessAttemptPreimage<'a> {
-    run_id: &'a RunId,
-    occurrence_id: &'a OccurrenceId,
-    occurrence_path_ref: &'a ContentRef,
-    semantic_call_id: &'a SemanticCallId,
-    state_input_ref: &'a LexicalValueRef,
-    attempt_ordinal: u64,
-    access_kind: AccessKind,
-    semantic_head: &'a SemanticHead,
-    capability_contract_ref: &'a ContentRef,
-    capability_implementation_ref: &'a ContentRef,
-    adapter_contract_ref: &'a ContentRef,
-    adapter_implementation_ref: &'a ContentRef,
-    request: &'a TypedValueRef,
-    request_digest: &'a RequestDigest,
-    physical_binding_ref: &'a ContentRef,
-    stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
 }
 
 trait ErasedBoundAccessInvocation: Send {
@@ -2403,12 +2476,7 @@ impl StructuredCertificationRegistry {
         }
         outbound_references.push(contract_reference(&policy.public_output_contract_ref)?);
         outbound_references.push(contract_reference(&policy.public_failure_contract_ref)?);
-        let object = component_object(
-            POLICY_OBJECT_TYPE,
-            policy.admission_policy_ref.clone(),
-            &policy.preimage(),
-            outbound_references,
-        )?;
+        let object = registered_owner(policy, outbound_references)?;
         self.register_component_object(object)
     }
 
@@ -2425,14 +2493,7 @@ impl StructuredCertificationRegistry {
         contract
             .validate()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        let key = contract.state_contract_ref.clone();
-        let contract_value: serde_json::Value = serde_json::from_slice(
-            contract
-                .canonical_contract_json()
-                .map_err(|error| CertifyError::Certification(error.to_string()))?
-                .as_bytes(),
-        )
-        .map_err(|error| CertifyError::Certification(error.to_string()))?;
+        let key = contract.content_ref()?;
         let mut outbound_references = Vec::new();
         if let Some(capability_contract_ref) = contract.execution.capability_contract_ref() {
             outbound_references.push(ComponentObjectReference {
@@ -2465,7 +2526,7 @@ impl StructuredCertificationRegistry {
             outbound_references.extend([
                 ComponentObjectReference {
                     object_type: stable_id(FACT_DESCRIPTOR_OBJECT_TYPE)?,
-                    content_ref: descriptor.descriptor_ref.clone(),
+                    content_ref: descriptor.content_ref()?,
                 },
                 contract_reference(&subject_contract_ref)?,
                 contract_reference(&response_contract_ref)?,
@@ -2475,16 +2536,7 @@ impl StructuredCertificationRegistry {
         if let Some(requirement_ref) = &contract.capability_requirement_ref {
             outbound_references.push(contract_reference(requirement_ref)?);
         }
-        let contract_object = RegisteredComponentObject {
-            object: CertifiedComponentObject {
-                object_type: semantic_component_object_type(StructuredComponentKind::State)?,
-                content_ref: key.clone(),
-                value: CanonicalJsonValue::new(contract_value)
-                    .map_err(|error| CertifyError::Certification(error.to_string()))?,
-            },
-            outbound_references,
-        };
-        validate_component_object(&contract_object.object)?;
+        let contract_object = registered_owner(&contract, outbound_references)?;
         let registered = RegisteredState { contract };
         if matches!(self.states.get(&key), Some(existing) if existing != &registered) {
             return Err(CertifyError::Certification(
@@ -2511,23 +2563,14 @@ impl StructuredCertificationRegistry {
         descriptor
             .validate()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        let descriptor_ref = descriptor.descriptor_ref.clone();
-        let canonical = descriptor
-            .canonical_json()
-            .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        let value = CanonicalJsonValue::from_canonical_json(canonical.as_bytes())?;
-        let object = RegisteredComponentObject {
-            object: CertifiedComponentObject {
-                object_type: stable_id(FACT_DESCRIPTOR_OBJECT_TYPE)?,
-                content_ref: descriptor_ref.clone(),
-                value,
-            },
-            outbound_references: vec![
+        let descriptor_ref = descriptor.content_ref()?;
+        let object = registered_owner(
+            &descriptor,
+            vec![
                 contract_reference(&descriptor.subject_contract_ref)?,
                 contract_reference(&descriptor.response_contract_ref)?,
             ],
-        };
-        validate_component_object(&object.object)?;
+        )?;
         if matches!(
             self.fact_descriptors.get(&descriptor_ref),
             Some(existing) if existing != &descriptor
@@ -2584,6 +2627,13 @@ impl StructuredCertificationRegistry {
                     },
                 ]);
             }
+            if let Some(StructuredEffectEntryContract::EntryAbsorbing {
+                entry_key_contract_ref,
+                ..
+            }) = protocol.entry_contract()
+            {
+                outbound_references.push(contract_reference(entry_key_contract_ref)?);
+            }
         }
         outbound_references.extend(
             contract
@@ -2597,12 +2647,7 @@ impl StructuredCertificationRegistry {
                 })
                 .collect::<Result<Vec<_>>>()?,
         );
-        self.register_component_object(component_object(
-            semantic_component_object_type(component_kind)?.as_str(),
-            contract_ref.clone(),
-            &contract,
-            outbound_references,
-        )?)?;
+        self.register_component_object(registered_live_component(&contract, outbound_references)?)?;
         insert_exact(
             &mut self.live_components,
             (component_kind, contract_ref.clone()),
@@ -2616,26 +2661,13 @@ impl StructuredCertificationRegistry {
         contract
             .validate()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        #[derive(Serialize)]
-        struct ClosedSumObject<'a> {
-            selector_contract_ref: &'a ContentRef,
-            variants: &'a [mfm_spec::structured::ClosedSumVariant],
-        }
         let mut outbound_references = vec![contract_reference(&contract.selector_contract_ref)?];
         for variant in &contract.variants {
             for payload in &variant.payloads {
                 outbound_references.push(contract_reference(&payload.contract_ref)?);
             }
         }
-        let object = component_object(
-            CLOSED_SUM_CONTRACT_OBJECT_TYPE,
-            contract.closed_sum_contract_ref.clone(),
-            &ClosedSumObject {
-                selector_contract_ref: &contract.selector_contract_ref,
-                variants: &contract.variants,
-            },
-            outbound_references,
-        )?;
+        let object = registered_owner(&contract, outbound_references)?;
         insert_exact(
             &mut self.closed_sums,
             contract.selector_contract_ref.clone(),
@@ -2663,16 +2695,13 @@ impl StructuredCertificationRegistry {
                 "capability requirement does not bind the exact authored recipe".to_owned(),
             ));
         }
-        self.register_component_object(component_object(
-            AUTHORED_OBJECT_TYPE,
-            recipe_ref.clone(),
+        self.register_component_object(registered_owner(
             &recipe,
             authored_component_references(&recipe)?,
         )?)?;
-        self.register_component_object(component_object(
-            CAPABILITY_REQUIREMENT_OBJECT_TYPE,
-            requirement_ref.clone(),
-            &recipe_ref,
+        let requirement = CapabilityExpansionRequirement::new(recipe_ref.clone());
+        self.register_component_object(registered_owner(
+            &requirement,
             vec![ComponentObjectReference {
                 object_type: stable_id(AUTHORED_OBJECT_TYPE)?,
                 content_ref: recipe_ref.clone(),
@@ -2691,9 +2720,7 @@ impl StructuredCertificationRegistry {
                 "duplicate policy expansion recipe".to_owned(),
             ));
         }
-        self.register_component_object(component_object(
-            POLICY_RECIPE_OBJECT_TYPE,
-            recipe_ref.clone(),
+        self.register_component_object(registered_owner(
             &recipe,
             policy_recipe_component_references(&recipe)?,
         )?)?;
@@ -2703,7 +2730,6 @@ impl StructuredCertificationRegistry {
 
     /// Adds one exact secret-free component object.
     fn register_component_object(&mut self, object: RegisteredComponentObject) -> Result<()> {
-        validate_component_object(&object.object)?;
         insert_exact(
             &mut self.component_objects,
             object.object.content_ref.clone(),
@@ -2770,9 +2796,7 @@ fn register_implementation_binding(
     let implementation_contract_ref = descriptor
         .content_ref()
         .map_err(|error| CertifyError::Certification(error.to_string()))?;
-    registry.register_component_object(component_object(
-        IMPLEMENTATION_CONTRACT_OBJECT_TYPE,
-        implementation_contract_ref.clone(),
+    registry.register_component_object(registered_owner(
         &descriptor,
         vec![
             ComponentObjectReference {
@@ -2822,6 +2846,7 @@ struct EntryPointDefinition {
     entry_point_id: StableId,
     entry_point_contract_ref: ContentRef,
     coverage_template: AuthoredStructuredProgram,
+    coverage_document: Option<Arc<CertifiedProgramDocument>>,
     profile: StructuredExpansionProfile,
     support_envelope: Option<EntryPointSupportEnvelope>,
 }
@@ -2938,22 +2963,10 @@ impl ProgramRegistryBuilder {
             mfm_spec::structured::StructuredValueDefinition::Retained { payload } => {
                 let contract = &payload.contract;
                 let schema = &payload.schema;
-                let evidence_ref = component_object_evidence_contract_ref()
-                    .map_err(|error| CertifyError::Certification(error.to_string()))?;
-                let evidence_value = CanonicalJsonValue::from_canonical_json(
-                    component_object_evidence_contract_canonical()
-                        .map_err(|error| CertifyError::Certification(error.to_string()))?
-                        .as_bytes(),
-                )?;
+                let evidence = ComponentObjectEvidence::current();
+                let evidence_ref = evidence.content_ref()?;
                 self.registry
-                    .register_component_object(RegisteredComponentObject {
-                        object: CertifiedComponentObject {
-                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: evidence_ref.clone(),
-                            value: evidence_value,
-                        },
-                        outbound_references: Vec::new(),
-                    })?;
+                    .register_component_object(registered_owner(&evidence, Vec::new())?)?;
                 let contract_ref = retained_value_contract_ref(contract)?;
                 if schema
                     .schema_id()
@@ -2965,24 +2978,13 @@ impl ProgramRegistryBuilder {
                         "registered value schema differs from its retained contract".to_owned(),
                     ));
                 }
-                let value = CanonicalJsonValue::from_canonical_json(
-                    contract
-                        .canonical_json()
-                        .map_err(|error| CertifyError::Certification(error.to_string()))?
-                        .as_bytes(),
-                )?;
-                self.registry
-                    .register_component_object(RegisteredComponentObject {
-                        object: CertifiedComponentObject {
-                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: contract_ref.clone(),
-                            value,
-                        },
-                        outbound_references: vec![ComponentObjectReference {
-                            object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: evidence_ref,
-                        }],
-                    })?;
+                self.registry.register_component_object(registered_owner(
+                    contract,
+                    vec![ComponentObjectReference {
+                        object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE)?,
+                        content_ref: evidence_ref,
+                    }],
+                )?)?;
                 insert_exact(
                     &mut self.registry.value_schemas,
                     contract_ref.clone(),
@@ -3005,37 +3007,24 @@ impl ProgramRegistryBuilder {
                         ));
                     }
                 }
-                let lane_content_ref = lane_outcome_contract_ref(&success_ref, lane_failure)?;
+                let lane_contract =
+                    LaneOutcomeContract::new(success_ref.clone(), lane_failure.clone());
+                let lane_content_ref = lane_contract.content_ref()?;
                 let mut lane_references = vec![contract_reference(&success_ref)?];
                 collect_failure_contract_reference(lane_failure, &mut lane_references)?;
-                self.registry
-                    .register_component_object(RegisteredComponentObject {
-                        object: CertifiedComponentObject {
-                            object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: lane_content_ref.clone(),
-                            value: CanonicalJsonValue::from_canonical_json(
-                                lane_outcome_contract_canonical_json(&success_ref, lane_failure)?
-                                    .as_bytes(),
-                            )?,
-                        },
-                        outbound_references: lane_references,
-                    })?;
-                let join_content_ref = fan_out_join_contract_ref(&success_ref, lane_failure)?;
-                self.registry
-                    .register_component_object(RegisteredComponentObject {
-                        object: CertifiedComponentObject {
-                            object_type: stable_id(FAN_OUT_JOIN_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: join_content_ref.clone(),
-                            value: CanonicalJsonValue::from_canonical_json(
-                                fan_out_join_contract_canonical_json(&success_ref, lane_failure)?
-                                    .as_bytes(),
-                            )?,
-                        },
-                        outbound_references: vec![ComponentObjectReference {
-                            object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
-                            content_ref: lane_content_ref,
-                        }],
-                    })?;
+                self.registry.register_component_object(registered_owner(
+                    &lane_contract,
+                    lane_references,
+                )?)?;
+                let join_contract = FanOutJoinContract::new(lane_content_ref.clone());
+                let join_content_ref = join_contract.content_ref()?;
+                self.registry.register_component_object(registered_owner(
+                    &join_contract,
+                    vec![ComponentObjectReference {
+                        object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
+                        content_ref: lane_content_ref,
+                    }],
+                )?)?;
                 Ok(join_content_ref)
             }
         }
@@ -3060,7 +3049,7 @@ impl ProgramRegistryBuilder {
                 "closed-sum selector differs from its registered value contract".to_owned(),
             ));
         }
-        let contract_ref = contract.closed_sum_contract_ref.clone();
+        let contract_ref = contract.content_ref()?;
         self.registry.register_closed_sum(contract)?;
         Ok(contract_ref)
     }
@@ -3080,12 +3069,8 @@ impl ProgramRegistryBuilder {
         let content_ref = identity
             .content_ref()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        self.registry.register_component_object(component_object(
-            EXECUTABLE_IDENTITY_OBJECT_TYPE,
-            content_ref.clone(),
-            &identity,
-            Vec::new(),
-        )?)?;
+        self.registry
+            .register_component_object(registered_owner(&identity, Vec::new())?)?;
         Ok(content_ref)
     }
 
@@ -3098,12 +3083,8 @@ impl ProgramRegistryBuilder {
         let content_ref = artifact
             .content_ref()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        self.registry.register_component_object(component_object(
-            QUALIFICATION_ARTIFACT_OBJECT_TYPE,
-            content_ref.clone(),
-            &artifact,
-            Vec::new(),
-        )?)?;
+        self.registry
+            .register_component_object(registered_owner(&artifact, Vec::new())?)?;
         Ok(content_ref)
     }
 
@@ -3183,7 +3164,7 @@ impl ProgramRegistryBuilder {
             &mut process_components,
             descriptor,
             StructuredComponentKind::State,
-            &contract.state_contract_ref,
+            &contract.content_ref()?,
             ProcessHandle::State(Arc::new(TypedStateCallbacks { callbacks })),
         )?;
         self.registry = registry;
@@ -3202,7 +3183,7 @@ impl ProgramRegistryBuilder {
                     .to_owned(),
             ));
         }
-        let contract_ref = contract.state_contract_ref.clone();
+        let contract_ref = contract.content_ref()?;
         self.registry.register_state(contract)?;
         Ok(contract_ref)
     }
@@ -3571,44 +3552,33 @@ impl ProgramRegistryBuilder {
                 "entry-point identity differs from the authored operation".to_owned(),
             ));
         }
-        #[derive(Serialize)]
-        struct EntryPointContract<'a> {
-            entry_point_id: &'a StableId,
-            input_contract_refs: Vec<&'a ContentRef>,
-            output_contract_ref: &'a ContentRef,
-            failure_contract_ref: ContentRef,
-        }
-        let entry_contract = EntryPointContract {
-            entry_point_id: &entry_point_id,
+        let entry_contract = StructuredEntryPointContract {
+            entry_point_id: entry_point_id.clone(),
             input_contract_refs: authored
                 .input_roots
                 .iter()
-                .map(|root| &root.contract_ref)
+                .map(|root| root.contract_ref.clone())
                 .collect(),
-            output_contract_ref: &authored.output_contract_ref,
+            output_contract_ref: authored.output_contract_ref.clone(),
             failure_contract_ref: authored.failure_contract.contract_ref()?,
         };
-        let entry_point_contract_ref =
-            typed_content_ref("mfm.structured-entry-point-contract", &entry_contract)?;
+        let entry_point_contract_ref = entry_contract.content_ref()?;
         let mut outbound_references = entry_contract
             .input_contract_refs
             .iter()
-            .map(|content_ref| contract_reference(content_ref))
+            .map(contract_reference)
             .collect::<Result<Vec<_>>>()?;
         outbound_references.extend([
-            contract_reference(entry_contract.output_contract_ref)?,
+            contract_reference(&entry_contract.output_contract_ref)?,
             contract_reference(&entry_contract.failure_contract_ref)?,
         ]);
-        self.registry.register_component_object(component_object(
-            ENTRY_POINT_CONTRACT_OBJECT_TYPE,
-            entry_point_contract_ref.clone(),
-            &entry_contract,
-            outbound_references,
-        )?)?;
+        self.registry
+            .register_component_object(registered_owner(&entry_contract, outbound_references)?)?;
         let definition = EntryPointDefinition {
             entry_point_id: entry_point_id.clone(),
             entry_point_contract_ref,
             coverage_template: authored,
+            coverage_document: None,
             profile,
             support_envelope: None,
         };
@@ -3625,7 +3595,7 @@ impl ProgramRegistryBuilder {
     pub fn build(
         mut self,
         expected_entry_point_ids: &[StableId],
-    ) -> Result<QualifiedProgramRegistry> {
+    ) -> Result<CertifiedProgramRegistry> {
         if let Some(error) = self.initialization_error.take() {
             return Err(error);
         }
@@ -3673,6 +3643,7 @@ impl ProgramRegistryBuilder {
                 semantic_components,
                 implementations: implementation_envelope,
             });
+            entry.coverage_document = Some(Arc::new(certified.into_document()));
             for implementation in implementations.entries {
                 required_process_components.insert((
                     implementation.component_kind,
@@ -3698,7 +3669,7 @@ impl ProgramRegistryBuilder {
             &self.process_components,
             &required_process_components,
         )?;
-        let qualified = QualifiedProgramRegistry {
+        let qualified = CertifiedProgramRegistry {
             registry: Arc::new(self.registry),
             entry_points: self.entry_points,
             process_components: self.process_components,
@@ -4007,7 +3978,7 @@ fn qualify_live_state_settlement_contracts(
 
 /// Immutable process-qualified structured-program registry.
 #[derive(Debug)]
-pub struct QualifiedProgramRegistry {
+pub struct CertifiedProgramRegistry {
     registry: Arc<StructuredCertificationRegistry>,
     entry_points: BTreeMap<StableId, EntryPointDefinition>,
     #[allow(dead_code)]
@@ -4016,7 +3987,7 @@ pub struct QualifiedProgramRegistry {
 
 /// Affine proof that a complete qualified registry has been consumed for
 /// runtime assembly. The only value is minted by
-/// [`QualifiedProgramRegistry::into_runtime_parts`]; its private field keeps
+/// [`CertifiedProgramRegistry::into_runtime_parts`]; its private field keeps
 /// callers from manufacturing a split-assembly token.
 pub struct RuntimeAssemblyToken {
     process_identity: Arc<()>,
@@ -4053,9 +4024,32 @@ impl AdmissionCertificationRegistry {
         })?;
         prepare_entry(entry, authored, &self.registry)
     }
+
+    /// Returns the persisted certification document for one exact candidate.
+    ///
+    /// The registry reuses the document fully certified while qualifying the
+    /// entry when `authored` is its exact coverage template. Other candidates
+    /// are independently certified under the entry's frozen support envelope.
+    pub fn certify_document(
+        &self,
+        entry_point_id: &StableId,
+        authored: AuthoredStructuredProgram,
+    ) -> Result<CertifiedProgramDocument> {
+        let entry = self.entry_points.get(entry_point_id).ok_or_else(|| {
+            CertifyError::Certification("entry point is not process-qualified".to_owned())
+        })?;
+        if authored == entry.coverage_template {
+            return entry.coverage_document.as_deref().cloned().ok_or_else(|| {
+                CertifyError::Certification(
+                    "entry point has no qualified coverage document".to_owned(),
+                )
+            });
+        }
+        prepare_entry(entry, authored, &self.registry).map(CertifiedProgram::into_document)
+    }
 }
 
-impl QualifiedProgramRegistry {
+impl CertifiedProgramRegistry {
     /// Resolves a private certification handle by exact qualified entry-point
     /// identity.
     pub fn certifier(&self, entry_point_id: &StableId) -> Result<EntryPointCertifier<'_>> {
@@ -4221,9 +4215,54 @@ impl CertifiedProcessRegistry {
         input: &CanonicalJsonValue,
         observation: &CanonicalJsonValue,
     ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
+        let observation = decode_runtime_process_value::<
+            CommittedObservation<CanonicalJsonValue, CanonicalJsonValue>,
+        >(observation)
+        .map_err(|code| QualifiedProcessFault::new(code.into(), state.clone()))?;
+        match &observation {
+            CommittedObservation::Returned(returned) => {
+                self.settle_returned(state, input, returned)
+            }
+            CommittedObservation::SafeFailure(safe_failure) => {
+                self.settle_safe_failure(state, input, safe_failure)
+            }
+        }
+    }
+
+    /// Settles one exact already-committed returned value.
+    pub fn settle_returned(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
+    ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
         let settlement = self
             .state_callbacks(state)?
-            .settle_observation_runtime(input, observation)
+            .settle_returned_runtime(input, returned)
+            .map_err(|code| QualifiedProcessFault::new(code.into(), state.clone()))?;
+        Ok(match settlement {
+            RuntimeStateSettlement::Proposed(value) => {
+                QualifiedStateSettlement::Proposed(QualifiedStateProposal {
+                    origin: state.clone(),
+                    value,
+                })
+            }
+            RuntimeStateSettlement::InvalidEvidence => {
+                QualifiedStateSettlement::InvalidEvidence(state.clone())
+            }
+        })
+    }
+
+    /// Settles one exact already-committed safe-failure value.
+    pub fn settle_safe_failure(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
+    ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
+        let settlement = self
+            .state_callbacks(state)?
+            .settle_safe_failure_runtime(input, safe_failure)
             .map_err(|code| QualifiedProcessFault::new(code.into(), state.clone()))?;
         Ok(match settlement {
             RuntimeStateSettlement::Proposed(value) => {
@@ -4382,24 +4421,18 @@ impl CertifiedProcessRegistry {
                 implementation.validate_request(&request)?;
                 let typed_request =
                     decode_process_value::<mfm_facts::FactSelectionRequest>(&request)?;
-                if typed_request.admitted_source_manifest_ref().map_err(|_| {
-                    CertifyError::Certification(
-                        "prior-run fact request source cannot be decoded".to_owned(),
-                    )
-                })? != *selection.admitted_prior_run_source_manifest_ref
-                    || typed_request.selector_contract_ref().map_err(|_| {
-                        CertifyError::Certification(
-                            "prior-run fact request selector cannot be decoded".to_owned(),
-                        )
-                    })? != mfm_facts::prior_run_fact_selector_contract_ref()
-                        .map_err(|error| CertifyError::Certification(error.to_string()))?
+                if typed_request.admitted_source_manifest_ref()
+                    != selection.admitted_prior_run_source_manifest_ref
+                    || typed_request.selector_contract_ref()
+                        != &mfm_facts::prior_run_fact_selector_contract_ref()
+                            .map_err(|error| CertifyError::Certification(error.to_string()))?
                     || selection.stable_resource_lineage_contract_ref.is_some()
                 {
                     return Err(CertifyError::Certification(
                         "prior-run fact request exceeds its admitted scanner target".to_owned(),
                     ));
                 }
-                let public_certificate = PriorRunFactScannerBindingCertificate::new(
+                let certificate = PriorRunFactScannerBindingCertificate::new(
                     selection.store_scope_id.clone(),
                     selection.store_epoch,
                     selection.tenant_scope_id.clone(),
@@ -4410,9 +4443,9 @@ impl CertifiedProcessRegistry {
                     selection.capability_implementation_ref.clone(),
                     selection.adapter_contract_ref.clone(),
                     selection.adapter_implementation_ref.clone(),
-                )
-                .to_history_object()
-                .map_err(|error| CertifyError::Certification(error.to_string()))?;
+                );
+                let public_certificate = HistoryObject::from_persisted(&certificate)
+                    .map_err(|error| CertifyError::Certification(error.to_string()))?;
                 let expected_authorization = ExpectedAuthorization::new(
                     selection,
                     AccessKind::Read,
@@ -4715,17 +4748,14 @@ impl AdmissionVerifier<'_> {
 pub fn structured_component_manifest_ref(
     manifest: &StateCapabilityAdapterSignerResourceManifest,
 ) -> Result<ContentRef> {
-    typed_content_ref("mfm.structured-component-manifest", manifest)
+    manifest.content_ref().map_err(Into::into)
 }
 
 /// Returns the canonical object reference for an exact secret-free implementation manifest.
 pub fn secret_free_implementation_manifest_ref(
     manifest: &SecretFreeImplementationManifest,
 ) -> Result<ContentRef> {
-    typed_content_ref(
-        "mfm.structured-secret-free-implementation-manifest",
-        manifest,
-    )
+    manifest.content_ref().map_err(Into::into)
 }
 
 struct CoreCertification {
@@ -4899,6 +4929,7 @@ fn prepare_entry(
     )?;
     verify_certified_document(&document, &policy, &working_registry)?;
     let value_schemas = qualified_value_schemas(&document, &working_registry)?;
+    let lexical_slot_refs = core.expanded.lexical_slot_refs()?;
     Ok(CertifiedProgram {
         authored: core.authored,
         expanded: core.expanded,
@@ -4907,6 +4938,7 @@ fn prepare_entry(
         coverage: core.coverage,
         document,
         value_schemas,
+        lexical_slot_refs,
     })
 }
 
@@ -4923,9 +4955,12 @@ fn qualified_value_schemas(
             .value
             .canonical_json()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        let Ok(contract) = RetainedValueContract::strict_decode(canonical.as_bytes()) else {
+        if component.content_ref.schema_id()
+            != &<RetainedValueContract as mfm_values::PersistedSchema>::schema_id()?
+        {
             continue;
-        };
+        }
+        let contract = RetainedValueContract::decode_canonical(canonical.as_bytes())?;
         let contract_ref = retained_value_contract_ref(&contract)?;
         if contract_ref != component.content_ref {
             return Err(CertifyError::Certification(
@@ -4960,38 +4995,15 @@ fn qualified_value_schemas(
 fn register_kernel_qualification_objects(
     registry: &mut StructuredCertificationRegistry,
 ) -> Result<(ContentRef, ContentRef, ContentRef)> {
-    let certified_marker = "mfm.certified-program-contract.v1";
-    let coverage_marker = "mfm.policy-coverage-proof-contract.v1";
-    let predicates = [
-        "authored-structure-v1",
-        "declarative-expansion-v1",
-        "expanded-structure-v1",
-        "exact-policy-coverage-v1",
-        "structural-first-use-manifest-v1",
-        "canonical-component-closure-v1",
-    ];
-    let certified_ref = typed_content_ref("mfm.structured-kernel-contract", &certified_marker)?;
-    let coverage_ref = typed_content_ref("mfm.structured-kernel-contract", &coverage_marker)?;
-    let predicate_ref =
-        typed_content_ref("mfm.structured-certification-predicate-set", &predicates)?;
-    registry.register_component_object(component_object(
-        CERTIFIED_PROGRAM_CONTRACT_OBJECT_TYPE,
-        certified_ref.clone(),
-        &certified_marker,
-        Vec::new(),
-    )?)?;
-    registry.register_component_object(component_object(
-        POLICY_COVERAGE_CONTRACT_OBJECT_TYPE,
-        coverage_ref.clone(),
-        &coverage_marker,
-        Vec::new(),
-    )?)?;
-    registry.register_component_object(component_object(
-        PREDICATE_SET_OBJECT_TYPE,
-        predicate_ref.clone(),
-        &predicates,
-        Vec::new(),
-    )?)?;
+    let certified_contract = CertifiedProgramKernelContract::V1;
+    let coverage_contract = PolicyCoverageKernelContract::V1;
+    let predicates = StructuredCertificationPredicateSet::current();
+    let certified_ref = certified_contract.content_ref()?;
+    let coverage_ref = coverage_contract.content_ref()?;
+    let predicate_ref = predicates.content_ref()?;
+    registry.register_component_object(registered_owner(&certified_contract, Vec::new())?)?;
+    registry.register_component_object(registered_owner(&coverage_contract, Vec::new())?)?;
+    registry.register_component_object(registered_owner(&predicates, Vec::new())?)?;
     Ok((certified_ref, predicate_ref, coverage_ref))
 }
 
@@ -5000,8 +5012,6 @@ fn register_profile_policy_objects(
     registry: &mut StructuredCertificationRegistry,
 ) -> Result<()> {
     for policy in &profile.policies {
-        let value =
-            CanonicalJsonValue::from_canonical_json(policy.canonical_contract_json()?.as_bytes())?;
         let mut outbound_references = Vec::with_capacity(policy.boundary_recipes.len() * 2);
         for binding in &policy.boundary_recipes {
             outbound_references.push(ComponentObjectReference {
@@ -5013,14 +5023,7 @@ fn register_profile_policy_objects(
                 content_ref: binding.recipe_ref.clone(),
             });
         }
-        registry.register_component_object(RegisteredComponentObject {
-            object: CertifiedComponentObject {
-                object_type: stable_id(EXPANSION_POLICY_CONTRACT_OBJECT_TYPE)?,
-                content_ref: policy.policy_ref.clone(),
-                value,
-            },
-            outbound_references,
-        })?;
+        registry.register_component_object(registered_owner(policy, outbound_references)?)?;
     }
     Ok(())
 }
@@ -5262,6 +5265,7 @@ impl<'a> ExpansionContext<'a> {
         scope_id: &StableId,
         scope_failure: &StructuredFailureContract,
     ) -> Result<ExpandedStateResult> {
+        let state_contract_ref = state.contract.content_ref()?;
         if self.support_expansion.is_none() {
             if !self
                 .eligible_boundary_ids
@@ -5271,14 +5275,12 @@ impl<'a> ExpansionContext<'a> {
                     "duplicate instantiated semantic call identity".to_owned(),
                 ));
             }
-            self.eligible_boundaries.push((
-                state.semantic_call_id.clone(),
-                state.contract.state_contract_ref.clone(),
-            ));
+            self.eligible_boundaries
+                .push((state.semantic_call_id.clone(), state_contract_ref.clone()));
         }
         let registered = self
             .registry
-            .state_contract(&state.contract.state_contract_ref)
+            .state_contract(&state_contract_ref)
             .ok_or_else(|| {
                 CertifyError::Certification("state contract is not registered".to_owned())
             })?;
@@ -5294,11 +5296,11 @@ impl<'a> ExpansionContext<'a> {
             .collect::<Result<Vec<_>>>()?;
         let occurrence_path = occurrence_path.clone();
         let has_policy = self.support_expansion.is_none()
-            && self.profile.policies.iter().any(|policy| {
-                policy
-                    .recipe_for(&state.contract.state_contract_ref)
-                    .is_some()
-            });
+            && self
+                .profile
+                .policies
+                .iter()
+                .any(|policy| policy.recipe_for(&state_contract_ref).is_some());
 
         if let Some(requirement_ref) = &state.contract.capability_requirement_ref {
             if self.support_expansion.is_some() {
@@ -5883,23 +5885,13 @@ impl<'a> ExpansionContext<'a> {
         state: &AuthoredStateCall,
         mut boundary: ExpandedBoundary,
     ) -> Result<ExpandedBoundary> {
-        let eligible: Vec<(u32, ContentRef, ContentRef)> = self
-            .profile
-            .policies
-            .iter()
-            .enumerate()
-            .filter_map(|(ordinal, policy)| {
-                policy
-                    .recipe_for(&state.contract.state_contract_ref)
-                    .map(|recipe_ref| {
-                        (
-                            ordinal as u32,
-                            policy.policy_ref.clone(),
-                            recipe_ref.clone(),
-                        )
-                    })
-            })
-            .collect();
+        let state_contract_ref = state.contract.content_ref()?;
+        let mut eligible = Vec::new();
+        for (ordinal, policy) in self.profile.policies.iter().enumerate() {
+            if let Some(recipe_ref) = policy.recipe_for(&state_contract_ref) {
+                eligible.push((ordinal as u32, policy.content_ref()?, recipe_ref.clone()));
+            }
+        }
         for (_, policy_ref, recipe_ref) in eligible.iter().rev() {
             let recipe = self
                 .registry
@@ -5960,12 +5952,13 @@ impl<'a> ExpansionContext<'a> {
                 ));
             }
             validate_handler_contract(&mapper.contract, &mapper.inputs[0].contract_ref)?;
+            let mapper_contract_ref = mapper.contract.content_ref()?;
             if matches!(
                 &program.root.failure_scope,
                 FailureScopeBinding::Owns { scope }
                     if scope.default_mappers.iter().any(|registration| {
                         registration.mapper_state_contract_ref
-                            == mapper.contract.state_contract_ref
+                            == mapper_contract_ref
                     })
             ) {
                 return Err(CertifyError::Certification(
@@ -6006,25 +5999,23 @@ impl<'a> ExpansionContext<'a> {
                 )?),
             });
         }
+        let state_contract_ref = state.contract.content_ref()?;
         let eligible: Vec<&ExpansionPolicyContract> = self
             .profile
             .policies
             .iter()
-            .filter(|policy| {
-                policy
-                    .recipe_for(&state.contract.state_contract_ref)
-                    .is_some()
-            })
+            .filter(|policy| policy.recipe_for(&state_contract_ref).is_some())
             .collect();
         for policy in eligible {
+            let policy_ref = policy.content_ref()?;
             self.trace.push(ExpansionTraceEntry {
                 stage: ExpansionStage::PolicyWrapping,
                 semantic_call_id: state.semantic_call_id.clone(),
-                expansion_ref: policy.policy_ref.clone(),
+                expansion_ref: policy_ref.clone(),
                 boundary_id: ExpansionBoundaryId::Fragment(find_expansion_boundary(
                     fragment,
                     &state.semantic_call_id,
-                    &policy.policy_ref,
+                    &policy_ref,
                 )?),
             });
         }
@@ -7357,9 +7348,10 @@ fn state_binding_expansion_boundary(
     authored_occurrence_path: StructuralPath,
     inputs: Vec<LexicalSlot>,
 ) -> Result<ExpandedBoundary> {
+    let state_contract_ref = authored.contract.content_ref()?;
     let path = authored_occurrence_path.child(StructuralPathSegment::Fragment {
         label: authored.label.clone(),
-        expansion_ref: authored.contract.state_contract_ref.clone(),
+        expansion_ref: state_contract_ref,
     })?;
     let boundary_id = path
         .fragment_boundary_id()
@@ -8003,7 +7995,7 @@ fn validate_profile(
         policy
             .validate()
             .map_err(|error| CertifyError::Certification(error.to_string()))?;
-        if !policies.insert(policy.policy_ref.clone()) {
+        if !policies.insert(policy.content_ref()?) {
             return Err(CertifyError::Certification(
                 "duplicate expansion policy".to_owned(),
             ));
@@ -8039,8 +8031,7 @@ fn validate_policy_root(
         .iter()
         .map(|root| root.contract_ref.clone())
         .collect();
-    if policy.derived_admission_policy_ref()? != policy.admission_policy_ref
-        || authored.operation_id != policy.operation_id
+    if authored.operation_id != policy.operation_id
         || profile.content_ref()? != policy.expansion_profile_ref
         || input_contracts != policy.public_input_contract_refs
         || authored.output_contract_ref != policy.public_output_contract_ref
@@ -8182,9 +8173,8 @@ fn validate_authored_block(
                             .to_owned(),
                     ));
                 }
-                if registry.state_contract(&state.contract.state_contract_ref)
-                    != Some(&state.contract)
-                {
+                let state_contract_ref = state.contract.content_ref()?;
+                if registry.state_contract(&state_contract_ref) != Some(&state.contract) {
                     return Err(CertifyError::Certification(
                         "authored state is not qualified".to_owned(),
                     ));
@@ -9431,8 +9421,9 @@ fn validate_state_binding(
             }
             _ => false,
         };
+    let state_contract_ref = state.contract.content_ref()?;
     if state.occurrence_path.occurrence_id()? != state.occurrence_id
-        || registry.state_contract(&state.contract.state_contract_ref) != Some(&state.contract)
+        || registry.state_contract(&state_contract_ref) != Some(&state.contract)
         || state.contract.capability_requirement_ref.is_some()
         || state.inputs.len() != 1
         || state.inputs[0].contract_ref != state.contract.input_contract_ref
@@ -9763,12 +9754,13 @@ fn validate_mapping_chain(
                 )
             })?;
         let expected_path = declaration_path(plan_path, &link.mapper.label, ordinal)?;
+        let link_mapper_contract_ref = link.mapper.contract.content_ref()?;
         let is_lexical_default_mapper = matches!(
             failure_scope,
             FailureScopeBinding::Owns { scope }
                 if scope.default_mappers.iter().any(|registration| {
                     registration.mapper_state_contract_ref
-                        == link.mapper.contract.state_contract_ref
+                        == link_mapper_contract_ref
                 })
         );
         if &link.plan_id != plan_id
@@ -9819,7 +9811,7 @@ fn validate_policy_coverage(
                 expected.push(PolicyCoverageEntry {
                     semantic_call_id: semantic_call_id.clone(),
                     profile_ordinal: ordinal as u32,
-                    policy_ref: policy.policy_ref.clone(),
+                    policy_ref: policy.content_ref()?,
                 });
             }
         }
@@ -9881,9 +9873,10 @@ fn collect_component_requirements(
     for declaration in &block.declarations {
         match declaration {
             ExpandedDeclaration::State(state) => {
+                let state_contract_ref = state.contract.content_ref()?;
                 push_component_requirement(
                     StructuredComponentKind::State,
-                    &state.contract.state_contract_ref,
+                    &state_contract_ref,
                     out,
                     seen,
                 );
@@ -9936,9 +9929,10 @@ fn collect_failure_requirements(
             ..
         } => {
             collect_component_requirements(before_handler, registry, out, seen)?;
+            let handler_contract_ref = handler.contract.content_ref()?;
             push_component_requirement(
                 StructuredComponentKind::State,
-                &handler.contract.state_contract_ref,
+                &handler_contract_ref,
                 out,
                 seen,
             );
@@ -9955,9 +9949,10 @@ fn collect_failure_requirements(
         } => {
             collect_component_requirements(before_boundary, registry, out, seen)?;
             for link in mapping_chain {
+                let mapper_contract_ref = link.mapper.contract.content_ref()?;
                 push_component_requirement(
                     StructuredComponentKind::State,
-                    &link.mapper.contract.state_contract_ref,
+                    &mapper_contract_ref,
                     out,
                     seen,
                 );
@@ -10300,11 +10295,8 @@ fn collect_state_contract_references(
     contract: &StructuredStateContract,
     references: &mut Vec<ComponentObjectReference>,
 ) -> Result<()> {
-    push_typed_reference(
-        references,
-        STATE_CONTRACT_OBJECT_TYPE,
-        &contract.state_contract_ref,
-    )?;
+    let state_contract_ref = contract.content_ref()?;
+    push_typed_reference(references, STATE_CONTRACT_OBJECT_TYPE, &state_contract_ref)?;
     if let Some(capability_contract_ref) = contract.execution.capability_contract_ref() {
         push_typed_reference(
             references,
@@ -10374,7 +10366,7 @@ fn collect_closed_sum_references(
     contract: &ClosedSumContract,
     references: &mut Vec<ComponentObjectReference>,
 ) -> Result<()> {
-    push_contract_reference(references, &contract.closed_sum_contract_ref)?;
+    push_contract_reference(references, &contract.content_ref()?)?;
     push_contract_reference(references, &contract.selector_contract_ref)?;
     for variant in &contract.variants {
         for payload in &variant.payloads {
@@ -10479,7 +10471,7 @@ fn collect_structural_path_references(
             let object_type = match schema_name {
                 "mfm.authored-structured-program" => stable_id(AUTHORED_OBJECT_TYPE)?,
                 "mfm.structured-state-contract" => stable_id(STATE_CONTRACT_OBJECT_TYPE)?,
-                _ => contract_object_type(expansion_ref)?,
+                _ => persisted_contract_kind(expansion_ref)?,
             };
             references.push(ComponentObjectReference {
                 object_type,
@@ -10495,10 +10487,11 @@ fn profile_component_references(
 ) -> Result<Vec<ComponentObjectReference>> {
     let mut references = Vec::new();
     for policy in &profile.policies {
+        let policy_ref = policy.content_ref()?;
         push_typed_reference(
             &mut references,
             EXPANSION_POLICY_CONTRACT_OBJECT_TYPE,
-            &policy.policy_ref,
+            &policy_ref,
         )?;
         for binding in &policy.boundary_recipes {
             push_typed_reference(
@@ -10559,65 +10552,38 @@ fn collect_kernel_derived_contract_objects(
                 }
             }
             ExpandedDeclaration::FanOut(group) => {
-                let lane_content_ref = lane_outcome_contract_ref(
-                    &group.lane_output_contract_ref,
-                    &group.lane_failure_contract,
-                )?;
-                let value = CanonicalJsonValue::from_canonical_json(
-                    lane_outcome_contract_canonical_json(
-                        &group.lane_output_contract_ref,
-                        &group.lane_failure_contract,
-                    )?
-                    .as_bytes(),
-                )?;
+                let lane_contract = LaneOutcomeContract::new(
+                    group.lane_output_contract_ref.clone(),
+                    group.lane_failure_contract.clone(),
+                );
+                let lane_content_ref = lane_contract.content_ref()?;
                 let mut lane_references =
                     vec![contract_reference(&group.lane_output_contract_ref)?];
                 collect_failure_contract_reference(
                     &group.lane_failure_contract,
                     &mut lane_references,
                 )?;
-                let object = RegisteredComponentObject {
-                    object: CertifiedComponentObject {
-                        object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
-                        content_ref: lane_content_ref.clone(),
-                        value,
-                    },
-                    outbound_references: lane_references,
-                };
-                validate_component_object(&object.object)?;
+                let object = registered_owner(&lane_contract, lane_references)?;
                 insert_exact(
                     objects,
                     lane_content_ref.clone(),
                     object,
                     "kernel-derived lane-outcome contract",
                 )?;
-                let join_content_ref = fan_out_join_contract_ref(
-                    &group.lane_output_contract_ref,
-                    &group.lane_failure_contract,
-                )?;
+                let join_contract = FanOutJoinContract::new(lane_content_ref.clone());
+                let join_content_ref = join_contract.content_ref()?;
                 if group.output_slot.contract_ref != join_content_ref {
                     return Err(CertifyError::Certification(
                         "fan-out output does not use its exact nominal join contract".to_owned(),
                     ));
                 }
-                let join = RegisteredComponentObject {
-                    object: CertifiedComponentObject {
-                        object_type: stable_id(FAN_OUT_JOIN_CONTRACT_OBJECT_TYPE)?,
-                        content_ref: join_content_ref.clone(),
-                        value: CanonicalJsonValue::from_canonical_json(
-                            fan_out_join_contract_canonical_json(
-                                &group.lane_output_contract_ref,
-                                &group.lane_failure_contract,
-                            )?
-                            .as_bytes(),
-                        )?,
-                    },
-                    outbound_references: vec![ComponentObjectReference {
+                let join = registered_owner(
+                    &join_contract,
+                    vec![ComponentObjectReference {
                         object_type: stable_id(LANE_OUTCOME_CONTRACT_OBJECT_TYPE)?,
                         content_ref: lane_content_ref,
                     }],
-                };
-                validate_component_object(&join.object)?;
+                )?;
                 insert_exact(
                     objects,
                     join_content_ref,
@@ -10703,12 +10669,7 @@ fn build_certified_document(
         )?;
     }
     for child in registry.children.values() {
-        let child_object = component_object(
-            AUTHORED_OBJECT_TYPE,
-            child.content_ref()?,
-            child,
-            authored_component_references(child)?,
-        )?;
+        let child_object = registered_owner(child, authored_component_references(child)?)?;
         insert_exact(
             &mut objects,
             child_object.object.content_ref.clone(),
@@ -10716,26 +10677,11 @@ fn build_certified_document(
             "registered child component",
         )?;
     }
-    let authored_object = component_object(
-        AUTHORED_OBJECT_TYPE,
-        authored.content_ref()?,
-        authored,
-        authored_component_references(authored)?,
-    )?;
-    let expanded_object = component_object(
-        EXPANDED_OBJECT_TYPE,
-        expanded.content_ref()?,
-        expanded,
-        expanded_component_references(expanded)?,
-    )?;
+    let authored_object = registered_owner(authored, authored_component_references(authored)?)?;
+    let expanded_object = registered_owner(expanded, expanded_component_references(expanded)?)?;
     let policy_object_type = stable_id(EXPANSION_POLICY_CONTRACT_OBJECT_TYPE)?;
-    let profile_object = component_object(
-        PROFILE_OBJECT_TYPE,
-        profile.content_ref()?,
-        profile,
-        profile_component_references(profile)?,
-    )?;
-    let proof_ref = typed_content_ref("mfm.structured-expansion-proof", proof)?;
+    let profile_object = registered_owner(profile, profile_component_references(profile)?)?;
+    let proof_ref = proof.content_ref()?;
     let mut proof_references = vec![
         ComponentObjectReference {
             object_type: stable_id(AUTHORED_OBJECT_TYPE)?,
@@ -10758,18 +10704,13 @@ fn build_certified_document(
                     stable_id(CAPABILITY_REQUIREMENT_OBJECT_TYPE)?
                 }
                 ExpansionStage::PolicyWrapping => policy_object_type.clone(),
-                ExpansionStage::FailureCompletion => contract_object_type(&entry.expansion_ref)?,
+                ExpansionStage::FailureCompletion => persisted_contract_kind(&entry.expansion_ref)?,
             },
             content_ref: entry.expansion_ref.clone(),
         });
     }
-    let proof_object = component_object(
-        PROOF_OBJECT_TYPE,
-        proof_ref.clone(),
-        proof,
-        proof_references,
-    )?;
-    let coverage_ref = typed_content_ref("mfm.structured-policy-coverage-proof", coverage)?;
+    let proof_object = registered_owner(proof, proof_references)?;
+    let coverage_ref = coverage.content_ref()?;
     let mut coverage_references = vec![
         ComponentObjectReference {
             object_type: stable_id(AUTHORED_OBJECT_TYPE)?,
@@ -10793,16 +10734,9 @@ fn build_certified_document(
                 content_ref: entry.policy_ref.clone(),
             }),
     );
-    let coverage_object = component_object(
-        COVERAGE_PROOF_OBJECT_TYPE,
-        coverage_ref.clone(),
-        coverage,
-        coverage_references,
-    )?;
+    let coverage_object = registered_owner(coverage, coverage_references)?;
     let component_manifest_ref = structured_component_manifest_ref(component_manifest)?;
-    let component_manifest_object = component_object(
-        COMPONENT_MANIFEST_OBJECT_TYPE,
-        component_manifest_ref.clone(),
+    let component_manifest_object = registered_owner(
         component_manifest,
         component_manifest
             .entries
@@ -10831,12 +10765,8 @@ fn build_certified_document(
             },
         ]);
     }
-    let implementation_manifest_object = component_object(
-        IMPLEMENTATION_MANIFEST_OBJECT_TYPE,
-        implementation_manifest_ref.clone(),
-        implementation_manifest,
-        implementation_manifest_references,
-    )?;
+    let implementation_manifest_object =
+        registered_owner(implementation_manifest, implementation_manifest_references)?;
     for object in [
         authored_object,
         expanded_object,
@@ -10857,7 +10787,7 @@ fn build_certified_document(
     let components = CertifiedProgramComponents {
         certified_program_contract_ref: policy.certified_program_contract_ref.clone(),
         entry_point_contract_ref: policy.entry_point_contract_ref.clone(),
-        qualified_entry_point_admission_policy_ref: policy.admission_policy_ref.clone(),
+        qualified_entry_point_admission_policy_ref: policy.content_ref()?,
         authored_program_ref: proof.authored_program_ref.clone(),
         expanded_program_ref: proof.expanded_program_ref.clone(),
         expansion_profile_ref: profile.content_ref()?,
@@ -10897,7 +10827,6 @@ fn kernel_never_component_object() -> Result<RegisteredComponentObject> {
         value: CanonicalJsonValue::new(never_value)
             .map_err(|error| CertifyError::Certification(error.to_string()))?,
     };
-    validate_component_object(&object)?;
     Ok(RegisteredComponentObject {
         object,
         outbound_references: Vec::new(),
@@ -10918,7 +10847,6 @@ fn kernel_access_fault_component_object() -> Result<RegisteredComponentObject> {
         },
         outbound_references: Vec::new(),
     };
-    validate_component_object(&object.object)?;
     Ok(object)
 }
 
@@ -10932,7 +10860,7 @@ fn verify_certified_document(
     let public_contracts = &components.public_input_output_failure_contract_refs;
     if components.certified_program_contract_ref != policy.certified_program_contract_ref
         || components.entry_point_contract_ref != policy.entry_point_contract_ref
-        || components.qualified_entry_point_admission_policy_ref != policy.admission_policy_ref
+        || components.qualified_entry_point_admission_policy_ref != policy.content_ref()?
         || components.expansion_profile_ref != policy.expansion_profile_ref
         || components.certification_predicate_set_ref != policy.certification_predicate_set_ref
         || public_contracts.input_contract_refs != policy.public_input_contract_refs
@@ -10945,8 +10873,6 @@ fn verify_certified_document(
     }
     let mut objects = BTreeMap::new();
     for object in &document.component_closure {
-        validate_component_object(object)
-            .map_err(|error| CertifyError::Verification(error.to_string()))?;
         if objects
             .insert(object.content_ref.clone(), object.clone())
             .is_some()
@@ -10956,11 +10882,8 @@ fn verify_certified_document(
             ));
         }
     }
-    let expanded: ExpandedStructuredProgram = decode_component(
-        &objects,
-        &components.expanded_program_ref,
-        EXPANDED_OBJECT_TYPE,
-    )?;
+    let expanded: ExpandedStructuredProgram =
+        decode_registered_owner(&objects, &components.expanded_program_ref)?;
     let derived_contracts = kernel_derived_contract_objects(&expanded)?;
     let registered_objects =
         validate_qualified_closure_objects(&objects, registry, &derived_contracts)?;
@@ -10973,39 +10896,28 @@ fn verify_certified_document(
             "certified component closure mismatch".to_owned(),
         ));
     }
-    let authored: AuthoredStructuredProgram = decode_component(
-        &objects,
-        &components.authored_program_ref,
-        AUTHORED_OBJECT_TYPE,
-    )?;
-    let profile: StructuredExpansionProfile = decode_component(
-        &objects,
-        &components.expansion_profile_ref,
-        PROFILE_OBJECT_TYPE,
-    )?;
+    let authored: AuthoredStructuredProgram =
+        decode_registered_owner(&objects, &components.authored_program_ref)?;
+    let profile: StructuredExpansionProfile =
+        decode_registered_owner(&objects, &components.expansion_profile_ref)?;
     let proof: StructuredExpansionProof =
-        decode_component(&objects, &components.expansion_proof_ref, PROOF_OBJECT_TYPE)?;
-    let coverage: StructuredPolicyCoverageProof = decode_component(
-        &objects,
-        &components.policy_coverage_proof_ref,
-        COVERAGE_PROOF_OBJECT_TYPE,
-    )?;
-    let component_manifest: StateCapabilityAdapterSignerResourceManifest = decode_component(
+        decode_registered_owner(&objects, &components.expansion_proof_ref)?;
+    let coverage: StructuredPolicyCoverageProof =
+        decode_registered_owner(&objects, &components.policy_coverage_proof_ref)?;
+    let component_manifest: StateCapabilityAdapterSignerResourceManifest = decode_registered_owner(
         &objects,
         &components.state_capability_adapter_signer_resource_manifest_closure_ref,
-        COMPONENT_MANIFEST_OBJECT_TYPE,
     )?;
-    let implementation_manifest: SecretFreeImplementationManifest = decode_component(
+    let implementation_manifest: SecretFreeImplementationManifest = decode_registered_owner(
         &objects,
         &components.secret_free_implementation_manifest_closure_ref,
-        IMPLEMENTATION_MANIFEST_OBJECT_TYPE,
     )?;
 
     let authored_ref = authored.content_ref()?;
     let expanded_ref = expanded.content_ref()?;
     let profile_ref = profile.content_ref()?;
-    let proof_ref = typed_content_ref("mfm.structured-expansion-proof", &proof)?;
-    let coverage_ref = typed_content_ref("mfm.structured-policy-coverage-proof", &coverage)?;
+    let proof_ref = proof.content_ref()?;
+    let coverage_ref = coverage.content_ref()?;
     let component_manifest_ref = structured_component_manifest_ref(&component_manifest)?;
     let implementation_manifest_ref =
         secret_free_implementation_manifest_ref(&implementation_manifest)?;
@@ -11049,22 +10961,26 @@ fn verify_certified_document(
     Ok(())
 }
 
-fn decode_component<T: DeserializeOwned>(
+fn decode_registered_owner<T: PersistedObjectPayload>(
     objects: &BTreeMap<ContentRef, CertifiedComponentObject>,
     content_ref: &ContentRef,
-    object_type: &str,
 ) -> Result<T> {
     let object = objects.get(content_ref).ok_or_else(|| {
         CertifyError::Verification("certified component object is missing".to_owned())
     })?;
-    if object.object_type != stable_id(object_type)? || &object.content_ref != content_ref {
+    if object.object_type != T::object_type()? || &object.content_ref != content_ref {
         return Err(CertifyError::Verification(
             "certified component object has the wrong registered type".to_owned(),
         ));
     }
-    serde_json::from_value(object.value.as_json().clone()).map_err(|error| {
-        CertifyError::Verification(format!("certified component object decode failed: {error}"))
-    })
+    let canonical = object.value.canonical_json()?;
+    let value = T::decode_canonical(canonical.as_bytes())?;
+    if CanonicalJsonPersistedSchema::content_ref(&value)? != *content_ref {
+        return Err(CertifyError::Verification(
+            "certified component bytes differ from their owner-derived reference".to_owned(),
+        ));
+    }
+    Ok(value)
 }
 
 fn validate_qualified_closure_objects(
@@ -11115,27 +11031,14 @@ fn validate_qualified_closure_objects(
                 })?,
             AUTHORED_OBJECT_TYPE => {
                 let value: AuthoredStructuredProgram =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
-                component_object(
-                    AUTHORED_OBJECT_TYPE,
-                    value.content_ref()?,
-                    &value,
-                    authored_component_references(&value)?,
-                )?
+                    decode_registered_owner(objects, &object.content_ref)?;
+                registered_owner(&value, authored_component_references(&value)?)?
             }
             POLICY_RECIPE_OBJECT_TYPE => {
                 let value: PolicyExpansionRecipe =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
-                let expected = component_object(
-                    POLICY_RECIPE_OBJECT_TYPE,
-                    value
-                        .content_ref()
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?,
-                    &value,
-                    policy_recipe_component_references(&value)?,
-                )?;
+                    decode_registered_owner(objects, &object.content_ref)?;
+                let expected =
+                    registered_owner(&value, policy_recipe_component_references(&value)?)?;
                 if !registry.policy_recipes.contains_key(&object.content_ref) {
                     return Err(CertifyError::Verification(
                         "policy recipe is not exact qualified callback-free data".to_owned(),
@@ -11145,30 +11048,17 @@ fn validate_qualified_closure_objects(
             }
             EXPANDED_OBJECT_TYPE => {
                 let value: ExpandedStructuredProgram =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
-                component_object(
-                    EXPANDED_OBJECT_TYPE,
-                    value.content_ref()?,
-                    &value,
-                    expanded_component_references(&value)?,
-                )?
+                    decode_registered_owner(objects, &object.content_ref)?;
+                registered_owner(&value, expanded_component_references(&value)?)?
             }
             PROFILE_OBJECT_TYPE => {
                 let value: StructuredExpansionProfile =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
-                component_object(
-                    PROFILE_OBJECT_TYPE,
-                    value.content_ref()?,
-                    &value,
-                    profile_component_references(&value)?,
-                )?
+                    decode_registered_owner(objects, &object.content_ref)?;
+                registered_owner(&value, profile_component_references(&value)?)?
             }
             PROOF_OBJECT_TYPE => {
                 let value: StructuredExpansionProof =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
+                    decode_registered_owner(objects, &object.content_ref)?;
                 let policy_object_type = stable_id(EXPANSION_POLICY_CONTRACT_OBJECT_TYPE)?;
                 let mut outbound_references = vec![
                     ComponentObjectReference {
@@ -11193,24 +11083,18 @@ fn validate_qualified_closure_objects(
                             }
                             ExpansionStage::PolicyWrapping => policy_object_type.clone(),
                             ExpansionStage::FailureCompletion => {
-                                contract_object_type(&entry.expansion_ref)?
+                                persisted_contract_kind(&entry.expansion_ref)?
                             }
                         },
                         content_ref: entry.expansion_ref.clone(),
                     });
                 }
-                component_object(
-                    PROOF_OBJECT_TYPE,
-                    typed_content_ref("mfm.structured-expansion-proof", &value)?,
-                    &value,
-                    outbound_references,
-                )?
+                registered_owner(&value, outbound_references)?
             }
             COVERAGE_PROOF_OBJECT_TYPE => {
                 let value: StructuredPolicyCoverageProof =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
-                let contract_object_type = stable_id(EXPANSION_POLICY_CONTRACT_OBJECT_TYPE)?;
+                    decode_registered_owner(objects, &object.content_ref)?;
+                let expansion_policy_kind = stable_id(EXPANSION_POLICY_CONTRACT_OBJECT_TYPE)?;
                 let mut outbound_references = vec![
                     ComponentObjectReference {
                         object_type: stable_id(AUTHORED_OBJECT_TYPE)?,
@@ -11227,21 +11111,15 @@ fn validate_qualified_closure_objects(
                 ];
                 outbound_references.extend(value.entries.iter().map(|entry| {
                     ComponentObjectReference {
-                        object_type: contract_object_type.clone(),
+                        object_type: expansion_policy_kind.clone(),
                         content_ref: entry.policy_ref.clone(),
                     }
                 }));
-                component_object(
-                    COVERAGE_PROOF_OBJECT_TYPE,
-                    typed_content_ref("mfm.structured-policy-coverage-proof", &value)?,
-                    &value,
-                    outbound_references,
-                )?
+                registered_owner(&value, outbound_references)?
             }
             COMPONENT_MANIFEST_OBJECT_TYPE => {
                 let value: StateCapabilityAdapterSignerResourceManifest =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
+                    decode_registered_owner(objects, &object.content_ref)?;
                 let outbound_references = value
                     .entries
                     .iter()
@@ -11252,17 +11130,11 @@ fn validate_qualified_closure_objects(
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                component_object(
-                    COMPONENT_MANIFEST_OBJECT_TYPE,
-                    structured_component_manifest_ref(&value)?,
-                    &value,
-                    outbound_references,
-                )?
+                registered_owner(&value, outbound_references)?
             }
             IMPLEMENTATION_MANIFEST_OBJECT_TYPE => {
                 let value: SecretFreeImplementationManifest =
-                    serde_json::from_value(object.value.as_json().clone())
-                        .map_err(|error| CertifyError::Verification(error.to_string()))?;
+                    decode_registered_owner(objects, &object.content_ref)?;
                 let mut outbound_references = Vec::with_capacity(value.entries.len() * 2);
                 for entry in &value.entries {
                     outbound_references.extend([
@@ -11276,12 +11148,7 @@ fn validate_qualified_closure_objects(
                         },
                     ]);
                 }
-                component_object(
-                    IMPLEMENTATION_MANIFEST_OBJECT_TYPE,
-                    secret_free_implementation_manifest_ref(&value)?,
-                    &value,
-                    outbound_references,
-                )?
+                registered_owner(&value, outbound_references)?
             }
             _ => {
                 return Err(CertifyError::Verification(
@@ -11361,7 +11228,6 @@ impl ClosureWalker<'_> {
             ))
         })?;
         let object = &registered.object;
-        validate_component_object(object)?;
         if object.object_type != object_type || object.content_ref != content_ref {
             return Err(CertifyError::Certification(
                 "component object type or content reference mismatch".to_owned(),
@@ -11418,20 +11284,20 @@ fn component_roots(components: &CertifiedProgramComponents) -> Result<Vec<(Stabl
         .public_input_output_failure_contract_refs
         .input_contract_refs
     {
-        roots.push((contract_object_type(reference)?, reference.clone()));
+        roots.push((persisted_contract_kind(reference)?, reference.clone()));
     }
     let output_contract_ref = &components
         .public_input_output_failure_contract_refs
         .output_contract_ref;
     roots.push((
-        contract_object_type(output_contract_ref)?,
+        persisted_contract_kind(output_contract_ref)?,
         output_contract_ref.clone(),
     ));
     let failure_contract_ref = &components
         .public_input_output_failure_contract_refs
         .failure_contract_ref;
     roots.push((
-        contract_object_type(failure_contract_ref)?,
+        persisted_contract_kind(failure_contract_ref)?,
         failure_contract_ref.clone(),
     ));
     roots.extend([
@@ -11484,56 +11350,35 @@ fn component_closure_digest(
     ))
 }
 
-fn component_object<T: Serialize>(
-    object_type: &str,
-    content_ref: ContentRef,
+fn registered_owner<T: PersistedObjectPayload>(
     value: &T,
     outbound_references: Vec<ComponentObjectReference>,
 ) -> Result<RegisteredComponentObject> {
-    let value = serde_json::to_value(value)
-        .map_err(|error| CertifyError::Certification(error.to_string()))?;
+    let canonical = value.encode_canonical()?;
     let object = CertifiedComponentObject {
-        object_type: stable_id(object_type)?,
-        content_ref,
-        value: CanonicalJsonValue::new(value).map_err(|error| {
-            CertifyError::Certification(format!(
-                "{object_type} component value is invalid: {error}"
-            ))
-        })?,
+        object_type: T::object_type()?,
+        content_ref: CanonicalJsonPersistedSchema::content_ref(value)?,
+        value: CanonicalJsonValue::from_canonical_json(canonical.as_bytes())?,
     };
-    validate_component_object(&object)?;
     Ok(RegisteredComponentObject {
         object,
         outbound_references,
     })
 }
 
-fn validate_component_object(object: &CertifiedComponentObject) -> Result<()> {
-    let canonical = object
-        .value
-        .canonical_json()
-        .map_err(|error| CertifyError::Certification(error.to_string()))?;
-    let expected = exact_content_ref(object.content_ref.schema_id().clone(), &canonical)
-        .map_err(|error| CertifyError::Certification(error.to_string()))?;
-    if expected != object.content_ref {
-        return Err(CertifyError::Certification(
-            "component object bytes do not match their content reference".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn typed_content_ref<T: Serialize>(schema_name: &str, value: &T) -> Result<ContentRef> {
-    let canonical = canonical(value)?;
-    let schema = mfm_ids::SchemaId::new(
-        schema_name,
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(format!("mfm.structured-schema.v1:{schema_name}:1").as_bytes()),
-    )
-    .map_err(|error| CertifyError::Certification(error.to_string()))?;
-    exact_content_ref(schema, &canonical)
-        .map_err(|error| CertifyError::Certification(error.to_string()))
+fn registered_live_component(
+    contract: &StructuredLiveComponentContract,
+    outbound_references: Vec<ComponentObjectReference>,
+) -> Result<RegisteredComponentObject> {
+    let canonical = contract.encode_canonical()?;
+    Ok(RegisteredComponentObject {
+        object: CertifiedComponentObject {
+            object_type: semantic_component_object_type(contract.component_kind)?,
+            content_ref: contract.content_ref()?,
+            value: CanonicalJsonValue::from_canonical_json(canonical.as_bytes())?,
+        },
+        outbound_references,
+    })
 }
 
 fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
@@ -11543,42 +11388,65 @@ fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| CertifyError::Certification(error.to_string()))
 }
 
+#[cfg(test)]
+fn fixture_content_ref<T: Serialize>(
+    schema: Result<mfm_ids::SchemaId>,
+    value: &T,
+) -> Result<ContentRef> {
+    let canonical = canonical(value)?;
+    ContentRef::new(
+        schema?,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .map_err(|error| CertifyError::Certification(error.to_string()))
+}
+
 fn stable_id(value: &str) -> Result<StableId> {
     StableId::new(value).map_err(|error| CertifyError::Certification(error.to_string()))
 }
 
 fn contract_reference(content_ref: &ContentRef) -> Result<ComponentObjectReference> {
     Ok(ComponentObjectReference {
-        object_type: contract_object_type(content_ref)?,
+        object_type: persisted_contract_kind(content_ref)?,
         content_ref: content_ref.clone(),
     })
 }
 
-fn contract_object_type(content_ref: &ContentRef) -> Result<StableId> {
-    let schema_name = content_ref.schema_id().canonical_name().ok_or_else(|| {
-        CertifyError::Certification(
-            "structured contract reference has no canonical schema name".to_owned(),
-        )
-    })?;
-    stable_id(match schema_name {
-        "mfm.retained-value-contract"
-        | "mfm.component-object-evidence-contract"
-        | "mfm.kernel.never-failure-contract"
-        | "mfm.kernel.access-fault-contract" => DATA_CONTRACT_OBJECT_TYPE,
-        "mfm.closed-sum-contract" => CLOSED_SUM_CONTRACT_OBJECT_TYPE,
-        "mfm.structured-fact-descriptor" => FACT_DESCRIPTOR_OBJECT_TYPE,
-        "mfm.capability-expansion-requirement" => CAPABILITY_REQUIREMENT_OBJECT_TYPE,
-        "mfm.structured-expansion-policy" => EXPANSION_POLICY_CONTRACT_OBJECT_TYPE,
-        "mfm.structured-entry-point-contract" => ENTRY_POINT_CONTRACT_OBJECT_TYPE,
-        "mfm.structured-certification-predicate-set" => PREDICATE_SET_OBJECT_TYPE,
-        "mfm.lane-outcome-contract" => LANE_OUTCOME_CONTRACT_OBJECT_TYPE,
-        "mfm.fan-out-join-contract" => FAN_OUT_JOIN_CONTRACT_OBJECT_TYPE,
-        _ => {
-            return Err(CertifyError::Certification(format!(
-                "unregistered structured contract schema: {schema_name}"
-            )))
-        }
-    })
+fn persisted_contract_kind(content_ref: &ContentRef) -> Result<StableId> {
+    if content_ref == &never_failure_contract_ref()? || content_ref == &access_fault_contract_ref()?
+    {
+        return stable_id(DATA_CONTRACT_OBJECT_TYPE);
+    }
+    let schema_id = content_ref.schema_id();
+    let kind = if schema_id == &<RetainedValueContract as mfm_values::PersistedSchema>::schema_id()?
+        || schema_id == &ComponentObjectEvidence::schema_id()?
+    {
+        DATA_CONTRACT_OBJECT_TYPE
+    } else if schema_id == &ClosedSumContract::schema_id()? {
+        CLOSED_SUM_CONTRACT_OBJECT_TYPE
+    } else if schema_id == &StructuredFactDescriptor::schema_id()? {
+        FACT_DESCRIPTOR_OBJECT_TYPE
+    } else if schema_id == &CapabilityExpansionRequirement::schema_id()? {
+        CAPABILITY_REQUIREMENT_OBJECT_TYPE
+    } else if schema_id == &ExpansionPolicyContract::schema_id()? {
+        EXPANSION_POLICY_CONTRACT_OBJECT_TYPE
+    } else if schema_id == &StructuredEntryPointContract::schema_id()? {
+        ENTRY_POINT_CONTRACT_OBJECT_TYPE
+    } else if schema_id == &StructuredCertificationPredicateSet::schema_id()? {
+        PREDICATE_SET_OBJECT_TYPE
+    } else if schema_id == &LaneOutcomeContract::schema_id()? {
+        LANE_OUTCOME_CONTRACT_OBJECT_TYPE
+    } else if schema_id == &FanOutJoinContract::schema_id()? {
+        FAN_OUT_JOIN_CONTRACT_OBJECT_TYPE
+    } else {
+        return Err(CertifyError::Certification(
+            "unregistered concrete persisted contract owner".to_owned(),
+        ));
+    };
+    stable_id(kind)
 }
 
 fn semantic_component_object_type(kind: StructuredComponentKind) -> Result<StableId> {
@@ -11612,6 +11480,26 @@ where
 mod closure_walker_tests {
     use super::*;
 
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+    #[serde(deny_unknown_fields)]
+    #[mfm(schema = "mfm.certify.closure-walker-node", version = "1")]
+    struct WalkerNode {
+        name: String,
+    }
+
+    impl PersistedObjectPayload for WalkerNode {
+        fn object_type() -> mfm_values::Result<StableId> {
+            StableId::new(DATA_CONTRACT_OBJECT_TYPE)
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+        }
+    }
+
+    fn node(name: &str) -> WalkerNode {
+        WalkerNode {
+            name: name.to_owned(),
+        }
+    }
+
     fn reference(content_ref: &ContentRef) -> ComponentObjectReference {
         ComponentObjectReference {
             object_type: stable_id(DATA_CONTRACT_OBJECT_TYPE).expect("contract type"),
@@ -11631,22 +11519,13 @@ mod closure_walker_tests {
 
     #[test]
     fn closure_walk_rejects_an_active_stack_cycle() {
-        let left_ref = typed_content_ref("mfm.closure-walker-test", &"left").expect("left ref");
-        let right_ref = typed_content_ref("mfm.closure-walker-test", &"right").expect("right ref");
-        let left = component_object(
-            DATA_CONTRACT_OBJECT_TYPE,
-            left_ref.clone(),
-            &"left",
-            vec![reference(&right_ref)],
-        )
-        .expect("left object");
-        let right = component_object(
-            DATA_CONTRACT_OBJECT_TYPE,
-            right_ref.clone(),
-            &"right",
-            vec![reference(&left_ref)],
-        )
-        .expect("right object");
+        let left_node = node("left");
+        let right_node = node("right");
+        let left_ref = left_node.content_ref().expect("left ref");
+        let right_ref = right_node.content_ref().expect("right ref");
+        let left = registered_owner(&left_node, vec![reference(&right_ref)]).expect("left object");
+        let right =
+            registered_owner(&right_node, vec![reference(&left_ref)]).expect("right object");
         let objects = BTreeMap::from([(left_ref.clone(), left), (right_ref, right)]);
         let error = walker(&objects)
             .walk(
@@ -11659,46 +11538,34 @@ mod closure_walker_tests {
 
     #[test]
     fn closure_walk_deduplicates_a_shared_dag_and_rejects_type_aliasing() {
-        let root_ref = typed_content_ref("mfm.closure-walker-test", &"root").expect("root ref");
-        let left_ref = typed_content_ref("mfm.closure-walker-test", &"left").expect("left ref");
-        let right_ref = typed_content_ref("mfm.closure-walker-test", &"right").expect("right ref");
-        let shared_ref =
-            typed_content_ref("mfm.closure-walker-test", &"shared").expect("shared ref");
+        let root_node = node("root");
+        let left_node = node("left");
+        let right_node = node("right");
+        let shared_node = node("shared");
+        let root_ref = root_node.content_ref().expect("root ref");
+        let left_ref = left_node.content_ref().expect("left ref");
+        let right_ref = right_node.content_ref().expect("right ref");
+        let shared_ref = shared_node.content_ref().expect("shared ref");
         let objects = BTreeMap::from([
             (
                 root_ref.clone(),
-                component_object(
-                    DATA_CONTRACT_OBJECT_TYPE,
-                    root_ref.clone(),
-                    &"root",
+                registered_owner(
+                    &root_node,
                     vec![reference(&left_ref), reference(&right_ref)],
                 )
                 .expect("root object"),
             ),
             (
                 left_ref.clone(),
-                component_object(
-                    DATA_CONTRACT_OBJECT_TYPE,
-                    left_ref,
-                    &"left",
-                    vec![reference(&shared_ref)],
-                )
-                .expect("left object"),
+                registered_owner(&left_node, vec![reference(&shared_ref)]).expect("left object"),
             ),
             (
                 right_ref.clone(),
-                component_object(
-                    DATA_CONTRACT_OBJECT_TYPE,
-                    right_ref,
-                    &"right",
-                    vec![reference(&shared_ref)],
-                )
-                .expect("right object"),
+                registered_owner(&right_node, vec![reference(&shared_ref)]).expect("right object"),
             ),
             (
                 shared_ref.clone(),
-                component_object(DATA_CONTRACT_OBJECT_TYPE, shared_ref, &"shared", Vec::new())
-                    .expect("shared object"),
+                registered_owner(&shared_node, Vec::new()).expect("shared object"),
             ),
         ]);
         let mut walker = walker(&objects);
@@ -11712,7 +11579,7 @@ mod closure_walker_tests {
             walker
                 .emitted
                 .iter()
-                .map(|object| object.value.as_json().as_str().expect("string object"))
+                .map(|object| { object.value.as_json()["name"].as_str().expect("node name") })
                 .collect::<Vec<_>>(),
             ["root", "left", "shared", "right"]
         );

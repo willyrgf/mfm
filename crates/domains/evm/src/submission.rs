@@ -4,14 +4,14 @@ use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, U256};
 use mfm_capabilities::{
-    BoundedComponentContract, EffectCapabilityContract, ReadCapabilityContract, Refreshable,
-    ResourceAuthorityContract, SignerContract,
+    BoundedComponentContract, EffectCapabilityContract, EntryAbsorbing, EntryKeyed,
+    ReadCapabilityContract, Refreshable, ResourceAuthorityContract, SignerContract,
 };
 use mfm_ids::{StableId, TenantScopeId};
 use mfm_program::structured::{
-    CapabilityExpansion, Direct, Effect, Never, Pure, Read, RefreshableBinding, RequiresCapability,
-    RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
-    SafeFailureMayFail, SafeFailureNotApplicable, State,
+    CapabilityExpansion, Direct, Effect, EntryAbsorbingBinding, Never, Pure, Read,
+    RefreshableBinding, RequiresCapability, RuntimeEffectCapability, RuntimeReadCapability,
+    RuntimeResourceAuthority, RuntimeSigner, SafeFailureMayFail, SafeFailureNotApplicable, State,
 };
 use mfm_program_derive::{MfmConfig, MfmValue, PublicOutputs};
 use mfm_spec::structured::{
@@ -914,7 +914,51 @@ evm_read_capability!(
     evm_signer_attestation_adapter_contract
 );
 
-/// Typed refreshable exact-candidate broadcast capability.
+/// Exact deterministic transaction hash one broadcast is keyed on.
+///
+/// The hash is derived from the signed candidate bytes before broadcast, so it
+/// names the transaction the chain will accept and is a pure projection of the
+/// committed request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+#[mfm(
+    namespace = "mfm.evm",
+    name = "broadcast-entry-key",
+    version = "1",
+    schema = "mfm.evm.broadcast_entry_key"
+)]
+pub struct EvmBroadcastEntryKey {
+    /// Deterministically derived EVM transaction hash.
+    pub transaction_hash: String,
+}
+
+impl EntryKeyed for BroadcastExactCandidateRequest {
+    type EntryKey = EvmBroadcastEntryKey;
+
+    fn entry_key(&self) -> Self::EntryKey {
+        EvmBroadcastEntryKey {
+            transaction_hash: self
+                .active_candidate
+                .attested_candidate
+                .transaction_hash
+                .clone(),
+        }
+    }
+}
+
+/// Typed refreshable, absorbing exact-candidate broadcast capability.
+///
+/// **What absorbs:** the account nonce. The signed candidate is deterministic,
+/// so a repeat submits byte-identical bytes under the same nonce; a chain
+/// accepts that transaction at most once, and a node that already holds it
+/// reports the same hash rather than admitting a second one.
+///
+/// **`Returned` is a function of chain post-state, not of one exchange.**
+/// [`SubmittedCandidateProof`] names the transaction the chain holds, which a
+/// re-invoked adapter recovers by reading the chain rather than by remembering
+/// what one submission replied. Nothing in the kernel checks this; a proof
+/// synthesized from the attested candidate without a chain read would be a
+/// well-typed claim about an event that never happened.
 pub enum BroadcastExactCandidateCapability {}
 
 impl EffectCapabilityContract for BroadcastExactCandidateCapability {
@@ -922,10 +966,12 @@ impl EffectCapabilityContract for BroadcastExactCandidateCapability {
     type Returned = SubmittedCandidateProof;
     type SafeFailure = EvmSubmissionFailure;
     type Refresh = Refreshable<BroadcastLineageHead>;
+    type Entry = EntryAbsorbing<3>;
 }
 
 impl RuntimeEffectCapability for BroadcastExactCandidateCapability {
     type RefreshBinding = RefreshableBinding<EvmBroadcastResource>;
+    type EntryBinding = EntryAbsorbingBinding<3>;
 
     fn contract() -> mfm_program::Result<StructuredLiveComponentContract> {
         StructuredLiveComponentContract::new_effect_capability_refreshable(
@@ -935,6 +981,10 @@ impl RuntimeEffectCapability for BroadcastExactCandidateCapability {
             structured_value_contract_ref::<EvmSubmissionFailure>()?,
             structured_value_contract_ref::<BroadcastLineageHead>()?,
             EvmBroadcastResource::contract()?.content_ref()?,
+            <EntryAbsorbingBinding<3> as mfm_program::structured::RuntimeEffectEntryBinding<
+                EntryAbsorbing<3>,
+                BroadcastExactCandidateRequest,
+            >>::contract()?,
             evm_broadcast_adapter_contract()?.content_ref()?,
         )
         .map_err(Into::into)
@@ -1868,3 +1918,4 @@ pub(crate) fn validate_transaction_hash(value: &str) -> bool {
 pub(crate) fn validate_quantity(value: &str) -> bool {
     U256::from_str(value).is_ok_and(|quantity| value == quantity.to_string())
 }
+use mfm_values::CanonicalJsonPersistedSchema;

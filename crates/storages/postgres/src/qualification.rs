@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mfm_certify::structured::QualifiedProgramRegistry;
+use mfm_certify::structured::CertifiedProgramRegistry;
 use mfm_store::structured::{
     assemble_structured_runtime, AssembledStructuredRuntime, ConfigurationHistoryStore,
     PublicPhysicalBindingVerifier,
@@ -22,7 +22,7 @@ use crate::structured::PostgresStructuredHistoryBackend;
 /// no memory fallback and no raw pool, URL, or fence input.
 pub async fn open_structured_authoritative(
     sessions: PostgresApplicationSessions,
-    registry: QualifiedProgramRegistry,
+    registry: CertifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
     let backend = PostgresStructuredHistoryBackend::from_application_sessions(sessions);
@@ -37,7 +37,7 @@ pub async fn open_structured_authoritative(
 /// while application admission receives only resolve capability.
 pub async fn open_structured_authoritative_with_configuration(
     sessions: PostgresCombinedSessions,
-    registry: QualifiedProgramRegistry,
+    registry: CertifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
     AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,
@@ -64,7 +64,7 @@ pub async fn open_structured_authoritative_with_configuration(
 /// Opens the application boundary with structured RunHistory and resolve-only configuration.
 pub async fn open_structured_authoritative_application(
     sessions: PostgresApplicationSessions,
-    registry: QualifiedProgramRegistry,
+    registry: CertifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> Result<(
     AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,

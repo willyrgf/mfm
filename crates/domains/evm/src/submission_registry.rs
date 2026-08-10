@@ -4,20 +4,19 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, U256};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_capabilities::{
     AccessFaultCode, CapabilityContractFault, EffectCapabilityImplementation,
     ReadCapabilityImplementation,
 };
 use mfm_certify::structured::ProgramRegistryBuilder;
-use mfm_ids::{ContentDigest, ContentRef, StableId, TenantScopeId};
-use mfm_program::structured::{
-    state_contract, CommittedObservation, State, StateFrame, StateSettlement,
-    StructuredStateCallbacks,
-};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId, TenantScopeId};
+use mfm_program::structured::{state_contract, State, StateFrame, StructuredStateCallbacks};
 use mfm_spec::structured::{
     ProposedStateOutcome, ProposedStateValue, SecretFreeImplementationDescriptor,
     StructuredComponentKind,
 };
+use serde::Serialize;
 
 use crate::submission::{
     ActivateWalletCandidateState, ActiveCandidateWork, AttestCandidateIdentityCapability,
@@ -72,8 +71,9 @@ use crate::{
     PriorEffectDisposition, PriorResourceDisposition, ReadEvmWalletNonceStatusRequest,
     ReadWalletNonceStatusCapability, ReplayExclusionDisposition, ReserveEvmNonceRequest,
     ReserveWalletNonceCapability, ReserveWalletNonceResponse, ReservedWalletNonce,
-    SubmittedCandidateProof, TransactionNonce, WalletNonceDomainActivationAttestation,
-    WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreLineageHead,
+    SubmittedCandidateProof, TransactionNonce, WalletNonceDomain,
+    WalletNonceDomainActivationAttestation, WalletNonceDomainActivationRecord, WalletNonceStatus,
+    WalletNonceStoreLineageHead,
 };
 
 /// Registered executable and qualification objects shared by every EVM
@@ -159,103 +159,22 @@ macro_rules! pure_process {
     };
 }
 
-macro_rules! read_process {
-    ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
+macro_rules! access_process {
+    ($state:ty, $kind:ident, $request:path, $settle:path, $settle_failure:path) => {
         impl SubmissionStateProcess for $state {
             fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
-                StructuredStateCallbacks::Read {
+                StructuredStateCallbacks::$kind {
                     request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
                         $request(frame.input())
                     }),
                     settle_returned: Arc::new(
                         |frame: StateFrame<'_, <Self as State>::Input>, returned| {
-                            $settle(
-                                frame.input(),
-                                &CommittedObservation::Returned(returned.clone()),
-                            )
+                            $settle(frame.input(), returned)
                         },
                     ),
                     settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
-                            frame.input(),
-                            &CommittedObservation::SafeFailure(failure.clone()),
-                        ) {
-                            StateSettlement::Proposed(outcome) => outcome,
-                            StateSettlement::InvalidEvidence => {
-                                unreachable!(
-                                    "safe-failure settlement cannot produce InvalidEvidence"
-                                )
-                            }
-                        },
-                    ),
-                }
-            }
-        }
-    };
-}
-
-macro_rules! reconciling_read_process {
-    ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
-        impl SubmissionStateProcess for $state {
-            fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
-                StructuredStateCallbacks::Read {
-                    request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
-                        $request(frame.input())
-                    }),
-                    settle_returned: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, returned| {
-                            $settle(
-                                frame.input(),
-                                &CommittedObservation::Returned(returned.clone()),
-                            )
-                        },
-                    ),
-                    settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
-                            frame.input(),
-                            &CommittedObservation::SafeFailure(failure.clone()),
-                        ) {
-                            StateSettlement::Proposed(outcome) => outcome,
-                            StateSettlement::InvalidEvidence => {
-                                unreachable!(
-                                    "safe-failure settlement cannot produce InvalidEvidence"
-                                )
-                            }
-                        },
-                    ),
-                }
-            }
-        }
-    };
-}
-
-macro_rules! reconciling_effect_process {
-    ($state:ty, $fixture:ident, $request:path, $settle:path, [$($failure:expr),+ $(,)?]) => {
-        impl SubmissionStateProcess for $state {
-            fn callbacks(_fixture: &QualificationFixture) -> StructuredStateCallbacks<Self> {
-                StructuredStateCallbacks::Effect {
-                    request: Arc::new(|frame: StateFrame<'_, <Self as State>::Input>| {
-                        $request(frame.input())
-                    }),
-                    settle_returned: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, returned| {
-                            $settle(
-                                frame.input(),
-                                &CommittedObservation::Returned(returned.clone()),
-                            )
-                        },
-                    ),
-                    settle_safe_failure: Arc::new(
-                        |frame: StateFrame<'_, <Self as State>::Input>, failure| match $settle(
-                            frame.input(),
-                            &CommittedObservation::SafeFailure(failure.clone()),
-                        ) {
-                            StateSettlement::Proposed(outcome) => outcome,
-                            StateSettlement::InvalidEvidence => {
-                                unreachable!(
-                                    "safe-failure settlement cannot produce InvalidEvidence"
-                                )
-                            }
+                        |frame: StateFrame<'_, <Self as State>::Input>, failure| {
+                            $settle_failure(frame.input(), failure)
                         },
                     ),
                 }
@@ -361,144 +280,124 @@ pure_process!(
     submission_process::select_submission_terminal
 );
 
-reconciling_read_process!(
+access_process!(
     ReadWalletNonceStatusState,
-    prepared,
+    Read,
     submission_process::read_status_request,
     submission_process::settle_wallet_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_pending_direct_failure
 );
-reconciling_read_process!(
+access_process!(
     ReadPostReserveWalletNonceStatusState,
-    post_reserve,
+    Read,
     submission_process::post_reserve_status_request,
     submission_process::settle_post_reserve_wallet_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_pending_direct_failure
 );
-read_process!(
+access_process!(
     ReadReservationStatusAfterFailureState,
-    reservation_reconciliation,
+    Read,
     submission_process::failure_reconciliation_status_request,
     submission_process::settle_reservation_failure_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_direct_failure
 );
-read_process!(
+access_process!(
     ReadCandidateStatusAfterFailureState,
-    candidate_reconciliation,
+    Read,
     submission_process::failure_reconciliation_status_request,
     submission_process::settle_candidate_progress_failure_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_direct_failure
 );
-reconciling_read_process!(
+access_process!(
     ReadCandidateWalletNonceStatusState,
-    prepared,
+    Read,
     submission_process::read_status_request,
     submission_process::settle_candidate_wallet_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_pending_direct_failure
 );
-reconciling_read_process!(
+access_process!(
     ReadObservedCandidateStatusState,
-    observed_candidate,
+    Read,
     submission_process::read_observed_candidate_status_request,
     submission_process::settle_observed_candidate_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_observed_candidate_failure
 );
-reconciling_read_process!(
+access_process!(
     ReadExhaustionStatusState,
-    exhaustion,
+    Read,
     submission_process::failure_reconciliation_status_request,
     submission_process::settle_exhaustion_status,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_pending_direct_failure
 );
-reconciling_read_process!(
+access_process!(
     ObservePendingNonceState,
-    prepared,
+    Read,
     submission_process::pending_nonce_request,
     submission_process::settle_pending_nonce,
-    [
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_pending_nonce_failure
 );
-reconciling_effect_process!(
+access_process!(
     ReserveWalletNonceState,
-    qualified_pending,
+    Effect,
     submission_process::reserve_nonce_request,
     submission_process::settle_reservation,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_reservation_failure
 );
-reconciling_read_process!(
+access_process!(
     AttestCandidateIdentityState,
-    candidate,
+    Read,
     submission_process::attest_candidate_request,
     submission_process::settle_candidate_attestation,
-    [EvmSubmissionFailure::SignerUnavailable]
+    submission_process::settle_candidate_attestation_failure
 );
-reconciling_effect_process!(
+access_process!(
     ActivateWalletCandidateState,
-    prepared_activation,
+    Effect,
     submission_process::activate_candidate_request,
     submission_process::settle_candidate_activation,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_candidate_activation_failure
 );
-reconciling_effect_process!(
+access_process!(
     BroadcastExactCandidateState,
-    active,
+    Effect,
     submission_process::broadcast_request,
     submission_process::settle_broadcast,
-    [
-        EvmSubmissionFailure::DestinationRejected,
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::SignerUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_broadcast_failure
 );
-reconciling_read_process!(
+access_process!(
     ObserveActivatedTransactionState,
-    observation,
+    Read,
     submission_process::transaction_lookup_request,
     submission_process::settle_transaction_lookup,
-    [
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_observation_failure
 );
-reconciling_read_process!(
+access_process!(
     ObserveCandidateReceiptState,
-    observation,
+    Read,
     submission_process::receipt_lookup_request,
     submission_process::settle_receipt_lookup,
-    [
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_observation_failure
 );
-reconciling_read_process!(
+access_process!(
     ObserveFinalizedHeadState,
-    observation,
+    Read,
     submission_process::finalized_head_request,
     submission_process::settle_finalized_head,
-    [
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_finalized_head_failure
 );
-reconciling_read_process!(
+access_process!(
     ObserveCanonicalInclusionState,
-    terminal,
+    Read,
     submission_process::inclusion_block_request,
     submission_process::settle_inclusion_block,
-    [
-        EvmSubmissionFailure::ProviderUnavailable,
-        EvmSubmissionFailure::TransportUnavailable,
-    ]
+    submission_process::settle_inclusion_block_failure
 );
-reconciling_effect_process!(
+access_process!(
     CompleteWalletNonceState,
-    completion,
+    Effect,
     submission_process::completion_request,
     submission_process::settle_completion,
-    [EvmSubmissionFailure::NonceAuthorityUnavailable]
+    submission_process::settle_completion_failure
 );
 
 /// Registers the complete state/capability side of the one structured EVM
@@ -637,14 +536,13 @@ where
 {
     let contract = state_contract::<S>()
         .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
-    let implementation_id = implementation_id(
-        S::semantic_state_id()
-            .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?,
-    )?;
+    let semantic_state_id = S::semantic_state_id()
+        .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
+    let implementation_id = implementation_id(semantic_state_id.as_str())?;
     registry.register_state::<S>(
         descriptor(
             StructuredComponentKind::State,
-            contract.state_contract_ref,
+            contract.content_ref()?,
             implementation_id,
             qualification,
         ),
@@ -716,12 +614,17 @@ fn descriptor(
     }
 }
 
-fn implementation_id(source: impl AsRef<str>) -> mfm_certify::Result<StableId> {
-    let digest = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.structured-implementation-id.v1",
-        &source.as_ref(),
-    )
-    .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
+#[derive(Serialize)]
+#[serde(transparent)]
+struct StructuredImplementationIdPreimage<'a>(&'a str);
+
+fn implementation_id(source: &str) -> mfm_certify::Result<StableId> {
+    let canonical =
+        mfm_journal::structured::canonical_json(&StructuredImplementationIdPreimage(source))
+            .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
+    let mut bytes = b"mfm.evm.structured-implementation-id.v1\0".to_vec();
+    bytes.extend_from_slice(canonical.as_bytes());
+    let digest = ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&bytes));
     StableId::new(format!("mfm.evm.implementation/{}", digest.digest()))
         .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))
 }
@@ -732,7 +635,16 @@ fn register_values(registry: &mut ProgramRegistryBuilder) -> mfm_certify::Result
             $(registry.register_value::<$value>()?;)+
         }};
     }
+    // The four absorbing Effect capabilities certify their entry-key contracts
+    // as outbound references, so those value contracts are part of the closure.
+    use crate::submission::EvmBroadcastEntryKey;
+    use crate::{EvmCandidateOperationKey, EvmNonceCompletionKey, EvmNonceReservationKey};
+
     values!(
+        EvmNonceReservationKey,
+        EvmCandidateOperationKey,
+        EvmNonceCompletionKey,
+        EvmBroadcastEntryKey,
         EvmSubmissionRequest,
         EvmSubmissionOutput,
         EvmSubmissionFailure,
@@ -1156,7 +1068,7 @@ fn valid_attested_candidate(candidate: &AttestedWalletCandidate) -> bool {
 
 fn valid_active_candidate(candidate: &ActiveWalletCandidate) -> bool {
     valid_attested_candidate(&candidate.attested_candidate)
-        && valid_reference(&candidate.activation_evidence_ref)
+        && candidate.candidate_operation_key.validate().is_ok()
 }
 
 fn valid_reservation(reservation: &crate::ReservedWalletNonce) -> bool {
@@ -1237,10 +1149,6 @@ fn valid_wallet_status(status: &WalletNonceStatus) -> bool {
                             .winning_candidate_ordinal
                         && candidate.attested_candidate.transaction_hash
                             == completion.canonical_terminal_outcome.transaction_hash
-                        && candidate.activation_evidence_ref
-                            == completion
-                                .canonical_terminal_outcome
-                                .winning_activation_evidence_ref
                 })
                 && valid_reference(resource_head_ref)
         }
@@ -1302,7 +1210,7 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
             ordinal == 0 && *exact_next_ordinal == 0
         }
         CandidateActivationPermit::Replacement {
-            predecessor_activation_ref,
+            predecessor_candidate_operation_key,
             predecessor_ordinal,
             exact_next_ordinal,
             replacement_policy_ref,
@@ -1312,7 +1220,7 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
                 && predecessor_ordinal
                     .checked_add(1)
                     .is_some_and(|next| next == ordinal)
-                && valid_reference(predecessor_activation_ref)
+                && predecessor_candidate_operation_key.validate().is_ok()
                 && valid_reference(replacement_policy_ref)
                 && valid_digest(eligibility_ref)
         }
@@ -1426,6 +1334,26 @@ impl QualificationFixture {
     }
 }
 
+#[derive(Serialize)]
+struct FixtureSenderPathInventoryPreimage<'a>(&'a WalletNonceDomain, Address);
+
+fn fixture_sender_path_inventory_digest(
+    nonce_domain: &WalletNonceDomain,
+    sender: Address,
+) -> mfm_certify::Result<ContentDigest> {
+    let canonical = mfm_journal::structured::canonical_json(&FixtureSenderPathInventoryPreimage(
+        nonce_domain,
+        sender,
+    ))
+    .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
+    let mut bytes = b"mfm.evm.fixture-sender-path-inventory.v1\0".to_vec();
+    bytes.extend_from_slice(canonical.as_bytes());
+    Ok(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        sha256_digest_bytes(&bytes),
+    ))
+}
+
 fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
     let common_ref = evm_wallet_nonce_policy_ref().map_err(fixture_contract_error)?;
     let declaration = ChainInstanceDeclaration::new(
@@ -1455,11 +1383,7 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
             .map_err(fixture_contract_error)?,
     )
     .map_err(fixture_contract_error)?;
-    let sender_inventory = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.fixture-sender-path-inventory.v1",
-        &(nonce_domain.clone(), sender),
-    )
-    .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?;
+    let sender_inventory = fixture_sender_path_inventory_digest(&nonce_domain, sender)?;
     let activation_record = WalletNonceDomainActivationRecord {
         activation_contract_ref: common_ref.clone(),
         qualified_activation_registry_lineage_ref: common_ref.clone(),
@@ -1561,10 +1485,6 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
     let qualified_pending = fixture_success(submission_process::qualify_pending_nonce(
         &observed_submission,
     ))?;
-    let observed_floor_ref = canonical_wallet_reference(&observed)
-        .map_err(fixture_contract_error)?
-        .content_digest()
-        .to_owned();
     let reservation = ReservedWalletNonce {
         nonce_domain: nonce_domain.clone(),
         domain_activation_record_ref: activation_record_ref,
@@ -1573,9 +1493,7 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
         submission_intent_id: prepared.intent.submission_intent_id.clone(),
         transaction_intent_digest: request.transaction_intent().digest().to_owned(),
         candidate_family_ref: request.candidate_family().digest().to_owned(),
-        observed_floor_ref,
         resource_lineage_ref: common_ref.clone(),
-        reservation_evidence_ref: common_ref.clone(),
     };
     let post_reserve = PostReservePreparedSubmission {
         prepared: prepared.clone(),
@@ -1632,7 +1550,10 @@ fn qualification_fixture() -> mfm_certify::Result<QualificationFixture> {
     ))?;
     let active_candidate = ActiveWalletCandidate {
         attested_candidate: attested.clone(),
-        activation_evidence_ref: common_ref.clone(),
+        candidate_operation_key: prepared_activation
+            .activation_request
+            .candidate_operation_key
+            .clone(),
         provider_activation_attestation: "fixture-provider-attestation".to_owned(),
     };
     let active = ActiveCandidateWork {
@@ -1728,3 +1649,4 @@ fn fixture_success<T: Clone, E>(outcome: ProposedStateOutcome<T, E>) -> mfm_cert
 fn validate_access_fault(_fault: &AccessFaultCode) -> Result<(), CapabilityContractFault> {
     Ok(())
 }
+use mfm_values::CanonicalJsonPersistedSchema;

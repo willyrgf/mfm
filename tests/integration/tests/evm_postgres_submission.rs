@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Output, Stdio};
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,9 +22,7 @@ use mfm_app::{
     EvmWalletDeploymentReleaseMaterial, ExportKind, ExportRequest, PageRequest, PublicJsonResponse,
     ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
 };
-use mfm_canonical::{
-    limits::MAX_CANONICAL_JSON_BYTES, sha256_digest_bytes, CanonicalValue, RecoverabilityContract,
-};
+use mfm_canonical::{limits::MAX_CANONICAL_JSON_BYTES, sha256_digest_bytes};
 use mfm_certify::structured::ProgramRegistryBuilder;
 use mfm_evm::{
     canonical_wallet_reference, derive_evm_chain_lineage_id, derive_evm_semantic_signer_id,
@@ -154,7 +152,7 @@ const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
 const RECOVERY_SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000064";
 const SUBMISSION_TOKEN: &str = "integration-submission";
 const CROSS_CHAIN_SUBMISSION_TOKEN: &str = "cross-chain-submission";
-const MAX_ANNEX_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
+const MAX_RETAINED_DOCUMENT_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
 // Keep the end-to-end fixture above the historical single-frame boundary even though the
 // generated retained-frame ceiling now admits the larger 32 MiB certified-program envelope.
 const HISTORICAL_SINGLE_FRAME_BYTES: usize = 16_777_216;
@@ -350,6 +348,13 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
 
     let rpc = LoopbackRpc::start(fixture.sender).await;
     assert!(rpc.endpoint().contains(PROVIDER_TEXT_CANARY));
+    // The first broadcast enters and is then answered ambiguously, which is the
+    // production shape of a provider whose response is lost after entry. The
+    // broadcast capability declares `EntryAbsorbing`, so the run must resolve
+    // that in-run: commit the ambiguity, re-assert the byte-identical committed
+    // request, and have the provider absorb the repeat. Exactly one transaction
+    // must ever reach the provider across both invocations.
+    rpc.answer_next_broadcasts_ambiguously(1);
     // The production application must own a fresh semantic intent from an
     // empty wallet authority. The deterministic worker is deliberately not
     // run here: doing so would pre-complete the same caller token and turn the
@@ -362,7 +367,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     rpc.enable_finality();
     run_worker_expect_crash_after_receipt(
@@ -373,7 +380,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     run_worker_expect_crash_after_finality(
         &database,
@@ -383,7 +392,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     run_worker_expect_crash_before_completion_commit(
         &database,
@@ -393,7 +404,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &mut provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     run_worker_expect_completion_acknowledgement_loss(
         &database,
@@ -403,7 +416,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     run_worker_expect_crash_after_completion(
         &database,
@@ -413,7 +428,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
 
     run_worker(
         &database,
@@ -423,7 +440,9 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
         &provider,
     )
     .await;
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 1);
+    // Two invocations, one transaction: the repeat was absorbed.
+    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
+    assert_eq!(rpc.accepted_transaction_count(), 1);
     assert_eq!(rpc.operation_count("eth_getTransactionCount"), 1);
     assert!(rpc.operation_count("eth_chainId") >= 1);
     assert!(rpc.operation_count("eth_getBalance") >= 1);
@@ -752,9 +771,7 @@ async fn evm_postgres_submission_worker() {
                         closed = true;
                         break;
                     }
-                    DriveOutcome::WaitingReads
-                    | DriveOutcome::PossibleEntry
-                    | DriveOutcome::BlockedIntegrity => {
+                    DriveOutcome::PossibleEntry(_) | DriveOutcome::BlockedIntegrity => {
                         panic!("EVM submission parked before completion")
                     }
                     DriveOutcome::AccessObserved
@@ -1491,32 +1508,13 @@ fn derive_application_run_id(
     operation_id: &StableId,
     invocation_identity: &InvocationIdentity,
 ) -> RunId {
-    let preimage = CanonicalValue::object([
-        (
-            "store_scope_id",
-            CanonicalValue::String(store_scope_id.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            CanonicalValue::String(operation_id.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            CanonicalValue::String(invocation_identity.as_str().to_owned()),
-        ),
-    ])
-    .expect("run-id preimage");
-    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
-    let validated = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .expect("validated run-id preimage");
-    contract
-        .derive_run_id(&validated)
-        .expect("derive production run identity")
+    mfm_journal::structured::derive_run_id(
+        store_scope_id,
+        tenant_scope_id,
+        operation_id,
+        invocation_identity,
+    )
+    .expect("derive production run identity")
 }
 
 async fn drive_application_to_closed(application: &mfm_app::Application, run_id: &RunId) {
@@ -1758,24 +1756,12 @@ async fn verify_production_projections(
         .expect("decode semantic portable frame stream");
     let audit_export =
         PortableRunExport::strict_decode(&audit_bytes).expect("decode audit portable frame stream");
-    assert_eq!(
-        semantic_export
-            .to_canonical_bytes()
-            .expect("re-encode semantic"),
-        semantic_bytes
-    );
-    assert_eq!(
-        audit_export.to_canonical_bytes().expect("re-encode audit"),
-        audit_bytes
-    );
-    assert_eq!(
-        semantic_export.content_ref().expect("semantic content ref"),
-        semantic_ref
-    );
-    assert_eq!(
-        audit_export.content_ref().expect("audit content ref"),
-        audit_ref
-    );
+    let semantic_encoded = semantic_export.encode().expect("re-encode semantic");
+    let audit_encoded = audit_export.encode().expect("re-encode audit");
+    assert_eq!(semantic_encoded.as_bytes(), semantic_bytes);
+    assert_eq!(audit_encoded.as_bytes(), audit_bytes);
+    assert_eq!(semantic_encoded.content_ref(), &semantic_ref);
+    assert_eq!(audit_encoded.content_ref(), &audit_ref);
     let semantic_frames = portable_frames(&semantic_bytes);
     let audit_frames = portable_frames(&audit_bytes);
     assert!(semantic_frames.len() > 1);
@@ -2294,7 +2280,7 @@ async fn assemble_runtime(
         .expanded()
         .canonical_json()
         .expect("expanded canonical bytes");
-    assert!(expanded_bytes.as_bytes().len() < MAX_ANNEX_BYTES);
+    assert!(expanded_bytes.as_bytes().len() < MAX_RETAINED_DOCUMENT_BYTES);
     assert_eq!(
         certified
             .expanded()
@@ -2313,7 +2299,7 @@ async fn assemble_runtime(
             .expect("root canonical bytes")
             .as_bytes()
             .len()
-            < MAX_ANNEX_BYTES
+            < MAX_RETAINED_DOCUMENT_BYTES
     );
     assert!(certified
         .document()
@@ -2326,7 +2312,7 @@ async fn assemble_runtime(
                 .expect("component canonical bytes")
                 .as_bytes()
                 .len()
-                < MAX_ANNEX_BYTES
+                < MAX_RETAINED_DOCUMENT_BYTES
         }));
 
     let document = certified.into_document();
@@ -3058,6 +3044,11 @@ struct LoopbackRpcState {
     finality_ready: AtomicBool,
     calls: Mutex<Vec<String>>,
     transaction_hash: Mutex<Option<String>>,
+    /// Accepts the next broadcast and then answers ambiguously, which is the
+    /// production shape of a provider whose response is lost after entry.
+    ambiguous_broadcasts: AtomicUsize,
+    /// Distinct signed transactions the provider ever accepted.
+    accepted_transactions: Mutex<BTreeSet<String>>,
 }
 
 impl LoopbackRpc {
@@ -3071,6 +3062,8 @@ impl LoopbackRpc {
             finality_ready: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),
             transaction_hash: Mutex::new(None),
+            ambiguous_broadcasts: AtomicUsize::new(0),
+            accepted_transactions: Mutex::new(BTreeSet::new()),
         });
         let provider_path = format!("/{PROVIDER_TEXT_CANARY}");
         let app = Router::new()
@@ -3099,6 +3092,22 @@ impl LoopbackRpc {
 
     fn enable_finality(&self) {
         self.state.finality_ready.store(true, Ordering::SeqCst);
+    }
+
+    /// Makes the next `count` broadcasts enter and then answer ambiguously.
+    fn answer_next_broadcasts_ambiguously(&self, count: usize) {
+        self.state
+            .ambiguous_broadcasts
+            .store(count, Ordering::SeqCst);
+    }
+
+    /// Returns the distinct signed transactions the provider ever accepted.
+    fn accepted_transaction_count(&self) -> usize {
+        self.state
+            .accepted_transactions
+            .lock()
+            .expect("accepted transaction lock")
+            .len()
     }
 
     fn operation_count(&self, method: &str) -> usize {
@@ -3233,6 +3242,23 @@ async fn loopback_rpc(
                     return None;
                 }
                 *retained = Some(hash.clone());
+                // The transaction enters whether or not the caller learns so.
+                state
+                    .accepted_transactions
+                    .lock()
+                    .expect("accepted transaction lock")
+                    .insert(hash.clone());
+                if state
+                    .ambiguous_broadcasts
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok()
+                {
+                    // Entered, then answered ambiguously: the adapter must not
+                    // conclude non-entry from this.
+                    return None;
+                }
                 Some(Value::String(hash))
             }),
         "eth_getTransactionByHash" => {
@@ -4381,7 +4407,7 @@ async fn load_batches(pool: &PgPool, run_id: &RunId) -> Vec<CommittedBatch> {
         let envelope_json = row
             .try_get::<String, _>("batch_envelope_json")
             .expect("batch envelope");
-        assert!(envelope_json.len() <= MAX_ANNEX_BYTES);
+        assert!(envelope_json.len() <= MAX_RETAINED_DOCUMENT_BYTES);
         let mut envelope =
             serde_json::from_str::<Value>(&envelope_json).expect("strictly decode batch envelope");
         assert_eq!(
@@ -4414,7 +4440,7 @@ async fn load_batches(pool: &PgPool, run_id: &RunId) -> Vec<CommittedBatch> {
                 let canonical_object = object
                     .try_get::<String, _>("canonical_json")
                     .expect("canonical object bytes");
-                assert!(canonical_object.len() <= MAX_ANNEX_BYTES);
+                assert!(canonical_object.len() <= MAX_RETAINED_DOCUMENT_BYTES);
                 json!({
                     "object_type": object
                         .try_get::<String, _>("object_type")

@@ -65,12 +65,12 @@ CREATE TABLE wallet_store_schema_metadata (
     schema_contract_version TEXT NOT NULL,
     CONSTRAINT wallet_store_schema_metadata_singleton_v1 CHECK (singleton),
     CONSTRAINT wallet_store_schema_metadata_version_v1 CHECK (
-        schema_contract_version = 'mfm.evm.wallet-authority-postgres.v1'
+        schema_contract_version = 'mfm.evm.wallet-authority-postgres.v2'
     )
 );
 
 INSERT INTO wallet_store_schema_metadata (singleton, schema_contract_version)
-VALUES (TRUE, 'mfm.evm.wallet-authority-postgres.v1');
+VALUES (TRUE, 'mfm.evm.wallet-authority-postgres.v2');
 
 CREATE TABLE wallet_store_incarnations (
     wallet_nonce_store_lineage_id TEXT NOT NULL,

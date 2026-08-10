@@ -1,9 +1,6 @@
 use std::pin::Pin;
 
-use mfm_canonical::{
-    CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes, RecoverabilityContract,
-    ValidatedCanonicalValue,
-};
+use mfm_canonical::{CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId};
 use mfm_journal::structured::JournalHead;
 pub use mfm_replay::portable::{ExportKind, PORTABLE_RUN_EXPORT_MEDIA_TYPE};
@@ -11,18 +8,16 @@ pub use mfm_replay::structured::{
     StructuredAccessAuditEntry as AccessAuditEntry, StructuredReplayResult as ReplayResponse,
     StructuredTransitionTrace as CanonicalTransitionTrace,
 };
-pub use mfm_spec::{EntryPointContract, PlanningProfile};
+pub use mfm_spec::{PlanningProfile, PublishedEntryPoint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncRead;
 
 use crate::{ErrorClass, PublicError};
 
-const ADMIT_RUN_REQUEST_CONTRACT: &str = "mfm.admit-run-request.v1";
 const ADMIT_RUN_RESPONSE_CONTRACT: &str = "mfm.admit-run-response.v1";
 const DRIVE_RESPONSE_CONTRACT: &str = "mfm.drive-response.v1";
 const PUBLIC_RUN_VIEW_CONTRACT: &str = "mfm.public-run-view.v1";
-const REPLAY_MODE_CONTRACT: &str = "mfm.replay-mode.v1";
 const INSPECTION_CURSOR_PREFIX: &str = "mfm.inspection-cursor.v1.";
 const MAX_CURSOR_BYTES: usize = 4_096;
 const MAX_CURSOR_ENCODED_BYTES: usize = (MAX_CURSOR_BYTES * 4).div_ceil(3);
@@ -34,13 +29,58 @@ pub const DEFAULT_PAGE_LIMIT: u16 = 100;
 /// Maximum number of entries returned by trace and audit inspection.
 pub const MAX_PAGE_LIMIT: u16 = 500;
 
-fn recoverability_contract() -> Result<&'static RecoverabilityContract, PublicError> {
-    RecoverabilityContract::embedded().map_err(|_| {
-        PublicError::internal(
-            "RecoverabilityContractUnavailable",
-            "The recoverability contract is unavailable",
+/// Lifts already-canonical JSON into the typed canonical value tree.
+fn canonical_value_from_json(value: &Value) -> Option<CanonicalValue> {
+    Some(match value {
+        Value::Null => CanonicalValue::Null,
+        Value::Bool(value) => CanonicalValue::Bool(*value),
+        Value::String(value) => CanonicalValue::String(value.clone()),
+        Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                CanonicalValue::Unsigned(value)
+            } else {
+                CanonicalValue::Signed(number.as_i64()?)
+            }
+        }
+        Value::Array(values) => CanonicalValue::Array(
+            values
+                .iter()
+                .map(canonical_value_from_json)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        Value::Object(entries) => CanonicalValue::object(
+            entries
+                .iter()
+                .map(|(key, value)| Some((key.clone(), canonical_value_from_json(value)?)))
+                .collect::<Option<Vec<_>>>()?,
         )
+        .ok()?,
     })
+}
+
+/// Validates one application response against its owner-local wire shape.
+///
+/// These responses are codec-only: nothing retains them under a `ContentRef`, so
+/// the contract is exactly their canonical bytes plus their typed wire shape and
+/// literal version.
+fn validate_response_wire(contract: &'static str, bytes: &[u8]) -> Result<(), PublicError> {
+    let invalid = || {
+        PublicError::backend(
+            ErrorClass::Internal,
+            "CanonicalResponseInvalid",
+            "A canonical application response failed validation",
+        )
+    };
+    let value: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+    let object = value.as_object().ok_or_else(invalid)?;
+    if let Some(version) = object.get("version") {
+        if version.as_str() != Some(contract) {
+            return Err(invalid());
+        }
+    } else if !object.contains_key("kind") {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 fn invalid_request(code: &'static str, message: &'static str) -> PublicError {
@@ -54,17 +94,6 @@ fn canonicalize_transport_json(
 ) -> Result<PlainCanonicalJsonBytes, PublicError> {
     let text = std::str::from_utf8(bytes).map_err(|_| invalid_request(code, message))?;
     PlainCanonicalJsonBytes::from_json_str(text).map_err(|_| invalid_request(code, message))
-}
-
-fn checked_value(
-    contract: &'static str,
-    value: CanonicalValue,
-    code: &'static str,
-    message: &'static str,
-) -> Result<ValidatedCanonicalValue, PublicError> {
-    recoverability_contract()?
-        .encode(contract, &value)
-        .map_err(|_| invalid_request(code, message))
 }
 
 fn canonical_object(
@@ -374,14 +403,14 @@ fn page_cursor_encoding_failed() -> PublicError {
     )
 }
 
-/// Strict, annex-validated admission request.
+/// Strict, owner-validated admission request.
 ///
 /// This type has no Serde implementation. Transports must pass their JSON bytes through
 /// [`Self::decode_json`], which rejects duplicate keys, floats, wrong literals, unknown fields,
 /// and invalid checked identities before authorization.
 #[derive(Clone)]
 pub struct AdmitRunRequest {
-    validated: ValidatedCanonicalValue,
+    validated: PlainCanonicalJsonBytes,
     entry_point_id: EntryPointId,
     invocation_identity: InvocationIdentity,
     input: mfm_spec::CanonicalJsonValue,
@@ -397,21 +426,14 @@ struct AdmitRunRequestWire {
 }
 
 impl AdmitRunRequest {
-    /// Decodes ordinary transport JSON and mints one annex-validated request.
+    /// Decodes ordinary transport JSON and mints one owner-validated request.
     pub fn decode_json(bytes: &[u8]) -> Result<Self, PublicError> {
         let canonical = canonicalize_transport_json(
             bytes,
             "AdmissionRequestInvalid",
             "Admission request JSON is invalid",
         )?;
-        let validated = recoverability_contract()?
-            .strict_decode(ADMIT_RUN_REQUEST_CONTRACT, canonical.as_bytes())
-            .map_err(|_| {
-                invalid_request(
-                    "AdmissionRequestInvalid",
-                    "Admission request does not match the frozen contract",
-                )
-            })?;
+        let validated = canonical.clone();
         let wire: AdmitRunRequestWire =
             serde_json::from_slice(validated.as_bytes()).map_err(|_| {
                 invalid_request(
@@ -451,10 +473,18 @@ impl AdmitRunRequest {
                 "Admission request input is not canonical JSON",
             )
         })?;
-        let input_value = recoverability_contract()?
-            .strict_decode("mfm.primitive-canonical_value.v1", input_bytes.as_bytes())
-            .and_then(|value| value.canonical_value())
-            .map_err(|_| {
+        mfm_spec::CanonicalJsonValue::from_canonical_json(input_bytes.as_bytes()).map_err(
+            |_| {
+                invalid_request(
+                    "AdmissionRequestInvalid",
+                    "Admission request input is not canonical JSON",
+                )
+            },
+        )?;
+        let input_value = serde_json::from_slice::<Value>(input_bytes.as_bytes())
+            .ok()
+            .and_then(|value| canonical_value_from_json(&value))
+            .ok_or_else(|| {
                 invalid_request(
                     "AdmissionRequestInvalid",
                     "Admission request input is not canonical JSON",
@@ -475,12 +505,15 @@ impl AdmitRunRequest {
             ),
             ("input", input_value),
         ])?;
-        let validated = checked_value(
-            ADMIT_RUN_REQUEST_CONTRACT,
-            value,
-            "AdmissionRequestInvalid",
-            "Admission request does not match the frozen contract",
-        )?;
+        let validated = PlainCanonicalJsonBytes::from_canonical_json_slice(
+            mfm_canonical::CanonicalJsonBytes::from_value(&value).as_bytes(),
+        )
+        .map_err(|_| {
+            invalid_request(
+                "AdmissionRequestInvalid",
+                "Admission request does not match the frozen contract",
+            )
+        })?;
         Ok(Self {
             validated,
             entry_point_id,
@@ -504,7 +537,7 @@ impl AdmitRunRequest {
         &self.input
     }
 
-    /// Returns the exact canonical request bytes admitted by the annex.
+    /// Returns the exact canonical request bytes this owner admitted.
     pub fn as_bytes(&self) -> &[u8] {
         self.validated.as_bytes()
     }
@@ -573,7 +606,6 @@ macro_rules! canonical_response {
         #[derive(Clone, PartialEq, Eq)]
         pub struct $name {
             canonical: PlainCanonicalJsonBytes,
-            schema_id: SchemaId,
         }
 
         impl $name {
@@ -587,29 +619,13 @@ macro_rules! canonical_response {
                             "A canonical application response failed validation",
                         )
                     })?;
-                let validated = recoverability_contract()?
-                    .strict_decode($contract, canonical.as_bytes())
-                    .map_err(|_| {
-                        PublicError::backend(
-                            ErrorClass::Internal,
-                            "CanonicalResponseInvalid",
-                            "A canonical application response failed validation",
-                        )
-                    })?;
-                Ok(Self {
-                    canonical,
-                    schema_id: validated.schema_id().clone(),
-                })
+                validate_response_wire($contract, canonical.as_bytes())?;
+                Ok(Self { canonical })
             }
 
             /// Returns exact canonical response bytes.
             pub fn as_bytes(&self) -> &[u8] {
                 self.canonical.as_bytes()
-            }
-
-            /// Returns the current response schema identity.
-            pub const fn schema_id(&self) -> &SchemaId {
-                &self.schema_id
             }
         }
 
@@ -617,7 +633,6 @@ macro_rules! canonical_response {
             fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 formatter
                     .debug_struct(stringify!($name))
-                    .field("schema_id", self.schema_id())
                     .finish_non_exhaustive()
             }
         }
@@ -627,19 +642,19 @@ macro_rules! canonical_response {
 canonical_response!(
     AdmitRunResponse,
     ADMIT_RUN_RESPONSE_CONTRACT,
-    "Exact annex-validated admission response.",
+    "Exact owner-validated admission response.",
     canonical_value
 );
 canonical_response!(
     DriveResponse,
     DRIVE_RESPONSE_CONTRACT,
-    "Exact annex-validated result of one run action.",
+    "Exact owner-validated result of one run action.",
     serializable
 );
 canonical_response!(
     PublicRunView,
     PUBLIC_RUN_VIEW_CONTRACT,
-    "Exact annex-validated ordinary public run view.",
+    "Exact owner-validated ordinary public run view.",
     serializable
 );
 
@@ -748,10 +763,7 @@ impl DriveResponse {
             mfm_runtime::structured::DriveOutcome::TransitionCommitted { closed: false }
             | mfm_runtime::structured::DriveOutcome::AccessObserved
             | mfm_runtime::structured::DriveOutcome::ConcurrentProgress => ("advanced", None),
-            mfm_runtime::structured::DriveOutcome::WaitingReads => {
-                ("waiting", Some("retryable_evidence_gap"))
-            }
-            mfm_runtime::structured::DriveOutcome::PossibleEntry => {
+            mfm_runtime::structured::DriveOutcome::PossibleEntry(_) => {
                 ("waiting", Some("operational_block"))
             }
             mfm_runtime::structured::DriveOutcome::BlockedIntegrity => {
@@ -775,7 +787,7 @@ pub enum ReplayMode {
 }
 
 impl ReplayMode {
-    /// Parses the frozen transport spelling and validates it through the annex.
+    /// Parses the exact transport spelling this owner admits.
     pub fn parse(value: &str) -> Result<Self, PublicError> {
         let mode = match value {
             "verify" => Self::Verify,
@@ -786,22 +798,12 @@ impl ReplayMode {
                 ))
             }
         };
-        recoverability_contract()?
-            .encode(
-                REPLAY_MODE_CONTRACT,
-                &CanonicalValue::String(mode.as_annex_str().to_owned()),
-            )
-            .map_err(|_| {
-                invalid_request(
-                    "ReplayModeInvalid",
-                    "Replay mode does not match the frozen contract",
-                )
-            })?;
+
         Ok(mode)
     }
 
-    /// Returns the annex spelling.
-    pub const fn as_annex_str(self) -> &'static str {
+    /// Returns the exact transport spelling.
+    pub const fn as_transport_str(self) -> &'static str {
         match self {
             Self::Verify => "verify",
         }
@@ -883,7 +885,7 @@ impl ExportedRun {
         self.content_ref.content_digest()
     }
 
-    /// Returns the annex-derived stream schema identity.
+    /// Returns the owner-derived stream schema identity.
     pub const fn schema_id(&self) -> &SchemaId {
         self.content_ref.schema_id()
     }
@@ -913,7 +915,6 @@ impl std::fmt::Debug for ExportedRun {
 mod tests {
     use mfm_ids::JournalCommitDigest;
     use mfm_journal::structured::JournalHead;
-    use serde::Deserialize;
     use static_assertions::assert_not_impl_any;
 
     use super::{
@@ -927,71 +928,67 @@ mod tests {
     assert_not_impl_any!(ExportedRun: Clone, Copy);
     assert_not_impl_any!(ReplayRequest: Clone, Copy);
 
-    #[derive(Deserialize)]
-    struct Corpus {
-        positive_vectors: Vec<Vector>,
-    }
+    /// The minimum admission request wire form.
+    const ADMIT_RUN_REQUEST_WIRE: &str = r#"{"entry_point_id":"mfm.portfolio/snapshot@1","input":{},"invocation_identity":"00000000-0000-4000-8000-000000000000","version":"mfm.admit-run-request.v1"}"#;
 
-    #[derive(Deserialize)]
-    struct Vector {
-        id: String,
-        canonical_hex: Option<String>,
-    }
+    /// The minimum attached admission response wire form.
+    const ADMIT_RUN_RESPONSE_WIRE: &str = r#"{"admission":"attached","entry_point_id":"mfm.portfolio/snapshot@1","entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","planning_profile_ref":{"content_digest":"content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111","schema_id":"schema:mfm.test.fact:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.admit-run-response.v1"}"#;
 
+    /// One advanced drive response wire form.
+    const DRIVE_RESPONSE_ADVANCED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"advanced","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// One waiting drive response wire form.
+    const DRIVE_RESPONSE_WAITING_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"waiting","reason":"retryable_evidence_gap","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// One closed drive response wire form.
+    const DRIVE_RESPONSE_CLOSED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"closed","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// The minimum public run view wire form.
+    const PUBLIC_RUN_VIEW_WIRE: &str = r#"{"entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"outcome":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","semantic_head":{"kind":"genesis"},"status":"actionable","tenant_scope_id":"mfm.tenant_scope.v1:11111111111111111111111111111111","version":"mfm.public-run-view.v1"}"#;
+    /// Every app-owned wire value decodes to its exact canonical bytes.
     #[test]
-    fn app_owned_wire_values_round_trip_the_frozen_corpus_bytes() {
-        let corpus: Corpus = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
-        )))
-        .expect("frozen corpus");
-
-        let request = vector_bytes(&corpus, "schema/mfm.admit-run-request.v1/minimum");
+    fn app_owned_wire_values_round_trip_their_exact_canonical_bytes() {
+        let request = ADMIT_RUN_REQUEST_WIRE.as_bytes();
         assert_eq!(
-            AdmitRunRequest::decode_json(&request)
+            AdmitRunRequest::decode_json(request)
                 .expect("admission request")
                 .as_bytes(),
             request
         );
 
-        let admission = vector_bytes(&corpus, "schema/mfm.admit-run-response.v1/minimum");
-        let admission = AdmitRunResponse::strict_decode(&admission).expect("admission response");
+        let admission = AdmitRunResponse::strict_decode(ADMIT_RUN_RESPONSE_WIRE.as_bytes())
+            .expect("admission response");
         assert_eq!(
             admission.admission().expect("status"),
             AdmissionStatus::Attached
         );
-        assert_eq!(
-            admission.as_bytes(),
-            vector_bytes(&corpus, "schema/mfm.admit-run-response.v1/minimum")
-        );
+        assert_eq!(admission.as_bytes(), ADMIT_RUN_RESPONSE_WIRE.as_bytes());
 
-        for id in [
-            "schema/mfm.drive-response.v1/minimum",
-            "schema/mfm.drive-response.v1/waiting",
-            "schema/mfm.drive-response.v1/closed",
+        for wire in [
+            DRIVE_RESPONSE_ADVANCED_WIRE,
+            DRIVE_RESPONSE_WAITING_WIRE,
+            DRIVE_RESPONSE_CLOSED_WIRE,
         ] {
-            let bytes = vector_bytes(&corpus, id);
             assert_eq!(
-                DriveResponse::strict_decode(&bytes)
+                DriveResponse::strict_decode(wire.as_bytes())
                     .expect("drive response")
                     .as_bytes(),
-                bytes
+                wire.as_bytes()
             );
         }
 
-        let public = vector_bytes(&corpus, "schema/mfm.public-run-view.v1/minimum");
         assert_eq!(
-            PublicRunView::strict_decode(&public)
+            PublicRunView::strict_decode(PUBLIC_RUN_VIEW_WIRE.as_bytes())
                 .expect("public run view")
                 .as_bytes(),
-            public
+            PUBLIC_RUN_VIEW_WIRE.as_bytes()
         );
     }
 
     #[test]
-    fn application_replay_mode_accepts_only_the_annex_spelling() {
+    fn application_replay_mode_accepts_only_the_current_spelling() {
         assert_eq!(
-            ReplayMode::parse("verify").expect("annex mode"),
+            ReplayMode::parse("verify").expect("current mode"),
             ReplayMode::Verify
         );
         assert!(ReplayMode::parse("reproduce").is_err());
@@ -1111,37 +1108,13 @@ mod tests {
 
     #[test]
     fn drive_response_rejects_the_superseded_outcome_discriminator() {
-        let corpus: Corpus = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
-        )))
-        .expect("frozen corpus");
-        let canonical = vector_bytes(&corpus, "schema/mfm.drive-response.v1/minimum");
         let value: serde_json::Value =
-            serde_json::from_slice(&canonical).expect("drive response JSON");
+            serde_json::from_str(DRIVE_RESPONSE_ADVANCED_WIRE).expect("drive response JSON");
         let mut object = value.as_object().expect("drive response object").clone();
         let kind = object.remove("kind").expect("drive response kind");
         object.insert("outcome".to_owned(), kind);
         let superseded = serde_json::to_vec(&object).expect("superseded drive response JSON");
 
         assert!(DriveResponse::strict_decode(&superseded).is_err());
-    }
-
-    fn vector_bytes(corpus: &Corpus, id: &str) -> Vec<u8> {
-        let encoded = corpus
-            .positive_vectors
-            .iter()
-            .find(|vector| vector.id == id)
-            .and_then(|vector| vector.canonical_hex.as_deref())
-            .expect("golden vector");
-        assert_eq!(encoded.len() % 2, 0);
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let text = std::str::from_utf8(pair).expect("hex pair");
-                u8::from_str_radix(text, 16).expect("hex byte")
-            })
-            .collect()
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use mfm_ids::{DigestAlgorithm, SchemaId};
 
 fn stable(value: &str) -> StableId {
     StableId::new(value).expect("stable fixture id")

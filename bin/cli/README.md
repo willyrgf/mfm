@@ -65,4 +65,4 @@ target/session provider. Therefore `ops list` and every `run` operation fail clo
 A deployment embeds or wraps the transport around a fully composed `mfm_app::Application`.
 Keystore commands remain locally usable because they do not construct run or wallet authority.
 
-See [the application surface contract](../../docs/recoverability-app-surface-v1.md).
+See [the application surface contract](../../docs/persisted-public-surfaces.md).

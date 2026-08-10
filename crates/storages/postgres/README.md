@@ -84,7 +84,7 @@ request replay returns the original revision; a stale predecessor or changed val
 ## Verification
 
 ```sh
-nix run .#run -- --task recoverability-postgres-v1
+nix run .#run -- --task structured-history-postgres-qualification
 nix run .#run -- --task postgres-sqlx-check
 nix run .#run -- --task postgres-sqlx-offline-check
 nix run .#run -- --task postgres-sql-inventory-check

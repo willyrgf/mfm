@@ -6,7 +6,7 @@ The domain port and canonical request/proof types live in `mfm-evm`. This crate 
 role-specific private pools, the provider protocol that authenticates the chain-registry lineage
 and route-membership catalog at a pinned non-rollback head, target/session enforcement, permanent
 operation keys, and linearizable status/reserve/activate/complete transactions. It performs no
-JSON-RPC, signing, Runtime scheduling, or RunHistory folding.
+JSON-RPC, signing, Runtime scheduling, or RunHistory reduction.
 
 `migrations/0001_wallet_authority.sql` is the one current schema. It creates separately privileged
 owner, activation-registry admin/public, and wallet-application surfaces. Normal status/mutation

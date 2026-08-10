@@ -38,7 +38,7 @@ type PriorRunFactScanInvoker = Box<
 
 /// Complete producer-free request to admit one certified run (store-internal).
 ///
-/// Run identity is supplied only after the adapter derives it from the annex
+/// Run identity is supplied only after the adapter derives it from the owner
 /// preimage; public callers use [`mfm_runtime::history::StructuredAdmissionCommand`].
 pub struct StructuredAdmissionRequest {
     pub(super) run_id: mfm_ids::RunId,

@@ -279,7 +279,7 @@ impl<'de> Deserialize<'de> for StoreScopeId {
 
 /// Store generation used to fence append writers.
 ///
-/// The recoverability-v1 wire form is a canonical decimal `u64` JSON string.
+/// The wire form is a canonical decimal `u64` JSON string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StoreEpoch(u64);
 

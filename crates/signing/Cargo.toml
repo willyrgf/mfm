@@ -17,6 +17,7 @@ zeroize = "1.7"
 mfm-canonical = { path = "../kernel/canonical" }
 mfm-capabilities = { path = "../kernel/capabilities" }
 mfm-ids = { path = "../kernel/ids" }
+mfm-values = { path = "../kernel/values" }
 
 [dev-dependencies]
 tokio = { workspace = true }

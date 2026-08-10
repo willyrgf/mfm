@@ -1255,7 +1255,7 @@ where
     registry.register_state::<S>(
         descriptor(
             StructuredComponentKind::State,
-            contract.state_contract_ref,
+            contract.content_ref()?,
             stable(format!(
                 "mfm.evm.implementation/{}",
                 S::semantic_state_id()
@@ -1321,3 +1321,4 @@ fn stable(value: impl AsRef<str>) -> mfm_program::Result<StableId> {
 fn certification_error(error: impl std::fmt::Display) -> mfm_certify::CertifyError {
     mfm_certify::CertifyError::Certification(error.to_string())
 }
+use mfm_values::CanonicalJsonPersistedSchema;
