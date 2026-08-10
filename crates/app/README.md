@@ -36,6 +36,11 @@ per-run identity. Admission performs no provider or signer IO and does not drive
 and export use purpose projections derived from qualified history by the same pure reducer. Replay
 is verification-only and has no live or caller-supplied comparison path.
 
+Admission, one-action drive, and public-run responses each have a separate closed decoder. Their
+required versions, typed identities, allowed variants, unknown-field rejection, and owner-specific
+cross-field invariants are validated before the app exposes canonical response bytes; response
+bytes from one owner are not accepted by another.
+
 ## Production composition
 
 `connect_production_application` requires:

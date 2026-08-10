@@ -1,10 +1,11 @@
 use std::pin::Pin;
 
-use mfm_canonical::{CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes};
+use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes};
 use mfm_ids::{
-    ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId, TenantScopeId,
+    ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity, RunId, SchemaId,
+    StableId, TenantScopeId,
 };
-use mfm_journal::structured::JournalHead;
+use mfm_journal::structured::{JournalHead, LexicalValueRef, RecordRef, SemanticHead};
 pub use mfm_replay::portable::{ExportKind, PORTABLE_RUN_EXPORT_MEDIA_TYPE};
 pub use mfm_replay::structured::{
     StructuredAccessAuditEntry as AccessAuditEntry, StructuredReplayResult as ReplayResponse,
@@ -12,7 +13,8 @@ pub use mfm_replay::structured::{
 };
 use mfm_runtime::history::{EffectEntryAttentionResolution, EffectEntrySubject};
 pub use mfm_spec::{PlanningProfile, PublishedEntryPoint};
-use serde::{Deserialize, Serialize};
+use mfm_values::PersistedSchema as _;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::AsyncRead;
 
@@ -61,29 +63,38 @@ fn canonical_value_from_json(value: &Value) -> Option<CanonicalValue> {
     })
 }
 
-/// Validates one application response against its owner-local wire shape.
-///
-/// These responses are codec-only: nothing retains them under a `ContentRef`, so
-/// the contract is exactly their canonical bytes plus their typed wire shape and
-/// literal version.
-fn validate_response_wire(contract: &'static str, bytes: &[u8]) -> Result<(), PublicError> {
-    let invalid = || {
-        PublicError::backend(
-            ErrorClass::Internal,
-            "CanonicalResponseInvalid",
-            "A canonical application response failed validation",
-        )
-    };
-    let value: Value = serde_json::from_slice(bytes).map_err(|_| invalid())?;
-    let object = value.as_object().ok_or_else(invalid)?;
-    if let Some(version) = object.get("version") {
-        if version.as_str() != Some(contract) {
-            return Err(invalid());
-        }
-    } else if !object.contains_key("kind") {
-        return Err(invalid());
+fn canonical_response_invalid() -> PublicError {
+    PublicError::backend(
+        ErrorClass::Internal,
+        "CanonicalResponseInvalid",
+        "A canonical application response failed validation",
+    )
+}
+
+/// Decodes one exact owner wire and rejects every alternate spelling.
+fn decode_exact_response<T>(bytes: &[u8]) -> Result<(PlainCanonicalJsonBytes, T), PublicError>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|_| canonical_response_invalid())?;
+    let wire: T =
+        serde_json::from_slice(canonical.as_bytes()).map_err(|_| canonical_response_invalid())?;
+    let encoded =
+        mfm_journal::structured::canonical_json(&wire).map_err(|_| canonical_response_invalid())?;
+    if encoded.as_bytes() != canonical.as_bytes() {
+        return Err(canonical_response_invalid());
     }
-    Ok(())
+    Ok((canonical, wire))
+}
+
+fn encode_exact_response<T: Serialize>(wire: &T) -> Result<PlainCanonicalJsonBytes, PublicError> {
+    mfm_journal::structured::canonical_json(wire).map_err(|_| {
+        PublicError::internal(
+            "CanonicalResponseConstructionFailed",
+            "A canonical response could not be constructed",
+        )
+    })
 }
 
 fn invalid_request(code: &'static str, message: &'static str) -> PublicError {
@@ -108,19 +119,6 @@ fn canonical_object(
             "A canonical response could not be constructed",
         )
     })
-}
-
-fn canonical_content_ref(value: &ContentRef) -> Result<CanonicalValue, PublicError> {
-    canonical_object([
-        (
-            "schema_id",
-            CanonicalValue::String(value.schema_id().as_str().to_owned()),
-        ),
-        (
-            "content_digest",
-            CanonicalValue::String(value.content_digest().as_str().to_owned()),
-        ),
-    ])
 }
 
 /// Shared transport request for one fixed-head trace or audit page.
@@ -724,121 +722,77 @@ impl AdmissionStatus {
     }
 }
 
-macro_rules! canonical_response {
-    ($name:ident, $contract:expr, $description:literal, canonical_value) => {
-        canonical_response!(@base $name, $contract, $description);
-
-        impl $name {
-            pub(crate) fn from_canonical_value(value: CanonicalValue) -> Result<Self, PublicError> {
-                let canonical = mfm_canonical::CanonicalJsonBytes::from_value(&value);
-                Self::strict_decode(canonical.as_bytes())
-            }
-        }
-    };
-    ($name:ident, $contract:expr, $description:literal, serializable) => {
-        canonical_response!(@base $name, $contract, $description);
-
-        impl $name {
-            pub(crate) fn from_serializable(value: &impl Serialize) -> Result<Self, PublicError> {
-                let canonical = mfm_journal::structured::canonical_json(value).map_err(|_| {
-                    PublicError::internal(
-                        "CanonicalResponseConstructionFailed",
-                        "A canonical response could not be constructed",
-                    )
-                })?;
-                Self::strict_decode(canonical.as_bytes())
-            }
-        }
-    };
-    (@base $name:ident, $contract:expr, $description:literal) => {
-        #[doc = $description]
-        #[derive(Clone, PartialEq, Eq)]
-        pub struct $name {
-            canonical: PlainCanonicalJsonBytes,
-        }
-
-        impl $name {
-            /// Strictly decodes exact canonical float-free response bytes.
-            pub fn strict_decode(bytes: &[u8]) -> Result<Self, PublicError> {
-                let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-                    .map_err(|_| {
-                        PublicError::backend(
-                            ErrorClass::Internal,
-                            "CanonicalResponseInvalid",
-                            "A canonical application response failed validation",
-                        )
-                    })?;
-                validate_response_wire($contract, canonical.as_bytes())?;
-                Ok(Self { canonical })
-            }
-
-            /// Returns exact canonical response bytes.
-            pub fn as_bytes(&self) -> &[u8] {
-                self.canonical.as_bytes()
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter
-                    .debug_struct(stringify!($name))
-                    .finish_non_exhaustive()
-            }
-        }
-    };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AdmissionStatusWire {
+    NewlyAdmitted,
+    Attached,
+    OutcomeUnknown,
 }
 
-canonical_response!(
-    AdmitRunResponse,
-    ADMIT_RUN_RESPONSE_CONTRACT,
-    "Exact owner-validated admission response.",
-    canonical_value
-);
-canonical_response!(
-    DriveResponse,
-    DRIVE_RESPONSE_CONTRACT,
-    "Exact owner-validated result of one run action.",
-    serializable
-);
-canonical_response!(
-    PublicRunView,
-    PUBLIC_RUN_VIEW_CONTRACT,
-    "Exact owner-validated ordinary public run view.",
-    serializable
-);
-
-impl PublicRunView {
-    pub(crate) fn from_structured(
-        evidence: &mfm_store::structured::PublicRunEvidence,
-    ) -> Result<Self, PublicError> {
-        let outcome = mfm_replay::structured::project_operation_outcome(evidence)
-            .map_err(|_| PublicError::replay_verification_failed())?
-            .map(|outcome| {
-                let value: serde_json::Value =
-                    serde_json::from_slice(outcome.canonical_value().as_bytes())
-                        .map_err(|_| PublicError::replay_verification_failed())?;
-                Ok::<_, PublicError>(serde_json::json!({
-                    "kind": outcome.kind(),
-                    "value_ref": outcome.value(),
-                    "value": value,
-                }))
-            })
-            .transpose()?;
-        Self::from_serializable(&serde_json::json!({
-            "version": PUBLIC_RUN_VIEW_CONTRACT,
-            "run_id": evidence.run_id(),
-            "tenant_scope_id": evidence.header().tenant_scope_id(),
-            "invocation_identity": evidence.header().invocation_identity(),
-            "entry_point_operation_id": evidence.header().entry_point_operation_id(),
-            "journal_head": evidence.journal_head(),
-            "semantic_head": evidence.semantic_head(),
-            "status": evidence.status().as_str(),
-            "outcome": outcome,
-        }))
+impl From<AdmissionStatus> for AdmissionStatusWire {
+    fn from(value: AdmissionStatus) -> Self {
+        match value {
+            AdmissionStatus::NewlyAdmitted => Self::NewlyAdmitted,
+            AdmissionStatus::Attached => Self::Attached,
+            AdmissionStatus::OutcomeUnknown => Self::OutcomeUnknown,
+        }
     }
 }
 
+impl From<AdmissionStatusWire> for AdmissionStatus {
+    fn from(value: AdmissionStatusWire) -> Self {
+        match value {
+            AdmissionStatusWire::NewlyAdmitted => Self::NewlyAdmitted,
+            AdmissionStatusWire::Attached => Self::Attached,
+            AdmissionStatusWire::OutcomeUnknown => Self::OutcomeUnknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdmitRunResponseWire {
+    version: String,
+    run_id: RunId,
+    admission: AdmissionStatusWire,
+    entry_point_id: EntryPointId,
+    entry_point_operation_id: StableId,
+    invocation_identity: InvocationIdentity,
+    planning_profile_ref: ContentRef,
+}
+
+impl AdmitRunResponseWire {
+    fn validate(&self) -> Result<(), PublicError> {
+        let planning_profile_schema =
+            PlanningProfile::schema_id().map_err(|_| canonical_response_invalid())?;
+        if self.version != ADMIT_RUN_RESPONSE_CONTRACT
+            || self.planning_profile_ref.schema_id() != &planning_profile_schema
+        {
+            return Err(canonical_response_invalid());
+        }
+        Ok(())
+    }
+}
+
+/// Exact owner-validated admission response.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmitRunResponse {
+    canonical: PlainCanonicalJsonBytes,
+    admission: AdmissionStatus,
+}
+
 impl AdmitRunResponse {
+    /// Strictly decodes the one current canonical admission-response language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self, PublicError> {
+        let (canonical, wire) = decode_exact_response::<AdmitRunResponseWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self {
+            canonical,
+            admission: wire.admission.into(),
+        })
+    }
+
     pub(crate) fn new(
         run_id: &RunId,
         admission: AdmissionStatus,
@@ -847,84 +801,316 @@ impl AdmitRunResponse {
         invocation_identity: &InvocationIdentity,
         planning_profile_ref: &ContentRef,
     ) -> Result<Self, PublicError> {
-        Self::from_canonical_value(canonical_object([
-            (
-                "version",
-                CanonicalValue::String(ADMIT_RUN_RESPONSE_CONTRACT.to_owned()),
-            ),
-            ("run_id", CanonicalValue::String(run_id.as_str().to_owned())),
-            (
-                "admission",
-                CanonicalValue::String(admission.as_str().to_owned()),
-            ),
-            (
-                "entry_point_id",
-                CanonicalValue::String(entry_point_id.as_str().to_owned()),
-            ),
-            (
-                "entry_point_operation_id",
-                CanonicalValue::String(entry_point_operation_id.as_str().to_owned()),
-            ),
-            (
-                "invocation_identity",
-                CanonicalValue::String(invocation_identity.as_str().to_owned()),
-            ),
-            (
-                "planning_profile_ref",
-                canonical_content_ref(planning_profile_ref)?,
-            ),
-        ])?)
+        let wire = AdmitRunResponseWire {
+            version: ADMIT_RUN_RESPONSE_CONTRACT.to_owned(),
+            run_id: run_id.clone(),
+            admission: admission.into(),
+            entry_point_id: entry_point_id.clone(),
+            entry_point_operation_id: entry_point_operation_id.clone(),
+            invocation_identity: invocation_identity.clone(),
+            planning_profile_ref: planning_profile_ref.clone(),
+        };
+        wire.validate()?;
+        let canonical = encode_exact_response(&wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Returns exact canonical response bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
     }
 
     /// Returns the admission observation used by transport status mapping.
-    pub fn admission(&self) -> Result<AdmissionStatus, PublicError> {
-        #[derive(Deserialize)]
-        struct Wire {
-            admission: String,
-        }
-        let wire: Wire = serde_json::from_slice(self.as_bytes()).map_err(|_| {
-            PublicError::internal(
-                "CanonicalResponseProjectionFailed",
-                "A canonical application response could not be projected",
-            )
-        })?;
-        match wire.admission.as_str() {
-            "newly_admitted" => Ok(AdmissionStatus::NewlyAdmitted),
-            "attached" => Ok(AdmissionStatus::Attached),
-            "outcome_unknown" => Ok(AdmissionStatus::OutcomeUnknown),
-            _ => Err(PublicError::internal(
-                "CanonicalResponseProjectionFailed",
-                "A canonical application response could not be projected",
-            )),
-        }
+    pub const fn admission(&self) -> AdmissionStatus {
+        self.admission
     }
 }
 
+impl std::fmt::Debug for AdmitRunResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AdmitRunResponse")
+            .field("admission", &self.admission)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DriveWaitingReasonWire {
+    OperationalBlock,
+    IntegrityBlock,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum DriveResponseWire {
+    Advanced {
+        version: String,
+        run_id: RunId,
+        journal_head: JournalHead,
+        reason: (),
+    },
+    Waiting {
+        version: String,
+        run_id: RunId,
+        journal_head: JournalHead,
+        reason: DriveWaitingReasonWire,
+    },
+    Closed {
+        version: String,
+        run_id: RunId,
+        journal_head: JournalHead,
+        reason: (),
+    },
+}
+
+impl DriveResponseWire {
+    fn validate(&self) -> Result<(), PublicError> {
+        let (version, journal_head) = match self {
+            Self::Advanced {
+                version,
+                journal_head,
+                ..
+            }
+            | Self::Waiting {
+                version,
+                journal_head,
+                ..
+            }
+            | Self::Closed {
+                version,
+                journal_head,
+                ..
+            } => (version, journal_head),
+        };
+        if version != DRIVE_RESPONSE_CONTRACT || journal_head.run_sequence == 0 {
+            return Err(canonical_response_invalid());
+        }
+        Ok(())
+    }
+}
+
+/// Exact owner-validated result of one run action.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DriveResponse {
+    canonical: PlainCanonicalJsonBytes,
+}
+
 impl DriveResponse {
+    /// Strictly decodes the one current canonical drive-response language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self, PublicError> {
+        let (canonical, wire) = decode_exact_response::<DriveResponseWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self { canonical })
+    }
+
     pub(crate) fn from_runtime(
         run_id: &RunId,
         outcome: mfm_runtime::structured::DriveOutcome,
         journal_head: &JournalHead,
     ) -> Result<Self, PublicError> {
-        let (kind, reason) = match outcome {
+        let version = DRIVE_RESPONSE_CONTRACT.to_owned();
+        let wire = match outcome {
             mfm_runtime::structured::DriveOutcome::TransitionCommitted { closed: true }
-            | mfm_runtime::structured::DriveOutcome::Closed => ("closed", None),
+            | mfm_runtime::structured::DriveOutcome::Closed => DriveResponseWire::Closed {
+                version,
+                run_id: run_id.clone(),
+                journal_head: journal_head.clone(),
+                reason: (),
+            },
             mfm_runtime::structured::DriveOutcome::TransitionCommitted { closed: false }
             | mfm_runtime::structured::DriveOutcome::AccessObserved
-            | mfm_runtime::structured::DriveOutcome::ConcurrentProgress => ("advanced", None),
-            mfm_runtime::structured::DriveOutcome::PossibleEntry(_) => {
-                ("waiting", Some("operational_block"))
+            | mfm_runtime::structured::DriveOutcome::ConcurrentProgress => {
+                DriveResponseWire::Advanced {
+                    version,
+                    run_id: run_id.clone(),
+                    journal_head: journal_head.clone(),
+                    reason: (),
+                }
             }
-            mfm_runtime::structured::DriveOutcome::BlockedIntegrity => {
-                ("waiting", Some("integrity_block"))
-            }
+            mfm_runtime::structured::DriveOutcome::PossibleEntry(_) => DriveResponseWire::Waiting {
+                version,
+                run_id: run_id.clone(),
+                journal_head: journal_head.clone(),
+                reason: DriveWaitingReasonWire::OperationalBlock,
+            },
+            mfm_runtime::structured::DriveOutcome::BlockedIntegrity => DriveResponseWire::Waiting {
+                version,
+                run_id: run_id.clone(),
+                journal_head: journal_head.clone(),
+                reason: DriveWaitingReasonWire::IntegrityBlock,
+            },
         };
-        Self::from_serializable(&serde_json::json!({
-            "kind": kind,
-            "run_id": run_id,
-            "journal_head": journal_head,
-            "reason": reason,
-        }))
+        wire.validate()?;
+        let canonical = encode_exact_response(&wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Returns exact canonical response bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for DriveResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DriveResponse")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PublicRunStatusWire {
+    Actionable,
+    PossibleEntry,
+    BlockedIntegrity,
+    Closed,
+}
+
+impl PublicRunStatusWire {
+    fn parse(value: &str) -> Result<Self, PublicError> {
+        match value {
+            "actionable" => Ok(Self::Actionable),
+            "possible_entry" => Ok(Self::PossibleEntry),
+            "blocked_integrity" => Ok(Self::BlockedIntegrity),
+            "closed" => Ok(Self::Closed),
+            _ => Err(canonical_response_invalid()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum PublicOutcomeKindWire {
+    Success,
+    Failure,
+}
+
+impl PublicOutcomeKindWire {
+    fn parse(value: &str) -> Result<Self, PublicError> {
+        match value {
+            "success" => Ok(Self::Success),
+            "failure" => Ok(Self::Failure),
+            _ => Err(canonical_response_invalid()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicOperationOutcomeWire {
+    kind: PublicOutcomeKindWire,
+    value_ref: LexicalValueRef,
+    value: mfm_spec::CanonicalJsonValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PublicRunViewWire {
+    version: String,
+    run_id: RunId,
+    tenant_scope_id: TenantScopeId,
+    invocation_identity: InvocationIdentity,
+    entry_point_operation_id: StableId,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
+    status: PublicRunStatusWire,
+    outcome: Option<PublicOperationOutcomeWire>,
+}
+
+impl PublicRunViewWire {
+    fn validate(&self) -> Result<(), PublicError> {
+        let semantic_ref = semantic_record_ref(&self.semantic_head);
+        if self.version != PUBLIC_RUN_VIEW_CONTRACT
+            || self.journal_head.run_sequence == 0
+            || semantic_ref.run_sequence == 0
+            || semantic_ref.run_id != self.run_id
+            || semantic_ref.run_sequence > self.journal_head.run_sequence
+            || matches!(self.status, PublicRunStatusWire::Closed) != self.outcome.is_some()
+        {
+            return Err(canonical_response_invalid());
+        }
+        if let Some(outcome) = &self.outcome {
+            let canonical = mfm_journal::structured::canonical_json(&outcome.value)
+                .map_err(|_| canonical_response_invalid())?;
+            let digest = ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical.as_bytes()),
+            );
+            if outcome.value_ref.value.value_ref.content_digest() != &digest {
+                return Err(canonical_response_invalid());
+            }
+        }
+        Ok(())
+    }
+}
+
+fn semantic_record_ref(head: &SemanticHead) -> &RecordRef {
+    match head {
+        SemanticHead::Genesis { admission_ref, .. } => admission_ref,
+        SemanticHead::Transition { transition_ref, .. } => transition_ref,
+    }
+}
+
+/// Exact owner-validated ordinary public run view.
+#[derive(Clone, PartialEq, Eq)]
+pub struct PublicRunView {
+    canonical: PlainCanonicalJsonBytes,
+}
+
+impl PublicRunView {
+    /// Strictly decodes the one current canonical public-run-view language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self, PublicError> {
+        let (canonical, wire) = decode_exact_response::<PublicRunViewWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self { canonical })
+    }
+
+    pub(crate) fn from_structured(
+        evidence: &mfm_store::structured::PublicRunEvidence,
+    ) -> Result<Self, PublicError> {
+        let outcome = mfm_replay::structured::project_operation_outcome(evidence)
+            .map_err(|_| PublicError::replay_verification_failed())?
+            .map(|outcome| {
+                let value = serde_json::from_slice(outcome.canonical_value().as_bytes())
+                    .map_err(|_| PublicError::replay_verification_failed())?;
+                Ok::<_, PublicError>(PublicOperationOutcomeWire {
+                    kind: PublicOutcomeKindWire::parse(outcome.kind())?,
+                    value_ref: outcome.value().clone(),
+                    value,
+                })
+            })
+            .transpose()?;
+        let wire = PublicRunViewWire {
+            version: PUBLIC_RUN_VIEW_CONTRACT.to_owned(),
+            run_id: evidence.run_id().clone(),
+            tenant_scope_id: evidence.header().tenant_scope_id().clone(),
+            invocation_identity: evidence.header().invocation_identity().clone(),
+            entry_point_operation_id: evidence.header().entry_point_operation_id().clone(),
+            journal_head: evidence.journal_head().clone(),
+            semantic_head: evidence.semantic_head().clone(),
+            status: PublicRunStatusWire::parse(evidence.status().as_str())?,
+            outcome,
+        };
+        wire.validate()?;
+        let canonical = encode_exact_response(&wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Returns exact canonical response bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
+    }
+}
+
+impl std::fmt::Debug for PublicRunView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PublicRunView")
+            .finish_non_exhaustive()
     }
 }
 
@@ -1092,20 +1278,43 @@ mod tests {
     /// The minimum admission request wire form.
     const ADMIT_RUN_REQUEST_WIRE: &str = r#"{"entry_point_id":"mfm.portfolio/snapshot@1","input":{},"invocation_identity":"00000000-0000-4000-8000-000000000000","version":"mfm.admit-run-request.v1"}"#;
 
-    /// The minimum attached admission response wire form.
-    const ADMIT_RUN_RESPONSE_WIRE: &str = r#"{"admission":"attached","entry_point_id":"mfm.portfolio/snapshot@1","entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","planning_profile_ref":{"content_digest":"content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111","schema_id":"schema:mfm.test.fact:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.admit-run-response.v1"}"#;
-
     /// One advanced drive response wire form.
-    const DRIVE_RESPONSE_ADVANCED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"advanced","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    const DRIVE_RESPONSE_ADVANCED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"advanced","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.drive-response.v1"}"#;
 
     /// One waiting drive response wire form.
-    const DRIVE_RESPONSE_WAITING_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"waiting","reason":"retryable_evidence_gap","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    const DRIVE_RESPONSE_WAITING_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"waiting","reason":"operational_block","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.drive-response.v1"}"#;
 
     /// One closed drive response wire form.
-    const DRIVE_RESPONSE_CLOSED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"closed","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+    const DRIVE_RESPONSE_CLOSED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"closed","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.drive-response.v1"}"#;
 
     /// The minimum public run view wire form.
-    const PUBLIC_RUN_VIEW_WIRE: &str = r#"{"entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"outcome":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","semantic_head":{"kind":"genesis"},"status":"actionable","tenant_scope_id":"mfm.tenant_scope.v1:11111111111111111111111111111111","version":"mfm.public-run-view.v1"}"#;
+    const PUBLIC_RUN_VIEW_WIRE: &str = r#"{"entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"outcome":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","semantic_head":{"admission_ref":{"ordinal":0,"record_hash":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"genesis","semantic_state_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"status":"actionable","tenant_scope_id":"mfm.tenant_scope.v1:11111111111111111111111111111111","version":"mfm.public-run-view.v1"}"#;
+
+    fn admit_run_response_wire() -> Vec<u8> {
+        let planning_profile_schema =
+            <mfm_spec::PlanningProfile as mfm_values::PersistedSchema>::schema_id()
+                .expect("planning profile schema");
+        canonical_test_bytes(&serde_json::json!({
+            "admission": "attached",
+            "entry_point_id": "mfm.portfolio/snapshot@1",
+            "entry_point_operation_id": "mfm.portfolio/snapshot",
+            "invocation_identity": "00000000-0000-4000-8000-000000000000",
+            "planning_profile_ref": {
+                "content_digest": format!("content:sha256-v1:{}", "1".repeat(64)),
+                "schema_id": planning_profile_schema,
+            },
+            "run_id": format!("run:sha256-jcs-v1:{}", "0".repeat(64)),
+            "version": "mfm.admit-run-response.v1",
+        }))
+    }
+
+    fn canonical_test_bytes(value: &serde_json::Value) -> Vec<u8> {
+        mfm_journal::structured::canonical_json(value)
+            .expect("canonical test response")
+            .as_bytes()
+            .to_vec()
+    }
+
     /// Every app-owned wire value decodes to its exact canonical bytes.
     #[test]
     fn app_owned_wire_values_round_trip_their_exact_canonical_bytes() {
@@ -1117,13 +1326,11 @@ mod tests {
             request
         );
 
-        let admission = AdmitRunResponse::strict_decode(ADMIT_RUN_RESPONSE_WIRE.as_bytes())
-            .expect("admission response");
-        assert_eq!(
-            admission.admission().expect("status"),
-            AdmissionStatus::Attached
-        );
-        assert_eq!(admission.as_bytes(), ADMIT_RUN_RESPONSE_WIRE.as_bytes());
+        let admission_wire = admit_run_response_wire();
+        let admission =
+            AdmitRunResponse::strict_decode(&admission_wire).expect("admission response");
+        assert_eq!(admission.admission(), AdmissionStatus::Attached);
+        assert_eq!(admission.as_bytes(), admission_wire);
 
         for wire in [
             DRIVE_RESPONSE_ADVANCED_WIRE,
@@ -1277,5 +1484,43 @@ mod tests {
         let superseded = serde_json::to_vec(&object).expect("superseded drive response JSON");
 
         assert!(DriveResponse::strict_decode(&superseded).is_err());
+    }
+
+    #[test]
+    fn response_owners_reject_incomplete_unknown_and_cross_owner_bytes() {
+        let garbage = br#"{"kind":"garbage"}"#;
+        assert!(AdmitRunResponse::strict_decode(garbage).is_err());
+        assert!(DriveResponse::strict_decode(garbage).is_err());
+        assert!(PublicRunView::strict_decode(garbage).is_err());
+
+        assert!(AdmitRunResponse::strict_decode(DRIVE_RESPONSE_ADVANCED_WIRE.as_bytes()).is_err());
+        assert!(PublicRunView::strict_decode(DRIVE_RESPONSE_ADVANCED_WIRE.as_bytes()).is_err());
+
+        let mut drive: serde_json::Value =
+            serde_json::from_str(DRIVE_RESPONSE_ADVANCED_WIRE).expect("drive response");
+        drive["reason"] = serde_json::json!("operational_block");
+        assert!(DriveResponse::strict_decode(&canonical_test_bytes(&drive)).is_err());
+        drive["reason"] = serde_json::Value::Null;
+        drive["extra"] = serde_json::json!(true);
+        assert!(DriveResponse::strict_decode(&canonical_test_bytes(&drive)).is_err());
+
+        let mut admission: serde_json::Value =
+            serde_json::from_slice(&admit_run_response_wire()).expect("admission response");
+        admission["planning_profile_ref"]["schema_id"] = serde_json::json!(format!(
+            "schema:mfm.foreign:1:sha256-jcs-v1:{}",
+            "2".repeat(64)
+        ));
+        assert!(AdmitRunResponse::strict_decode(&canonical_test_bytes(&admission)).is_err());
+
+        let mut public: serde_json::Value =
+            serde_json::from_str(PUBLIC_RUN_VIEW_WIRE).expect("public run view");
+        public["status"] = serde_json::json!("closed");
+        assert!(PublicRunView::strict_decode(&canonical_test_bytes(&public)).is_err());
+        public["status"] = serde_json::json!("actionable");
+        public
+            .as_object_mut()
+            .expect("public run view object")
+            .remove("version");
+        assert!(PublicRunView::strict_decode(&canonical_test_bytes(&public)).is_err());
     }
 }
