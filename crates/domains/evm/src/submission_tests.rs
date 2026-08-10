@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, B256, U256};
+use mfm_capabilities::EffectCapabilityImplementation;
 use mfm_ids::{InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
 use mfm_journal::structured::{LexicalValueRef, TypedValueRef};
 use mfm_program::structured::{
@@ -76,6 +77,121 @@ fn candidate_families_require_strict_increase_on_both_fee_axes() {
     let mut wire = serde_json::to_value(&valid_family).expect("serialize candidate family");
     wire["candidates"][1]["max_priority_fee_per_gas"] = serde_json::json!("2");
     assert!(serde_json::from_value::<EvmCandidateFamily>(wire).is_err());
+}
+
+#[test]
+fn candidate_operation_keys_bind_the_exact_reservation_and_ordinal() {
+    let fixture = QualificationFixture::new().expect("qualification fixture");
+    let reservation = &fixture.post_reserve.reservation;
+    let submission = &fixture.prepared.intent.derived.request;
+    let exact = fixture.active.active_candidate.clone();
+    let wrong_ordinal_key = crate::derive_evm_candidate_operation_key(
+        &reservation.semantic_reservation_key,
+        exact
+            .attested_candidate
+            .candidate_ordinal
+            .checked_add(1)
+            .expect("next ordinal"),
+    )
+    .expect("wrong-ordinal key remains syntactically valid");
+    assert!(wrong_ordinal_key.validate().is_ok());
+
+    let mut foreign_reservation_wire =
+        serde_json::to_value(&reservation.semantic_reservation_key).expect("reservation key JSON");
+    let mut foreign_digest = reservation.semantic_reservation_key.as_str().to_owned();
+    let replacement = if foreign_digest.ends_with('0') {
+        '1'
+    } else {
+        '0'
+    };
+    foreign_digest.pop();
+    foreign_digest.push(replacement);
+    foreign_reservation_wire["digest"] = serde_json::json!(foreign_digest);
+    let foreign_reservation: crate::EvmNonceReservationKey =
+        serde_json::from_value(foreign_reservation_wire).expect("foreign reservation key");
+    let foreign_key = crate::derive_evm_candidate_operation_key(
+        &foreign_reservation,
+        exact.attested_candidate.candidate_ordinal,
+    )
+    .expect("foreign-reservation key remains syntactically valid");
+
+    let validator = crate::EvmSubmissionCapabilityImplementation::new()
+        .expect("submission capability validator");
+    for wrong_key in [wrong_ordinal_key, foreign_key] {
+        let mut wrong = exact.clone();
+        wrong.candidate_operation_key = wrong_key;
+        assert!(wrong.candidate_operation_key.validate().is_ok());
+        assert!(crate::validate_active_wallet_candidate_prefix(
+            reservation,
+            submission.transaction_intent(),
+            submission.candidate_family(),
+            std::slice::from_ref(&wrong),
+        )
+        .is_err());
+        assert!(crate::derive_exact_candidate_activation_permit(
+            reservation,
+            std::slice::from_ref(&wrong),
+            1,
+            1,
+        )
+        .is_err());
+
+        for response in [
+            crate::ActivateCandidateResponse::Activated {
+                candidate: wrong.clone(),
+            },
+            crate::ActivateCandidateResponse::AlreadyRetained {
+                candidate: wrong.clone(),
+            },
+        ] {
+            assert!(
+                <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+                    crate::ActivateWalletCandidateCapability,
+                >>::validate_returned(&validator, &response)
+                .is_err()
+            );
+            assert_eq!(
+                submission_process::settle_candidate_activation(
+                    &fixture.prepared_activation,
+                    &response,
+                ),
+                StateSettlement::InvalidEvidence
+            );
+        }
+
+        let mut broadcast = submission_process::broadcast_request(&fixture.active);
+        broadcast.active_candidate = wrong;
+        assert!(
+            <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+                crate::BroadcastExactCandidateCapability,
+            >>::validate_request(&validator, &broadcast)
+            .is_err()
+        );
+    }
+
+    let exact_response = crate::ActivateCandidateResponse::Activated {
+        candidate: exact.clone(),
+    };
+    assert!(
+        <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+            crate::ActivateWalletCandidateCapability,
+        >>::validate_returned(&validator, &exact_response)
+        .is_ok()
+    );
+    assert!(matches!(
+        submission_process::settle_candidate_activation(
+            &fixture.prepared_activation,
+            &exact_response,
+        ),
+        StateSettlement::Proposed(_)
+    ));
+    let exact_broadcast = submission_process::broadcast_request(&fixture.active);
+    assert!(
+        <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+            crate::BroadcastExactCandidateCapability,
+        >>::validate_request(&validator, &exact_broadcast)
+        .is_ok()
+    );
 }
 
 #[test]
@@ -1007,6 +1123,11 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     let c0 = fixture.active.active_candidate.clone();
     let mut c1 = c0.clone();
     c1.attested_candidate.candidate_ordinal = 1;
+    c1.candidate_operation_key = crate::derive_evm_candidate_operation_key(
+        &c1.attested_candidate.semantic_reservation_key,
+        c1.attested_candidate.candidate_ordinal,
+    )
+    .expect("second candidate operation key");
     c1.attested_candidate.transaction_hash = format!("{:#x}", B256::repeat_byte(0x42));
     let second_fee = fixture
         .prepared
@@ -1042,6 +1163,47 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         second_unsigned.unsigned_candidate_digest.clone();
     c1.attested_candidate.candidate_descriptor_ref =
         canonical_wallet_reference(&second_unsigned).expect("second candidate descriptor");
+
+    let replacement_permit = derive_exact_candidate_activation_permit(
+        &fixture.post_reserve.reservation,
+        std::slice::from_ref(&c0),
+        1,
+        1,
+    )
+    .expect("exact replacement permit");
+    let exact_replacement_request = crate::ActivateEvmCandidateRequest {
+        nonce_domain: fixture.post_reserve.reservation.nonce_domain.clone(),
+        candidate_operation_key: c1.candidate_operation_key.clone(),
+        next_candidate: c1.attested_candidate.clone(),
+        activation_permit: replacement_permit,
+    };
+    let validator = crate::EvmSubmissionCapabilityImplementation::new()
+        .expect("submission capability validator");
+    assert!(
+        <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+            crate::ActivateWalletCandidateCapability,
+        >>::validate_request(&validator, &exact_replacement_request)
+        .is_ok()
+    );
+    let mut wrong_predecessor_request = exact_replacement_request;
+    let CandidateActivationPermit::Replacement {
+        predecessor_candidate_operation_key,
+        ..
+    } = &mut wrong_predecessor_request.activation_permit
+    else {
+        panic!("replacement permit");
+    };
+    *predecessor_candidate_operation_key = crate::derive_evm_candidate_operation_key(
+        &fixture.post_reserve.reservation.semantic_reservation_key,
+        u16::MAX,
+    )
+    .expect("syntactically valid wrong predecessor key");
+    assert!(
+        <crate::EvmSubmissionCapabilityImplementation as EffectCapabilityImplementation<
+            crate::ActivateWalletCandidateCapability,
+        >>::validate_request(&validator, &wrong_predecessor_request)
+        .is_err()
+    );
 
     let mut work = fixture.candidate.work.clone();
     work.activated_candidates = vec![c0.clone(), c1.clone()];

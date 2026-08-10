@@ -1068,7 +1068,7 @@ fn valid_attested_candidate(candidate: &AttestedWalletCandidate) -> bool {
 
 fn valid_active_candidate(candidate: &ActiveWalletCandidate) -> bool {
     valid_attested_candidate(&candidate.attested_candidate)
-        && candidate.candidate_operation_key.validate().is_ok()
+        && crate::wallet_authority::active_candidate_operation_key_is_exact(candidate)
 }
 
 fn valid_reservation(reservation: &crate::ReservedWalletNonce) -> bool {
@@ -1204,7 +1204,11 @@ fn valid_reserve_response(response: &ReserveWalletNonceResponse) -> bool {
     }
 }
 
-fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> bool {
+fn valid_activation_permit(
+    permit: &CandidateActivationPermit,
+    reservation_key: &crate::EvmNonceReservationKey,
+    ordinal: u16,
+) -> bool {
     match permit {
         CandidateActivationPermit::Initial { exact_next_ordinal } => {
             ordinal == 0 && *exact_next_ordinal == 0
@@ -1220,7 +1224,8 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
                 && predecessor_ordinal
                     .checked_add(1)
                     .is_some_and(|next| next == ordinal)
-                && predecessor_candidate_operation_key.validate().is_ok()
+                && derive_evm_candidate_operation_key(reservation_key, *predecessor_ordinal)
+                    .is_ok_and(|expected| expected == *predecessor_candidate_operation_key)
                 && valid_reference(replacement_policy_ref)
                 && valid_digest(eligibility_ref)
         }
@@ -1229,10 +1234,10 @@ fn valid_activation_permit(permit: &CandidateActivationPermit, ordinal: u16) -> 
 
 fn valid_activation_request(request: &ActivateEvmCandidateRequest) -> bool {
     request.nonce_domain.validate().is_ok()
-        && request.candidate_operation_key.validate().is_ok()
         && valid_attested_candidate(&request.next_candidate)
         && valid_activation_permit(
             &request.activation_permit,
+            &request.next_candidate.semantic_reservation_key,
             request.next_candidate.candidate_ordinal,
         )
         && derive_evm_candidate_operation_key(

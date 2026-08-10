@@ -802,6 +802,14 @@ pub fn derive_evm_candidate_operation_key(
     ))
 }
 
+pub(crate) fn active_candidate_operation_key_is_exact(candidate: &ActiveWalletCandidate) -> bool {
+    derive_evm_candidate_operation_key(
+        &candidate.attested_candidate.semantic_reservation_key,
+        candidate.attested_candidate.candidate_ordinal,
+    )
+    .is_ok_and(|expected| expected == candidate.candidate_operation_key)
+}
+
 /// Derives the permanent completion operation key.
 pub fn derive_evm_nonce_completion_key(
     reservation_key: &EvmNonceReservationKey,
@@ -1822,6 +1830,7 @@ pub(crate) fn derive_exact_candidate_activation_permit_inner(
             candidate.attested_candidate.semantic_reservation_key
                 != reservation.semantic_reservation_key
                 || usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
+                || !active_candidate_operation_key_is_exact(candidate)
         })
     {
         return Err(WalletAuthorityContractError::Invalid(
@@ -1971,7 +1980,7 @@ pub fn validate_active_wallet_candidate_prefix(
             || attested.signing_profile_contract_ref
                 != *transaction_intent.signing_profile_contract_ref()
             || validate_reference(&attested.signer_attestation_ref).is_err()
-            || candidate.candidate_operation_key.validate().is_err()
+            || !active_candidate_operation_key_is_exact(candidate)
             || !valid_provider_attestation(&candidate.provider_activation_attestation)
             || !crate::submission::validate_transaction_hash(&attested.transaction_hash)
             || !descriptor_refs.insert(attested.candidate_descriptor_ref.clone())
@@ -2558,18 +2567,6 @@ impl CompletedWalletNonce {
             return Err(WalletAuthorityContractError::Invalid(
                 "completed_wallet_nonce_closure",
             ));
-        }
-        for (ordinal, candidate) in self.sealed_activated_candidates.iter().enumerate() {
-            if usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
-                || candidate.attested_candidate.semantic_reservation_key
-                    != self.semantic_reservation_key
-                || candidate.candidate_operation_key.validate().is_err()
-                || !valid_provider_attestation(&candidate.provider_activation_attestation)
-            {
-                return Err(WalletAuthorityContractError::Invalid(
-                    "completed_wallet_nonce_prefix",
-                ));
-            }
         }
         Ok(())
     }
