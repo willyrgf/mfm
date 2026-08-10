@@ -280,6 +280,15 @@ impl ConfigurationRevisionObject {
     pub const fn content_ref(&self) -> &ContentRef {
         &self.object.content_ref
     }
+
+    fn matches_append_request(&self, request: &ConfigurationAppendRequest) -> bool {
+        let revision = self.revision();
+        revision.key == request.key
+            && revision.predecessor_ref.as_ref() == request.expected_predecessor_ref.as_ref()
+            && revision.append_request_id == request.append_request_id
+            && revision.value_contract_ref == request.value_contract_ref
+            && revision.canonical_value == request.value.canonical().as_str()
+    }
 }
 
 /// Store-verified current configured value selected for admission.
@@ -495,9 +504,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
         if let Some(existing) = history.as_ref().and_then(|history| {
             history_append_identity(history.revisions.iter(), &request.append_request_id)
         }) {
-            return if existing.revision().value_contract_ref == request.value_contract_ref
-                && existing.revision().canonical_value == request.value.canonical().as_str()
-            {
+            return if existing.matches_append_request(&request) {
                 Ok(existing.clone())
             } else {
                 Err(StructuredStoreError::AppendConflict)
@@ -1062,6 +1069,62 @@ mod tests {
             ))
             .await;
         assert_eq!(stale, Err(StructuredStoreError::StaleHead));
+    }
+
+    #[tokio::test]
+    async fn append_request_identity_includes_the_exact_predecessor() {
+        let store = qualify_and_open_configuration_history(MemoryConfigurationHistoryBackend::new(
+            store_scope(),
+        ))
+        .await
+        .expect("semantic open");
+        let (writer, _reader) = store.into_authorities();
+        let stream = key('3');
+        let first = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                None,
+                AppendRequestId::new("configured/exact-predecessor-first").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("value"),
+            ))
+            .await
+            .expect("first revision");
+        let second = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                Some(first.content_ref().clone()),
+                AppendRequestId::new("configured/exact-predecessor-second").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
+            ))
+            .await
+            .expect("second revision");
+
+        let exact_historical_retry = writer
+            .append(ConfigurationAppendRequest::new(
+                stream.clone(),
+                None,
+                AppendRequestId::new("configured/exact-predecessor-first").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("value"),
+            ))
+            .await;
+        assert_eq!(exact_historical_retry, Ok(first.clone()));
+
+        let changed_predecessor = writer
+            .append(ConfigurationAppendRequest::new(
+                stream,
+                Some(second.content_ref().clone()),
+                AppendRequestId::new("configured/exact-predecessor-first").expect("append id"),
+                contract(),
+                ProposedCanonicalValue::from_json(r#"{"revision":1}"#).expect("value"),
+            ))
+            .await;
+        assert_eq!(
+            changed_predecessor,
+            Err(StructuredStoreError::AppendConflict)
+        );
     }
 
     #[tokio::test]

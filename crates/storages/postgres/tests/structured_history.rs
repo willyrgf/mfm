@@ -1190,6 +1190,32 @@ async fn configuration_acceptance_vectors_match_memory_and_postgres() {
     assert_eq!(postgres_replay, memory_replay);
     assert_eq!(postgres_replay, Ok(first.clone()));
 
+    let postgres_changed_predecessor = postgres_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(exact.content_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#)
+                .expect("changed-predecessor replay value"),
+        ))
+        .await;
+    let memory_changed_predecessor = memory_writer
+        .append(ConfigurationAppendRequest::new(
+            stream.clone(),
+            Some(exact.content_ref().clone()),
+            AppendRequestId::new("postgres-configured-parity-positive").expect("append id"),
+            contract.clone(),
+            ProposedCanonicalValue::from_json(r#"{"revision":1}"#)
+                .expect("changed-predecessor replay value"),
+        ))
+        .await;
+    assert_eq!(postgres_changed_predecessor, memory_changed_predecessor);
+    assert_eq!(
+        postgres_changed_predecessor,
+        Err(mfm_runtime::history::HistoryError::AppendConflict)
+    );
+
     let postgres_current = postgres_reader
         .resolve(&stream, &contract)
         .await
