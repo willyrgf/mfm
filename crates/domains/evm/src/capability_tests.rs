@@ -39,7 +39,7 @@ fn chain_binding(chain_id: u64) -> Result<EvmChainInstanceBinding, WalletAuthori
 }
 
 #[test]
-fn routing_generation_round_trips_as_one_exact_content_reference() {
+fn routing_generation_round_trips_as_one_content_reference() {
     let generation = generation(7);
     let content_ref = generation.to_content_ref().expect("content ref");
     assert_eq!(

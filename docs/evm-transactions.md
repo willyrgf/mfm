@@ -175,7 +175,7 @@ both make absence temporary. Only real writer fencing mints `SupersededBeforeEnt
 Recovering a parked EVM run therefore no longer means starting a fresh run under the same caller
 submission token. The parked run resolves itself; the cross-run path remains only what makes a
 *caller's* retry safe. After three authorizations the occurrence parks terminally and
-`list_parked_runs` is how an operator finds it.
+The current-attention inventory is how an operator finds it.
 
 ## Observation and terminal convergence
 

@@ -51,11 +51,12 @@ an entry beyond the bound. That attempt is left with a dangling authorization, s
 "every attempt carries a terminal observation" holds for resolved histories only.
 
 Windowed absorption is the third and the worst, because it looks resolvable. The
-fold has no clock and cannot have one — a wall-clock-conditioned fold breaks
-refold equivalence — so absorption backed by a retention window rather than
+reducer has no clock and cannot have one — wall-clock-conditioned reduction breaks
+replay equivalence — so absorption backed by a retention window rather than
 durable state is indistinguishable, at the contract, from absorption that does
 not expire. A run re-asserted past the window is re-entered without absorbing.
-Discovery latency is the whole exposure; `list_parked_runs` is what bounds it.
+Discovery latency is the whole exposure; the current-attention inventory is what
+bounds it.
 
 Four things are declared and unverifiable, all asserted by naming
 `EntryAbsorbing<MAX>`: that the external system absorbs a repeat, that the
@@ -63,23 +64,23 @@ adapter transmits the entry key, that absorption is retained long enough, and
 that `Returned` is a function of the external system's post-state rather than of
 one exchange. The last is checkable by review only.
 
-See [`effect-entry-resolution.md`](effect-entry-resolution.md) for the mechanism
-and for the uniqueness trade it spends.
+The normative absorption contract is in [`design.md`](design.md), and the current attention
+resolutions are in [`run-execution.md`](run-execution.md).
 
-## No way to find a parked run
+## Attention discovery is bounded by sweep cadence, not by listing
 
-Every application entry point is per-`RunId`, and there is no listing surface.
-An operator who does not already hold the run id of a parked run cannot
-discover it, so parks are found late or by accident.
+The current Effect-entry-attention inventory closes the discovery gap: an
+operator no longer needs to already hold a run id. `GET
+/v1/effect-entry-attention` and `mfm run effect-entry-attention` list a tenant's
+currently blocked runs from a partial index whose size tracks current membership
+rather than retained lifetime attempts.
 
-This is independent of how a park is resolved. Every recovery design assumes a
-caller who already knows which run to fix, and nothing produces that caller.
-
-It is also load-bearing for any absorption-based recovery, because discovery
-latency is the whole exposure where absorption is backed by a retention window
-rather than durable state: a park found in minutes re-asserts inside any
-plausible window, and a park found weeks later re-asserts outside it and
-duplicates.
+What remains is cadence, not capability. Nothing in the repository schedules a
+sweep, so how quickly attention is noticed is a deployment property. That still
+matters for absorption backed by a retention window rather than durable state: a
+run found in minutes re-asserts inside any plausible window, and one found weeks
+later re-asserts outside it and duplicates. The inventory bounds the exposure; it
+does not eliminate it.
 
 ## Verification residuals
 

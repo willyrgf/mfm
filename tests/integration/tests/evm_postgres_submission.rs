@@ -3017,7 +3017,35 @@ impl PhysicalObligationChecker for ExactPhysicalBindingVerifier {
         context: &PhysicalBindingAuthorization<'_>,
         certificate: &HistoryObject,
     ) -> std::result::Result<(), StructuredStoreError> {
-        self.verify_retained_authorization(context, certificate)
+        let expected_lineage = self
+            .certificate_lineages
+            .get(&certificate.content_ref)
+            .ok_or(StructuredStoreError::Certification)?;
+        let capability = (
+            StructuredComponentKind::Capability,
+            context.capability_contract_ref.clone(),
+            context.capability_implementation_ref.clone(),
+        );
+        let adapter = (
+            StructuredComponentKind::Adapter,
+            context.adapter_contract_ref.clone(),
+            context.adapter_implementation_ref.clone(),
+        );
+        if certificate.validate().is_ok()
+            && context.admitted_routing_policy_ref == &self.routing_policy_ref
+            && context.minimum_lineage_head_ref.is_none()
+            && context.stable_resource_lineage_contract_ref == expected_lineage.as_ref()
+            && self.implementation_entries.contains(&capability)
+            && self.implementation_entries.contains(&adapter)
+            && match context.access_kind {
+                AccessKind::Read => expected_lineage.is_none(),
+                AccessKind::Effect => expected_lineage.is_some(),
+            }
+        {
+            Ok(())
+        } else {
+            Err(StructuredStoreError::Certification)
+        }
     }
 
     fn verify_retained_supersession(
@@ -3031,11 +3059,11 @@ impl PhysicalObligationChecker for ExactPhysicalBindingVerifier {
 
     fn verify_current_supersession(
         &self,
-        context: &PhysicalBindingSupersession<'_>,
-        public_lineage_head: &HistoryObject,
-        evidence: &HistoryObject,
+        _context: &PhysicalBindingSupersession<'_>,
+        _public_lineage_head: &HistoryObject,
+        _evidence: &HistoryObject,
     ) -> std::result::Result<(), StructuredStoreError> {
-        self.verify_retained_supersession(context, public_lineage_head, evidence)
+        Err(StructuredStoreError::Certification)
     }
 }
 
