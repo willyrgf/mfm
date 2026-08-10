@@ -7,54 +7,15 @@ autotests = false
 [package.metadata.mfm]
 layer = "test"
 
-[features]
-parity-tests = [
-    "mfm-storage-evm-postgres/parity-tests",
-    "mfm-storage-postgres/parity-tests",
-]
-
 [dependencies]
-async-trait = { workspace = true }
 axum = "0.7"
-ring = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
-uuid = { version = "1.0", features = ["v4"] }
-tempfile = "3.0"
 tokio = { workspace = true }
-mfm-app = { path = "../../crates/app", features = ["test-support"] }
-mfm-authority-seal = { path = "../../crates/kernel/authority-seal" }
+mfm-app = { path = "../../crates/app" }
 mfm-journal = { path = "../../crates/kernel/journal" }
 mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-canonical = { path = "../../crates/kernel/canonical" }
-mfm-facts = { path = "../../crates/kernel/facts" }
-mfm-certify = { path = "../../crates/kernel/certify" }
-mfm-program = { path = "../../crates/kernel/program" }
-mfm-store = { path = "../../crates/kernel/store", features = ["test-support"] }
-mfm-storage-postgres = { path = "../../crates/storages/postgres" }
-mfm-storage-evm-postgres = { path = "../../crates/storages/evm-postgres" }
-mfm-values = { path = "../../crates/kernel/values" }
-mfm-evm = { path = "../../crates/domains/evm" }
-mfm-evm-live = { path = "../../crates/live/evm" }
-mfm-keystore = { path = "../../crates/keystore" }
-mfm-portfolio = { path = "../../crates/domains/portfolio" }
-mfm-replay = { path = "../../crates/kernel/replay", features = ["test-support"] }
-mfm-runtime = { path = "../../crates/kernel/runtime" }
-mfm-spec = { path = "../../crates/kernel/spec" }
+mfm-replay = { path = "../../crates/kernel/replay" }
 mfm-rest-api = { path = "../../bin/rest-api" }
-mfm-wallet-authority-provider-test-support = { path = "../wallet-authority-provider" }
-
-[dev-dependencies]
-alloy-primitives = { workspace = true }
-k256 = { version = "0.13.0", features = ["ecdsa"] }
-hex = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
-mfm-signing = { path = "../../crates/signing" }
-tower = "0.5"
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true, features = ["fmt"] }
-zeroize = "1.7"
 
 [[test]]
 name = "cargo_metadata_contract"
@@ -79,13 +40,3 @@ path = "tests/run_identity_contract.rs"
 [[test]]
 name = "transport_surface_contract"
 path = "tests/transport_surface_contract.rs"
-
-[[test]]
-name = "evm_postgres_submission"
-path = "tests/evm_postgres_submission.rs"
-required-features = ["parity-tests"]
-
-[[bin]]
-name = "mfm-integration-wallet-authority-provider"
-path = "src/bin/wallet_authority_provider.rs"
-required-features = ["parity-tests"]

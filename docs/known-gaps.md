@@ -92,7 +92,7 @@ contract claims.
 | Canonical ingress | The generated, hostile, and production-scale acceptance matrix. Exact-limit and one-over boundaries are covered per field; the full generated corpus is not. |
 | SQL ownership | An independent audit of every production query and its scale behaviour. The AST inventory proves ownership of the current set only. |
 | EVM wallet queries | A production latency envelope. Query shape, non-aggregate predicates, indexed plans, and 64-reservation scale are covered. |
-| EVM provider trust | Deployment-owned provider trust, and the broader crash, ambiguity, and production-authority matrices. Repository-local crash boundaries at broadcast, receipt, finality, and completion are covered, as is one in-run absorption of an ambiguous broadcast. The two-process production harness kills completion between authorization and observation, discovers the original run through public attention, proves `CloseThenReassert` then `Reassert`, and closes that same run after a second restart. |
+| EVM provider trust | Deployment-owned provider trust, the broader crash, ambiguity, and production-authority matrices, and a composed same-run `CloseThenReassert`/`Reassert` proof through public attention and Runtime. Storage and domain tests cover their local contracts, but there is no two-process production harness. |
 | EVM fault matrix | Cross-process, replacement, and scale fault matrices. |
 | Portable replay | Live application multi-hop export and live Postgres replay. The generated corpus, offline parity, bounds, and tamper cases are covered. |
 | Purpose isolation | The complete runtime/audit/replay/export isolation matrix. A 16-case compile-fail matrix and package regressions are covered. |

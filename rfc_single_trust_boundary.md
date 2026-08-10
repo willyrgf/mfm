@@ -100,9 +100,8 @@ same shape — and the standalone REST binary calls it before binding its listen
 embedder calling `make_app`; both superseded analyses overstated the reachable surface). Every
 `mfm run`/`mfm ops` subcommand dead-ends the same way. That is ~2,880 + 638 source lines of transport (plus 2,006 lines of their
 tests), including 710 lines of atomic-pair file output for an export command that cannot execute.
-The only complete execution path in the repository is
-`tests/integration/tests/evm_postgres_submission.rs:853`. Failing closed is correct given the
-absent authority — and the REST crate documents embedding as the intent (`lib.rs:95–99`) — but
+There is no complete execution path in the repository. Failing closed is correct given the absent
+authority — and the REST crate documents embedding as the intent (`lib.rs:95–99`) — but
 shipping 6k lines of transport over an unconditional error, indefinitely, is not a design; it is
 a diorama unless the embedder is named or the authority is supplied.
 
@@ -367,9 +366,8 @@ variant.
   loading); `run-execution.md:150-153` stays verbatim (already fresh-process-scoped);
   `known-gaps.md` needs no edit under the accept-and-replay regression policy.
 
-**Tests:** the six injected-crash integration scenarios pass **byte-unchanged** (every restart
-is a cold cache exercising the unchanged full-verification path). The sixteen
-`structured_runtime_causal.rs` scenarios are preserved assertion-for-assertion; ~31 direct
+**Tests:** the sixteen `structured_runtime_causal.rs` scenarios are preserved
+assertion-for-assertion; ~31 direct
 `drive_once` call sites take a mechanical two-token edit for the new signature.
 `verify_incremental_equivalence` is re-pointed at the *production* fold function, becoming the
 cache's permanent proof harness; add two targeted tests (fold across a foreign suffix containing
@@ -570,9 +568,9 @@ byte-for-byte against the store-retained candidate"; admission paragraph "certif
 `ObservationSubstitutedPositive` injection arm (unrepresentable once `NewlyCommitted` is
 payloadless — the test asserted a check whose attack the type system now forbids); postgres
 history tests take mechanical variant updates. New: the equivalence law wired into the causal
-corpus and the integration run; one certify test proving `expand_document` output ==
+corpus; one certify test proving `expand_document` output ==
 what `verify_root` reconstructs. Unaffected: `structured_history_qualification.rs` (the suite
-that matters most now), all six crash-restart scenarios, the memo-substitution rejection test.
+that matters most now) and the memo-substitution rejection test.
 
 **Commit sequence:**
 1. `split certify structured into expansion, validate, registry, and process modules`
@@ -783,15 +781,14 @@ transaction, derived policy `SchemaId` byte-identity).
 
 - **Phase 1 invariant harness:** promote `verify_incremental_equivalence` from test-support to
   the permanent proof obligation of the cache: every cached/folded projection must equal full
-  re-verification, extended to cover concurrent-writer head advancement. The six injected-crash
-  restart scenarios in `tests/integration/tests/evm_postgres_submission.rs` and the sixteen
-  causality tests in `store/tests/structured_runtime_causal.rs` must pass **unchanged** — they
-  assert durable-history semantics, which the cache must not alter.
+  re-verification, extended to cover concurrent-writer head advancement. The sixteen causality
+  tests in `store/tests/structured_runtime_causal.rs` must pass unchanged because they assert
+  durable-history semantics, which the cache must not alter.
 - **Phase 2:** tests that assert deleted shadows are deleted with them; tests that assert
   boundary verification (hostile persisted batches, malformed rows, tampered exports) must pass
   unchanged. The 81 compile-fail tests stay.
-- **Phase 3:** the out-of-process-authority proof must survive in whatever form the target
-  design keeps (see §6); the integration suite remains the composed-system gate.
+- **Phase 3:** add a focused out-of-process-authority proof for whatever form the target design
+  keeps (see §6); no composed-system gate currently owns that evidence.
 - Scope-driven gates per `docs/build-and-verification.md`; no broad gates merely because a
   commit exists; `.#ci` composes `.#check`/`.#test`/`.#test-db`.
 
@@ -879,7 +876,7 @@ Every fact this RFC's argument rests on, with where it was verified:
 | REST fails closed unconditionally, before binding the listener (health unreachable) | `bin/rest-api/src/lib.rs:100`, `bin/rest-api/src/main.rs` |
 | no out-of-workspace embedder can exist (sealed broker, unpublished seal crate) | `crates/kernel/authority-seal/Cargo.toml` (`publish = false`), `session.rs:350` (`test-support`-only constructor) |
 | provider proof bound in three inconsistent copies (4096 / 16384 / 16384) | `provider.rs:42`, `inventory.rs:22`, test provider `lib.rs:2182` |
-| sole end-to-end path is a test | `tests/integration/tests/evm_postgres_submission.rs:853` (`run_production_application_worker`) |
+| no end-to-end executable path | CLI and REST both fail closed before acquiring writer authority |
 | embedding is the documented intent for REST | `bin/rest-api/src/lib.rs:95–99` ("Deployments embed this library and inject a fully composed `AppState`") |
 | provider wire divergence: 3 vs 5 `ProviderMutation` variants | `crates/storages/evm-postgres/src/provider.rs:1020` vs `tests/wallet-authority-provider/src/lib.rs:70` |
 | per-mutation fenced revalidation in the wallet authority | `crates/storages/evm-postgres/src/authority.rs` (`reserve_after_qualification_inner` / `activate_candidate_inner` / `complete_inner`) |

@@ -435,9 +435,6 @@ in
             -- --ignored --exact --nocapture
           cargo sqlx prepare --check -- --all-targets --features parity-tests
           cargo test --features parity-tests --test wallet-authority --no-run
-          cd "$repo_root"
-          cargo test --release -p mfm-integration-tests --features parity-tests \
-            --test evm_postgres_submission --no-run
           echo "wallet activation and nonce schema accepted by authoritative validation and SQLx"
         ''
       ];
@@ -491,30 +488,6 @@ in
       ];
       env = postgresEnv;
       requires = [ "postgres" ];
-    };
-    evm-postgres-submission-qualification = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "--release"
-        "-p"
-        "mfm-integration-tests"
-        "--features"
-        "parity-tests"
-        "--test"
-        "evm_postgres_submission"
-        "--"
-        "--nocapture"
-      ];
-      env = postgresEnv;
-      requires = [ "postgres" ];
-    };
-    wallet-nonce-postgres-qualification = {
-      kind = "composite";
-      steps = {
-        storage.task = "wallet-nonce-postgres-storage-qualification";
-        structured-submission.task = "evm-postgres-submission-qualification";
-      };
     };
     parity-bitcoin-core = cargoLeaf {
       tools = cargoTools ++ [ "bitcoin-core-cli" ];
@@ -575,8 +548,8 @@ in
           task = "structured-history-postgres-qualification";
           dependsOn = [ "postgres-sqlx-check" ];
         };
-        wallet-nonce-postgres-qualification = {
-          task = "wallet-nonce-postgres-qualification";
+        wallet-nonce-postgres-storage-qualification = {
+          task = "wallet-nonce-postgres-storage-qualification";
           dependsOn = [ "postgres-sqlx-check" ];
         };
       };

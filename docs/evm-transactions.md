@@ -175,11 +175,7 @@ both make absence temporary. Only real writer fencing mints `SupersededBeforeEnt
 Recovering a parked EVM run therefore no longer means starting a fresh run under the same caller
 submission token. The parked run resolves itself; the cross-run path remains only what makes a
 *caller's* retry safe. After three authorizations the occurrence parks terminally and
-the current-attention inventory is how an operator finds it. The production PostgreSQL
-qualification kills a worker after the original completion authorization but before its
-observation, discovers that same run as `CloseThenReassert`, closes the dead attempt without
-calling the wallet adapter, discovers `Reassert`, and re-enters the exact completion request. A
-second restart after the recovered observation then settles and closes the original run.
+the current-attention inventory is how an operator finds it.
 
 ## Observation and terminal convergence
 
@@ -254,5 +250,4 @@ chain-registry/catalog qualification, pinned lineage and head rejection, exact r
 binding, cross-chain rejection before admission, activation, first/later reservation rules,
 idempotency, competing intents, candidate progression, completion, target copying, stale sessions,
 permits, rollback, restart, and zero normal-execution registry queries. The structured submission
-qualification additionally uses a loopback JSON-RPC server, deterministic signer, real wallet
-authority, process restart, exact single broadcast, and later completion.
+path does not currently have a composed process-restart qualification through Runtime.
