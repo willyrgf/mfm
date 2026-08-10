@@ -106,5 +106,5 @@ continuing an outstanding Effect.
 
 Transport tests cover exact request bytes, response id/result validation, bounds, unknown fields,
 provider-text redaction, and Returned/SafeFailure mapping. Structured Runtime tests cover affine
-invocation and refresh rules. The managed submission qualification uses a loopback JSON-RPC server
-and asserts one exact broadcast across process restart.
+invocation and refresh rules. There is no managed composed-submission qualification covering a
+loopback broadcast across process restart.
