@@ -337,6 +337,17 @@ in
         SQLX_OFFLINE = "true";
       };
     };
+    mfm-store-default-api-surface = cargoLeaf {
+      run = [
+        "cargo"
+        "test"
+        "-p"
+        "mfm-store"
+        "--no-default-features"
+        "--test"
+        "api-surface"
+      ];
+    };
     nextest-run = cargoLeaf {
       run = [
         "cargo"
@@ -535,6 +546,7 @@ in
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
+        "mfm-store-default-api-surface"
         "nextest-run"
         "doc-tests"
       ];
