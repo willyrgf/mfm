@@ -237,9 +237,12 @@ hash to their nested typed value reference.
 All JSON rendering uses an owner-specific strict one-current schema. Required fields, checked
 identities, field types, variants, cross-field relations, unknown fields, and exact canonical
 re-encoding are validated before a response wrapper is constructed. Bytes accepted by one owner
-cannot be substituted for another. Cursor and content-reference strings are opaque identity, not
-authorization. Every protected method independently authenticates and authorizes its exact purpose
-and tenant/run target.
+cannot be substituted for another. Replay summary, transition trace, and access audit likewise have
+separate typed owners; trace entries re-derive the assigned transition-record hash, while audit
+entries bind status/outcome/observation and re-derive any included observation-record hash. A
+fixed-head audit treats an observation in a later suffix as absent. Cursor and content-reference
+strings are opaque identity, not authorization. Every protected method independently authenticates
+and authorizes its exact purpose and tenant/run target.
 
 ## Portable export
 

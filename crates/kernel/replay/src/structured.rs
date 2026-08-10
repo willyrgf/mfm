@@ -1,13 +1,20 @@
 //! Callback-free replay and purpose-limited projections over qualified reduction.
 
 use mfm_canonical::PlainCanonicalJsonBytes;
-use mfm_ids::RunId;
-use mfm_journal::structured::{JournalHead, LexicalValueRef, ObservationOutcome, SemanticHead};
+use mfm_ids::{
+    AccessAttemptId, ContentRef, OccurrenceId, RequestDigest, RunId, RunSemanticStateDigest,
+    SemanticCallId,
+};
+use mfm_journal::structured::{
+    derive_record_hash, AccessKind, CommittedFactRef, ExternalAccessObserved, JournalHead,
+    LexicalValueRef, ObservationOutcome, RecordHashPreimage, RecordRef, RunRecord, SemanticHead,
+    StateOutcomeRef, StateTransitionCommitted, TypedValueRef,
+};
 use mfm_store::structured::{
     AuditAccessEntry, AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
     StructuredHistoryBackend, StructuredStoreError, TraceRunEvidence, TraceTransitionEntry,
 };
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 /// Result of callback-free structured-history replay verification.
 pub type Result<T> = std::result::Result<T, StructuredReplayError>;
@@ -26,87 +33,26 @@ pub enum StructuredReplayError {
     InvalidRecordedHistory,
 }
 
-/// One canonical projection retained behind a concrete public DTO.
-///
-/// A projection is codec-only: it carries no schema identity, because nothing
-/// retains it under a `ContentRef`. Its exact bytes and its typed wire shape are
-/// the whole contract.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GeneratedProjection {
-    canonical: PlainCanonicalJsonBytes,
+fn encode_exact_projection<T: Serialize>(wire: &T) -> Result<PlainCanonicalJsonBytes> {
+    mfm_journal::structured::canonical_json(wire)
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)
 }
 
-impl GeneratedProjection {
-    fn encode(value: &impl Serialize) -> Result<Self> {
-        let canonical = mfm_journal::structured::canonical_json(value)
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        Ok(Self { canonical })
+fn decode_exact_projection<T>(bytes: &[u8]) -> Result<(PlainCanonicalJsonBytes, T)>
+where
+    T: DeserializeOwned + Serialize,
+{
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
+    let wire: T = serde_json::from_slice(canonical.as_bytes())
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
+    if encode_exact_projection(&wire)?.as_bytes() != canonical.as_bytes() {
+        return Err(StructuredReplayError::InvalidRecordedHistory);
     }
-
-    fn strict_decode(bytes: &[u8]) -> Result<Self> {
-        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        Ok(Self { canonical })
-    }
-
-    /// Returns exact canonical projection bytes.
-    pub fn as_bytes(&self) -> &[u8] {
-        self.canonical.as_bytes()
-    }
+    Ok((canonical, wire))
 }
 
-macro_rules! generated_projection {
-    ($name:ident, $contract:literal, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Debug, Clone, PartialEq, Eq)]
-        pub struct $name(GeneratedProjection);
-
-        impl $name {
-            fn encode(value: &impl Serialize) -> Result<Self> {
-                GeneratedProjection::encode(value).map(Self)
-            }
-
-            /// Strictly decodes exact canonical projection bytes.
-            pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-                let projection = GeneratedProjection::strict_decode(bytes)?;
-                validate_projection($contract, projection.as_bytes())?;
-                Ok(Self(projection))
-            }
-
-            /// Returns exact canonical projection bytes.
-            pub fn as_bytes(&self) -> &[u8] {
-                self.0.as_bytes()
-            }
-        }
-    };
-}
-
-fn validate_projection(contract: &str, bytes: &[u8]) -> Result<()> {
-    if contract == "mfm.structured-replay-result.v1" {
-        let wire: StructuredReplayResultWire = serde_json::from_slice(bytes)
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        wire.validate()?;
-    }
-    Ok(())
-}
-
-generated_projection!(
-    StructuredReplayResult,
-    "mfm.structured-replay-result.v1",
-    "Canonical callback-free replay verification summary."
-);
-generated_projection!(
-    StructuredTransitionTrace,
-    "mfm.structured-transition-trace.v1",
-    "One canonical state-transition trace entry."
-);
-generated_projection!(
-    StructuredAccessAuditEntry,
-    "mfm.structured-access-audit.v1",
-    "One canonical external-access audit entry."
-);
-
-#[derive(Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum StructuredReplayResultWire {
     Verified {
@@ -120,7 +66,7 @@ enum StructuredReplayResultWire {
 }
 
 impl StructuredReplayResultWire {
-    fn validate(self) -> Result<()> {
+    fn validate(&self) -> Result<()> {
         match self {
             Self::Verified {
                 version,
@@ -130,17 +76,19 @@ impl StructuredReplayResultWire {
                 record_count,
                 status,
             } => {
-                if version != "mfm.structured-replay-result.v1" {
-                    return Err(StructuredReplayError::InvalidRecordedHistory);
-                }
                 let semantic_ref = match &semantic_head {
                     SemanticHead::Genesis { admission_ref, .. } => admission_ref,
                     SemanticHead::Transition { transition_ref, .. } => transition_ref,
                 };
-                if record_count == 0
+                let maximum_record_count = journal_head.run_sequence.checked_mul(2);
+                if version != "mfm.structured-replay-result.v1"
+                    || record_count == &0
                     || journal_head.run_sequence == 0
-                    || semantic_ref.run_id != run_id
+                    || semantic_ref.run_id != *run_id
+                    || semantic_ref.run_sequence == 0
                     || semantic_ref.run_sequence > journal_head.run_sequence
+                    || *record_count < journal_head.run_sequence
+                    || maximum_record_count.is_none_or(|maximum| *record_count > maximum)
                 {
                     return Err(StructuredReplayError::InvalidRecordedHistory);
                 }
@@ -155,13 +103,253 @@ impl StructuredReplayResultWire {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum StructuredReplayStatus {
     Actionable,
     PossibleEntry,
     BlockedIntegrity,
     Closed,
+}
+
+impl StructuredReplayStatus {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "actionable" => Ok(Self::Actionable),
+            "possible_entry" => Ok(Self::PossibleEntry),
+            "blocked_integrity" => Ok(Self::BlockedIntegrity),
+            "closed" => Ok(Self::Closed),
+            _ => Err(StructuredReplayError::InvalidRecordedHistory),
+        }
+    }
+}
+
+/// Canonical callback-free replay verification summary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredReplayResult {
+    canonical: PlainCanonicalJsonBytes,
+}
+
+impl StructuredReplayResult {
+    fn from_wire(wire: &StructuredReplayResultWire) -> Result<Self> {
+        wire.validate()?;
+        let canonical = encode_exact_projection(wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Strictly decodes the one current replay-result language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let (canonical, wire) = decode_exact_projection::<StructuredReplayResultWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self { canonical })
+    }
+
+    /// Returns exact canonical projection bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredTransitionTraceWire {
+    version: String,
+    record_ref: RecordRef,
+    occurrence_id: OccurrenceId,
+    occurrence_path_ref: ContentRef,
+    semantic_call_id: SemanticCallId,
+    input: LexicalValueRef,
+    consumed_observation_ref: Option<RecordRef>,
+    outcome_ref: ContentRef,
+    outcome: StateOutcomeRef,
+    facts: Vec<CommittedFactRef>,
+    before_semantic_state_digest: RunSemanticStateDigest,
+    after_semantic_state_digest: RunSemanticStateDigest,
+}
+
+impl StructuredTransitionTraceWire {
+    fn record(&self) -> RunRecord {
+        RunRecord::StateTransitionCommitted(StateTransitionCommitted {
+            occurrence_id: self.occurrence_id.clone(),
+            occurrence_path_ref: self.occurrence_path_ref.clone(),
+            semantic_call_id: self.semantic_call_id.clone(),
+            input: self.input.clone(),
+            consumed_observation_ref: self.consumed_observation_ref.clone(),
+            outcome_ref: self.outcome_ref.clone(),
+            outcome: self.outcome.clone(),
+            facts: self.facts.clone(),
+            before_semantic_state_digest: self.before_semantic_state_digest.clone(),
+            after_semantic_state_digest: self.after_semantic_state_digest.clone(),
+        })
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.version != "mfm.structured-transition-trace.v1"
+            || self.record_ref.run_sequence == 0
+            || self.record_ref.ordinal != 0
+            || self
+                .consumed_observation_ref
+                .as_ref()
+                .is_some_and(|record| {
+                    record.run_id != self.record_ref.run_id
+                        || record.run_sequence == 0
+                        || record.run_sequence >= self.record_ref.run_sequence
+                        || record.ordinal != 0
+                })
+        {
+            return Err(StructuredReplayError::InvalidRecordedHistory);
+        }
+        let record = self.record();
+        let expected_hash = derive_record_hash(&RecordHashPreimage {
+            run_id: &self.record_ref.run_id,
+            run_sequence: self.record_ref.run_sequence,
+            ordinal: self.record_ref.ordinal,
+            record: &record,
+        })
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
+        if self.record_ref.record_hash != expected_hash {
+            return Err(StructuredReplayError::InvalidRecordedHistory);
+        }
+        Ok(())
+    }
+}
+
+/// One canonical state-transition trace entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredTransitionTrace {
+    canonical: PlainCanonicalJsonBytes,
+}
+
+impl StructuredTransitionTrace {
+    fn from_wire(wire: &StructuredTransitionTraceWire) -> Result<Self> {
+        wire.validate()?;
+        let canonical = encode_exact_projection(wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Strictly decodes the one current transition-trace language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let (canonical, wire) = decode_exact_projection::<StructuredTransitionTraceWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self { canonical })
+    }
+
+    /// Returns exact canonical projection bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StructuredAccessStatusWire {
+    Authorized,
+    Returned,
+    SafeFailure,
+    SupersededBeforeEntry,
+    EntryUnknown,
+    IntegrityFault,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructuredAccessAuditWire {
+    version: String,
+    authorization_ref: RecordRef,
+    observation_ref: Option<RecordRef>,
+    access_attempt_id: AccessAttemptId,
+    attempt_ordinal: u64,
+    occurrence_id: OccurrenceId,
+    occurrence_path_ref: ContentRef,
+    semantic_call_id: SemanticCallId,
+    access_kind: AccessKind,
+    capability_contract_ref: ContentRef,
+    capability_implementation_ref: ContentRef,
+    adapter_contract_ref: ContentRef,
+    adapter_implementation_ref: ContentRef,
+    request: TypedValueRef,
+    request_digest: RequestDigest,
+    physical_binding_ref: ContentRef,
+    stable_resource_lineage_contract_ref: Option<ContentRef>,
+    status: StructuredAccessStatusWire,
+    outcome: Option<ObservationOutcome>,
+}
+
+impl StructuredAccessAuditWire {
+    fn validate(&self) -> Result<()> {
+        if self.version != "mfm.structured-access-audit.v1"
+            || self.authorization_ref.run_sequence == 0
+            || self.authorization_ref.ordinal != 0
+        {
+            return Err(StructuredReplayError::InvalidRecordedHistory);
+        }
+        match (
+            self.observation_ref.as_ref(),
+            self.outcome.as_ref(),
+            self.status,
+        ) {
+            (None, None, StructuredAccessStatusWire::Authorized) => return Ok(()),
+            (Some(observation_ref), Some(outcome), status)
+                if observation_status_wire(outcome) == status =>
+            {
+                if observation_ref.run_id != self.authorization_ref.run_id
+                    || observation_ref.run_sequence <= self.authorization_ref.run_sequence
+                    || observation_ref.ordinal != 0
+                    || (matches!(
+                        outcome,
+                        ObservationOutcome::SupersededBeforeEntry { .. }
+                            | ObservationOutcome::EntryUnknown { .. }
+                    ) && self.access_kind != AccessKind::Effect)
+                {
+                    return Err(StructuredReplayError::InvalidRecordedHistory);
+                }
+                let record = RunRecord::ExternalAccessObserved(ExternalAccessObserved {
+                    authorization_ref: self.authorization_ref.clone(),
+                    access_attempt_id: self.access_attempt_id.clone(),
+                    outcome: outcome.clone(),
+                });
+                let expected_hash = derive_record_hash(&RecordHashPreimage {
+                    run_id: &observation_ref.run_id,
+                    run_sequence: observation_ref.run_sequence,
+                    ordinal: observation_ref.ordinal,
+                    record: &record,
+                })
+                .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
+                if observation_ref.record_hash != expected_hash {
+                    return Err(StructuredReplayError::InvalidRecordedHistory);
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        Err(StructuredReplayError::InvalidRecordedHistory)
+    }
+}
+
+/// One canonical external-access audit entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredAccessAuditEntry {
+    canonical: PlainCanonicalJsonBytes,
+}
+
+impl StructuredAccessAuditEntry {
+    fn from_wire(wire: &StructuredAccessAuditWire) -> Result<Self> {
+        wire.validate()?;
+        let canonical = encode_exact_projection(wire)?;
+        Self::strict_decode(canonical.as_bytes())
+    }
+
+    /// Strictly decodes the one current access-audit language.
+    pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
+        let (canonical, wire) = decode_exact_projection::<StructuredAccessAuditWire>(bytes)?;
+        wire.validate()?;
+        Ok(Self { canonical })
+    }
+
+    /// Returns exact canonical projection bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.canonical.as_bytes()
+    }
 }
 
 /// One bounded head-fixed transition-trace projection page.
@@ -302,17 +490,16 @@ pub async fn verify_recorded_history<B: StructuredHistoryBackend>(
 
 /// Projects the canonical callback-free replay summary of one verified prefix.
 pub fn project_replay_result(run: &RecordedRunEvidence) -> Result<StructuredReplayResult> {
-    let result = StructuredReplayResult::encode(&serde_json::json!({
-        "version": "mfm.structured-replay-result.v1",
-        "kind": "verified",
-        "run_id": run.run_id(),
-        "journal_head": run.journal_head(),
-        "semantic_head": run.semantic_head(),
-        "record_count": run.record_count(),
-        "status": run.status().as_str(),
-    }))?;
-    validate_projection("mfm.structured-replay-result.v1", result.as_bytes())?;
-    Ok(result)
+    let record_count = u64::try_from(run.record_count())
+        .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
+    StructuredReplayResult::from_wire(&StructuredReplayResultWire::Verified {
+        version: "mfm.structured-replay-result.v1".to_owned(),
+        run_id: run.run_id().clone(),
+        journal_head: run.journal_head().clone(),
+        semantic_head: run.semantic_head().clone(),
+        record_count,
+        status: StructuredReplayStatus::parse(run.status().as_str())?,
+    })
 }
 
 /// Projects one bounded, head-fixed transition trace page.
@@ -328,20 +515,20 @@ pub fn project_transition_trace(
     let entries = transitions[range]
         .iter()
         .map(|transition| {
-            StructuredTransitionTrace::encode(&serde_json::json!({
-                "version": "mfm.structured-transition-trace.v1",
-                "record_ref": transition.record_ref(),
-                "occurrence_id": transition.occurrence_id(),
-                "occurrence_path_ref": transition.occurrence_path_ref(),
-                "semantic_call_id": transition.semantic_call_id(),
-                "input": transition.input(),
-                "consumed_observation_ref": transition.consumed_observation_ref(),
-                "outcome_ref": transition.outcome_ref(),
-                "outcome": transition.outcome(),
-                "facts": transition.facts(),
-                "before_semantic_state_digest": transition.before_semantic_state_digest(),
-                "after_semantic_state_digest": transition.after_semantic_state_digest(),
-            }))
+            StructuredTransitionTrace::from_wire(&StructuredTransitionTraceWire {
+                version: "mfm.structured-transition-trace.v1".to_owned(),
+                record_ref: transition.record_ref().clone(),
+                occurrence_id: transition.occurrence_id().clone(),
+                occurrence_path_ref: transition.occurrence_path_ref().clone(),
+                semantic_call_id: transition.semantic_call_id().clone(),
+                input: transition.input().clone(),
+                consumed_observation_ref: transition.consumed_observation_ref().cloned(),
+                outcome_ref: transition.outcome_ref().clone(),
+                outcome: transition.outcome().clone(),
+                facts: transition.facts().to_vec(),
+                before_semantic_state_digest: transition.before_semantic_state_digest().clone(),
+                after_semantic_state_digest: transition.after_semantic_state_digest().clone(),
+            })
         })
         .collect::<Result<Vec<_>>>()?;
     Ok(StructuredTransitionTracePage {
@@ -364,7 +551,7 @@ pub fn project_access_audit(
     let (range, next_index) = page_range(authorizations.len(), start, limit)?;
     let entries = authorizations[range]
         .iter()
-        .map(|authorization| access_projection(authorization))
+        .map(|authorization| access_projection(authorization, &at_journal_head))
         .collect::<Result<Vec<_>>>()?;
     Ok(StructuredAccessAuditPage {
         run_id: run.run_id().clone(),
@@ -446,47 +633,55 @@ fn page_range(
     Ok((start..end, next_index))
 }
 
-fn access_projection(authorization: &AuditAccessEntry) -> Result<StructuredAccessAuditEntry> {
-    let (observation_ref, status, outcome) = match authorization.observation() {
-        None => (None, "authorized", serde_json::Value::Null),
+fn access_projection(
+    authorization: &AuditAccessEntry,
+    at_journal_head: &JournalHead,
+) -> Result<StructuredAccessAuditEntry> {
+    let observation = authorization.observation().filter(|observation| {
+        observation.record_ref().run_sequence <= at_journal_head.run_sequence
+    });
+    let (observation_ref, status, outcome) = match observation {
+        None => (None, StructuredAccessStatusWire::Authorized, None),
         Some(observation) => (
-            Some(observation.record_ref()),
-            observation_status(observation.outcome()),
-            serde_json::to_value(observation.outcome())
-                .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?,
+            Some(observation.record_ref().clone()),
+            observation_status_wire(observation.outcome()),
+            Some(observation.outcome().clone()),
         ),
     };
-    StructuredAccessAuditEntry::encode(&serde_json::json!({
-        "version": "mfm.structured-access-audit.v1",
-        "authorization_ref": authorization.authorization_ref(),
-        "observation_ref": observation_ref,
-        "access_attempt_id": authorization.access_attempt_id(),
-        "attempt_ordinal": authorization.attempt_ordinal(),
-        "occurrence_id": authorization.occurrence_id(),
-        "occurrence_path_ref": authorization.occurrence_path_ref(),
-        "semantic_call_id": authorization.semantic_call_id(),
-        "access_kind": authorization.access_kind(),
-        "capability_contract_ref": authorization.capability_contract_ref(),
-        "capability_implementation_ref": authorization.capability_implementation_ref(),
-        "adapter_contract_ref": authorization.adapter_contract_ref(),
-        "adapter_implementation_ref": authorization.adapter_implementation_ref(),
-        "request": authorization.request(),
-        "request_digest": authorization.request_digest(),
-        "physical_binding_ref": authorization.physical_binding_ref(),
-        "stable_resource_lineage_contract_ref":
-            authorization.stable_resource_lineage_contract_ref(),
-        "status": status,
-        "outcome": outcome,
-    }))
+    StructuredAccessAuditEntry::from_wire(&StructuredAccessAuditWire {
+        version: "mfm.structured-access-audit.v1".to_owned(),
+        authorization_ref: authorization.authorization_ref().clone(),
+        observation_ref,
+        access_attempt_id: authorization.access_attempt_id().clone(),
+        attempt_ordinal: authorization.attempt_ordinal(),
+        occurrence_id: authorization.occurrence_id().clone(),
+        occurrence_path_ref: authorization.occurrence_path_ref().clone(),
+        semantic_call_id: authorization.semantic_call_id().clone(),
+        access_kind: authorization.access_kind(),
+        capability_contract_ref: authorization.capability_contract_ref().clone(),
+        capability_implementation_ref: authorization.capability_implementation_ref().clone(),
+        adapter_contract_ref: authorization.adapter_contract_ref().clone(),
+        adapter_implementation_ref: authorization.adapter_implementation_ref().clone(),
+        request: authorization.request().clone(),
+        request_digest: authorization.request_digest().clone(),
+        physical_binding_ref: authorization.physical_binding_ref().clone(),
+        stable_resource_lineage_contract_ref: authorization
+            .stable_resource_lineage_contract_ref()
+            .cloned(),
+        status,
+        outcome,
+    })
 }
 
-fn observation_status(outcome: &ObservationOutcome) -> &'static str {
+fn observation_status_wire(outcome: &ObservationOutcome) -> StructuredAccessStatusWire {
     match outcome {
-        ObservationOutcome::Returned { .. } => "returned",
-        ObservationOutcome::SafeFailure { .. } => "safe_failure",
-        ObservationOutcome::SupersededBeforeEntry { .. } => "superseded_before_entry",
-        ObservationOutcome::EntryUnknown { .. } => "entry_unknown",
-        ObservationOutcome::IntegrityFault { .. } => "integrity_fault",
+        ObservationOutcome::Returned { .. } => StructuredAccessStatusWire::Returned,
+        ObservationOutcome::SafeFailure { .. } => StructuredAccessStatusWire::SafeFailure,
+        ObservationOutcome::SupersededBeforeEntry { .. } => {
+            StructuredAccessStatusWire::SupersededBeforeEntry
+        }
+        ObservationOutcome::EntryUnknown { .. } => StructuredAccessStatusWire::EntryUnknown,
+        ObservationOutcome::IntegrityFault { .. } => StructuredAccessStatusWire::IntegrityFault,
     }
 }
 
@@ -501,5 +696,139 @@ fn classify_store_error(error: StructuredStoreError) -> StructuredReplayError {
         | StructuredStoreError::Certification
         | StructuredStoreError::StaleHead
         | StructuredStoreError::AppendConflict => StructuredReplayError::InvalidRecordedHistory,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mfm_canonical::sha256_digest_bytes;
+    use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes, JournalRecordHash, SchemaId};
+
+    use super::*;
+
+    #[test]
+    fn transition_trace_owner_rederives_its_record_hash_and_rejects_cross_owner_bytes() {
+        let mut wire = transition_wire();
+        let record = wire.record();
+        wire.record_ref.record_hash = derive_record_hash(&RecordHashPreimage {
+            run_id: &wire.record_ref.run_id,
+            run_sequence: wire.record_ref.run_sequence,
+            ordinal: wire.record_ref.ordinal,
+            record: &record,
+        })
+        .expect("transition record hash");
+
+        let projection = StructuredTransitionTrace::from_wire(&wire).expect("transition trace");
+        assert_eq!(
+            StructuredTransitionTrace::strict_decode(projection.as_bytes())
+                .expect("strict transition trace")
+                .as_bytes(),
+            projection.as_bytes(),
+        );
+        assert!(StructuredReplayResult::strict_decode(projection.as_bytes()).is_err());
+        assert!(StructuredAccessAuditEntry::strict_decode(projection.as_bytes()).is_err());
+
+        wire.record_ref.record_hash = JournalRecordHash::from_digest(digest(99));
+        let foreign_hash = encode_exact_projection(&wire).expect("foreign hash trace");
+        assert!(StructuredTransitionTrace::strict_decode(foreign_hash.as_bytes()).is_err());
+
+        let mut unknown: serde_json::Value =
+            serde_json::from_slice(projection.as_bytes()).expect("transition trace JSON");
+        unknown["extra"] = serde_json::json!(true);
+        let unknown = mfm_journal::structured::canonical_json(&unknown).expect("unknown trace");
+        assert!(StructuredTransitionTrace::strict_decode(unknown.as_bytes()).is_err());
+    }
+
+    #[tokio::test]
+    async fn fixed_head_audit_treats_a_later_observation_as_absent() {
+        let fixture = mfm_store::structured::test_support::observed_read_export(218)
+            .await
+            .expect("observed-read fixture");
+        let authorization = fixture.audit.records().first().expect("read authorization");
+        let observation = authorization.observation().expect("read observation");
+        assert!(
+            observation.record_ref().run_sequence > authorization.authorization_ref().run_sequence
+        );
+        let authorization_index = usize::try_from(authorization.authorization_ref().run_sequence)
+            .expect("authorization sequence")
+            .checked_sub(1)
+            .expect("one-based authorization sequence");
+        let authorization_head = fixture
+            .audit
+            .journal_heads()
+            .get(authorization_index)
+            .expect("authorization head");
+
+        let fixed = project_access_audit(&fixture.audit, Some(authorization_head), 0, 500)
+            .expect("fixed-head audit");
+        let fixed_entry = fixed.entries().first().expect("fixed-head audit entry");
+        let fixed_json: serde_json::Value =
+            serde_json::from_slice(fixed_entry.as_bytes()).expect("fixed audit JSON");
+        assert_eq!(fixed_json["status"], "authorized");
+        assert!(fixed_json["observation_ref"].is_null());
+        assert!(fixed_json["outcome"].is_null());
+
+        let complete =
+            project_access_audit(&fixture.audit, None, 0, 500).expect("complete audit projection");
+        let complete_entry = complete.entries().first().expect("complete audit entry");
+        let complete_json: serde_json::Value =
+            serde_json::from_slice(complete_entry.as_bytes()).expect("complete audit JSON");
+        assert_eq!(complete_json["status"], "returned");
+        assert!(!complete_json["observation_ref"].is_null());
+        assert!(!complete_json["outcome"].is_null());
+        assert!(StructuredReplayResult::strict_decode(complete_entry.as_bytes()).is_err());
+        assert!(StructuredTransitionTrace::strict_decode(complete_entry.as_bytes()).is_err());
+
+        let mut mismatched = complete_json;
+        mismatched["status"] = serde_json::json!("authorized");
+        let mismatched =
+            mfm_journal::structured::canonical_json(&mismatched).expect("mismatched audit");
+        assert!(StructuredAccessAuditEntry::strict_decode(mismatched.as_bytes()).is_err());
+    }
+
+    fn transition_wire() -> StructuredTransitionTraceWire {
+        let run_id = RunId::from_digest(DigestAlgorithm::Sha256JcsV1, digest(1));
+        let input = LexicalValueRef::new(
+            content_ref(2),
+            TypedValueRef {
+                contract_ref: content_ref(3),
+                value_ref: content_ref(4),
+            },
+        );
+        StructuredTransitionTraceWire {
+            version: "mfm.structured-transition-trace.v1".to_owned(),
+            record_ref: RecordRef::new(run_id, 2, 0, JournalRecordHash::from_digest(digest(5))),
+            occurrence_id: OccurrenceId::from_digest(digest(6)),
+            occurrence_path_ref: content_ref(7),
+            semantic_call_id: SemanticCallId::from_digest(digest(8)),
+            input: input.clone(),
+            consumed_observation_ref: None,
+            outcome_ref: content_ref(9),
+            outcome: StateOutcomeRef::Success(input),
+            facts: Vec::new(),
+            before_semantic_state_digest: RunSemanticStateDigest::from_digest(digest(10)),
+            after_semantic_state_digest: RunSemanticStateDigest::from_digest(digest(11)),
+        }
+    }
+
+    fn content_ref(discriminator: u8) -> ContentRef {
+        ContentRef::new(
+            SchemaId::new(
+                "mfm.replay.test",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                digest(discriminator),
+            )
+            .expect("schema id"),
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(&[discriminator]),
+            ),
+        )
+        .expect("content ref")
+    }
+
+    fn digest(discriminator: u8) -> DigestBytes {
+        DigestBytes::from_array([discriminator; 32])
     }
 }

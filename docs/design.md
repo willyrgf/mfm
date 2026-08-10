@@ -352,8 +352,13 @@ treat a merely well-shaped completeness claim as authoritative.
 
 `mfm-replay` owns the portable export format and offline verifier, and projects the reviewed public
 run view, transition trace, access audit, and replay summary from the same qualified reduction.
-Pages are fixed to one journal head. Portable export first authorizes every referenced prior-run
-source under the sealed export purpose and only then serializes exact committed-batch envelopes,
+Replay summary, transition trace, and access audit each have a distinct private typed wire owner;
+there is no generic projection wrapper or contract switch. Transition decode re-derives the exact
+assigned record hash. Audit decode binds status to the exact optional observation and re-derives an
+included observation record hash. Pages are fixed to one journal head, and an observation committed
+after that head is projected as absent even when it exists in the currently loaded suffix. Portable
+export first authorizes every referenced prior-run source under the sealed export purpose and only
+then serializes exact committed-batch envelopes,
 source relationships, and semantic/physical fixation with the exact target key, database identity,
 fence generation, release epoch, and current-incarnation reference with a closure reference; denied
 or incomplete source closures emit zero bytes. Offline verification uses only bundle bytes and an

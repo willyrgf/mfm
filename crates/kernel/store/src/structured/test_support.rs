@@ -47,7 +47,7 @@ use mfm_spec::structured::{
 use serde::{Deserialize, Serialize};
 
 use super::memory::StructuredMemoryBackend;
-use super::purpose::{ExportRunEvidence, RecordedRunEvidence};
+use super::purpose::{AuditRunEvidence, ExportRunEvidence, RecordedRunEvidence};
 use super::qualification::StructuredStoreError;
 use super::qualification::{
     PhysicalBindingAuthorization, PhysicalBindingSupersession, PhysicalObligationChecker,
@@ -324,6 +324,8 @@ pub struct OfflineExportFixture {
     pub export: ExportRunEvidence,
     /// The same run loaded through the recorded-replay purpose reader.
     pub recorded: RecordedRunEvidence,
+    /// The same run loaded through the access-audit purpose reader.
+    pub audit: AuditRunEvidence,
     /// Program trust used by store and isolated replay reduction.
     pub program_qualifier: Arc<ProgramVerificationRegistry>,
     /// Physical-binding trust used by store and isolated replay reduction.
@@ -382,6 +384,7 @@ pub async fn zero_state_export(discriminator: u8) -> super::Result<OfflineExport
         .await
         .map_err(|_| StructuredStoreError::InvalidHistory)?;
     let export = opened.export_reader.load_for_export(&run_id).await?;
+    let audit = opened.audit_reader.load_access_audit(&run_id).await?;
     let recorded = opened
         .replay_reader
         .load_for_recorded_verify(&run_id)
@@ -389,6 +392,7 @@ pub async fn zero_state_export(discriminator: u8) -> super::Result<OfflineExport
     Ok(OfflineExportFixture {
         export,
         recorded,
+        audit,
         program_qualifier: fixture.program_qualifier,
         physical_binding_verifier: AcceptPhysicalBindings,
     })
@@ -444,6 +448,7 @@ pub async fn observed_read_export(discriminator: u8) -> super::Result<OfflineExp
     let export = opened.export_reader.load_for_export(&consumer_run).await?;
     let producer_export = opened.export_reader.load_for_export(&producer_run).await?;
     let export = export.with_authorized_sources(None, vec![(producer_export, None)])?;
+    let audit = opened.audit_reader.load_access_audit(&consumer_run).await?;
     let recorded = opened
         .replay_reader
         .load_for_recorded_verify(&consumer_run)
@@ -451,6 +456,7 @@ pub async fn observed_read_export(discriminator: u8) -> super::Result<OfflineExp
     Ok(OfflineExportFixture {
         export,
         recorded,
+        audit,
         program_qualifier: fixture.program_qualifier,
         physical_binding_verifier: AcceptPhysicalBindings,
     })
