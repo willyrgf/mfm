@@ -397,6 +397,11 @@ record family. The shared canonical append boundary rejects any serialized revis
 `MAX_CONFIGURATION_REVISION_BYTES` before dispatching to memory or PostgreSQL; the configured value
 itself remains subject to its schema byte bound.
 
+An append request identity binds the exact stream key, predecessor, configured-value contract, and
+canonical value. An exact historical retry returns its retained revision even after later
+successors. Reusing that identity with any different bound input is an append conflict; only a new
+identity presented against a non-current predecessor is a stale-head request.
+
 PostgreSQL retains an independent exact `configuration_heads` compare-and-append row for each
 stream. That local head detects removal, rollback, or divergence while the database remains under
 the admitted writer generation. It is not evidence against a coordinated rollback of both the
