@@ -56,8 +56,9 @@ use mfm_store::structured::{
     BackendAppendOutcome, PhysicalBindingAuthorization, PhysicalBindingSupersession,
     PhysicalObligationChecker, PhysicalTargetIdentity, RawHistoryLoadLimit, RawRunHistory,
     RunCurrentProjection, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredMemoryBackend, StructuredRunSnapshot, StructuredStoreError, StructuredStoreIdentity,
-    StructuredStoreRunSnapshot, StructuredStoreSnapshot, TenantFactPublication, ValidatedRunAppend,
+    StructuredMemoryBackend, StructuredRunSnapshot, StructuredSemanticOpenAudit,
+    StructuredStoreError, StructuredStoreIdentity, TenantFactPublication, ValidatedRunAppend,
+    SEMANTIC_OPEN_KEY_PAGE_ITEMS,
 };
 use mfm_values::{CanonicalJsonPersistedSchema, PersistedObjectPayload};
 use serde::{Deserialize, Serialize};
@@ -1065,6 +1066,7 @@ fn refresh_effect_binding_source(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum InjectAppend {
     None,
+    OversizedSemanticOpenRunPage,
     ObservationConcurrentDifferent,
     ObservationSubstitutedPositive,
     AuthorizationAcknowledgementUnknown,
@@ -1091,6 +1093,130 @@ impl InjectingBackend {
             override_history: Mutex::new(None),
             override_projection: Mutex::new(None),
         }
+    }
+}
+
+struct InjectingAudit {
+    inner: Box<dyn StructuredSemanticOpenAudit>,
+    override_history: Option<RawRunHistory>,
+    override_projection: Option<RunCurrentProjection>,
+    oversized_run_page: bool,
+}
+
+impl StructuredSemanticOpenAudit for InjectingAudit {
+    fn scan_run_ids<'a>(
+        &'a mut self,
+        after_run_id: Option<&'a RunId>,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
+        Box::pin(async move {
+            if self.oversized_run_page && after_run_id.is_none() {
+                return (0..=SEMANTIC_OPEN_KEY_PAGE_ITEMS)
+                    .map(|index| {
+                        RunId::parse(format!("run:sha256-jcs-v1:{index:064x}"))
+                            .map_err(|_| StructuredStoreError::InvalidHistory)
+                    })
+                    .collect();
+            }
+            let mut page = self.inner.scan_run_ids(after_run_id).await?;
+            if let Some(run_id) = self
+                .override_history
+                .as_ref()
+                .map(|history| &history.run_id)
+                .or_else(|| {
+                    self.override_projection
+                        .as_ref()
+                        .map(|projection| &projection.run_id)
+                })
+                .filter(|run_id| after_run_id.is_none_or(|after| *run_id > after))
+            {
+                page.push(run_id.clone());
+            }
+            page.sort();
+            page.dedup();
+            page.truncate(SEMANTIC_OPEN_KEY_PAGE_ITEMS as usize);
+            Ok(page)
+        })
+    }
+
+    fn load_run_projection<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>> {
+        Box::pin(async move {
+            match self
+                .override_projection
+                .as_ref()
+                .filter(|projection| &projection.run_id == run_id)
+            {
+                Some(projection) => Ok(Some(projection.clone())),
+                None => self.inner.load_run_projection(run_id).await,
+            }
+        })
+    }
+
+    fn load_run_history_bounded<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        through: Option<&'a JournalHead>,
+        limit: RawHistoryLoadLimit,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
+        Box::pin(async move {
+            let Some(mut history) = self
+                .override_history
+                .as_ref()
+                .filter(|history| &history.run_id == run_id)
+                .cloned()
+            else {
+                return self
+                    .inner
+                    .load_run_history_bounded(run_id, through, limit)
+                    .await;
+            };
+            if let Some(head) = through {
+                let Some(position) = history.batches.iter().position(|batch| &batch.head == head)
+                else {
+                    return Ok(None);
+                };
+                history.batches.truncate(position + 1);
+            }
+            history.validate_load_limit(limit)?;
+            Ok(Some(history))
+        })
+    }
+
+    fn scan_run_publications<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        after_run_sequence: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
+        self.inner.scan_run_publications(run_id, after_run_sequence)
+    }
+
+    fn scan_fact_tenants<'a>(
+        &'a mut self,
+        after_tenant_scope_id: Option<&'a TenantScopeId>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantScopeId>> {
+        self.inner.scan_fact_tenants(after_tenant_scope_id)
+    }
+
+    fn load_fact_head<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+    ) -> StructuredBackendFuture<'a, Option<TenantFactFrontier>> {
+        self.inner.load_fact_head(tenant_scope_id)
+    }
+
+    fn scan_tenant_publications<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+        after_fact_order: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
+        self.inner
+            .scan_tenant_publications(tenant_scope_id, after_fact_order)
+    }
+
+    fn finish(self: Box<Self>) -> StructuredBackendFuture<'static, ()> {
+        self.inner.finish()
     }
 }
 
@@ -1210,17 +1336,11 @@ impl StructuredHistoryBackend for InjectingBackend {
         })
     }
 
-    fn scan_run_ids<'a>(
-        &'a self,
-        after_run_id: Option<&'a RunId>,
-        maximum_items: u32,
-    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
-        self.inner.scan_run_ids(after_run_id, maximum_items)
-    }
-
-    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot> {
+    fn begin_semantic_open_audit(
+        &self,
+    ) -> StructuredBackendFuture<'_, Box<dyn StructuredSemanticOpenAudit>> {
         Box::pin(async move {
-            let mut snapshot = self.inner.load_store_snapshot().await?;
+            let inner = self.inner.begin_semantic_open_audit().await?;
             let history = self
                 .override_history
                 .lock()
@@ -1231,25 +1351,12 @@ impl StructuredHistoryBackend for InjectingBackend {
                 .lock()
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
                 .clone();
-            if let Some(history) = history {
-                let run_id = history.run_id.clone();
-                if let Some(run) = snapshot.runs.iter_mut().find(|run| run.run_id == run_id) {
-                    run.history = Some(history);
-                    if projection.is_some() {
-                        run.current_projection = projection;
-                    }
-                } else {
-                    snapshot.runs.push(StructuredStoreRunSnapshot {
-                        run_id,
-                        history: Some(history),
-                        current_projection: projection,
-                    });
-                    snapshot
-                        .runs
-                        .sort_by(|left, right| left.run_id.cmp(&right.run_id));
-                }
-            }
-            Ok(snapshot)
+            Ok(Box::new(InjectingAudit {
+                inner,
+                override_history: history,
+                override_projection: projection,
+                oversized_run_page: self.injection == InjectAppend::OversizedSemanticOpenRunPage,
+            }) as Box<dyn StructuredSemanticOpenAudit>)
         })
     }
 
@@ -1340,7 +1447,9 @@ impl StructuredHistoryBackend for InjectingBackend {
                             .map_err(|_| StructuredStoreError::InvalidHistory)?;
                     Ok(BackendAppendOutcome::NewlyCommitted(returned))
                 }
-                InjectAppend::None | InjectAppend::AuthorizationAcknowledgementUnknown => {
+                InjectAppend::None
+                | InjectAppend::OversizedSemanticOpenRunPage
+                | InjectAppend::AuthorizationAcknowledgementUnknown => {
                     Err(StructuredStoreError::InvalidHistory)
                 }
             }
@@ -1427,6 +1536,23 @@ fn conflicting_observation_batch(
             commit_digest,
         },
     })
+}
+
+#[tokio::test]
+async fn semantic_open_rejects_a_backend_page_above_the_fixed_bound() {
+    let (_, _, _, registry) = program_cache_registry(Arc::new(AtomicUsize::new(0)));
+    let result = open_structured_runtime(
+        InjectingBackend::new(
+            store_identity(90),
+            InjectAppend::OversizedSemanticOpenRunPage,
+        ),
+        registry,
+        Arc::new(ExactPublicBindingVerifier {
+            certificate: binding_object(90),
+        }),
+    )
+    .await;
+    assert!(matches!(result, Err(StructuredStoreError::InvalidHistory)));
 }
 
 #[tokio::test]

@@ -310,6 +310,14 @@ reduced prefix must then equal that same-snapshot head, and the target is revali
 snapshot is released. A predecessor digest is a compare-and-append precondition, never a second
 stream identity.
 
+Store assembly uses a separate non-cloneable semantic-open audit capability. The memory backend
+owns an asynchronous read snapshot and PostgreSQL owns one repeatable-read, read-only transaction;
+both expose only fixed key and route pages plus bounded one-run loads. Store qualification consumes
+those pages, retains verification state for one root at a time, validates tenant publication routes
+without collecting a tenant lifetime, releases the snapshot, and freshly revalidates authority.
+Concrete backends own physical snapshot and paging mechanics; `mfm-store` alone owns semantic
+qualification and comparison.
+
 Runtime access proofs are consumed by both Read and Effect adapters. A qualified adapter must bind
 the proof's access kind, state input where applicable, and retained physical certificate before
 entering a target. The unqualified Effect invoker is integrity-fault-only. EVM recovery observes

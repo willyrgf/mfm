@@ -29,6 +29,12 @@ pub const MAX_RUN_HISTORY_OBJECTS: usize = 1_048_576;
 /// Maximum canonical committed-batch bytes across one openable run.
 pub const MAX_RUN_HISTORY_CANONICAL_BYTES: usize = 536_870_912;
 
+/// Fixed keyset page used by semantic-open run and tenant sweeps.
+pub const SEMANTIC_OPEN_KEY_PAGE_ITEMS: u32 = 128;
+
+/// Fixed route page used by semantic-open publication sweeps.
+pub const SEMANTIC_OPEN_ROUTE_PAGE_ITEMS: u32 = 1_024;
+
 /// Exact remaining capacity supplied to a raw-prefix loader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawHistoryLoadLimit {
@@ -199,42 +205,66 @@ pub struct StructuredRunSnapshot {
     pub current_projection: Option<RunCurrentProjection>,
 }
 
-/// One run key and both state-bearing surfaces observed in semantic snapshot `S0`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuredStoreRunSnapshot {
-    /// Union key from immutable history and the disposable projection.
-    pub run_id: RunId,
-    /// Complete immutable history, when present.
-    pub history: Option<RawRunHistory>,
-    /// Complete current projection, when present.
-    pub current_projection: Option<RunCurrentProjection>,
-}
-
-/// One tenant's complete disposable fact route and head surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TenantFactProjectionSnapshot {
-    /// Union key from immutable routes and the disposable head.
-    pub tenant_scope_id: TenantScopeId,
-    /// Positive current head; zero is represented by absence.
-    pub current_frontier: Option<TenantFactFrontier>,
-    /// Complete immutable publication route in fact order.
-    pub publications: Vec<TenantFactPublication>,
-}
-
-/// Complete raw physical state captured by one semantic-open snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructuredStoreSnapshot {
-    /// Union of immutable and projection run keys.
-    pub runs: Vec<StructuredStoreRunSnapshot>,
-    /// Union of immutable fact-route and fact-head tenant keys.
-    pub tenant_facts: Vec<TenantFactProjectionSnapshot>,
-}
-
 /// Stable append lookup result, ending at the exact retained attempt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendAttemptLookup {
     /// Immutable prefix through the attempt.
     pub history: RawRunHistory,
+}
+
+/// Non-cloneable backend-owned semantic snapshot `S0`.
+///
+/// Every method reads the same physical snapshot. Page cursors are exclusive and all returned
+/// pages are bounded by the fixed semantic-open constants.
+pub trait StructuredSemanticOpenAudit: Send {
+    /// Scans the union of history, projection, and publication run keys.
+    fn scan_run_ids<'a>(
+        &'a mut self,
+        after_run_id: Option<&'a RunId>,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>>;
+
+    /// Loads one disposable run projection from `S0`.
+    fn load_run_projection<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>>;
+
+    /// Loads one bounded complete or exact-head immutable run prefix from `S0`.
+    fn load_run_history_bounded<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        through: Option<&'a JournalHead>,
+        limit: RawHistoryLoadLimit,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
+
+    /// Scans one run's publication routes by exclusive run sequence.
+    fn scan_run_publications<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        after_run_sequence: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>>;
+
+    /// Scans the union of fact-route and fact-head tenant keys.
+    fn scan_fact_tenants<'a>(
+        &'a mut self,
+        after_tenant_scope_id: Option<&'a TenantScopeId>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantScopeId>>;
+
+    /// Loads one optional positive fact head from `S0`.
+    fn load_fact_head<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+    ) -> StructuredBackendFuture<'a, Option<TenantFactFrontier>>;
+
+    /// Scans one tenant's routes by exclusive fact order.
+    fn scan_tenant_publications<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+        after_fact_order: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>>;
+
+    /// Revalidates and releases `S0`; dropping without finish releases no authority.
+    fn finish(self: Box<Self>) -> StructuredBackendFuture<'static, ()>;
 }
 
 /// Raw backend. Implementations decode, compare, insert, and CAS only.
@@ -270,15 +300,10 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
         append_request_id: &'a AppendRequestId,
     ) -> StructuredBackendFuture<'a, Option<AppendAttemptLookup>>;
 
-    /// Enumerates the union of immutable and projection run keys in order.
-    fn scan_run_ids<'a>(
-        &'a self,
-        after_run_id: Option<&'a RunId>,
-        maximum_items: u32,
-    ) -> StructuredBackendFuture<'a, Vec<RunId>>;
-
-    /// Captures every semantic-open decision surface in one physical snapshot.
-    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot>;
+    /// Begins one pinned, paged, non-cloneable semantic-open snapshot.
+    fn begin_semantic_open_audit(
+        &self,
+    ) -> StructuredBackendFuture<'_, Box<dyn StructuredSemanticOpenAudit>>;
 
     /// Freshly revalidates the target, fence, release, and store identity after `S0`.
     fn validate_authority(&self) -> StructuredBackendFuture<'_, ()>;

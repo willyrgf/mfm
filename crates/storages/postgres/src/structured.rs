@@ -12,9 +12,9 @@ use mfm_journal::structured::{
 use mfm_store::structured::{
     AppendAttemptLookup, BackendAppendOutcome, RawHistoryLoadLimit, RawRunHistory,
     RunCurrentProjection, StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot,
-    StructuredStoreError, StructuredStoreIdentity, StructuredStoreRunSnapshot,
-    StructuredStoreSnapshot, TenantFactProjectionPlan, TenantFactProjectionSnapshot,
-    TenantFactPublication, ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
+    StructuredSemanticOpenAudit, StructuredStoreError, StructuredStoreIdentity,
+    TenantFactProjectionPlan, TenantFactPublication, ValidatedRunAppend, MAX_STORED_FRAME_BYTES,
+    SEMANTIC_OPEN_KEY_PAGE_ITEMS, SEMANTIC_OPEN_ROUTE_PAGE_ITEMS,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -253,7 +253,7 @@ impl PostgresStructuredHistoryBackend {
         }
     }
 
-    async fn begin_read(&self) -> Result<ReadTx<'_>, StructuredStoreError> {
+    async fn begin_read(&self) -> Result<ReadTx<'static>, StructuredStoreError> {
         begin_read(&self.run_reader, &self.target).await
     }
 
@@ -264,6 +264,124 @@ impl PostgresStructuredHistoryBackend {
     ) -> Result<LockedWriteTx<'_>, StructuredStoreError> {
         let write = begin_run_write(&self.run_writer, &self.target).await?;
         lock_run_and_tenant(write, run_id, tenant_key).await
+    }
+}
+
+struct PostgresSemanticOpenAudit {
+    transaction: Option<ReadTx<'static>>,
+    target: TargetBinding,
+    identity: StructuredStoreIdentity,
+}
+
+impl PostgresSemanticOpenAudit {
+    fn transaction(&mut self) -> Result<&mut Transaction<'static, Postgres>, StructuredStoreError> {
+        self.transaction
+            .as_mut()
+            .map(ReadTx::conn)
+            .ok_or(StructuredStoreError::BackendUnavailable)
+    }
+}
+
+impl StructuredSemanticOpenAudit for PostgresSemanticOpenAudit {
+    fn scan_run_ids<'a>(
+        &'a mut self,
+        after_run_id: Option<&'a RunId>,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
+        Box::pin(async move {
+            select_run_ids(
+                self.transaction()?,
+                after_run_id,
+                SEMANTIC_OPEN_KEY_PAGE_ITEMS,
+            )
+            .await
+        })
+    }
+
+    fn load_run_projection<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>> {
+        Box::pin(async move {
+            let identity = self.identity.clone();
+            load_run_projection(self.transaction()?, run_id, &identity).await
+        })
+    }
+
+    fn load_run_history_bounded<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        through: Option<&'a JournalHead>,
+        limit: RawHistoryLoadLimit,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
+        Box::pin(async move {
+            match through {
+                Some(head) => load_exact_prefix(self.transaction()?, run_id, head, limit).await,
+                None => load_complete_history(self.transaction()?, run_id, limit).await,
+            }
+        })
+    }
+
+    fn scan_run_publications<'a>(
+        &'a mut self,
+        run_id: &'a RunId,
+        after_run_sequence: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
+        Box::pin(async move {
+            let identity = self.identity.clone();
+            select_run_publications(self.transaction()?, &identity, run_id, after_run_sequence)
+                .await
+        })
+    }
+
+    fn scan_fact_tenants<'a>(
+        &'a mut self,
+        after_tenant_scope_id: Option<&'a TenantScopeId>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantScopeId>> {
+        Box::pin(async move {
+            select_fact_tenants(
+                self.transaction()?,
+                after_tenant_scope_id,
+                SEMANTIC_OPEN_KEY_PAGE_ITEMS,
+            )
+            .await
+        })
+    }
+
+    fn load_fact_head<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+    ) -> StructuredBackendFuture<'a, Option<TenantFactFrontier>> {
+        Box::pin(async move {
+            let identity = self.identity.clone();
+            load_fact_head(self.transaction()?, &identity, tenant_scope_id).await
+        })
+    }
+
+    fn scan_tenant_publications<'a>(
+        &'a mut self,
+        tenant_scope_id: &'a TenantScopeId,
+        after_fact_order: Option<u64>,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
+        Box::pin(async move {
+            let identity = self.identity.clone();
+            select_tenant_publications(
+                self.transaction()?,
+                &identity,
+                tenant_scope_id,
+                after_fact_order,
+            )
+            .await
+        })
+    }
+
+    fn finish(mut self: Box<Self>) -> StructuredBackendFuture<'static, ()> {
+        Box::pin(async move {
+            let transaction = self
+                .transaction
+                .take()
+                .ok_or(StructuredStoreError::BackendUnavailable)?;
+            transaction.commit_checked(&self.target).await
+        })
     }
 }
 
@@ -373,71 +491,17 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         })
     }
 
-    fn scan_run_ids<'a>(
-        &'a self,
-        after_run_id: Option<&'a RunId>,
-        maximum_items: u32,
-    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
-        Box::pin(async move {
-            if maximum_items == 0 {
-                return Err(invalid("PostgreSQL run page is empty"));
-            }
-            let mut transaction = self.begin_read().await?;
-            let rows = select_run_ids(transaction.conn(), after_run_id, maximum_items).await?;
-            transaction.commit_checked(&self.target).await?;
-            Ok(rows)
-        })
-    }
-
-    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot> {
+    fn begin_semantic_open_audit(
+        &self,
+    ) -> StructuredBackendFuture<'_, Box<dyn StructuredSemanticOpenAudit>> {
         Box::pin(async move {
             let mut transaction = self.begin_read().await?;
-            let mut runs = Vec::new();
-            let mut after = None;
-            loop {
-                let page = select_run_ids(transaction.conn(), after.as_ref(), 256).await?;
-                for run_id in &page {
-                    let snapshot = load_run_snapshot(
-                        transaction.conn(),
-                        run_id,
-                        &self.identity,
-                        self.target.schema_name(),
-                        RawHistoryLoadLimit::run(),
-                    )
-                    .await?;
-                    runs.push(StructuredStoreRunSnapshot {
-                        run_id: run_id.clone(),
-                        history: snapshot.history,
-                        current_projection: snapshot.current_projection,
-                    });
-                }
-                after = page.last().cloned();
-                if page.len() < 256 {
-                    break;
-                }
-            }
-            let mut tenant_facts = Vec::new();
-            let mut after_tenant = None;
-            loop {
-                let page =
-                    select_fact_tenants(transaction.conn(), after_tenant.as_ref(), 256).await?;
-                for tenant_scope_id in &page {
-                    tenant_facts.push(
-                        load_fact_projection(
-                            transaction.conn(),
-                            &self.identity,
-                            tenant_scope_id.clone(),
-                        )
-                        .await?,
-                    );
-                }
-                after_tenant = page.last().cloned();
-                if page.len() < 256 {
-                    break;
-                }
-            }
-            transaction.commit_checked(&self.target).await?;
-            Ok(StructuredStoreSnapshot { runs, tenant_facts })
+            transaction.validate_target(&self.target).await?;
+            Ok(Box::new(PostgresSemanticOpenAudit {
+                transaction: Some(transaction),
+                target: self.target.clone(),
+                identity: self.identity.clone(),
+            }) as Box<dyn StructuredSemanticOpenAudit>)
         })
     }
 
@@ -936,7 +1000,26 @@ async fn load_run_snapshot(
     schema_name: &str,
     limit: RawHistoryLoadLimit,
 ) -> Result<StructuredRunSnapshot, StructuredStoreError> {
-    let projection_row = sqlx::query(
+    let current_projection = load_run_projection(transaction, run_id, identity).await?;
+    #[cfg(feature = "test-support")]
+    crate::transaction::await_read_phase_barrier(schema_name, "after_head").await;
+    #[cfg(not(feature = "test-support"))]
+    let _ = schema_name;
+    let history = load_complete_history(transaction, run_id, limit).await?;
+    #[cfg(feature = "test-support")]
+    crate::transaction::await_read_phase_barrier(schema_name, "after_batches").await;
+    Ok(StructuredRunSnapshot {
+        history,
+        current_projection,
+    })
+}
+
+async fn load_run_projection(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    identity: &StructuredStoreIdentity,
+) -> Result<Option<RunCurrentProjection>, StructuredStoreError> {
+    sqlx::query(
         "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
                 head_sequence::text AS head_sequence, head_commit_digest, \
                 has_effect_entry_attention \
@@ -945,18 +1028,18 @@ async fn load_run_snapshot(
     .bind(run_id.as_str())
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    let current_projection = projection_row
-        .map(|row| decode_run_projection(&row, run_id, identity))
-        .transpose()?;
-    #[cfg(feature = "test-support")]
-    crate::transaction::await_read_phase_barrier(schema_name, "after_head").await;
-    #[cfg(not(feature = "test-support"))]
-    let _ = schema_name;
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?
+    .map(|row| decode_run_projection(&row, run_id, identity))
+    .transpose()
+}
+
+async fn load_complete_history(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    limit: RawHistoryLoadLimit,
+) -> Result<Option<RawRunHistory>, StructuredStoreError> {
     preflight_history_load(transaction, run_id, None, limit).await?;
     let rows = select_batch_rows(transaction, StructuredBatchQuery::Prefix, run_id, None).await?;
-    #[cfg(feature = "test-support")]
-    crate::transaction::await_read_phase_barrier(schema_name, "after_batches").await;
     let history = if rows.is_empty() {
         None
     } else {
@@ -977,10 +1060,7 @@ async fn load_run_snapshot(
     if let Some(history) = &history {
         history.validate_load_limit(limit)?;
     }
-    Ok(StructuredRunSnapshot {
-        history,
-        current_projection,
-    })
+    Ok(history)
 }
 
 async fn load_exact_prefix(
@@ -1090,6 +1170,7 @@ async fn select_run_ids(
         "SELECT run_id FROM ( \
              SELECT run_id FROM run_history_batches \
              UNION SELECT run_id FROM run_history_heads \
+             UNION SELECT run_id FROM tenant_fact_publications \
          ) AS run_keys \
          WHERE ($1::text IS NULL OR run_id > $1::text) \
          ORDER BY run_id LIMIT $2::bigint",
@@ -1133,11 +1214,11 @@ async fn select_fact_tenants(
         .collect()
 }
 
-async fn load_fact_projection(
+async fn load_fact_head(
     transaction: &mut Transaction<'_, Postgres>,
     identity: &StructuredStoreIdentity,
-    tenant_scope_id: TenantScopeId,
-) -> Result<TenantFactProjectionSnapshot, StructuredStoreError> {
+    tenant_scope_id: &TenantScopeId,
+) -> Result<Option<TenantFactFrontier>, StructuredStoreError> {
     let head_rows = sqlx::query(
         "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
                 fact_order::text AS fact_order \
@@ -1147,7 +1228,7 @@ async fn load_fact_projection(
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-    let current_frontier = match head_rows.as_slice() {
+    Ok(match head_rows.as_slice() {
         [] => None,
         [row]
             if required_text(row, "store_scope_id")? == identity.store_scope_id.as_str()
@@ -1166,19 +1247,73 @@ async fn load_fact_projection(
                 "PostgreSQL fact head is not unique or changed identity",
             ))
         }
+    })
+}
+
+async fn select_tenant_publications(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &StructuredStoreIdentity,
+    tenant_scope_id: &TenantScopeId,
+    after_fact_order: Option<u64>,
+) -> Result<Vec<TenantFactPublication>, StructuredStoreError> {
+    let first_order = match after_fact_order {
+        Some(order) => match order.checked_add(1) {
+            Some(order) => order,
+            None => return Ok(Vec::new()),
+        },
+        None => 1,
     };
-    let rows = select_fact_publication_rows(
+    select_fact_publication_rows(
         transaction,
         identity,
-        &tenant_scope_id,
-        1,
+        tenant_scope_id,
+        first_order,
         u64::MAX,
-        u32::MAX,
+        SEMANTIC_OPEN_ROUTE_PAGE_ITEMS,
     )
-    .await?;
-    let publications = rows
-        .into_iter()
+    .await?
+    .into_iter()
+    .map(|row| {
+        decode_tenant_publication(
+            &row,
+            &identity.store_scope_id,
+            identity.store_epoch,
+            tenant_scope_id,
+        )
+    })
+    .collect()
+}
+
+async fn select_run_publications(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &StructuredStoreIdentity,
+    run_id: &RunId,
+    after_run_sequence: Option<u64>,
+) -> Result<Vec<TenantFactPublication>, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT publication.store_scope_id, publication.store_epoch::text AS store_epoch, \
+                publication.tenant_scope_id, publication.fact_order::text AS fact_order, \
+                publication.run_id, publication.run_sequence::text AS run_sequence, \
+                publication.transition_ordinal, publication.transition_record_hash, \
+                batch.head_commit_digest \
+           FROM tenant_fact_publications AS publication \
+           JOIN run_history_batches AS batch \
+             ON batch.run_id = publication.run_id \
+            AND batch.run_sequence = publication.run_sequence \
+          WHERE publication.run_id = $1 \
+            AND ($2::numeric IS NULL OR publication.run_sequence > $2::numeric) \
+          ORDER BY publication.run_sequence LIMIT $3::bigint",
+    )
+    .bind(run_id.as_str())
+    .bind(after_run_sequence.map(|sequence| sequence.to_string()))
+    .bind(i64::from(SEMANTIC_OPEN_ROUTE_PAGE_ITEMS))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    rows.into_iter()
         .map(|row| {
+            let tenant_scope_id = TenantScopeId::new(required_text(&row, "tenant_scope_id")?)
+                .map_err(|_| invalid("PostgreSQL publication tenant is invalid"))?;
             decode_tenant_publication(
                 &row,
                 &identity.store_scope_id,
@@ -1186,12 +1321,7 @@ async fn load_fact_projection(
                 &tenant_scope_id,
             )
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(TenantFactProjectionSnapshot {
-        tenant_scope_id,
-        current_frontier,
-        publications,
-    })
+        .collect()
 }
 
 async fn select_fact_publication_rows(

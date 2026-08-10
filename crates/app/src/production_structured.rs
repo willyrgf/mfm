@@ -1298,6 +1298,7 @@ fn classify_runtime_fault_code(
         },
         RuntimeFaultCode::StoreInvalid => match store_fault_kind {
             Some(RuntimeStoreFaultKind::RunNotFound) => PublicError::run_not_found(),
+            Some(RuntimeStoreFaultKind::CapacityExceeded) => run_history_capacity_exceeded(),
             _ => PublicError::replay_verification_failed(),
         },
         RuntimeFaultCode::StoreUnavailable => run_store_unavailable(),
@@ -1342,6 +1343,7 @@ fn classify_store_error(error: StructuredStoreError) -> PublicError {
         StructuredStoreError::BackendUnavailable | StructuredStoreError::AcknowledgementUnknown => {
             run_store_unavailable()
         }
+        StructuredStoreError::CapacityExceeded => run_history_capacity_exceeded(),
         StructuredStoreError::InvalidHistory
         | StructuredStoreError::CandidateRejected
         | StructuredStoreError::Certification => PublicError::replay_verification_failed(),
@@ -1397,6 +1399,14 @@ fn run_store_unavailable() -> PublicError {
         ErrorClass::ServiceUnavailable,
         "RunStoreUnavailable",
         "The authoritative run store is unavailable",
+    )
+}
+
+fn run_history_capacity_exceeded() -> PublicError {
+    PublicError::backend(
+        ErrorClass::ServiceUnavailable,
+        "RunHistoryCapacityExceeded",
+        "Retained run history exceeds the supported capacity",
     )
 }
 
@@ -1737,6 +1747,7 @@ mod tests {
         for disposition in [
             RuntimeStoreFaultKind::RunNotFound,
             RuntimeStoreFaultKind::InvalidHistory,
+            RuntimeStoreFaultKind::CapacityExceeded,
             RuntimeStoreFaultKind::Certification,
         ] {
             assert_public_mapping(
@@ -1754,6 +1765,13 @@ mod tests {
             ErrorClass::NotFound,
             "RunNotFound",
             "The requested run was not found",
+        );
+        assert_public_mapping(
+            RuntimeFaultCode::StoreInvalid,
+            Some(RuntimeStoreFaultKind::CapacityExceeded),
+            ErrorClass::ServiceUnavailable,
+            "RunHistoryCapacityExceeded",
+            "Retained run history exceeds the supported capacity",
         );
         for disposition in [
             RuntimeStoreFaultKind::InvalidHistory,

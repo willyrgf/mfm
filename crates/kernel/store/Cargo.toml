@@ -18,7 +18,7 @@ name = "mfm_store"
 path = "src/lib.rs"
 
 [features]
-test-support = ["dep:mfm-program"]
+test-support = ["dep:mfm-program", "dep:tokio"]
 backend-conformance = ["test-support"]
 
 [dependencies]
@@ -36,6 +36,7 @@ mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
 
 [dev-dependencies]
 mfm-capabilities = { path = "../capabilities" }

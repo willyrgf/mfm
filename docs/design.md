@@ -245,6 +245,17 @@ uses exact-head compare-and-append, and opens only after a deployment-supplied a
 fence qualifies the store scope and epoch. An unavailable or unqualified database fails closed;
 there is no memory fallback.
 
+Semantic open owns one non-cloneable physical snapshot `S0` until the complete audit finishes.
+It keyset-pages the union of history, projection, and publication run keys, then qualifies and
+drops one run at a time. Each run is preflighted before materialization and is limited to 65,536
+batches, 1,048,576 retained objects, and 512 MiB of canonical history; exceeding those retention
+limits is a capacity failure, not evidence corruption. For that run, the audit compares the exact
+reduced projection and derived publications against pagewise routes from the same `S0`. It then
+keyset-pages tenants and checks each dense route and head without accumulating the store's
+publication lifetime. Total store history remains unbounded because no store-wide snapshot,
+verified-run map, or publication vector is constructed. The backend revalidates and releases `S0`,
+and authority is validated freshly once more before Runtime or any reader is constructed.
+
 ## Runtime access choke point
 
 Runtime interprets the minimum declaration-ordered actionable path from the verified cursor. Its
