@@ -175,7 +175,11 @@ both make absence temporary. Only real writer fencing mints `SupersededBeforeEnt
 Recovering a parked EVM run therefore no longer means starting a fresh run under the same caller
 submission token. The parked run resolves itself; the cross-run path remains only what makes a
 *caller's* retry safe. After three authorizations the occurrence parks terminally and
-The current-attention inventory is how an operator finds it.
+the current-attention inventory is how an operator finds it. The production PostgreSQL
+qualification kills a worker after the original completion authorization but before its
+observation, discovers that same run as `CloseThenReassert`, closes the dead attempt without
+calling the wallet adapter, discovers `Reassert`, and re-enters the exact completion request. A
+second restart after the recovered observation then settles and closes the original run.
 
 ## Observation and terminal convergence
 
