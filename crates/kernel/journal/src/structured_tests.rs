@@ -3,6 +3,50 @@ use serde_json::json;
 
 use super::*;
 
+fn persisted_field_shape<T: PersistedSchema>(name: &str) -> SchemaShape {
+    let shape = T::schema_shape().expect("persisted schema shape");
+    let SchemaShape::Struct { fields } = shape else {
+        panic!("persisted owner is not a struct");
+    };
+    fields
+        .into_iter()
+        .find(|field| field.name == name)
+        .unwrap_or_else(|| panic!("missing persisted field {name}"))
+        .shape
+}
+
+fn assert_sequence_bounds(shape: SchemaShape, minimum_items: u32, maximum_items: u32) {
+    let SchemaShape::BoundedSequence {
+        minimum_items: actual_minimum,
+        maximum_items: actual_maximum,
+        ..
+    } = shape
+    else {
+        panic!("persisted field is not a bounded sequence");
+    };
+    assert_eq!(actual_minimum, minimum_items);
+    assert_eq!(actual_maximum, maximum_items);
+}
+
+#[test]
+fn append_owners_bind_their_exact_record_and_object_cardinalities() {
+    let maximum_records = u32::try_from(MAX_APPEND_RECORDS).expect("record bound fits u32");
+    let maximum_objects = u32::try_from(MAX_APPEND_OBJECTS).expect("object bound fits u32");
+
+    for records in [
+        persisted_field_shape::<CommitCandidate>("records"),
+        persisted_field_shape::<CommittedBatch>("records"),
+    ] {
+        assert_sequence_bounds(records, 1, maximum_records);
+    }
+    for objects in [
+        persisted_field_shape::<CommitCandidate>("objects"),
+        persisted_field_shape::<CommittedBatch>("objects"),
+    ] {
+        assert_sequence_bounds(objects, 0, maximum_objects);
+    }
+}
+
 #[test]
 fn source_manifest_eligibility_is_exact_on_operation_program_and_descriptor() {
     let operation = stable("mfm.journal.test/producer");

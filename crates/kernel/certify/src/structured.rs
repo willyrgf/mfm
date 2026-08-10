@@ -1668,16 +1668,10 @@ impl ReadCapabilityImplementation<PriorRunFactSelectionCapability>
         &self,
         returned: &mfm_facts::FactSelectionReadResponse,
     ) -> std::result::Result<(), CapabilityContractFault> {
-        let response: PriorRunFactSelectionResponse =
-            serde_json::from_str(returned.canonical_response_json())
-                .map_err(|_| CapabilityContractFault::new(self.fault_code.clone()))?;
-        let canonical = mfm_journal::structured::canonical_json(&response)
-            .map_err(|_| CapabilityContractFault::new(self.fault_code.clone()))?;
-        if response.version != PriorRunFactSelectionResponse::VERSION
-            || canonical.as_str() != returned.canonical_response_json()
-        {
-            return Err(CapabilityContractFault::new(self.fault_code.clone()));
-        }
+        PriorRunFactSelectionResponse::decode_canonical(
+            returned.canonical_response_json().as_bytes(),
+        )
+        .map_err(|_| CapabilityContractFault::new(self.fault_code.clone()))?;
         Ok(())
     }
 

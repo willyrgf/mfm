@@ -13,8 +13,8 @@ use mfm_ids::{
 };
 use mfm_program_derive::PersistedSchema;
 use mfm_values::{
-    FieldDescriptor, LiteralValue, MfmValue, PersistedObjectPayload, PersistedSchema,
-    SchemaIdentity, SchemaKind, SchemaShape, SequenceOrdering, StringGrammar,
+    CanonicalJsonPersistedSchema, FieldDescriptor, LiteralValue, MfmValue, PersistedObjectPayload,
+    PersistedSchema, SchemaIdentity, SchemaKind, SchemaShape, SequenceOrdering, StringGrammar,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +32,12 @@ pub const MAX_PRIOR_RUN_SOURCE_REFERENCES: usize = 65536;
 
 /// Maximum bytes in one canonical prior-run source manifest.
 pub const MAX_PRIOR_RUN_SOURCE_MANIFEST_BYTES: usize = 16777216;
+
+/// Maximum records in one atomic structured-history append.
+pub const MAX_APPEND_RECORDS: usize = 2;
+
+/// Maximum objects in one atomic structured-history append.
+pub const MAX_APPEND_OBJECTS: usize = 65_536;
 
 /// Object-type tag for the immutable admitted configuration root.
 pub const ADMISSION_CONFIGURATION_OBJECT_TYPE: &str = "structured.admission_configuration";
@@ -872,6 +878,7 @@ pub struct PriorRunFactQueryResult {
 #[serde(deny_unknown_fields)]
 pub struct PriorRunFactSelectionResponse {
     /// Sole current response contract version.
+    #[mfm(literal = "mfm.prior-run-fact-selection-response.v1")]
     pub version: String,
     /// Domain-separated digest of the exact state-authored request.
     pub request_digest: FactQueryDigest,
@@ -1363,8 +1370,10 @@ pub struct CommitCandidate {
     /// Exact tenant-fact publication or authorization-barrier coordinate.
     pub tenant_fact_coordinate: TenantFactCoordinate,
     /// One record, or one semantic record plus adjacent closure.
+    #[mfm(persisted, minimum_items = 1, maximum_items = 2)]
     pub records: Vec<RunRecord>,
     /// Exact objects admitted or byte-identically resolved with this append.
+    #[mfm(persisted, minimum_items = 0, maximum_items = 65536)]
     pub objects: Vec<HistoryObject>,
 }
 
@@ -1395,8 +1404,10 @@ pub struct CommittedBatch {
     /// Complete candidate digest before record assignment.
     pub candidate_digest: ContentDigest,
     /// Assigned records in dense ordinal order.
+    #[mfm(persisted, minimum_items = 1, maximum_items = 2)]
     pub records: Vec<AssignedRecord>,
     /// Objects atomically admitted or verified by this batch.
+    #[mfm(persisted, minimum_items = 0, maximum_items = 65536)]
     pub objects: Vec<HistoryObject>,
     /// New exact run head.
     pub head: JournalHead,
@@ -1590,7 +1601,9 @@ pub fn derive_fact_logical_identity(
 ///
 /// The exact candidate owner fixes the complete preimage shape.
 pub fn derive_candidate_digest(candidate: &CommitCandidate) -> Result<ContentDigest> {
-    let canonical = canonical_json(candidate)?;
+    let canonical = candidate
+        .encode_canonical()
+        .map_err(|_| StructuredJournalError::Canonical)?;
     let mut preimage = b"mfm.structured-candidate.v1\0".to_vec();
     preimage.extend_from_slice(canonical.as_bytes());
     Ok(ContentDigest::from_digest(
