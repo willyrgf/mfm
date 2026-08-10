@@ -2,11 +2,25 @@
 
 use std::collections::BTreeSet;
 
-use mfm_ids::{ContentDigest, ContentRef};
+use mfm_canonical::sha256_digest_bytes;
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm};
 use mfm_journal::structured::{AccessKind, HistoryObject};
 use serde::Serialize;
 
 use crate::EvmStructuredLiveBindingError;
+
+#[derive(Serialize)]
+struct PhysicalBindingReleasePreimage<'a> {
+    admitted_routing_policy_ref: &'a ContentRef,
+    physical_target_ref: &'a ContentRef,
+    certificate_ref: &'a ContentRef,
+    predecessor_binding_ref: Option<&'a ContentRef>,
+    activation_lineage_head_ref: Option<&'a ContentRef>,
+}
+
+#[derive(Serialize)]
+#[serde(transparent)]
+struct PhysicalBindingReleaseHistoryPreimage<'a>(&'a [PhysicalBindingReleasePreimage<'a>]);
 
 /// One immutable public release of an exact physical target.
 ///
@@ -77,17 +91,9 @@ pub struct EvmPhysicalBindingReleaseHistory {
 impl EvmPhysicalBindingReleaseHistory {
     /// Returns the canonical digest of every ordered release field in this history.
     pub fn content_digest(&self) -> Result<ContentDigest, EvmStructuredLiveBindingError> {
-        #[derive(Serialize)]
-        struct Release<'a> {
-            admitted_routing_policy_ref: &'a ContentRef,
-            physical_target_ref: &'a ContentRef,
-            certificate_ref: &'a ContentRef,
-            predecessor_binding_ref: Option<&'a ContentRef>,
-            activation_lineage_head_ref: Option<&'a ContentRef>,
-        }
         let releases = self
             .releases()
-            .map(|release| Release {
+            .map(|release| PhysicalBindingReleasePreimage {
                 admitted_routing_policy_ref: release.admitted_routing_policy_ref(),
                 physical_target_ref: release.physical_target_ref(),
                 certificate_ref: &release.certificate().content_ref,
@@ -95,11 +101,16 @@ impl EvmPhysicalBindingReleaseHistory {
                 activation_lineage_head_ref: release.activation_lineage_head_ref(),
             })
             .collect::<Vec<_>>();
-        mfm_journal::structured::domain_content_digest(
-            "mfm.evm.physical-binding-release-history.v1",
-            &releases,
+        let canonical = mfm_journal::structured::canonical_json(
+            &PhysicalBindingReleaseHistoryPreimage(&releases),
         )
-        .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)
+        .map_err(|_| EvmStructuredLiveBindingError::InvalidContract)?;
+        let mut bytes = b"mfm.evm.physical-binding-release-history.v1\0".to_vec();
+        bytes.extend_from_slice(canonical.as_bytes());
+        Ok(ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(&bytes),
+        ))
     }
 
     /// Constructs and validates one non-empty linear release history.
@@ -427,18 +438,30 @@ mod tests {
     }
 
     fn object(discriminator: u8) -> HistoryObject {
-        HistoryObject::new(
-            StableId::new(format!("mfm.evm-live.test/object-{discriminator}"))
-                .expect("test object type"),
-            SchemaId::new(
-                "mfm.evm-live.test-object",
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                sha256_digest_bytes(b"mfm.evm-live.test-object.v1"),
-            )
-            .expect("test schema"),
-            format!("{{\"discriminator\":{discriminator}}}"),
+        let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&format!(
+            "{{\"discriminator\":{discriminator}}}"
+        ))
+        .expect("test object canonical JSON");
+        let schema_id = SchemaId::new(
+            "mfm.evm-live.test-object",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(b"mfm.evm-live.test-object.v1"),
         )
-        .expect("test object")
+        .expect("test schema");
+        let content_ref = ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical.as_bytes()),
+            ),
+        )
+        .expect("test object reference");
+        HistoryObject {
+            object_type: StableId::new(format!("mfm.evm-live.test/object-{discriminator}"))
+                .expect("test object type"),
+            content_ref,
+            canonical_json: canonical.as_str().to_owned(),
+        }
     }
 }

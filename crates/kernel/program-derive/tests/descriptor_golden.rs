@@ -198,14 +198,14 @@ fn generated_value_descriptor_is_stable() {
     );
     assert_eq!(
         descriptor.schema_id().expect("schema id").as_str(),
-        "schema:mfm.test.priced_asset:1:sha256-jcs-v1:2ace2fabd0b5853cf06870b4805ab6a8025fb212ad5a8ce9660b262ec1f673a3"
+        "schema:mfm.test.priced_asset:1:sha256-jcs-v1:3fc09529960c3ab2508ef19b3460883b2a3d230df374de5c7496318740c36bed"
     );
 }
 
 #[test]
 fn empty_rust_tuple_uses_the_exact_null_unit_shape() {
     let descriptor = UnitField::schema_descriptor().expect("descriptor");
-    let SchemaShape::Struct { fields } = &descriptor.identity.shape else {
+    let SchemaShape::Struct { fields } = &canonical_shape(&descriptor) else {
         panic!("expected struct shape");
     };
     assert_eq!(fields[0].shape, SchemaShape::Unit);
@@ -260,7 +260,7 @@ fn transparent_string_value_descriptor_uses_string_shape() {
         descriptor.identity.schema_name.as_str(),
         "mfm.test.account_id"
     );
-    assert_eq!(descriptor.identity.shape, SchemaShape::String);
+    assert_eq!(canonical_shape(&descriptor), &SchemaShape::String);
     assert_eq!(
         serde_json::to_value(AccountId {
             raw: "acct".to_owned()
@@ -281,8 +281,8 @@ fn transparent_map_value_descriptor_uses_map_shape() {
         "mfm.test.public_metadata"
     );
     assert_eq!(
-        descriptor.identity.shape,
-        SchemaShape::BTreeMapString {
+        canonical_shape(&descriptor),
+        &SchemaShape::BTreeMapString {
             value: Box::new(SchemaShape::String)
         }
     );
@@ -298,7 +298,7 @@ fn transparent_map_value_descriptor_uses_map_shape() {
 #[test]
 fn inline_custom_default_is_an_exact_omission_contract() {
     let descriptor = InlineDefaultConfig::schema_descriptor().expect("descriptor");
-    let SchemaShape::Struct { fields } = &descriptor.identity.shape else {
+    let SchemaShape::Struct { fields } = &canonical_shape(&descriptor) else {
         panic!("expected struct shape");
     };
     assert_eq!(fields.len(), 1);
@@ -331,7 +331,7 @@ fn generated_config_descriptor_resolves_wire_names_and_inline_value_shapes() {
     let descriptor = PortfolioRequest::schema_descriptor().expect("descriptor");
     assert_eq!(descriptor.identity.schema_kind, SchemaKind::PlanningConfig);
 
-    let SchemaShape::Struct { fields } = &descriptor.identity.shape else {
+    let SchemaShape::Struct { fields } = &canonical_shape(&descriptor) else {
         panic!("expected struct shape");
     };
     let names = fields
@@ -377,7 +377,7 @@ fn generated_config_descriptor_resolves_wire_names_and_inline_value_shapes() {
             .as_ref()
             .expect("priced asset semantic id")
     );
-    assert_eq!(serialized_shape.as_ref(), &priced_asset.identity.shape);
+    assert_eq!(serialized_shape.as_ref(), canonical_shape(&priced_asset));
 }
 
 #[test]
@@ -432,4 +432,14 @@ fn generated_non_value_descriptors_use_distinct_schema_kinds() {
             .schema_kind,
         SchemaKind::PublicOutput
     );
+}
+
+fn canonical_shape(descriptor: &mfm_values::SchemaDescriptor) -> &SchemaShape {
+    canonical_shape_of(&descriptor.identity)
+}
+
+fn canonical_shape_of(identity: &mfm_values::SchemaIdentity) -> &SchemaShape {
+    identity
+        .canonical_json_shape()
+        .expect("canonical-JSON descriptor shape")
 }

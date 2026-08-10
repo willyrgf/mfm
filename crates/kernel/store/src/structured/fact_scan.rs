@@ -3,7 +3,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_canonical::RecoverabilityContract;
 use mfm_facts::{
     prior_run_fact_selector_contract_ref, FactCandidate, FactSelectionReadFailure,
     FactSelectionReadFailureCode, FactSelectionReadResponse, FactSelectionRequest, FactSubject,
@@ -11,14 +10,15 @@ use mfm_facts::{
 };
 #[cfg(feature = "test-support")]
 use mfm_ids::StoreScopeId;
-use mfm_ids::{FactContentIdentityDigest, FactLogicalIdentityDigest, RunId, StableId};
+use mfm_ids::{RunId, StableId};
 use mfm_journal::structured::{
-    canonical_json, CommittedBatch, ObservationOutcome, PriorRunFactCompletenessMode,
-    PriorRunFactQueryResult, PriorRunFactScanAttestation, PriorRunFactSelectionResponse,
-    PriorRunFactSourceManifest, RecordRef, RunAdmitted, RunRecord, SelectedPriorRunFact,
-    TenantFactCoordinate, TenantFactFrontier,
+    canonical_json, derive_fact_content_identity, derive_fact_logical_identity, CommittedBatch,
+    ObservationOutcome, PriorRunFactCompletenessMode, PriorRunFactQueryResult,
+    PriorRunFactScanAttestation, PriorRunFactSelectionResponse, PriorRunFactSourceManifest,
+    RecordRef, RunAdmitted, RunRecord, SelectedPriorRunFact, TenantFactCoordinate,
+    TenantFactFrontier,
 };
-use serde::Serialize;
+use mfm_values::CanonicalJsonPersistedSchema;
 
 #[cfg(feature = "test-support")]
 use std::sync::{Mutex, OnceLock};
@@ -30,8 +30,6 @@ use super::fold::{
 use super::qualification::PublicPhysicalBindingVerifier;
 
 const SCAN_PAGE_ITEMS: u32 = 1_024;
-const FACT_CONTENT_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-content-identity-preimage.v1";
-const FACT_LOGICAL_IDENTITY_PREIMAGE_CONTRACT: &str = "mfm.fact-logical-identity-preimage.v1";
 
 #[cfg(feature = "test-support")]
 static FACT_SCAN_COUNTERS: OnceLock<Mutex<BTreeMap<String, FactScanCounters>>> = OnceLock::new();
@@ -225,7 +223,7 @@ pub(super) fn fact_scan_permit(
         .object(&authorization.request.value_ref)
         .ok_or_else(|| invalid("fact scan request object is absent"))?;
     let expected_request: FactSelectionRequest = request_object
-        .decode()
+        .decode_mfm_value()
         .map_err(|_| invalid("fact scan request object cannot be decoded"))?;
     let source_object = successor
         .object(
@@ -235,7 +233,8 @@ pub(super) fn fact_scan_permit(
                 .prior_run_source_manifest_ref,
         )
         .ok_or_else(|| invalid("fact scan source manifest is absent"))?;
-    let source_manifest = PriorRunFactSourceManifest::from_history_object(source_object)
+    let source_manifest = source_object
+        .decode_persisted::<PriorRunFactSourceManifest>()
         .map_err(|_| invalid("fact scan source manifest is invalid"))?;
     let integrity_fault_code = StableId::new("prior-run-fact-scan-integrity-fault")
         .map_err(|_| invalid("fact scan integrity code cannot be derived"))?;
@@ -359,7 +358,7 @@ type ScanResult<T> = std::result::Result<T, ScanError>;
 
 impl BackendFactScanPort {
     async fn scan(&self, request: FactSelectionRequest) -> ScanResult<FactSelectionReadResponse> {
-        let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
+        let bounds = request.scan_bounds().clone();
         #[cfg(feature = "test-support")]
         let counter_scope = self.consumer_admission.store_scope_id.as_str().to_owned();
         let mut session = FactScanSession::new(
@@ -382,29 +381,26 @@ impl BackendFactScanPort {
     ) -> Pin<Box<dyn Future<Output = ScanResult<FactSelectionReadResponse>> + Send + 'a>> {
         Box::pin(async move {
             if request != self.expected_request
-                || request
-                    .admitted_source_manifest_ref()
-                    .map_err(|_| ScanError::Integrity)?
-                    != self
+                || request.admitted_source_manifest_ref()
+                    != &self
                         .consumer_admission
                         .admission_material_refs
                         .prior_run_source_manifest_ref
-                || request
-                    .selector_contract_ref()
-                    .map_err(|_| ScanError::Integrity)?
-                    != prior_run_fact_selector_contract_ref().map_err(|_| ScanError::Integrity)?
+                || request.selector_contract_ref()
+                    != &prior_run_fact_selector_contract_ref().map_err(|_| ScanError::Integrity)?
             {
                 return Err(ScanError::Integrity);
             }
-            let bounds = request.scan_bounds().map_err(|_| ScanError::Integrity)?;
+            let bounds = request.scan_bounds();
             if self.frontier.fact_order > bounds.maximum_publications() {
                 return Err(ScanError::Safe(
                     FactSelectionReadFailureCode::PublicationBoundExceeded,
                 ));
             }
-            let queries = request.queries().map_err(|_| ScanError::Integrity)?;
+            let queries = request.queries();
             let mut accumulators = queries
-                .into_iter()
+                .iter()
+                .cloned()
                 .map(|query| {
                     let query_ref = query.content_ref().map_err(|_| ScanError::Integrity)?;
                     Ok((query_ref, FactTopK::new(query)))
@@ -720,7 +716,8 @@ impl BackendFactScanPort {
                         .prior_run_source_manifest_ref,
                 )
                 .ok_or(ScanError::Integrity)?;
-            let source_manifest = PriorRunFactSourceManifest::from_history_object(source_object)
+            let source_manifest = source_object
+                .decode_persisted::<PriorRunFactSourceManifest>()
                 .map_err(|_| ScanError::Integrity)?;
             for batch in verified.batches() {
                 let TenantFactCoordinate::FactSelectionBarrier { frontier } =
@@ -744,13 +741,15 @@ impl BackendFactScanPort {
                 let request_object = verified
                     .object(&authorization.request.value_ref)
                     .ok_or(ScanError::Integrity)?;
-                let request: FactSelectionRequest =
-                    request_object.decode().map_err(|_| ScanError::Integrity)?;
+                let request: FactSelectionRequest = request_object
+                    .decode_mfm_value()
+                    .map_err(|_| ScanError::Integrity)?;
                 let returned_object = verified
                     .object(&value.value_ref)
                     .ok_or(ScanError::Integrity)?;
-                let recorded: FactSelectionReadResponse =
-                    returned_object.decode().map_err(|_| ScanError::Integrity)?;
+                let recorded: FactSelectionReadResponse = returned_object
+                    .decode_mfm_value()
+                    .map_err(|_| ScanError::Integrity)?;
                 let nested = BackendFactScanPort {
                     source: Arc::clone(&self.source),
                     program_verifier: Arc::clone(&self.program_verifier),
@@ -866,12 +865,10 @@ impl BackendFactScanPort {
             let subject =
                 FactSubject::from_canonical_json(subject_object.canonical_json.as_bytes())
                     .map_err(|_| ScanError::Integrity)?;
-            let content_identity = fact_content_identity(fact)?;
-            let fact_identity = fact_logical_identity(
-                &publication.transition_ref,
-                fact.emission_ordinal,
-                &content_identity,
-            )?;
+            let content_identity =
+                derive_fact_content_identity(fact).map_err(|_| ScanError::Integrity)?;
+            let fact_identity = derive_fact_logical_identity(&publication.transition_ref, fact)
+                .map_err(|_| ScanError::Integrity)?;
             let candidate_key = FactCandidate::new(
                 fact.descriptor_ref.clone(),
                 subject.clone(),
@@ -952,7 +949,8 @@ pub(super) async fn verify_actionable_history(
                 .prior_run_source_manifest_ref,
         )
         .ok_or_else(|| invalid("verified fact source manifest is absent"))?;
-    let source_manifest = PriorRunFactSourceManifest::from_history_object(source_object)
+    let source_manifest = source_object
+        .decode_persisted::<PriorRunFactSourceManifest>()
         .map_err(|_| invalid("verified fact source manifest is invalid"))?;
     let integrity_fault_code = StableId::new("prior-run-fact-scan-integrity-fault")
         .map_err(|_| invalid("fact scan integrity code cannot be derived"))?;
@@ -977,13 +975,13 @@ pub(super) async fn verify_actionable_history(
             .object(&authorization.request.value_ref)
             .ok_or_else(|| invalid("verified fact request object is absent"))?;
         let request: FactSelectionRequest = request_object
-            .decode()
+            .decode_mfm_value()
             .map_err(|_| invalid("verified fact request object cannot be decoded"))?;
         let returned_object = verified
             .object(&value.value_ref)
             .ok_or_else(|| invalid("verified fact response object is absent"))?;
         let recorded: FactSelectionReadResponse = returned_object
-            .decode()
+            .decode_mfm_value()
             .map_err(|_| invalid("verified fact response object cannot be decoded"))?;
         let port = BackendFactScanPort {
             source: Arc::clone(&source),
@@ -1009,145 +1007,4 @@ pub(super) async fn verify_actionable_history(
         }
     }
     Ok(verified)
-}
-
-#[derive(Serialize)]
-struct FactContentIdentityPreimage<'a> {
-    fact_descriptor_ref: &'a mfm_ids::ContentRef,
-    subject_ref: &'a mfm_journal::structured::TypedValueRef,
-    response_ref: &'a mfm_journal::structured::TypedValueRef,
-}
-
-#[derive(Serialize)]
-struct FactLogicalIdentityPreimage<'a> {
-    transition_ref: &'a RecordRef,
-    emission_ordinal: u32,
-    fact_content_identity: &'a FactContentIdentityDigest,
-}
-
-fn fact_content_identity(
-    fact: &mfm_journal::structured::CommittedFactRef,
-) -> ScanResult<FactContentIdentityDigest> {
-    let canonical = canonical_json(&FactContentIdentityPreimage {
-        fact_descriptor_ref: &fact.descriptor_ref,
-        subject_ref: &fact.subject,
-        response_ref: &fact.response,
-    })
-    .map_err(|_| ScanError::Integrity)?;
-    let recoverability = RecoverabilityContract::embedded().map_err(|_| ScanError::Integrity)?;
-    let preimage = recoverability
-        .strict_decode(
-            FACT_CONTENT_IDENTITY_PREIMAGE_CONTRACT,
-            canonical.as_bytes(),
-        )
-        .map_err(|_| ScanError::Integrity)?;
-    recoverability
-        .derive_fact_content_identity(&preimage)
-        .map_err(|_| ScanError::Integrity)
-}
-
-fn fact_logical_identity(
-    producer_transition_ref: &RecordRef,
-    emission_ordinal: u32,
-    fact_content_identity: &FactContentIdentityDigest,
-) -> ScanResult<FactLogicalIdentityDigest> {
-    let canonical = canonical_json(&FactLogicalIdentityPreimage {
-        transition_ref: producer_transition_ref,
-        emission_ordinal,
-        fact_content_identity,
-    })
-    .map_err(|_| ScanError::Integrity)?;
-    let recoverability = RecoverabilityContract::embedded().map_err(|_| ScanError::Integrity)?;
-    let preimage = recoverability
-        .strict_decode(
-            FACT_LOGICAL_IDENTITY_PREIMAGE_CONTRACT,
-            canonical.as_bytes(),
-        )
-        .map_err(|_| ScanError::Integrity)?;
-    recoverability
-        .derive_fact_logical_identity(&preimage)
-        .map_err(|_| ScanError::Integrity)
-}
-
-#[cfg(test)]
-mod tests {
-    use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId};
-    use mfm_journal::structured::{CommittedFactRef, TypedValueRef};
-
-    use super::{fact_content_identity, fact_logical_identity};
-
-    fn content_ref(label: &str) -> ContentRef {
-        ContentRef::new(
-            SchemaId::new(
-                &format!("mfm.fact-scan.test/{label}"),
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                mfm_canonical::sha256_digest_bytes(format!("schema:{label}").as_bytes()),
-            )
-            .expect("test schema"),
-            ContentDigest::from_digest(
-                DigestAlgorithm::Sha256V1,
-                mfm_canonical::sha256_digest_bytes(format!("content:{label}").as_bytes()),
-            ),
-        )
-        .expect("test content ref")
-    }
-
-    fn typed_value(label: &str) -> TypedValueRef {
-        TypedValueRef {
-            contract_ref: content_ref(&format!("{label}-contract")),
-            value_ref: content_ref(&format!("{label}-value")),
-        }
-    }
-
-    #[test]
-    fn fact_identities_preserve_content_and_tenant_order_independence() {
-        let first = CommittedFactRef {
-            emission_ordinal: 0,
-            fact_slot_ordinal: 0,
-            descriptor_ref: content_ref("descriptor"),
-            subject: typed_value("first-subject"),
-            response: typed_value("shared-response"),
-            claim_ref: content_ref("first-claim"),
-        };
-        let mut different_subject = first.clone();
-        different_subject.subject = typed_value("second-subject");
-        different_subject.claim_ref = content_ref("second-claim");
-        let first_identity =
-            fact_content_identity(&first).unwrap_or_else(|_| panic!("first content identity"));
-        let second_identity = fact_content_identity(&different_subject)
-            .unwrap_or_else(|_| panic!("second content identity"));
-        assert_ne!(first_identity, second_identity);
-
-        let transition = mfm_journal::structured::RecordRef {
-            run_id: mfm_ids::RunId::from_digest(
-                DigestAlgorithm::Sha256JcsV1,
-                mfm_canonical::sha256_digest_bytes(b"fact producer"),
-            ),
-            run_sequence: 2,
-            ordinal: 0,
-            record_hash: mfm_ids::JournalRecordHash::from_digest(
-                mfm_canonical::sha256_digest_bytes(b"fact transition"),
-            ),
-        };
-        let logical = fact_logical_identity(&transition, 0, &first_identity)
-            .unwrap_or_else(|_| panic!("logical identity"));
-        assert_eq!(
-            logical,
-            fact_logical_identity(&transition, 0, &first_identity)
-                .unwrap_or_else(|_| panic!("repeat logical identity"))
-        );
-        assert_ne!(
-            logical,
-            fact_logical_identity(&transition, 1, &first_identity)
-                .unwrap_or_else(|_| panic!("different-ordinal logical identity"))
-        );
-        assert_eq!(
-            (first_identity.as_str(), logical.as_str()),
-            (
-                "sha256-jcs-v1:750c25181393c210eb78395460a19d4ba6589f44e24263e898abcdd3c02531a4",
-                "sha256-jcs-v1:ecb2957d79215dd8d7538e97546ce719b173da0629d1b3073eec947a541603d6",
-            )
-        );
-    }
 }

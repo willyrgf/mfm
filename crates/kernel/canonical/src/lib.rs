@@ -34,20 +34,13 @@ use std::fmt;
 
 use mfm_ids::{ContentDigest, DigestAlgorithm, DigestBytes};
 use ring::digest::{digest, Context, SHA256};
-use serde::de::{self, Deserialize, Deserializer, Error as _, MapAccess, SeqAccess, Visitor};
+use serde::de::{
+    self, Deserialize, DeserializeSeed, Deserializer, Error as _, MapAccess, SeqAccess, Visitor,
+};
 
 use crate::limits::MAX_BASE64URL_CHARACTERS;
 
-mod recoverability;
-
-/// Generated recoverability budgets shared by all bounded codecs.
-#[path = "recoverability_limits.rs"]
 pub mod limits;
-
-pub use recoverability::{
-    CanonicalReferencePath, RecoverabilityContract, RecoverabilityError, RecoverabilityErrorCode,
-    ReferenceTerminalKind, SchemaReferenceEdge, ValidatedCanonicalValue,
-};
 
 /// Result type for canonicalization operations.
 pub type Result<T> = std::result::Result<T, CanonicalError>;
@@ -63,23 +56,38 @@ pub struct CanonicalError {
     message: String,
 }
 
+/// Computes the raw `sha256-v1` content digest of exact retained bytes.
+///
+/// This is an unbranded byte primitive. It accepts bytes, never a semantic
+/// domain string, so it cannot mint a domain-separated semantic identity.
+pub fn raw_content_digest(bytes: &[u8]) -> ContentDigest {
+    let mut hasher = RawContentDigestHasher::new();
+    hasher.update(bytes);
+    hasher.finalize()
+}
+
 /// Incremental raw retained-content digest fixed to `sha256-v1`.
 ///
-/// Construction is available only through
-/// [`RecoverabilityContract::raw_content_digest_hasher`]. The hasher is
-/// intentionally non-cloneable and exposes no generic algorithm selection.
+/// The hasher is intentionally non-cloneable, requires no registry handle, and
+/// exposes no generic algorithm selection.
 ///
 /// ```compile_fail
-/// let contract = mfm_canonical::RecoverabilityContract::embedded().unwrap();
-/// let hasher = contract.raw_content_digest_hasher();
+/// let hasher = mfm_canonical::RawContentDigestHasher::new();
 /// let _duplicate = hasher.clone();
 /// ```
 pub struct RawContentDigestHasher {
     context: Context,
 }
 
+impl Default for RawContentDigestHasher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RawContentDigestHasher {
-    fn new() -> Self {
+    /// Starts one single-use raw `sha256-v1` retained-content digest.
+    pub fn new() -> Self {
         Self {
             context: Context::new(&SHA256),
         }
@@ -135,6 +143,16 @@ impl CanonicalJsonBytes {
         Self { bytes }
     }
 
+    /// Promotes already-canonical plain JSON emitted from a checked typed
+    /// owner into typed canonical bytes.
+    ///
+    /// Typed owners use this only after their own closed schema has validated
+    /// the value; ordinary plain JSON remains outside the typed API.
+    #[doc(hidden)]
+    pub fn from_checked_plain(value: PlainCanonicalJsonBytes) -> Self {
+        Self { bytes: value.bytes }
+    }
+
     /// Returns the canonical JSON bytes.
     pub fn as_bytes(&self) -> &[u8] {
         self.bytes.as_bytes()
@@ -183,9 +201,14 @@ impl PlainCanonicalJsonBytes {
             return Err(CanonicalError::new("canonical JSON exceeds its byte bound"));
         }
         validate_number_tokens(input)?;
-        let value: PlainJsonValue = serde_json::from_str(input)
+        let mut deserializer = serde_json::Deserializer::from_str(input);
+        let value = PlainJsonValueSeed { depth: 0 }
+            .deserialize(&mut deserializer)
+            .and_then(|value| {
+                deserializer.end()?;
+                Ok(value)
+            })
             .map_err(|error| CanonicalError::new(format!("invalid canonical JSON: {error}")))?;
-        value.validate_depth(0)?;
         let canonical = Self::from_value(&value);
         if canonical.bytes.len() > limits::MAX_CANONICAL_JSON_BYTES {
             return Err(CanonicalError::new("canonical JSON exceeds its byte bound"));
@@ -349,24 +372,6 @@ enum PlainJsonValue {
 }
 
 impl PlainJsonValue {
-    fn validate_depth(&self, depth: usize) -> Result<()> {
-        if depth > MAX_CANONICAL_JSON_DEPTH {
-            return Err(CanonicalError::new("canonical JSON nesting depth exceeded"));
-        }
-        match self {
-            Self::Array(values) => values
-                .iter()
-                .try_for_each(|value| value.validate_depth(depth + 1)),
-            Self::Object(object) => object
-                .entries
-                .iter()
-                .try_for_each(|entry| entry.value.validate_depth(depth + 1)),
-            Self::Null | Self::Bool(_) | Self::String(_) | Self::Signed(_) | Self::Unsigned(_) => {
-                Ok(())
-            }
-        }
-    }
-
     fn write_json(&self, out: &mut String) {
         match self {
             Self::Null => out.push_str("null"),
@@ -405,11 +410,32 @@ impl<'de> Deserialize<'de> for PlainJsonValue {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(PlainJsonValueVisitor)
+        PlainJsonValueSeed { depth: 0 }.deserialize(deserializer)
     }
 }
 
-struct PlainJsonValueVisitor;
+#[derive(Clone, Copy)]
+struct PlainJsonValueSeed {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for PlainJsonValueSeed {
+    type Value = PlainJsonValue;
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        if self.depth > limits::MAX_CANONICAL_JSON_DEPTH {
+            return Err(D::Error::custom("canonical JSON nesting depth exceeded"));
+        }
+        deserializer.deserialize_any(PlainJsonValueVisitor { depth: self.depth })
+    }
+}
+
+struct PlainJsonValueVisitor {
+    depth: usize,
+}
 
 impl<'de> Visitor<'de> for PlainJsonValueVisitor {
     type Value = PlainJsonValue;
@@ -478,6 +504,11 @@ impl<'de> Visitor<'de> for PlainJsonValueVisitor {
     where
         E: de::Error,
     {
+        if value.len() > limits::MAX_STRING_UTF8_BYTES {
+            return Err(E::custom(
+                "canonical JSON string exceeds its UTF-8 byte bound",
+            ));
+        }
         Ok(PlainJsonValue::String(value.to_owned()))
     }
 
@@ -485,6 +516,11 @@ impl<'de> Visitor<'de> for PlainJsonValueVisitor {
     where
         E: de::Error,
     {
+        if value.len() > limits::MAX_STRING_UTF8_BYTES {
+            return Err(E::custom(
+                "canonical JSON string exceeds its UTF-8 byte bound",
+            ));
+        }
         Ok(PlainJsonValue::String(value))
     }
 
@@ -499,7 +535,7 @@ impl<'de> Visitor<'de> for PlainJsonValueVisitor {
     where
         D: Deserializer<'de>,
     {
-        PlainJsonValue::deserialize(deserializer)
+        PlainJsonValueSeed { depth: self.depth }.deserialize(deserializer)
     }
 
     fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
@@ -507,7 +543,15 @@ impl<'de> Visitor<'de> for PlainJsonValueVisitor {
         A: SeqAccess<'de>,
     {
         let mut values = Vec::new();
-        while let Some(value) = seq.next_element()? {
+        let child = PlainJsonValueSeed {
+            depth: self.depth + 1,
+        };
+        while let Some(value) = seq.next_element_seed(child)? {
+            if values.len() == limits::MAX_ARRAY_ITEMS {
+                return Err(A::Error::custom(
+                    "canonical JSON array exceeds its item bound",
+                ));
+            }
             values.push(value);
         }
         Ok(PlainJsonValue::Array(values))
@@ -519,15 +563,70 @@ impl<'de> Visitor<'de> for PlainJsonValueVisitor {
     {
         let mut entries = Vec::new();
         let mut seen = BTreeSet::new();
-        while let Some((key, value)) = map.next_entry::<String, PlainJsonValue>()? {
+        let child = PlainJsonValueSeed {
+            depth: self.depth + 1,
+        };
+        while let Some(key) = map.next_key::<BoundedObjectKey>()? {
+            if entries.len() == limits::MAX_OBJECT_ENTRIES {
+                return Err(A::Error::custom(
+                    "canonical JSON object exceeds its entry bound",
+                ));
+            }
+            let key = key.0;
             if !seen.insert(key.clone()) {
                 return Err(A::Error::custom(format!("duplicate object key '{key}'")));
             }
+            let value = map.next_value_seed(child)?;
             entries.push((key, value));
         }
         PlainJsonObject::new(entries)
             .map(PlainJsonValue::Object)
             .map_err(A::Error::custom)
+    }
+}
+
+struct BoundedObjectKey(String);
+
+impl<'de> Deserialize<'de> for BoundedObjectKey {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_string(BoundedObjectKeyVisitor)
+    }
+}
+
+struct BoundedObjectKeyVisitor;
+
+impl Visitor<'_> for BoundedObjectKeyVisitor {
+    type Value = BoundedObjectKey;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a bounded canonical JSON object key")
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value.len() > limits::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES {
+            return Err(E::custom(
+                "canonical JSON object key exceeds its UTF-8 byte bound",
+            ));
+        }
+        Ok(BoundedObjectKey(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        if value.len() > limits::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES {
+            return Err(E::custom(
+                "canonical JSON object key exceeds its UTF-8 byte bound",
+            ));
+        }
+        Ok(BoundedObjectKey(value))
     }
 }
 

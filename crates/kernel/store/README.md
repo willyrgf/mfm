@@ -29,7 +29,7 @@ Assembly never returns a store, writer, port, backend, pool, proposal constructo
 attempt. Semantic mutation is reachable only through Runtime's `RuntimeHistoryPort`, implemented by
 a private adapter.
 
-`RunId` is derived inside the adapter from the annex `mfm.run-id-preimage.v1` (store scope, tenant
+`RunId` is derived inside the adapter from the `mfm.run-id` semantic domain (store scope, tenant
 scope, entry-point operation ID, invocation identity). Callers never supply a trusted run digest.
 
 On certified-root cache miss the adapter calls `AdmissionVerificationRegistry::verify_root` and

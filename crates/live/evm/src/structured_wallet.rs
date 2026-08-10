@@ -28,6 +28,7 @@ use mfm_program::structured::{
 use mfm_spec::structured::{
     SecretFreeImplementationDescriptor, StructuredComponentKind, StructuredLiveComponentContract,
 };
+use mfm_values::CanonicalJsonPersistedSchema;
 
 use crate::{
     EvmPhysicalBindingPurpose, EvmPhysicalBindingReleaseHistory, EvmStructuredLiveBindingError,

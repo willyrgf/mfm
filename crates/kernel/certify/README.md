@@ -15,7 +15,7 @@ semantic/implementation pairs and bounds fit that envelope. `AdmissionVerificati
 recomputes the exact qualified document for the store adapter. Finalization consumes the caller's
 complete expected entry-point identity set and rejects duplicate, missing, or extra identities.
 
-Store assembly consumes one complete `QualifiedProgramRegistry` exactly once, installing the
+Store assembly consumes one complete `CertifiedProgramRegistry` exactly once, installing the
 admission verification half in the private store adapter and the process half in Runtime.
 Application code must not split and reassemble those halves independently.
 

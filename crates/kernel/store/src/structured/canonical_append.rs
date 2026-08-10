@@ -7,10 +7,8 @@
 use std::collections::BTreeSet;
 
 use super::configuration::ConfigurationRevision;
-use mfm_canonical::limits::{
-    MAX_ARRAY_ITEMS, MAX_CONFIGURATION_REVISION_BYTES, MAX_OBJECT_ENTRIES,
-};
-pub use mfm_canonical::limits::{MAX_BATCH_OBJECTS, MAX_BATCH_RECORDS, MAX_STORED_FRAME_BYTES};
+use super::configuration::MAX_CONFIGURATION_REVISION_BYTES;
+use mfm_canonical::limits::{MAX_ARRAY_ITEMS, MAX_OBJECT_ENTRIES};
 use mfm_canonical::MAX_CANONICAL_JSON_DEPTH;
 use mfm_ids::ContentRef;
 use mfm_journal::structured::{
@@ -18,6 +16,15 @@ use mfm_journal::structured::{
 };
 
 use super::fold::StructuredStoreError;
+
+/// Maximum bytes in one stored append frame.
+pub const MAX_STORED_FRAME_BYTES: usize = 33554432;
+
+/// Maximum retained objects in one appended batch.
+pub const MAX_BATCH_OBJECTS: usize = 65536;
+
+/// Maximum records in one appended batch.
+pub const MAX_BATCH_RECORDS: usize = 65536;
 
 /// Store-owned canonical run append accepted by every persistence backend.
 pub struct CanonicalRunAppend {
@@ -213,7 +220,7 @@ pub fn validate_record_object_closure(
         match &assigned.record {
             RunRecord::RunAdmitted(admission) => {
                 required.extend([
-                    admission.certified_program_root_ref.clone(),
+                    admission.certified_program_ref.clone(),
                     admission.admission_material_refs.configuration_ref.clone(),
                     admission
                         .admission_material_refs
@@ -364,7 +371,7 @@ fn validate_frame_length(byte_len: usize, minimum: usize) -> Result<(), Structur
 #[cfg(test)]
 mod tests {
     use mfm_canonical::sha256_digest_bytes;
-    use mfm_ids::{DigestAlgorithm, SchemaId, StableId};
+    use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
     use mfm_journal::structured::HistoryObject;
 
     use super::{
@@ -379,18 +386,25 @@ mod tests {
     }
 
     fn boundary_object() -> HistoryObject {
-        HistoryObject::new(
-            StableId::new("structured.boundary-object").expect("object type"),
-            SchemaId::new(
-                "mfm.store.boundary-object",
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                sha256_digest_bytes(b"structured-boundary-object"),
+        let canonical_json = canonical_string_with_bytes(MAX_STORED_FRAME_BYTES);
+        HistoryObject {
+            object_type: StableId::new("structured.boundary-object").expect("object type"),
+            content_ref: ContentRef::new(
+                SchemaId::new(
+                    "mfm.store.boundary-object",
+                    "1",
+                    DigestAlgorithm::Sha256JcsV1,
+                    sha256_digest_bytes(b"structured-boundary-object"),
+                )
+                .expect("object schema"),
+                ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(canonical_json.as_bytes()),
+                ),
             )
-            .expect("object schema"),
-            canonical_string_with_bytes(MAX_STORED_FRAME_BYTES),
-        )
-        .expect("exact object frame")
+            .expect("object content reference"),
+            canonical_json,
+        }
     }
 
     #[test]

@@ -75,14 +75,14 @@ directly instead of its enclosing gate:
 
 ```bash
 nix run .#run -- --task cargo-metadata-contract
-nix run .#run -- --task recoverability-postgres-v1
+nix run .#run -- --task structured-history-postgres-qualification
 nix run .#run -- --task postgres-sql-inventory-check
 nix run .#run -- --task parity-bitcoin-core
 ```
 
 The task invocation starts only its declared service requirements. Task ids
 come from `nixfied.nix`; the examples above run the metadata contract without a
-service, the complete recoverability-v1 PostgreSQL corpus/conformance target
+service, the complete structured-history PostgreSQL qualification target
 with managed PostgreSQL, the dynamic SQL inventory leaf without a database, and
 the Bitcoin parity target with managed Bitcoin Core. Direct task runs use the
 broad verification target and retain Nixfied evidence.

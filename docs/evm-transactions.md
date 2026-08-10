@@ -160,8 +160,22 @@ history, facts, outputs, logs, traces, exports, errors, and wallet storage never
 keys, signatures, or signed transactions.
 
 If physical authority is revoked and non-entry is proved before broadcast, Runtime records
-`SupersededBeforeEntry` and may authorize the next generation. If entry may have occurred,
-`EntryUnknown` parks the occurrence; it cannot rebroadcast automatically.
+`SupersededBeforeEntry` and may authorize the next generation.
+
+All four wallet and broadcast Effect capabilities declare `EntryAbsorbing<3>`, so entry ambiguity
+is resolved in-run rather than parking. A crashed attempt is closed by Runtime — one synthesized
+`EntryUnknown` carrying the reserved kernel fault code, reaching no adapter — and the next ordinal
+re-asserts the byte-identical committed request. Each adapter recognizes its own prior write and
+reports it: the three wallet operations by their retained operation key under a unique constraint,
+and broadcast by re-submitting the deterministic signed transaction and, when the node's answer is
+ambiguous, reading the chain for the attested transaction hash. An absent transaction keeps the
+ambiguity; it never becomes a non-entry claim, because `READ COMMITTED` and mempool propagation
+both make absence temporary. Only real writer fencing mints `SupersededBeforeEntry`.
+
+Recovering a parked EVM run therefore no longer means starting a fresh run under the same caller
+submission token. The parked run resolves itself; the cross-run path remains only what makes a
+*caller's* retry safe. After three authorizations the occurrence parks terminally and
+`list_parked_runs` is how an operator finds it.
 
 ## Observation and terminal convergence
 

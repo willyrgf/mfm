@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use alloy_primitives::U256;
 use mfm_ids::{StableId, TenantScopeId};
-use mfm_program::structured::{CommittedObservation, StateSettlement};
+use mfm_program::structured::StateSettlement;
 use mfm_spec::structured::{ProposedStateOutcome, ProposedStateValue};
 
 use crate::submission::{
@@ -184,16 +184,8 @@ pub(crate) fn failure_reconciliation_status_request(
 
 pub(crate) fn settle_wallet_status(
     prepared: &PreparedWalletSubmission,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<WalletStatusDecision, PendingEvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(
-                PendingEvmSubmissionFailure::Direct { failure: *failure },
-            ));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     match validated_wallet_status(prepared, returned) {
         Some(decision) => StateSettlement::Proposed(ProposedStateOutcome::Success(decision)),
         None => StateSettlement::InvalidEvidence,
@@ -202,16 +194,8 @@ pub(crate) fn settle_wallet_status(
 
 pub(crate) fn settle_post_reserve_wallet_status(
     prepared: &PostReservePreparedSubmission,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<WalletStatusDecision, PendingEvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(
-                PendingEvmSubmissionFailure::Direct { failure: *failure },
-            ));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     let reservation_matches = match returned {
         WalletNonceStatus::Reserved { reservation, .. }
         | WalletNonceStatus::Completed { reservation, .. } => reservation == &prepared.reservation,
@@ -228,14 +212,8 @@ pub(crate) fn settle_post_reserve_wallet_status(
 
 pub(crate) fn settle_reservation_failure_status(
     request: &FailureReconciliationRequest,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<WalletStatusDecision, EvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(*failure));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     if request.baseline != WalletStatusBaseline::Absent {
         return StateSettlement::InvalidEvidence;
     }
@@ -257,14 +235,8 @@ pub(crate) fn settle_reservation_failure_status(
 
 pub(crate) fn settle_candidate_failure_status(
     request: &FailureReconciliationRequest,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<CandidateResolution, EvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(*failure));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     let WalletStatusBaseline::Reserved { .. } = &request.baseline else {
         return StateSettlement::InvalidEvidence;
     };
@@ -291,9 +263,9 @@ pub(crate) fn settle_candidate_failure_status(
 
 pub(crate) fn settle_candidate_progress_failure_status(
     request: &FailureReconciliationRequest,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<SubmissionProgress, EvmSubmissionFailure> {
-    match settle_candidate_failure_status(request, observation) {
+    match settle_candidate_failure_status(request, returned) {
         StateSettlement::Proposed(outcome) => match outcome.into_parts().0 {
             ProposedStateValue::Success(CandidateResolution::Completed { completion }) => {
                 StateSettlement::Proposed(ProposedStateOutcome::Success(SubmissionProgress {
@@ -319,9 +291,9 @@ pub(crate) fn settle_candidate_progress_failure_status(
 
 pub(crate) fn settle_exhaustion_status(
     request: &FailureReconciliationRequest,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<CandidateResolution, PendingEvmSubmissionFailure> {
-    match settle_candidate_failure_status(request, observation) {
+    match settle_candidate_failure_status(request, returned) {
         StateSettlement::Proposed(outcome) => match outcome.into_parts().0 {
             ProposedStateValue::Success(resolution) => {
                 StateSettlement::Proposed(ProposedStateOutcome::Success(resolution))
@@ -336,16 +308,8 @@ pub(crate) fn settle_exhaustion_status(
 
 pub(crate) fn settle_candidate_wallet_status(
     prepared: &PreparedWalletSubmission,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<CandidateResolution, PendingEvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(
-                PendingEvmSubmissionFailure::Direct { failure: *failure },
-            ));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     let Some(status) = validated_wallet_status(prepared, returned) else {
         return StateSettlement::InvalidEvidence;
     };
@@ -371,17 +335,8 @@ pub(crate) fn settle_candidate_wallet_status(
 /// the observed prefix.
 pub(crate) fn settle_observed_candidate_status(
     observed: &CandidateObservationWork,
-    observation: &CommittedObservation<WalletNonceStatus, EvmSubmissionFailure>,
+    returned: &WalletNonceStatus,
 ) -> StateSettlement<CandidateResolution, PendingEvmSubmissionFailure> {
-    let returned = match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            return StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
-                &observed.active.candidate.work,
-                *failure,
-            )));
-        }
-        CommittedObservation::Returned(returned) => returned,
-    };
     let Some(status) = validated_wallet_status(&observed.active.candidate.work.prepared, returned)
     else {
         return StateSettlement::InvalidEvidence;
@@ -603,25 +558,109 @@ fn reconcile_reserved(
     }
 }
 
+pub(crate) fn settle_direct_failure<Input, Output>(
+    _: &Input,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<Output, EvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(*failure)
+}
+
+pub(crate) fn settle_pending_direct_failure<Input, Output>(
+    _: &Input,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<Output, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(PendingEvmSubmissionFailure::Direct { failure: *failure })
+}
+
+pub(crate) fn settle_observed_candidate_failure(
+    observed: &CandidateObservationWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CandidateResolution, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(
+        &observed.active.candidate.work,
+        *failure,
+    ))
+}
+
+pub(crate) fn settle_pending_nonce_failure(
+    prepared: &PreparedWalletSubmission,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<ObservedPendingSubmission, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_absent(prepared, *failure))
+}
+
+pub(crate) fn settle_reservation_failure(
+    qualified: &QualifiedPendingSubmission,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<PostReservePreparedSubmission, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_absent(&qualified.prepared, *failure))
+}
+
+pub(crate) fn settle_candidate_attestation_failure(
+    candidate: &CandidateWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CandidateWork, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&candidate.work, *failure))
+}
+
+pub(crate) fn settle_candidate_activation_failure(
+    prepared: &PreparedCandidateActivation,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CandidateActivationDecision, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&prepared.candidate.work, *failure))
+}
+
+pub(crate) fn settle_broadcast_failure(
+    active: &ActiveCandidateWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CandidateObservationWork, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&active.candidate.work, *failure))
+}
+
+pub(crate) fn settle_observation_failure(
+    work: &CandidateObservationWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CandidateObservationWork, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&work.active.candidate.work, *failure))
+}
+
+pub(crate) fn settle_finalized_head_failure(
+    work: &CandidateObservationWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<TerminalEvidenceWork, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&work.active.candidate.work, *failure))
+}
+
+pub(crate) fn settle_inclusion_block_failure(
+    terminal: &TerminalEvidenceWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<TerminalEvidenceWork, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(
+        &terminal.candidate.active.candidate.work,
+        *failure,
+    ))
+}
+
+pub(crate) fn settle_completion_failure(
+    work: &CompletionWork,
+    failure: &EvmSubmissionFailure,
+) -> ProposedStateOutcome<CompletedWalletNonce, PendingEvmSubmissionFailure> {
+    ProposedStateOutcome::Failure(reconcile_reserved(&work.submission_work, *failure))
+}
+
 pub(crate) fn settle_pending_nonce(
     prepared: &PreparedWalletSubmission,
-    observation: &CommittedObservation<ObservedPendingNonceFloor, EvmSubmissionFailure>,
+    observed: &ObservedPendingNonceFloor,
 ) -> StateSettlement<ObservedPendingSubmission, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_absent(prepared, *failure)),
-        ),
-        CommittedObservation::Returned(observed)
-            if observed.nonce_domain == prepared.intent.derived.nonce_domain
-                && observed.route_generation_ref
-                    == *prepared.intent.derived.request.route_generation_ref() =>
-        {
-            StateSettlement::Proposed(ProposedStateOutcome::Success(ObservedPendingSubmission {
-                prepared: prepared.clone(),
-                observed: observed.clone(),
-            }))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if observed.nonce_domain == prepared.intent.derived.nonce_domain
+        && observed.route_generation_ref == *prepared.intent.derived.request.route_generation_ref()
+    {
+        StateSettlement::Proposed(ProposedStateOutcome::Success(ObservedPendingSubmission {
+            prepared: prepared.clone(),
+            observed: observed.clone(),
+        }))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -667,13 +706,10 @@ pub(crate) fn reserve_nonce_request(
 
 pub(crate) fn settle_reservation(
     qualified: &QualifiedPendingSubmission,
-    observation: &CommittedObservation<ReserveWalletNonceResponse, EvmSubmissionFailure>,
+    returned: &ReserveWalletNonceResponse,
 ) -> StateSettlement<PostReservePreparedSubmission, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_absent(&qualified.prepared, *failure)),
-        ),
-        CommittedObservation::Returned(ReserveWalletNonceResponse::Reserved { reservation })
+    match returned {
+        ReserveWalletNonceResponse::Reserved { reservation }
             if reservation_matches_prepared(reservation, &qualified.prepared) =>
         {
             StateSettlement::Proposed(ProposedStateOutcome::Success(
@@ -683,25 +719,25 @@ pub(crate) fn settle_reservation(
                 },
             ))
         }
-        CommittedObservation::Returned(ReserveWalletNonceResponse::NonceDomainBusy) => {
+        ReserveWalletNonceResponse::NonceDomainBusy => {
             StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_absent(
                 &qualified.prepared,
                 EvmSubmissionFailure::NonceDomainBusy,
             )))
         }
-        CommittedObservation::Returned(ReserveWalletNonceResponse::NonceLineageDiverged) => {
+        ReserveWalletNonceResponse::NonceLineageDiverged => {
             StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_absent(
                 &qualified.prepared,
                 EvmSubmissionFailure::NonceLineageDiverged,
             )))
         }
-        CommittedObservation::Returned(ReserveWalletNonceResponse::NonceCapacityExhausted) => {
+        ReserveWalletNonceResponse::NonceCapacityExhausted => {
             StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_absent(
                 &qualified.prepared,
                 EvmSubmissionFailure::NonceCapacityExhausted,
             )))
         }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+        _ => StateSettlement::InvalidEvidence,
     }
 }
 
@@ -935,20 +971,14 @@ pub(crate) fn attest_candidate_request(
 
 pub(crate) fn settle_candidate_attestation(
     candidate: &CandidateWork,
-    observation: &CommittedObservation<AttestedWalletCandidate, EvmSubmissionFailure>,
+    attested: &AttestedWalletCandidate,
 ) -> StateSettlement<CandidateWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_reserved(&candidate.work, *failure)),
-        ),
-        CommittedObservation::Returned(attested)
-            if attestation_matches_candidate(attested, &candidate.unsigned_candidate) =>
-        {
-            let mut candidate = candidate.clone();
-            candidate.attested_candidate = Some(attested.clone());
-            StateSettlement::Proposed(ProposedStateOutcome::Success(candidate))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if attestation_matches_candidate(attested, &candidate.unsigned_candidate) {
+        let mut candidate = candidate.clone();
+        candidate.attested_candidate = Some(attested.clone());
+        StateSettlement::Proposed(ProposedStateOutcome::Success(candidate))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1044,25 +1074,19 @@ pub(crate) fn activate_candidate_request(
 
 pub(crate) fn settle_candidate_activation(
     prepared: &PreparedCandidateActivation,
-    observation: &CommittedObservation<ActivateCandidateResponse, EvmSubmissionFailure>,
+    returned: &ActivateCandidateResponse,
 ) -> StateSettlement<CandidateActivationDecision, PendingEvmSubmissionFailure> {
     let candidate = &prepared.candidate;
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_reserved(&candidate.work, *failure)),
+    match returned {
+        ActivateCandidateResponse::CandidateProgressionConflict => StateSettlement::Proposed(
+            ProposedStateOutcome::Success(CandidateActivationDecision::Reconcile),
         ),
-        CommittedObservation::Returned(ActivateCandidateResponse::CandidateProgressionConflict) => {
-            StateSettlement::Proposed(ProposedStateOutcome::Success(
-                CandidateActivationDecision::Reconcile,
-            ))
-        }
-        CommittedObservation::Returned(ActivateCandidateResponse::Activated {
-            candidate: active,
-        }) if candidate
-            .attested_candidate
-            .as_ref()
-            .is_some_and(|attested| active.attested_candidate == *attested)
-            && active.activation_evidence_ref.to_content_ref().is_ok() =>
+        ActivateCandidateResponse::Activated { candidate: active }
+            if candidate
+                .attested_candidate
+                .as_ref()
+                .is_some_and(|attested| active.attested_candidate == *attested)
+                && active.candidate_operation_key.validate().is_ok() =>
         {
             StateSettlement::Proposed(ProposedStateOutcome::Success(
                 CandidateActivationDecision::Activated {
@@ -1073,13 +1097,12 @@ pub(crate) fn settle_candidate_activation(
                 },
             ))
         }
-        CommittedObservation::Returned(ActivateCandidateResponse::AlreadyRetained {
-            candidate: active,
-        }) if candidate
-            .attested_candidate
-            .as_ref()
-            .is_some_and(|attested| active.attested_candidate == *attested)
-            && active.activation_evidence_ref.to_content_ref().is_ok() =>
+        ActivateCandidateResponse::AlreadyRetained { candidate: active }
+            if candidate
+                .attested_candidate
+                .as_ref()
+                .is_some_and(|attested| active.attested_candidate == *attested)
+                && active.candidate_operation_key.validate().is_ok() =>
         {
             // The database already contains this exact candidate. Reconcile
             // through the fresh wallet-status read; the state machine's
@@ -1089,7 +1112,7 @@ pub(crate) fn settle_candidate_activation(
                 CandidateActivationDecision::Reconcile,
             ))
         }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+        _ => StateSettlement::InvalidEvidence,
     }
 }
 
@@ -1119,49 +1142,42 @@ pub(crate) fn broadcast_request(
 
 pub(crate) fn settle_broadcast(
     active: &ActiveCandidateWork,
-    observation: &CommittedObservation<SubmittedCandidateProof, EvmSubmissionFailure>,
+    submitted: &SubmittedCandidateProof,
 ) -> StateSettlement<CandidateObservationWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_reserved(&active.candidate.work, *failure)),
-        ),
-        CommittedObservation::Returned(submitted)
-            if submitted.candidate_ordinal
-                == active.active_candidate.attested_candidate.candidate_ordinal
-                && submitted.unsigned_candidate_digest
-                    == active
-                        .active_candidate
-                        .attested_candidate
-                        .unsigned_candidate_digest
-                && submitted.transaction_hash
-                    == active.active_candidate.attested_candidate.transaction_hash
-                && submitted.semantic_signer_id
-                    == active
-                        .active_candidate
-                        .attested_candidate
-                        .semantic_signer_id
-                && submitted.signer_generation_ref.to_content_ref().is_ok()
-                && submitted.signing_contract_ref.to_content_ref().is_ok()
-                && submitted.submission_contract_ref
-                    == *active
-                        .candidate
-                        .unsigned_candidate
-                        .transaction_intent
-                        .submission_contract_ref() =>
-        {
-            StateSettlement::Proposed(ProposedStateOutcome::Success(CandidateObservationWork {
-                active: active.clone(),
-                submitted: submitted.clone(),
-                next_round: 0,
-                observation: CandidateTransactionObservation {
-                    transaction: None,
-                    receipt: None,
-                    finalized_head: None,
-                    inclusion_block: None,
-                },
-            }))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if submitted.candidate_ordinal == active.active_candidate.attested_candidate.candidate_ordinal
+        && submitted.unsigned_candidate_digest
+            == active
+                .active_candidate
+                .attested_candidate
+                .unsigned_candidate_digest
+        && submitted.transaction_hash == active.active_candidate.attested_candidate.transaction_hash
+        && submitted.semantic_signer_id
+            == active
+                .active_candidate
+                .attested_candidate
+                .semantic_signer_id
+        && submitted.signer_generation_ref.to_content_ref().is_ok()
+        && submitted.signing_contract_ref.to_content_ref().is_ok()
+        && submitted.submission_contract_ref
+            == *active
+                .candidate
+                .unsigned_candidate
+                .transaction_intent
+                .submission_contract_ref()
+    {
+        StateSettlement::Proposed(ProposedStateOutcome::Success(CandidateObservationWork {
+            active: active.clone(),
+            submitted: submitted.clone(),
+            next_round: 0,
+            observation: CandidateTransactionObservation {
+                transaction: None,
+                receipt: None,
+                finalized_head: None,
+                inclusion_block: None,
+            },
+        }))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1215,23 +1231,14 @@ pub(crate) fn transaction_lookup_request(
 
 pub(crate) fn settle_transaction_lookup(
     work: &CandidateObservationWork,
-    observation: &CommittedObservation<EvmTransactionLookupObservation, EvmSubmissionFailure>,
+    returned: &EvmTransactionLookupObservation,
 ) -> StateSettlement<CandidateObservationWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
-                &work.active.candidate.work,
-                *failure,
-            )))
-        }
-        CommittedObservation::Returned(returned)
-            if valid_transaction_observation(candidate_hash(work), returned) =>
-        {
-            let mut work = work.clone();
-            work.observation.transaction = Some(returned.clone());
-            StateSettlement::Proposed(ProposedStateOutcome::Success(work))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if valid_transaction_observation(candidate_hash(work), returned) {
+        let mut work = work.clone();
+        work.observation.transaction = Some(returned.clone());
+        StateSettlement::Proposed(ProposedStateOutcome::Success(work))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1269,24 +1276,15 @@ pub(crate) fn receipt_lookup_request(work: &CandidateObservationWork) -> EvmRece
 
 pub(crate) fn settle_receipt_lookup(
     work: &CandidateObservationWork,
-    observation: &CommittedObservation<EvmReceiptLookupObservation, EvmSubmissionFailure>,
+    returned: &EvmReceiptLookupObservation,
 ) -> StateSettlement<CandidateObservationWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
-                &work.active.candidate.work,
-                *failure,
-            )))
-        }
-        CommittedObservation::Returned(returned)
-            if valid_receipt_observation(candidate_hash(work), returned) =>
-        {
-            let mut work = work.clone();
-            work.observation.receipt = Some(returned.clone());
-            work.next_round = work.next_round.saturating_add(1);
-            StateSettlement::Proposed(ProposedStateOutcome::Success(work))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if valid_receipt_observation(candidate_hash(work), returned) {
+        let mut work = work.clone();
+        work.observation.receipt = Some(returned.clone());
+        work.next_round = work.next_round.saturating_add(1);
+        StateSettlement::Proposed(ProposedStateOutcome::Success(work))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1348,26 +1346,18 @@ pub(crate) fn finalized_head_request(
 
 pub(crate) fn settle_finalized_head(
     work: &CandidateObservationWork,
-    observation: &CommittedObservation<EvmFinalizedHeadObservation, EvmSubmissionFailure>,
+    head: &EvmFinalizedHeadObservation,
 ) -> StateSettlement<TerminalEvidenceWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
-                &work.active.candidate.work,
-                *failure,
-            )))
-        }
-        CommittedObservation::Returned(head)
-            if crate::submission::validate_quantity(&head.block_number)
-                && crate::submission::validate_transaction_hash(&head.block_hash) =>
-        {
-            let mut candidate = work.clone();
-            candidate.observation.finalized_head = Some(head.clone());
-            StateSettlement::Proposed(ProposedStateOutcome::Success(TerminalEvidenceWork {
-                candidate,
-            }))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if crate::submission::validate_quantity(&head.block_number)
+        && crate::submission::validate_transaction_hash(&head.block_hash)
+    {
+        let mut candidate = work.clone();
+        candidate.observation.finalized_head = Some(head.clone());
+        StateSettlement::Proposed(ProposedStateOutcome::Success(TerminalEvidenceWork {
+            candidate,
+        }))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1386,24 +1376,16 @@ pub(crate) fn inclusion_block_request(
 
 pub(crate) fn settle_inclusion_block(
     terminal: &TerminalEvidenceWork,
-    observation: &CommittedObservation<EvmInclusionBlockObservation, EvmSubmissionFailure>,
+    block: &EvmInclusionBlockObservation,
 ) -> StateSettlement<TerminalEvidenceWork, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => {
-            StateSettlement::Proposed(ProposedStateOutcome::Failure(reconcile_reserved(
-                &terminal.candidate.active.candidate.work,
-                *failure,
-            )))
-        }
-        CommittedObservation::Returned(block)
-            if crate::submission::validate_quantity(&block.block_number)
-                && crate::submission::validate_transaction_hash(&block.block_hash) =>
-        {
-            let mut terminal = terminal.clone();
-            terminal.candidate.observation.inclusion_block = Some(block.clone());
-            StateSettlement::Proposed(ProposedStateOutcome::Success(terminal))
-        }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+    if crate::submission::validate_quantity(&block.block_number)
+        && crate::submission::validate_transaction_hash(&block.block_hash)
+    {
+        let mut terminal = terminal.clone();
+        terminal.candidate.observation.inclusion_block = Some(block.clone());
+        StateSettlement::Proposed(ProposedStateOutcome::Success(terminal))
+    } else {
+        StateSettlement::InvalidEvidence
     }
 }
 
@@ -1485,11 +1467,6 @@ pub(crate) fn verify_canonical_inclusion(
             .active_candidate
             .attested_candidate
             .candidate_ordinal,
-        winning_activation_evidence_ref: work
-            .active
-            .active_candidate
-            .activation_evidence_ref
-            .clone(),
         transaction_hash: transaction_hash.clone(),
         inclusion_block_number: receipt_number.clone(),
         inclusion_block_hash: receipt_block_hash.clone(),
@@ -1556,13 +1533,10 @@ pub(crate) fn completion_request(work: &CompletionWork) -> CompleteEvmNonceReque
 
 pub(crate) fn settle_completion(
     work: &CompletionWork,
-    observation: &CommittedObservation<CompleteWalletNonceResponse, EvmSubmissionFailure>,
+    returned: &CompleteWalletNonceResponse,
 ) -> StateSettlement<CompletedWalletNonce, PendingEvmSubmissionFailure> {
-    match observation {
-        CommittedObservation::SafeFailure(failure) => StateSettlement::Proposed(
-            ProposedStateOutcome::Failure(reconcile_reserved(&work.submission_work, *failure)),
-        ),
-        CommittedObservation::Returned(CompleteWalletNonceResponse::Completed { completion })
+    match returned {
+        CompleteWalletNonceResponse::Completed { completion }
             if completion.nonce_domain == work.request.nonce_domain
                 && completion.semantic_completion_key == work.request.completion_key
                 && completion.semantic_reservation_key
@@ -1571,11 +1545,11 @@ pub(crate) fn settle_completion(
                     == work.request.canonical_terminal_outcome
                 && completion.terminal_witnesses == work.request.terminal_witnesses
                 && completion.validate().is_ok()
-                && completion.completion_evidence_ref.to_content_ref().is_ok() =>
+                && completion.semantic_completion_key.validate().is_ok() =>
         {
             StateSettlement::Proposed(ProposedStateOutcome::Success(completion.clone()))
         }
-        CommittedObservation::Returned(_) => StateSettlement::InvalidEvidence,
+        _ => StateSettlement::InvalidEvidence,
     }
 }
 

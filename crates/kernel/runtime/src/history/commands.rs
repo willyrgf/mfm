@@ -80,7 +80,8 @@ impl StructuredAdmissionMaterial {
             &prior_run_source_manifest,
             ADMISSION_PRIOR_RUN_SOURCE_MANIFEST_OBJECT_TYPE,
         )?;
-        PriorRunFactSourceManifest::from_history_object(&prior_run_source_manifest)
+        prior_run_source_manifest
+            .decode_persisted::<PriorRunFactSourceManifest>()
             .map_err(|_| HistoryError::InvalidHistory)?;
         validate_admission_object(&routing_policy, ADMISSION_ROUTING_POLICY_OBJECT_TYPE)?;
         stable_resource_lineage_contract_refs.sort();
@@ -164,7 +165,7 @@ impl StructuredAdmissionCommand {
     /// Binds one exact qualified program document and declaration-ordered roots.
     ///
     /// Callers never supply a run digest; the store derives `RunId` from the
-    /// annex-backed preimage.
+    /// owner-derived preimage.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tenant_scope_id: TenantScopeId,

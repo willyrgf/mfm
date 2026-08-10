@@ -17,8 +17,8 @@ pub use commands::{
     StructuredAdmissionCommand, StructuredAdmissionMaterial,
 };
 pub use cursor::{
-    ActionableState, LaneCursor, ObservationQualification, ProgramCursor, StateLeaf,
-    StructuredFrontier,
+    ActionableState, EffectEntrySubject, LaneCursor, ObservationQualification, ProgramCursor,
+    StateLeaf, StructuredFrontier,
 };
 pub use error::HistoryError;
 pub use identity::{PhysicalTargetIdentity, StructuredStoreIdentity};

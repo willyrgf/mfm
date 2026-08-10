@@ -82,7 +82,6 @@ pub use wallet::{
     evm_deterministic_signing_profile_canonical, evm_deterministic_signing_profile_ref,
     evm_submission_expansion_policy_canonical, evm_submission_expansion_policy_ref,
     evm_wallet_assurance_policy_canonical, evm_wallet_assurance_policy_ref,
-    evm_wallet_finality_policy_canonical, evm_wallet_finality_policy_ref,
     evm_wallet_nonce_policy_canonical, evm_wallet_nonce_policy_ref, EvmCallerSubmissionToken,
     EvmSubmissionFailure, EvmSubmitTransactionSelector, EvmTransactionTarget,
     EvmWalletAccessListEntry, EvmWalletError, EvmWalletFeeCandidate, EvmWalletObservedTransaction,
@@ -92,8 +91,7 @@ pub use wallet::{
     EVM_SUBMISSION_EXPANSION_POLICY_VERSION, EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
     EVM_SUBMIT_TRANSACTION_OPERATION_ID, EVM_WALLET_ACCESS_LIST_MAX_ENTRIES,
     EVM_WALLET_ACCESS_LIST_MAX_STORAGE_KEYS, EVM_WALLET_ASSURANCE_POLICY_VERSION,
-    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_DATA_MAX_BYTES,
-    EVM_WALLET_FINALITY_POLICY_VERSION, EVM_WALLET_FINALITY_TAG,
+    EVM_WALLET_BROADCAST_OPERATION_ID, EVM_WALLET_DATA_MAX_BYTES, EVM_WALLET_FINALITY_TAG,
     EVM_WALLET_FINALIZED_HEAD_OPERATION_ID, EVM_WALLET_INCLUSION_BLOCK_OPERATION_ID,
     EVM_WALLET_NONCE_POLICY_VERSION, EVM_WALLET_RECEIPT_LOG_DATA_MAX_BYTES,
     EVM_WALLET_RECEIPT_LOG_LIMIT, EVM_WALLET_RECEIPT_LOOKUP_OPERATION_ID,
@@ -127,7 +125,9 @@ pub use wallet_authority::{
     WalletNonceAuthorityResource, WalletNonceDomain, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreIncarnation,
     WalletNonceStoreLineageHead, WalletNonceStorePromotionAttestation, WalletNonceStoreSuccessor,
-    EVM_TRANSACTION_NONCE_MAX, EVM_WALLET_OBSERVATION_ROUND_LIMIT,
+    EVM_TRANSACTION_NONCE_MAX, EVM_WALLET_OBSERVATION_ROUND_LIMIT, MAX_COMPLETION_RECOVERY_BYTES,
+    MAX_PROVIDER_DEPLOYMENT_ROUTES, MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES,
+    MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
 };
 
 #[cfg(test)]

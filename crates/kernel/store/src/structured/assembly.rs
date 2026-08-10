@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use mfm_certify::structured::QualifiedProgramRegistry;
+use mfm_certify::structured::CertifiedProgramRegistry;
 use mfm_runtime::history::HistoryError;
 use mfm_runtime::structured::{Runtime, RuntimeProcessRegistry};
 
@@ -40,7 +40,7 @@ pub struct AssembledStructuredRuntime<B: StructuredHistoryBackend> {
 /// cannot split, omit, substitute, or reuse either half independently.
 pub fn assemble_structured_runtime<B: StructuredHistoryBackend>(
     backend: B,
-    registry: QualifiedProgramRegistry,
+    registry: CertifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> std::result::Result<AssembledStructuredRuntime<B>, HistoryError> {
     let (admission, processes, assembly_token) = registry.into_runtime_parts(StoreAssemblyConsumer);
@@ -68,7 +68,7 @@ pub fn assemble_structured_runtime<B: StructuredHistoryBackend>(
 #[cfg(any(test, feature = "test-support"))]
 pub fn assemble_with_backend<B: StructuredHistoryBackend>(
     backend: B,
-    registry: QualifiedProgramRegistry,
+    registry: CertifiedProgramRegistry,
     physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
 ) -> std::result::Result<AssembledStructuredRuntime<B>, HistoryError> {
     assemble_structured_runtime(backend, registry, physical_binding_verifier)

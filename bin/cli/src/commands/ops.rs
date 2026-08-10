@@ -1,5 +1,5 @@
 use clap::Subcommand;
-use mfm_app::{EntryPointContract, PublicError};
+use mfm_app::{PublicError, PublishedEntryPoint};
 
 use crate::commands::CommandContext;
 use crate::presentation::output::handle_public_result;
@@ -32,7 +32,7 @@ impl OpsCommand {
     }
 }
 
-fn entry_points_text(entries: &[EntryPointContract]) -> Result<String, PublicError> {
+fn entry_points_text(entries: &[PublishedEntryPoint]) -> Result<String, PublicError> {
     let mut text = entries
         .iter()
         .map(|entry| entry.entry_point_id().as_str())
@@ -46,7 +46,7 @@ fn entry_points_text(entries: &[EntryPointContract]) -> Result<String, PublicErr
 
 #[cfg(test)]
 mod tests {
-    use mfm_app::{EntryPointContract, PlanningProfile, PublicJsonResponse};
+    use mfm_app::{PlanningProfile, PublicJsonResponse, PublishedEntryPoint};
     use mfm_ids::{EntryPointId, SchemaId, StableId};
 
     use super::entry_points_text;
@@ -80,12 +80,12 @@ mod tests {
         );
     }
 
-    fn entry_point(id: &str) -> EntryPointContract {
+    fn entry_point(id: &str) -> PublishedEntryPoint {
         let profile = PlanningProfile::from_canonical_json(
             br#"{"canonical_profile_parameters":{},"framework_policy_refs":[],"planner_contract_ref":{"content_digest":"content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111","schema_id":"schema:mfm.test.component:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"planner_implementation_ref":{"content_digest":"content:sha256-v1:2222222222222222222222222222222222222222222222222222222222222222","schema_id":"schema:mfm.test.component:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"version":"mfm.planning-profile.v1"}"#,
         )
         .expect("planning profile");
-        EntryPointContract::new(
+        PublishedEntryPoint::new(
             EntryPointId::new(id).expect("entry-point id"),
             StableId::new("mfm.test/operation").expect("operation id"),
             profile,

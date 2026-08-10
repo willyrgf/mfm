@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `AutoincrementInsertRequest: EntryKeyed` is not satisfied
+  --> tests/ui/structured/fail/absorbing_entry_mode_without_a_key.rs:17:18
+   |
+17 |     type Entry = EntryAbsorbing<3>;
+   |                  ^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `EntryKeyed` is not implemented for `AutoincrementInsertRequest`
+  --> tests/ui/structured/fail/../support.rs
+   |
+   | pub struct AutoincrementInsertRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: the trait `EntryKeyed` is implemented for `KeyedInsertRequest`
+  --> tests/ui/structured/fail/../support.rs
+   |
+   | impl EntryKeyed for KeyedInsertRequest {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = note: required for `mfm_capabilities::EntryAbsorbing<3>` to implement `mfm_capabilities::private::EffectEntryModeForSealed<AutoincrementInsertRequest>`
+   = note: required for `<AutoincrementInsertCapability as EffectCapabilityContract>::Entry` to implement `EffectEntryModeFor<<AutoincrementInsertCapability as EffectCapabilityContract>::Request>`
+note: required by a bound in `mfm_capabilities::EffectCapabilityContract::Entry`
+  --> $WORKSPACE/crates/kernel/capabilities/src/lib.rs
+   |
+   |     type Entry: EffectEntryModeFor<Self::Request>;
+   |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `EffectCapabilityContract::Entry`

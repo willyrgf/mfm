@@ -14,7 +14,7 @@ bytes; it is never bearer authority.
 
 | Family | Persisted meaning |
 | --- | --- |
-| `RunAdmitted` | Store/tenant/run/invocation identity, exact certified program and audit refs, immutable admission material, initial lexical bindings, and genesis semantic digest. |
+| `RunAdmitted` | Store/tenant/run/invocation identity, the one certified-program reference, immutable admission material, initial lexical bindings, and genesis semantic digest. |
 | `StateTransitionCommitted` | Exact occurrence/path/call, input binding, optional consumed observation, nominal outcome, facts, and before/after semantic digests. |
 | `ExternalAccessAuthorized` | Exact occurrence, attempt ordinal, semantic head, capability/adapter contracts and implementations, request/digest, public binding, and optional stable resource lineage. |
 | `ExternalAccessObserved` | Exact authorization/access-attempt linkage and one closed observation outcome. |
@@ -39,10 +39,117 @@ Raw provider bodies, arbitrary diagnostic text, endpoints, credentials, signed b
 sessions, fence keys, and mutation permits are never fields of these records or their object
 closure.
 
+## Persisted schema vocabulary
+
+`mfm-values` owns the one shape-derived persisted-schema mechanism. A schema identity hashes its
+schema kind, name, manual version, optional semantic type identity, fixed policies, and its
+`PersistedEncoding`. Audit provenance stays outside the hash. There is no registry: a descriptor
+names a closed grammar identifier and the checked Rust owner is the one implementation of that rule.
+
+`SchemaKind::PersistedContract` marks a retained history/component contract that is not a state
+value, planning config, state input, or operation output. Codec-only public DTOs have no schema
+identity at all.
+
+`PersistedEncoding` is closed:
+
+| Encoding | Hashed elements |
+| --- | --- |
+| `CanonicalJson` | complete serialized shape |
+| `CanonicalJsonLines` | record shape, minimum/maximum records, maximum framed record bytes, maximum stream bytes |
+
+`CanonicalJsonLines` fixes LF delimiters and a required final LF; those are not configurable flags.
+Each encoding validates its own form: `CanonicalJson` validates one canonical value against the
+complete shape, and `CanonicalJsonLines` validates delimiters, record bounds, and every record
+against the declared record shape. A stream owner therefore never restates its own framing rules.
+
+The bounded-shape vocabulary is closed. Beyond the existing unit, boolean, string, bytes, integer,
+decimal, option, sequence, tuple, struct, enum, string-map, inline-value, and generic forms, a
+persisted shape may use:
+
+| Form | Hashed bounds |
+| --- | --- |
+| `BoundedString` | inclusive UTF-8 byte bounds and one `StringGrammar` |
+| `BoundedBytes` | inclusive decoded byte bounds |
+| `UnsignedRange` / `SignedRange` | inclusive numeric range |
+| `Literal` | one exact null/boolean/unsigned/signed/string value |
+| `BoundedSequence` | element shape, inclusive cardinality, ordering, uniqueness |
+| `BoundedStringMap` | key grammar and byte bounds, value shape, inclusive entry bounds |
+| `CanonicalJsonTerminal` | one `CanonicalJsonProfile` |
+
+`StringGrammar` is a closed enum whose variants each delegate to one checked owner:
+`UnicodeScalarText`, `ContentDigest`, `SemanticDigest`, `RunId`, `OccurrenceId`, `SchemaId`,
+`SemanticTypeId`, `EntryPointId`, `StableId`, `StoreScopeId`, `TenantScopeId`, `UuidV4`,
+`CanonicalUnsignedText`, `LowerPathToken`, and `MediaType`. `mfm_values::MediaType` is the one owner
+of the lowercase registered media-type grammar without parameters.
+
+`CanonicalJsonProfile` has two profiles: `GeneralFloatFree` for framework surfaces that deliberately
+admit signed and unsigned integers, and `UnsignedNative` for the fact subject/predicate domain. Both
+enforce the global canonical byte, depth, string, key, array, and object limits, and both scan every
+string value under the persisted-surface secret-marker policy. Object keys are judged as structural
+names, exactly as declared struct field names are, so a name such as `authorization_ref` is admitted
+while a `"Bearer …"` value is not.
+
+Changing any field, tag, literal, bound, grammar, number profile, referenced shape, framing rule, or
+manual version changes the derived `SchemaId`; changing `SchemaAudit` provenance alone does not.
+
+Retained owners declare their shape with `#[derive(PersistedSchema)]` rather than restating it, so a
+contract cannot drift from the bytes it serializes. Checked identity fields map to their closed
+grammar, a nested persisted owner embeds its own declared shape, and each derived identity and
+schema id is a cached one-time constant. Retained documents whose semantic legality is established
+by certification or expansion — the authored and expanded programs, policy recipes, lane and join
+contracts, and configured values — declare the bounded canonical-JSON terminal instead of a flat
+field list; that terminal still enforces the float-free profile and the global canonical bounds.
+
+## Semantic-hash owners
+
+Every domain-separated identity is minted by exactly one owner from one exact preimage. The
+framework envelope is `SHA-256(JCS({"domain": D, "value": V}))`; the two byte-concatenation forms
+are noted where they differ. There is no generic public "hash anything under a caller-supplied
+domain" helper.
+
+| Domain | Owner | Exact preimage |
+| --- | --- | --- |
+| `mfm.run-id.v1` | `mfm_journal::structured::derive_run_id` | store scope, tenant scope, entry-point operation id, invocation identity |
+| `mfm.fact-content-identity.v1` | `derive_fact_content_identity` | fact descriptor ref, subject ref, response ref |
+| `mfm.fact-logical-identity.v1` | `derive_fact_logical_identity` | producer transition ref, emission ordinal, fact content identity |
+| `mfm.fact-query.v1` | `mfm_facts::derive_fact_query_digest` | exact canonical request bytes, byte-concatenated after the domain |
+| `mfm.structured-candidate.v1` | `derive_candidate_digest` | exact canonical candidate bytes, byte-concatenated after the domain |
+| `mfm.structured-access-attempt.v1` | `derive_access_attempt_id` | exact canonical attempt preimage, byte-concatenated after the domain |
+| `mfm.evm.qualified-chain-instance.v1` | `derive_qualified_chain_instance_id` | chain instance declaration |
+| `mfm.evm.chain-lineage.v1` | `derive_evm_chain_lineage_id` | qualified chain instance |
+| `mfm.evm.wallet-nonce-domain.v1` | `derive_wallet_nonce_domain` | chain lineage id and lowercase hex sender address |
+| `mfm.evm.intent-issuer.v1` | `derive_authenticated_intent_issuer_id` | authenticated issuer material |
+| `mfm.evm.submission-intent.v3` | `derive_submission_intent_id` | issuer, nonce domain, submission semantics |
+| `mfm.evm.submission-semantics.v1` | `derive_submission_semantics_digest` | exact submission semantics |
+| `mfm.evm.nonce-reservation.v1` | `derive_evm_nonce_reservation_key` | nonce domain and submission intent |
+| `mfm.evm.nonce-candidate.v1` | `derive_evm_candidate_operation_key` | reservation key and candidate ordinal |
+| `mfm.evm.nonce-completion.v1` | `derive_evm_nonce_completion_key` | reservation key |
+| `mfm.evm.transaction-intent.v1` | `EvmTransactionIntent::digest` | exact transaction intent |
+| `mfm.evm.candidate-family.v1` | `EvmCandidateFamily::digest` | exact candidate family |
+
+Semantic digests use `sha256-jcs-v1`; exact retained-byte content addressing uses `sha256-v1`. The
+two are distinct identity kinds and neither substitutes for the other.
+
+## Bound limits
+
+Every bound is owned by the layer that enforces it; there is no central cross-domain budget module.
+
+| Owner | Bounds |
+| --- | --- |
+| `mfm_canonical::limits` | canonical JSON bytes, depth, string bytes, object key bytes, object entries, array items, base64url characters |
+| `mfm_store::structured` | stored frame bytes, batch objects, batch records, configuration revision bytes, export source runs, export fact routes |
+| `mfm_replay::portable` | portable stream bytes, framed record bytes, frames, batches, objects |
+| `mfm_journal::structured` | prior-run source rules, programs and descriptors per rule, total references, manifest bytes |
+| `mfm_evm::wallet_authority` | completion recovery bytes, provider message bytes, provider proof bytes, provider deployment routes, provider finish-authorization bytes |
+| `mfm_facts` | eight fact-scan bounds, selection queries, selection limit, fact emissions |
+
 ## Content-addressed objects
 
 Every `HistoryObject` contains an object-type tag, schema id plus raw canonical-byte digest, and
-the exact canonical JSON. The store validates bytes and identity on admission and load. Each append
+the exact canonical JSON. A retained owner is built and read through
+`HistoryObject::from_persisted`/`decode_persisted`, which bind one `HistoryObjectPayload` to both
+its declared schema identity and its one checked object type, so typed bytes cannot be paired with
+a foreign object kind. The store validates bytes and identity on admission and load. Each append
 must introduce exactly the newly reachable closure required by its records—no missing member and no
 unreferenced extra object.
 
@@ -61,7 +168,9 @@ table of semantic truth. Backend indexes are rebuildable projections only.
 
 Configured values use a separate append-only stream keyed by store, tenant, entry operation, and
 target. A revision contains sequence, predecessor, append request id, exact configured-value
-contract, content reference, canonical bytes, and writer lineage. Application paths can resolve but
+contract, content reference, canonical bytes, and writer lineage. `ConfigurationRevision` has one
+owner-derived `mfm.structured-configuration-revision` schema identity; admission material and the
+configuration store share it, so the same revision bytes cannot carry two derivations. Application paths can resolve but
 cannot append. The shared append boundary bounds the canonical serialized revision before any
 backend receives it, so memory and PostgreSQL accept the same content-addressed revision bytes.
 Configuration is not a RunHistory record family.
@@ -69,9 +178,15 @@ Configuration is not a RunHistory record family.
 ## Certified program
 
 The certified root content-addresses the exact authored program, expanded program, expansion
-profile/proof, policy proof, state/capability/adapter/signer/resource manifest closure, and
-secret-free implementation manifest. Repeated refs in `RunAdmitted` are audit projections and must
-equal the certified root. Serialized authored or component bytes have no authority independently.
+profile/proof, policy proof, qualified entry-point admission policy,
+state/capability/adapter/signer/resource manifest closure, and secret-free implementation manifest.
+
+`CertifiedProgramRoot` has one owner-derived `mfm.certified-program-root` canonical-JSON schema, and
+its reference is that schema identity plus the raw SHA-256 digest of its exact JCS bytes. That single
+`RunAdmitted.certified_program_ref` is simultaneously the program identity, the retained root-object
+key, the prior-run authorization identity, and the export identity. There is no second bespoke
+digest and no repeated audit projection on `RunAdmitted`: everything behind the reference is exactly
+`root.components`. Serialized authored or component bytes have no authority independently.
 
 ## Wallet authority
 
@@ -88,11 +203,24 @@ Target-held private keys, live sessions, transaction permits, database passwords
 signatures, and signed transaction bytes are process/deployment authority and are not persisted in
 semantic tables. SQL role and session metadata is infrastructure, not portable semantic evidence.
 
+Wallet authority retains no derivative evidence reference. The former
+`reservation_evidence_ref`, `activation_evidence_ref`, `completion_evidence_ref`,
+`winning_activation_evidence_ref`, `predecessor_activation_ref`,
+`observed_floor_ref`, and `original_terminal_witnesses_ref` digests restated
+material the closure already retains exactly, so they are gone and there is no
+replacement identity. The authoritative bindings are the permanent operation
+keys — `EvmNonceReservationKey`, `EvmCandidateOperationKey` (now carried on
+`ActiveWalletCandidate` and on the replacement permit), and
+`EvmNonceCompletionKey` — over the exact retained request, state input, and
+result, plus the signed `ProviderMutation`. The winner is selected by ordinal and
+transaction hash against the exact retained prefix. The provider protocol is v4.
+
 ## Public application DTOs
 
 The reviewed application surfaces are:
 
-- complete entry-point contracts;
+- published entry points (`mfm.published-entry-point.v1`), which are output metadata with no
+  retained-value contract, content reference, or decoder;
 - admission response with logical run identity and admission disposition;
 - one-action drive response;
 - public run view with verified status/head and terminal output when closed;
@@ -110,15 +238,24 @@ authorizes its exact purpose and tenant/run target.
 The current media type is:
 
 ```text
-application/vnd.mfm.structured-run-export-stream.v2
+application/vnd.mfm.structured-run-export-stream.v3
 ```
 
-Each newline-delimited canonical frame binds an ordinal, kind, predecessor digest, and payload. The
-terminal seal binds version, requested semantic/audit kind, every run fixation, source closure,
-per-run authenticated principal, fixed `export` grant, content-addressed policy-decision
-references, assigned prefixes, chain digest, and exact byte/frame counts. Replay input checks the supplied
-content digest, exact current recoverability schemas, store/tenant/run identity, and per-frame and
-total bounds. Former monolithic object bytes are rejected; no compatibility decoder exists.
+The complete stream is the one portable identity: `mfm-replay` owns it as a `CanonicalJsonLines`
+persisted schema, and `encode()` returns the exact bytes and their `ContentRef` together so the two
+can never be paired across streams. A frame is an internal typed record of that one codec, carries
+no identity of its own, and binds only a kind and a payload.
+
+The terminal seal binds version, requested semantic/audit kind, every run fixation, source closure,
+per-run authenticated principal, fixed `export` grant, content-addressed policy-decision references,
+and assigned prefixes. It deliberately restates no frame ordinal, predecessor digest, chain digest,
+frame count, or byte count: physical line order, the caller's expected complete-stream `ContentRef`,
+and the canonical batch predecessor chains already own those facts.
+
+`verify_offline(bytes, expected_content_ref, trust)` compares the caller's expected complete-stream
+reference against the bytes before decoding anything, then checks the closed batch/seal union,
+framing, bounds, terminal placement, source closure, fixation, and seal. Old bytes are rejected; no
+v2 decoder exists.
 
 Semantic exports authorize only the exact selected cutoff and recursively required producer heads;
 later audit-only suffixes are not semantic dependencies. The retained decision references are
@@ -151,6 +288,5 @@ For every new persisted or public field:
 1. identify its semantic owner and exact schema;
 2. prove it is canonical, bounded, float-free, strict, and content-addressed where required;
 3. prove it is public evidence rather than a disguised credential or bearer;
-4. add hostile unknown-field, contract/provenance substitution, and redaction tests;
-5. update recoverability annex/corpus and regenerate them in place; and
-6. reject old bytes rather than adding a compatibility path.
+4. add hostile unknown-field, contract/provenance substitution, and redaction tests; and
+5. reject old bytes rather than adding a compatibility path.

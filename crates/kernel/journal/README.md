@@ -19,5 +19,5 @@ scanner certificate, selected-source provenance with exact subject/response/clai
 completeness attestation. Every persisted
 struct denies unknown fields and uses canonical float-free encodings.
 
-It does not persist, fold, schedule, execute callbacks, or define a storage backend. Successor
+It does not persist, reduce, schedule, execute callbacks, or define a storage backend. Successor
 legality and exact object closure belong to `mfm-store`.

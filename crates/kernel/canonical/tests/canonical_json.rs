@@ -112,8 +112,8 @@ fn base64url_bytes_accept_exact_character_budget_and_reject_one_over() {
 fn plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse() {
     {
         let exact = format!(
-            "\"{}\"",
-            "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 2)
+            "[\"{}\",\"y\"]",
+            "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 8),
         );
         let canonical = PlainCanonicalJsonBytes::from_json_str(&exact)
             .expect("exact canonical JSON document budget");
@@ -124,8 +124,8 @@ fn plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse() 
     }
 
     let one_over = format!(
-        "\"{}\"",
-        "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 1)
+        "[\"{}\",\"y\"]",
+        "x".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_BYTES - 7),
     );
     let error = PlainCanonicalJsonBytes::from_json_str(&one_over)
         .expect_err("one byte over the canonical JSON document budget");
@@ -133,33 +133,134 @@ fn plain_json_accepts_exact_document_budget_and_rejects_one_over_before_parse() 
 }
 
 #[test]
-fn incremental_raw_content_hashing_matches_the_one_shot_contract() {
-    let contract = mfm_canonical::RecoverabilityContract::embedded()
-        .expect("embedded recoverability contract");
+fn plain_json_enforces_string_and_object_key_bounds_at_ingress() {
+    {
+        let exact = format!(
+            "\"{}\"",
+            "x".repeat(mfm_canonical::limits::MAX_STRING_UTF8_BYTES)
+        );
+        PlainCanonicalJsonBytes::from_json_str(&exact).expect("exact string budget");
+    }
+
+    let string_over = format!(
+        "\"{}\"",
+        "x".repeat(mfm_canonical::limits::MAX_STRING_UTF8_BYTES + 1)
+    );
+    assert!(PlainCanonicalJsonBytes::from_json_str(&string_over)
+        .expect_err("one byte over the string budget")
+        .message()
+        .contains("string exceeds"));
+
+    {
+        let exact = format!(
+            "{{\"{}\":0}}",
+            "k".repeat(mfm_canonical::limits::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES)
+        );
+        PlainCanonicalJsonBytes::from_json_str(&exact).expect("exact object-key budget");
+    }
+
+    let key_over = format!(
+        "{{\"{}\":0}}",
+        "k".repeat(mfm_canonical::limits::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES + 1)
+    );
+    assert!(PlainCanonicalJsonBytes::from_json_str(&key_over)
+        .expect_err("one byte over the object-key budget")
+        .message()
+        .contains("object key exceeds"));
+}
+
+#[test]
+fn plain_json_enforces_array_and_object_cardinality_at_ingress() {
+    {
+        let mut exact = String::with_capacity(mfm_canonical::limits::MAX_ARRAY_ITEMS * 2 + 1);
+        exact.push('[');
+        for index in 0..mfm_canonical::limits::MAX_ARRAY_ITEMS {
+            if index != 0 {
+                exact.push(',');
+            }
+            exact.push('0');
+        }
+        exact.push(']');
+        PlainCanonicalJsonBytes::from_json_str(&exact).expect("exact array-item budget");
+
+        exact.insert(exact.len() - 1, ',');
+        exact.insert(exact.len() - 1, '0');
+        assert!(PlainCanonicalJsonBytes::from_json_str(&exact)
+            .expect_err("one item over the array budget")
+            .message()
+            .contains("array exceeds"));
+    }
+
+    {
+        let mut object = String::with_capacity(mfm_canonical::limits::MAX_OBJECT_ENTRIES * 12);
+        object.push('{');
+        for index in 0..mfm_canonical::limits::MAX_OBJECT_ENTRIES {
+            if index != 0 {
+                object.push(',');
+            }
+            use std::fmt::Write as _;
+            write!(&mut object, "\"{index:06x}\":0").expect("write object fixture");
+        }
+        object.push('}');
+        PlainCanonicalJsonBytes::from_json_str(&object).expect("exact object-entry budget");
+
+        object.insert(object.len() - 1, ',');
+        object.insert_str(object.len() - 1, "\"overflow\":0");
+        assert!(PlainCanonicalJsonBytes::from_json_str(&object)
+            .expect_err("one entry over the object budget")
+            .message()
+            .contains("object exceeds"));
+    }
+}
+
+#[test]
+fn plain_json_enforces_nesting_depth_during_deserialization() {
+    let exact = format!(
+        "{}0{}",
+        "[".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_DEPTH),
+        "]".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_DEPTH)
+    );
+    PlainCanonicalJsonBytes::from_json_str(&exact).expect("exact nesting-depth budget");
+
+    let one_over = format!(
+        "{}0{}",
+        "[".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_DEPTH + 1),
+        "]".repeat(mfm_canonical::limits::MAX_CANONICAL_JSON_DEPTH + 1)
+    );
+    assert!(PlainCanonicalJsonBytes::from_json_str(&one_over)
+        .expect_err("one level over the nesting-depth budget")
+        .message()
+        .contains("nesting depth"));
+}
+
+#[test]
+fn incremental_raw_content_hashing_matches_the_one_shot_digest() {
+    use mfm_canonical::{raw_content_digest, RawContentDigestHasher};
+
     let fixture = b"portable export stream digest fixture";
 
     for split in 0..=fixture.len() {
-        let mut incremental = contract.raw_content_digest_hasher();
+        let mut incremental = RawContentDigestHasher::new();
         incremental.update(&fixture[..split]);
         incremental.update(&fixture[split..]);
         assert_eq!(
             incremental.finalize(),
-            contract.raw_content_digest(fixture),
+            raw_content_digest(fixture),
             "split {split}"
         );
     }
 
-    let mut empty = contract.raw_content_digest_hasher();
+    let mut empty = RawContentDigestHasher::new();
     empty.update(b"");
-    assert_eq!(empty.finalize(), contract.raw_content_digest(b""));
+    assert_eq!(empty.finalize(), raw_content_digest(b""));
 
-    let mut segments = contract.raw_content_digest_hasher();
+    let mut segments = RawContentDigestHasher::new();
     for segment in [b"portable ".as_slice(), b"export ", b"stream"] {
         segments.update(segment);
     }
     assert_eq!(
         segments.finalize(),
-        contract.raw_content_digest(b"portable export stream")
+        raw_content_digest(b"portable export stream")
     );
 }
 

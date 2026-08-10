@@ -6,14 +6,14 @@ error[E0277]: the trait bound `mfm_program::structured::Never: MfmValue` is not 
    |
    = help: the following other types implement trait `MfmValue`:
              ArtifactRef<T>
+             AutoincrementInsertRequest
              Input
+             InsertKey
+             KeyedInsertRequest
              mfm_facts::read::FactSelectionCompletenessMode
              mfm_facts::read::FactSelectionReadFailure
              mfm_facts::read::FactSelectionReadFailureCode
-             mfm_facts::read::FactSelectionReadResponse
-             mfm_facts::read::FactSelectionScanBounds
-             mfm_facts::selection::FactSelectionRequest
-             support::Output
+           and $N others
    = note: required for `SafeFailureMayFail` to implement `SafeFailureDisposition<mfm_program::structured::Read<ReadCapability>, mfm_program::structured::Never>`
 note: required by a bound in `mfm_program::structured::State::SafeFailureDisposition`
   --> src/structured.rs

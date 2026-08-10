@@ -39,7 +39,7 @@ mfm-evm = { path = "../../crates/domains/evm" }
 mfm-evm-live = { path = "../../crates/live/evm" }
 mfm-keystore = { path = "../../crates/keystore" }
 mfm-portfolio = { path = "../../crates/domains/portfolio" }
-mfm-replay = { path = "../../crates/kernel/replay" }
+mfm-replay = { path = "../../crates/kernel/replay", features = ["test-support"] }
 mfm-runtime = { path = "../../crates/kernel/runtime" }
 mfm-spec = { path = "../../crates/kernel/spec" }
 mfm-rest-api = { path = "../../bin/rest-api" }

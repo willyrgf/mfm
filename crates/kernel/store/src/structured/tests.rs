@@ -33,13 +33,33 @@ use mfm_spec::structured::{
 };
 use mfm_spec::CanonicalJsonValue;
 use mfm_values::{
-    EnumTagging, EnumVariantDescriptor, FieldDescriptor, RetainedValueContract, SchemaIdentity,
-    SchemaKind, SchemaShape,
+    CanonicalJsonPersistedSchema, EnumTagging, EnumVariantDescriptor, FieldDescriptor, MediaType,
+    RetainedValueContract, SchemaIdentity, SchemaKind, SchemaShape,
 };
 
 use super::backend::StructuredRunStore;
 use super::fold::{ProgramVerifier, VerifiedStructuredRun};
 use super::*;
+
+fn test_history_object(
+    object_type: StableId,
+    schema_id: SchemaId,
+    canonical_json: impl Into<String>,
+) -> HistoryObject {
+    let canonical_json = canonical_json.into();
+    HistoryObject {
+        object_type,
+        content_ref: ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical_json.as_bytes()),
+            ),
+        )
+        .expect("test object content reference"),
+        canonical_json,
+    }
+}
 
 #[derive(Clone)]
 struct FixtureProgramVerifier {
@@ -367,7 +387,7 @@ async fn backend_positive_replies_cannot_substitute_store_validated_content() {
             writer
                 .admit_run(admission(
                     &fixture,
-                    run_id(discriminator),
+                    run_id(&fixture.entry_point, discriminator),
                     "substituted-positive-reply",
                 ))
                 .await
@@ -396,7 +416,7 @@ async fn exact_backend_positive_replies_are_normalized_from_the_retained_candida
         let attempt = writer
             .admit_run(admission(
                 &fixture,
-                run_id(discriminator),
+                run_id(&fixture.entry_point, discriminator),
                 "exact-positive-reply",
             ))
             .await
@@ -425,7 +445,7 @@ async fn ambiguity_resolution_rejects_wrong_identity_and_malformed_envelopes() {
         let attempt = writer
             .admit_run(admission(
                 &fixture,
-                run_id(discriminator),
+                run_id(&fixture.entry_point, discriminator),
                 "corrupt-resolution",
             ))
             .await
@@ -437,7 +457,7 @@ async fn ambiguity_resolution_rejects_wrong_identity_and_malformed_envelopes() {
         assert!(matches!(
             writer
                 .resolve_append(
-                    &run_id(discriminator),
+                    &run_id(&fixture.entry_point, discriminator),
                     attempt.append_request_id(),
                     attempt.candidate_digest(),
                 )
@@ -460,7 +480,7 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(1);
+    let run_id = run_id(&fixture.entry_point, 1);
     let attempt = writer
         .admit_run(admission(&fixture, run_id.clone(), "admit-zero"))
         .await
@@ -494,19 +514,24 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
     let root_object = resolved
         .objects
         .iter()
-        .find(|object| object.content_ref == admission_record.certified_program_root_ref)
+        .find(|object| object.content_ref == admission_record.certified_program_ref)
         .expect("separately persisted certified root");
     assert_eq!(
         root_object.object_type.as_str(),
         "structured.certified_program_root"
     );
-    assert_ne!(
-        admission_record.certified_program_root_ref,
-        admission_record.certified_program_ref
+    assert_eq!(
+        root_object.content_ref,
+        fixture
+            .document
+            .root
+            .content_ref()
+            .expect("certified root reference"),
+        "the one certified reference is the retained root object key",
     );
     assert!(resolved.objects.iter().all(|object| {
         object.object_type.as_str() != "structured.certified_program_document"
-            && object.canonical_json.len() < mfm_canonical::limits::MAX_STORED_FRAME_BYTES
+            && object.canonical_json.len() < MAX_STORED_FRAME_BYTES
     }));
     assert!(fixture.document.component_closure.iter().all(|component| {
         resolved
@@ -529,6 +554,62 @@ async fn zero_state_admission_closes_atomically_and_resolves_lost_acknowledgemen
     ));
 }
 
+/// A forged run identity that is internally self-consistent still fails.
+///
+/// The batch envelope and `RunAdmitted.run_id` are both attacker-supplied, so
+/// their agreement proves nothing. Qualification re-derives the identity from
+/// the admitted coordinates through the one shared owner rule. The invocation
+/// identity is bound by no other check, so this case isolates that rule.
+#[tokio::test]
+async fn a_self_consistent_forged_run_identity_fails_qualification() {
+    let fixture = zero_state_fixture(120);
+    let identity = store_identity(120);
+    let backend = StructuredMemoryBackend::new(identity.clone());
+    let store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(NoPhysicalBindings),
+    );
+    let (writer, _reader) = store.split();
+    let run_id = run_id(&fixture.entry_point, 120);
+    writer
+        .admit_run(admission(
+            &fixture,
+            run_id.clone(),
+            "forged-identity-admission",
+        ))
+        .await
+        .expect("admit forged-identity fixture run");
+    let raw = backend
+        .load(&run_id)
+        .await
+        .expect("raw admitted prefix")
+        .expect("admitted prefix");
+    super::fold::verify_recorded_history(raw.clone(), &verifier(&fixture), &NoPhysicalBindings)
+        .expect("the unforged admitted prefix qualifies");
+
+    let forged = forge_last_record(raw, &identity, |record| {
+        let RunRecord::RunAdmitted(admission) = record else {
+            panic!("admission record")
+        };
+        admission.invocation_identity =
+            InvocationIdentity::new("00000000-0000-4000-8000-000000000002")
+                .expect("foreign invocation");
+    });
+    let RunRecord::RunAdmitted(forged_admission) = &forged.batches[0].records[0].record else {
+        panic!("forged admission record")
+    };
+    assert_eq!(
+        forged_admission.run_id, forged.run_id,
+        "the forgery keeps the envelope and the admitted record in agreement",
+    );
+    assert_eq!(
+        super::fold::verify_recorded_history(forged, &verifier(&fixture), &NoPhysicalBindings)
+            .expect_err("a derived-identity mismatch must fail closed"),
+        StructuredStoreError::InvalidHistory
+    );
+}
+
 #[tokio::test]
 async fn pure_transition_and_root_closure_share_one_atomic_append() {
     let fixture = one_state_fixture(2);
@@ -538,7 +619,7 @@ async fn pure_transition_and_root_closure_share_one_atomic_append() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(2);
+    let run_id = run_id(&fixture.entry_point, 2);
     let admitted = writer
         .admit_run(admission(&fixture, run_id.clone(), "admit-state"))
         .await
@@ -587,7 +668,7 @@ async fn never_occurrences_reject_proposed_and_forged_failures_for_every_executi
             Arc::new(AcceptPhysicalBindings),
         );
         let (writer, reader) = store.split();
-        let run_id = run_id(discriminator);
+        let run_id = run_id(&fixture.entry_point, discriminator);
         writer
             .admit_run(admission(
                 &fixture,
@@ -649,39 +730,62 @@ async fn never_occurrences_reject_proposed_and_forged_failures_for_every_executi
                 .await
                 .expect("raw authorized Never run")
                 .expect("authorized Never run");
-            assert_eq!(
-                writer
-                    .authorize_access(
-                        reader
-                            .load_verified(&run_id)
-                            .await
-                            .expect("authorized Never run"),
-                        &AccessAuthorizationProposal::new(
-                            AppendRequestId::new(format!(
-                                "never-second-authorization-{discriminator}"
-                            ))
+            // The single-outstanding-attempt rule is relaxed for Read and only
+            // for Read. Both halves are pinned here: a Read successor is
+            // admitted while its unobserved predecessor stands, and an Effect
+            // successor is still rejected before any append.
+            let second = writer
+                .authorize_access(
+                    reader
+                        .load_verified(&run_id)
+                        .await
+                        .expect("authorized Never run"),
+                    &AccessAuthorizationProposal::new(
+                        AppendRequestId::new(format!("never-second-authorization-{discriminator}"))
                             .expect("second authorization append id"),
-                            action.input.clone(),
-                            ProposedCanonicalValue::from_json("7").expect("second request"),
-                            admission_object(
-                                "fixture.physical-binding",
-                                "fixture.physical-binding",
-                                discriminator,
-                            ),
+                        action.input.clone(),
+                        ProposedCanonicalValue::from_json("7").expect("second request"),
+                        admission_object(
+                            "fixture.physical-binding",
+                            "fixture.physical-binding",
+                            discriminator,
                         ),
-                    )
-                    .await
-                    .expect_err("a second unresolved access must be rejected before append"),
-                StructuredStoreError::CandidateRejected
-            );
-            assert_eq!(
-                backend
-                    .load(&run_id)
-                    .await
-                    .expect("raw Never run after rejected second authorization")
-                    .expect("authorized Never run"),
-                raw_after_authorization
-            );
+                    ),
+                )
+                .await;
+            let (authorization, authorized) = match execution {
+                StructuredExecutionKind::Read => {
+                    let (successor, permit) = second
+                        .expect("a Read successor is admitted with its predecessor standing")
+                        .into_committed_access_authorization()
+                        .expect("new Read successor permit");
+                    assert_ne!(
+                        successor.authorization_ref(),
+                        authorization.authorization_ref()
+                    );
+                    (successor, permit)
+                }
+                StructuredExecutionKind::Effect => {
+                    assert_eq!(
+                        second.expect_err(
+                            "a second unresolved Effect access must be rejected before append"
+                        ),
+                        StructuredStoreError::CandidateRejected
+                    );
+                    assert_eq!(
+                        backend
+                            .load(&run_id)
+                            .await
+                            .expect("raw Never run after rejected second authorization")
+                            .expect("authorized Never run"),
+                        raw_after_authorization
+                    );
+                    (authorization, authorized)
+                }
+                StructuredExecutionKind::Pure => {
+                    unreachable!("Pure states authorize no external access")
+                }
+            };
             let observation = writer
                 .commit_observation(
                     authorized,
@@ -727,10 +831,11 @@ async fn never_occurrences_reject_proposed_and_forged_failures_for_every_executi
             .expect("admitted Never run");
         assert_eq!(
             raw.batches.len(),
-            if execution == StructuredExecutionKind::Pure {
-                1
-            } else {
-                3
+            match execution {
+                StructuredExecutionKind::Pure => 1,
+                // The Read successor is admitted, so its authorization appends.
+                StructuredExecutionKind::Read => 4,
+                StructuredExecutionKind::Effect => 3,
             },
             "candidate rejection must append nothing before valid access prefixes"
         );
@@ -811,7 +916,7 @@ async fn persisted_root_outcomes_bind_every_applicable_provenance_exactly() {
                 Arc::new(NoPhysicalBindings),
             );
             let (writer, reader) = store.split();
-            let run_id = run_id(discriminator);
+            let run_id = run_id(&root.fixture.entry_point, discriminator);
             writer
                 .admit_run(admission_with_json(
                     &root.fixture,
@@ -945,8 +1050,8 @@ async fn persisted_root_outcomes_bind_every_applicable_provenance_exactly() {
                 }
             }
             let exact_outcome = closed_outcome_object(&raw);
-            let exact_json = exact_outcome
-                .decode::<serde_json::Value>()
+            exact_outcome.validate().expect("valid operation outcome");
+            let exact_json: serde_json::Value = serde_json::from_str(&exact_outcome.canonical_json)
                 .expect("operation outcome JSON");
             let expected_variant = if closes_as_failure {
                 "Failure"
@@ -1050,7 +1155,7 @@ async fn persisted_authorizations_reject_future_lane_binding_and_ordinal_substit
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, _) = sequential_store.split();
-    let sequential_run = run_id(96);
+    let sequential_run = run_id(&sequential.entry_point, 96);
     writer
         .admit_run(admission(
             &sequential,
@@ -1150,7 +1255,7 @@ async fn persisted_authorizations_reject_future_lane_binding_and_ordinal_substit
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, _) = fan_out_store.split();
-    let fan_out_run = run_id(97);
+    let fan_out_run = run_id(&fan_out.entry_point, 97);
     writer
         .admit_run(admission(
             &fan_out,
@@ -1214,7 +1319,7 @@ async fn persisted_observations_reject_variant_schema_and_contract_substitution(
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(106);
+    let run_id = run_id(&fixture.entry_point, 106);
     writer
         .admit_run(admission(
             &fixture,
@@ -1287,14 +1392,13 @@ async fn persisted_observations_reject_variant_schema_and_contract_substitution(
         .iter()
         .find(|object| object.content_ref == returned_value.value_ref)
         .expect("returned value object");
-    let wrong_schema_object = HistoryObject::new(
+    let wrong_schema_object = test_history_object(
         returned_object.object_type.clone(),
         safe_failure_schema
             .schema_id()
             .expect("safe-failure schema id"),
         &returned_object.canonical_json,
-    )
-    .expect("wrong-schema value object");
+    );
 
     let attacks = [
         forge_last_record(raw.clone(), &identity, |record| {
@@ -1366,7 +1470,7 @@ async fn persisted_structure_rejects_skipped_roles_and_missing_or_premature_clos
             Arc::new(NoPhysicalBindings),
         );
         let (writer, reader) = store.split();
-        let run_id = run_id(discriminator);
+        let run_id = run_id(&fixture.entry_point, discriminator);
         writer
             .admit_run(admission(
                 &fixture,
@@ -1448,7 +1552,7 @@ async fn persisted_structure_rejects_skipped_roles_and_missing_or_premature_clos
         Arc::new(NoPhysicalBindings),
     );
     let (writer, _) = zero_store.split();
-    let zero_run = run_id(103);
+    let zero_run = run_id(&zero.entry_point, 103);
     writer
         .admit_run(admission(&zero, zero_run.clone(), "closed-zero-admission"))
         .await
@@ -1490,7 +1594,7 @@ async fn persisted_structure_rejects_skipped_roles_and_missing_or_premature_clos
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = transitioned_store.split();
-    let transitioned_run = run_id(105);
+    let transitioned_run = run_id(&transitioned.entry_point, 105);
     writer
         .admit_run(admission(
             &transitioned,
@@ -1564,7 +1668,7 @@ async fn persisted_structure_rejects_skipped_roles_and_missing_or_premature_clos
         Arc::new(NoPhysicalBindings),
     );
     let (writer, _) = open_store.split();
-    let open_run = run_id(104);
+    let open_run = run_id(&open.entry_point, 104);
     writer
         .admit_run(admission(&open, open_run.clone(), "open-state-admission"))
         .await
@@ -1616,7 +1720,7 @@ async fn persisted_failure_plans_reject_skipped_actual_pre_post_and_handler_occu
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let handled_run = run_id(114);
+    let handled_run = run_id(&handled.fixture.entry_point, 114);
     writer
         .admit_run(admission(
             &handled.fixture,
@@ -1722,7 +1826,7 @@ async fn persisted_failure_plans_reject_skipped_actual_pre_post_and_handler_occu
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let post_run = run_id(115);
+    let post_run = run_id(&propagating.fixture.entry_point, 115);
     writer
         .admit_run(admission(
             &propagating.fixture,
@@ -1790,7 +1894,7 @@ async fn persisted_transition_cannot_select_an_inactive_match_arm() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(105);
+    let run_id = run_id(&fixture.entry_point, 105);
     writer
         .admit_run(admission_with_json(
             &fixture,
@@ -1868,7 +1972,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, reader) = read_store.split();
-    let read_run = run_id(107);
+    let read_run = run_id(&read.entry_point, 107);
     writer
         .admit_run(admission(&read, read_run.clone(), "crash-read-admission"))
         .await
@@ -1897,10 +2001,15 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
     let (authorization, authorized) = authorization
         .into_committed_access_authorization()
         .expect("new Read authorization");
-    assert_eq!(
-        fresh_frontier(&read_backend, &read, &read_run).await,
-        StructuredFrontier::WaitingReads,
-        "authorization crash must resume before invocation"
+    // A real crash destroys the in-process authorization handle, so drop it
+    // before asserting that the recovered fold can still make progress.
+    drop(authorized);
+    assert!(
+        matches!(
+            fresh_frontier(&read_backend, &read, &read_run).await,
+            StructuredFrontier::Actions(_)
+        ),
+        "an unobserved Read authorization must resume actionable"
     );
     let before_invocation = read_backend
         .load(&read_run)
@@ -1908,24 +2017,53 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         .expect("authorization prefix")
         .expect("authorized Read");
     assert_eq!(
-        fresh_frontier(&read_backend, &read, &read_run).await,
-        StructuredFrontier::WaitingReads,
-        "invocation has no append boundary and resumes from authorization"
-    );
-    assert_eq!(
         read_backend
             .load(&read_run)
             .await
             .expect("post-invocation prefix")
             .expect("authorized Read"),
-        before_invocation
+        before_invocation,
+        "invocation has no append boundary"
+    );
+    let verified = reader
+        .load_verified(&read_run)
+        .await
+        .expect("recovered Read action");
+    let StructuredFrontier::Actions(actions) = verified.frontier() else {
+        panic!("a crashed Read must be re-assertable")
+    };
+    let reasserted_action = actions[0].clone();
+    assert_eq!(
+        reasserted_action.leaf,
+        StateLeaf::Reassertable {
+            next_attempt_ordinal: 1
+        }
+    );
+    let reasserted = writer
+        .authorize_access(
+            verified,
+            &AccessAuthorizationProposal::new(
+                AppendRequestId::new("crash-read-reassertion").expect("re-assertion append id"),
+                reasserted_action.input,
+                ProposedCanonicalValue::from_json("7").expect("Read request"),
+                admission_object("fixture.physical-binding", "fixture.physical-binding", 107),
+            ),
+        )
+        .await
+        .expect("re-asserted Read authorization");
+    let (reasserted, reasserted_permit) = reasserted
+        .into_committed_access_authorization()
+        .expect("new re-asserted Read authorization");
+    assert_ne!(
+        reasserted.authorization_ref(),
+        authorization.authorization_ref()
     );
     writer
         .commit_observation(
-            authorized,
+            reasserted_permit,
             &AccessObservationProposal::new(
                 AppendRequestId::new("crash-read-observation").expect("observation append id"),
-                authorization.authorization_ref().clone(),
+                reasserted.authorization_ref().clone(),
                 ProposedObservationOutcome::Returned(
                     ProposedCanonicalValue::from_json("8").expect("Read returned value"),
                 ),
@@ -1965,7 +2103,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = handler_store.split();
-    let handler_run = run_id(108);
+    let handler_run = run_id(&handler.fixture.entry_point, 108);
     writer
         .admit_run(admission(
             &handler.fixture,
@@ -2043,7 +2181,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, _) = branch_store.split();
-    let branch_run = run_id(109);
+    let branch_run = run_id(&branch.entry_point, 109);
     writer
         .admit_run(admission_with_json(
             &branch,
@@ -2075,7 +2213,7 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, reader) = fan_out_store.split();
-    let fan_out_run = run_id(110);
+    let fan_out_run = run_id(&fan_out.entry_point, 110);
     writer
         .admit_run(admission(
             &fan_out,
@@ -2084,7 +2222,9 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         ))
         .await
         .expect("fan-out admission");
-    let mut authorization_refs = Vec::new();
+    // An unobserved Read keeps its lane actionable, so a lane is authorized,
+    // observed, and settled before the next one becomes the minimum action. A
+    // crash between any two of those steps resumes at that exact point.
     for lane in ["a", "b"] {
         let verified = reader
             .load_verified(&fan_out_run)
@@ -2110,24 +2250,29 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         let (authorization, _) = attempt
             .into_committed_access_authorization()
             .expect("new lane authorization");
-        authorization_refs.push(authorization.authorization_ref().clone());
-    }
-    assert_eq!(
-        fresh_frontier(&fan_out_backend, &fan_out, &fan_out_run).await,
-        StructuredFrontier::WaitingReads
-    );
-    for (lane, authorization_ref) in authorization_refs.into_iter().enumerate() {
-        let verified = reader
-            .load_verified(&fan_out_run)
-            .await
-            .expect("fan-out observation prefix");
+        let StructuredFrontier::Actions(actions) =
+            fresh_frontier(&fan_out_backend, &fan_out, &fan_out_run).await
+        else {
+            panic!("an unobserved fan-out Read must recover actionable")
+        };
+        assert_eq!(
+            actions[0].leaf,
+            StateLeaf::Reassertable {
+                next_attempt_ordinal: 1
+            },
+            "the crashed lane keeps the cursor instead of yielding to the next"
+        );
+        assert_eq!(actions[0].occurrence_id, action.occurrence_id);
         writer
             .commit_observation(
-                verified,
+                reader
+                    .load_verified(&fan_out_run)
+                    .await
+                    .expect("fan-out observation prefix"),
                 &AccessObservationProposal::new(
                     AppendRequestId::new(format!("crash-fan-out-observe-{lane}"))
                         .expect("lane observation id"),
-                    authorization_ref,
+                    authorization.authorization_ref().clone(),
                     ProposedObservationOutcome::Returned(
                         ProposedCanonicalValue::from_json("8").expect("lane returned value"),
                     ),
@@ -2159,6 +2304,659 @@ async fn fresh_folds_resume_every_runtime_crash_boundary() {
         fresh_frontier(&fan_out_backend, &fan_out, &fan_out_run).await,
         StructuredFrontier::Complete,
         "final fan-out settlement and closure survive a fresh fold"
+    );
+}
+
+/// One absorbing Effect fixture with a three-entry budget.
+fn absorbing_effect_fixture(discriminator: u8) -> Fixture {
+    let mut fixture = zero_state_fixture(discriminator);
+    let entry_key_contract_ref = fixture.input.contract_ref.clone();
+    fixture = one_state_fixture_with_entry(
+        discriminator,
+        StructuredExecutionKind::Effect,
+        mfm_spec::structured::StructuredEffectEntryContract::EntryAbsorbing {
+            entry_key_contract_ref: Box::new(entry_key_contract_ref),
+            max_entries: std::num::NonZeroU16::new(3).expect("positive budget"),
+        },
+    );
+    fixture
+}
+
+struct ParkedEffect {
+    fixture: Fixture,
+    backend: StructuredMemoryBackend,
+    run_id: RunId,
+    discriminator: u8,
+}
+
+impl ParkedEffect {
+    /// Admits one Effect run and commits its first authorization, leaving the
+    /// occurrence in the shape a crash between authorize and observe produces.
+    async fn crash(fixture: Fixture, discriminator: u8) -> Self {
+        let backend = StructuredMemoryBackend::new(store_identity(discriminator));
+        let run_id = run_id(&fixture.entry_point, discriminator);
+        let parked = Self {
+            fixture,
+            backend,
+            run_id,
+            discriminator,
+        };
+        parked
+            .writer()
+            .admit_run(admission(
+                &parked.fixture,
+                parked.run_id.clone(),
+                &format!("absorbing-admission-{discriminator}"),
+            ))
+            .await
+            .expect("Effect admission");
+        parked.authorize("first").await;
+        parked
+    }
+
+    fn store(&self) -> StructuredRunStore<StructuredMemoryBackend> {
+        StructuredRunStore::new(
+            self.backend.clone(),
+            Arc::new(verifier(&self.fixture)),
+            Arc::new(AcceptPhysicalBindings),
+        )
+    }
+
+    fn writer(&self) -> super::backend::StructuredRunHistoryWriter<StructuredMemoryBackend> {
+        self.store().split().0
+    }
+
+    fn reader(&self) -> super::backend::StructuredRunHistoryReader<StructuredMemoryBackend> {
+        self.store().split().1
+    }
+
+    async fn frontier(&self) -> StructuredFrontier {
+        fresh_frontier(&self.backend, &self.fixture, &self.run_id).await
+    }
+
+    async fn authorize(&self, label: &str) -> mfm_ids::AccessAttemptId {
+        let store = self.store();
+        let (writer, reader) = store.split();
+        let verified = reader
+            .load_verified(&self.run_id)
+            .await
+            .expect("actionable Effect");
+        let StructuredFrontier::Actions(actions) = verified.frontier() else {
+            panic!("Effect must be actionable to authorize")
+        };
+        let input = actions[0].input.clone();
+        let attempt = writer
+            .authorize_access(
+                verified,
+                &AccessAuthorizationProposal::new(
+                    AppendRequestId::new(format!("absorbing-{label}-{}", self.discriminator))
+                        .expect("authorization append id"),
+                    input,
+                    ProposedCanonicalValue::from_json("7").expect("Effect request"),
+                    admission_object(
+                        "fixture.physical-binding",
+                        "fixture.physical-binding",
+                        self.discriminator,
+                    ),
+                ),
+            )
+            .await
+            .expect("Effect authorization");
+        let (authorization, _) = attempt
+            .into_committed_access_authorization()
+            .expect("new Effect authorization");
+        authorization.access_attempt_id().clone()
+    }
+
+    /// Commits the closing `EntryUnknown` observation Runtime synthesizes.
+    async fn close(&self, label: &str, attempt_id: &mfm_ids::AccessAttemptId) {
+        let store = self.store();
+        let (writer, reader) = store.split();
+        let verified = reader
+            .load_verified(&self.run_id)
+            .await
+            .expect("closable Effect");
+        let authorization_ref = verified
+            .records()
+            .iter()
+            .find_map(|assigned| match &assigned.record {
+                RunRecord::ExternalAccessAuthorized(record)
+                    if &record.access_attempt_id == attempt_id =>
+                {
+                    Some(assigned.record_ref.clone())
+                }
+                _ => None,
+            })
+            .expect("committed authorization");
+        writer
+            .commit_observation(
+                verified,
+                &AccessObservationProposal::new(
+                    AppendRequestId::new(format!("absorbing-close-{label}-{}", self.discriminator))
+                        .expect("observation append id"),
+                    authorization_ref,
+                    ProposedObservationOutcome::EntryUnknown {
+                        fault_code: StableId::new("mfm.kernel/invoker-authority-lost")
+                            .expect("fault code"),
+                    },
+                ),
+            )
+            .await
+            .expect("closing observation");
+    }
+}
+
+#[tokio::test]
+async fn an_entry_once_capability_parks_on_both_shapes_exactly_as_before() {
+    for (discriminator, observe) in [(130_u8, false), (131, true)] {
+        let fixture =
+            one_state_fixture_with_execution(discriminator, StructuredExecutionKind::Effect);
+        let parked = ParkedEffect::crash(fixture, discriminator).await;
+        let attempt = parked
+            .reader()
+            .load_verified(&parked.run_id)
+            .await
+            .expect("parked run")
+            .records()
+            .iter()
+            .find_map(|assigned| match &assigned.record {
+                RunRecord::ExternalAccessAuthorized(record) => {
+                    Some(record.access_attempt_id.clone())
+                }
+                _ => None,
+            })
+            .expect("committed authorization");
+        if observe {
+            parked.close("entry-once", &attempt).await;
+        }
+        assert!(
+            matches!(
+                parked.frontier().await,
+                StructuredFrontier::PossibleEntry(_)
+            ),
+            "an EntryOnce capability parks on both shapes"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_crashed_absorbing_effect_closes_before_anything_re_asserts() {
+    let parked = ParkedEffect::crash(absorbing_effect_fixture(132), 132).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("a crashed absorbing Effect must be actionable")
+    };
+    let StateLeaf::EntryClosable { access_attempt_id } = actions[0].leaf.clone() else {
+        panic!(
+            "a crashed attempt closes before it re-asserts, got {:?}",
+            actions[0].leaf
+        )
+    };
+
+    // EntryClosable authorizes nothing, at any ordinal.
+    let store = parked.store();
+    let (writer, reader) = store.split();
+    let verified = reader
+        .load_verified(&parked.run_id)
+        .await
+        .expect("closable Effect");
+    let input = actions[0].input.clone();
+    assert_eq!(
+        writer
+            .authorize_access(
+                verified,
+                &AccessAuthorizationProposal::new(
+                    AppendRequestId::new("closable-authorization").expect("append id"),
+                    input,
+                    ProposedCanonicalValue::from_json("7").expect("request"),
+                    admission_object("fixture.physical-binding", "fixture.physical-binding", 132),
+                ),
+            )
+            .await
+            .expect_err("an entry-closable leaf authorizes nothing"),
+        StructuredStoreError::CandidateRejected
+    );
+
+    parked.close("first", &access_attempt_id).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("a closed attempt must be re-assertable")
+    };
+    assert_eq!(
+        actions[0].leaf,
+        StateLeaf::Reassertable {
+            next_attempt_ordinal: 1
+        }
+    );
+}
+
+#[tokio::test]
+async fn re_assertion_stops_at_the_declared_entry_budget() {
+    let parked = ParkedEffect::crash(absorbing_effect_fixture(133), 133).await;
+    // crash -> close -> re-assert, twice, reaching the third attempt and
+    // stopping there. This is the exact sequence the rejected relaxation
+    // stranded, and it is why closing was the right fix.
+    let mut attempt = match parked.frontier().await {
+        StructuredFrontier::Actions(actions) => match &actions[0].leaf {
+            StateLeaf::EntryClosable { access_attempt_id } => access_attempt_id.clone(),
+            leaf => panic!("expected a closable first attempt, got {leaf:?}"),
+        },
+        frontier => panic!("expected an actionable crash, got {frontier:?}"),
+    };
+    // The second attempt still has budget behind it, so a crash closes again.
+    parked.close("round-1", &attempt).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("a closed attempt within budget must be re-assertable")
+    };
+    assert_eq!(
+        actions[0].leaf,
+        StateLeaf::Reassertable {
+            next_attempt_ordinal: 1
+        }
+    );
+    attempt = parked.authorize("second").await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("the second attempt crashes closable")
+    };
+    assert_eq!(
+        actions[0].leaf,
+        StateLeaf::EntryClosable {
+            access_attempt_id: attempt.clone()
+        }
+    );
+
+    parked.close("round-2", &attempt).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("the second closure must be re-assertable")
+    };
+    assert_eq!(
+        actions[0].leaf,
+        StateLeaf::Reassertable {
+            next_attempt_ordinal: 2
+        }
+    );
+
+    // The third authorization is the budget. Closing it would authorize a
+    // fourth, so the closure has no consumer and is not derived: the occurrence
+    // parks terminally the moment the last attempt is outstanding.
+    let spent = parked.authorize("third").await;
+    let frontier = parked.frontier().await;
+    let StructuredFrontier::PossibleEntry(subject) = &frontier else {
+        panic!("a spent budget parks terminally, got {frontier:?}")
+    };
+    assert_eq!(subject.access_attempt_id, spent);
+
+    // And an observed ambiguity on the spent attempt parks the same way.
+    parked.close("spent", &spent).await;
+    assert!(
+        matches!(
+            parked.frontier().await,
+            StructuredFrontier::PossibleEntry(_)
+        ),
+        "a spent budget parks exactly as an EntryOnce capability does"
+    );
+}
+
+#[tokio::test]
+async fn a_second_observation_on_a_closed_attempt_is_rejected() {
+    let parked = ParkedEffect::crash(absorbing_effect_fixture(134), 134).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("crashed absorbing Effect")
+    };
+    let StateLeaf::EntryClosable { access_attempt_id } = actions[0].leaf.clone() else {
+        panic!("closable leaf")
+    };
+    parked.close("first", &access_attempt_id).await;
+
+    // A live invoker whose attempt was closed under it delivers its real
+    // completion late. The one-observation-per-attempt rule rejects it, and
+    // whatever it did externally is absorbed by the re-assertion.
+    let store = parked.store();
+    let (writer, reader) = store.split();
+    let verified = reader
+        .load_verified(&parked.run_id)
+        .await
+        .expect("closed Effect");
+    let authorization_ref = verified
+        .records()
+        .iter()
+        .find_map(|assigned| match &assigned.record {
+            RunRecord::ExternalAccessAuthorized(_) => Some(assigned.record_ref.clone()),
+            _ => None,
+        })
+        .expect("committed authorization");
+    assert_eq!(
+        writer
+            .commit_observation(
+                verified,
+                &AccessObservationProposal::new(
+                    AppendRequestId::new("late-real-completion").expect("append id"),
+                    authorization_ref,
+                    ProposedObservationOutcome::Returned(
+                        ProposedCanonicalValue::from_json("8").expect("returned value"),
+                    ),
+                ),
+            )
+            .await
+            .expect_err("a closed attempt admits no second observation"),
+        StructuredStoreError::CandidateRejected
+    );
+}
+
+#[tokio::test]
+async fn a_re_assertion_must_carry_byte_identical_committed_request_bytes() {
+    // Persisted input is hostile, so every field of the repeat is verified at
+    // the fold and each one carries its own rejection.
+    type RequestMutation = fn(&mut mfm_journal::structured::ExternalAccessAuthorized);
+    let mutations: [(&str, RequestMutation); 4] = [
+        ("request_digest", |record| {
+            record.request_digest = mfm_ids::RequestDigest::from_digest(sha256_digest_bytes(
+                b"mfm.structured-test.different-request-bytes",
+            ));
+        }),
+        ("state_input_ref", |record| {
+            record.state_input_ref.value.value_ref =
+                content_ref("fixture.different-state-input", 9);
+        }),
+        ("request_contract_ref", |record| {
+            record.request.contract_ref = content_ref("fixture.different-request-contract", 9);
+        }),
+        ("occurrence_id", |record| {
+            record.occurrence_id = mfm_ids::OccurrenceId::from_digest(sha256_digest_bytes(
+                b"mfm.structured-test.different-occurrence",
+            ));
+        }),
+    ];
+    for (index, (label, mutate)) in mutations.into_iter().enumerate() {
+        let discriminator = 135 + u8::try_from(index).expect("bounded index");
+        let parked =
+            ParkedEffect::crash(absorbing_effect_fixture(discriminator), discriminator).await;
+        let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+            panic!("crashed absorbing Effect")
+        };
+        let StateLeaf::EntryClosable { access_attempt_id } = actions[0].leaf.clone() else {
+            panic!("closable leaf")
+        };
+        parked.close("first", &access_attempt_id).await;
+        let raw = parked
+            .backend
+            .load(&parked.run_id)
+            .await
+            .expect("raw closed prefix")
+            .expect("closed Effect");
+        let predecessor = raw
+            .batches
+            .iter()
+            .flat_map(|batch| batch.records.iter())
+            .find_map(|assigned| match &assigned.record {
+                RunRecord::ExternalAccessAuthorized(record) => Some(record.clone()),
+                _ => None,
+            })
+            .expect("committed authorization");
+        let mut forged = predecessor;
+        forged.attempt_ordinal = 1;
+        mutate(&mut forged);
+        forged.access_attempt_id = mfm_ids::AccessAttemptId::from_digest(sha256_digest_bytes(
+            format!("mfm.structured-test.forged-reassertion.{label}").as_bytes(),
+        ));
+        let candidate = super::fold::assign_candidate(
+            &store_identity(discriminator),
+            CommitCandidate {
+                run_id: parked.run_id.clone(),
+                expected_head: Some(raw.batches.last().expect("closed batch").head.clone()),
+                append_request_id: AppendRequestId::new(format!("forged-reassertion-{label}"))
+                    .expect("forged append id"),
+                tenant_fact_coordinate: TenantFactCoordinate::None,
+                records: vec![RunRecord::ExternalAccessAuthorized(forged)],
+                objects: Vec::new(),
+            },
+        )
+        .expect("well-formed forged re-assertion envelope");
+        let mut hostile = raw;
+        hostile.batches.push(candidate);
+        assert_eq!(
+            super::fold::verify_recorded_history(
+                hostile,
+                &verifier(&parked.fixture),
+                &AcceptPhysicalBindings,
+            )
+            .unwrap_err(),
+            StructuredStoreError::InvalidHistory,
+            "a re-assertion with a different {label} must be rejected"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_second_concurrent_re_assertion_is_rejected_on_the_effect_path() {
+    let parked = ParkedEffect::crash(absorbing_effect_fixture(139), 139).await;
+    let StructuredFrontier::Actions(actions) = parked.frontier().await else {
+        panic!("crashed absorbing Effect")
+    };
+    let StateLeaf::EntryClosable { access_attempt_id } = actions[0].leaf.clone() else {
+        panic!("closable leaf")
+    };
+    parked.close("first", &access_attempt_id).await;
+    let reasserted = parked.authorize("reassert").await;
+    let _ = reasserted;
+
+    // The single-outstanding-attempt rule is unchanged on the Effect path, and
+    // the closing observation is why it can be. This is the property the
+    // rejected relaxation lost.
+    let store = parked.store();
+    let (writer, reader) = store.split();
+    let verified = reader
+        .load_verified(&parked.run_id)
+        .await
+        .expect("re-asserted Effect");
+    assert_eq!(
+        writer
+            .authorize_access(
+                verified,
+                &AccessAuthorizationProposal::new(
+                    AppendRequestId::new("second-concurrent-reassertion").expect("append id"),
+                    actions[0].input.clone(),
+                    ProposedCanonicalValue::from_json("7").expect("request"),
+                    admission_object("fixture.physical-binding", "fixture.physical-binding", 139),
+                ),
+            )
+            .await
+            .expect_err("an unobserved Effect predecessor rejects its successor"),
+        StructuredStoreError::CandidateRejected
+    );
+}
+
+#[tokio::test]
+async fn supersession_is_gated_by_the_certified_protocol_and_not_by_uninhabitedness() {
+    // The fixture's refresh evidence type is inhabited, so a well-typed
+    // supersession value exists. What rejects it is the certified `NoRefresh`
+    // protocol gate, and the entry axis does not touch that.
+    let parked = ParkedEffect::crash(absorbing_effect_fixture(140), 140).await;
+    let store = parked.store();
+    let (writer, reader) = store.split();
+    let verified = reader
+        .load_verified(&parked.run_id)
+        .await
+        .expect("crashed absorbing Effect");
+    let authorization_ref = verified
+        .records()
+        .iter()
+        .find_map(|assigned| match &assigned.record {
+            RunRecord::ExternalAccessAuthorized(_) => Some(assigned.record_ref.clone()),
+            _ => None,
+        })
+        .expect("committed authorization");
+    assert_eq!(
+        writer
+            .commit_observation(
+                verified,
+                &AccessObservationProposal::new(
+                    AppendRequestId::new("no-refresh-supersession").expect("append id"),
+                    authorization_ref,
+                    ProposedObservationOutcome::SupersededBeforeEntry {
+                        public_lineage_head: Box::new(admission_object(
+                            "fixture.lineage-head",
+                            "fixture.lineage-head",
+                            140,
+                        )),
+                        evidence: ProposedCanonicalValue::from_json("7").expect("evidence"),
+                    },
+                ),
+            )
+            .await
+            .expect_err("a NoRefresh capability admits no supersession"),
+        StructuredStoreError::CandidateRejected
+    );
+}
+
+#[tokio::test]
+async fn only_the_successor_ordinal_admits_a_re_asserted_read() {
+    let fixture = one_state_fixture_with_execution(126, StructuredExecutionKind::Read);
+    let identity = store_identity(126);
+    let backend = StructuredMemoryBackend::new(identity.clone());
+    let store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(AcceptPhysicalBindings),
+    );
+    let (writer, reader) = store.split();
+    let run_id = run_id(&fixture.entry_point, 126);
+    writer
+        .admit_run(admission(
+            &fixture,
+            run_id.clone(),
+            "read-ordinal-admission",
+        ))
+        .await
+        .expect("Read admission");
+    let verified = reader.load_verified(&run_id).await.expect("Read action");
+    let StructuredFrontier::Actions(actions) = verified.frontier() else {
+        panic!("Read must be actionable")
+    };
+    let action = actions[0].clone();
+    writer
+        .authorize_access(
+            verified,
+            &AccessAuthorizationProposal::new(
+                AppendRequestId::new("read-ordinal-authorization")
+                    .expect("authorization append id"),
+                action.input,
+                ProposedCanonicalValue::from_json("7").expect("Read request"),
+                admission_object("fixture.physical-binding", "fixture.physical-binding", 126),
+            ),
+        )
+        .await
+        .expect("Read authorization");
+
+    let raw = backend
+        .load(&run_id)
+        .await
+        .expect("raw authorized prefix")
+        .expect("authorized Read");
+    let authorized = raw
+        .batches
+        .iter()
+        .flat_map(|batch| batch.records.iter())
+        .find_map(|assigned| match &assigned.record {
+            RunRecord::ExternalAccessAuthorized(record) => Some(record.clone()),
+            _ => None,
+        })
+        .expect("committed Read authorization");
+    assert_eq!(authorized.attempt_ordinal, 0);
+    // The leaf admits exactly the successor ordinal. A forged repeat of the
+    // predecessor's ordinal is rejected even though a Read successor is legal.
+    let mut forged_record = authorized;
+    forged_record.attempt_ordinal = 0;
+    forged_record.access_attempt_id = mfm_ids::AccessAttemptId::from_digest(sha256_digest_bytes(
+        b"mfm.structured-test.forged-read-attempt.v1",
+    ));
+    let forged = super::fold::assign_candidate(
+        &identity,
+        CommitCandidate {
+            run_id: run_id.clone(),
+            expected_head: Some(raw.batches.last().expect("authorized batch").head.clone()),
+            append_request_id: AppendRequestId::new("forged-read-same-ordinal")
+                .expect("forged append id"),
+            tenant_fact_coordinate: TenantFactCoordinate::None,
+            records: vec![RunRecord::ExternalAccessAuthorized(forged_record)],
+            objects: Vec::new(),
+        },
+    )
+    .expect("well-formed forged authorization envelope");
+    let mut hostile = raw;
+    hostile.batches.push(forged);
+    assert_eq!(
+        super::fold::verify_recorded_history(
+            hostile,
+            &verifier(&fixture),
+            &AcceptPhysicalBindings,
+        )
+        .expect_err("a repeated Read ordinal cannot be admitted"),
+        StructuredStoreError::InvalidHistory
+    );
+}
+
+#[tokio::test]
+async fn an_effect_entry_frontier_names_its_blocked_occurrence() {
+    let fixture = one_state_fixture_with_execution(116, StructuredExecutionKind::Effect);
+    let backend = StructuredMemoryBackend::new(store_identity(116));
+    let store = StructuredRunStore::new(
+        backend.clone(),
+        Arc::new(verifier(&fixture)),
+        Arc::new(AcceptPhysicalBindings),
+    );
+    let (writer, reader) = store.split();
+    let run_id = run_id(&fixture.entry_point, 116);
+    writer
+        .admit_run(admission(
+            &fixture,
+            run_id.clone(),
+            "parked-effect-admission",
+        ))
+        .await
+        .expect("Effect admission");
+    let verified = reader.load_verified(&run_id).await.expect("Effect action");
+    let StructuredFrontier::Actions(actions) = verified.frontier() else {
+        panic!("Effect must be actionable")
+    };
+    let action = actions[0].clone();
+    let authorization = writer
+        .authorize_access(
+            verified,
+            &AccessAuthorizationProposal::new(
+                AppendRequestId::new("parked-effect-authorization")
+                    .expect("authorization append id"),
+                action.input.clone(),
+                ProposedCanonicalValue::from_json("7").expect("Effect request"),
+                admission_object("fixture.physical-binding", "fixture.physical-binding", 116),
+            ),
+        )
+        .await
+        .expect("Effect authorization");
+    let (authorization, _) = authorization
+        .into_committed_access_authorization()
+        .expect("new Effect authorization");
+
+    // A crash between authorization and observation: the barrier must still say
+    // which occurrence it is about, not only that the run is blocked.
+    let StructuredFrontier::PossibleEntry(subject) =
+        fresh_frontier(&backend, &fixture, &run_id).await
+    else {
+        panic!("an unobserved Effect authorization must park")
+    };
+    assert_eq!(subject.occurrence_id, action.occurrence_id);
+    assert_eq!(
+        subject.occurrence_path_ref,
+        action
+            .occurrence_path
+            .content_ref()
+            .expect("occurrence path reference")
+    );
+    assert_eq!(
+        &subject.access_attempt_id,
+        authorization.access_attempt_id()
+    );
+    assert_eq!(
+        Some(&subject.capability_contract_ref),
+        action.capability_contract_ref.as_ref()
     );
 }
 
@@ -2543,7 +3341,9 @@ fn distinct_read_contract_fixture(
         entries: vec![
             SecretFreeImplementationManifestEntry {
                 component_kind: StructuredComponentKind::State,
-                semantic_contract_ref: state_contract.state_contract_ref,
+                semantic_contract_ref: state_contract
+                    .content_ref()
+                    .expect("state contract reference"),
                 implementation_contract_ref: content_ref(
                     "fixture.distinct-state-implementation",
                     discriminator,
@@ -3196,7 +3996,7 @@ fn add_retained_contract(
             content_ref: contract_ref.clone(),
             value: CanonicalJsonValue::from_canonical_json(
                 contract
-                    .canonical_json()
+                    .encode_canonical()
                     .expect("retained contract canonical")
                     .as_bytes(),
             )
@@ -3446,12 +4246,11 @@ fn forge_closed_outcome(
         &serde_json::to_string(&hostile_json).expect("hostile outcome JSON"),
     )
     .expect("canonical hostile outcome");
-    let hostile_object = HistoryObject::new(
+    let hostile_object = test_history_object(
         exact_outcome.object_type.clone(),
         exact_outcome.content_ref.schema_id().clone(),
         canonical.as_str(),
-    )
-    .expect("hostile operation outcome object");
+    );
     let original = raw.batches.pop().expect("closure-producing batch");
     let mut records = original
         .records
@@ -3529,7 +4328,7 @@ async fn incremental_successors_match_fresh_full_folds_after_every_prefix() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(6);
+    let run_id = run_id(&fixture.entry_point, 6);
     writer
         .admit_run(admission(&fixture, run_id.clone(), "equivalence-admit"))
         .await
@@ -3683,7 +4482,7 @@ async fn retained_schema_shape_is_authoritative_before_atomic_append() {
         Arc::new(NoPhysicalBindings),
     );
     let (writer, _reader) = store.split();
-    let run_id = run_id(3);
+    let run_id = run_id(&fixture.entry_point, 3);
     let request = admission_with_json(
         &fixture,
         run_id.clone(),
@@ -3747,8 +4546,8 @@ fn admission_with_json(
 ) -> StructuredAdmissionRequest {
     StructuredAdmissionRequest::new(
         run_id,
-        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant"),
-        InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("invocation"),
+        fixture_tenant(),
+        fixture_invocation(),
         fixture.entry_point.clone(),
         fixture.document.clone(),
         admission_material(9),
@@ -3769,10 +4568,10 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
             "fixture.admission-context",
             discriminator,
         ),
-        PriorRunFactSourceManifest::new(Vec::new())
-            .expect("empty prior-run source manifest")
-            .to_history_object()
-            .expect("prior-run source object"),
+        HistoryObject::from_persisted(
+            &PriorRunFactSourceManifest::new(Vec::new()).expect("empty prior-run source manifest"),
+        )
+        .expect("prior-run source object"),
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             "fixture.admission-routing",
@@ -3784,7 +4583,7 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
 }
 
 fn admission_object(object_type: &str, schema_name: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
+    test_history_object(
         StableId::new(object_type).expect("object type"),
         SchemaId::new(
             schema_name,
@@ -3795,7 +4594,6 @@ fn admission_object(object_type: &str, schema_name: &str, discriminator: u8) -> 
         .expect("admission schema"),
         "{\"entries\":[]}",
     )
-    .expect("admission object")
 }
 
 fn zero_state_fixture(discriminator: u8) -> Fixture {
@@ -3840,6 +4638,18 @@ fn one_state_fixture_with_execution(
     discriminator: u8,
     execution_kind: StructuredExecutionKind,
 ) -> Fixture {
+    one_state_fixture_with_entry(
+        discriminator,
+        execution_kind,
+        mfm_spec::structured::StructuredEffectEntryContract::EntryOnce {},
+    )
+}
+
+fn one_state_fixture_with_entry(
+    discriminator: u8,
+    execution_kind: StructuredExecutionKind,
+    entry_contract: mfm_spec::structured::StructuredEffectEntryContract,
+) -> Fixture {
     let mut fixture = zero_state_fixture(discriminator);
     let root_path = fixture.expanded.root.path.clone();
     let label = StableId::new("only-state").expect("label");
@@ -3879,6 +4689,7 @@ fn one_state_fixture_with_execution(
                 contract_ref.clone(),
                 contract_ref.clone(),
                 contract_ref.clone(),
+                entry_contract,
                 adapter_ref.clone(),
             )
             .expect("Effect capability contract"),
@@ -3913,7 +4724,7 @@ fn one_state_fixture_with_execution(
         None,
     )
     .expect("state contract");
-    let state_contract_ref = state_contract.state_contract_ref.clone();
+    let state_contract_ref = state_contract.content_ref().expect("state contract ref");
     let output = LexicalSlot {
         lexical_path: occurrence_path.clone(),
         contract_ref: contract_ref.clone(),
@@ -4396,7 +5207,7 @@ fn document(
     discriminator: u8,
 ) -> CertifiedProgramDocument {
     let contract_ref = retained_value_contract_ref(contract).expect("contract ref");
-    let canonical = contract.canonical_json().expect("contract canonical");
+    let canonical = contract.encode_canonical().expect("contract canonical");
     let component = CertifiedComponentObject {
         object_type: StableId::new("structured.data_contract").expect("object type"),
         content_ref: contract_ref.clone(),
@@ -4527,7 +5338,7 @@ fn value_contract(schema: &SchemaIdentity, discriminator: u8) -> RetainedValueCo
         schema.schema_id().expect("schema"),
         fixture_semantic_type(discriminator),
         StableId::new("fixture.integer").expect("role"),
-        "application/json",
+        MediaType::new("application/json").expect("media type"),
         content_ref("fixture.evidence", discriminator),
     )
     .expect("retained contract")
@@ -4594,9 +5405,24 @@ fn store_identity(discriminator: u8) -> StructuredStoreIdentity {
     }
 }
 
-fn run_id(discriminator: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&[discriminator, 5]),
+fn fixture_tenant() -> TenantScopeId {
+    TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32))).expect("tenant")
+}
+
+fn fixture_invocation() -> InvocationIdentity {
+    InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("invocation")
+}
+
+/// Derives a fixture run identity through the one shared owner rule.
+///
+/// Qualification re-derives the identity from the admitted coordinates, so a
+/// fixture cannot invent an arbitrary run identity.
+fn run_id(entry_point: &StableId, discriminator: u8) -> RunId {
+    mfm_journal::structured::derive_run_id(
+        &store_identity(discriminator).store_scope_id,
+        &fixture_tenant(),
+        entry_point,
+        &fixture_invocation(),
     )
+    .expect("fixture run id")
 }

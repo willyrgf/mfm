@@ -70,4 +70,4 @@ target/session provider, so `make_default_app_state` fails closed before binding
 
 Deployments embed this crate, construct a qualified `mfm_app::Application`, wrap it in
 `AppState::new`, and pass it to `make_app`. See
-[the application surface contract](../../docs/recoverability-app-surface-v1.md).
+[the application surface contract](../../docs/persisted-public-surfaces.md).

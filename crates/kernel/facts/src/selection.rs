@@ -1,48 +1,136 @@
 use std::cmp::Ordering;
 
-use mfm_canonical::{sha256_digest_bytes, CanonicalBytes, CanonicalValue, ValidatedCanonicalValue};
-use mfm_ids::{
-    ContentDigest, ContentRef, DigestAlgorithm, FactContentIdentityDigest,
-    FactLogicalIdentityDigest, FactQueryDigest, SchemaId,
+use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
+use mfm_ids::{ContentRef, FactContentIdentityDigest, FactLogicalIdentityDigest, FactQueryDigest};
+use mfm_program_derive::{MfmValue, PersistedSchema};
+use mfm_values::{
+    CanonicalJsonPersistedSchema, FieldDescriptor, LiteralValue, MfmValue, SchemaIdentity,
+    SchemaKind, SchemaShape, ValueError,
 };
-use mfm_program_derive::MfmValue;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use crate::codec;
 use crate::{
     CanonicalFactPredicate, FactError, FactSelectionCompletenessMode, FactSelectionScanBounds,
     FactSubject, Result, MAX_FACT_SELECTION_LIMIT, MAX_FACT_SELECTION_QUERIES,
 };
 
-const FACT_SELECTION_QUERY_CONTRACT: &str = "mfm.fact-selection-query.v1";
-const FACT_SELECTION_REQUEST_CONTRACT: &str = "mfm.fact-selection-request.v1";
-const REQUEST_VERSION: &str = "mfm.fact-selection-request.v1";
+const FACT_QUERY_DOMAIN: &str = "mfm.fact-query.v1";
 const PRODUCER_SCOPE: &str = "other_runs_in_tenant_scope";
-const COMPLETENESS_MODE: &str = "complete_through_authorization_frontier";
-const SELECTOR_CONTRACT_BYTES: &[u8] = br#"{"contract":"mfm.prior-run-fact-selector.v1","evaluator":"fact_top_k_v1","ordering":"tenant_publication_then_fact_identity","producer_scope":"other_runs_in_tenant_scope"}"#;
-const SELECTOR_SCHEMA_SEED: &[u8] = b"mfm.prior-run-fact-selector-contract.schema.v1";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.prior-run-fact-selector-contract", version = "1")]
+struct PriorRunFactSelectorDefinition {
+    #[mfm(literal = "mfm.prior-run-fact-selector.v1")]
+    contract: String,
+    #[mfm(literal = "fact_top_k_v1")]
+    evaluator: String,
+    #[mfm(literal = "tenant_publication_then_fact_identity")]
+    ordering: String,
+    #[mfm(literal = "other_runs_in_tenant_scope")]
+    producer_scope: String,
+}
+
+impl PriorRunFactSelectorDefinition {
+    fn current() -> Self {
+        Self {
+            contract: "mfm.prior-run-fact-selector.v1".to_owned(),
+            evaluator: "fact_top_k_v1".to_owned(),
+            ordering: "tenant_publication_then_fact_identity".to_owned(),
+            producer_scope: PRODUCER_SCOPE.to_owned(),
+        }
+    }
+}
 
 /// Returns the one fixed selector contract accepted by prior-run fact reads.
 pub fn prior_run_fact_selector_contract_ref() -> Result<ContentRef> {
-    let schema_id = SchemaId::new(
-        "mfm.prior-run-fact-selector-contract",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(SELECTOR_SCHEMA_SEED),
-    )
-    .map_err(|_| FactError::Identity)?;
-    ContentRef::new(
-        schema_id,
-        ContentDigest::from_digest(
-            DigestAlgorithm::Sha256V1,
-            sha256_digest_bytes(SELECTOR_CONTRACT_BYTES),
-        ),
-    )
-    .map_err(|_| FactError::Identity)
+    PriorRunFactSelectorDefinition::current()
+        .content_ref()
+        .map_err(|_| FactError::Identity)
 }
 
-/// Closed producer scope for recoverability-v1 fact selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+struct PriorRunFactSelectorRef(ContentRef);
+
+impl PriorRunFactSelectorRef {
+    fn current() -> Result<Self> {
+        prior_run_fact_selector_contract_ref().map(Self)
+    }
+
+    const fn as_ref(&self) -> &ContentRef {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for PriorRunFactSelectorRef {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let reference = ContentRef::deserialize(deserializer)?;
+        let expected = prior_run_fact_selector_contract_ref().map_err(serde::de::Error::custom)?;
+        if reference != expected {
+            return Err(serde::de::Error::custom(
+                "unsupported prior-run fact selector reference",
+            ));
+        }
+        Ok(Self(reference))
+    }
+}
+
+impl mfm_values::PersistedSchema for PriorRunFactSelectorRef {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        let reference =
+            prior_run_fact_selector_contract_ref().map_err(|_| ValueError::SchemaShapeMismatch)?;
+        SchemaIdentity::new(
+            SchemaKind::PersistedContract,
+            None,
+            "mfm.prior-run-fact-selector-reference",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| ValueError::Identity(error.to_string()))?,
+            SchemaShape::named_struct(vec![
+                FieldDescriptor::required(
+                    "content_digest",
+                    SchemaShape::Literal(LiteralValue::String(
+                        reference.content_digest().as_str().to_owned(),
+                    )),
+                ),
+                FieldDescriptor::required(
+                    "schema_id",
+                    SchemaShape::Literal(LiteralValue::String(
+                        reference.schema_id().as_str().to_owned(),
+                    )),
+                ),
+            ])?,
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        if prior_run_fact_selector_contract_ref().as_ref() == Ok(&self.0) {
+            Ok(())
+        } else {
+            Err(ValueError::SchemaShapeMismatch)
+        }
+    }
+}
+
+/// Closed producer scope for prior-run fact selection.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.fact-producer-scope", version = "1")]
 pub enum FactProducerScope {
     /// Facts emitted by other runs admitted in the same tenant scope.
     OtherRunsInTenantScope,
@@ -58,7 +146,21 @@ impl FactProducerScope {
 }
 
 /// Primary ordering over dense tenant fact publication order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.fact-ordering", version = "1")]
 pub enum FactOrdering {
     /// Oldest publication first.
     Ascending,
@@ -74,18 +176,24 @@ impl FactOrdering {
             Self::Descending => "descending",
         }
     }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "ascending" => Ok(Self::Ascending),
-            "descending" => Ok(Self::Descending),
-            _ => Err(FactError::Canonical),
-        }
-    }
 }
 
 /// Deterministic tie-break over frozen fact logical identity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    PersistedSchema,
+)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.fact-tie-break", version = "1")]
 pub enum FactTieBreak {
     /// Lowest fact logical identity first.
     FactIdentityAscending,
@@ -101,18 +209,17 @@ impl FactTieBreak {
             Self::FactIdentityDescending => "fact_identity_descending",
         }
     }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "fact_identity_ascending" => Ok(Self::FactIdentityAscending),
-            "fact_identity_descending" => Ok(Self::FactIdentityDescending),
-            _ => Err(FactError::Canonical),
-        }
-    }
 }
 
 /// Bounded result limit for one fact-selection query.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, PersistedSchema)]
+#[serde(transparent)]
+#[mfm(
+    schema = "mfm.fact-selection-limit",
+    version = "1",
+    unsigned_minimum = 1,
+    unsigned_maximum = 128
+)]
 pub struct FactSelectionLimit(u8);
 
 impl FactSelectionLimit {
@@ -130,10 +237,6 @@ impl FactSelectionLimit {
     pub const fn get(self) -> u32 {
         self.0 as u32
     }
-
-    fn as_usize(self) -> usize {
-        usize::from(self.0)
-    }
 }
 
 impl TryFrom<u32> for FactSelectionLimit {
@@ -144,12 +247,25 @@ impl TryFrom<u32> for FactSelectionLimit {
     }
 }
 
-/// One annex-backed query within a reserved fact-selection request.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl<'de> Deserialize<'de> for FactSelectionLimit {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(u32::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+    }
+}
+
+/// One owner-validated query within a reserved fact-selection request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.fact-selection-query", version = "1")]
 pub struct FactSelectionQuery {
-    validated: ValidatedCanonicalValue,
+    #[serde(rename = "fact_descriptor_ref")]
     descriptor_ref: ContentRef,
+    #[serde(rename = "canonical_predicate")]
     predicate: CanonicalFactPredicate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     content_identity_filter: Option<FactContentIdentityDigest>,
     ordering: FactOrdering,
     limit: FactSelectionLimit,
@@ -157,7 +273,7 @@ pub struct FactSelectionQuery {
 }
 
 impl FactSelectionQuery {
-    /// Constructs and annex-validates one query.
+    /// Constructs and validates one query.
     pub fn new(
         descriptor_ref: ContentRef,
         predicate: CanonicalFactPredicate,
@@ -166,98 +282,16 @@ impl FactSelectionQuery {
         limit: FactSelectionLimit,
         tie_break: FactTieBreak,
     ) -> Result<Self> {
-        let mut fields = vec![
-            (
-                "fact_descriptor_ref",
-                codec::canonical_content_ref(&descriptor_ref)?,
-            ),
-            ("canonical_predicate", predicate.canonical_value()?),
-            (
-                "ordering",
-                CanonicalValue::String(ordering.as_str().to_owned()),
-            ),
-            ("limit", CanonicalValue::Unsigned(u64::from(limit.get()))),
-            (
-                "tie_break",
-                CanonicalValue::String(tie_break.as_str().to_owned()),
-            ),
-        ];
-        if let Some(identity) = &content_identity_filter {
-            fields.push((
-                "content_identity_filter",
-                CanonicalValue::String(identity.as_str().to_owned()),
-            ));
-        }
-        Self::from_canonical_value(codec::object(fields)?)
-    }
-
-    /// Strictly decodes exact canonical JSON under the frozen query schema.
-    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
-        Self::from_validated(codec::strict_decode(FACT_SELECTION_QUERY_CONTRACT, bytes)?)
-    }
-
-    /// Encodes a canonical value only after frozen-schema validation.
-    pub fn from_canonical_value(value: CanonicalValue) -> Result<Self> {
-        Self::from_validated(codec::encode(FACT_SELECTION_QUERY_CONTRACT, &value)?)
-    }
-
-    fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
-        let value = validated
-            .canonical_value()
-            .map_err(FactError::Recoverability)?;
-        let object = codec::required_object(&value)?;
-        let descriptor_ref =
-            codec::content_ref(codec::required_field(object, "fact_descriptor_ref")?)?;
-        let predicate = CanonicalFactPredicate::from_canonical_value(
-            codec::required_field(object, "canonical_predicate")?.clone(),
-        )?;
-        let content_identity_filter = codec::optional_field(object, "content_identity_filter")
-            .map(|value| {
-                FactContentIdentityDigest::parse(codec::string(value)?)
-                    .map_err(|_| FactError::Identity)
-            })
-            .transpose()?;
-        let ordering =
-            FactOrdering::parse(codec::string(codec::required_field(object, "ordering")?)?)?;
-        let limit_value: u32 = codec::unsigned(codec::required_field(object, "limit")?)?
-            .try_into()
-            .map_err(|_| FactError::Canonical)?;
-        let limit = FactSelectionLimit::new(limit_value)?;
-        let tie_break =
-            FactTieBreak::parse(codec::string(codec::required_field(object, "tie_break")?)?)?;
-        Ok(Self {
-            validated,
+        let query = Self {
             descriptor_ref,
             predicate,
             content_identity_filter,
             ordering,
             limit,
             tie_break,
-        })
-    }
-
-    /// Returns the exact canonical JSON bytes.
-    pub fn canonical_json(&self) -> &[u8] {
-        self.validated.as_bytes()
-    }
-
-    /// Returns the frozen annex-derived query schema identity.
-    pub const fn schema_id(&self) -> &SchemaId {
-        self.validated.schema_id()
-    }
-
-    /// Returns the exact query content identity.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        codec::contract()?
-            .content_ref(&self.validated)
-            .map_err(Into::into)
-    }
-
-    /// Reconstructs the checked canonical query.
-    pub fn canonical_value(&self) -> Result<CanonicalValue> {
-        self.validated
-            .canonical_value()
-            .map_err(FactError::Recoverability)
+        };
+        mfm_values::PersistedSchema::validate(&query).map_err(|_| FactError::Canonical)?;
+        Ok(query)
     }
 
     /// Returns the exact retained fact descriptor.
@@ -315,12 +349,16 @@ impl FactSelectionQuery {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(rename_all = "snake_case")]
+#[mfm(schema = "mfm.fact-selection-request-version", version = "1")]
+enum FactSelectionRequestVersion {
+    #[serde(rename = "mfm.fact-selection-request.v1")]
+    V1,
+}
+
 /// One closed, state-authored request for other-run facts in the admitted tenant.
-///
-/// The typed Read value retains the exact annex-backed canonical bytes through a
-/// base64url wire field. Deserialization revalidates those inner bytes, so neither
-/// a caller nor a persisted program can construct an incomplete or non-canonical request.
-#[derive(Debug, Clone, PartialEq, Eq, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 #[mfm(
     namespace = "mfm.fact",
@@ -329,304 +367,107 @@ impl FactSelectionQuery {
     schema = "mfm.fact.selection_request"
 )]
 pub struct FactSelectionRequest {
-    #[serde(rename = "canonical_request_base64url")]
-    canonical_request_json: String,
+    admitted_source_manifest_ref: ContentRef,
+    #[mfm(persisted)]
+    producer_scope: FactProducerScope,
+    #[mfm(persisted)]
+    completeness_mode: FactSelectionCompletenessMode,
+    #[mfm(persisted)]
+    scan_bounds: FactSelectionScanBounds,
+    #[mfm(persisted)]
+    selector_contract_ref: PriorRunFactSelectorRef,
+    #[mfm(persisted, minimum_items = 1, maximum_items = 128)]
+    queries: Vec<FactSelectionQuery>,
+    #[mfm(persisted)]
+    version: FactSelectionRequestVersion,
+}
+
+#[derive(Serialize)]
+struct FactQueryPreimage<'a> {
+    domain: &'static str,
+    value: &'a FactSelectionRequest,
 }
 
 impl FactSelectionRequest {
-    /// Constructs an annex-backed request while preserving authored query order.
+    /// Strictly decodes exact canonical bytes through this concrete owner's shape.
+    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|_| FactError::Canonical)?;
+        <Self as MfmValue>::schema_descriptor()
+            .and_then(|schema| {
+                schema
+                    .identity
+                    .validate_canonical_value(canonical.as_bytes())
+            })
+            .map_err(|_| FactError::Canonical)?;
+        serde_json::from_slice(canonical.as_bytes()).map_err(|_| FactError::Canonical)
+    }
+
+    /// Constructs an owner-validated request while preserving authored query order.
     pub fn new(
         admitted_source_manifest_ref: ContentRef,
         scan_bounds: FactSelectionScanBounds,
         queries: Vec<FactSelectionQuery>,
     ) -> Result<Self> {
+        scan_bounds.validate()?;
         if queries.is_empty() || queries.len() > MAX_FACT_SELECTION_QUERIES {
             return Err(FactError::Selection(
                 "fact selection request must contain 1 through 128 queries",
             ));
         }
-        scan_bounds.validate()?;
-        let query_values = queries
-            .iter()
-            .map(FactSelectionQuery::canonical_value)
-            .collect::<Result<Vec<_>>>()?;
-        Self::from_canonical_value(codec::object([
-            (
-                "admitted_source_manifest_ref",
-                codec::canonical_content_ref(&admitted_source_manifest_ref)?,
-            ),
-            (
-                "completeness_mode",
-                CanonicalValue::String(COMPLETENESS_MODE.to_owned()),
-            ),
-            (
-                "producer_scope",
-                CanonicalValue::String(PRODUCER_SCOPE.to_owned()),
-            ),
-            (
-                "scan_bounds",
-                codec::object([
-                    (
-                        "maximum_facts",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_facts()),
-                    ),
-                    (
-                        "maximum_publications",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_publications()),
-                    ),
-                    (
-                        "maximum_response_bytes",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_response_bytes()),
-                    ),
-                    (
-                        "maximum_retained_source_bytes",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_retained_source_bytes()),
-                    ),
-                    (
-                        "maximum_selected_results",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_selected_results()),
-                    ),
-                    (
-                        "maximum_distinct_producers",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_distinct_producers()),
-                    ),
-                    (
-                        "maximum_producer_fold_batches",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_producer_fold_batches()),
-                    ),
-                    (
-                        "maximum_pages",
-                        CanonicalValue::Unsigned(scan_bounds.maximum_pages()),
-                    ),
-                ])?,
-            ),
-            (
-                "selector_contract_ref",
-                codec::canonical_content_ref(&prior_run_fact_selector_contract_ref()?)?,
-            ),
-            ("queries", CanonicalValue::Array(query_values)),
-            (
-                "version",
-                CanonicalValue::String(REQUEST_VERSION.to_owned()),
-            ),
-        ])?)
-    }
-
-    /// Strictly decodes exact canonical JSON under the frozen request schema.
-    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
-        Self::from_validated(codec::strict_decode(
-            FACT_SELECTION_REQUEST_CONTRACT,
-            bytes,
-        )?)
-    }
-
-    /// Encodes a canonical value only after frozen-schema validation.
-    pub fn from_canonical_value(value: CanonicalValue) -> Result<Self> {
-        Self::from_validated(codec::encode(FACT_SELECTION_REQUEST_CONTRACT, &value)?)
-    }
-
-    fn from_validated(validated: ValidatedCanonicalValue) -> Result<Self> {
-        let value = validated
-            .canonical_value()
-            .map_err(FactError::Recoverability)?;
-        let object = codec::required_object(&value)?;
-        if codec::string(codec::required_field(object, "version")?)? != REQUEST_VERSION
-            || codec::string(codec::required_field(object, "producer_scope")?)? != PRODUCER_SCOPE
-            || codec::string(codec::required_field(object, "completeness_mode")?)?
-                != COMPLETENESS_MODE
-        {
-            return Err(FactError::Canonical);
-        }
-        let _source_manifest_ref = codec::content_ref(codec::required_field(
-            object,
-            "admitted_source_manifest_ref",
-        )?)?;
-        let selector_contract_ref =
-            codec::content_ref(codec::required_field(object, "selector_contract_ref")?)?;
-        if selector_contract_ref != prior_run_fact_selector_contract_ref()? {
-            return Err(FactError::Selection(
-                "fact selection request names an unsupported selector contract",
-            ));
-        }
-        let bounds = codec::required_object(codec::required_field(object, "scan_bounds")?)?;
-        FactSelectionScanBounds::new_with_work_bounds(
-            codec::unsigned(codec::required_field(bounds, "maximum_publications")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_facts")?)?,
-            codec::unsigned(codec::required_field(
-                bounds,
-                "maximum_retained_source_bytes",
-            )?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_selected_results")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_response_bytes")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_distinct_producers")?)?,
-            codec::unsigned(codec::required_field(
-                bounds,
-                "maximum_producer_fold_batches",
-            )?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_pages")?)?,
-        )?;
-        let query_values = match codec::required_field(object, "queries")? {
-            CanonicalValue::Array(values) => values,
-            _ => return Err(FactError::Canonical),
-        };
-        if query_values.is_empty() || query_values.len() > MAX_FACT_SELECTION_QUERIES {
-            return Err(FactError::Selection(
-                "fact selection request must contain 1 through 128 queries",
-            ));
-        }
-        query_values
-            .iter()
-            .cloned()
-            .map(FactSelectionQuery::from_canonical_value)
-            .collect::<Result<Vec<_>>>()?;
-        let canonical_request_json =
-            String::from_utf8(validated.as_bytes().to_vec()).map_err(|_| FactError::Canonical)?;
         Ok(Self {
-            canonical_request_json,
+            admitted_source_manifest_ref,
+            producer_scope: FactProducerScope::OtherRunsInTenantScope,
+            completeness_mode: FactSelectionCompletenessMode::CompleteThroughAuthorizationFrontier,
+            scan_bounds,
+            selector_contract_ref: PriorRunFactSelectorRef::current()?,
+            queries,
+            version: FactSelectionRequestVersion::V1,
         })
     }
 
-    /// Returns the exact canonical JSON bytes used as request evidence.
-    pub fn canonical_json(&self) -> &[u8] {
-        self.canonical_request_json.as_bytes()
-    }
-
-    /// Returns the frozen annex-derived request schema identity.
-    pub fn schema_id(&self) -> Result<SchemaId> {
-        Ok(
-            codec::strict_decode(FACT_SELECTION_REQUEST_CONTRACT, self.canonical_json())?
-                .schema_id()
-                .clone(),
-        )
-    }
-
-    /// Returns the exact request content identity.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        let validated =
-            codec::strict_decode(FACT_SELECTION_REQUEST_CONTRACT, self.canonical_json())?;
-        codec::contract()?
-            .content_ref(&validated)
-            .map_err(Into::into)
-    }
-
-    /// Reconstructs the checked canonical request.
-    pub fn canonical_value(&self) -> Result<CanonicalValue> {
-        codec::strict_decode(FACT_SELECTION_REQUEST_CONTRACT, self.canonical_json())?
-            .canonical_value()
-            .map_err(FactError::Recoverability)
-    }
-
-    /// Derives the frozen domain-separated request digest.
+    /// Derives the frozen domain-separated request digest from this typed owner.
     pub fn request_digest(&self) -> Result<FactQueryDigest> {
-        let validated =
-            codec::strict_decode(FACT_SELECTION_REQUEST_CONTRACT, self.canonical_json())?;
-        codec::contract()?
-            .derive_fact_query_digest(&validated)
-            .map_err(Into::into)
+        let json = serde_json::to_string(&FactQueryPreimage {
+            domain: FACT_QUERY_DOMAIN,
+            value: self,
+        })
+        .map_err(|_| FactError::Canonical)?;
+        let canonical =
+            PlainCanonicalJsonBytes::from_json_str(&json).map_err(|_| FactError::Canonical)?;
+        Ok(FactQueryDigest::from_digest(sha256_digest_bytes(
+            canonical.as_bytes(),
+        )))
     }
 
     /// Returns the fixed tenant-relative producer scope.
     pub const fn producer_scope(&self) -> FactProducerScope {
-        FactProducerScope::OtherRunsInTenantScope
+        self.producer_scope
     }
 
     /// Returns the sole completeness mode admitted by the scanner.
     pub const fn completeness_mode(&self) -> FactSelectionCompletenessMode {
-        FactSelectionCompletenessMode::CompleteThroughAuthorizationFrontier
+        self.completeness_mode
     }
 
     /// Returns the exact source manifest admitted with this run.
-    pub fn admitted_source_manifest_ref(&self) -> Result<ContentRef> {
-        let value = self.canonical_value()?;
-        codec::content_ref(codec::required_field(
-            codec::required_object(&value)?,
-            "admitted_source_manifest_ref",
-        )?)
+    pub const fn admitted_source_manifest_ref(&self) -> &ContentRef {
+        &self.admitted_source_manifest_ref
     }
 
     /// Returns the fixed selector contract frozen into this request.
-    pub fn selector_contract_ref(&self) -> Result<ContentRef> {
-        let value = self.canonical_value()?;
-        codec::content_ref(codec::required_field(
-            codec::required_object(&value)?,
-            "selector_contract_ref",
-        )?)
+    pub const fn selector_contract_ref(&self) -> &ContentRef {
+        self.selector_contract_ref.as_ref()
     }
 
     /// Returns the explicit total scan bounds.
-    pub fn scan_bounds(&self) -> Result<FactSelectionScanBounds> {
-        let value = self.canonical_value()?;
-        let bounds = codec::required_object(codec::required_field(
-            codec::required_object(&value)?,
-            "scan_bounds",
-        )?)?;
-        FactSelectionScanBounds::new_with_work_bounds(
-            codec::unsigned(codec::required_field(bounds, "maximum_publications")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_facts")?)?,
-            codec::unsigned(codec::required_field(
-                bounds,
-                "maximum_retained_source_bytes",
-            )?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_selected_results")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_response_bytes")?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_distinct_producers")?)?,
-            codec::unsigned(codec::required_field(
-                bounds,
-                "maximum_producer_fold_batches",
-            )?)?,
-            codec::unsigned(codec::required_field(bounds, "maximum_pages")?)?,
-        )
+    pub const fn scan_bounds(&self) -> &FactSelectionScanBounds {
+        &self.scan_bounds
     }
 
     /// Returns queries in state-authored order.
-    pub fn queries(&self) -> Result<Vec<FactSelectionQuery>> {
-        let value = self.canonical_value()?;
-        let query_values = match codec::required_field(codec::required_object(&value)?, "queries")?
-        {
-            CanonicalValue::Array(values) => values,
-            _ => return Err(FactError::Canonical),
-        };
-        query_values
-            .iter()
-            .cloned()
-            .map(FactSelectionQuery::from_canonical_value)
-            .collect()
-    }
-}
-
-impl<'de> Deserialize<'de> for FactSelectionRequest {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            canonical_request_base64url: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let canonical = CanonicalBytes::from_base64url_no_pad(wire.canonical_request_base64url)
-            .map_err(serde::de::Error::custom)?;
-        Self::from_canonical_json(canonical.as_bytes()).map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for FactSelectionRequest {
-    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        #[derive(Serialize)]
-        struct Wire<'a> {
-            canonical_request_base64url: &'a str,
-        }
-
-        let encoded = CanonicalBytes::new(self.canonical_json().to_vec());
-        Wire {
-            canonical_request_base64url: encoded.encoded(),
-        }
-        .serialize(serializer)
+    pub fn queries(&self) -> &[FactSelectionQuery] {
+        &self.queries
     }
 }
 
@@ -734,9 +575,9 @@ impl<T> FactTopK<T> {
             .selected
             .binary_search_by(|existing| self.query.compare(existing, &candidate))
             .unwrap_or_else(|index| index);
-        if insertion < self.query.limit.as_usize() {
+        if insertion < usize::from(self.query.limit.0) {
             self.selected.insert(insertion, candidate);
-            if self.selected.len() > self.query.limit.as_usize() {
+            if self.selected.len() > usize::from(self.query.limit.0) {
                 self.selected.pop();
             }
         }

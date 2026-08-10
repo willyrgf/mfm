@@ -37,8 +37,8 @@ use crate::provider::{
 };
 use crate::schema::NONCE_APPLICATION_ROLE;
 use crate::support::{
-    canonical_json, decode_canonical, evidence_reference, open_role_pool, reference_text,
-    session_identity, transaction_id,
+    canonical_json, decode_canonical, open_role_pool, reference_text, session_identity,
+    transaction_id,
 };
 use crate::WalletAuthorityProviderClient;
 
@@ -427,15 +427,6 @@ impl PostgresWalletNonceAuthority {
     ) -> bool {
         let request = &retained.request;
         let completion = &retained.completion;
-        let expected_evidence = evidence_reference(
-            "mfm.evm.wallet-completion-evidence.v1",
-            &(
-                request,
-                &retained.state_input_ref,
-                &reservation.reservation.resource_lineage_ref,
-            ),
-        );
-        let expected_witness_ref = canonical_wallet_reference(&request.terminal_witnesses);
         EffectCapabilityImplementation::<CompleteWalletNonceCapability>::validate_request(
             &self.validator,
             request,
@@ -452,11 +443,7 @@ impl PostgresWalletNonceAuthority {
             && completion.terminal_witnesses == request.terminal_witnesses
             && completion.sealed_activated_candidates == candidates
             && completion.validate().is_ok()
-            && expected_witness_ref.is_ok_and(|reference| {
-                completion.original_terminal_witnesses_ref == reference.content_digest()
-            })
-            && expected_evidence
-                .is_ok_and(|evidence| completion.completion_evidence_ref == evidence)
+            && completion.semantic_completion_key == request.completion_key
     }
 
     async fn load_validated_reservation(
@@ -477,19 +464,6 @@ impl PostgresWalletNonceAuthority {
     fn retained_reservation_is_valid(&self, closure: &ReservationClosure) -> bool {
         let request = &closure.request;
         let reservation = &closure.reservation;
-        let observed_floor_ref = mfm_journal::structured::domain_content_digest(
-            "mfm.evm.wallet-observed-floor-provenance.v1",
-            &(&request.qualified_floor, &closure.state_input_ref),
-        );
-        let reservation_evidence_ref = evidence_reference(
-            "mfm.evm.wallet-reservation-evidence.v1",
-            &(
-                request,
-                &closure.state_input_ref,
-                &reservation.resource_lineage_ref,
-                reservation.nonce,
-            ),
-        );
         EffectCapabilityImplementation::<ReserveWalletNonceCapability>::validate_request(
             &self.validator,
             request,
@@ -503,10 +477,7 @@ impl PostgresWalletNonceAuthority {
             && reservation.domain_activation_record_ref
                 == request.domain_activation_attestation.activation_record_ref
             && reservation.resource_lineage_ref.to_content_ref().is_ok()
-            && observed_floor_ref
-                .is_ok_and(|digest| reservation.observed_floor_ref == digest.as_str())
-            && reservation_evidence_ref
-                .is_ok_and(|evidence| reservation.reservation_evidence_ref == evidence)
+            && reservation.submission_intent_id == request.submission_intent_id
     }
 
     fn context(
@@ -1815,33 +1786,6 @@ impl PostgresWalletNonceAuthority {
                     }
                 }
 
-                let observed_floor_ref = match mfm_journal::structured::domain_content_digest(
-                    "mfm.evm.wallet-observed-floor-provenance.v1",
-                    &(&request.qualified_floor, state_input_ref),
-                ) {
-                    Ok(value) => value.as_str().to_owned(),
-                    Err(_) => {
-                        let completion =
-                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
-                        return self.abort_write(write, completion).await;
-                    }
-                };
-                let reservation_evidence_ref = match evidence_reference(
-                    "mfm.evm.wallet-reservation-evidence.v1",
-                    &(
-                        request,
-                        state_input_ref,
-                        &self.current_lineage_head.public_lineage_head_ref,
-                        nonce,
-                    ),
-                ) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let completion =
-                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
-                        return self.abort_write(write, completion).await;
-                    }
-                };
                 let reservation = ReservedWalletNonce {
                     nonce_domain: request.nonce_domain.clone(),
                     domain_activation_record_ref: request
@@ -1853,9 +1797,7 @@ impl PostgresWalletNonceAuthority {
                     submission_intent_id: request.submission_intent_id.clone(),
                     transaction_intent_digest: request.transaction_intent.digest().to_owned(),
                     candidate_family_ref: request.candidate_family.digest().to_owned(),
-                    observed_floor_ref,
                     resource_lineage_ref: self.current_lineage_head.public_lineage_head_ref.clone(),
-                    reservation_evidence_ref,
                 };
                 if let Err(completion) = self
                     .prepare_mutation(
@@ -2196,24 +2138,9 @@ impl PostgresWalletNonceAuthority {
                         EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
                     return self.abort_write(write, completion).await;
                 }
-                let activation_evidence_ref = match evidence_reference(
-                    "mfm.evm.wallet-candidate-activation-evidence.v1",
-                    &(
-                        request,
-                        state_input_ref,
-                        &reservation.reservation.resource_lineage_ref,
-                    ),
-                ) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let completion =
-                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
-                        return self.abort_write(write, completion).await;
-                    }
-                };
                 let mut candidate = ActiveWalletCandidate {
                     attested_candidate: request.next_candidate.clone(),
-                    activation_evidence_ref,
+                    candidate_operation_key: request.candidate_operation_key.clone(),
                     // The provider signs the exact mutation envelope before the
                     // attestation can be attached to the durable candidate.
                     provider_activation_attestation: String::new(),
@@ -2509,31 +2436,6 @@ impl PostgresWalletNonceAuthority {
                     }
                     Ok(None) => {}
                 }
-                let original_terminal_witnesses_ref =
-                    match canonical_wallet_reference(&request.terminal_witnesses) {
-                        Ok(reference) => reference.content_digest().to_owned(),
-                        Err(_) => {
-                            let completion = EffectAdapterCompletion::IntegrityFault(
-                                self.integrity_fault.clone(),
-                            );
-                            return self.abort_write(write, completion).await;
-                        }
-                    };
-                let completion_evidence_ref = match evidence_reference(
-                    "mfm.evm.wallet-completion-evidence.v1",
-                    &(
-                        request,
-                        state_input_ref,
-                        &reservation.reservation.resource_lineage_ref,
-                    ),
-                ) {
-                    Ok(value) => value,
-                    Err(_) => {
-                        let completion =
-                            EffectAdapterCompletion::IntegrityFault(self.integrity_fault.clone());
-                        return self.abort_write(write, completion).await;
-                    }
-                };
                 let mut completed = match CompletedWalletNonce::with_recovery_closure(
                     request.nonce_domain.clone(),
                     reservation.reservation.nonce,
@@ -2542,8 +2444,6 @@ impl PostgresWalletNonceAuthority {
                     request.canonical_terminal_outcome.clone(),
                     request.terminal_witnesses.clone(),
                     candidates.clone(),
-                    original_terminal_witnesses_ref,
-                    completion_evidence_ref,
                     String::new(),
                     (*reservation.reservation).clone(),
                     (*reservation.transaction_intent).clone(),
@@ -3098,19 +2998,15 @@ async fn load_candidates(
         let retained_reservation_key: &str = row
             .try_get("semantic_reservation_key")
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        let expected_activation_evidence_ref = evidence_reference(
-            "mfm.evm.wallet-candidate-activation-evidence.v1",
-            &(
-                &request,
-                &state_input_ref,
-                &reservation.reservation.resource_lineage_ref,
-            ),
-        )?;
         if retained_ordinal
             != i32::try_from(ordinal).map_err(|_| PostgresEvmWalletError::InvalidAuthority)?
             || usize::from(candidate.attested_candidate.candidate_ordinal) != ordinal
             || request.next_candidate != candidate.attested_candidate
             || request.candidate_operation_key != expected_key
+            // The retained candidate carries the same permanent operation key as
+            // its request and its row; that key replaces the former derivative
+            // activation-evidence digest.
+            || candidate.candidate_operation_key != expected_key
             || retained_key != expected_key.as_str()
             || retained_reservation_key
                 != reservation.reservation.semantic_reservation_key.as_str()
@@ -3122,7 +3018,6 @@ async fn load_candidates(
             .is_err()
             || !candidate_progression_matches(&request, reservation, &candidates)
             || !attested_candidate_matches(&request, reservation, &candidates)
-            || candidate.activation_evidence_ref != expected_activation_evidence_ref
         {
             return Err(PostgresEvmWalletError::InvalidAuthority);
         }
@@ -3248,8 +3143,6 @@ async fn decode_completion_row(
     let state_input_ref: LexicalValueRef = decode_row_json(&row, "state_input_json")?;
     let retained_completion_key = required_row_text(&row, "semantic_completion_key")?;
     let retained_reservation_key = required_row_text(&row, "semantic_reservation_key")?;
-    let terminal_witnesses_ref = canonical_wallet_reference(&request.terminal_witnesses)
-        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
     if retained_completion_key != completion.semantic_completion_key.as_str()
         || retained_reservation_key != completion.semantic_reservation_key.as_str()
         || request.completion_key != completion.semantic_completion_key
@@ -3258,7 +3151,6 @@ async fn decode_completion_row(
         || request.canonical_terminal_outcome != terminal_outcome
         || request.canonical_terminal_outcome != completion.canonical_terminal_outcome
         || request.terminal_witnesses != completion.terminal_witnesses
-        || completion.original_terminal_witnesses_ref != terminal_witnesses_ref.content_digest()
         || completion.validate().is_err()
     {
         return Err(PostgresEvmWalletError::InvalidAuthority);
@@ -3472,10 +3364,6 @@ fn completion_closure_matches(
         && outcome.submission_intent_id.validate().is_ok()
         && ContentDigest::from_str(&outcome.transaction_intent_digest).is_ok()
         && usize::from(outcome.winning_candidate_ordinal) < mfm_evm::EVM_WALLET_REPLACEMENT_LIMIT
-        && outcome
-            .winning_activation_evidence_ref
-            .to_content_ref()
-            .is_ok()
         && valid_evm_hash(&outcome.transaction_hash)
         && valid_evm_quantity(&outcome.inclusion_block_number)
         && valid_evm_hash(&outcome.inclusion_block_hash)
@@ -3499,7 +3387,6 @@ fn completion_closure_matches(
         && candidates.iter().any(|candidate| {
             candidate.attested_candidate.candidate_ordinal == outcome.winning_candidate_ordinal
                 && candidate.attested_candidate.transaction_hash == outcome.transaction_hash
-                && candidate.activation_evidence_ref == outcome.winning_activation_evidence_ref
         })
 }
 

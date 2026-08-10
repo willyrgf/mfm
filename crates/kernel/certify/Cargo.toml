@@ -32,6 +32,7 @@ mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
@@ -39,7 +40,6 @@ serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-mfm-program-derive = { path = "../program-derive" }
 trybuild = "1.0"
 
 [[test]]

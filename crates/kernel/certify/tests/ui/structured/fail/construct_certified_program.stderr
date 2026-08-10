@@ -16,4 +16,4 @@ error: cannot construct `CertifiedProgram` with struct literal syntax due to pri
 12 |         document: panic!(),
    |         ------------------ private field
    |
-   = note: ...and other private field `value_schemas` that was not provided
+   = note: ...and other private fields `value_schemas` and `lexical_slot_refs` that were not provided

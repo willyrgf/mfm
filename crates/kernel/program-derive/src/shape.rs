@@ -7,6 +7,7 @@ pub(super) enum DeriveKind {
     StateInput,
     OperationOutput,
     PublicOutputs,
+    PersistedContract,
 }
 
 impl DeriveKind {
@@ -17,6 +18,7 @@ impl DeriveKind {
             Self::StateInput => quote!(::mfm_values::SchemaKind::StateInput),
             Self::OperationOutput => quote!(::mfm_values::SchemaKind::OperationOutput),
             Self::PublicOutputs => quote!(::mfm_values::SchemaKind::PublicOutput),
+            Self::PersistedContract => quote!(::mfm_values::SchemaKind::PersistedContract),
         }
     }
 
@@ -26,6 +28,7 @@ impl DeriveKind {
             Self::StateInput => "input_schema_descriptor",
             Self::OperationOutput => "output_schema_descriptor",
             Self::PublicOutputs => "public_schema_descriptor",
+            Self::PersistedContract => "schema_descriptor",
         }
     }
 }
@@ -46,6 +49,14 @@ pub(super) fn schema_shape_tokens(
     kind: DeriveKind,
     attrs: &ContainerAttrs,
 ) -> syn::Result<SchemaShapeOutput> {
+    if attrs.unsigned_minimum.is_some()
+        && (kind != DeriveKind::PersistedContract || !attrs.serde_transparent)
+    {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "unsigned bounds require PersistedSchema on a serde-transparent newtype",
+        ));
+    }
     if kind == DeriveKind::StateInput
         && (attrs.transparent_string || attrs.transparent_map || attrs.serde_transparent)
     {
@@ -55,10 +66,13 @@ pub(super) fn schema_shape_tokens(
         ));
     }
     if attrs.transparent_string {
-        return transparent_string_shape_tokens(data);
+        return transparent_string_shape_tokens(data, kind);
     }
     if attrs.transparent_map {
         return transparent_map_shape_tokens(data, kind);
+    }
+    if kind == DeriveKind::PersistedContract && attrs.serde_transparent {
+        return transparent_newtype_shape_tokens(data, kind, attrs);
     }
 
     match data {
@@ -85,6 +99,61 @@ pub(super) fn schema_shape_tokens(
             "MFM derives do not support unions",
         )),
     }
+}
+
+/// Builds the shape of a `#[serde(transparent)]` newtype from its one field.
+///
+/// The retained bytes are exactly the inner value's bytes, so the contract's
+/// shape is the inner shape rather than a wrapper object.
+fn transparent_newtype_shape_tokens(
+    data: &Data,
+    kind: DeriveKind,
+    attrs: &ContainerAttrs,
+) -> syn::Result<SchemaShapeOutput> {
+    let Data::Struct(DataStruct { fields, .. }) = data else {
+        return Err(syn::Error::new(
+            Span::call_site(),
+            "serde(transparent) requires a one-field struct",
+        ));
+    };
+    let mut iter = fields.iter();
+    let (Some(field), None) = (iter.next(), iter.next()) else {
+        return Err(syn::Error::new(
+            fields.span(),
+            "serde(transparent) requires exactly one field",
+        ));
+    };
+    let shape = if let Some((minimum, maximum)) = attrs.unsigned_minimum.zip(attrs.unsigned_maximum)
+    {
+        let Type::Path(path) = &field.ty else {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "unsigned bounds require an unsigned integer newtype",
+            ));
+        };
+        let supported = path.path.segments.last().is_some_and(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "u8" | "u16" | "u32" | "u64"
+            )
+        });
+        if !supported {
+            return Err(syn::Error::new_spanned(
+                &field.ty,
+                "unsigned bounds require an unsigned integer newtype",
+            ));
+        }
+        quote!(::mfm_values::SchemaShape::UnsignedRange {
+            minimum: #minimum,
+            maximum: #maximum,
+        })
+    } else {
+        shape_tokens(&field.ty, kind)?
+    };
+    Ok(SchemaShapeOutput {
+        shape,
+        default_bounds: Vec::new(),
+    })
 }
 
 fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<SchemaShapeOutput> {
@@ -138,14 +207,28 @@ fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<Sc
     let value_shape = shape_tokens(value, kind)?;
 
     Ok(SchemaShapeOutput {
-        shape: quote!(::mfm_values::SchemaShape::BTreeMapString {
-            value: Box::new(#value_shape)
-        }),
+        shape: if kind == DeriveKind::PersistedContract {
+            quote!(::mfm_values::SchemaShape::BoundedStringMap {
+                key_grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
+                key_minimum_bytes: 0,
+                key_maximum_bytes: ::mfm_values::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES as u32,
+                value: Box::new(#value_shape),
+                minimum_entries: 0,
+                maximum_entries: ::mfm_values::MAX_OBJECT_ENTRIES as u32,
+            })
+        } else {
+            quote!(::mfm_values::SchemaShape::BTreeMapString {
+                value: Box::new(#value_shape)
+            })
+        },
         default_bounds: Vec::new(),
     })
 }
 
-fn transparent_string_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput> {
+fn transparent_string_shape_tokens(
+    data: &Data,
+    kind: DeriveKind,
+) -> syn::Result<SchemaShapeOutput> {
     let Data::Struct(DataStruct {
         fields: Fields::Named(fields),
         ..
@@ -176,7 +259,11 @@ fn transparent_string_shape_tokens(data: &Data) -> syn::Result<SchemaShapeOutput
     }
 
     Ok(SchemaShapeOutput {
-        shape: quote!(::mfm_values::SchemaShape::String),
+        shape: if kind == DeriveKind::PersistedContract {
+            bounded_persisted_string()
+        } else {
+            quote!(::mfm_values::SchemaShape::String)
+        },
         default_bounds: Vec::new(),
     })
 }
@@ -307,8 +394,73 @@ fn field_descriptor_tokens(
             ));
         }
         names.push(wire_name.clone());
-        let shape = shape_tokens(&field.ty, kind)?;
-        let constructor = if attrs.default {
+        let shape_kind = if attrs.persisted {
+            DeriveKind::PersistedContract
+        } else {
+            kind
+        };
+        let mut shape = if attrs.optional_absent {
+            let Type::Path(path) = &field.ty else {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "Option::is_none requires an Option field",
+                ));
+            };
+            let segment = path
+                .path
+                .segments
+                .last()
+                .filter(|segment| segment.ident == "Option")
+                .ok_or_else(|| {
+                    syn::Error::new_spanned(&field.ty, "Option::is_none requires an Option field")
+                })?;
+            shape_tokens(one_generic_type(segment, "Option")?, shape_kind)?
+        } else {
+            shape_tokens(&field.ty, shape_kind)?
+        };
+        if let Some(literal) = attrs.literal {
+            if kind != DeriveKind::PersistedContract || !is_string_type(&field.ty) {
+                return Err(syn::Error::new_spanned(
+                    &field.ty,
+                    "mfm(literal) requires a String field on PersistedSchema",
+                ));
+            }
+            shape = quote!(::mfm_values::SchemaShape::Literal(
+                ::mfm_values::LiteralValue::String(#literal.to_owned())
+            ));
+        }
+        if attrs.minimum_items.is_some() || attrs.maximum_items.is_some() {
+            let minimum_items = attrs
+                .minimum_items
+                .map_or_else(|| quote!(None), |value| quote!(Some(#value)));
+            let maximum_items = attrs
+                .maximum_items
+                .map_or_else(|| quote!(None), |value| quote!(Some(#value)));
+            shape = quote!({
+                let shape = #shape;
+                match shape {
+                    ::mfm_values::SchemaShape::BoundedSequence {
+                        element,
+                        minimum_items,
+                        maximum_items,
+                        ordering,
+                        unique,
+                    } => ::mfm_values::SchemaShape::BoundedSequence {
+                        element,
+                        minimum_items: #minimum_items.unwrap_or(minimum_items),
+                        maximum_items: #maximum_items.unwrap_or(maximum_items),
+                        ordering,
+                        unique,
+                    },
+                    _ => return Err(::mfm_values::ValueError::Descriptor(
+                        "sequence bounds require a sequence field".to_owned(),
+                    )),
+                }
+            });
+        }
+        let constructor = if attrs.optional_absent {
+            quote!(::mfm_values::FieldDescriptor::optional_absent)
+        } else if attrs.default {
             let ty = &field.ty;
             default_bounds.push(quote! {
                 let _ = || {
@@ -365,8 +517,13 @@ fn shape_tokens_for_path(
     };
     let ident = segment.ident.to_string();
 
+    if let Some(shape) = checked_identity_shape(&ident) {
+        return Ok(shape);
+    }
+
     match ident.as_str() {
         "bool" => Ok(quote!(::mfm_values::SchemaShape::Bool)),
+        "String" if kind == DeriveKind::PersistedContract => Ok(bounded_persisted_string()),
         "String" => Ok(quote!(::mfm_values::SchemaShape::String)),
         "i8" => Ok(signed_integer(8)),
         "i16" => Ok(signed_integer(16)),
@@ -377,6 +534,14 @@ fn shape_tokens_for_path(
         "u32" => Ok(unsigned_integer(32)),
         "u64" => Ok(unsigned_integer(64)),
         "NonZeroU64" => Ok(unsigned_integer(64)),
+        "NonZeroU16" => Ok(quote!(::mfm_values::SchemaShape::UnsignedRange {
+            minimum: 1,
+            maximum: u64::from(u16::MAX)
+        })),
+        "NonZeroU32" => Ok(quote!(::mfm_values::SchemaShape::UnsignedRange {
+            minimum: 1,
+            maximum: u64::from(u32::MAX)
+        })),
         "f32" | "f64" => Err(syn::Error::new_spanned(
             type_path,
             "floating point fields are not supported by MFM persisted surfaces",
@@ -398,6 +563,10 @@ fn shape_tokens_for_path(
                 "serde_json::Value is not supported by MFM persisted surfaces",
             ))
         }
+        "Box" => {
+            let element = one_generic_type(segment, "Box")?;
+            shape_tokens(element, kind)
+        }
         "Option" => {
             let element = one_generic_type(segment, "Option")?;
             let shape = shape_tokens(element, kind)?;
@@ -406,12 +575,32 @@ fn shape_tokens_for_path(
         "Vec" => {
             let element = one_generic_type(segment, "Vec")?;
             let shape = shape_tokens(element, kind)?;
-            Ok(quote!(::mfm_values::SchemaShape::Vec(Box::new(#shape))))
+            if kind == DeriveKind::PersistedContract {
+                Ok(quote!(::mfm_values::SchemaShape::BoundedSequence {
+                    element: Box::new(#shape),
+                    minimum_items: 0,
+                    maximum_items: ::mfm_values::MAX_ARRAY_ITEMS as u32,
+                    ordering: ::mfm_values::SequenceOrdering::Preserved,
+                    unique: false,
+                }))
+            } else {
+                Ok(quote!(::mfm_values::SchemaShape::Vec(Box::new(#shape))))
+            }
         }
         "NonEmpty" => {
             let element = one_generic_type(segment, "NonEmpty")?;
             let shape = shape_tokens(element, kind)?;
-            Ok(quote!(::mfm_values::SchemaShape::NonEmptyVec(Box::new(#shape))))
+            if kind == DeriveKind::PersistedContract {
+                Ok(quote!(::mfm_values::SchemaShape::BoundedSequence {
+                    element: Box::new(#shape),
+                    minimum_items: 1,
+                    maximum_items: ::mfm_values::MAX_ARRAY_ITEMS as u32,
+                    ordering: ::mfm_values::SequenceOrdering::Preserved,
+                    unique: false,
+                }))
+            } else {
+                Ok(quote!(::mfm_values::SchemaShape::NonEmptyVec(Box::new(#shape))))
+            }
         }
         "BTreeMap" => {
             let (key, value) = two_generic_types(segment, "BTreeMap")?;
@@ -422,22 +611,49 @@ fn shape_tokens_for_path(
                 ));
             }
             let value_shape = shape_tokens(value, kind)?;
-            Ok(quote!(::mfm_values::SchemaShape::BTreeMapString {
-                value: Box::new(#value_shape)
-            }))
+            if kind == DeriveKind::PersistedContract {
+                Ok(quote!(::mfm_values::SchemaShape::BoundedStringMap {
+                    key_grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
+                    key_minimum_bytes: 0,
+                    key_maximum_bytes: ::mfm_values::MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES as u32,
+                    value: Box::new(#value_shape),
+                    minimum_entries: 0,
+                    maximum_entries: ::mfm_values::MAX_OBJECT_ENTRIES as u32,
+                }))
+            } else {
+                Ok(quote!(::mfm_values::SchemaShape::BTreeMapString {
+                    value: Box::new(#value_shape)
+                }))
+            }
         }
         _ if kind == DeriveKind::StateInput && ident.ends_with("Input") => {
             let ty = quote!(#type_path);
             Ok(quote!({
                 let descriptor = <#ty as ::mfm_values::StateInput>::input_schema_descriptor()?;
-                descriptor.identity.shape
+                descriptor.identity.canonical_json_shape()?.clone()
             }))
+        }
+        _ if kind == DeriveKind::PersistedContract => {
+            // A nested persisted owner declares its own shape; the outer
+            // contract embeds it so one type never restates another's fields.
+            let ty = quote!(#type_path);
+            Ok(quote!(
+                <#ty as ::mfm_values::PersistedSchema>::schema_shape()?
+            ))
         }
         _ => {
             let ty = quote!(#type_path);
             Ok(quote!(::mfm_values::SchemaShape::inline_value::<#ty>()?))
         }
     }
+}
+
+fn bounded_persisted_string() -> proc_macro2::TokenStream {
+    quote!(::mfm_values::SchemaShape::BoundedString {
+        minimum_bytes: 0,
+        maximum_bytes: ::mfm_values::MAX_STRING_UTF8_BYTES as u32,
+        grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
+    })
 }
 
 fn signed_integer(bits: u16) -> proc_macro2::TokenStream {
@@ -450,4 +666,46 @@ fn unsigned_integer(bits: u16) -> proc_macro2::TokenStream {
 
 fn is_string_type(ty: &Type) -> bool {
     matches!(ty, Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "String"))
+}
+
+/// Maps a checked identity type to its bounded-string shape and grammar.
+///
+/// The grammar is enforced by the checked Rust owner; the descriptor only names
+/// it, so a persisted contract never restates an identity's regular expression.
+fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
+    let grammar_and_bound = match ident {
+        "ContentRef" => {
+            return Some(quote!(::mfm_values::SchemaShape::content_ref()?));
+        }
+        "ContentDigest" => (quote!(ContentDigest), 128_u32),
+        "SchemaId" => (quote!(SchemaId), 512),
+        "SemanticTypeId" => (quote!(SemanticTypeId), 512),
+        "SemanticDigest" => (quote!(SemanticDigest), 128),
+        "RunId" => (quote!(RunId), 128),
+        "OccurrenceId" => (quote!(OccurrenceId), 128),
+        "SemanticCallId" => (quote!(SemanticCallId), 128),
+        "FragmentBoundaryId" => (quote!(FragmentBoundaryId), 128),
+        "FailurePlanId" => (quote!(FailurePlanId), 128),
+        "AccessAttemptId" => (quote!(AccessAttemptId), 128),
+        "ArtifactId" => (quote!(ArtifactId), 128),
+        "JournalRecordHash"
+        | "JournalCommitDigest"
+        | "RunSemanticStateDigest"
+        | "FactContentIdentityDigest"
+        | "FactLogicalIdentityDigest"
+        | "FactQueryDigest"
+        | "RequestDigest" => (quote!(SemanticDigest), 128),
+        "StableId" | "AppendRequestId" => (quote!(StableId), 256),
+        "StoreEpoch" => (quote!(CanonicalUnsignedText), 20),
+        "StoreScopeId" => (quote!(StoreScopeId), 64),
+        "TenantScopeId" => (quote!(TenantScopeId), 64),
+        "EntryPointId" => (quote!(EntryPointId), 256),
+        "InvocationIdentity" => (quote!(UuidV4), 64),
+        _ => return None,
+    };
+    let (grammar, maximum_bytes) = grammar_and_bound;
+    Some(quote!(::mfm_values::SchemaShape::identity_string(
+        ::mfm_values::StringGrammar::#grammar,
+        #maximum_bytes
+    )))
 }

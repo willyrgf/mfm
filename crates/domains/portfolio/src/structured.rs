@@ -18,6 +18,7 @@ use mfm_program_derive::MfmValue;
 use mfm_spec::structured::{
     LaneOutcome, ProposedStateOutcome, SecretFreeImplementationDescriptor, StructuredComponentKind,
 };
+use mfm_values::CanonicalJsonPersistedSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{assemble_structured_public_outputs, validate_structured_snapshot_selection};
@@ -480,7 +481,7 @@ where
     registry.register_state::<S>(
         SecretFreeImplementationDescriptor {
             component_kind: StructuredComponentKind::State,
-            semantic_contract_ref: contract.state_contract_ref,
+            semantic_contract_ref: contract.content_ref().map_err(certification_error)?,
             implementation_id: stable(format!(
                 "mfm.portfolio.implementation/{}",
                 S::semantic_state_id()

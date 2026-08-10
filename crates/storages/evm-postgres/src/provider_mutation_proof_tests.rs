@@ -18,16 +18,48 @@ use mfm_evm::{
     ExecutionDisposition, ObservedPendingNonceFloor, PriorEffectDisposition,
     PriorResourceDisposition, QualifiedPendingNonceFloor, ReplayExclusionDisposition,
     ReserveEvmNonceRequest, ReservedWalletNonce, TerminalWitnesses, TransactionNonce,
-    UnsignedWalletCandidate, WalletNonceDomainActivationAttestation,
+    UnsignedWalletCandidate, WalletNonceDomain, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStoreIncarnation,
 };
 use mfm_ids::{StableId, TenantScopeId};
-use mfm_journal::structured::{domain_content_digest, LexicalValueRef, TypedValueRef};
+use mfm_journal::structured::{LexicalValueRef, TypedValueRef};
 use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 
 const SIGNING_SEED: [u8; 32] = [0x42; 32];
 const WRONG_SIGNING_SEED: [u8; 32] = [0x24; 32];
+const FIXTURE_SENDER_INVENTORY_DOMAIN: &[u8] = b"mfm.evm.fixture-sender-path-inventory.v1\0";
+const PROVIDER_ASSERTION_PAYLOAD_DOMAIN: &[u8] =
+    b"mfm.wallet-authority-provider.assertion-payload.v1\0";
+
+fn fixture_sender_inventory_digest(
+    nonce_domain: &WalletNonceDomain,
+    sender: Address,
+) -> mfm_ids::ContentDigest {
+    let canonical = mfm_journal::structured::canonical_json(&(nonce_domain, sender))
+        .expect("sender inventory preimage");
+    let mut preimage = FIXTURE_SENDER_INVENTORY_DOMAIN.to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    mfm_ids::ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    )
+}
+
+fn provider_mutation_payload_digest(
+    context: &ProviderTargetContext,
+    operation_key: &str,
+    mutation: &ProviderMutation,
+) -> mfm_ids::ContentDigest {
+    let canonical = mfm_journal::structured::canonical_json(&(context, operation_key, mutation))
+        .expect("provider mutation payload preimage");
+    let mut preimage = PROVIDER_ASSERTION_PAYLOAD_DOMAIN.to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    mfm_ids::ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    )
+}
 
 struct CompletionProofFixture {
     mutation: ProviderMutation,
@@ -63,11 +95,7 @@ fn completion_fixture() -> CompletionProofFixture {
             .expect("route content reference"),
     )
     .expect("route generation");
-    let sender_inventory = domain_content_digest(
-        "mfm.evm.fixture-sender-path-inventory.v1",
-        &(nonce_domain.clone(), sender),
-    )
-    .expect("sender inventory digest");
+    let sender_inventory = fixture_sender_inventory_digest(&nonce_domain, sender);
     let activation_record = WalletNonceDomainActivationRecord {
             activation_contract_ref: common_ref.clone(),
             qualified_activation_registry_lineage_ref: common_ref.clone(),
@@ -186,14 +214,7 @@ fn completion_fixture() -> CompletionProofFixture {
         reservation_key: reservation_key.clone(),
         qualified_floor: qualified_floor.clone(),
     };
-    let observed_floor_ref = domain_content_digest(
-        "mfm.evm.wallet-observed-floor-provenance.v1",
-        &(&reserve_request.qualified_floor, &state_input),
-    )
-    .expect("observed-floor digest")
-    .as_str()
-    .to_owned();
-    let mut reservation = ReservedWalletNonce {
+    let reservation = ReservedWalletNonce {
         nonce_domain: nonce_domain.clone(),
         domain_activation_record_ref: activation.activation_record_ref.clone(),
         nonce: 0,
@@ -201,23 +222,8 @@ fn completion_fixture() -> CompletionProofFixture {
         submission_intent_id: submission_intent_id.clone(),
         transaction_intent_digest: intent.digest().to_owned(),
         candidate_family_ref: candidate_family.digest().to_owned(),
-        observed_floor_ref,
         resource_lineage_ref: common_ref.clone(),
-        reservation_evidence_ref: common_ref.clone(),
     };
-    let reservation_evidence = domain_content_digest(
-        "mfm.evm.wallet-reservation-evidence.v1",
-        &(
-            &reserve_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-            reservation.nonce,
-        ),
-    )
-    .expect("reservation evidence digest");
-    reservation.reservation_evidence_ref = common_ref
-        .with_content_digest(reservation_evidence)
-        .expect("reservation evidence reference");
 
     let unsigned_envelope = intent
         .unsigned_candidate(reservation.nonce, &candidate_family.candidates()[0])
@@ -252,21 +258,9 @@ fn completion_fixture() -> CompletionProofFixture {
         activation_permit: derive_exact_candidate_activation_permit(&reservation, &[], 0, 0)
             .expect("initial activation permit"),
     };
-    let activation_evidence = domain_content_digest(
-        "mfm.evm.wallet-candidate-activation-evidence.v1",
-        &(
-            &activation_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-        ),
-    )
-    .expect("activation evidence digest");
-    let activation_evidence_ref = common_ref
-        .with_content_digest(activation_evidence)
-        .expect("activation evidence reference");
     let active_candidate = ActiveWalletCandidate {
         attested_candidate: attested,
-        activation_evidence_ref: activation_evidence_ref.clone(),
+        candidate_operation_key: activation_request.candidate_operation_key.clone(),
         provider_activation_attestation: "fixture-provider-attestation".to_owned(),
     };
     let transaction_hash = active_candidate.attested_candidate.transaction_hash.clone();
@@ -279,7 +273,6 @@ fn completion_fixture() -> CompletionProofFixture {
         transaction_intent_digest: reservation.transaction_intent_digest.clone(),
         nonce: reservation.nonce,
         winning_candidate_ordinal: 0,
-        winning_activation_evidence_ref: activation_evidence_ref,
         transaction_hash: transaction_hash.clone(),
         inclusion_block_number: "10".to_owned(),
         inclusion_block_hash: inclusion_block_hash.clone(),
@@ -324,18 +317,6 @@ fn completion_fixture() -> CompletionProofFixture {
         canonical_terminal_outcome,
         terminal_witnesses,
     };
-    let completion_evidence = domain_content_digest(
-        "mfm.evm.wallet-completion-evidence.v1",
-        &(
-            &completion_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-        ),
-    )
-    .expect("completion evidence digest");
-    let completion_evidence_ref = common_ref
-        .with_content_digest(completion_evidence)
-        .expect("completion evidence reference");
     let completion = CompletedWalletNonce::with_recovery_closure(
         completion_request.nonce_domain.clone(),
         completion_request.current_reservation.nonce,
@@ -347,11 +328,6 @@ fn completion_fixture() -> CompletionProofFixture {
         completion_request.canonical_terminal_outcome.clone(),
         completion_request.terminal_witnesses.clone(),
         vec![active_candidate],
-        canonical_wallet_reference(&completion_request.terminal_witnesses)
-            .expect("terminal witness reference")
-            .content_digest()
-            .to_owned(),
-        completion_evidence_ref,
         "fixture-provider-attestation".to_owned(),
         reservation,
         intent,
@@ -423,11 +399,7 @@ fn persisted_proof(
     mutation: &ProviderMutation,
     seed: &[u8; 32],
 ) -> String {
-    let payload_digest = domain_content_digest(
-        "mfm.wallet-authority-provider.assertion-payload.v1",
-        &(context, operation_key, mutation),
-    )
-    .expect("provider payload digest");
+    let payload_digest = provider_mutation_payload_digest(context, operation_key, mutation);
     let challenge = [0x33_u8; 32];
     let mut signed = Vec::with_capacity(
         ASSERTION_DOMAIN.len()
@@ -573,6 +545,21 @@ fn detached_audit_mutation_from_closure(
     })
 }
 
+fn detached_audit_payload_digest(
+    context: &DetachedAuditContext,
+    operation_key: &str,
+    mutation: &DetachedAuditMutation,
+) -> mfm_ids::ContentDigest {
+    let canonical = mfm_journal::structured::canonical_json(&(context, operation_key, mutation))
+        .expect("detached audit payload preimage");
+    let mut preimage = PROVIDER_ASSERTION_PAYLOAD_DOMAIN.to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    mfm_ids::ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    )
+}
+
 fn independently_verify_detached_completion(
     recovery_closure: &str,
     proof_value: &str,
@@ -615,11 +602,8 @@ fn independently_verify_detached_completion(
         .map_err(|_| "store incarnation")?;
 
     let mutation = detached_audit_mutation_from_closure(recovery_closure)?;
-    let payload_digest = domain_content_digest(
-        "mfm.wallet-authority-provider.assertion-payload.v1",
-        &(&proof.context, &proof.operation_key, &mutation),
-    )
-    .map_err(|_| "payload digest")?;
+    let payload_digest =
+        detached_audit_payload_digest(&proof.context, &proof.operation_key, &mutation);
     if proof.payload_digest != payload_digest.as_str() {
         return Err("payload binding");
     }

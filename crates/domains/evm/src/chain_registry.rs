@@ -671,6 +671,24 @@ impl EvmRoutingCatalogDescriptor {
     }
 }
 
+impl mfm_values::PersistedObjectPayload for EvmRoutingCatalogDescriptor {
+    fn object_type() -> mfm_values::Result<mfm_ids::StableId> {
+        mfm_ids::StableId::new("structured.admission_routing_policy")
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
+
+impl mfm_values::PersistedSchema for EvmRoutingCatalogDescriptor {
+    fn schema_identity() -> mfm_values::Result<mfm_values::SchemaIdentity> {
+        <Self as mfm_values::MfmValue>::schema_descriptor().map(|descriptor| descriptor.identity)
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        EvmRoutingCatalogDescriptor::validate(self)
+            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RoutingAuthorityReferenceKind {
     RegistryLineage,

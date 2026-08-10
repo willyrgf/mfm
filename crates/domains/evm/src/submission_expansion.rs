@@ -761,3 +761,4 @@ fn label(prefix: &str, suffix: impl ToString) -> mfm_program::Result<StableId> {
 fn stable(value: &str) -> mfm_program::Result<StableId> {
     StableId::new(value).map_err(|error| mfm_program::ProgramError::Authoring(error.to_string()))
 }
+use mfm_values::CanonicalJsonPersistedSchema;

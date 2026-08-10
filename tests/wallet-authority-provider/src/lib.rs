@@ -39,10 +39,14 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Notify;
 use zeroize::{Zeroize, Zeroizing};
 
-const PROTOCOL_VERSION: u16 = 3;
+const PROTOCOL_VERSION: u16 = 4;
 const MAX_MESSAGE_BYTES: usize = 1_048_576;
 const AUTHENTICATION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.authentication.v1\0";
 const ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
+const ASSERTION_PAYLOAD_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion-payload.v1\0";
+const SQL_PREFIX_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.sql-prefix.v1\0";
+const REGISTRY_ISSUANCE_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.registry-issuance.v1\0";
+const REGISTRY_ISSUANCE_SCHEMA: &[u8] = br#"{"fields":["provider_id","record_ref"],"name":"mfm.wallet-authority-provider.registry-issuance","version":"1"}"#;
 const LEASE_HOLD_FAULT_DURATION: Duration = Duration::from_secs(2);
 const DEPLOYMENT_ASSEMBLY_LEASE_TTL: Duration = Duration::from_secs(30);
 const MAX_DEPLOYMENT_ASSEMBLY_LEASES: usize = 64;
@@ -2953,12 +2957,7 @@ struct WalletSqlPrefix {
 
 impl WalletSqlPrefix {
     fn digest(&self) -> Result<String, ProviderTestError> {
-        mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.sql-prefix.v1",
-            self,
-        )
-        .map(|digest| digest.as_str().to_owned())
-        .map_err(|_| ProviderTestError::Invalid)
+        sql_prefix_digest(self).map(|digest| digest.as_str().to_owned())
     }
 }
 
@@ -3372,18 +3371,12 @@ fn provider_issuance_reference(
     provider_id: &str,
     record_ref: &EvmWalletReference,
 ) -> Result<EvmWalletReference, ProviderTestError> {
-    let digest = mfm_journal::structured::domain_content_digest(
-        "mfm.wallet-authority-provider.registry-issuance.v1",
-        &(provider_id, record_ref),
-    )
-    .map_err(|_| ProviderTestError::Invalid)?;
+    let digest = registry_issuance_digest(provider_id, record_ref)?;
     let schema = SchemaId::new(
         "mfm.wallet-authority-provider.registry-issuance",
         "1",
         DigestAlgorithm::Sha256JcsV1,
-        mfm_canonical::sha256_digest_bytes(
-            b"mfm.structured-schema.v1:mfm.wallet-authority-provider.registry-issuance:1",
-        ),
+        mfm_canonical::sha256_digest_bytes(REGISTRY_ISSUANCE_SCHEMA),
     )
     .map_err(|_| ProviderTestError::Invalid)?;
     let reference = ContentRef::new(schema, digest).map_err(|_| ProviderTestError::Invalid)?;
@@ -3446,11 +3439,7 @@ impl ServerChannel {
         kind: &str,
         payload: &T,
     ) -> Result<String, ProviderTestError> {
-        let digest = mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.assertion-payload.v1",
-            payload,
-        )
-        .map_err(|_| ProviderTestError::Invalid)?;
+        let digest = assertion_payload_digest(payload)?;
         let mut signed = Vec::new();
         signed.extend_from_slice(ASSERTION_DOMAIN);
         signed.extend_from_slice(&self.authentication_challenge);
@@ -3467,11 +3456,7 @@ impl ServerChannel {
         mutation: &ProviderMutation,
         signature: &str,
     ) -> Result<String, ProviderTestError> {
-        let payload_digest = mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.assertion-payload.v1",
-            &(context, operation_key, mutation),
-        )
-        .map_err(|_| ProviderTestError::Invalid)?;
+        let payload_digest = assertion_payload_digest(&(context, operation_key, mutation))?;
         let proof = PersistedMutationProof {
             provider_id: provider_id.to_owned(),
             challenge: hex::encode(self.authentication_challenge),
@@ -3586,6 +3571,42 @@ fn canonical_json<T: Serialize>(value: &T) -> Result<String, ProviderTestError> 
     mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json)
         .map(|canonical| canonical.as_str().to_owned())
         .map_err(|_| ProviderTestError::Invalid)
+}
+
+fn assertion_payload_digest<T: Serialize>(value: &T) -> Result<ContentDigest, ProviderTestError> {
+    let canonical = canonical_json(value)?;
+    let mut preimage = Vec::with_capacity(ASSERTION_PAYLOAD_DOMAIN.len() + canonical.len());
+    preimage.extend_from_slice(ASSERTION_PAYLOAD_DOMAIN);
+    preimage.extend_from_slice(canonical.as_bytes());
+    Ok(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    ))
+}
+
+fn sql_prefix_digest(value: &WalletSqlPrefix) -> Result<ContentDigest, ProviderTestError> {
+    let canonical = canonical_json(value)?;
+    let mut preimage = Vec::with_capacity(SQL_PREFIX_DOMAIN.len() + canonical.len());
+    preimage.extend_from_slice(SQL_PREFIX_DOMAIN);
+    preimage.extend_from_slice(canonical.as_bytes());
+    Ok(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    ))
+}
+
+fn registry_issuance_digest(
+    provider_id: &str,
+    record_ref: &EvmWalletReference,
+) -> Result<ContentDigest, ProviderTestError> {
+    let canonical = canonical_json(&(provider_id, record_ref))?;
+    let mut preimage = Vec::with_capacity(REGISTRY_ISSUANCE_DOMAIN.len() + canonical.len());
+    preimage.extend_from_slice(REGISTRY_ISSUANCE_DOMAIN);
+    preimage.extend_from_slice(canonical.as_bytes());
+    Ok(ContentDigest::from_digest(
+        DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    ))
 }
 
 #[cfg(test)]

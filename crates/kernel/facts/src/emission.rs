@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 
 use mfm_canonical::{sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, SemanticTypeId, StableId};
+use mfm_values::MediaType;
 use serde::Serialize;
 
 use crate::{FactError, Result, MAX_FACT_EMISSIONS};
@@ -18,7 +19,7 @@ pub struct ProposedFactValue {
     content_ref: ContentRef,
     semantic_type_id: SemanticTypeId,
     role: StableId,
-    media_type: String,
+    media_type: MediaType,
     evidence_contract_ref: ContentRef,
     canonical: PlainCanonicalJsonBytes,
 }
@@ -33,7 +34,7 @@ impl Serialize for ProposedFactValue {
             content_ref: &'a ContentRef,
             semantic_type_id: &'a SemanticTypeId,
             role: &'a StableId,
-            media_type: &'a str,
+            media_type: &'a MediaType,
             evidence_contract_ref: &'a ContentRef,
             canonical_json: &'a str,
         }
@@ -55,19 +56,13 @@ impl ProposedFactValue {
         schema_id: SchemaId,
         semantic_type_id: SemanticTypeId,
         role: StableId,
-        media_type: impl Into<String>,
+        media_type: MediaType,
         evidence_contract_ref: ContentRef,
         canonical: PlainCanonicalJsonBytes,
     ) -> Result<Self> {
         if canonical.as_bytes().len() > MAX_CANONICAL_VALUE_BYTES {
             return Err(FactError::Emission(
-                "canonical fact value exceeds the annex-wide byte bound",
-            ));
-        }
-        let media_type = media_type.into();
-        if media_type.is_empty() || media_type.len() > 255 || !media_type.is_ascii() {
-            return Err(FactError::Emission(
-                "fact value media type must be nonempty bounded ASCII",
+                "canonical fact value exceeds the canonical JSON byte bound",
             ));
         }
         let digest = ContentDigest::from_digest(
@@ -106,7 +101,7 @@ impl ProposedFactValue {
     }
 
     /// Returns the reviewed media type.
-    pub fn media_type(&self) -> &str {
+    pub const fn media_type(&self) -> &MediaType {
         &self.media_type
     }
 
@@ -136,7 +131,7 @@ struct ProposedFactValueIdentity {
     content_ref: ContentRef,
     semantic_type_id: SemanticTypeId,
     role: StableId,
-    media_type: String,
+    media_type: MediaType,
     evidence_contract_ref: ContentRef,
 }
 

@@ -9,10 +9,8 @@ use mfm_spec::structured::{StructuralPath, StructuredExecutionKind};
 pub enum StateLeaf {
     /// No callback or access has yet committed for this occurrence.
     Ready,
-    /// One exact access authorization is outstanding.
+    /// One exact Effect access authorization is outstanding.
     Authorized {
-        /// Read or Effect access kind.
-        access_kind: mfm_journal::structured::AccessKind,
         /// Immutable attempt identity.
         access_attempt_id: AccessAttemptId,
     },
@@ -39,6 +37,23 @@ pub enum StateLeaf {
     BlockedIntegrity {
         /// Exact integrity observation.
         observation_ref: RecordRef,
+    },
+    /// A crashed Effect attempt on an absorbing capability with budget
+    /// remaining. Runtime must commit its closing observation before any
+    /// re-assertion. Authorizes nothing.
+    EntryClosable {
+        /// Immutable identity of the attempt whose invoker authority is lost.
+        access_attempt_id: AccessAttemptId,
+    },
+    /// The parked attempt is resolved and a repeat is safe. The next ordinal
+    /// re-asserts the byte-identical committed request.
+    ///
+    /// One leaf serves both access kinds: it carries only an ordinal, and the
+    /// access kind is in scope wherever it is read. What differs between the
+    /// kinds is which rule admits the successor, and that lives in one place.
+    Reassertable {
+        /// Next attempt ordinal.
+        next_attempt_ordinal: u64,
     },
 }
 
@@ -105,15 +120,32 @@ pub enum ProgramCursor {
     },
 }
 
+/// Exact identity of the occurrence whose unresolved Effect entry blocks a run.
+///
+/// Every field is already exposed by the access-audit projection, so carrying
+/// the subject past the barrier is redaction-safe by construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntrySubject {
+    /// Exact normalized occurrence identity.
+    pub occurrence_id: OccurrenceId,
+    /// Canonical normalized occurrence path reference.
+    pub occurrence_path_ref: ContentRef,
+    /// Immutable identity of the attempt whose entry is unresolved.
+    pub access_attempt_id: AccessAttemptId,
+    /// Exact semantic Effect capability contract.
+    pub capability_contract_ref: ContentRef,
+}
+
 /// Closed action frontier derived only from the verified cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructuredFrontier {
     /// Declaration-ordered actionable state paths.
     Actions(Vec<ActionableState>),
-    /// Every unresolved action is an already-authorized Read.
-    WaitingReads,
-    /// Possible Effect entry blocks all later work.
-    PossibleEntry,
+    /// Possible Effect entry of one exact occurrence blocks all later work.
+    ///
+    /// The subject is boxed: it is four identities wide and this frontier is
+    /// returned through the recursive fan-out walk.
+    PossibleEntry(Box<EffectEntrySubject>),
     /// Committed integrity evidence blocks all later work.
     BlockedIntegrity,
     /// Root outcome is closed.

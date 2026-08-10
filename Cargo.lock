@@ -2500,7 +2500,6 @@ dependencies = [
 name = "mfm-ids"
 version = "0.1.0"
 dependencies = [
- "mfm-canonical",
  "serde",
  "serde_json",
  "thiserror",
@@ -2557,6 +2556,8 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "mfm-program-derive",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2661,6 +2662,7 @@ dependencies = [
  "mfm-journal",
  "mfm-spec",
  "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",
@@ -2718,6 +2720,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-capabilities",
  "mfm-ids",
+ "mfm-values",
  "serde",
  "thiserror",
  "tokio",
@@ -2731,6 +2734,7 @@ dependencies = [
  "mfm-canonical",
  "mfm-facts",
  "mfm-ids",
+ "mfm-program-derive",
  "mfm-values",
  "serde",
  "serde_json",

@@ -879,6 +879,60 @@ pub struct GenerationGuardedSignerDescriptor {
     reference: ContentRef,
 }
 
+/// Returns the one owner-derived signer-descriptor schema identity.
+///
+/// The descriptor is a retained public surface, so its identity is derived from
+/// its declared shape rather than a name seed.
+fn generation_guarded_signer_descriptor_schema_id() -> Result<SchemaId> {
+    use mfm_values::{
+        FieldDescriptor, LiteralValue, SchemaIdentity, SchemaKind, SchemaShape, StringGrammar,
+    };
+
+    let reference = SchemaShape::content_ref().map_err(|_| invalid_public_descriptor())?;
+    let text = |maximum_bytes: u32| SchemaShape::BoundedString {
+        minimum_bytes: 1,
+        maximum_bytes,
+        grammar: StringGrammar::UnicodeScalarText,
+    };
+    let public_identity = SchemaShape::named_struct(vec![
+        FieldDescriptor::required("account_id", SchemaShape::Option(Box::new(text(256)))),
+        FieldDescriptor::required(
+            "public_key",
+            SchemaShape::Option(Box::new(SchemaShape::BoundedBytes {
+                minimum_decoded_bytes: 1,
+                maximum_decoded_bytes: 1024,
+            })),
+        ),
+    ])
+    .map_err(|_| invalid_public_descriptor())?;
+    SchemaIdentity::new(
+        SchemaKind::PersistedContract,
+        None,
+        GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME,
+        mfm_ids::SchemaVersion::new("1").map_err(|_| invalid_public_descriptor())?,
+        SchemaShape::named_struct(vec![
+            FieldDescriptor::required("algorithm", text(128)),
+            FieldDescriptor::required("direct_sign_exclusion_ref", reference.clone()),
+            FieldDescriptor::required("durable_generation_ref", reference.clone()),
+            FieldDescriptor::required("expected_public_identity", public_identity),
+            FieldDescriptor::required("fence_attestation_ref", reference),
+            FieldDescriptor::required("profile", text(128)),
+            FieldDescriptor::required("provider_implementation_id", text(256)),
+            FieldDescriptor::required("signer_ref", text(256)),
+            FieldDescriptor::required(
+                "version",
+                SchemaShape::Literal(LiteralValue::String(
+                    GENERATION_GUARDED_SIGNER_DESCRIPTOR_VERSION.to_owned(),
+                )),
+            ),
+        ])
+        .map_err(|_| invalid_public_descriptor())?,
+    )
+    .map_err(|_| invalid_public_descriptor())?
+    .schema_id()
+    .map_err(|_| invalid_public_descriptor())
+}
+
 impl GenerationGuardedSignerDescriptor {
     fn from_verified(binding: &VerifiedGenerationGuardedSignerBinding) -> Result<Self> {
         let identity = binding.expected_public_identity();
@@ -933,15 +987,7 @@ impl GenerationGuardedSignerDescriptor {
             ])
             .map_err(|_| invalid_public_descriptor())?,
         );
-        let schema_id = SchemaId::new(
-            GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(
-                format!("schema:{GENERATION_GUARDED_SIGNER_DESCRIPTOR_SCHEMA_NAME}:1").as_bytes(),
-            ),
-        )
-        .map_err(|_| invalid_public_descriptor())?;
+        let schema_id = generation_guarded_signer_descriptor_schema_id()?;
         let reference = ContentRef::new(
             schema_id,
             ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),

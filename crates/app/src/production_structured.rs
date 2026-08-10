@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use alloy_primitives::Address;
 use async_trait::async_trait;
+use mfm_canonical::sha256_digest_bytes;
 use mfm_certify::structured::{AdmissionCertificationRegistry, ProgramRegistryBuilder};
 use mfm_ids::{
-    AppendRequestId, ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId,
-    TenantScopeId,
+    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, EntryPointId, InvocationIdentity,
+    RunId, StableId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, AccessKind, HistoryObject, ADMISSION_CONFIGURATION_OBJECT_TYPE,
@@ -22,7 +23,7 @@ use mfm_runtime::structured::{
 use mfm_spec::structured::{
     SecretFreeExecutableIdentity, SecretFreeQualificationArtifact, StructuredExpansionProfile,
 };
-use mfm_spec::{EntryPointContract, PlanningProfile};
+use mfm_spec::{PlanningProfile, PublishedEntryPoint};
 use mfm_storage_postgres::{
     open_structured_authoritative_application, PostgresApplicationSessions,
     PostgresConfigurationHistoryBackend, PostgresStructuredHistoryBackend,
@@ -35,7 +36,7 @@ use mfm_store::structured::{
     ReplayRunReader, StructuredAdmissionMaterial, StructuredStoreError, TraceRunReader,
     VerifiedConfiguredValue,
 };
-use mfm_values::{MfmConfig, MfmValue, PublicOutputDescriptor};
+use mfm_values::{CanonicalJsonPersistedSchema, MfmConfig, MfmValue, PublicOutputDescriptor};
 use tokio::io::AsyncWriteExt;
 
 use crate::application::{
@@ -46,10 +47,10 @@ use crate::stream_spool::WritableSpool;
 use crate::{
     complete_access_audit_page, complete_transition_trace_page, decode_access_audit_page_request,
     decode_transition_trace_page_request, AccessAuditPage, AdmissionStatus, AdmitRunRequest,
-    AdmitRunResponse, Application, DriveResponse, EntryPointContract as PublicEntryPointContract,
-    ErrorClass, ExportRequest, ExportedRun, PageRequest, PublicError, PublicRunView,
-    PublicRuntimeFaultAttribution, PublicRuntimeFaultPhase, PublicRuntimeFaultSubject,
-    ReplayRequest, ReplayResponse, RunAccessPolicy, TransitionTracePage,
+    AdmitRunResponse, Application, DriveResponse, ErrorClass, ExportRequest, ExportedRun,
+    PageRequest, PublicError, PublicRunView, PublicRuntimeFaultAttribution,
+    PublicRuntimeFaultPhase, PublicRuntimeFaultSubject, ReplayRequest, ReplayResponse,
+    RunAccessPolicy, TransitionTracePage,
 };
 
 const EXECUTABLE_ID: &str = "mfm.application/structured-runtime";
@@ -57,7 +58,6 @@ const QUALIFICATION_ID: &str = "mfm.application/structured-production-qualificat
 const PORTFOLIO_SCOPE_ID: &str = "mfm.portfolio/structured-snapshot-scope";
 const BALANCE_SCOPE_ID: &str = "mfm.evm/structured-balance-scope";
 const SUBMISSION_SCOPE_ID: &str = "mfm.evm/structured-submission-scope";
-const CONFIGURATION_REVISION_SCHEMA: &str = "mfm.structured-configuration-revision.v1";
 
 type HistoryBackend = PostgresStructuredHistoryBackend;
 type ConfigReader = ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>;
@@ -163,9 +163,9 @@ pub(super) async fn connect(
 }
 
 struct RegistryAssembly {
-    registry: mfm_certify::structured::QualifiedProgramRegistry,
+    registry: mfm_certify::structured::CertifiedProgramRegistry,
     certifier: AdmissionCertificationRegistry,
-    entry_points: Vec<PublicEntryPointContract>,
+    entry_points: Vec<PublishedEntryPoint>,
     broadcast_resource_ref: ContentRef,
     physical_binding_purposes: Vec<mfm_evm_live::EvmPhysicalBindingPurpose>,
 }
@@ -288,7 +288,7 @@ fn assemble_registry(
         .map_err(|_| registry_invalid())
     };
     let entry_points = vec![
-        EntryPointContract::new(
+        PublishedEntryPoint::new(
             EntryPointId::new(mfm_portfolio::PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID)
                 .map_err(|_| registry_invalid())?,
             portfolio_operation,
@@ -299,7 +299,7 @@ fn assemble_registry(
                 .map_err(|_| registry_invalid())?,
         )
         .map_err(|_| registry_invalid())?,
-        EntryPointContract::new(
+        PublishedEntryPoint::new(
             EntryPointId::new(mfm_evm::EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
                 .map_err(|_| registry_invalid())?,
             submission_operation,
@@ -377,7 +377,7 @@ impl ApplicationBackend for ProductionBackend {
     async fn admit_run(
         &self,
         call: &AuthorizedAdmissionCall,
-        entry_point: PublicEntryPointContract,
+        entry_point: PublishedEntryPoint,
         request: AdmitRunRequest,
     ) -> Result<AdmitRunResponse, PublicError> {
         let operation_id = entry_point.entry_point_operation_id().clone();
@@ -718,14 +718,21 @@ impl ProductionBackend {
         configured: &VerifiedConfiguredValue,
         stable_resource_refs: Vec<ContentRef>,
     ) -> Result<StructuredAdmissionMaterial, PublicError> {
-        let configuration = HistoryObject::new(
-            stable(ADMISSION_CONFIGURATION_OBJECT_TYPE)?,
-            fixed_schema_id(CONFIGURATION_REVISION_SCHEMA)?,
-            canonical_json(configured.revision())
-                .map_err(|_| configured_value_invalid())?
-                .as_str(),
-        )
-        .map_err(|_| configured_value_invalid())?;
+        let canonical =
+            canonical_json(configured.revision()).map_err(|_| configured_value_invalid())?;
+        let configuration = HistoryObject {
+            object_type: stable(ADMISSION_CONFIGURATION_OBJECT_TYPE)?,
+            content_ref: ContentRef::new(
+                mfm_store::structured::ConfigurationRevision::schema_id()
+                    .map_err(|_| configured_value_invalid())?,
+                ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(canonical.as_bytes()),
+                ),
+            )
+            .map_err(|_| configured_value_invalid())?,
+            canonical_json: canonical.as_str().to_owned(),
+        };
         StructuredAdmissionMaterial::new(
             configuration,
             self.context_manifest.clone(),
@@ -1133,7 +1140,7 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
         }
         if context.stable_resource_lineage_contract_ref == &self.broadcast_resource_ref {
             let claim: mfm_evm::BroadcastLineageHead = evidence
-                .decode()
+                .decode_mfm_value()
                 .map_err(|_| StructuredStoreError::Certification)?;
             if claim.validate().is_ok()
                 && claim.public_lineage_head_ref.to_content_ref().ok().as_ref()
@@ -1143,7 +1150,7 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
             }
         } else if context.stable_resource_lineage_contract_ref == &self.wallet_resource_ref {
             let claim: mfm_evm::WalletNonceStoreLineageHead = evidence
-                .decode()
+                .decode_mfm_value()
                 .map_err(|_| StructuredStoreError::Certification)?;
             if claim.validate().is_ok()
                 && claim.public_lineage_head_ref.to_content_ref().ok().as_ref()
@@ -1165,15 +1172,13 @@ async fn write_structured_export(
         request.kind(),
     )
     .map_err(|_| export_stream_io_error())?;
-    let bytes = export
-        .to_canonical_bytes()
-        .map_err(|_| export_stream_io_error())?;
-    let content_ref = export.content_ref().map_err(|_| export_stream_io_error())?;
+    let encoded = export.encode().map_err(|_| export_stream_io_error())?;
+    let content_ref = encoded.content_ref().clone();
     let mut spool = WritableSpool::create()
         .await
         .map_err(|_| export_stream_io_error())?;
     spool
-        .write_all(&bytes)
+        .write_all(encoded.as_bytes())
         .await
         .map_err(|_| export_stream_io_error())?;
     let spool = spool.finish().await.map_err(|_| export_stream_io_error())?;
@@ -1185,14 +1190,6 @@ fn admission_append_request_id(
 ) -> Result<AppendRequestId, PublicError> {
     AppendRequestId::new(format!("admission/{}", invocation_identity.as_str()))
         .map_err(|_| admission_invalid())
-}
-
-fn fixed_schema_id(name: &str) -> Result<SchemaId, PublicError> {
-    mfm_canonical::RecoverabilityContract::embedded()
-        .map_err(|_| registry_invalid())?
-        .schema_id(name)
-        .cloned()
-        .map_err(|_| registry_invalid())
 }
 
 fn stable(value: impl AsRef<str>) -> Result<StableId, PublicError> {
@@ -1363,6 +1360,7 @@ fn export_stream_io_error() -> PublicError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_ids::SchemaId;
     use serde::Serialize;
 
     #[test]
@@ -1539,7 +1537,7 @@ mod tests {
     }
 
     fn test_object(name: &str, discriminator: u8) -> HistoryObject {
-        HistoryObject::new(
+        test_history_object(
             StableId::new(format!("mfm.app.test/{name}")).expect("test object type"),
             SchemaId::new(
                 "mfm.app.test-object",
@@ -1550,7 +1548,6 @@ mod tests {
             .expect("test object schema"),
             format!("{{\"discriminator\":{discriminator}}}"),
         )
-        .expect("test history object")
     }
 
     fn test_encoded_object<T: Serialize>(
@@ -1560,7 +1557,7 @@ mod tests {
     ) -> HistoryObject {
         let schema_name = format!("mfm.app.test-encoded-{discriminator}");
         let canonical = canonical_json(value).expect("test canonical evidence");
-        HistoryObject::new(
+        test_history_object(
             StableId::new(format!("mfm.app.test/{name}")).expect("test object type"),
             SchemaId::new(
                 &schema_name,
@@ -1573,7 +1570,26 @@ mod tests {
             .expect("test encoded schema"),
             canonical.as_str(),
         )
-        .expect("test encoded history object")
+    }
+
+    fn test_history_object(
+        object_type: StableId,
+        schema_id: SchemaId,
+        canonical_json: impl Into<String>,
+    ) -> HistoryObject {
+        let canonical_json = canonical_json.into();
+        HistoryObject {
+            object_type,
+            content_ref: ContentRef::new(
+                schema_id,
+                ContentDigest::from_digest(
+                    DigestAlgorithm::Sha256V1,
+                    sha256_digest_bytes(canonical_json.as_bytes()),
+                ),
+            )
+            .expect("test object content reference"),
+            canonical_json,
+        }
     }
 
     #[test]

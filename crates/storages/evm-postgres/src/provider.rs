@@ -5,22 +5,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mfm_canonical::limits::{
-    MAX_PROVIDER_DEPLOYMENT_ROUTES, MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES,
-    MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
-};
 use mfm_evm::{
     canonical_wallet_reference, ActivateEvmCandidateRequest, ActiveWalletCandidate,
     CompleteEvmNonceRequest, CompletedWalletNonce, EvmRoutingCatalogDescriptor, EvmWalletReference,
     ReserveEvmNonceRequest, ReservedWalletNonce, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStoreIncarnation, WalletNonceStoreLineageHead,
-    WalletNonceStoreSuccessor,
+    WalletNonceStoreSuccessor, MAX_PROVIDER_DEPLOYMENT_ROUTES,
+    MAX_PROVIDER_FINISH_AUTHORIZATION_BYTES, MAX_PROVIDER_MESSAGE_BYTES, MAX_PROVIDER_PROOF_BYTES,
 };
 use mfm_ids::{ContentDigest, ContentRef, StableId};
-use mfm_journal::structured::{
-    HistoryObject, LexicalValueRef, ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
-};
-use mfm_values::MfmValue;
+use mfm_journal::structured::{HistoryObject, LexicalValueRef};
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{UnparsedPublicKey, ED25519};
 use serde::de::DeserializeOwned;
@@ -34,11 +28,12 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::{PostgresEvmWalletError, Result};
 use crate::support::{canonical_json, decode_canonical, reference_text};
 
-const PROTOCOL_VERSION: u16 = 3;
+const PROTOCOL_VERSION: u16 = 4;
 const MAX_MESSAGE_BYTES: usize = MAX_PROVIDER_MESSAGE_BYTES;
 const PROVIDER_IO_TIMEOUT: Duration = Duration::from_secs(15);
 const AUTHENTICATION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.authentication.v1\0";
 const ASSERTION_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion.v1\0";
+const ASSERTION_PAYLOAD_DOMAIN: &[u8] = b"mfm.wallet-authority-provider.assertion-payload.v1\0";
 const MAX_DEPLOYMENT_ROUTES: usize = MAX_PROVIDER_DEPLOYMENT_ROUTES;
 /// Raw proof budget chosen so the complete FinishDeploymentAssembly JSON
 /// envelope (hex-encoded proofs plus metadata for every admitted route) stays
@@ -409,11 +404,7 @@ impl WalletAuthorityProviderClient {
         payload: &T,
         signature_hex: &str,
     ) -> Result<()> {
-        let digest = mfm_journal::structured::domain_content_digest(
-            "mfm.wallet-authority-provider.assertion-payload.v1",
-            payload,
-        )
-        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let digest = provider_assertion_payload_digest(payload)?;
         let signature = decode_signature(signature_hex)?;
         let mut signed = Vec::with_capacity(
             ASSERTION_DOMAIN.len()
@@ -484,15 +475,7 @@ impl QualifiedEvmRoutingCatalog {
 
     /// Builds the exact routing-policy history object admitted at run start.
     pub fn routing_policy_object(&self) -> Result<HistoryObject> {
-        let object_type = StableId::new(ADMISSION_ROUTING_POLICY_OBJECT_TYPE)
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        let schema_id = EvmRoutingCatalogDescriptor::schema_id()
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        let canonical = self
-            .descriptor
-            .canonical()
-            .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
-        HistoryObject::new(object_type, schema_id, canonical.as_str())
+        HistoryObject::from_persisted(&self.descriptor)
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)
     }
 
@@ -1989,11 +1972,8 @@ fn verify_persisted_mutation_proof(
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
     validate_persisted_mutation_context(&proof.context)?;
-    let payload_digest = mfm_journal::structured::domain_content_digest(
-        "mfm.wallet-authority-provider.assertion-payload.v1",
-        &(&proof.context, &proof.operation_key, mutation),
-    )
-    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let payload_digest =
+        provider_assertion_payload_digest(&(&proof.context, &proof.operation_key, mutation))?;
     if proof.payload_digest != payload_digest.as_str() {
         return Err(PostgresEvmWalletError::InvalidAuthority);
     }
@@ -2081,11 +2061,7 @@ fn verify_channel_assertion<T: Serialize>(
     payload: &T,
     signature_hex: &str,
 ) -> Result<()> {
-    let digest = mfm_journal::structured::domain_content_digest(
-        "mfm.wallet-authority-provider.assertion-payload.v1",
-        payload,
-    )
-    .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let digest = provider_assertion_payload_digest(payload)?;
     let signature = decode_signature(signature_hex)?;
     let mut signed = Vec::with_capacity(
         ASSERTION_DOMAIN.len()
@@ -2101,6 +2077,19 @@ fn verify_channel_assertion<T: Serialize>(
         .verify(&signed, signature.as_ref())
         .map_err(|_| PostgresEvmWalletError::FenceRejected);
     verified
+}
+
+fn provider_assertion_payload_digest<T: Serialize>(payload: &T) -> Result<ContentDigest> {
+    let canonical = mfm_journal::structured::canonical_json(payload)
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+    let mut preimage =
+        Vec::with_capacity(ASSERTION_PAYLOAD_DOMAIN.len() + canonical.as_bytes().len());
+    preimage.extend_from_slice(ASSERTION_PAYLOAD_DOMAIN);
+    preimage.extend_from_slice(canonical.as_bytes());
+    Ok(ContentDigest::from_digest(
+        mfm_ids::DigestAlgorithm::Sha256V1,
+        mfm_canonical::sha256_digest_bytes(&preimage),
+    ))
 }
 
 #[cfg(test)]

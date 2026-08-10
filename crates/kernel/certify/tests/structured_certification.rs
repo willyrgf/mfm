@@ -11,7 +11,7 @@ use mfm_capabilities::{
     ReadAdapterCompletion, ReadAdapterInvoker, ReadCapabilityContract,
     ReadCapabilityImplementation, ResourceAuthorityContract, SignerContract,
 };
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId};
 use mfm_journal::structured::HistoryObject;
 use mfm_program::structured::{
     state_contract, AuthoringPolicy, CapabilityExpansion, ChildOperation, ClosedSum,
@@ -22,7 +22,7 @@ use mfm_program::structured::{
     SafeFailureNotApplicable, SafeFailureSuccessOnly, State, StateFrame, StateSettlement,
     StructuredStateCallbacks,
 };
-use mfm_program_derive::MfmValue;
+use mfm_program_derive::{MfmValue, PersistedSchema};
 use mfm_spec::structured::{
     AuthoredBlock, AuthoredDeclaration, AuthoredFailureDirective, CertifiedComponentObject,
     CertifiedFailureBoundary, CertifiedProgramComponents, ExpandedDeclaration, ExpansionBoundaryId,
@@ -31,8 +31,24 @@ use mfm_spec::structured::{
     SecretFreeImplementationManifest, SecretFreeQualificationArtifact,
     StateCapabilityAdapterSignerResourceManifest, StructuredComponentDependency,
     StructuredComponentKind, StructuredExpansionProfile, StructuredLiveComponentContract,
+    StructuredStateContract,
 };
+use mfm_values::{CanonicalJsonPersistedSchema, PersistedObjectPayload};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.fixture.read-physical-binding", version = "1")]
+struct FixturePhysicalBindingCertificate {
+    target: u8,
+}
+
+impl PersistedObjectPayload for FixturePhysicalBindingCertificate {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.fixture_read_physical_binding")
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[mfm(
@@ -973,7 +989,7 @@ impl FixtureRegistryExt for ProgramRegistryBuilder {
     ) -> mfm_certify::Result<ContentRef> {
         let semantic_contract_ref = state_contract::<S>()
             .map_err(|error| mfm_certify::CertifyError::Certification(error.to_string()))?
-            .state_contract_ref;
+            .content_ref()?;
         let descriptor = fixture_implementation_descriptor(
             self,
             StructuredComponentKind::State,
@@ -1046,6 +1062,7 @@ fn immutable_registry_certifies_and_reverifies_one_exact_program() {
         certified.reference().expect("certified reference"),
         certified
             .document()
+            .root
             .content_ref()
             .expect("document reference")
     );
@@ -1110,13 +1127,23 @@ fn one_entry_certifies_distinct_candidate_roots_inside_its_support_envelope() {
     let first = registry
         .certifier(&operation_id)
         .expect("certifier")
-        .certify(template)
+        .certify(template.clone())
         .expect("template candidate");
     let second = registry
         .certifier(&operation_id)
         .expect("certifier")
-        .certify(alternate)
+        .certify(alternate.clone())
         .expect("alternate candidate");
+    let admission = registry.admission_certification_registry();
+    let retained_template = admission
+        .certify_document(&operation_id, template)
+        .expect("retained template document");
+    let dynamic_alternate = admission
+        .certify_document(&operation_id, alternate)
+        .expect("dynamic alternate document");
+    assert_eq!(&retained_template, first.document());
+    assert_eq!(&dynamic_alternate, second.document());
+    assert_ne!(retained_template, dynamic_alternate);
     assert_ne!(
         first.reference().expect("first root"),
         second.reference().expect("second root")
@@ -1260,7 +1287,10 @@ fn admission_verifier_rejects_persisted_authority_mutation() {
     let mut hostile = certified.document().clone();
     hostile.component_closure.swap(0, 1);
     assert_eq!(
-        hostile.content_ref().expect("closure-only hostile ref"),
+        hostile
+            .root
+            .content_ref()
+            .expect("closure-only hostile ref"),
         certified.reference().expect("certified ref"),
         "the sole authority ref hashes the root, whose closure digest binds the external closure"
     );
@@ -1287,7 +1317,10 @@ fn admission_verifier_rejects_persisted_authority_mutation() {
     hostile.root.canonical_component_closure_digest =
         fixture_closure_digest(&hostile.root.components, &hostile.component_closure);
     assert_ne!(
-        hostile.content_ref().expect("semantic-root hostile ref"),
+        hostile
+            .root
+            .content_ref()
+            .expect("semantic-root hostile ref"),
         certified.reference().expect("certified ref")
     );
     registry
@@ -1535,7 +1568,7 @@ fn admission_verifier_rejects_well_formed_weaker_coverage_and_alternate_predicat
     let protected = state_contract::<CopyState>().expect("copy state contract");
     let recipe = identity_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: recipe.content_ref().expect("policy recipe ref"),
     }])
     .expect("policy contract");
@@ -1575,21 +1608,10 @@ fn admission_verifier_rejects_well_formed_weaker_coverage_and_alternate_predicat
     weaker.entries.clear();
     let mut hostile = certified.document().clone();
     let exact_coverage_ref = hostile.root.components.policy_coverage_proof_ref.clone();
-    let coverage_index = hostile
-        .component_closure
-        .iter()
-        .position(|object| object.content_ref == exact_coverage_ref)
-        .expect("exact coverage object");
-    let weaker_coverage = fixture_component_with_same_schema(
-        &hostile.component_closure[coverage_index],
-        serde_json::to_value(&weaker).expect("weaker coverage JSON"),
-    );
-    assert_eq!(
-        weaker_coverage.object_type.as_str(),
-        "structured.policy_coverage_proof"
-    );
-    hostile.root.components.policy_coverage_proof_ref = weaker_coverage.content_ref.clone();
-    hostile.component_closure[coverage_index] = weaker_coverage;
+    let weaker_coverage_ref = mutate_component_value(&mut hostile, &exact_coverage_ref, |value| {
+        *value = serde_json::to_value(&weaker).expect("weaker coverage JSON");
+    });
+    hostile.root.components.policy_coverage_proof_ref = weaker_coverage_ref;
     hostile.root.canonical_component_closure_digest =
         fixture_closure_digest(&hostile.root.components, &hostile.component_closure);
     verifier
@@ -1602,68 +1624,34 @@ fn admission_verifier_rejects_well_formed_weaker_coverage_and_alternate_predicat
         .components
         .certification_predicate_set_ref
         .clone();
-    let predicate_index = hostile
-        .component_closure
-        .iter()
-        .position(|object| object.content_ref == exact_predicate_ref)
-        .expect("exact predicate-set object");
-    let mut alternate_predicates = hostile.component_closure[predicate_index]
-        .value
-        .as_json()
-        .clone();
-    alternate_predicates
-        .as_array_mut()
-        .expect("predicate set array")
-        .push(serde_json::Value::String(
-            "alternate-reviewed-predicate-v1".to_owned(),
-        ));
-    let alternate_predicate = fixture_component_with_same_schema(
-        &hostile.component_closure[predicate_index],
-        alternate_predicates,
-    );
-    assert_eq!(
-        alternate_predicate.object_type.as_str(),
-        "structured.certification_predicate_set"
-    );
+    let alternate_predicate_ref =
+        mutate_component_value(&mut hostile, &exact_predicate_ref, |value| {
+            value.as_object_mut().expect("predicate set object").insert(
+                "authored_structure".to_owned(),
+                serde_json::Value::String("v2".to_owned()),
+            );
+        });
 
     let exact_policy_ref = hostile
         .root
         .components
         .qualified_entry_point_admission_policy_ref
         .clone();
-    let policy_index = hostile
-        .component_closure
-        .iter()
-        .position(|object| object.content_ref == exact_policy_ref)
-        .expect("exact admission-policy object");
-    let mut alternate_policy = hostile.component_closure[policy_index]
-        .value
-        .as_json()
-        .clone();
-    alternate_policy
-        .as_object_mut()
-        .expect("admission-policy object")
-        .insert(
-            "certification_predicate_set_ref".to_owned(),
-            serde_json::to_value(&alternate_predicate.content_ref)
-                .expect("alternate predicate reference JSON"),
-        );
-    let alternate_policy = fixture_component_with_same_schema(
-        &hostile.component_closure[policy_index],
-        alternate_policy,
-    );
-    assert_eq!(
-        alternate_policy.object_type.as_str(),
-        "structured.admission_policy"
-    );
-    hostile.root.components.certification_predicate_set_ref =
-        alternate_predicate.content_ref.clone();
+    let alternate_policy_ref = mutate_component_value(&mut hostile, &exact_policy_ref, |value| {
+        value
+            .as_object_mut()
+            .expect("admission-policy object")
+            .insert(
+                "certification_predicate_set_ref".to_owned(),
+                serde_json::to_value(&alternate_predicate_ref)
+                    .expect("alternate predicate reference JSON"),
+            );
+    });
+    hostile.root.components.certification_predicate_set_ref = alternate_predicate_ref;
     hostile
         .root
         .components
-        .qualified_entry_point_admission_policy_ref = alternate_policy.content_ref.clone();
-    hostile.component_closure[predicate_index] = alternate_predicate;
-    hostile.component_closure[policy_index] = alternate_policy;
+        .qualified_entry_point_admission_policy_ref = alternate_policy_ref;
     hostile.root.canonical_component_closure_digest =
         fixture_closure_digest(&hostile.root.components, &hostile.component_closure);
     verifier
@@ -1835,7 +1823,7 @@ fn qualification_rejects_serialized_policy_proceed_inside_fan_out() {
         serde_json::from_value(recipe_json).expect("hostile serialized policy recipe");
     let protected = state_contract::<CopyState>().expect("copy state contract");
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: hostile_recipe.content_ref().expect("hostile recipe ref"),
     }])
     .expect("hostile policy contract");
@@ -1877,7 +1865,7 @@ fn policy_wraps_an_eligible_state_already_authored_inside_a_fan_out_lane() {
     let recipe = identity_policy_recipe();
     let protected = state_contract::<LaneAState>().expect("lane state contract");
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: recipe.content_ref().expect("recipe ref"),
     }])
     .expect("policy contract");
@@ -1929,7 +1917,7 @@ fn declarative_policy_wraps_the_exact_eligible_boundary_once() {
     let state_contract = state_contract::<CopyState>().expect("copy state contract");
     let recipe = identity_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: state_contract.state_contract_ref.clone(),
+        boundary_contract_ref: fixture_state_ref(&state_contract),
         recipe_ref: recipe.content_ref().expect("recipe ref"),
     }])
     .expect("policy contract");
@@ -1964,7 +1952,7 @@ fn declarative_policy_wraps_the_exact_eligible_boundary_once() {
     assert_eq!(certified.policy_coverage_proof().entries.len(), 1);
     assert_eq!(
         certified.policy_coverage_proof().entries[0].policy_ref,
-        policy.policy_ref
+        policy.content_ref().expect("policy ref")
     );
     assert_eq!(certified.expansion_proof().substitution_trace.len(), 1);
     assert!(matches!(
@@ -1980,7 +1968,7 @@ fn typed_policy_preserves_one_eventual_failure_handler() {
     let protected_contract = state_contract::<FallibleState>().expect("fallible state contract");
     let recipe = typed_identity_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected_contract.state_contract_ref.clone(),
+        boundary_contract_ref: fixture_state_ref(&protected_contract),
         recipe_ref: recipe.content_ref().expect("recipe ref"),
     }])
     .expect("policy contract");
@@ -2040,16 +2028,12 @@ fn capability_lowering_is_exact_callback_free_and_registration_order_independent
         panic!("capability recipe must contain its concrete state");
     };
     assert_eq!(
-        state.contract.state_contract_ref,
-        state_contract::<ConcreteCapabilityState>()
-            .expect("concrete contract")
-            .state_contract_ref
+        fixture_state_ref(&state.contract),
+        fixture_state_ref(&state_contract::<ConcreteCapabilityState>().expect("concrete contract"))
     );
     assert_ne!(
-        state.contract.state_contract_ref,
-        state_contract::<AbstractCapabilityState>()
-            .expect("abstract contract")
-            .state_contract_ref
+        fixture_state_ref(&state.contract),
+        fixture_state_ref(&state_contract::<AbstractCapabilityState>().expect("abstract contract"))
     );
 }
 
@@ -2059,9 +2043,9 @@ fn capability_support_children_preserve_namespaced_identity_trace_and_policy_exc
     let authored = child_capability_program(operation_id.clone(), 2);
     let policy_recipe = identity_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: state_contract::<CopyState>()
-            .expect("copy state contract")
-            .state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(
+            &state_contract::<CopyState>().expect("copy state contract"),
+        ),
         recipe_ref: policy_recipe.content_ref().expect("policy recipe ref"),
     }])
     .expect("support-state policy");
@@ -2388,9 +2372,9 @@ fn policy_expansion_still_rejects_child_operations() {
     let authored = copy_program(operation_id.clone());
     let recipe = child_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: state_contract::<CopyState>()
-            .expect("copy state contract")
-            .state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(
+            &state_contract::<CopyState>().expect("copy state contract"),
+        ),
         recipe_ref: recipe.content_ref().expect("policy recipe ref"),
     }])
     .expect("child policy");
@@ -2792,7 +2776,7 @@ fn failure_post_is_bound_only_to_the_protected_affine_failure_plan() {
     let protected_contract = state_contract::<FallibleState>().expect("fallible state contract");
     let recipe = typed_policy_recipe_with_failure_post();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected_contract.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected_contract),
         recipe_ref: recipe.content_ref().expect("recipe ref"),
     }])
     .expect("policy contract");
@@ -2868,10 +2852,8 @@ fn failure_post_is_bound_only_to_the_protected_affine_failure_plan() {
         mfm_spec::structured::BlockTail::Normal(source_slot.clone())
     );
     assert_eq!(
-        audit.contract.state_contract_ref,
-        state_contract::<FailureAuditState>()
-            .expect("audit contract")
-            .state_contract_ref
+        fixture_state_ref(&audit.contract),
+        fixture_state_ref(&state_contract::<FailureAuditState>().expect("audit contract"))
     );
 }
 
@@ -2887,7 +2869,7 @@ fn explicit_failure_post_mappers_form_one_exact_affine_chain() {
             typed_policy_recipe_with_two_failure_mappers()
         };
         let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-            boundary_contract_ref: protected_contract.state_contract_ref,
+            boundary_contract_ref: fixture_state_ref(&protected_contract),
             recipe_ref: recipe.content_ref().expect("recipe ref"),
         }])
         .expect("policy contract");
@@ -3020,15 +3002,17 @@ fn policy_profile_order_is_outer_to_inner_on_entry_and_reversed_on_exit() {
     let outer_recipe = outer_policy_recipe();
     let inner_recipe = inner_policy_recipe();
     let outer = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref.clone(),
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: outer_recipe.content_ref().expect("outer recipe ref"),
     }])
     .expect("outer policy");
     let inner = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: inner_recipe.content_ref().expect("inner recipe ref"),
     }])
     .expect("inner policy");
+    let outer_ref = outer.content_ref().expect("outer policy ref");
+    let inner_ref = inner.content_ref().expect("inner policy ref");
     let mut policy_profile = profile();
     policy_profile.policies = vec![outer.clone(), inner.clone()];
 
@@ -3085,7 +3069,7 @@ fn policy_profile_order_is_outer_to_inner_on_entry_and_reversed_on_exit() {
             .iter()
             .map(|entry| &entry.policy_ref)
             .collect::<Vec<_>>(),
-        vec![&outer.policy_ref, &inner.policy_ref]
+        vec![&outer_ref, &inner_ref]
     );
     assert_eq!(
         certified
@@ -3094,7 +3078,7 @@ fn policy_profile_order_is_outer_to_inner_on_entry_and_reversed_on_exit() {
             .iter()
             .map(|entry| &entry.expansion_ref)
             .collect::<Vec<_>>(),
-        vec![&outer.policy_ref, &inner.policy_ref]
+        vec![&outer_ref, &inner_ref]
     );
 }
 
@@ -3249,7 +3233,7 @@ fn complete_structured_pipeline_has_stable_golden_bytes_and_execution() {
         .expect("authored canonical bytes");
     let profile = certified
         .expansion_profile()
-        .canonical_json()
+        .encode_canonical()
         .expect("profile canonical bytes");
     let proof = canonical_fixture_bytes(certified.expansion_proof());
     let coverage = canonical_fixture_bytes(certified.policy_coverage_proof());
@@ -3268,7 +3252,8 @@ fn complete_structured_pipeline_has_stable_golden_bytes_and_execution() {
             .expect("semantic manifest schema");
     let fallible_state_ref = state_contract::<FallibleState>()
         .expect("fallible state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let fallible_index = component_manifest
         .entries
         .iter()
@@ -3289,7 +3274,8 @@ fn complete_structured_pipeline_has_stable_golden_bytes_and_execution() {
     );
     let abstract_state_ref = state_contract::<AbstractFallibleCapabilityState>()
         .expect("abstract state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     assert!(component_manifest
         .entries
         .iter()
@@ -3351,16 +3337,16 @@ fn complete_structured_pipeline_has_stable_golden_bytes_and_execution() {
     assert_eq!(
         actual,
         concat!(
-            "authored_sha256=c88cbfadb438e8cdb087c4ca1a05fa0873df3d25e9bfc3918961abd586ea9ec1\n",
-            "expanded_sha256=673424ee901ab26f9b28c7edbd7cc16df143deff218795989ec34f4eee141a4c\n",
-            "profile_sha256=ece4250d787dcc91c2a646ec5e78490d487ac1e3cdc9fbb4eb14f9331e9cb60b\n",
-            "proof_sha256=0f77d5ad24a3b02694836b2bf1a268f19d4118a914fb3500254b5729a7b6adb9\n",
-            "coverage_sha256=34c64ede64588319bd6a4ff105757cffab545345313642eb68a0a3ab860a1d85\n",
-            "component_manifest_sha256=532e066ea4b6baca3b758c1fc1b072e39f6d1c26c910e3cf5955571b14f40ff2\n",
-            "implementation_manifest_sha256=a4973d3abaf3088110571cfc3b8da047b06fae9f5d6a4023d45d3e4c9cbea9fb\n",
-            "root_sha256=fe2c9a5d477c35710ba8624f90fadaba822df5ca94d7edfd9cf1a08a9eea1b22\n",
-            "certified_ref=ContentRef { schema_id: Identity(\"schema:mfm.certified-program:1:sha256-jcs-v1:3fb6529deb28e23b49f2f978846d0051070f189478e301210233c019b0646b19\"), content_digest: Identity(\"content:sha256-v1:3b120f4a9b85f0770099e4d5c3ad00197102c388cd75e0a69561e45eaa4c039c\") }\n",
-            "closure_digest=content:sha256-v1:f969b2b474f5c0ac224d81806f2c620df75ab968cd03e35e6d8c6d92d842a7a4",
+            "authored_sha256=ca6d3ead56a921de75cf9d7d16f7857f8b217f1a07d9d25f2796a5ec1e76236c\n",
+            "expanded_sha256=8823493a73236a18f7c67e8e2dc163c4a3c8bdd5b98397fee2fa78d86fc6ce23\n",
+            "profile_sha256=1a1af72f565ccc89570a1266837a60d5512ad248563cf1349fde1347e86eee38\n",
+            "proof_sha256=5ae06606a5c4d333c7fc8ec62f0a38359d7bfd2bc11d9a99c022695f8bc70685\n",
+            "coverage_sha256=1bec86dd64483a54ef063669c959bedd78c56ad676ae471759cb0dd9ca63bf89\n",
+            "component_manifest_sha256=53da5de277d37e3fd8724269201d271f1c065dbbf3caac0fc83d17d880438734\n",
+            "implementation_manifest_sha256=1966a08c4571c7758599cca505601f61770422ab5a3eda55f9b6a334afac0216\n",
+            "root_sha256=1a57dfb715feecf50bc69c6dd6a2ff72fddbca19cb139c30938a6aa9e5c8a654\n",
+            "certified_ref=ContentRef { schema_id: Identity(\"schema:mfm.certified-program-root:1:sha256-jcs-v1:69806a8bcc14c81300f1f70c73784ea896c3b64405b8ae93299251631e9d85c0\"), content_digest: Identity(\"content:sha256-v1:1a57dfb715feecf50bc69c6dd6a2ff72fddbca19cb139c30938a6aa9e5c8a654\") }\n",
+            "closure_digest=content:sha256-v1:c74280c2e6b84c29187893fdd21809a6d49443a630365dd2e5493a09aa99f170",
         )
     );
 }
@@ -3507,7 +3493,8 @@ fn qualification_rejects_a_caller_substituted_fan_out_join_contract() {
     let mut authored = fan_out_program(operation_id.clone());
     let foreign = state_contract::<CopyState>()
         .expect("foreign state contract")
-        .state_contract_ref;
+        .content_ref()
+        .expect("state contract ref");
     let AuthoredDeclaration::FanOut(fan_out) = &mut authored.root.declarations[0] else {
         unreachable!("fan-out fixture shape")
     };
@@ -3739,7 +3726,7 @@ fn a_failure_post_state_failure_causally_supersedes_the_protected_failure() {
     let protected = state_contract::<FallibleState>().expect("fallible contract");
     let recipe = typed_policy_recipe_with_fallible_failure_post();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: recipe.content_ref().expect("recipe ref"),
     }])
     .expect("policy contract");
@@ -4748,12 +4735,12 @@ fn certify_full_pipeline_fixture(
     let outer_recipe = typed_outer_policy_recipe();
     let inner_recipe = guarded_policy_recipe();
     let outer = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref.clone(),
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: outer_recipe.content_ref().expect("outer recipe ref"),
     }])
     .expect("outer policy");
     let inner = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: inner_recipe.content_ref().expect("inner recipe ref"),
     }])
     .expect("inner policy");
@@ -4853,7 +4840,7 @@ fn certify_full_pipeline_fixture(
 fn certify_typed_child_fixture(
     operation_id: &StableId,
 ) -> (
-    mfm_certify::structured::QualifiedProgramRegistry,
+    mfm_certify::structured::CertifiedProgramRegistry,
     mfm_certify::structured::CertifiedProgram,
 ) {
     let mut assembly = ProgramRegistryBuilder::new();
@@ -4909,7 +4896,7 @@ fn certify_typed_child_fixture(
 
 fn qualify_typed_fan_out_fixture(
     operation_id: &StableId,
-) -> mfm_certify::structured::QualifiedProgramRegistry {
+) -> mfm_certify::structured::CertifiedProgramRegistry {
     let mut assembly = ProgramRegistryBuilder::new();
     register_fixture_runtime_components(&mut assembly, false);
     for register in [
@@ -4950,7 +4937,7 @@ fn certify_guarded_fixture(operation_id: &StableId) -> mfm_certify::structured::
     let protected = state_contract::<FallibleState>().expect("fallible contract");
     let recipe = guarded_policy_recipe();
     let policy = ExpansionPolicyContract::new(vec![PolicyExpansionBinding {
-        boundary_contract_ref: protected.state_contract_ref,
+        boundary_contract_ref: fixture_state_ref(&protected),
         recipe_ref: recipe.content_ref().expect("guarded recipe ref"),
     }])
     .expect("guard policy");
@@ -5849,27 +5836,6 @@ fn canonical_fixture_bytes<T: Serialize>(value: &T) -> mfm_canonical::PlainCanon
     mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&json).expect("fixture canonical JSON")
 }
 
-fn fixture_component_with_same_schema(
-    template: &CertifiedComponentObject,
-    value: serde_json::Value,
-) -> CertifiedComponentObject {
-    let value = mfm_spec::CanonicalJsonValue::new(value).expect("canonical component value");
-    let canonical = value.canonical_json().expect("canonical component bytes");
-    let content_ref = ContentRef::new(
-        template.content_ref.schema_id().clone(),
-        ContentDigest::from_digest(
-            DigestAlgorithm::Sha256V1,
-            sha256_digest_bytes(canonical.as_bytes()),
-        ),
-    )
-    .expect("component content reference");
-    CertifiedComponentObject {
-        object_type: template.object_type.clone(),
-        content_ref,
-        value,
-    }
-}
-
 fn mutate_component_value(
     document: &mut mfm_spec::structured::CertifiedProgramDocument,
     current_ref: &ContentRef,
@@ -5883,9 +5849,21 @@ fn mutate_component_value(
     let template = document.component_closure[index].clone();
     let mut value = template.value.as_json().clone();
     mutate(&mut value);
-    let replacement = fixture_component_with_same_schema(&template, value);
-    let replacement_ref = replacement.content_ref.clone();
-    document.component_closure[index] = replacement;
+    let value = mfm_spec::CanonicalJsonValue::new(value).expect("hostile canonical value");
+    let canonical = value.canonical_json().expect("hostile canonical bytes");
+    let replacement_ref = ContentRef::new(
+        template.content_ref.schema_id().clone(),
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .expect("hostile component reference");
+    document.component_closure[index] = CertifiedComponentObject {
+        object_type: template.object_type,
+        content_ref: replacement_ref.clone(),
+        value,
+    };
     replacement_ref
 }
 
@@ -5995,18 +5973,9 @@ fn register_fixture_adapter(assembly: &mut ProgramRegistryBuilder) {
         stable("mfm.fixture/read-adapter-implementation"),
     )
     .expect("adapter descriptor");
-    let certificate = HistoryObject::new(
-        stable("mfm.fixture/read-physical-binding"),
-        SchemaId::new(
-            "mfm.fixture/read-physical-binding",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.fixture/read-physical-binding"),
-        )
-        .expect("physical-binding schema"),
-        "{\"target\":1}",
-    )
-    .expect("physical-binding certificate");
+    let certificate =
+        HistoryObject::from_persisted(&FixturePhysicalBindingCertificate { target: 1 })
+            .expect("physical-binding certificate");
     assembly
         .register_read_adapter::<FixtureReadCapability, _>(
             descriptor,
@@ -6115,4 +6084,8 @@ fn fixture_resource_contract() -> mfm_program::Result<StructuredLiveComponentCon
 
 fn stable(value: &str) -> StableId {
     StableId::new(value).expect("stable fixture id")
+}
+
+fn fixture_state_ref(contract: &StructuredStateContract) -> ContentRef {
+    contract.content_ref().expect("state contract ref")
 }

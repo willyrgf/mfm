@@ -18,6 +18,7 @@ use mfm_ids::{AccessAttemptId, AppendRequestId, ContentRef, OccurrenceId, RunId}
 use mfm_journal::structured::{JournalHead, ObservationOutcome, RecordRef};
 use mfm_spec::structured::{StructuredComponentKind, StructuredExecutionKind};
 use mfm_spec::CanonicalJsonValue;
+use mfm_values::CanonicalJsonPersistedSchema;
 
 /// Runtime-owned holder for the complete qualified callback registry.
 /// Certification only supplies the deterministic qualified component set;
@@ -123,11 +124,25 @@ impl RuntimeProcessRegistry {
 
 use crate::history::{
     AccessAuthorizationProposal, AccessObservationProposal, ActionableState,
-    CommittedAccessAuthorization, HistoryAppendOutcome, HistoryError, ObservationCommit,
-    ObservationQualification, ProposedCanonicalValue, ProposedObservationOutcome,
-    RuntimeHistoryPort, StateLeaf, StateTransitionProposal, StructuredAdmissionCommand,
-    StructuredAppendAttempt, StructuredFrontier, StructuredStoreIdentity, VerifiedRunView,
+    CommittedAccessAuthorization, EffectEntrySubject, HistoryAppendOutcome, HistoryError,
+    ObservationCommit, ObservationQualification, ProposedCanonicalValue,
+    ProposedObservationOutcome, RuntimeHistoryPort, StateLeaf, StateTransitionProposal,
+    StructuredAdmissionCommand, StructuredAppendAttempt, StructuredFrontier,
+    StructuredStoreIdentity, VerifiedRunView,
 };
+
+/// Kernel-owned fault code for the closing observation of a crashed attempt.
+///
+/// This is the only thing distinguishing a Runtime-synthesized closure from an
+/// adapter-reported ambiguity anywhere downstream: the two records are
+/// shape-identical and carry no origin. It is reserved, unreachable from any
+/// adapter, and must never be reused by a domain.
+pub const INVOKER_AUTHORITY_LOST: &str = "mfm.kernel/invoker-authority-lost";
+
+fn invoker_authority_lost_fault_code() -> mfm_ids::StableId {
+    mfm_ids::StableId::new(INVOKER_AUTHORITY_LOST)
+        .expect("the kernel invoker-authority-lost code is a valid stable id")
+}
 
 /// Result returned by structured Runtime preparation and drive operations.
 pub type Result<T> = std::result::Result<T, RuntimeError>;
@@ -271,14 +286,14 @@ pub enum DriveOutcome {
         /// Whether the same atomic append also committed `RunClosed`.
         closed: bool,
     },
-    /// One authorization was invoked exactly once and its completion committed.
+    /// One committed completion. Either an authorization was invoked exactly
+    /// once and its completion committed, or a crashed absorbing Effect attempt
+    /// was closed without reaching any adapter.
     AccessObserved,
     /// Another worker changed the cursor before this semantic action committed.
     ConcurrentProgress,
-    /// Every currently eligible fan-out lane is waiting on an unmatched Read.
-    WaitingReads,
-    /// Possible Effect entry blocks progress.
-    PossibleEntry,
+    /// Possible Effect entry of one exact occurrence blocks progress.
+    PossibleEntry(Box<EffectEntrySubject>),
     /// Committed integrity evidence blocks progress.
     BlockedIntegrity,
     /// The exact root outcome is already durably closed.
@@ -472,13 +487,10 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                 self.retain_verified(verified).await?;
                 return Ok(DriveOutcome::Closed);
             }
-            StructuredFrontier::WaitingReads => {
+            StructuredFrontier::PossibleEntry(subject) => {
+                let subject = subject.clone();
                 self.retain_verified(verified).await?;
-                return Ok(DriveOutcome::WaitingReads);
-            }
-            StructuredFrontier::PossibleEntry => {
-                self.retain_verified(verified).await?;
-                return Ok(DriveOutcome::PossibleEntry);
+                return Ok(DriveOutcome::PossibleEntry(subject));
             }
             StructuredFrontier::BlockedIntegrity => {
                 self.retain_verified(verified).await?;
@@ -575,11 +587,14 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                         )),
                 }
             }
-            (StructuredExecutionKind::Read, StateLeaf::Ready) => {
+            (StructuredExecutionKind::Read, StateLeaf::Ready | StateLeaf::Reassertable { .. }) => {
                 self.drive_access::<ReadPhysicalBindingKind>(verified, state, state_identity, input)
                     .await
             }
-            (StructuredExecutionKind::Effect, StateLeaf::Ready | StateLeaf::Refreshable { .. }) => {
+            (
+                StructuredExecutionKind::Effect,
+                StateLeaf::Ready | StateLeaf::Refreshable { .. } | StateLeaf::Reassertable { .. },
+            ) => {
                 self.drive_access::<EffectPhysicalBindingKind>(
                     verified,
                     state,
@@ -588,12 +603,85 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                 )
                 .await
             }
+            (StructuredExecutionKind::Effect, StateLeaf::EntryClosable { access_attempt_id }) => {
+                let access_attempt_id = access_attempt_id.clone();
+                self.close_parked_attempt(verified, &state, access_attempt_id)
+                    .await
+            }
             _ => Err(self.candidate_fault(
                 RuntimeFaultPhase::QualifyCandidate,
                 run_id.clone(),
                 Some(pre_fault_head),
                 Some(occurrence_id),
             )),
+        }
+    }
+
+    /// Commits the closing observation of one crashed absorbing Effect attempt.
+    ///
+    /// This path authors nothing, invokes nothing, and reaches no adapter. It
+    /// asserts nothing about the external system: it asserts that the invoker
+    /// authority for this attempt is lost and entry is unknown, which is the
+    /// literal truth of a crash. Observation admission already requires exactly
+    /// an existing authorization with no prior observation, so the record is
+    /// legal history with no contract change — and this is the one observation
+    /// Runtime can synthesize without invoking anything and without lying. If a
+    /// later edit makes Runtime synthesize any other outcome, that property is
+    /// gone.
+    ///
+    /// Two workers may race this closure, or close a slow attempt that is still
+    /// live. The first commit wins and the second is rejected by the
+    /// one-observation-per-attempt rule; a live invoker whose attempt was closed
+    /// under it has its real completion rejected the same way, and whatever it
+    /// did to the external system is absorbed by the re-assertion at the next
+    /// ordinal. That is the collapse absorption already declares harmless, which
+    /// is exactly why closing is scoped to a declared `EntryAbsorbing` and an
+    /// `EntryOnce` park is never touched.
+    async fn close_parked_attempt(
+        &self,
+        verified: P::VerifiedRun,
+        state: &ActionableState,
+        access_attempt_id: AccessAttemptId,
+    ) -> Result<DriveOutcome> {
+        let run_id = verified.run_id().clone();
+        let pre_fault_head = verified.journal_head().clone();
+        let occurrence_id = state.occurrence_id.clone();
+        let candidate_fault = || {
+            self.candidate_fault(
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+            )
+        };
+        // The observation pipeline resolves the authorization out of folded
+        // history, so the in-process record the crash destroyed is not required.
+        let authorization_ref = verified
+            .authorization(&access_attempt_id)
+            .map(|(authorization_ref, _)| authorization_ref.clone())
+            .ok_or_else(candidate_fault)?;
+        let capability_contract_ref = state
+            .capability_contract_ref
+            .as_ref()
+            .ok_or_else(candidate_fault)?;
+        let capability_identity = self
+            .processes
+            .component_identity(StructuredComponentKind::Capability, capability_contract_ref)
+            .ok_or_else(candidate_fault)?;
+        let invoked = InvokedObservation::<EffectPhysicalBindingKind, P::VerifiedRun> {
+            run_id,
+            authorization_ref,
+            access_attempt_id,
+            outcome: ProposedObservationOutcome::EntryUnknown {
+                fault_code: invoker_authority_lost_fault_code(),
+            },
+            verified,
+            adapter_origin: capability_identity,
+            _kind: PhantomData,
+        };
+        match self.qualify_invoked_observation(invoked).await? {
+            Some(pending) => self.commit_pending_observation(pending).await,
+            None => Ok(DriveOutcome::AccessObserved),
         }
     }
 
@@ -790,6 +878,9 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             StateLeaf::Refreshable {
                 next_attempt_ordinal,
                 ..
+            }
+            | StateLeaf::Reassertable {
+                next_attempt_ordinal,
             } => *next_attempt_ordinal,
             _ => {
                 return Err(self.candidate_fault(

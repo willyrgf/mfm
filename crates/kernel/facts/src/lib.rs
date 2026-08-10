@@ -2,7 +2,7 @@
 //! Pure fact authoring and selection semantics for the MFM typed kernel.
 //!
 //! Facts are transition outputs. Same-run consumers use lexical structured-program values;
-//! deliberate cross-run selection uses one annex-backed
+//! deliberate cross-run selection uses one owner-validated
 //! [`FactSelectionRequest`]. This crate owns only journal-independent value
 //! semantics. Journal references, tenant coordinates, scan authority,
 //! responses, completeness proofs, and retained-object authority live in
@@ -16,13 +16,15 @@
 //!     CanonicalValue::object([("wallet", CanonicalValue::String("alice".into()))])
 //!         .expect("canonical predicate"),
 //! )?;
-//! assert_eq!(predicate.canonical_json(), br#"{"wallet":"alice"}"#);
+//! assert_eq!(
+//!     predicate.canonical_json()?.as_bytes(),
+//!     br#"{"wallet":"alice"}"#,
+//! );
 //! assert_eq!(FactSelectionLimit::new(128)?.get(), 128);
 //! assert!(FactSet::empty().as_slice().is_empty());
 //! # Ok::<(), mfm_facts::FactError>(())
 //! ```
 
-mod codec;
 mod descriptor;
 mod emission;
 mod read;
@@ -31,9 +33,6 @@ mod value;
 
 pub use descriptor::{FactDescriptor, FactKind};
 pub use emission::{FactProposal, FactSet, ProposedFactValue};
-pub use mfm_canonical::limits::{
-    MAX_FACT_EMISSIONS, MAX_FACT_SELECTION_LIMIT, MAX_FACT_SELECTION_QUERIES,
-};
 pub use read::{
     FactSelectionCompletenessMode, FactSelectionReadFailure, FactSelectionReadFailureCode,
     FactSelectionReadResponse, FactSelectionScanBounds, MAX_FACT_SCAN_DISTINCT_PRODUCERS,
@@ -47,15 +46,21 @@ pub use selection::{
 };
 pub use value::{CanonicalFactPredicate, FactScalar, FactSubject};
 
+/// Maximum facts one transition may emit.
+pub const MAX_FACT_EMISSIONS: usize = 4096;
+
+/// Maximum queries in one fact-selection request.
+pub const MAX_FACT_SELECTION_QUERIES: usize = 128;
+
+/// Maximum results one fact-selection query may request.
+pub const MAX_FACT_SELECTION_LIMIT: u32 = 128;
+
 /// Result type for pure fact construction and validation.
 pub type Result<T> = std::result::Result<T, FactError>;
 
 /// Redaction-safe fact contract failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FactError {
-    /// The frozen recoverability codec rejected the value.
-    #[error(transparent)]
-    Recoverability(#[from] mfm_canonical::RecoverabilityError),
     /// A canonical value could not be built or projected.
     #[error("canonical fact value is invalid")]
     Canonical,

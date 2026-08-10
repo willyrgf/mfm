@@ -1,6 +1,7 @@
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId};
 use mfm_spec::structured::{
-    StructuredFailureContract, StructuredSafeFailureDispositionContract, StructuredStateContract,
+    StructuredEffectEntryContract, StructuredFailureContract,
+    StructuredSafeFailureDispositionContract, StructuredStateContract,
     StructuredStateExecutionContract,
 };
 use mfm_spec::{CanonicalJsonValue, PlanningProfile};
@@ -74,4 +75,37 @@ fn live_state_contract_rejects_missing_or_mismatched_safe_failure_disposition() 
     let mismatched =
         serde_json::from_value::<StructuredStateContract>(mismatched).expect("shape-valid bytes");
     assert!(mismatched.validate().is_err());
+}
+
+#[test]
+fn an_absorbing_entry_contract_rejects_a_zero_entry_budget_from_persisted_bytes() {
+    // Persisted specification data is untrusted, so the illegal state must be
+    // unrepresentable on the way in and not merely rejected at authoring time.
+    let keyed = serde_json::json!({
+        "kind": "entry_absorbing",
+        "entry_key_contract_ref": fixture_ref("entry-key"),
+        "max_entries": 3,
+    });
+    let decoded: StructuredEffectEntryContract =
+        serde_json::from_value(keyed).expect("a positive entry budget decodes");
+    let StructuredEffectEntryContract::EntryAbsorbing { max_entries, .. } = decoded else {
+        panic!("absorbing entry contract")
+    };
+    assert_eq!(max_entries.get(), 3);
+
+    for budget in [0, -1] {
+        let hostile = serde_json::json!({
+            "kind": "entry_absorbing",
+            "entry_key_contract_ref": fixture_ref("entry-key"),
+            "max_entries": budget,
+        });
+        assert!(
+            serde_json::from_value::<StructuredEffectEntryContract>(hostile).is_err(),
+            "an absorbing capability must admit at least one entry: {budget}"
+        );
+    }
+
+    // Absorption without a retained entry key has no shape at all.
+    let unkeyed = serde_json::json!({ "kind": "entry_absorbing", "max_entries": 3 });
+    assert!(serde_json::from_value::<StructuredEffectEntryContract>(unkeyed).is_err());
 }

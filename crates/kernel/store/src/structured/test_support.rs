@@ -32,7 +32,10 @@ use mfm_spec::structured::{
     StructuredStateExecutionContract,
 };
 use mfm_spec::CanonicalJsonValue;
-use mfm_values::{RetainedValueContract, SchemaIdentity, SchemaKind, SchemaShape};
+use mfm_values::{
+    CanonicalJsonPersistedSchema, MediaType, RetainedValueContract, SchemaIdentity, SchemaKind,
+    SchemaShape,
+};
 
 use super::backend::StructuredRunStore;
 use super::fold::{ProgramVerifier, StructuredStoreError, VerifiedProgramData};
@@ -145,7 +148,7 @@ pub async fn zero_state_export(discriminator: u8) -> super::Result<OfflineExport
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(discriminator);
+    let run_id = run_id(&fixture.entry_point, discriminator);
     writer
         .admit_run(admission(&fixture, run_id.clone(), discriminator))
         .await?;
@@ -177,7 +180,7 @@ pub async fn observed_read_export(discriminator: u8) -> super::Result<OfflineExp
         Arc::new(AcceptPhysicalBindings),
     );
     let (writer, reader) = store.split();
-    let run_id = run_id(discriminator);
+    let run_id = run_id(&fixture.entry_point, discriminator);
     writer
         .admit_run(admission(&fixture, run_id.clone(), discriminator))
         .await?;
@@ -194,7 +197,7 @@ pub async fn observed_read_export(discriminator: u8) -> super::Result<OfflineExp
             verified,
             &AccessAuthorizationProposal::new(
                 mfm_ids::AppendRequestId::new(format!(
-                    "portable-fixture-read-authorization-{discriminator}"
+                    "portable-fixture-read-grant-{discriminator}"
                 ))
                 .map_err(|_| super::StructuredStoreError::InvalidHistory)?,
                 action.input,
@@ -266,10 +269,8 @@ fn verifier(fixture: &Fixture) -> FixtureProgramVerifier {
 fn admission(fixture: &Fixture, run_id: RunId, discriminator: u8) -> StructuredAdmissionRequest {
     StructuredAdmissionRequest::new(
         run_id,
-        TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32)))
-            .expect("fixture tenant"),
-        InvocationIdentity::new("00000000-0000-4000-8000-000000000001")
-            .expect("fixture invocation"),
+        fixture_tenant(),
+        fixture_invocation(),
         fixture.entry_point.clone(),
         fixture.document.clone(),
         admission_material(discriminator),
@@ -291,10 +292,10 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
             "fixture.admission-context",
             discriminator,
         ),
-        PriorRunFactSourceManifest::new(Vec::new())
-            .expect("empty source manifest")
-            .to_history_object()
-            .expect("source manifest object"),
+        HistoryObject::from_persisted(
+            &PriorRunFactSourceManifest::new(Vec::new()).expect("empty source manifest"),
+        )
+        .expect("source manifest object"),
         admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             "fixture.admission-routing",
@@ -306,18 +307,25 @@ fn admission_material(discriminator: u8) -> StructuredAdmissionMaterial {
 }
 
 fn admission_object(object_type: &str, schema_name: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
-        StableId::new(object_type).expect("object type"),
-        SchemaId::new(
-            schema_name,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(&[discriminator, schema_name.as_bytes()[0]]),
+    let canonical_json = "{\"entries\":[]}".to_owned();
+    HistoryObject {
+        object_type: StableId::new(object_type).expect("object type"),
+        content_ref: ContentRef::new(
+            SchemaId::new(
+                schema_name,
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                sha256_digest_bytes(&[discriminator, schema_name.as_bytes()[0]]),
+            )
+            .expect("admission schema"),
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical_json.as_bytes()),
+            ),
         )
-        .expect("admission schema"),
-        "{\"entries\":[]}",
-    )
-    .expect("admission object")
+        .expect("admission content reference"),
+        canonical_json,
+    }
 }
 
 fn zero_state_fixture(discriminator: u8) -> Fixture {
@@ -409,7 +417,7 @@ fn one_read_state_fixture(discriminator: u8) -> Fixture {
         None,
     )
     .expect("read state contract");
-    let state_contract_ref = state_contract.state_contract_ref.clone();
+    let state_contract_ref = state_contract.content_ref().expect("state contract ref");
     let output = LexicalSlot {
         lexical_path: occurrence_path.clone(),
         contract_ref: contract_ref.clone(),
@@ -531,7 +539,7 @@ fn document(
     discriminator: u8,
 ) -> CertifiedProgramDocument {
     let contract_ref = retained_value_contract_ref(contract);
-    let canonical = contract.canonical_json().expect("contract canonical");
+    let canonical = contract.encode_canonical().expect("contract canonical");
     let component = CertifiedComponentObject {
         object_type: StableId::new("structured.data_contract").expect("component type"),
         content_ref: contract_ref.clone(),
@@ -615,7 +623,7 @@ fn value_contract(schema: &SchemaIdentity, discriminator: u8) -> RetainedValueCo
         schema.schema_id().expect("schema"),
         fixture_semantic_type(discriminator),
         StableId::new("fixture.integer").expect("role"),
-        "application/json",
+        MediaType::new("application/json").expect("media type"),
         content_ref("fixture.evidence", discriminator),
     )
     .expect("value contract")
@@ -682,9 +690,22 @@ fn store_identity(discriminator: u8) -> StructuredStoreIdentity {
     }
 }
 
-fn run_id(discriminator: u8) -> RunId {
-    RunId::from_digest(
-        DigestAlgorithm::Sha256JcsV1,
-        sha256_digest_bytes(&[discriminator, 5]),
+fn fixture_tenant() -> TenantScopeId {
+    TenantScopeId::new(format!("{}{}", TenantScopeId::PREFIX, "2".repeat(32)))
+        .expect("fixture tenant")
+}
+
+fn fixture_invocation() -> InvocationIdentity {
+    InvocationIdentity::new("00000000-0000-4000-8000-000000000001").expect("fixture invocation")
+}
+
+/// Derives a fixture run identity through the one shared owner rule.
+fn run_id(entry_point: &StableId, discriminator: u8) -> RunId {
+    mfm_journal::structured::derive_run_id(
+        &store_identity(discriminator).store_scope_id,
+        &fixture_tenant(),
+        entry_point,
+        &fixture_invocation(),
     )
+    .expect("fixture run id")
 }

@@ -2,22 +2,16 @@
 
 use std::collections::BTreeSet;
 
-use mfm_canonical::{
-    sha256_digest_bytes, PlainCanonicalJsonBytes, RecoverabilityContract, ValidatedCanonicalValue,
-};
-use mfm_ids::{ContentRef, DigestAlgorithm, EntryPointId, SchemaId, SemanticTypeId, StableId};
-use mfm_values::{component_object_evidence_contract_ref, RetainedValueContract};
-use serde::de::DeserializeOwned;
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::{ContentRef, EntryPointId, SchemaId, StableId};
+use mfm_program_derive::PersistedSchema;
+use mfm_values::{CanonicalJsonPersistedSchema, CanonicalJsonProfile, SchemaShape};
 use serde::{Deserialize, Serialize};
 
 use crate::{Result, SpecError};
 
 const PLANNING_PROFILE_CONTRACT: &str = "mfm.planning-profile.v1";
-const ENTRY_POINT_CONTRACT: &str = "mfm.entry-point-contract.v1";
-
-fn contract() -> Result<&'static RecoverabilityContract> {
-    RecoverabilityContract::embedded().map_err(Into::into)
-}
+const PUBLISHED_ENTRY_POINT: &str = "mfm.published-entry-point.v1";
 
 fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
     let json =
@@ -26,22 +20,39 @@ fn canonical<T: Serialize>(value: &T) -> Result<PlainCanonicalJsonBytes> {
         .map_err(|error| SpecError::Contract(error.to_string()))
 }
 
-fn validated<T: Serialize>(schema_contract: &str, value: &T) -> Result<ValidatedCanonicalValue> {
-    let canonical = canonical(value)?;
-    contract()?
-        .strict_decode(schema_contract, canonical.as_bytes())
-        .map_err(Into::into)
+impl mfm_values::PersistedSchema for CanonicalJsonValue {
+    fn schema_identity() -> mfm_values::Result<mfm_values::SchemaIdentity> {
+        mfm_values::SchemaIdentity::new(
+            mfm_values::SchemaKind::PersistedContract,
+            None,
+            "mfm.public-canonical-value",
+            mfm_ids::SchemaVersion::new("1")
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))?,
+            open_canonical_value_shape(),
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        let json = serde_json::to_string(&self.0)
+            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)?;
+        let canonical = PlainCanonicalJsonBytes::from_json_str(&json)
+            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)?;
+        <Self as mfm_values::PersistedSchema>::schema_identity()?
+            .validate_canonical_value(canonical.as_bytes())
+    }
 }
 
-fn decode<T: DeserializeOwned + ContractInvariant>(
-    schema_contract: &str,
-    bytes: &[u8],
-) -> Result<T> {
-    let checked = contract()?.strict_decode(schema_contract, bytes)?;
-    let value = serde_json::from_slice::<T>(checked.as_bytes())
-        .map_err(|error| SpecError::Contract(format!("typed canonical decode failed: {error}")))?;
-    value.validate_invariant()?;
-    Ok(value)
+/// The one bounded canonical-JSON terminal admitted at public boundaries.
+fn open_canonical_value_shape() -> SchemaShape {
+    SchemaShape::CanonicalJsonTerminal {
+        profile: CanonicalJsonProfile::GeneralFloatFree,
+    }
+}
+
+fn validate_open_canonical_value(bytes: &[u8]) -> Result<()> {
+    <CanonicalJsonValue as mfm_values::PersistedSchema>::schema_identity()
+        .and_then(|identity| identity.validate_canonical_value(bytes))
+        .map_err(|error| SpecError::Contract(error.to_string()))
 }
 
 trait ContractInvariant {
@@ -56,7 +67,7 @@ impl CanonicalJsonValue {
     /// Validates one JSON value against the current open-value contract.
     pub fn new(value: serde_json::Value) -> Result<Self> {
         let bytes = canonical(&value)?;
-        contract()?.strict_decode("mfm.primitive-canonical_value.v1", bytes.as_bytes())?;
+        validate_open_canonical_value(bytes.as_bytes())?;
         Ok(Self(value))
     }
 
@@ -67,10 +78,19 @@ impl CanonicalJsonValue {
 
     /// Strictly decodes a canonical open value.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
-        let checked = contract()?.strict_decode("mfm.primitive-canonical_value.v1", bytes)?;
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|error| SpecError::Contract(error.to_string()))?;
+        validate_open_canonical_value(canonical.as_bytes())?;
+        let checked = canonical;
         let value = serde_json::from_slice(checked.as_bytes())
             .map_err(|error| SpecError::Contract(error.to_string()))?;
         Ok(Self(value))
+    }
+
+    /// Strictly decodes exact bytes for an already-selected semantic owner.
+    #[doc(hidden)]
+    pub fn from_exact_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_canonical_json(bytes)
     }
 
     /// Returns canonical bytes for this value.
@@ -81,6 +101,44 @@ impl CanonicalJsonValue {
     /// Returns the checked JSON value.
     pub const fn as_json(&self) -> &serde_json::Value {
         &self.0
+    }
+
+    /// Constructs one closed single-key tagged semantic value.
+    #[doc(hidden)]
+    pub fn tagged(tag: impl Into<String>, value: Self) -> Result<Self> {
+        let mut object = serde_json::Map::new();
+        object.insert(tag.into(), value.0);
+        Self::new(serde_json::Value::Object(object))
+    }
+
+    /// Constructs the canonical non-empty head/tail join value.
+    #[doc(hidden)]
+    pub fn head_tail(head: Self, tail: Vec<Self>) -> Result<Self> {
+        let mut object = serde_json::Map::new();
+        object.insert("head".to_owned(), head.0);
+        object.insert(
+            "tail".to_owned(),
+            serde_json::Value::Array(tail.into_iter().map(|value| value.0).collect()),
+        );
+        Self::new(serde_json::Value::Object(object))
+    }
+
+    /// Selects and clones one nested object path.
+    #[doc(hidden)]
+    pub fn select_path<'a>(&self, path: impl IntoIterator<Item = &'a str>) -> Result<Self> {
+        let mut selected = &self.0;
+        for segment in path {
+            selected = selected.get(segment).ok_or_else(|| {
+                SpecError::Contract("canonical semantic path is absent".to_owned())
+            })?;
+        }
+        Self::new(selected.clone())
+    }
+
+    /// Returns one string-valued object field.
+    #[doc(hidden)]
+    pub fn string_field(&self, field: &str) -> Option<&str> {
+        self.0.get(field).and_then(serde_json::Value::as_str)
     }
 }
 
@@ -104,8 +162,9 @@ impl<'de> Deserialize<'de> for CanonicalJsonValue {
 }
 
 /// Exact structured-expansion profile selected by a published entry point.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.planning-profile", version = "1")]
 pub struct PlanningProfile {
     version: String,
     canonical_profile_parameters: CanonicalJsonValue,
@@ -156,20 +215,16 @@ impl PlanningProfile {
     /// Returns exact canonical bytes validated by the public contract.
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
         self.validate_invariant()?;
-        let value = validated(PLANNING_PROFILE_CONTRACT, self)?;
-        PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
+        self.encode_canonical()
             .map_err(|error| SpecError::Contract(error.to_string()))
-    }
-
-    /// Returns the raw-byte content identity of this profile.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        let value = validated(PLANNING_PROFILE_CONTRACT, self)?;
-        contract()?.content_ref(&value).map_err(Into::into)
     }
 
     /// Strictly decodes exact canonical profile bytes.
     pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
-        decode(PLANNING_PROFILE_CONTRACT, bytes)
+        let value = Self::decode_canonical(bytes)
+            .map_err(|error| SpecError::Contract(error.to_string()))?;
+        value.validate_invariant()?;
+        Ok(value)
     }
 }
 
@@ -195,10 +250,14 @@ impl ContractInvariant for PlanningProfile {
     }
 }
 
-/// Published structured-program entry-point contract.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EntryPointContract {
+/// Published structured-program entry point.
+///
+/// This is output metadata, not retained content: it has no retained-value
+/// contract, no content reference, and no decoder. Discovery publishes it; the
+/// distinct certified `mfm.structured-entry-point-contract` component is the
+/// retained one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PublishedEntryPoint {
     version: String,
     entry_point_id: EntryPointId,
     entry_point_operation_id: StableId,
@@ -208,27 +267,7 @@ pub struct EntryPointContract {
     public_output_schema_id: SchemaId,
 }
 
-impl EntryPointContract {
-    /// Returns the retained-value contract used for entry-point discovery data.
-    pub fn retained_contract() -> Result<RetainedValueContract> {
-        let semantic_type_id = SemanticTypeId::new(
-            "mfm.recoverability",
-            "entry-point-contract",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"semantic:mfm.recoverability:entry-point-contract:1"),
-        )?;
-        RetainedValueContract::new(
-            schema_id(ENTRY_POINT_CONTRACT)?,
-            semantic_type_id,
-            StableId::new("mfm.admission.entry-point-contract")
-                .map_err(|error| SpecError::Identity(error.to_string()))?,
-            "application/json",
-            component_object_evidence_contract_ref()?,
-        )
-        .map_err(Into::into)
-    }
-
+impl PublishedEntryPoint {
     /// Constructs a complete published entry point.
     pub fn new(
         entry_point_id: EntryPointId,
@@ -239,7 +278,7 @@ impl EntryPointContract {
     ) -> Result<Self> {
         let planning_profile_ref = planning_profile.content_ref()?;
         let entry = Self {
-            version: ENTRY_POINT_CONTRACT.to_owned(),
+            version: PUBLISHED_ENTRY_POINT.to_owned(),
             entry_point_id,
             entry_point_operation_id,
             planning_profile_ref,
@@ -281,43 +320,25 @@ impl EntryPointContract {
         &self.public_output_schema_id
     }
 
-    /// Returns exact canonical bytes validated by the public contract.
+    /// Returns exact canonical output bytes for this published entry point.
     pub fn canonical_json(&self) -> Result<PlainCanonicalJsonBytes> {
         self.validate_invariant()?;
-        let value = validated(ENTRY_POINT_CONTRACT, self)?;
-        PlainCanonicalJsonBytes::from_canonical_json_slice(value.as_bytes())
+        let json =
+            serde_json::to_string(self).map_err(|error| SpecError::Contract(error.to_string()))?;
+        PlainCanonicalJsonBytes::from_json_str(&json)
             .map_err(|error| SpecError::Contract(error.to_string()))
-    }
-
-    /// Returns the raw-byte content identity of this entry point.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        let value = validated(ENTRY_POINT_CONTRACT, self)?;
-        contract()?.content_ref(&value).map_err(Into::into)
-    }
-
-    /// Strictly decodes exact canonical entry-point bytes.
-    pub fn from_canonical_json(bytes: &[u8]) -> Result<Self> {
-        decode(ENTRY_POINT_CONTRACT, bytes)
     }
 }
 
-impl ContractInvariant for EntryPointContract {
+impl ContractInvariant for PublishedEntryPoint {
     fn validate_invariant(&self) -> Result<()> {
-        if self.version != ENTRY_POINT_CONTRACT
+        if self.version != PUBLISHED_ENTRY_POINT
             || self.planning_profile.content_ref()? != self.planning_profile_ref
         {
             return Err(SpecError::Invariant(
-                "entry point does not bind its exact profile".to_owned(),
+                "published entry point does not bind its exact profile".to_owned(),
             ));
         }
         Ok(())
     }
-}
-
-/// Returns the current schema identity for a named public transport contract.
-pub fn schema_id(schema_contract: &str) -> Result<SchemaId> {
-    contract()?
-        .schema_id(schema_contract)
-        .cloned()
-        .map_err(Into::into)
 }

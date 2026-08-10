@@ -54,6 +54,7 @@ use mfm_store::structured::{
     PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
     StructuredAdmissionMaterial, StructuredStoreError, StructuredStoreIdentity,
 };
+use mfm_values::CanonicalJsonPersistedSchema;
 use serde_json::json;
 
 const EXECUTABLE_ID: &str = "mfm.portfolio.test/structured-executable";
@@ -292,11 +293,11 @@ fn portfolio_and_balance_certification_is_depth_two_and_order_stable() {
     let balance_ref = forward.balance.reference().expect("balance reference");
     assert_eq!(
         portfolio_ref.content_digest().as_str(),
-        "content:sha256-v1:4a9ccc67cbefe7ab3451c781bac14a8b3fb79f215a5b92c0844a3ae4987829ed"
+        "content:sha256-v1:646640e1a68c699865fa6a620a70078bac3c749ec3662d8da2b0f05b137b5ac4"
     );
     assert_eq!(
         balance_ref.content_digest().as_str(),
-        "content:sha256-v1:e952743af93de72416591731580068397db7dba0a316f4ba858d944c5055a17a"
+        "content:sha256-v1:6e2c5ca83101b821fcfd07520dfba8840431f8d8e97fd516f3aadcfc51992c51"
     );
 
     let registry = forward.verification;
@@ -821,9 +822,11 @@ fn test_admission_material(label: &str) -> StructuredAdmissionMaterial {
             ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
             &format!("mfm.portfolio.test.{label}.context"),
         ),
-        PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
-            .expect("execution prior-run source manifest"),
+        HistoryObject::from_persisted(
+            &PriorRunFactSourceManifest::new(Vec::new())
+                .expect("execution prior-run source manifest"),
+        )
+        .expect("execution prior-run source object"),
         test_admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             &format!("mfm.portfolio.test.{label}.routing"),
@@ -834,8 +837,7 @@ fn test_admission_material(label: &str) -> StructuredAdmissionMaterial {
 }
 
 fn test_admission_object(object_type: &str, schema: &str) -> HistoryObject {
-    HistoryObject::new(stable(object_type), schema_id(schema), "{}")
-        .expect("execution admission object")
+    test_history_object(stable(object_type), schema_id(schema), "{}")
 }
 
 struct CertifiedPrograms {
@@ -1056,12 +1058,31 @@ fn lane(
 }
 
 fn certificate(discriminator: &str) -> HistoryObject {
-    HistoryObject::new(
+    test_history_object(
         stable("mfm.portfolio.test/physical-certificate"),
         schema_id("mfm.portfolio.test.physical-certificate"),
         format!("{{\"binding\":{discriminator:?}}}"),
     )
-    .expect("certificate")
+}
+
+fn test_history_object(
+    object_type: StableId,
+    schema_id: SchemaId,
+    canonical_json: impl Into<String>,
+) -> HistoryObject {
+    let canonical_json = canonical_json.into();
+    HistoryObject {
+        object_type,
+        content_ref: ContentRef::new(
+            schema_id,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical_json.as_bytes()),
+            ),
+        )
+        .expect("test object content reference"),
+        canonical_json,
+    }
 }
 
 fn profile(max_fan_out_depth: u8) -> StructuredExpansionProfile {

@@ -5,11 +5,11 @@ Pure fact authoring and selection semantics for the typed kernel.
 The crate owns:
 
 - exact descriptor projections and bounded canonical subject values (boolean, string, or
-  unsigned-integer scalars under the unsigned-native recoverability contract);
+  unsigned-integer scalars under the unsigned-native canonical profile);
 - explicit producer-independent subject/response `ProposedFactValue` material,
   slot-indexed same-run `FactProposal`, and ordered, duplicate-free `FactSet`
   with nondecreasing fact-slot groups;
-- the annex-backed `FactSelectionQuery` and `FactSelectionRequest`, including the admitted source
+- the owner-validated `FactSelectionQuery` and `FactSelectionRequest`, including the admitted source
   reference, fixed selector, completeness mode, and five total scan bounds;
 - the ordinary Read's typed canonical-response wrapper and closed redaction-safe failure codes;
 - exact subject predicates, publication ordering, logical-identity tie-breaks,
@@ -33,7 +33,7 @@ structured fact-claim object. State code cannot author or substitute that object
 
 `FactSelectionRequest::from_canonical_json` and
 `FactSelectionQuery::from_canonical_json` strictly decode exact canonical bytes
-with the embedded recoverability annex. Schema identities and query digests
-come from that annex. The MFM Read value carries those exact inner bytes in one
-base64url field whose deserializer revalidates them; there is no compatibility
-wire format.
+against this crate's own persisted shapes, which also derive the schema
+identities and query digests. The MFM Read value carries those exact inner bytes
+in one base64url field whose deserializer revalidates them; there is no
+compatibility wire format.

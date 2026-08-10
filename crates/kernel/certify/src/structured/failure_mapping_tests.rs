@@ -24,7 +24,8 @@ struct MappingFixture {
 }
 
 fn fixture_ref(label: &str) -> ContentRef {
-    typed_content_ref("mfm.failure-mapping-test", &label).expect("fixture ref")
+    fixture_content_ref(test_fixture_schema_id("mfm.failure-mapping-test"), &label)
+        .expect("fixture ref")
 }
 
 fn semantic_call(label: &str) -> SemanticCallId {
@@ -62,7 +63,7 @@ fn mapping_state(
     )
     .expect("mapper contract");
     registry.states.insert(
-        contract.state_contract_ref.clone(),
+        contract.content_ref().expect("mapper contract ref"),
         RegisteredState {
             contract: contract.clone(),
         },
@@ -389,7 +390,8 @@ fn affine_failure_mapping_rejects_each_hostile_substitution() {
     let FailurePlan::Propagate { mapping_chain, .. } = &mut hostile else {
         unreachable!()
     };
-    mapping_chain[0].mapper.contract.state_contract_ref = fixture_ref("foreign-mapper-state");
+    mapping_chain[0].mapper.contract.semantic_state_id =
+        stable_id("mfm.test/foreign-mapper-state").expect("foreign mapper state id");
     assert_rejected(&one, &hostile);
 
     let mut hostile = one.plan.clone();
@@ -437,8 +439,8 @@ fn affine_failure_mapping_rejects_each_hostile_substitution() {
                 mapper_state_contract_ref: mapping_chain[0]
                     .mapper
                     .contract
-                    .state_contract_ref
-                    .clone(),
+                    .content_ref()
+                    .expect("mapper contract ref"),
                 route_contract,
             }],
         },
@@ -676,4 +678,15 @@ fn eventual_failure_handler_graph_rejects_missing_duplicate_and_cyclic_plans() {
     assert!(error
         .to_string()
         .contains("typed failure source has duplicate certified plans"));
+}
+
+/// Test-only arbitrary identity; production never constructs one.
+fn test_fixture_schema_id(name: &'static str) -> super::Result<mfm_ids::SchemaId> {
+    mfm_ids::SchemaId::new(
+        name,
+        "1",
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        mfm_canonical::sha256_digest_bytes(name.as_bytes()),
+    )
+    .map_err(|error| super::CertifyError::Certification(error.to_string()))
 }

@@ -31,15 +31,14 @@ and outcome expressions are normalized without control records.
 ## Cursor selection
 
 Outside fan-out there is one current state. Inside fan-out the fold exposes declaration-ordered
-actionable lane paths. Runtime selects the minimum path. A waiting Read does not prevent a later
-independent lane from becoming actionable, but a structural barrier or possible Effect entry stops
-the scan. A join is derived only after every lane has one canonical lane outcome, and its values
+actionable lane paths. Runtime selects the minimum path. A structural barrier or possible Effect
+entry stops the scan, and an unobserved Read keeps its lane actionable rather than exposing a later
+one, because it is re-assertable rather than waiting. A join is derived only after every lane has one canonical lane outcome, and its values
 are ordered by declaration rather than completion time.
 
 The fold reports one of:
 
 - actionable state occurrences;
-- waiting unmatched Reads;
 - possible Effect entry;
 - committed integrity blocking; or
 - complete root outcome.
@@ -84,12 +83,13 @@ The current completion variants are:
 | Read/Effect | `Returned` | Exact reviewed value may reach settlement. |
 | Read/Effect | `SafeFailure` | Exact reviewed failure may reach settlement. |
 | Effect | `SupersededBeforeEntry` | Purpose-limited proof creates the next ordinal. |
-| Effect | `EntryUnknown` | Parks possible target entry. |
+| Effect | `EntryUnknown` | Parks possible target entry, or re-asserts at the next ordinal under a declared `EntryAbsorbing` with budget remaining. |
 | Read/Effect | `IntegrityFault` | Committed evidence blocks the run. |
 
-An unmatched Read waits; it is not silently retried or synthetically completed. Only committed
-`SupersededBeforeEntry` permits a new attempt for the same Effect occurrence. A stale worker cannot
-self-upgrade its physical authority.
+An unmatched Read is re-assertable at the next ordinal, because a Read consumes no externally
+meaningful state; nothing is synthetically completed. Only committed `SupersededBeforeEntry` permits
+a new attempt for the same Effect occurrence. A stale worker cannot self-upgrade its physical
+authority.
 
 ## Settlement and failure handling
 
@@ -163,7 +163,6 @@ closure under the current structured export schema.
 - transition committed, with whether it also closed;
 - access observed;
 - concurrent progress;
-- waiting Reads;
 - possible entry;
 - blocked integrity; or
 - already closed.

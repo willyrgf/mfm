@@ -119,25 +119,29 @@ fn descriptor_identity_has_golden_canonical_json_and_schema_id() {
             .identity_canonical_json()
             .expect("canonical identity")
             .as_str(),
-        "{\"canonicalization\":\"sha256-jcs-v1\",\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"},\"versioning\":\"manual_version\"}"
+        "{\"canonicalization\":\"sha256-jcs-v1\",\"encoding\":{\"kind\":\"canonical_json\",\"shape\":{\"fields\":[{\"default\":\"required\",\"name\":\"amount\",\"shape\":{\"kind\":\"decimal_string\",\"scale\":{\"kind\":\"variable\"}}},{\"default\":\"required\",\"name\":\"label\",\"shape\":{\"kind\":\"string\"}}],\"kind\":\"struct\"}},\"persisted_surface\":{\"numbers\":\"no_floats\",\"secrets\":\"no_secrets\"},\"schema_kind\":\"value\",\"schema_name\":\"mfm.test.example_value\",\"schema_version\":\"1\",\"semantic_type_id\":\"semantic:mfm.test:example-value:1:sha256-jcs-v1:3333333333333333333333333333333333333333333333333333333333333333\",\"versioning\":\"manual_version\"}"
     );
     assert_eq!(
         ExampleValue::schema_id()
             .expect("example schema id")
             .as_str(),
-        "schema:mfm.test.example_value:1:sha256-jcs-v1:a8d99e06027b3fbad4b15248550d1fe2fe899091c629f48af1a3e267f7bd3379"
+        "schema:mfm.test.example_value:1:sha256-jcs-v1:bd1f47f7703b8fbf6ef6de5d18a8c3bc043092ef3fd44087c3252ff246cb2924"
     );
 }
 
 #[test]
 fn every_schema_identity_encoder_rejects_mutated_oversized_shape() {
     let mut descriptor = ExampleValue::schema_descriptor().expect("example descriptor");
-    descriptor.identity.shape = SchemaShape::named_struct(
-        (0..1_500)
-            .map(|index| FieldDescriptor::required(format!("field_{index:04}"), SchemaShape::Bool))
-            .collect(),
-    )
-    .expect("oversized shape");
+    descriptor.identity.encoding = mfm_values::PersistedEncoding::CanonicalJson {
+        shape: SchemaShape::named_struct(
+            (0..1_500)
+                .map(|index| {
+                    FieldDescriptor::required(format!("field_{index:04}"), SchemaShape::Bool)
+                })
+                .collect(),
+        )
+        .expect("oversized shape"),
+    };
 
     assert!(descriptor.identity_canonical_json().is_err());
     assert!(serde_json::to_vec(&descriptor.identity).is_err());
@@ -172,7 +176,7 @@ fn framework_generic_descriptors_have_golden_schema_ids() {
         ArtifactRef::<ExampleValue>::schema_id()
             .expect("artifact ref schema id")
             .as_str(),
-        "schema:mfm.kernel.artifact_ref:1:sha256-jcs-v1:2f3dcaab8ef8b51b86b239fbb34f7b070cb7e70efb6f603d3c047dd20d5dba8b"
+        "schema:mfm.kernel.artifact_ref:1:sha256-jcs-v1:c876826bd07c719d662b1487e87fbe7f8d2e5ca404ad095d10a2507dfa25ae1b"
     );
 }
 

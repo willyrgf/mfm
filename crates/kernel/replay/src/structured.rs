@@ -1,7 +1,7 @@
 //! Callback-free replay and purpose-limited projections over the sole structured-history fold.
 
-use mfm_canonical::{PlainCanonicalJsonBytes, RecoverabilityContract};
-use mfm_ids::{RunId, SchemaId};
+use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_ids::RunId;
 use mfm_journal::structured::{JournalHead, LexicalValueRef, ObservationOutcome, SemanticHead};
 use mfm_store::structured::{
     AuditAccessEntry, AuditRunEvidence, PublicRunEvidence, RecordedRunEvidence, ReplayRunReader,
@@ -26,48 +26,32 @@ pub enum StructuredReplayError {
     InvalidRecordedHistory,
 }
 
-/// One annex-validated projection retained behind a concrete public DTO.
+/// One canonical projection retained behind a concrete public DTO.
+///
+/// A projection is codec-only: it carries no schema identity, because nothing
+/// retains it under a `ContentRef`. Its exact bytes and its typed wire shape are
+/// the whole contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GeneratedProjection {
-    schema_id: SchemaId,
     canonical: PlainCanonicalJsonBytes,
 }
 
 impl GeneratedProjection {
-    fn encode(contract: &str, value: &impl Serialize) -> Result<Self> {
+    fn encode(value: &impl Serialize) -> Result<Self> {
         let canonical = mfm_journal::structured::canonical_json(value)
             .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        let validated = RecoverabilityContract::embedded()
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?
-            .strict_decode(contract, canonical.as_bytes())
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        Ok(Self {
-            schema_id: validated.schema_id().clone(),
-            canonical,
-        })
+        Ok(Self { canonical })
     }
 
-    fn strict_decode(contract: &str, bytes: &[u8]) -> Result<Self> {
+    fn strict_decode(bytes: &[u8]) -> Result<Self> {
         let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
             .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        let validated = RecoverabilityContract::embedded()
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?
-            .strict_decode(contract, canonical.as_bytes())
-            .map_err(|_| StructuredReplayError::InvalidRecordedHistory)?;
-        Ok(Self {
-            schema_id: validated.schema_id().clone(),
-            canonical,
-        })
+        Ok(Self { canonical })
     }
 
     /// Returns exact canonical projection bytes.
     pub fn as_bytes(&self) -> &[u8] {
         self.canonical.as_bytes()
-    }
-
-    /// Returns the projection schema identity.
-    pub const fn schema_id(&self) -> &SchemaId {
-        &self.schema_id
     }
 }
 
@@ -79,12 +63,12 @@ macro_rules! generated_projection {
 
         impl $name {
             fn encode(value: &impl Serialize) -> Result<Self> {
-                GeneratedProjection::encode($contract, value).map(Self)
+                GeneratedProjection::encode(value).map(Self)
             }
 
-            /// Strictly decodes the exact annex-registered projection bytes.
+            /// Strictly decodes exact canonical projection bytes.
             pub fn strict_decode(bytes: &[u8]) -> Result<Self> {
-                let projection = GeneratedProjection::strict_decode($contract, bytes)?;
+                let projection = GeneratedProjection::strict_decode(bytes)?;
                 validate_projection($contract, projection.as_bytes())?;
                 Ok(Self(projection))
             }
@@ -92,11 +76,6 @@ macro_rules! generated_projection {
             /// Returns exact canonical projection bytes.
             pub fn as_bytes(&self) -> &[u8] {
                 self.0.as_bytes()
-            }
-
-            /// Returns the annex-derived projection schema identity.
-            pub const fn schema_id(&self) -> &SchemaId {
-                self.0.schema_id()
             }
         }
     };
@@ -167,7 +146,6 @@ impl StructuredReplayResultWire {
                 }
                 match status {
                     StructuredReplayStatus::Actionable
-                    | StructuredReplayStatus::WaitingReads
                     | StructuredReplayStatus::PossibleEntry
                     | StructuredReplayStatus::BlockedIntegrity
                     | StructuredReplayStatus::Closed => Ok(()),
@@ -181,7 +159,6 @@ impl StructuredReplayResultWire {
 #[serde(rename_all = "snake_case")]
 enum StructuredReplayStatus {
     Actionable,
-    WaitingReads,
     PossibleEntry,
     BlockedIntegrity,
     Closed,

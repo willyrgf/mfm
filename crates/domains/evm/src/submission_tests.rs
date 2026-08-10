@@ -1,12 +1,10 @@
 use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, B256, U256};
-use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_ids::{InvocationIdentity, RunId, StableId, StoreScopeId, TenantScopeId};
 use mfm_journal::structured::{LexicalValueRef, TypedValueRef};
 use mfm_program::structured::{
-    CapabilityExpansion, CommittedObservation, RuntimeEffectCapability, RuntimeSigner, State,
-    StateSettlement,
+    CapabilityExpansion, RuntimeEffectCapability, RuntimeSigner, State, StateSettlement,
 };
 use mfm_signing::{
     PublicKeyBytes, PublicSigningIdentity, SigningAlgorithmId,
@@ -747,30 +745,7 @@ fn test_run_id(tenant: &TenantScopeId, invocation: InvocationIdentity) -> RunId 
     let store = StoreScopeId::new(format!("{}{}", StoreScopeId::PREFIX, "7".repeat(32)))
         .expect("store scope");
     let operation = StableId::new("mfm.evm/submit-transaction").expect("operation");
-    let preimage = CanonicalValue::object([
-        (
-            "store_scope_id",
-            CanonicalValue::String(store.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            CanonicalValue::String(tenant.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            CanonicalValue::String(operation.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            CanonicalValue::String(invocation.as_str().to_owned()),
-        ),
-    ])
-    .expect("run preimage");
-    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
-    let encoded = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .expect("validated run preimage");
-    contract.derive_run_id(&encoded).expect("run id")
+    mfm_journal::structured::derive_run_id(&store, tenant, &operation, &invocation).expect("run id")
 }
 
 fn replace_json_path(value: &mut serde_json::Value, path: &[&str], replacement: serde_json::Value) {
@@ -845,10 +820,8 @@ fn completion_requests_reject_forged_terminal_witness_cross_links() {
     reject("execution status", forged);
 
     let mut forged = request.clone();
-    forged.terminal_witnesses.terminal_assurance_contract_ref = forged
-        .canonical_terminal_outcome
-        .winning_activation_evidence_ref
-        .clone();
+    forged.terminal_witnesses.terminal_assurance_contract_ref =
+        forged.current_reservation.resource_lineage_ref.clone();
     reject("terminal assurance", forged);
 
     let mut forged = request;
@@ -1069,11 +1042,6 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         second_unsigned.unsigned_candidate_digest.clone();
     c1.attested_candidate.candidate_descriptor_ref =
         canonical_wallet_reference(&second_unsigned).expect("second candidate descriptor");
-    c1.activation_evidence_ref = fixture
-        .post_reserve
-        .reservation
-        .reservation_evidence_ref
-        .clone();
 
     let mut work = fixture.candidate.work.clone();
     work.activated_candidates = vec![c0.clone(), c1.clone()];
@@ -1195,10 +1163,9 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
         },
         canonical_status_digest: unchanged_status_digest,
     };
-    let StateSettlement::Proposed(outcome) = submission_process::settle_observed_candidate_status(
-        &observation,
-        &CommittedObservation::Returned(unchanged_status),
-    ) else {
+    let StateSettlement::Proposed(outcome) =
+        submission_process::settle_observed_candidate_status(&observation, &unchanged_status)
+    else {
         panic!("non-terminal observation must resume next ordinal");
     };
     let ProposedStateValue::Success(CandidateResolution::Resume { work: advanced }) =
@@ -1222,10 +1189,9 @@ fn recovery_visits_every_activated_candidate_before_replacement() {
     // Status resume still starts at 0 even when the retained prefix is non-empty.
     let multi_status = reserved_status(&fixture, true);
     // reserved_status(advanced=true) has one candidate; assert next resets to 0.
-    let StateSettlement::Proposed(outcome) = submission_process::settle_wallet_status(
-        &fixture.prepared,
-        &CommittedObservation::Returned(multi_status),
-    ) else {
+    let StateSettlement::Proposed(outcome) =
+        submission_process::settle_wallet_status(&fixture.prepared, &multi_status)
+    else {
         panic!("reserved status must settle");
     };
     let ProposedStateValue::Success(WalletStatusDecision::Reserved { work: resumed }) =
@@ -1252,12 +1218,6 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
     assert_eq!(
         completed.terminal_witnesses,
         fixture.completion.request.terminal_witnesses
-    );
-    let witnesses_ref =
-        canonical_wallet_reference(&completed.terminal_witnesses).expect("witnesses reference");
-    assert_eq!(
-        completed.original_terminal_witnesses_ref,
-        witnesses_ref.content_digest()
     );
     assert!(
         !completed.sealed_activated_candidates.is_empty(),
@@ -1332,10 +1292,13 @@ fn completed_wallet_nonce_retains_rehashable_public_recovery_closure() {
     assert!(forged.validate().is_err(), "empty sealed prefix rejected");
 
     let mut forged = completed.clone();
-    forged.original_terminal_witnesses_ref = format!("{:#x}", B256::repeat_byte(0xee));
+    forged.terminal_witnesses = TerminalWitnesses {
+        canonical_public_result: "{\"tampered\":true}".to_owned(),
+        ..forged.terminal_witnesses.clone()
+    };
     assert!(
         forged.validate().is_err(),
-        "witness digest mismatch rejected"
+        "directly tampered terminal witnesses rejected"
     );
 
     let mut forged = completed.clone();
@@ -1413,7 +1376,7 @@ fn failure_reconciliation_uses_one_exact_authoritative_snapshot() {
     assert_eq!(
         submission_process::settle_candidate_failure_status(
             &fixture.candidate_reconciliation,
-            &CommittedObservation::Returned(unchanged),
+            &unchanged,
         ),
         StateSettlement::Proposed(ProposedStateOutcome::Failure(
             EvmSubmissionFailure::ProviderUnavailable,
@@ -1434,7 +1397,7 @@ fn failure_reconciliation_uses_one_exact_authoritative_snapshot() {
     let StateSettlement::Proposed(changed_resolution) =
         submission_process::settle_candidate_failure_status(
             &fixture.candidate_reconciliation,
-            &CommittedObservation::Returned(changed),
+            &changed,
         )
     else {
         panic!("changed status must settle");
@@ -1464,7 +1427,7 @@ fn failure_reconciliation_uses_one_exact_authoritative_snapshot() {
     assert_eq!(
         submission_process::settle_candidate_failure_status(
             &fixture.candidate_reconciliation,
-            &CommittedObservation::Returned(completed),
+            &completed,
         ),
         StateSettlement::Proposed(ProposedStateOutcome::Success(
             CandidateResolution::Completed {
@@ -1480,41 +1443,37 @@ fn reconciliation_status_reads_fail_closed_without_recursing() {
     assert_eq!(
         submission_process::settle_candidate_failure_status(
             &fixture.reservation_reconciliation,
-            &CommittedObservation::Returned(reserved_status(&fixture, false)),
+            &reserved_status(&fixture, false),
         ),
         StateSettlement::InvalidEvidence
     );
     assert_eq!(
-        submission_process::settle_candidate_failure_status(
+        submission_process::settle_direct_failure::<_, CandidateResolution>(
             &fixture.candidate_reconciliation,
-            &CommittedObservation::SafeFailure(EvmSubmissionFailure::NonceAuthorityUnavailable,),
+            &EvmSubmissionFailure::NonceAuthorityUnavailable,
         ),
-        StateSettlement::Proposed(ProposedStateOutcome::Failure(
-            EvmSubmissionFailure::NonceAuthorityUnavailable,
-        ))
+        ProposedStateOutcome::Failure(EvmSubmissionFailure::NonceAuthorityUnavailable)
     );
     assert_eq!(
-        submission_process::settle_candidate_wallet_status(
+        submission_process::settle_pending_direct_failure::<_, CandidateResolution>(
             &fixture.prepared,
-            &CommittedObservation::SafeFailure(EvmSubmissionFailure::NonceAuthorityUnavailable,),
+            &EvmSubmissionFailure::NonceAuthorityUnavailable,
         ),
-        StateSettlement::Proposed(ProposedStateOutcome::Failure(
-            PendingEvmSubmissionFailure::Direct {
-                failure: EvmSubmissionFailure::NonceAuthorityUnavailable,
-            },
-        ))
+        ProposedStateOutcome::Failure(PendingEvmSubmissionFailure::Direct {
+            failure: EvmSubmissionFailure::NonceAuthorityUnavailable,
+        },)
     );
     assert_eq!(
         submission_process::settle_post_reserve_wallet_status(
             &fixture.post_reserve,
-            &CommittedObservation::Returned(WalletNonceStatus::Absent),
+            &WalletNonceStatus::Absent,
         ),
         StateSettlement::InvalidEvidence
     );
     assert_eq!(
         submission_process::settle_reservation_failure_status(
             &fixture.reservation_reconciliation,
-            &CommittedObservation::Returned(WalletNonceStatus::Busy),
+            &WalletNonceStatus::Busy,
         ),
         StateSettlement::Proposed(ProposedStateOutcome::Failure(
             EvmSubmissionFailure::NonceDomainBusy,
@@ -1566,66 +1525,11 @@ fn completed_status(fixture: &QualificationFixture) -> WalletNonceStatus {
                 .expect("fixture state value"),
         },
     );
-    let mut reservation = fixture.post_reserve.reservation.clone();
-    let observed_floor_digest = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.wallet-observed-floor-provenance.v1",
-        &(&reserve_request.qualified_floor, &state_input),
-    )
-    .expect("fixture observed floor digest");
-    reservation.observed_floor_ref = observed_floor_digest.as_str().to_owned();
-    let reservation_evidence_digest = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.wallet-reservation-evidence.v1",
-        &(
-            &reserve_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-            reservation.nonce,
-        ),
-    )
-    .expect("fixture reservation evidence digest");
-    reservation.reservation_evidence_ref = fixture
-        .post_reserve
-        .reservation
-        .reservation_evidence_ref
-        .with_content_digest(reservation_evidence_digest)
-        .expect("fixture reservation evidence reference");
+    let reservation = fixture.post_reserve.reservation.clone();
     let mut completion_request = fixture.completion.request.clone();
     completion_request.current_reservation = reservation.clone();
     let activation_request = fixture.prepared_activation.activation_request.clone();
-    let activation_evidence_digest = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.wallet-candidate-activation-evidence.v1",
-        &(
-            &activation_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-        ),
-    )
-    .expect("fixture activation evidence digest");
-    let mut active_candidate = fixture.active.active_candidate.clone();
-    active_candidate.activation_evidence_ref = fixture
-        .active
-        .active_candidate
-        .activation_evidence_ref
-        .with_content_digest(activation_evidence_digest.clone())
-        .expect("fixture activation evidence reference");
-    completion_request
-        .canonical_terminal_outcome
-        .winning_activation_evidence_ref = active_candidate.activation_evidence_ref.clone();
-    let completion_evidence_digest = mfm_journal::structured::domain_content_digest(
-        "mfm.evm.wallet-completion-evidence.v1",
-        &(
-            &completion_request,
-            &state_input,
-            &reservation.resource_lineage_ref,
-        ),
-    )
-    .expect("fixture completion evidence digest");
-    let completion_evidence_ref = fixture
-        .post_reserve
-        .reservation
-        .reservation_evidence_ref
-        .with_content_digest(completion_evidence_digest)
-        .expect("fixture completion evidence reference");
+    let active_candidate = fixture.active.active_candidate.clone();
     let completion = CompletedWalletNonce::with_recovery_closure(
         completion_request.nonce_domain.clone(),
         completion_request.current_reservation.nonce,
@@ -1637,11 +1541,6 @@ fn completed_status(fixture: &QualificationFixture) -> WalletNonceStatus {
         completion_request.canonical_terminal_outcome.clone(),
         completion_request.terminal_witnesses.clone(),
         vec![active_candidate],
-        canonical_wallet_reference(&completion_request.terminal_witnesses)
-            .expect("terminal witness reference")
-            .content_digest()
-            .to_owned(),
-        completion_evidence_ref,
         "fixture-provider-attestation".to_owned(),
         reservation,
         request.transaction_intent().clone(),
@@ -1819,3 +1718,4 @@ fn count_direct_failure_skip_arms(directive: &AuthoredFailureDirective) -> usize
         AuthoredFailureDirective::NoFailure | AuthoredFailureDirective::Default => 0,
     }
 }
+use mfm_values::CanonicalJsonPersistedSchema;

@@ -355,17 +355,6 @@ in
         "--doc"
       ];
     };
-    portable-replay-corpus = cargoLeaf {
-      run = [
-        "cargo"
-        "test"
-        "-p"
-        "mfm-replay"
-        "--lib"
-        "--"
-        "--nocapture"
-      ];
-    };
     postgres-sqlx-check = cargoLeaf {
       tools = sqlxTools;
       run = [
@@ -444,7 +433,7 @@ in
       env = postgresSqlxEnv;
       requires = [ "postgres" ];
     };
-    recoverability-postgres-v1 = cargoLeaf {
+    structured-history-postgres-qualification = cargoLeaf {
       run = [
         "cargo"
         "test"
@@ -546,7 +535,6 @@ in
     workspace-tests = {
       kind = "composite";
       steps = nixfiedLib.seq [
-        "portable-replay-corpus"
         "nextest-run"
         "doc-tests"
       ];
@@ -571,8 +559,8 @@ in
       kind = "composite";
       steps = {
         postgres-sqlx-check.task = "postgres-sqlx-check";
-        recoverability-postgres-v1 = {
-          task = "recoverability-postgres-v1";
+        structured-history-postgres-qualification = {
+          task = "structured-history-postgres-qualification";
           dependsOn = [ "postgres-sqlx-check" ];
         };
         wallet-nonce-postgres-qualification = {

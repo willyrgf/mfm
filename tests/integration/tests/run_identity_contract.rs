@@ -1,4 +1,3 @@
-use mfm_canonical::{CanonicalValue, RecoverabilityContract};
 use mfm_ids::{InvocationIdentity, StableId, StoreScopeId, TenantScopeId};
 
 #[test]
@@ -30,31 +29,7 @@ fn derive_run_id(
     operation: &StableId,
     invocation: &InvocationIdentity,
 ) -> mfm_ids::RunId {
-    let preimage = CanonicalValue::object([
-        (
-            "store_scope_id",
-            CanonicalValue::String(store_scope_id.as_str().to_owned()),
-        ),
-        (
-            "tenant_scope_id",
-            CanonicalValue::String(tenant_scope_id.as_str().to_owned()),
-        ),
-        (
-            "entry_point_operation_id",
-            CanonicalValue::String(operation.as_str().to_owned()),
-        ),
-        (
-            "invocation_identity",
-            CanonicalValue::String(invocation.as_str().to_owned()),
-        ),
-    ])
-    .expect("run-id preimage");
-    let contract = RecoverabilityContract::embedded().expect("recoverability contract");
-    let validated = contract
-        .encode("mfm.run-id-preimage.v1", &preimage)
-        .expect("validated run-id preimage");
-    contract
-        .derive_run_id(&validated)
+    mfm_journal::structured::derive_run_id(store_scope_id, tenant_scope_id, operation, invocation)
         .expect("derive run identity")
 }
 

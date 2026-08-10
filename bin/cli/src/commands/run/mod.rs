@@ -418,22 +418,25 @@ fn finish_export(result: Result<(), PublicError>, format: &super::OutputFormat) 
 #[cfg(test)]
 mod tests {
     use mfm_app::{AdmitRunResponse, DriveResponse, ErrorClass, PublicJsonResponse, PublicRunView};
-    use serde::Deserialize;
 
     use super::{map_export_write_error, public_text, CreateNewFileError};
     use crate::commands::OutputFormat;
     use crate::presentation::output::render_public_result;
 
-    #[derive(Deserialize)]
-    struct Corpus {
-        positive_vectors: Vec<Vector>,
-    }
+    /// The minimum attached admission response wire form.
+    const ADMIT_RUN_RESPONSE_WIRE: &str = r#"{"admission":"attached","entry_point_id":"mfm.portfolio/snapshot@1","entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","planning_profile_ref":{"content_digest":"content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111","schema_id":"schema:mfm.test.fact:1:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"},"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","version":"mfm.admit-run-response.v1"}"#;
 
-    #[derive(Deserialize)]
-    struct Vector {
-        id: String,
-        canonical_hex: Option<String>,
-    }
+    /// One advanced drive response wire form.
+    const DRIVE_RESPONSE_ADVANCED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"advanced","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// One waiting drive response wire form.
+    const DRIVE_RESPONSE_WAITING_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"waiting","reason":"retryable_evidence_gap","run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// One closed drive response wire form.
+    const DRIVE_RESPONSE_CLOSED_WIRE: &str = r#"{"journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"kind":"closed","reason":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000"}"#;
+
+    /// The minimum public run view wire form.
+    const PUBLIC_RUN_VIEW_WIRE: &str = r#"{"entry_point_operation_id":"mfm.portfolio/snapshot","invocation_identity":"00000000-0000-4000-8000-000000000000","journal_head":{"commit_digest":"sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","run_sequence":1},"outcome":null,"run_id":"run:sha256-jcs-v1:0000000000000000000000000000000000000000000000000000000000000000","semantic_head":{"kind":"genesis"},"status":"actionable","tenant_scope_id":"mfm.tenant_scope.v1:11111111111111111111111111111111","version":"mfm.public-run-view.v1"}"#;
 
     #[test]
     fn destination_copy_failures_use_only_the_fixed_export_write_contract() {
@@ -445,34 +448,27 @@ mod tests {
 
     #[test]
     fn structured_run_commands_render_the_exact_reviewed_success_contracts() {
-        let corpus: Corpus = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../contracts/recoverability/v1/corpus.json"
-        )))
-        .expect("frozen corpus");
-
-        let admission = vector_bytes(&corpus, "schema/mfm.admit-run-response.v1/minimum");
+        let admission = ADMIT_RUN_RESPONSE_WIRE.as_bytes();
         assert_cli_rendering(
-            &AdmitRunResponse::strict_decode(&admission).expect("strict admission response"),
-            &admission,
+            &AdmitRunResponse::strict_decode(admission).expect("strict admission response"),
+            admission,
         );
 
-        for id in [
-            "schema/mfm.drive-response.v1/minimum",
-            "schema/mfm.drive-response.v1/waiting",
-            "schema/mfm.drive-response.v1/closed",
+        for drive in [
+            DRIVE_RESPONSE_ADVANCED_WIRE,
+            DRIVE_RESPONSE_WAITING_WIRE,
+            DRIVE_RESPONSE_CLOSED_WIRE,
         ] {
-            let drive = vector_bytes(&corpus, id);
             assert_cli_rendering(
-                &DriveResponse::strict_decode(&drive).expect("strict drive response"),
-                &drive,
+                &DriveResponse::strict_decode(drive.as_bytes()).expect("strict drive response"),
+                drive.as_bytes(),
             );
         }
 
-        let public = vector_bytes(&corpus, "schema/mfm.public-run-view.v1/minimum");
+        let public = PUBLIC_RUN_VIEW_WIRE.as_bytes();
         assert_cli_rendering(
-            &PublicRunView::strict_decode(&public).expect("strict public run view"),
-            &public,
+            &PublicRunView::strict_decode(public).expect("strict public run view"),
+            public,
         );
     }
 
@@ -497,23 +493,5 @@ mod tests {
                 serde_json::to_string_pretty(&value).expect("pretty response JSON")
             )
         );
-    }
-
-    fn vector_bytes(corpus: &Corpus, id: &str) -> Vec<u8> {
-        let encoded = corpus
-            .positive_vectors
-            .iter()
-            .find(|vector| vector.id == id)
-            .and_then(|vector| vector.canonical_hex.as_deref())
-            .expect("golden response vector");
-        assert_eq!(encoded.len() % 2, 0);
-        encoded
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let text = std::str::from_utf8(pair).expect("hex pair");
-                u8::from_str_radix(text, 16).expect("hex byte")
-            })
-            .collect()
     }
 }

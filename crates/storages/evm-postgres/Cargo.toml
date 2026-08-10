@@ -45,6 +45,10 @@ path = "src/bin/provider_process.rs"
 required-features = ["parity-tests"]
 
 [[test]]
+name = "provider-protocol"
+path = "tests/provider_protocol.rs"
+
+[[test]]
 name = "wallet-authority"
 path = "tests/wallet_authority.rs"
 required-features = ["parity-tests"]

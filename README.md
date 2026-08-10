@@ -60,7 +60,7 @@ libraries and inject a qualified application.
 - [Persisted/public surfaces](docs/persisted-public-surfaces.md)
 - [Build and verification](docs/build-and-verification.md)
 - [Known gaps](docs/known-gaps.md)
-- [Effect entry resolution](docs/effect-entry-resolution.md) (proposed, not implemented)
+- [Effect entry resolution](docs/effect-entry-resolution.md)
 - [CLI](bin/cli/README.md) and [REST API](bin/rest-api/README.md)
 
 ## Development

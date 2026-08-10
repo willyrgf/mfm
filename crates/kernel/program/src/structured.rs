@@ -7,35 +7,38 @@
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::marker::PhantomData;
+use std::num::NonZeroU16;
 use std::sync::Arc;
 
 use mfm_capabilities::{
-    EffectAdapterInvoker, EffectCapabilityContract, EffectRefreshMode, NoRefresh,
-    ReadAdapterInvoker, ReadCapabilityContract, Refreshable, ResourceAuthorityContract,
-    SignerContract,
+    EffectAdapterInvoker, EffectCapabilityContract, EffectEntryMode, EffectRefreshMode,
+    EntryAbsorbing, EntryKeyed, EntryOnce, NoRefresh, ReadAdapterInvoker, ReadCapabilityContract,
+    Refreshable, ResourceAuthorityContract, SignerContract,
 };
 use mfm_ids::{ContentRef, StableId};
 use mfm_spec::structured::{
     access_fault_contract_ref, failure_handler_semantic_call_id, fan_out_join_contract_ref,
-    policy_expansion_recipe_ref, policy_proceed_program_ref,
-    prior_run_fact_selection_capability_contract, retained_value_contract_ref,
-    structured_value_contract, structured_value_contract_ref, AuthoredBlock, AuthoredDeclaration,
-    AuthoredFailureDirective, AuthoredFanOut, AuthoredFanOutLane, AuthoredMatch, AuthoredMatchArm,
-    AuthoredOperationCall, AuthoredStateCall, AuthoredStructuredProgram, BlockTail,
-    ClosedSumContract, ClosedSumPayload, ClosedSumVariant, FailureMapperRegistration, FailureScope,
-    FailureScopeBinding, FragmentInputBinding, LaneOutcome, LexicalProducer, LexicalSlot,
-    ProposedStateOutcome, ResultRole, SemanticCallPath, SemanticPathSegment, StructuralPath,
-    StructuralPathSegment, StructuredCapabilityProtocolContract, StructuredEffectRefreshContract,
-    StructuredExecutionKind, StructuredFailureContract, StructuredLiveComponentContract,
-    StructuredSafeFailureDispositionContract, StructuredStateContract,
-    StructuredStateExecutionContract,
+    policy_proceed_program_ref, prior_run_fact_selection_capability_contract,
+    retained_value_contract_ref, structured_value_contract, structured_value_contract_ref,
+    AuthoredBlock, AuthoredDeclaration, AuthoredFailureDirective, AuthoredFanOut,
+    AuthoredFanOutLane, AuthoredMatch, AuthoredMatchArm, AuthoredOperationCall, AuthoredStateCall,
+    AuthoredStructuredProgram, BlockTail, ClosedSumContract, ClosedSumPayload, ClosedSumVariant,
+    FailureMapperRegistration, FailureScope, FailureScopeBinding, FragmentInputBinding,
+    LaneOutcome, LexicalProducer, LexicalSlot, ProposedStateOutcome, ResultRole, SemanticCallPath,
+    SemanticPathSegment, StructuralPath, StructuralPathSegment,
+    StructuredCapabilityProtocolContract, StructuredEffectEntryContract,
+    StructuredEffectRefreshContract, StructuredExecutionKind, StructuredFailureContract,
+    StructuredLiveComponentContract, StructuredSafeFailureDispositionContract,
+    StructuredStateContract, StructuredStateExecutionContract,
 };
 
+use mfm_program_derive::PersistedSchema;
 /// Success-only proposal admitted by safe-failure settlement under
 /// [`SafeFailureSuccessOnly`].
 pub use mfm_spec::structured::ProposedSuccessOutcome;
 use mfm_values::{
-    component_object_evidence_contract_ref, MfmValue, RetainedValueContract, SchemaShape,
+    CanonicalJsonPersistedSchema, ComponentObjectEvidence, MediaType, MfmValue,
+    PersistedObjectPayload, RetainedValueContract, SchemaShape, ValueError,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -158,6 +161,8 @@ mod private {
     pub trait CapabilitySealed {}
 
     pub trait RuntimeEffectRefreshBindingSealed<Mode> {}
+
+    pub trait RuntimeEffectEntryBindingSealed<Mode, Request> {}
 
     impl CapabilitySealed for Direct {}
     impl<Expansion> CapabilitySealed for RequiresCapability<Expansion> {}
@@ -468,6 +473,10 @@ pub trait RuntimeEffectCapability: EffectCapabilityContract + Send + Sync + 'sta
     /// lineage contracts for this capability's refresh mode.
     type RefreshBinding: RuntimeEffectRefreshBinding<Self::Refresh>;
 
+    /// Sealed typed binding that derives the exact entry contract for this
+    /// capability's re-entry discipline.
+    type EntryBinding: RuntimeEffectEntryBinding<Self::Entry, Self::Request>;
+
     /// Returns the exact semantic Effect capability contract.
     fn contract() -> Result<StructuredLiveComponentContract>;
 }
@@ -490,6 +499,68 @@ impl private::RuntimeEffectRefreshBindingSealed<NoRefresh> for NoRefreshBinding 
 impl RuntimeEffectRefreshBinding<NoRefresh> for NoRefreshBinding {
     fn contract() -> Result<StructuredEffectRefreshContract> {
         Ok(StructuredEffectRefreshContract::NoRefresh {})
+    }
+}
+
+/// Sealed derivation of one Effect entry-mode contract over one exact request.
+///
+/// The binding is parameterized by the request so the absorbing arm can name
+/// `Request::EntryKey`: the certified reference is the *key's* contract, not the
+/// request's, and only a keyed request can satisfy the bound at all.
+pub trait RuntimeEffectEntryBinding<Mode, Request>:
+    private::RuntimeEffectEntryBindingSealed<Mode, Request> + Send + Sync + 'static
+where
+    Mode: EffectEntryMode,
+{
+    /// Derives the exact canonical entry contract.
+    fn contract() -> Result<StructuredEffectEntryContract>;
+}
+
+/// Typed binding for an Effect whose parked attempt is terminal.
+pub enum EntryOnceBinding {}
+
+impl<Request> private::RuntimeEffectEntryBindingSealed<EntryOnce, Request> for EntryOnceBinding where
+    Request: MfmValue
+{
+}
+
+impl<Request> RuntimeEffectEntryBinding<EntryOnce, Request> for EntryOnceBinding
+where
+    Request: MfmValue,
+{
+    fn contract() -> Result<StructuredEffectEntryContract> {
+        Ok(StructuredEffectEntryContract::EntryOnce {})
+    }
+}
+
+/// Typed binding from an absorbing declaration to its retained entry key.
+///
+/// `MAX == 0` is an authoring rejection rather than a representable document: a
+/// const generic cannot express non-zero in Rust, so the conversion is one
+/// runtime check here, at authoring time.
+pub struct EntryAbsorbingBinding<const MAX: u16>;
+
+impl<Request, const MAX: u16> private::RuntimeEffectEntryBindingSealed<EntryAbsorbing<MAX>, Request>
+    for EntryAbsorbingBinding<MAX>
+where
+    Request: EntryKeyed,
+{
+}
+
+impl<Request, const MAX: u16> RuntimeEffectEntryBinding<EntryAbsorbing<MAX>, Request>
+    for EntryAbsorbingBinding<MAX>
+where
+    Request: EntryKeyed,
+{
+    fn contract() -> Result<StructuredEffectEntryContract> {
+        Ok(StructuredEffectEntryContract::EntryAbsorbing {
+            entry_key_contract_ref: Box::new(structured_value_contract_ref::<Request::EntryKey>()?),
+            max_entries: NonZeroU16::new(MAX).ok_or_else(|| {
+                ProgramError::Authoring(
+                    "an absorbing Effect capability must admit at least one entry".to_owned(),
+                )
+            })?,
+        })
     }
 }
 
@@ -529,6 +600,7 @@ where
         safe_failure_contract_ref: structured_value_contract_ref::<Capability::SafeFailure>()?,
         access_fault_contract_ref: access_fault_contract_ref()?,
         refresh_contract: Capability::RefreshBinding::contract()?,
+        entry_contract: Capability::EntryBinding::contract()?,
     };
     if contract.component_kind != mfm_spec::structured::StructuredComponentKind::Capability
         || contract.capability_protocol.as_ref() != Some(&expected)
@@ -713,27 +785,6 @@ pub enum CommittedObservation<Returned, SafeFailure> {
     SafeFailure(SafeFailure),
 }
 
-/// Borrowed value-only view over one committed normal observation.
-#[derive(Debug, Clone, Copy)]
-pub struct CommittedObservationView<'a, Returned, SafeFailure> {
-    observation: &'a CommittedObservation<Returned, SafeFailure>,
-}
-
-impl<'a, Returned, SafeFailure> CommittedObservationView<'a, Returned, SafeFailure> {
-    /// Constructs a view after Runtime has verified the committed observation.
-    #[doc(hidden)]
-    pub const fn from_committed(
-        observation: &'a CommittedObservation<Returned, SafeFailure>,
-    ) -> Self {
-        Self { observation }
-    }
-
-    /// Returns the exact committed normal observation.
-    pub const fn observation(self) -> &'a CommittedObservation<Returned, SafeFailure> {
-        self.observation
-    }
-}
-
 /// Closed result of deterministic returned-value settlement.
 ///
 /// Safe-failure settlement cannot produce [`StateSettlement::InvalidEvidence`];
@@ -900,11 +951,7 @@ impl<S: State> StructuredStateCallbacks<S> {
         }
     }
 
-    /// Settles one exact committed normal observation, when applicable.
-    ///
-    /// Returned observations use the full returned settlement. Safe-failure
-    /// observations use the disposition-typed success-or-failure proposal path
-    /// and never invent an infrastructure semantic failure.
+    /// Settles one exact already-committed normal observation.
     #[doc(hidden)]
     pub fn settle_observation(
         &self,
@@ -989,7 +1036,11 @@ pub fn state_contract<S: State>() -> Result<StructuredStateContract> {
 pub fn closed_sum_contract<T: ClosedSum>() -> Result<ClosedSumContract> {
     let descriptor =
         T::schema_descriptor().map_err(|error| ProgramError::Authoring(error.to_string()))?;
-    let SchemaShape::Enum { variants, .. } = &descriptor.identity().shape else {
+    let shape = descriptor
+        .identity()
+        .canonical_json_shape()
+        .map_err(|error| ProgramError::Authoring(error.to_string()))?;
+    let SchemaShape::Enum { variants, .. } = shape else {
         return Err(ProgramError::Authoring(
             "Match selector is not a canonical tagged enum".to_owned(),
         ));
@@ -1054,8 +1105,10 @@ fn inline_value_contract_ref(shape: &SchemaShape) -> Result<ContentRef> {
         schema_id.clone(),
         semantic_type_id.clone(),
         derived_stable_id("structured-value")?,
-        "application/json",
-        component_object_evidence_contract_ref()
+        MediaType::new("application/json")
+            .map_err(|error| ProgramError::Authoring(error.to_string()))?,
+        ComponentObjectEvidence::current()
+            .content_ref()
             .map_err(|error| ProgramError::Authoring(error.to_string()))?,
     )
     .map_err(|error| ProgramError::Authoring(error.to_string()))?;
@@ -1460,7 +1513,7 @@ where
         validate_default_route::<ScopeFailure>(&route, &mapper.output_contract_ref)?;
         let registration = FailureMapperRegistration {
             source_failure_contract_ref: source,
-            mapper_state_contract_ref: mapper.state_contract_ref,
+            mapper_state_contract_ref: mapper.content_ref()?,
             route_contract: route,
         };
         scope.default_mappers.push(registration.clone());
@@ -1876,7 +1929,7 @@ where
             &route,
         )?;
         self.finish(AuthoredFailureDirective::Custom {
-            handler_state_contract_ref: Box::new(handler.state_contract_ref),
+            handler_state_contract_ref: Box::new(handler.content_ref()?),
             route_contract: Box::new(route),
             arms,
         })
@@ -1994,7 +2047,7 @@ where
             &route,
         )?;
         self.finish(AuthoredFailureDirective::Custom {
-            handler_state_contract_ref: Box::new(handler.state_contract_ref),
+            handler_state_contract_ref: Box::new(handler.content_ref()?),
             route_contract: Box::new(route),
             arms,
         })
@@ -2462,7 +2515,9 @@ where
 }
 
 /// Canonical callback-free policy expansion recipe with one sealed `proceed`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
+#[serde(deny_unknown_fields)]
+#[mfm(schema = "mfm.policy-expansion-recipe", version = "1")]
 pub struct PolicyExpansionRecipe {
     program: AuthoredStructuredProgram,
     failure_post: Option<AuthoredStructuredProgram>,
@@ -2482,7 +2537,15 @@ impl PolicyExpansionRecipe {
 
     /// Returns the canonical recipe identity used by a policy contract.
     pub fn content_ref(&self) -> Result<ContentRef> {
-        policy_expansion_recipe_ref(self).map_err(Into::into)
+        CanonicalJsonPersistedSchema::content_ref(self)
+            .map_err(|error| ProgramError::Authoring(error.to_string()))
+    }
+}
+
+impl PersistedObjectPayload for PolicyExpansionRecipe {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new("structured.policy_recipe")
+            .map_err(|error| ValueError::Identity(error.to_string()))
     }
 }
 

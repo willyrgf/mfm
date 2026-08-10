@@ -7,10 +7,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use mfm_canonical::{sha256_digest_bytes, RecoverabilityContract};
+use mfm_canonical::sha256_digest_bytes;
 use mfm_ids::{
-    ContentDigest, ContentRef, DigestAlgorithm, RunId, StableId, StoreEpoch, StoreScopeId,
-    TenantScopeId,
+    ContentDigest, ContentRef, DigestAlgorithm, RunId, SchemaId, StableId, StoreEpoch,
+    StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, CommittedBatch, JournalHead, RecordRef, SemanticHead, TenantFactCoordinate,
@@ -20,6 +20,10 @@ use mfm_store::structured::{
     verify_offline_recorded_history, ExportEncoderView, ExportRunEvidence, PhysicalTargetIdentity,
     ProgramVerifier, PublicPhysicalBindingVerifier, RawRunHistory, RecordedRunEvidence,
     StructuredStoreError,
+};
+use mfm_values::{
+    CanonicalJsonLinesBounds, CanonicalJsonProfile, EnumTagging, EnumVariantDescriptor,
+    FieldDefaultPolicy, FieldDescriptor, PersistedSchema, SchemaIdentity, SchemaKind, SchemaShape,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,7 +92,7 @@ impl AuthorizedExportClosure {
         self.evidence.with_encoder_view(ReplayEncoderConsumer, f)
     }
 
-    fn portable_authorization_decisions(
+    fn portable_export_decisions(
         &self,
         root_run_id: &RunId,
         source_run_ids: &[RunId],
@@ -116,24 +120,120 @@ impl AuthorizedExportClosure {
 
 /// Exact media type of the current bounded structured portable frame stream.
 pub const PORTABLE_RUN_EXPORT_MEDIA_TYPE: &str =
-    "application/vnd.mfm.structured-run-export-stream.v2";
+    "application/vnd.mfm.structured-run-export-stream.v3";
 
 /// Current portable-export contract version retained in the terminal seal.
-pub const PORTABLE_EXPORT_VERSION: &str = "mfm.structured-portable-run-export-stream.v2";
+pub const PORTABLE_EXPORT_VERSION: &str = "mfm.structured-portable-run-export-stream.v3";
 
-/// Annex identity used for the stream's external [`ContentRef`].
-pub const PORTABLE_EXPORT_SCHEMA_CONTRACT: &str = "mfm.portable-run-export-stream.v1";
+/// The one complete portable frame stream, owned by this crate.
+///
+/// A frame is an internal typed record of this stream codec; it carries no
+/// independent identity. Only the complete stream has a `ContentRef`, so its
+/// declared encoding is the bounded JSON-lines form and its record shape is the
+/// closed `batch`/`seal` frame union.
+struct PortableRunExportStream;
 
-/// Annex identity used to validate each individual frame.
-pub const PORTABLE_FRAME_SCHEMA_CONTRACT: &str = "mfm.portable-run-export-frame.v1";
+impl PersistedSchema for PortableRunExportStream {
+    fn schema_identity() -> mfm_values::Result<SchemaIdentity> {
+        SchemaIdentity::new_canonical_json_lines(
+            SchemaKind::PersistedContract,
+            "mfm.portable-run-export-stream",
+            mfm_ids::SchemaVersion::new("3")
+                .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))?,
+            SchemaShape::Struct {
+                fields: vec![
+                    FieldDescriptor {
+                        name: "kind".to_owned(),
+                        shape: SchemaShape::Enum {
+                            tagging: EnumTagging::External,
+                            variants: vec![
+                                EnumVariantDescriptor {
+                                    name: "batch".to_owned(),
+                                    shape: SchemaShape::Unit,
+                                },
+                                EnumVariantDescriptor {
+                                    name: "seal".to_owned(),
+                                    shape: SchemaShape::Unit,
+                                },
+                            ],
+                        },
+                        default: FieldDefaultPolicy::Required,
+                    },
+                    FieldDescriptor {
+                        name: "payload".to_owned(),
+                        shape: SchemaShape::CanonicalJsonTerminal {
+                            profile: CanonicalJsonProfile::GeneralFloatFree,
+                        },
+                        default: FieldDefaultPolicy::Required,
+                    },
+                ],
+            },
+            CanonicalJsonLinesBounds {
+                minimum_records: 2,
+                maximum_records: u32::try_from(MAX_PORTABLE_FRAMES).unwrap_or(u32::MAX),
+                maximum_framed_record_bytes: u32::try_from(MAX_PORTABLE_FRAME_BYTES)
+                    .unwrap_or(u32::MAX),
+                maximum_stream_bytes: MAX_PORTABLE_EXPORT_BYTES,
+            },
+        )
+    }
+
+    fn validate(&self) -> mfm_values::Result<()> {
+        Ok(())
+    }
+}
+
+fn portable_stream_schema_id() -> Result<SchemaId, PortableExportError> {
+    <PortableRunExportStream as PersistedSchema>::schema_id()
+        .map_err(|_| PortableExportError::Invalid)
+}
+
+/// The exact encoded portable stream together with its complete-stream identity.
+///
+/// Encoding happens once: the bytes and their `ContentRef` are produced by the
+/// same pass and exposed read-only, so no caller can pair one stream's bytes
+/// with another stream's reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodedPortableRunExport {
+    bytes: Vec<u8>,
+    content_ref: ContentRef,
+}
+
+impl EncodedPortableRunExport {
+    /// Returns the exact encoded newline-delimited canonical frame stream.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Returns the complete-stream content reference of these exact bytes.
+    pub const fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+
+    /// Consumes this encoding and returns its exact bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
 
 const PORTABLE_EXPORT_GRANT: &str = "export";
 
 /// Maximum bytes in one complete portable frame stream.
-pub use mfm_canonical::limits::{
-    MAX_PORTABLE_BATCHES, MAX_PORTABLE_EXPORT_BYTES, MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_FRAMES,
-    MAX_PORTABLE_FRAME_BYTES, MAX_PORTABLE_OBJECTS, MAX_PORTABLE_SOURCE_RUNS,
-};
+pub const MAX_PORTABLE_EXPORT_BYTES: u64 = 16777216;
+
+/// Maximum bytes in one framed portable record, including its delimiter.
+pub const MAX_PORTABLE_FRAME_BYTES: usize = 1048576;
+
+/// Maximum frames in one complete portable stream.
+pub const MAX_PORTABLE_FRAMES: usize = 1048577;
+
+/// Maximum batches carried by one portable stream.
+pub const MAX_PORTABLE_BATCHES: usize = 1048576;
+
+/// Maximum retained objects carried by one portable stream.
+pub const MAX_PORTABLE_OBJECTS: usize = 1048576;
+
+pub use mfm_store::structured::{MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_SOURCE_RUNS};
 
 /// Closed portable-export scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -189,7 +289,7 @@ pub struct PortableRunExport {
     source_prefixes: Vec<PortableRunPrefix>,
     batches: Vec<CommittedBatch>,
     fact_routes: Vec<PortableFactRoute>,
-    authorization_decisions: Vec<PortableAuthorizationDecision>,
+    export_decisions: Vec<PortableAuthorizationDecision>,
     closure_reference: ContentDigest,
 }
 
@@ -247,9 +347,7 @@ enum PortableFrameKind {
 #[serde(deny_unknown_fields)]
 struct PortableFrame {
     kind: PortableFrameKind,
-    ordinal: u64,
     payload: Value,
-    previous_frame_digest: Option<ContentDigest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -272,25 +370,24 @@ struct PortableRunFixation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PortableSeal {
-    authorization_decisions: Vec<PortableAuthorizationDecision>,
+    /// Export authorization decisions, named without the persisted-surface
+    /// secret marker `authorization` so untrusted stream bytes stay checkable
+    /// under the strict canonical-terminal key policy.
+    export_decisions: Vec<PortableAuthorizationDecision>,
     closure_reference: ContentDigest,
-    final_frame_digest: ContentDigest,
     fixation: PortableFixation,
-    frame_chain_digest: ContentDigest,
     kind: ExportKind,
     root_run_id: RunId,
     run_fixations: Vec<PortableRunFixation>,
     source_run_ids: Vec<RunId>,
     store_scope_id: StoreScopeId,
     tenant_scope_id: TenantScopeId,
-    total_bytes: u64,
-    total_frames: u64,
     version: String,
 }
 
 #[derive(Serialize)]
 struct ClosureDigestBody<'a> {
-    authorization_decisions: &'a [PortableAuthorizationDecision],
+    export_decisions: &'a [PortableAuthorizationDecision],
     fixation: &'a PortableFixation,
     kind: ExportKind,
     root_run_id: &'a RunId,
@@ -310,7 +407,7 @@ impl PortableRunExport {
         closure.with_encoder_view(|view| {
             let root_run_id = view.run_id().clone();
             Self::from_encoder_view(view, kind, |source_run_ids| {
-                closure.portable_authorization_decisions(&root_run_id, source_run_ids)
+                closure.portable_export_decisions(&root_run_id, source_run_ids)
             })
         })
     }
@@ -318,7 +415,7 @@ impl PortableRunExport {
     fn from_encoder_view(
         view: ExportEncoderView<'_>,
         kind: ExportKind,
-        authorization_decisions_for: impl FnOnce(&[RunId]) -> Vec<PortableAuthorizationDecision>,
+        export_decisions_for: impl FnOnce(&[RunId]) -> Vec<PortableAuthorizationDecision>,
     ) -> Result<Self, PortableExportError> {
         let batches = select_batches(&view, kind)?;
         if batches.is_empty() {
@@ -385,7 +482,7 @@ impl PortableRunExport {
         }
         let mut source_run_ids = required_source_heads.keys().cloned().collect::<Vec<_>>();
         source_run_ids.sort();
-        let authorization_decisions = authorization_decisions_for(&source_run_ids);
+        let export_decisions = export_decisions_for(&source_run_ids);
         let source_prefixes = sources
             .into_iter()
             .filter(|source| required_source_heads.contains_key(source.run_id()))
@@ -420,7 +517,7 @@ impl PortableRunExport {
             source_prefixes,
             batches,
             fact_routes: root_fact_routes,
-            authorization_decisions,
+            export_decisions,
             closure_reference: placeholder_digest(),
         };
         export.closure_reference = export.compute_closure_reference()?;
@@ -428,22 +525,14 @@ impl PortableRunExport {
         Ok(export)
     }
 
-    /// Encodes the exact bounded newline-delimited canonical frame stream.
-    pub fn to_canonical_bytes(&self) -> Result<Vec<u8>, PortableExportError> {
+    /// Encodes the exact bounded newline-delimited canonical frame stream and
+    /// its complete-stream content reference together.
+    pub fn encode(&self) -> Result<EncodedPortableRunExport, PortableExportError> {
         self.validate_structure()?;
-        encode_frames(self)
-    }
-
-    /// Returns the content reference for the exact encoded frame stream.
-    pub fn content_ref(&self) -> Result<ContentRef, PortableExportError> {
-        let bytes = self.to_canonical_bytes()?;
-        let contract =
-            RecoverabilityContract::embedded().map_err(|_| PortableExportError::Invalid)?;
-        let schema_id = contract
-            .schema_id(PORTABLE_EXPORT_SCHEMA_CONTRACT)
-            .map_err(|_| PortableExportError::Invalid)?
-            .clone();
-        ContentRef::new(schema_id, raw_digest(&bytes)).map_err(|_| PortableExportError::Invalid)
+        let bytes = encode_frames(self)?;
+        let content_ref = ContentRef::new(portable_stream_schema_id()?, raw_digest(&bytes))
+            .map_err(|_| PortableExportError::Invalid)?;
+        Ok(EncodedPortableRunExport { bytes, content_ref })
     }
 
     /// Returns the exact recursive source-closure identity authorized by an
@@ -458,15 +547,36 @@ impl PortableRunExport {
     }
 
     /// Strictly decodes and validates one frame stream without ambient IO.
+    ///
+    /// Structural decode is not the production door: a caller that trusts a
+    /// stream must go through [`Self::verify_offline`], which proves the
+    /// complete-stream identity first.
+    #[cfg(feature = "test-support")]
     pub fn strict_decode(bytes: &[u8]) -> Result<Self, PortableExportError> {
         decode_frames(bytes)
     }
 
-    /// Offline verification using only bundle bytes and an explicit trust snapshot.
+    #[cfg(not(feature = "test-support"))]
+    fn strict_decode(bytes: &[u8]) -> Result<Self, PortableExportError> {
+        decode_frames(bytes)
+    }
+
+    /// Offline verification using only bundle bytes, the caller's expected
+    /// complete-stream identity, and an explicit trust snapshot.
+    ///
+    /// The expected reference is compared against the bytes before anything is
+    /// decoded, so substituted bytes are rejected by identity rather than by a
+    /// structural coincidence.
     pub fn verify_offline(
         bytes: &[u8],
+        expected_content_ref: &ContentRef,
         trust: &ReplayTrustSnapshot<'_>,
     ) -> Result<StructuredReplayResult, PortableExportError> {
+        let observed = ContentRef::new(portable_stream_schema_id()?, raw_digest(bytes))
+            .map_err(|_| PortableExportError::Invalid)?;
+        if &observed != expected_content_ref {
+            return Err(PortableExportError::Invalid);
+        }
         let export = Self::strict_decode(bytes)?;
         let evidence = export.fold_with_trust(trust)?;
         project_replay_result(&evidence).map_err(|_| PortableExportError::Invalid)
@@ -635,7 +745,7 @@ impl PortableRunExport {
     fn compute_closure_reference(&self) -> Result<ContentDigest, PortableExportError> {
         let run_fixations = self.run_fixations();
         let body = ClosureDigestBody {
-            authorization_decisions: &self.authorization_decisions,
+            export_decisions: &self.export_decisions,
             fixation: &self.fixation,
             kind: self.kind,
             root_run_id: &self.run_id,
@@ -681,7 +791,7 @@ impl PortableRunExport {
         {
             return Err(PortableExportError::Invalid);
         }
-        validate_authorization_decisions(self)?;
+        validate_export_decisions(self)?;
         let mut object_count = 0usize;
         let mut previous: Option<JournalHead> = None;
         for batch in &self.batches {
@@ -762,17 +872,17 @@ impl PortableRunExport {
     }
 }
 
-fn validate_authorization_decisions(export: &PortableRunExport) -> Result<(), PortableExportError> {
-    if export.authorization_decisions.len() != export.source_run_ids.len() + 1 {
+fn validate_export_decisions(export: &PortableRunExport) -> Result<(), PortableExportError> {
+    if export.export_decisions.len() != export.source_run_ids.len() + 1 {
         return Err(PortableExportError::Invalid);
     }
     let principal = export
-        .authorization_decisions
+        .export_decisions
         .first()
         .map(|decision| &decision.principal_id)
         .ok_or(PortableExportError::Invalid)?;
     let mut expected = std::iter::once(&export.run_id).chain(export.source_run_ids.iter());
-    for decision in &export.authorization_decisions {
+    for decision in &export.export_decisions {
         if decision.grant != PORTABLE_EXPORT_GRANT
             || &decision.principal_id != principal
             || Some(&decision.run_id) != expected.next()
@@ -1244,10 +1354,10 @@ fn validate_prefix(
 
 fn encode_frames(export: &PortableRunExport) -> Result<Vec<u8>, PortableExportError> {
     let mut stream = Vec::new();
-    let mut previous = None;
-    let mut chain = genesis_chain_digest();
-    let mut ordinal = 0_u64;
     // The root is emitted first, followed by source prefixes in run-id order.
+    // Physical line order carries frame sequence, and the canonical batch
+    // predecessor chains already prove batch order, so frames retain no ordinal
+    // and no chain digest of their own.
     let prefixes = std::iter::once((&export.run_id, &export.batches)).chain(
         export
             .source_prefixes
@@ -1261,15 +1371,10 @@ fn encode_frames(export: &PortableRunExport) -> Result<Vec<u8>, PortableExportEr
                 run_id: run_id.clone(),
             })
             .map_err(|_| PortableExportError::Invalid)?;
-            let frame = PortableFrame {
+            let encoded = encode_frame(&PortableFrame {
                 kind: PortableFrameKind::Batch,
-                ordinal,
                 payload,
-                previous_frame_digest: previous.clone(),
-            };
-            let encoded = encode_frame(&frame)?;
-            let digest = raw_digest(&encoded[..encoded.len() - 1]);
-            chain = chain_step(&chain, &digest);
+            })?;
             let next_len = stream
                 .len()
                 .checked_add(encoded.len())
@@ -1280,85 +1385,37 @@ fn encode_frames(export: &PortableRunExport) -> Result<Vec<u8>, PortableExportEr
                 return Err(PortableExportError::TooLarge);
             }
             stream.extend_from_slice(&encoded);
-            previous = Some(digest);
-            ordinal = ordinal.saturating_add(1);
         }
+    }
+    if stream.is_empty() {
+        return Err(PortableExportError::Invalid);
     }
 
-    let frame_chain_digest = chain.clone();
-    let final_frame_digest = previous.ok_or(PortableExportError::Invalid)?;
-    let total_frames = ordinal.saturating_add(1);
-    let mut total_bytes = 0_u64;
-    let mut seal_bytes = Vec::new();
-    for _ in 0..8 {
-        let seal = PortableSeal {
-            authorization_decisions: export.authorization_decisions.clone(),
-            closure_reference: export.closure_reference.clone(),
-            final_frame_digest: final_frame_digest.clone(),
-            fixation: export.fixation.clone(),
-            frame_chain_digest: frame_chain_digest.clone(),
-            kind: export.kind,
-            root_run_id: export.run_id.clone(),
-            run_fixations: export.run_fixations(),
-            source_run_ids: export.source_run_ids.clone(),
-            store_scope_id: export.store_scope_id.clone(),
-            tenant_scope_id: export.tenant_scope_id.clone(),
-            total_bytes,
-            total_frames,
-            version: export.version.clone(),
-        };
-        let payload = serde_json::to_value(seal).map_err(|_| PortableExportError::Invalid)?;
-        let frame = PortableFrame {
-            kind: PortableFrameKind::Seal,
-            ordinal: total_frames - 1,
-            payload,
-            previous_frame_digest: Some(final_frame_digest.clone()),
-        };
-        seal_bytes = encode_frame(&frame)?;
-        let next_total = u64::try_from(stream.len().saturating_add(seal_bytes.len()))
-            .map_err(|_| PortableExportError::TooLarge)?;
-        if next_total > MAX_PORTABLE_EXPORT_BYTES {
-            return Err(PortableExportError::TooLarge);
-        }
-        if next_total == total_bytes {
-            break;
-        }
-        total_bytes = next_total;
-    }
-    if total_bytes == 0 {
-        total_bytes = u64::try_from(stream.len().saturating_add(seal_bytes.len()))
-            .map_err(|_| PortableExportError::TooLarge)?;
-        let seal = PortableSeal {
-            authorization_decisions: export.authorization_decisions.clone(),
-            closure_reference: export.closure_reference.clone(),
-            final_frame_digest: final_frame_digest.clone(),
-            fixation: export.fixation.clone(),
-            frame_chain_digest,
-            kind: export.kind,
-            root_run_id: export.run_id.clone(),
-            run_fixations: export.run_fixations(),
-            source_run_ids: export.source_run_ids.clone(),
-            store_scope_id: export.store_scope_id.clone(),
-            tenant_scope_id: export.tenant_scope_id.clone(),
-            total_bytes,
-            total_frames,
-            version: export.version.clone(),
-        };
-        let payload = serde_json::to_value(seal).map_err(|_| PortableExportError::Invalid)?;
-        seal_bytes = encode_frame(&PortableFrame {
-            kind: PortableFrameKind::Seal,
-            ordinal: total_frames - 1,
-            payload,
-            previous_frame_digest: Some(final_frame_digest),
-        })?;
-    }
+    // The seal no longer restates the stream's own size or frame count, so it
+    // encodes once instead of converging through a fixed point.
+    let seal = PortableSeal {
+        export_decisions: export.export_decisions.clone(),
+        closure_reference: export.closure_reference.clone(),
+        fixation: export.fixation.clone(),
+        kind: export.kind,
+        root_run_id: export.run_id.clone(),
+        run_fixations: export.run_fixations(),
+        source_run_ids: export.source_run_ids.clone(),
+        store_scope_id: export.store_scope_id.clone(),
+        tenant_scope_id: export.tenant_scope_id.clone(),
+        version: export.version.clone(),
+    };
+    let payload = serde_json::to_value(seal).map_err(|_| PortableExportError::Invalid)?;
+    let seal_bytes = encode_frame(&PortableFrame {
+        kind: PortableFrameKind::Seal,
+        payload,
+    })?;
     let final_len = stream
         .len()
         .checked_add(seal_bytes.len())
         .ok_or(PortableExportError::TooLarge)?;
     if u64::try_from(final_len).map_err(|_| PortableExportError::TooLarge)?
         > MAX_PORTABLE_EXPORT_BYTES
-        || final_len as u64 != total_bytes
     {
         return Err(PortableExportError::TooLarge);
     }
@@ -1367,42 +1424,33 @@ fn encode_frames(export: &PortableRunExport) -> Result<Vec<u8>, PortableExportEr
 }
 
 fn decode_frames(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError> {
-    if bytes.is_empty() || bytes.len() as u64 > MAX_PORTABLE_EXPORT_BYTES {
+    // Size is separated from structure only so an oversized stream reports the
+    // distinct bound failure instead of a generic rejection.
+    if bytes.len() as u64 > MAX_PORTABLE_EXPORT_BYTES
+        || bytes
+            .split(|byte| *byte == b'\n')
+            .any(|line| line.len().saturating_add(1) > MAX_PORTABLE_FRAME_BYTES)
+    {
         return Err(PortableExportError::TooLarge);
     }
-    if !bytes.ends_with(b"\n") {
-        return Err(PortableExportError::Invalid);
-    }
-    let contract = RecoverabilityContract::embedded().map_err(|_| PortableExportError::Invalid)?;
+    // Framing, delimiters, record bounds, and the closed frame-union record
+    // shape are all owned by the declared JSON-lines encoding.
+    <PortableRunExportStream as PersistedSchema>::schema_identity()
+        .and_then(|identity| identity.validate_canonical_json_lines(bytes))
+        .map_err(|_| PortableExportError::Invalid)?;
     let mut batches_by_run: BTreeMap<RunId, Vec<CommittedBatch>> = BTreeMap::new();
-    let mut previous = None;
-    let mut chain = genesis_chain_digest();
     let mut seal = None;
     let mut frame_count = 0usize;
     for line in bytes
         .split(|byte| *byte == b'\n')
         .take_while(|line| !line.is_empty())
     {
-        if line.len().saturating_add(1) > MAX_PORTABLE_FRAME_BYTES {
-            return Err(PortableExportError::TooLarge);
-        }
-        if line.contains(&b'\r') {
-            return Err(PortableExportError::Invalid);
-        }
-        if frame_count >= MAX_PORTABLE_FRAMES {
-            return Err(PortableExportError::TooLarge);
-        }
-        let validated = contract
-            .strict_decode(PORTABLE_FRAME_SCHEMA_CONTRACT, line)
-            .map_err(|_| PortableExportError::Invalid)?;
-        let frame: PortableFrame = serde_json::from_slice(validated.as_bytes())
-            .map_err(|_| PortableExportError::Invalid)?;
-        let expected_ordinal =
-            u64::try_from(frame_count).map_err(|_| PortableExportError::TooLarge)?;
-        if frame.ordinal != expected_ordinal || frame.previous_frame_digest != previous {
-            return Err(PortableExportError::Invalid);
-        }
-        let digest = raw_digest(line);
+        // A frame is an internal typed record of the one stream codec, so it
+        // carries no identity of its own beyond the record shape already
+        // enforced above.
+        let frame: PortableFrame =
+            serde_json::from_slice(line).map_err(|_| PortableExportError::Invalid)?;
+        frame_count = frame_count.saturating_add(1);
         match frame.kind {
             PortableFrameKind::Batch => {
                 if seal.is_some() {
@@ -1414,7 +1462,7 @@ fn decode_frames(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError>
                 batches.push(payload.batch);
             }
             PortableFrameKind::Seal => {
-                if seal.is_some() || frame_count == 0 {
+                if seal.is_some() || frame_count < 2 {
                     return Err(PortableExportError::Invalid);
                 }
                 seal = Some(
@@ -1423,41 +1471,12 @@ fn decode_frames(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError>
                 );
             }
         }
-        chain = chain_step(&chain, &digest);
-        previous = Some(digest);
-        frame_count = frame_count.saturating_add(1);
     }
+    // Exact complete-stream identity is proved by the caller's expected
+    // reference before decoding, terminal placement by the batch-after-seal
+    // rejection above, and batch order by the canonical predecessor chains, so
+    // the seal restates neither its own size nor a frame chain.
     let seal = seal.ok_or(PortableExportError::Invalid)?;
-    if frame_count != bytes.iter().filter(|byte| **byte == b'\n').count()
-        || seal.total_frames != frame_count as u64
-        || seal.total_bytes != bytes.len() as u64
-        || seal.final_frame_digest
-            != previous
-                .as_ref()
-                .and_then(|_| {
-                    if frame_count >= 2 {
-                        let mut lines = bytes.split(|byte| *byte == b'\n');
-                        let last_batch = lines.nth(frame_count - 2)?;
-                        Some(raw_digest(last_batch))
-                    } else {
-                        None
-                    }
-                })
-                .ok_or(PortableExportError::Invalid)?
-    {
-        return Err(PortableExportError::Invalid);
-    }
-    let mut prior_chain = genesis_chain_digest();
-    let mut lines = bytes
-        .split(|byte| *byte == b'\n')
-        .take_while(|line| !line.is_empty());
-    for _ in 0..frame_count.saturating_sub(1) {
-        let line = lines.next().ok_or(PortableExportError::Invalid)?;
-        prior_chain = chain_step(&prior_chain, &raw_digest(line));
-    }
-    if seal.frame_chain_digest != prior_chain {
-        return Err(PortableExportError::Invalid);
-    }
     let root_batches = batches_by_run
         .remove(&seal.root_run_id)
         .ok_or(PortableExportError::Invalid)?;
@@ -1480,7 +1499,7 @@ fn decode_frames(bytes: &[u8]) -> Result<PortableRunExport, PortableExportError>
         return Err(PortableExportError::Invalid);
     }
     let export = PortableRunExport {
-        authorization_decisions: seal.authorization_decisions.clone(),
+        export_decisions: seal.export_decisions.clone(),
         version: seal.version,
         kind: seal.kind,
         store_scope_id: seal.store_scope_id,
@@ -1526,17 +1545,6 @@ fn raw_digest(bytes: &[u8]) -> ContentDigest {
 
 fn placeholder_digest() -> ContentDigest {
     raw_digest(b"mfm.portable-export.digest-placeholder")
-}
-
-fn genesis_chain_digest() -> ContentDigest {
-    raw_digest(b"mfm.portable-export.frame-chain-genesis")
-}
-
-fn chain_step(previous: &ContentDigest, frame: &ContentDigest) -> ContentDigest {
-    let mut bytes = Vec::with_capacity(previous.as_str().len() + frame.as_str().len());
-    bytes.extend_from_slice(previous.as_str().as_bytes());
-    bytes.extend_from_slice(frame.as_str().as_bytes());
-    raw_digest(&bytes)
 }
 
 fn classify_fold_error(error: StructuredStoreError) -> PortableExportError {
@@ -1700,9 +1708,7 @@ mod tests {
     fn exact_frame_limit_succeeds_and_one_byte_over_fails() {
         let frame = |payload_len| super::PortableFrame {
             kind: super::PortableFrameKind::Batch,
-            ordinal: 0,
             payload: serde_json::Value::String("x".repeat(payload_len)),
-            previous_frame_digest: None,
         };
         let target = MAX_PORTABLE_FRAME_BYTES - 1;
         let mut low = 0usize;
@@ -1793,8 +1799,9 @@ mod tests {
         assert_eq!(
             PortableRunExport::strict_decode(&exact)
                 .expect("decode exact total limit")
-                .to_canonical_bytes()
-                .expect("re-encode exact total limit"),
+                .encode()
+                .expect("re-encode exact total limit")
+                .into_bytes(),
             exact
         );
         let many_small =
@@ -1802,8 +1809,9 @@ mod tests {
         assert_eq!(
             PortableRunExport::strict_decode(&many_small)
                 .expect("decode many-small-frame export")
-                .to_canonical_bytes()
-                .expect("re-encode many-small-frame export"),
+                .encode()
+                .expect("re-encode many-small-frame export")
+                .into_bytes(),
             many_small
         );
     }
@@ -1812,8 +1820,9 @@ mod tests {
     fn golden_frame_stream_rejects_omission_extra_substitution_reordering_and_stale_head() {
         let export = golden_export();
         let bytes = export
-            .to_canonical_bytes()
-            .expect("encode synthetic portable golden");
+            .encode()
+            .expect("encode synthetic portable golden")
+            .into_bytes();
         let decoded = PortableRunExport::strict_decode(&bytes).expect("decode synthetic golden");
         assert_eq!(decoded, export);
 
@@ -1824,7 +1833,7 @@ mod tests {
         let trust = ReplayTrustSnapshot::new(&reject_program, &reject_physical)
             .with_authorized_closure(export.closure_reference(), &release, &lineage);
         assert_eq!(
-            PortableRunExport::verify_offline(&bytes, &trust),
+            PortableRunExport::verify_offline(&bytes, &stream_ref(&bytes), &trust),
             Err(PortableExportError::Invalid)
         );
 
@@ -1904,10 +1913,35 @@ mod tests {
         assert!(PortableRunExport::strict_decode(&audit_suffix_bytes).is_ok());
     }
 
+    /// Offline verification is gated on the caller's expected stream identity.
+    #[test]
+    fn offline_verification_rejects_bytes_that_are_not_the_expected_stream() {
+        let export = golden_export();
+        let encoded = export.encode().expect("encode expectation golden");
+        assert_eq!(encoded.content_ref(), &stream_ref(encoded.as_bytes()));
+
+        let release = AcceptRelease;
+        let lineage = AcceptStoreLineage;
+        let trust = ReplayTrustSnapshot::new(&RejectProgram, &RejectPhysical)
+            .with_authorized_closure(export.closure_reference(), &release, &lineage);
+
+        let mut other = golden_export();
+        other.export_decisions[0].decision_ref = decision_ref(9);
+        other.closure_reference = other
+            .compute_closure_reference()
+            .expect("other closure reference");
+        let other_bytes = super::encode_frames(&other).expect("other bytes");
+        assert_ne!(other_bytes, encoded.as_bytes());
+        assert_eq!(
+            PortableRunExport::verify_offline(&other_bytes, encoded.content_ref(), &trust),
+            Err(PortableExportError::Invalid)
+        );
+    }
+
     #[test]
     fn serialized_authorization_decision_tampering_is_rejected() {
         let mut wrong_grant = golden_export();
-        wrong_grant.authorization_decisions[0].grant = "read_public".to_owned();
+        wrong_grant.export_decisions[0].grant = "read_public".to_owned();
         wrong_grant.closure_reference = wrong_grant
             .compute_closure_reference()
             .expect("wrong grant closure reference");
@@ -1918,7 +1952,7 @@ mod tests {
         );
 
         let mut omitted = golden_export();
-        omitted.authorization_decisions.clear();
+        omitted.export_decisions.clear();
         omitted.closure_reference = omitted
             .compute_closure_reference()
             .expect("omitted decision closure reference");
@@ -1929,7 +1963,7 @@ mod tests {
         );
 
         let mut substituted = golden_export();
-        substituted.authorization_decisions[0].decision_ref = decision_ref(9);
+        substituted.export_decisions[0].decision_ref = decision_ref(9);
         substituted.closure_reference = substituted
             .compute_closure_reference()
             .expect("substituted decision closure reference");
@@ -1948,7 +1982,11 @@ mod tests {
         let trusted_original = ReplayTrustSnapshot::new(&reject_program, &reject_physical)
             .with_authorized_closure(trusted_golden.closure_reference(), &release, &lineage);
         assert_eq!(
-            PortableRunExport::verify_offline(&substituted_bytes, &trusted_original),
+            PortableRunExport::verify_offline(
+                &substituted_bytes,
+                &stream_ref(&substituted_bytes),
+                &trusted_original,
+            ),
             Err(PortableExportError::Invalid)
         );
     }
@@ -1957,8 +1995,9 @@ mod tests {
     fn serialized_recursive_prefix_tampering_is_rejected() {
         let export = recursive_golden_export();
         let bytes = export
-            .to_canonical_bytes()
-            .expect("encode recursive portable golden");
+            .encode()
+            .expect("encode recursive portable golden")
+            .into_bytes();
         assert_eq!(
             PortableRunExport::strict_decode(&bytes).expect("decode recursive portable golden"),
             export
@@ -1998,7 +2037,7 @@ mod tests {
         substituted_publication.closure_reference = substituted_publication
             .compute_closure_reference()
             .expect("publication substitution closure");
-        assert!(substituted_publication.to_canonical_bytes().is_err());
+        assert!(substituted_publication.encode().is_err());
 
         let mut stale_head = export.clone();
         stale_head.source_prefixes[0]
@@ -2008,224 +2047,195 @@ mod tests {
         stale_head.closure_reference = stale_head
             .compute_closure_reference()
             .expect("stale source head closure");
-        assert!(stale_head.to_canonical_bytes().is_err());
+        assert!(stale_head.encode().is_err());
 
         let mut omitted_route = export;
         omitted_route.fact_routes.clear();
         omitted_route.closure_reference = omitted_route
             .compute_closure_reference()
             .expect("omitted route closure");
-        assert!(omitted_route.to_canonical_bytes().is_err());
+        assert!(omitted_route.encode().is_err());
     }
 
+    /// Online and offline replay agree on one export built from current owners.
+    ///
+    /// The evidence is agreement between the two paths over bytes this tree
+    /// produces, not equality with a frozen artifact: the schema reset changes
+    /// those bytes by design.
     #[tokio::test]
-    async fn generated_portable_artifact_corpus_round_trips() {
-        let corpus: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../../contracts/recoverability/v1/corpus.json"
-        ))
-        .expect("recoverability corpus");
-        for vector in corpus["portable_artifact_vectors"]
-            .as_array()
-            .expect("portable artifact vectors")
-        {
-            let bytes = decode_hex(vector["bytes_hex"].as_str().expect("artifact bytes"));
-            match vector["kind"].as_str().expect("artifact vector kind") {
-                "strict_decode_acceptance" => {
-                    let export = PortableRunExport::strict_decode(&bytes)
-                        .unwrap_or_else(|error| panic!("{}: {error:?}", vector["id"]));
-                    if vector
-                        .get("offline_fold")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("rejection")
-                    {
-                        let release = AcceptRelease;
-                        let lineage = AcceptStoreLineage;
-                        let trust = ReplayTrustSnapshot::new(&RejectProgram, &RejectPhysical)
-                            .with_authorized_closure(
-                                export.closure_reference(),
-                                &release,
-                                &lineage,
-                            );
-                        assert!(
-                            PortableRunExport::verify_offline(&bytes, &trust).is_err(),
-                            "{} must reject during offline fold",
-                            vector["id"]
-                        );
-                    } else if vector
-                        .get("offline_fold")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("acceptance")
-                    {
-                        let discriminator = vector["fixture_discriminator"]
-                            .as_u64()
-                            .and_then(|value| u8::try_from(value).ok())
-                            .expect("offline acceptance fixture discriminator");
-                        let fixture =
-                            mfm_store::structured::test_support::zero_state_export(discriminator)
-                                .await
-                                .expect("offline acceptance fixture");
-                        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
-                            fixture.into_replay_parts();
-                        let closure = AuthorizedExportClosure::new(
-                            fixture_export,
-                            StableId::new("mfm.portable-test/principal").expect("principal"),
-                            decision_ref(1),
-                            BTreeMap::new(),
-                        )
-                        .expect("seal offline acceptance fixture");
-                        let generated = PortableRunExport::from_authorized_export_closure(
-                            &closure,
-                            ExportKind::Semantic,
-                        )
-                        .expect("encode offline acceptance fixture");
-                        assert_eq!(
-                            generated
-                                .to_canonical_bytes()
-                                .expect("canonical offline acceptance fixture"),
-                            bytes,
-                            "{} must retain the generated fixture bytes",
-                            vector["id"]
-                        );
-                        let release = AcceptRelease;
-                        let lineage = AcceptStoreLineage;
-                        let trust =
-                            ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
-                                .with_authorized_closure(
-                                    generated.closure_reference(),
-                                    &release,
-                                    &lineage,
-                                );
-                        let offline = PortableRunExport::verify_offline(&bytes, &trust)
-                            .expect("generated offline acceptance");
-                        let online = super::project_replay_result(&fixture_recorded)
-                            .expect("online acceptance projection");
-                        assert_eq!(offline.as_bytes(), online.as_bytes());
-                        assert_eq!(offline.schema_id(), online.schema_id());
-                    } else if vector
-                        .get("offline_fold")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("observed_read")
-                    {
-                        let discriminator = vector["fixture_discriminator"]
-                            .as_u64()
-                            .and_then(|value| u8::try_from(value).ok())
-                            .expect("observed-read fixture discriminator");
-                        let fixture = mfm_store::structured::test_support::observed_read_export(
-                            discriminator,
-                        )
-                        .await
-                        .expect("observed-read audit fixture");
-                        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
-                            fixture.into_replay_parts();
-                        let closure = AuthorizedExportClosure::new(
-                            fixture_export,
-                            StableId::new("mfm.portable-test/principal").expect("principal"),
-                            decision_ref(3),
-                            BTreeMap::new(),
-                        )
-                        .expect("seal observed-read audit fixture");
-                        let generated = PortableRunExport::from_authorized_export_closure(
-                            &closure,
-                            ExportKind::Audit,
-                        )
-                        .expect("encode observed-read audit fixture");
-                        assert_eq!(
-                            generated
-                                .to_canonical_bytes()
-                                .expect("canonical observed-read audit fixture"),
-                            bytes,
-                            "{} must retain the independent store-shaped artifact",
-                            vector["id"]
-                        );
-                        let release = AcceptRelease;
-                        let lineage = AcceptStoreLineage;
-                        let trust =
-                            ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
-                                .with_authorized_closure(
-                                    generated.closure_reference(),
-                                    &release,
-                                    &lineage,
-                                );
-                        let offline = PortableRunExport::verify_offline(&bytes, &trust)
-                            .expect("offline observed-read audit fixture");
-                        let online = super::project_replay_result(&fixture_recorded)
-                            .expect("online observed-read audit projection");
-                        assert_eq!(offline.as_bytes(), online.as_bytes());
-                        assert_eq!(offline.schema_id(), online.schema_id());
-                    }
-                }
-                "strict_decode_rejection" => {
-                    assert!(
-                        PortableRunExport::strict_decode(&bytes).is_err(),
-                        "{} must reject",
-                        vector["id"]
-                    );
-                }
-                other => panic!("unknown portable artifact vector kind: {other}"),
-            }
-        }
+    async fn online_and_offline_replay_agree_on_a_semantic_export() {
+        let fixture = mfm_store::structured::test_support::zero_state_export(201)
+            .await
+            .expect("offline acceptance fixture");
+        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
+            fixture.into_replay_parts();
+        let closure = AuthorizedExportClosure::new(
+            fixture_export,
+            StableId::new("mfm.portable-test/principal").expect("principal"),
+            decision_ref(1),
+            BTreeMap::new(),
+        )
+        .expect("seal offline acceptance fixture");
+        let generated =
+            PortableRunExport::from_authorized_export_closure(&closure, ExportKind::Semantic)
+                .expect("encode offline acceptance fixture");
+        let bytes = generated
+            .encode()
+            .expect("canonical offline acceptance fixture")
+            .into_bytes();
+
+        let release = AcceptRelease;
+        let lineage = AcceptStoreLineage;
+        let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
+            .with_authorized_closure(generated.closure_reference(), &release, &lineage);
+        let offline = PortableRunExport::verify_offline(&bytes, &stream_ref(&bytes), &trust)
+            .expect("generated offline acceptance");
+        let online =
+            super::project_replay_result(&fixture_recorded).expect("online acceptance projection");
+        assert_eq!(offline.as_bytes(), online.as_bytes());
+
+        let untrusted = ReplayTrustSnapshot::new(&RejectProgram, &RejectPhysical)
+            .with_authorized_closure(generated.closure_reference(), &release, &lineage);
+        assert!(
+            PortableRunExport::verify_offline(&bytes, &stream_ref(&bytes), &untrusted).is_err(),
+            "an untrusted program snapshot must fail the offline fold",
+        );
     }
 
+    /// An audit export carrying a real observed-Read suffix agrees in both paths.
+    #[tokio::test]
+    async fn online_and_offline_replay_agree_on_an_observed_read_audit_export() {
+        let fixture = mfm_store::structured::test_support::observed_read_export(202)
+            .await
+            .expect("observed-read audit fixture");
+        let (fixture_export, fixture_recorded, fixture_program, fixture_physical) =
+            fixture.into_replay_parts();
+        let closure = AuthorizedExportClosure::new(
+            fixture_export,
+            StableId::new("mfm.portable-test/principal").expect("principal"),
+            decision_ref(3),
+            BTreeMap::new(),
+        )
+        .expect("seal observed-read audit fixture");
+        let generated =
+            PortableRunExport::from_authorized_export_closure(&closure, ExportKind::Audit)
+                .expect("encode observed-read audit fixture");
+        let bytes = generated
+            .encode()
+            .expect("canonical observed-read audit fixture")
+            .into_bytes();
+
+        let release = AcceptRelease;
+        let lineage = AcceptStoreLineage;
+        let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
+            .with_authorized_closure(generated.closure_reference(), &release, &lineage);
+        let offline = PortableRunExport::verify_offline(&bytes, &stream_ref(&bytes), &trust)
+            .expect("offline observed-read audit fixture");
+        let online = super::project_replay_result(&fixture_recorded)
+            .expect("online observed-read audit projection");
+        assert_eq!(offline.as_bytes(), online.as_bytes());
+    }
+
+    /// A source run that collides with the root run is not a second source.
     #[test]
-    fn generated_nested_source_graph_vectors_exercise_expander() {
-        let corpus: serde_json::Value = serde_json::from_slice(include_bytes!(
-            "../../../../contracts/recoverability/v1/corpus.json"
-        ))
-        .expect("recoverability corpus");
-        for vector in corpus["portable_source_graph_vectors"]
-            .as_array()
-            .expect("portable source graph vectors")
-        {
-            let root = RunId::parse(
-                vector["root_run_id"]
-                    .as_str()
-                    .expect("source graph root run id"),
-            )
-            .expect("source graph root");
-            let edges = vector["edges"]
-                .as_object()
-                .expect("source graph edges")
-                .iter()
-                .map(|(run_id, dependencies)| {
-                    let run_id = RunId::parse(run_id).expect("source graph run");
-                    let dependencies = dependencies
-                        .as_array()
-                        .expect("source graph dependencies")
-                        .iter()
-                        .map(|dependency| {
-                            RunId::parse(dependency.as_str().expect("source graph dependency"))
-                                .expect("source graph dependency run")
-                        })
-                        .collect::<BTreeSet<_>>();
-                    (run_id, dependencies)
-                })
-                .collect::<BTreeMap<_, _>>();
-            let root_sources = edges.get(&root).cloned().expect("root graph edges");
-            let result = expand_export_source_closure(&root, root_sources, |run_id| {
-                Ok::<_, ExportSourceClosureError>(edges.get(run_id).cloned().unwrap_or_default())
-            });
-            match vector["kind"].as_str().expect("source graph vector kind") {
-                "source_graph_acceptance" => {
-                    let expected = vector["expected_sources"]
-                        .as_array()
-                        .expect("source graph expected sources")
-                        .iter()
-                        .map(|run_id| {
-                            RunId::parse(run_id.as_str().expect("expected source run"))
-                                .expect("expected source")
-                        })
-                        .collect::<BTreeSet<_>>();
-                    assert_eq!(result.expect("nested shared source graph"), expected);
-                }
-                "source_graph_rejection" => {
-                    assert_eq!(
-                        result.expect_err("nested cyclic source graph"),
-                        ExportSourceClosureError::Cycle
-                    );
-                }
-                other => panic!("unknown source graph vector kind: {other}"),
-            }
+    fn a_source_that_collides_with_the_root_run_is_rejected() {
+        let mut collided = recursive_golden_export();
+        let root_run_id = collided.run_id.clone();
+        collided.source_run_ids = vec![root_run_id.clone()];
+        collided.source_prefixes[0].run_id = root_run_id;
+        collided.closure_reference = collided
+            .compute_closure_reference()
+            .expect("collided closure reference");
+        assert_eq!(collided.encode(), Err(PortableExportError::Invalid));
+    }
+
+    /// The same source run may be fixed only once in one export.
+    #[test]
+    fn a_duplicated_source_fixation_is_rejected() {
+        let mut duplicated = recursive_golden_export();
+        let source = duplicated.source_prefixes[0].clone();
+        duplicated.source_run_ids.push(source.run_id.clone());
+        duplicated.source_prefixes.push(source);
+        duplicated.closure_reference = duplicated
+            .compute_closure_reference()
+            .expect("duplicated closure reference");
+        assert_eq!(duplicated.encode(), Err(PortableExportError::Invalid));
+    }
+
+    /// The recursive source closure is bounded before any per-source work.
+    #[test]
+    fn a_source_count_over_the_budget_is_rejected() {
+        let mut over_budget = recursive_golden_export();
+        let template = over_budget.source_prefixes[0].clone();
+        let mut run_ids = std::collections::BTreeSet::new();
+        while run_ids.len() <= super::MAX_PORTABLE_SOURCE_RUNS {
+            let index = run_ids.len();
+            run_ids.insert(source_run_id(0, index));
         }
+        over_budget.source_run_ids = run_ids.iter().cloned().collect();
+        over_budget.source_prefixes = over_budget
+            .source_run_ids
+            .iter()
+            .map(|run_id| {
+                let mut prefix = template.clone();
+                prefix.run_id = run_id.clone();
+                prefix
+            })
+            .collect();
+        assert_eq!(over_budget.encode(), Err(PortableExportError::Invalid));
+    }
+
+    /// A nested source graph expands to its shared transitive closure.
+    #[test]
+    fn a_nested_shared_source_graph_expands_to_its_transitive_closure() {
+        let root = source_run_id(1, 0);
+        let first = source_run_id(1, 1);
+        let second = source_run_id(1, 2);
+        let shared = source_run_id(1, 3);
+        let edges = BTreeMap::from([
+            (
+                root.clone(),
+                BTreeSet::from([first.clone(), second.clone()]),
+            ),
+            (first.clone(), BTreeSet::from([shared.clone()])),
+            (second.clone(), BTreeSet::from([shared.clone()])),
+            (shared.clone(), BTreeSet::new()),
+        ]);
+        let expanded = expand_export_source_closure(
+            &root,
+            edges.get(&root).cloned().expect("root edges"),
+            |run_id| {
+                Ok::<_, ExportSourceClosureError>(edges.get(run_id).cloned().unwrap_or_default())
+            },
+        )
+        .expect("nested shared source graph");
+        assert_eq!(expanded, BTreeSet::from([first, second, shared]));
+    }
+
+    /// A cyclic source graph is rejected instead of expanded forever.
+    #[test]
+    fn a_cyclic_source_graph_is_rejected() {
+        let root = source_run_id(2, 0);
+        let first = source_run_id(2, 1);
+        let second = source_run_id(2, 2);
+        let edges = BTreeMap::from([
+            (root.clone(), BTreeSet::from([first.clone()])),
+            (first.clone(), BTreeSet::from([second.clone()])),
+            (second, BTreeSet::from([first])),
+        ]);
+        assert_eq!(
+            expand_export_source_closure(
+                &root,
+                edges.get(&root).cloned().expect("root edges"),
+                |run_id| {
+                    Ok::<_, ExportSourceClosureError>(
+                        edges.get(run_id).cloned().unwrap_or_default(),
+                    )
+                },
+            )
+            .expect_err("cyclic source graph"),
+            ExportSourceClosureError::Cycle
+        );
     }
 
     #[tokio::test]
@@ -2246,18 +2256,18 @@ mod tests {
             PortableRunExport::from_authorized_export_closure(&closure, ExportKind::Semantic)
                 .expect("encode verified export evidence");
         let bytes = export
-            .to_canonical_bytes()
-            .expect("encode canonical portable frames");
+            .encode()
+            .expect("encode canonical portable frames")
+            .into_bytes();
         let release = AcceptRelease;
         let lineage = AcceptStoreLineage;
         let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
             .with_authorized_closure(export.closure_reference(), &release, &lineage);
 
         let online = super::project_replay_result(&fixture_recorded).expect("online projection");
-        let offline =
-            PortableRunExport::verify_offline(&bytes, &trust).expect("offline projection");
+        let offline = PortableRunExport::verify_offline(&bytes, &stream_ref(&bytes), &trust)
+            .expect("offline projection");
         assert_eq!(offline.as_bytes(), online.as_bytes());
-        assert_eq!(offline.schema_id(), online.schema_id());
 
         let expected_target = export.fixation.physical_target.target_key.clone();
         let mut wrong_target = export;
@@ -2277,7 +2287,11 @@ mod tests {
                 &accepted_lineage,
             );
         assert_eq!(
-            PortableRunExport::verify_offline(&wrong_target_bytes, &target_trust),
+            PortableRunExport::verify_offline(
+                &wrong_target_bytes,
+                &stream_ref(&wrong_target_bytes),
+                &target_trust,
+            ),
             Err(PortableExportError::Invalid)
         );
 
@@ -2317,7 +2331,11 @@ mod tests {
                 &expected_tenant,
             );
         assert_eq!(
-            PortableRunExport::verify_offline(&wrong_tenant_bytes, &tenant_trust),
+            PortableRunExport::verify_offline(
+                &wrong_tenant_bytes,
+                &stream_ref(&wrong_tenant_bytes),
+                &tenant_trust,
+            ),
             Err(PortableExportError::Invalid)
         );
     }
@@ -2343,17 +2361,18 @@ mod tests {
             "audit export must carry the suffix"
         );
         let audit_bytes = audit
-            .to_canonical_bytes()
-            .expect("encode later-audit frames");
+            .encode()
+            .expect("encode later-audit frames")
+            .into_bytes();
         let release = AcceptRelease;
         let lineage = AcceptStoreLineage;
         let trust = ReplayTrustSnapshot::new(&fixture_program, fixture_physical.as_ref())
             .with_authorized_closure(audit.closure_reference(), &release, &lineage);
         let online = super::project_replay_result(&fixture_recorded).expect("online audit result");
-        let offline = PortableRunExport::verify_offline(&audit_bytes, &trust)
-            .expect("offline later-audit result");
+        let offline =
+            PortableRunExport::verify_offline(&audit_bytes, &stream_ref(&audit_bytes), &trust)
+                .expect("offline later-audit result");
         assert_eq!(offline.as_bytes(), online.as_bytes());
-        assert_eq!(offline.schema_id(), online.schema_id());
 
         let mut semantic_suffix = audit;
         semantic_suffix.kind = ExportKind::Semantic;
@@ -2366,6 +2385,15 @@ mod tests {
             PortableRunExport::strict_decode(&semantic_suffix_bytes),
             Err(PortableExportError::Invalid)
         );
+    }
+
+    /// The complete-stream reference an exporter publishes for exact bytes.
+    fn stream_ref(bytes: &[u8]) -> ContentRef {
+        ContentRef::new(
+            super::portable_stream_schema_id().expect("portable stream schema id"),
+            super::raw_digest(bytes),
+        )
+        .expect("portable stream content ref")
     }
 
     fn golden_export() -> PortableRunExport {
@@ -2456,7 +2484,7 @@ mod tests {
             source_prefixes: Vec::new(),
             batches: vec![batch],
             fact_routes: Vec::new(),
-            authorization_decisions: vec![PortableAuthorizationDecision {
+            export_decisions: vec![PortableAuthorizationDecision {
                 decision_ref: decision_ref(0),
                 grant: PORTABLE_EXPORT_GRANT.to_owned(),
                 principal_id: StableId::new("mfm.portable-test/principal").expect("principal"),
@@ -2545,14 +2573,12 @@ mod tests {
             fact_routes: Vec::new(),
         }];
         export.fact_routes = vec![frontier_route];
-        export
-            .authorization_decisions
-            .push(PortableAuthorizationDecision {
-                decision_ref: decision_ref(8),
-                grant: PORTABLE_EXPORT_GRANT.to_owned(),
-                principal_id: StableId::new("mfm.portable-test/principal").expect("principal"),
-                run_id: source_run_id,
-            });
+        export.export_decisions.push(PortableAuthorizationDecision {
+            decision_ref: decision_ref(8),
+            grant: PORTABLE_EXPORT_GRANT.to_owned(),
+            principal_id: StableId::new("mfm.portable-test/principal").expect("principal"),
+            run_id: source_run_id,
+        });
         export.closure_reference = export
             .compute_closure_reference()
             .expect("recursive closure reference");
@@ -2625,9 +2651,7 @@ mod tests {
         .map_err(|_| PortableExportError::Invalid)?;
         super::encode_frame(&super::PortableFrame {
             kind: super::PortableFrameKind::Batch,
-            ordinal: 0,
             payload,
-            previous_frame_digest: None,
         })
     }
 
@@ -2683,15 +2707,18 @@ mod tests {
         Some(max)
     }
 
-    fn decode_hex(value: &str) -> Vec<u8> {
-        value
-            .as_bytes()
-            .chunks_exact(2)
-            .map(|pair| {
-                let high = (pair[0] as char).to_digit(16).expect("hex high digit");
-                let low = (pair[1] as char).to_digit(16).expect("hex low digit");
-                u8::try_from((high << 4) | low).expect("hex byte")
-            })
-            .collect()
+    /// A distinct synthetic source run identity.
+    fn source_run_id(seed: u8, index: usize) -> RunId {
+        RunId::from_digest(
+            DigestAlgorithm::Sha256JcsV1,
+            sha256_digest_bytes(
+                &[
+                    b"portable-source-graph".as_slice(),
+                    &[seed],
+                    &index.to_be_bytes(),
+                ]
+                .concat(),
+            ),
+        )
     }
 }

@@ -377,7 +377,7 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
 #[cfg(any(test, feature = "test-support"))]
 pub fn assemble_in_memory_runtime(
     identity: super::StructuredStoreIdentity,
-    registry: mfm_certify::structured::QualifiedProgramRegistry,
+    registry: mfm_certify::structured::CertifiedProgramRegistry,
     physical_binding_verifier: std::sync::Arc<dyn super::PublicPhysicalBindingVerifier>,
 ) -> std::result::Result<
     super::AssembledStructuredRuntime<StructuredMemoryBackend>,

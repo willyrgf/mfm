@@ -28,7 +28,7 @@ use mfm_evm::{
     QualifiedPendingNonceFloor, QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
     ReplayExclusionDisposition, ReserveEvmNonceRequest, ReserveWalletNonceResponse,
     ReservedWalletNonce, TerminalWitnesses, TransactionNonce, UnsignedWalletCandidate,
-    WalletNonceAuthority, WalletNonceDomainActivationAttestation,
+    WalletNonceAuthority, WalletNonceDomain, WalletNonceDomainActivationAttestation,
     WalletNonceDomainActivationRecord, WalletNonceStatus, WalletNonceStoreIncarnation,
     WalletNonceStoreLineageHead, WalletNonceStoreSuccessor,
 };
@@ -66,6 +66,27 @@ const ACTIVATION_ADMIN_ROLE: &str = "mfm_evm_wallet_activation_admin";
 const DEPLOYMENT_RPC_TARGET_IDENTITY_BASE: u8 = 0x51;
 const DEPLOYMENT_RPC_PROOF_KEY_BASE: u8 = 0x72;
 const MANAGED_WALLET_TEST_STACK_BYTES: usize = 32 * 1024 * 1024;
+
+fn skipped_candidate_eligibility_digest(request: &ActivateEvmCandidateRequest) -> ContentDigest {
+    let canonical = canonical_json(request).expect("skipped eligibility preimage");
+    let mut preimage = b"mfm.evm.test/skipped-candidate-eligibility.v1\0".to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&preimage))
+}
+
+fn forged_candidate_eligibility_digest(request: &ActivateEvmCandidateRequest) -> ContentDigest {
+    let canonical = canonical_json(request).expect("forged eligibility preimage");
+    let mut preimage = b"mfm.evm.test/forged-candidate-eligibility.v1\0".to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&preimage))
+}
+
+fn sender_path_inventory_digest(nonce_domain: &WalletNonceDomain) -> ContentDigest {
+    let canonical = canonical_json(nonce_domain).expect("sender inventory preimage");
+    let mut preimage = b"mfm.evm.test/sender-path-inventory.v1\0".to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&preimage))
+}
 
 #[test]
 fn real_sql_authority_preserves_activation_nonce_and_role_boundaries() {
@@ -1736,25 +1757,27 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     )
     .expect("skipped candidate key");
     skipped_replacement.activation_permit = CandidateActivationPermit::Replacement {
-        predecessor_activation_ref: fixture.common_ref.clone(),
+        predecessor_candidate_operation_key: derive_evm_candidate_operation_key(
+            &reservation.semantic_reservation_key,
+            0,
+        )
+        .expect("predecessor candidate operation key"),
         predecessor_ordinal: 1,
         exact_next_ordinal: 2,
         replacement_policy_ref: evm_wallet_nonce_policy_ref().expect("replacement policy"),
-        eligibility_ref: mfm_journal::structured::domain_content_digest(
-            "mfm.evm.test/skipped-candidate-eligibility.v1",
-            &replacement_request,
-        )
-        .expect("skipped candidate eligibility")
-        .as_str()
-        .to_owned(),
+        eligibility_ref: skipped_candidate_eligibility_digest(&replacement_request)
+            .as_str()
+            .to_owned(),
     };
     let mut wrong_predecessor = replacement_request.clone();
     if let CandidateActivationPermit::Replacement {
-        predecessor_activation_ref,
+        predecessor_candidate_operation_key,
         ..
     } = &mut wrong_predecessor.activation_permit
     {
-        *predecessor_activation_ref = fixture.common_ref.clone();
+        *predecessor_candidate_operation_key =
+            derive_evm_candidate_operation_key(&reservation.semantic_reservation_key, u16::MAX)
+                .expect("foreign candidate operation key");
     }
     assert!(matches!(
         authority_a
@@ -1785,13 +1808,9 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         eligibility_ref, ..
     } = &mut wrong_eligibility.activation_permit
     {
-        *eligibility_ref = mfm_journal::structured::domain_content_digest(
-            "mfm.evm.test/forged-candidate-eligibility.v1",
-            &replacement_request,
-        )
-        .expect("forged candidate eligibility")
-        .as_str()
-        .to_owned();
+        *eligibility_ref = forged_candidate_eligibility_digest(&replacement_request)
+            .as_str()
+            .to_owned();
     }
     assert!(matches!(
         authority_a
@@ -3835,7 +3854,7 @@ async fn assert_hostile_restore_prefix_rejected(
     .await;
 
     let mut rewritten_reservation = reservation.clone();
-    rewritten_reservation.reservation_evidence_ref = fixture.next_provider_fence_head_ref.clone();
+    rewritten_reservation.resource_lineage_ref = fixture.next_provider_fence_head_ref.clone();
     assert_prefix_text_rewrite_rejected(
         admin,
         schema,
@@ -5144,18 +5163,11 @@ async fn corrupt_completion_semantically(
         .expect("load completion for semantic corruption probe");
     let mut request: serde_json::Value =
         serde_json::from_str(&original_request_json).expect("completion request JSON");
-    let mut completion: serde_json::Value =
+    let completion: serde_json::Value =
         serde_json::from_str(&original_completion_json).expect("completion JSON");
     request["terminal_witnesses"]["finalized_head"]["block_number"] = "103".into();
     request["terminal_witnesses"]["finalized_head"]["block_hash"] =
         format!("{:#x}", B256::repeat_byte(0xa3)).into();
-    let witnesses: TerminalWitnesses =
-        serde_json::from_value(request["terminal_witnesses"].clone())
-            .expect("decode forged terminal witness closure");
-    completion["original_terminal_witnesses_ref"] = canonical_wallet_reference(&witnesses)
-        .expect("reference forged terminal witness closure")
-        .content_digest()
-        .into();
     let forged_request_json =
         serde_json::to_string(&request).expect("canonical completion request JSON");
     let forged_completion_json =
@@ -5738,12 +5750,7 @@ fn activation_record_for_sender(
         canonical_wallet_reference(incarnation).expect("initial incarnation reference");
     record.wallet_nonce_domain = nonce_domain.clone();
     record.sender_identity = format!("{sender:#x}");
-    record.exhaustive_sender_path_inventory_digest =
-        mfm_journal::structured::domain_content_digest(
-            "mfm.evm.test/sender-path-inventory.v1",
-            &nonce_domain,
-        )
-        .expect("sender inventory")
+    record.exhaustive_sender_path_inventory_digest = sender_path_inventory_digest(&nonce_domain)
         .as_str()
         .to_owned();
     record.validate().expect("activation race record");
@@ -5853,11 +5860,7 @@ impl Fixture {
         };
         let initial_store_incarnation_ref =
             canonical_wallet_reference(&incarnation).expect("incarnation reference");
-        let inventory = mfm_journal::structured::domain_content_digest(
-            "mfm.evm.test/sender-path-inventory.v1",
-            &nonce_domain,
-        )
-        .expect("inventory digest");
+        let inventory = sender_path_inventory_digest(&nonce_domain);
         let activation_record = WalletNonceDomainActivationRecord {
             activation_contract_ref: common_ref.clone(),
             qualified_activation_registry_lineage_ref: registry_lineage_ref.clone(),
@@ -5887,13 +5890,9 @@ impl Fixture {
         secondary_activation_record.wallet_nonce_domain = secondary_nonce_domain.clone();
         secondary_activation_record.sender_identity = format!("{secondary_sender:#x}");
         secondary_activation_record.exhaustive_sender_path_inventory_digest =
-            mfm_journal::structured::domain_content_digest(
-                "mfm.evm.test/sender-path-inventory.v1",
-                &secondary_nonce_domain,
-            )
-            .expect("secondary inventory digest")
-            .as_str()
-            .to_owned();
+            sender_path_inventory_digest(&secondary_nonce_domain)
+                .as_str()
+                .to_owned();
         secondary_activation_record
             .validate()
             .expect("secondary activation record");
@@ -6149,7 +6148,6 @@ impl Fixture {
                 transaction_intent_digest: reservation.transaction_intent_digest.clone(),
                 nonce: reservation.nonce,
                 winning_candidate_ordinal: 0,
-                winning_activation_evidence_ref: active_candidate.activation_evidence_ref.clone(),
                 transaction_hash: transaction_hash.clone(),
                 inclusion_block_number: "101".to_owned(),
                 inclusion_block_hash: inclusion_block_hash.clone(),
@@ -6224,18 +6222,30 @@ impl Fixture {
 }
 
 fn history_object(name: &str, generation: u64) -> HistoryObject {
-    HistoryObject::new(
-        stable(&format!("mfm.evm.test/{name}")),
-        SchemaId::new(
-            "mfm.evm.test-wallet-lineage-head",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.structured-schema.v1:mfm.evm.test-wallet-lineage-head:1"),
-        )
-        .expect("history schema"),
-        format!("{{\"generation\":{generation}}}"),
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&format!(
+        "{{\"generation\":{generation}}}"
+    ))
+    .expect("history object canonical JSON");
+    let schema_id = SchemaId::new(
+        "mfm.evm.test-wallet-lineage-head",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.evm.test-wallet-lineage-head.v1"),
     )
-    .expect("history object")
+    .expect("history schema");
+    let content_ref = ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .expect("history object reference");
+    HistoryObject {
+        object_type: stable(&format!("mfm.evm.test/{name}")),
+        content_ref,
+        canonical_json: canonical.as_str().to_owned(),
+    }
 }
 
 fn authority_reference(role: &str) -> EvmWalletReference {
