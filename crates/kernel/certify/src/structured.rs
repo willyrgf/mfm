@@ -24,10 +24,10 @@ use mfm_ids::{
     RequestDigest, RunId, SemanticCallId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
-    derive_access_attempt_id, derive_record_hash, AccessKind, ExternalAccessAuthorized,
-    HistoryObject, LexicalValueRef, PriorRunFactScannerBindingCertificate,
-    PriorRunFactSelectionResponse, RecordHashPreimage, RecordRef, RunRecord, SemanticHead,
-    TypedValueRef,
+    derive_access_attempt_id, derive_record_hash, AccessAttemptIdentityPreimage, AccessKind,
+    ExternalAccessAuthorized, HistoryObject, LexicalValueRef,
+    PriorRunFactScannerBindingCertificate, PriorRunFactSelectionResponse, RecordHashPreimage,
+    RecordRef, RunRecord, SemanticHead, TypedValueRef,
 };
 use mfm_program::structured::{
     closed_sum_contract, runtime_effect_capability_contract, runtime_read_capability_contract,
@@ -1880,9 +1880,27 @@ impl ExpectedAuthorization {
             })
             .ok()
             .is_some_and(|expected| expected == authorization_ref.record_hash);
-        let access_attempt_matches = derive_access_attempt_id(&self.run_id, authorization)
-            .ok()
-            .is_some_and(|expected| expected == authorization.access_attempt_id);
+        let access_attempt_matches = derive_access_attempt_id(&AccessAttemptIdentityPreimage {
+            run_id: &self.run_id,
+            occurrence_id: &authorization.occurrence_id,
+            occurrence_path_ref: &authorization.occurrence_path_ref,
+            semantic_call_id: &authorization.semantic_call_id,
+            state_input_ref: &authorization.state_input_ref,
+            attempt_ordinal: authorization.attempt_ordinal,
+            access_kind: authorization.access_kind,
+            semantic_head: &authorization.semantic_head,
+            capability_contract_ref: &authorization.capability_contract_ref,
+            capability_implementation_ref: &authorization.capability_implementation_ref,
+            adapter_contract_ref: &authorization.adapter_contract_ref,
+            adapter_implementation_ref: &authorization.adapter_implementation_ref,
+            request: &authorization.request,
+            request_digest: &authorization.request_digest,
+            physical_binding_ref: &authorization.physical_binding_ref,
+            stable_resource_lineage_contract_ref: &authorization
+                .stable_resource_lineage_contract_ref,
+        })
+        .ok()
+        .is_some_and(|expected| expected == authorization.access_attempt_id);
         authorization_ref.run_id == self.run_id
             // The record reference is part of the append proof, not merely a
             // run label. Recompute the assigned-record hash from the exact

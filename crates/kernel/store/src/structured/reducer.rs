@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use mfm_facts::FactSet;
 use mfm_ids::{AccessAttemptId, ContentRef, OccurrenceId, RunId, RunSemanticStateDigest, StableId};
 use mfm_journal::structured::{
-    derive_access_attempt_id, derive_semantic_state_digest, AccessKind, CommittedFactRef,
-    ExternalAccessAuthorized, ExternalAccessObserved, JournalHead, LexicalValueRef,
-    ObservationOutcome, RecordRef, RunAdmitted, RunClosed, SemanticHead, SemanticStatePreimage,
-    SemanticTransitionPreimage, StateOutcomeRef, StateTransitionCommitted, StructuralValueOrigin,
-    TypedValueRef,
+    derive_access_attempt_id, derive_semantic_state_digest, AccessAttemptIdentityPreimage,
+    AccessKind, CommittedFactRef, ExternalAccessAuthorized, ExternalAccessObserved, JournalHead,
+    LexicalValueRef, ObservationOutcome, RecordRef, RunAdmitted, RunClosed, SemanticHead,
+    SemanticStatePreimage, SemanticTransitionPreimage, StateOutcomeRef, StateTransitionCommitted,
+    StructuralValueOrigin, TypedValueRef,
 };
 use mfm_runtime::history::{
     ActionableState, EffectEntryAttentionResolution, EffectEntrySubject, LaneCursor, ProgramCursor,
@@ -1251,8 +1251,25 @@ fn author_authorization(
         physical_binding_ref,
         stable_resource_lineage_contract_ref,
     };
-    record.access_attempt_id =
-        derive_access_attempt_id(previous.run_id(), &record).map_err(|_| invalid())?;
+    record.access_attempt_id = derive_access_attempt_id(&AccessAttemptIdentityPreimage {
+        run_id: previous.run_id(),
+        occurrence_id: &record.occurrence_id,
+        occurrence_path_ref: &record.occurrence_path_ref,
+        semantic_call_id: &record.semantic_call_id,
+        state_input_ref: &record.state_input_ref,
+        attempt_ordinal: record.attempt_ordinal,
+        access_kind: record.access_kind,
+        semantic_head: &record.semantic_head,
+        capability_contract_ref: &record.capability_contract_ref,
+        capability_implementation_ref: &record.capability_implementation_ref,
+        adapter_contract_ref: &record.adapter_contract_ref,
+        adapter_implementation_ref: &record.adapter_implementation_ref,
+        request: &record.request,
+        request_digest: &record.request_digest,
+        physical_binding_ref: &record.physical_binding_ref,
+        stable_resource_lineage_contract_ref: &record.stable_resource_lineage_contract_ref,
+    })
+    .map_err(|_| invalid())?;
     Ok(record)
 }
 

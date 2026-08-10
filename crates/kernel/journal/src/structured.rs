@@ -1459,25 +1459,45 @@ struct FactLogicalIdentityPreimage<'a> {
     transition_ref: &'a RecordRef,
 }
 
-/// Exact journal-owned preimage of one immutable access-attempt identity.
+/// Exact semantic preimage of one immutable access-attempt identity.
+///
+/// The journal owns this hash language independently of the persisted authorization record, so a
+/// semantic reducer and the record compiler can derive the same identity without either rebuilding
+/// the other's representation.
 #[derive(Serialize)]
-struct AccessAttemptPreimage<'a> {
-    run_id: &'a RunId,
-    occurrence_id: &'a OccurrenceId,
-    occurrence_path_ref: &'a ContentRef,
-    semantic_call_id: &'a SemanticCallId,
-    state_input_ref: &'a LexicalValueRef,
-    attempt_ordinal: u64,
-    access_kind: AccessKind,
-    semantic_head: &'a SemanticHead,
-    capability_contract_ref: &'a ContentRef,
-    capability_implementation_ref: &'a ContentRef,
-    adapter_contract_ref: &'a ContentRef,
-    adapter_implementation_ref: &'a ContentRef,
-    request: &'a TypedValueRef,
-    request_digest: &'a RequestDigest,
-    physical_binding_ref: &'a ContentRef,
-    stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
+pub struct AccessAttemptIdentityPreimage<'a> {
+    /// Run authorizing the attempt.
+    pub run_id: &'a RunId,
+    /// State occurrence authorizing the attempt.
+    pub occurrence_id: &'a OccurrenceId,
+    /// Structural occurrence path.
+    pub occurrence_path_ref: &'a ContentRef,
+    /// Certified semantic call.
+    pub semantic_call_id: &'a SemanticCallId,
+    /// Exact state input.
+    pub state_input_ref: &'a LexicalValueRef,
+    /// Zero-based attempt ordinal for the occurrence.
+    pub attempt_ordinal: u64,
+    /// Read or Effect access kind.
+    pub access_kind: AccessKind,
+    /// Semantic head authorizing the attempt.
+    pub semantic_head: &'a SemanticHead,
+    /// Semantic capability contract.
+    pub capability_contract_ref: &'a ContentRef,
+    /// Qualified capability implementation.
+    pub capability_implementation_ref: &'a ContentRef,
+    /// Semantic adapter contract.
+    pub adapter_contract_ref: &'a ContentRef,
+    /// Qualified adapter implementation.
+    pub adapter_implementation_ref: &'a ContentRef,
+    /// Immutable typed request.
+    pub request: &'a TypedValueRef,
+    /// Digest of the canonical request.
+    pub request_digest: &'a RequestDigest,
+    /// Qualified physical binding.
+    pub physical_binding_ref: &'a ContentRef,
+    /// Stable resource lineage for refreshable Effects.
+    pub stable_resource_lineage_contract_ref: &'a Option<ContentRef>,
 }
 
 /// Exact journal-owned preimage of one assigned-record hash.
@@ -1612,29 +1632,11 @@ pub fn derive_candidate_digest(candidate: &CommitCandidate) -> Result<ContentDig
     ))
 }
 
-/// Derives one immutable access-attempt identity from its exact record owner.
+/// Derives one immutable access-attempt identity from its exact semantic preimage.
 pub fn derive_access_attempt_id(
-    run_id: &RunId,
-    authorization: &ExternalAccessAuthorized,
+    preimage: &AccessAttemptIdentityPreimage<'_>,
 ) -> Result<AccessAttemptId> {
-    let canonical = canonical_json(&AccessAttemptPreimage {
-        run_id,
-        occurrence_id: &authorization.occurrence_id,
-        occurrence_path_ref: &authorization.occurrence_path_ref,
-        semantic_call_id: &authorization.semantic_call_id,
-        state_input_ref: &authorization.state_input_ref,
-        attempt_ordinal: authorization.attempt_ordinal,
-        access_kind: authorization.access_kind,
-        semantic_head: &authorization.semantic_head,
-        capability_contract_ref: &authorization.capability_contract_ref,
-        capability_implementation_ref: &authorization.capability_implementation_ref,
-        adapter_contract_ref: &authorization.adapter_contract_ref,
-        adapter_implementation_ref: &authorization.adapter_implementation_ref,
-        request: &authorization.request,
-        request_digest: &authorization.request_digest,
-        physical_binding_ref: &authorization.physical_binding_ref,
-        stable_resource_lineage_contract_ref: &authorization.stable_resource_lineage_contract_ref,
-    })?;
+    let canonical = canonical_json(preimage)?;
     let mut bytes = b"mfm.structured-access-attempt.v1\0".to_vec();
     bytes.extend_from_slice(canonical.as_bytes());
     Ok(AccessAttemptId::from_digest(sha256_digest_bytes(&bytes)))
