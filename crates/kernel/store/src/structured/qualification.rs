@@ -1413,12 +1413,3 @@ fn require_exact_admission_object_refs(
     }
     Ok(())
 }
-
-/// Read-only offline verification through the same qualified/reduced path.
-pub fn verify_offline_recorded_history(
-    raw: RawRunHistory,
-    programs: &ProgramVerificationRegistry,
-    physical: &dyn PhysicalObligationChecker,
-) -> super::Result<super::purpose::OfflineVerifiedRun> {
-    super::semantic_open::verify_offline_history(raw, programs, physical)
-}

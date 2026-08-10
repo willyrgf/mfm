@@ -200,10 +200,12 @@ Typed operation results that cross the terminal public boundary are separate rev
 closures, provider attestations, signed envelopes, and other verification preimages remain
 internal evidence.
 
-The explicit offline replay entry point consumes raw history plus concrete trust
-and returns an opaque `OfflineVerifiedRun` containing only recorded status and
-bounded export metadata. The complete verified cursor, objects, and bindings
-never cross the store boundary.
+The sole offline replay entry point consumes one complete callback-free closure: the root history,
+every exact producer prefix, every dense publication route, and concrete trust. It verifies every
+required producer head and recomputes each retained positive selection before returning an opaque
+`OfflineVerifiedRun` containing only recorded status and bounded fixation metadata. No raw-history-
+only path can mint offline evidence, and the complete verified cursor, objects, and bindings never
+cross the store boundary.
 
 Incremental mutation returns a successor produced by that same rule. Candidate authoring reduces an
 intent, lets the compiler author bytes, requalifies those exact bytes, and reduces the recorded form
@@ -344,9 +346,11 @@ A positive response retains the request digest, exact source references, canonic
 subject/response/claim bytes, deterministic identities, and an authorization/frontier completeness
 attestation.
 Exhausted bounds and backend unavailability are typed safe failures; missing, malformed, or
-substituted provenance is an integrity fault. Public verified loads recompute every retained
-positive response at its recorded frontier and reject any mismatch, so replay and projections never
-treat a merely well-shaped completeness claim as authoritative.
+substituted provenance is an integrity fault. Live and offline verified loads traverse every
+retained selection barrier through its dense frontier, including pending or safe-failure attempts,
+and recompute every retained positive response. Offline verification additionally requires the
+supplied producer prefixes and publication routes to equal that complete traversal exactly, so
+replay and projections never treat a merely well-shaped completeness claim as authoritative.
 
 ## Replay and public projections
 
@@ -377,6 +381,9 @@ producer only to the maximum transition head required by selected fact routes. A
 suffix therefore cannot add a semantic-export dependency. Decision references in the terminal seal
 are opaque content-addressed policy evidence; offline consumers do not resolve them live, and the
 explicit trust snapshot must bind the exact closure digest before reduction.
+Portable replay invokes the store verifier once for that whole closure, then checks every declared
+source's complete journal and semantic fixation against the source metadata minted by that same
+verification.
 
 Recorded replay is verification-only: it reduces the committed prefix and returns its bounded
 summary. It never falls back to live callbacks or compares current history.

@@ -1,7 +1,7 @@
 //! Sole asynchronous transition from physical usability to semantic authority.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mfm_journal::structured::{TenantFactCoordinate, TenantFactFrontier};
 
@@ -267,6 +267,7 @@ pub(super) fn replay_step(
 struct SnapshotFactSource {
     histories: BTreeMap<mfm_ids::RunId, RawRunHistory>,
     publications: BTreeMap<mfm_ids::TenantScopeId, Vec<TenantFactPublication>>,
+    scanned_publications: Option<Mutex<BTreeSet<(mfm_ids::TenantScopeId, u64)>>>,
 }
 
 impl SnapshotFactSource {
@@ -295,6 +296,7 @@ impl SnapshotFactSource {
         Ok(Self {
             histories,
             publications,
+            scanned_publications: None,
         })
     }
 
@@ -315,8 +317,8 @@ impl SnapshotFactSource {
                 publication.frontier.fact_order,
             );
             if exact_publications
-                .insert(key.clone(), publication.clone())
-                .is_some_and(|existing| existing != *publication)
+                .insert(key, publication.clone())
+                .is_some()
             {
                 return Err(StructuredStoreError::InvalidHistory);
             }
@@ -328,7 +330,19 @@ impl SnapshotFactSource {
         Ok(Self {
             histories,
             publications,
+            scanned_publications: Some(Mutex::new(BTreeSet::new())),
         })
+    }
+
+    fn scanned_publication_coordinates(
+        &self,
+    ) -> super::Result<BTreeSet<(mfm_ids::TenantScopeId, u64)>> {
+        self.scanned_publications
+            .as_ref()
+            .ok_or(StructuredStoreError::InvalidHistory)?
+            .lock()
+            .map(|coordinates| coordinates.clone())
+            .map_err(|_| StructuredStoreError::InvalidHistory)
     }
 }
 
@@ -344,7 +358,7 @@ impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
             if first_order == 0 || maximum_items == 0 {
                 return Err(StructuredStoreError::InvalidHistory);
             }
-            Ok(self
+            let publications = self
                 .publications
                 .get(tenant_scope_id)
                 .into_iter()
@@ -355,7 +369,19 @@ impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
                 })
                 .take(maximum_items as usize)
                 .cloned()
-                .collect())
+                .collect::<Vec<_>>();
+            if let Some(scanned) = &self.scanned_publications {
+                let mut scanned = scanned
+                    .lock()
+                    .map_err(|_| StructuredStoreError::InvalidHistory)?;
+                scanned.extend(publications.iter().map(|publication| {
+                    (
+                        publication.frontier.tenant_scope_id.clone(),
+                        publication.frontier.fact_order,
+                    )
+                }));
+            }
+            Ok(publications)
         })
     }
 
@@ -509,32 +535,47 @@ fn retained_frontier(
     }
 }
 
-pub(super) fn verify_offline_history(
-    raw: RawRunHistory,
-    programs: &ProgramVerificationRegistry,
-    physical: &dyn PhysicalObligationChecker,
-) -> super::Result<super::purpose::OfflineVerifiedRun> {
-    super::purpose::OfflineVerifiedRun::from_verified(verify_qualified(raw, programs, physical)?)
-}
-
 /// Verifies retained fact responses by executing the live selector over the supplied closure.
 pub async fn verify_offline_run_closure(
     closure: OfflineRunClosure,
     programs: Arc<ProgramVerificationRegistry>,
     physical: Arc<dyn PhysicalObligationChecker>,
 ) -> super::Result<super::purpose::OfflineVerifiedRun> {
-    let expected_sources = closure
-        .source_prefixes
-        .iter()
-        .map(|history| history.run_id.clone())
-        .collect::<BTreeSet<_>>();
-    if expected_sources.len() != closure.source_prefixes.len()
-        || expected_sources.contains(&closure.root.run_id)
+    if closure.source_prefixes.len() > super::purpose::MAX_PORTABLE_SOURCE_RUNS
+        || closure.fact_publications.len() > super::purpose::MAX_PORTABLE_FACT_ROUTES
     {
         return Err(StructuredStoreError::InvalidHistory);
     }
-    let source: Arc<dyn super::fact_scan::PriorRunFactSource> =
-        Arc::new(SnapshotFactSource::from_offline_closure(&closure)?);
+    let mut expected_sources = BTreeMap::new();
+    for history in &closure.source_prefixes {
+        let head = history
+            .batches
+            .last()
+            .map(|batch| batch.head.clone())
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        if history.run_id == closure.root.run_id
+            || expected_sources
+                .insert(history.run_id.clone(), head)
+                .is_some()
+        {
+            return Err(StructuredStoreError::InvalidHistory);
+        }
+    }
+    let expected_publications = closure
+        .fact_publications
+        .iter()
+        .map(|publication| {
+            (
+                publication.frontier.tenant_scope_id.clone(),
+                publication.frontier.fact_order,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    if expected_publications.len() != closure.fact_publications.len() {
+        return Err(StructuredStoreError::InvalidHistory);
+    }
+    let snapshot = Arc::new(SnapshotFactSource::from_offline_closure(&closure)?);
+    let source: Arc<dyn super::fact_scan::PriorRunFactSource> = snapshot.clone();
     let prefix_memo = Arc::new(super::fact_scan::PrefixVerificationMemo::default());
     let (verified, _) = super::fact_scan::qualify_and_reduce_for_scan_with_publications_and_memo(
         source,
@@ -544,8 +585,34 @@ pub async fn verify_offline_run_closure(
         Arc::clone(&prefix_memo),
     )
     .await?;
-    if prefix_memo.verified_run_ids()? != expected_sources {
+    let verified_prefixes = prefix_memo.verified_prefixes()?;
+    let verified_source_ids = verified_prefixes
+        .iter()
+        .map(|source| source.run_id().clone())
+        .collect::<BTreeSet<_>>();
+    if verified_source_ids != expected_sources.keys().cloned().collect()
+        || snapshot.scanned_publication_coordinates()? != expected_publications
+    {
         return Err(StructuredStoreError::InvalidHistory);
     }
-    super::purpose::OfflineVerifiedRun::from_verified(verified)
+    let mut heads_by_sequence = BTreeMap::new();
+    for source in &verified_prefixes {
+        let key = (source.run_id().clone(), source.journal_head().run_sequence);
+        if heads_by_sequence
+            .insert(key, source.journal_head().clone())
+            .is_some_and(|existing| existing != *source.journal_head())
+        {
+            return Err(StructuredStoreError::InvalidHistory);
+        }
+    }
+    let mut verified_sources = Vec::with_capacity(expected_sources.len());
+    for (run_id, expected_head) in expected_sources {
+        let source = verified_prefixes
+            .iter()
+            .find(|source| source.run_id() == &run_id && source.journal_head() == &expected_head)
+            .cloned()
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        verified_sources.push(source);
+    }
+    super::purpose::OfflineVerifiedRun::from_verified_closure(verified, verified_sources)
 }

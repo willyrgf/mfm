@@ -7,6 +7,7 @@
 //! passed where `ExportRunEvidence` is required.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use mfm_ids::{
     AccessAttemptId, ContentRef, InvocationIdentity, OccurrenceId, RequestDigest, RunId,
@@ -779,11 +780,43 @@ pub struct OfflineVerifiedRun {
     header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
+    source_prefixes: Vec<OfflineVerifiedPrefix>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfflineVerifiedPrefix {
+    run_id: RunId,
+    tenant_scope_id: TenantScopeId,
+    journal_head: JournalHead,
+    semantic_head: SemanticHead,
 }
 
 impl OfflineVerifiedRun {
-    pub(crate) fn from_verified(verified: VerifiedStructuredRun) -> Result<Self> {
+    pub(crate) fn from_verified_closure(
+        verified: VerifiedStructuredRun,
+        sources: Vec<Arc<VerifiedStructuredRun>>,
+    ) -> Result<Self> {
         let run_id = verified.run_id().clone();
+        if sources.len() > MAX_PORTABLE_SOURCE_RUNS
+            || sources.iter().any(|source| source.run_id() == &run_id)
+            || sources
+                .iter()
+                .map(|source| source.run_id())
+                .collect::<BTreeSet<_>>()
+                .len()
+                != sources.len()
+        {
+            return Err(super::StructuredStoreError::InvalidHistory);
+        }
+        let source_prefixes = sources
+            .iter()
+            .map(|source| OfflineVerifiedPrefix {
+                run_id: source.run_id().clone(),
+                tenant_scope_id: source.admission().tenant_scope_id.clone(),
+                journal_head: source.journal_head().clone(),
+                semantic_head: source.semantic_head().clone(),
+            })
+            .collect();
         let header = RunEvidenceHeader::from_admission(verified.admission());
         let journal_head = verified.journal_head().clone();
         let semantic_head = verified.semantic_head().clone();
@@ -794,6 +827,7 @@ impl OfflineVerifiedRun {
             header,
             journal_head,
             semantic_head,
+            source_prefixes,
         })
     }
 
@@ -815,6 +849,22 @@ impl OfflineVerifiedRun {
     /// Returns the exact reduced semantic head.
     pub const fn semantic_head(&self) -> &SemanticHead {
         &self.semantic_head
+    }
+
+    /// Confirms one exact source prefix reduced as part of this complete closure.
+    pub fn matches_verified_prefix(
+        &self,
+        run_id: &RunId,
+        tenant_scope_id: &TenantScopeId,
+        journal_head: &JournalHead,
+        semantic_head: &SemanticHead,
+    ) -> bool {
+        self.source_prefixes.iter().any(|source| {
+            &source.run_id == run_id
+                && &source.tenant_scope_id == tenant_scope_id
+                && &source.journal_head == journal_head
+                && &source.semantic_head == semantic_head
+        })
     }
 
     /// Consumes the opaque reduced result into recorded-replay evidence.

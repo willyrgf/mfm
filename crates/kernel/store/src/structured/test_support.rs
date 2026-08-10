@@ -542,11 +542,12 @@ impl LiveFixtureStore {
 
     /// Loads this fixture run's verified state.
     pub async fn load_verified(&self) -> super::Result<super::purpose::OfflineVerifiedRun> {
-        super::verify_offline_recorded_history(
-            self.raw_prefix().await?,
-            self.program_qualifier.as_ref(),
-            &AcceptPhysicalBindings,
+        super::verify_offline_run_closure(
+            super::OfflineRunClosure::new(self.raw_prefix().await?, Vec::new(), Vec::new()),
+            Arc::clone(&self.program_qualifier),
+            Arc::new(AcceptPhysicalBindings),
         )
+        .await
     }
 
     /// Reads this fixture run's exact raw persisted prefix.
@@ -1145,4 +1146,248 @@ fn persisted_ref<T: CanonicalJsonPersistedSchema>(value: &T) -> mfm_program::Res
     value
         .content_ref()
         .map_err(|error| mfm_program::ProgramError::Authoring(error.to_string()))
+}
+
+#[cfg(test)]
+mod offline_closure_tests {
+    use super::*;
+    use crate::structured::{
+        OfflineRunClosure, RawRunHistory, StructuredHistoryBackend, TenantFactPublication,
+    };
+    use mfm_journal::structured::{
+        CommitCandidate, ObservationOutcome, PriorRunFactSelectionResponse, RunRecord,
+        TYPED_VALUE_OBJECT_TYPE,
+    };
+    use mfm_values::CanonicalJsonPersistedSchema;
+
+    fn forge_incomplete_response(
+        identity: &StructuredStoreIdentity,
+        mut raw: RawRunHistory,
+    ) -> super::super::Result<RawRunHistory> {
+        let original = raw
+            .batches
+            .pop()
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        let mut records = original
+            .records
+            .iter()
+            .map(|assigned| assigned.record.clone())
+            .collect::<Vec<_>>();
+        let mut objects = original.objects;
+        let returned_ref = records
+            .iter_mut()
+            .find_map(|record| {
+                let RunRecord::ExternalAccessObserved(observation) = record else {
+                    return None;
+                };
+                let ObservationOutcome::Returned { value } = &mut observation.outcome else {
+                    return None;
+                };
+                Some(&mut value.value_ref)
+            })
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        let original_ref = returned_ref.clone();
+        let object = objects
+            .iter_mut()
+            .find(|object| object.content_ref == original_ref)
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        let returned: FactSelectionReadResponse = serde_json::from_str(&object.canonical_json)
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        let mut response = PriorRunFactSelectionResponse::decode_canonical(
+            returned.canonical_response_json().as_bytes(),
+        )
+        .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        let selected = response
+            .query_results
+            .first_mut()
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        if selected.selected.is_empty() {
+            return Err(StructuredStoreError::InvalidHistory);
+        }
+        selected.selected.clear();
+        let incomplete = FactSelectionReadResponse::from_canonical_json(
+            response
+                .encode_canonical()
+                .map_err(|_| StructuredStoreError::InvalidHistory)?
+                .as_str()
+                .to_owned(),
+        )
+        .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        let proposed = ProposedCanonicalValue::from_value(&incomplete)?;
+        let canonical = proposed.canonical();
+        let content_ref = ContentRef::new(
+            <FactSelectionReadResponse as mfm_values::MfmValue>::schema_id()
+                .map_err(|_| StructuredStoreError::InvalidHistory)?,
+            ContentDigest::from_digest(
+                DigestAlgorithm::Sha256V1,
+                sha256_digest_bytes(canonical.as_bytes()),
+            ),
+        )
+        .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        object.object_type = StableId::new(TYPED_VALUE_OBJECT_TYPE)
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        object.content_ref = content_ref.clone();
+        object.canonical_json = canonical.as_str().to_owned();
+        *returned_ref = content_ref;
+        objects.sort_by(|left, right| left.content_ref.cmp(&right.content_ref));
+        let expected_head = raw.batches.last().map(|batch| batch.head.clone());
+        raw.batches.push(assign_hostile_candidate(
+            identity,
+            CommitCandidate {
+                run_id: raw.run_id.clone(),
+                expected_head,
+                append_request_id: AppendRequestId::new("offline-incomplete-response")
+                    .map_err(|_| StructuredStoreError::InvalidHistory)?,
+                tenant_fact_coordinate: original.tenant_fact_coordinate,
+                records,
+                objects,
+            },
+        )?);
+        Ok(raw)
+    }
+
+    async fn observed_closure(
+        discriminator: u8,
+    ) -> super::super::Result<(
+        RawRunHistory,
+        RawRunHistory,
+        Vec<TenantFactPublication>,
+        Arc<ProgramVerificationRegistry>,
+        Arc<dyn PhysicalObligationChecker>,
+    )> {
+        let fixture = fact_scan_fixture(discriminator);
+        let backend = StructuredMemoryBackend::new(store_identity(discriminator));
+        let opened = super::super::qualify_and_open_structured_store(
+            backend.clone(),
+            fixture.registry,
+            Arc::new(AcceptPhysicalBindings),
+        )
+        .await?;
+        let (producer_run, _) = opened
+            .runtime
+            .admit_run(admission(&fixture.producer, discriminator, "producer"))
+            .await
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        opened
+            .runtime
+            .drive_once(&producer_run)
+            .await
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        let (consumer_run, _) = opened
+            .runtime
+            .admit_run(admission_with_sources(
+                &fixture.consumer,
+                discriminator,
+                "consumer",
+                fixture.source_manifest,
+            ))
+            .await
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        opened
+            .runtime
+            .drive_once(&consumer_run)
+            .await
+            .map_err(|_| StructuredStoreError::InvalidHistory)?;
+        let root = backend
+            .load_snapshot(&consumer_run)
+            .await?
+            .history
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        let source = backend
+            .load_snapshot(&producer_run)
+            .await?
+            .history
+            .ok_or(StructuredStoreError::InvalidHistory)?;
+        let publications = backend
+            .scan_fact_publications(&fixture_tenant(), 1, 1, 1_024)
+            .await?;
+        Ok((
+            root,
+            source,
+            publications,
+            fixture.program_qualifier,
+            Arc::new(AcceptPhysicalBindings),
+        ))
+    }
+
+    #[tokio::test]
+    async fn offline_evidence_requires_the_exact_fact_source_closure() {
+        let (root, source, publications, programs, physical) =
+            observed_closure(0xe1).await.expect("observed fact closure");
+        let source_verified = super::super::verify_offline_run_closure(
+            OfflineRunClosure::new(source.clone(), Vec::new(), Vec::new()),
+            Arc::clone(&programs),
+            Arc::clone(&physical),
+        )
+        .await
+        .expect("fact producer verifies without prior sources");
+        let verified = super::super::verify_offline_run_closure(
+            OfflineRunClosure::new(root.clone(), vec![source.clone()], publications.clone()),
+            Arc::clone(&programs),
+            Arc::clone(&physical),
+        )
+        .await
+        .expect("complete fact closure verifies");
+        assert!(verified.matches_verified_prefix(
+            source_verified.run_id(),
+            source_verified.tenant_scope_id(),
+            source_verified.journal_head(),
+            source_verified.semantic_head(),
+        ));
+
+        assert_eq!(
+            super::super::verify_offline_run_closure(
+                OfflineRunClosure::new(root.clone(), Vec::new(), publications.clone()),
+                Arc::clone(&programs),
+                Arc::clone(&physical),
+            )
+            .await,
+            Err(StructuredStoreError::InvalidHistory),
+            "a selected producer prefix cannot be omitted",
+        );
+        assert_eq!(
+            super::super::verify_offline_run_closure(
+                OfflineRunClosure::new(root.clone(), vec![source.clone()], Vec::new()),
+                Arc::clone(&programs),
+                Arc::clone(&physical),
+            )
+            .await,
+            Err(StructuredStoreError::InvalidHistory),
+            "a dense publication route cannot be omitted",
+        );
+        let incomplete = forge_incomplete_response(&store_identity(0xe1), root.clone())
+            .expect("well-shaped incomplete retained response");
+        assert!(
+            super::super::semantic_open::verify_qualified(
+                incomplete.clone(),
+                programs.as_ref(),
+                physical.as_ref(),
+            )
+            .is_ok(),
+            "the forged response remains structurally and semantically reducible without its source closure",
+        );
+        assert_eq!(
+            super::super::verify_offline_run_closure(
+                OfflineRunClosure::new(incomplete, vec![source.clone()], publications.clone(),),
+                Arc::clone(&programs),
+                Arc::clone(&physical),
+            )
+            .await,
+            Err(StructuredStoreError::InvalidHistory),
+            "a complete closure recomputes and rejects an incomplete retained response",
+        );
+
+        let mut duplicated_publications = publications.clone();
+        duplicated_publications.extend(publications);
+        assert_eq!(
+            super::super::verify_offline_run_closure(
+                OfflineRunClosure::new(root, vec![source], duplicated_publications),
+                programs,
+                physical,
+            )
+            .await,
+            Err(StructuredStoreError::InvalidHistory),
+            "even byte-identical publication coordinates are unique evidence",
+        );
+    }
 }

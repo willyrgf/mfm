@@ -14,7 +14,9 @@ use mfm_store::structured::test_support::{
     forge_wrong_admission_genesis, qualify_recorded_structure_only,
     verify_incremental_reduction_equivalence, LiveFixtureStore,
 };
-use mfm_store::structured::{verify_offline_recorded_history, RawRunHistory, StructuredStoreError};
+use mfm_store::structured::{
+    verify_offline_run_closure, OfflineRunClosure, RawRunHistory, StructuredStoreError,
+};
 
 /// Admits the fixture run and returns its exact raw persisted prefix.
 async fn admitted_prefix(
@@ -30,12 +32,16 @@ async fn admitted_prefix(
 }
 
 /// Requalifies one raw prefix through the sole offline entry point.
-fn requalify(store: &LiveFixtureStore, raw: RawRunHistory) -> Result<(), StructuredStoreError> {
-    verify_offline_recorded_history(
-        raw,
-        &store.program_qualifier,
-        store.physical_binding_verifier().as_ref(),
+async fn requalify(
+    store: &LiveFixtureStore,
+    raw: RawRunHistory,
+) -> Result<(), StructuredStoreError> {
+    verify_offline_run_closure(
+        OfflineRunClosure::new(raw, Vec::new(), Vec::new()),
+        Arc::clone(&store.program_qualifier),
+        store.physical_binding_verifier(),
     )
+    .await
     .map(|_| ())
 }
 
@@ -78,7 +84,9 @@ fn forge_last_batch(
 async fn a_real_admitted_prefix_qualifies() {
     let store = LiveFixtureStore::open(70);
     let raw = admitted_prefix(&store, 70, "anchor").await;
-    requalify(&store, raw).expect("the unforged admitted prefix qualifies");
+    requalify(&store, raw)
+        .await
+        .expect("the unforged admitted prefix qualifies");
 }
 
 /// A forgery that keeps the envelope and the admitted record in agreement is
@@ -87,7 +95,9 @@ async fn a_real_admitted_prefix_qualifies() {
 async fn a_self_consistent_forged_run_identity_fails_qualification() {
     let store = LiveFixtureStore::open(71);
     let raw = admitted_prefix(&store, 71, "forged-identity").await;
-    requalify(&store, raw.clone()).expect("the unforged admitted prefix qualifies");
+    requalify(&store, raw.clone())
+        .await
+        .expect("the unforged admitted prefix qualifies");
 
     let forged = forge_last_batch(&store, raw, "forged-identity", |records, _| {
         let RunRecord::RunAdmitted(admission) = &mut records[0] else {
@@ -105,7 +115,7 @@ async fn a_self_consistent_forged_run_identity_fails_qualification() {
         "the forgery keeps the envelope and the admitted record in agreement",
     );
     assert_eq!(
-        requalify(&store, forged),
+        requalify(&store, forged).await,
         Err(StructuredStoreError::InvalidHistory),
         "a derived run identity cannot be satisfied by internal agreement",
     );
@@ -117,7 +127,9 @@ async fn a_self_consistent_forged_run_identity_fails_qualification() {
 async fn an_omitted_required_object_fails_qualification() {
     let store = LiveFixtureStore::open(72);
     let raw = admitted_prefix(&store, 72, "omitted-object").await;
-    requalify(&store, raw.clone()).expect("the unforged admitted prefix qualifies");
+    requalify(&store, raw.clone())
+        .await
+        .expect("the unforged admitted prefix qualifies");
 
     let omitted: ContentRef = raw.batches[0]
         .objects
@@ -129,7 +141,7 @@ async fn an_omitted_required_object_fails_qualification() {
         objects.retain(|object| object.content_ref != omitted);
     });
     assert_eq!(
-        requalify(&store, forged),
+        requalify(&store, forged).await,
         Err(StructuredStoreError::InvalidHistory),
         "the introduced-object closure is exact, not a lower bound",
     );
@@ -141,7 +153,9 @@ async fn an_omitted_required_object_fails_qualification() {
 async fn a_substituted_certified_program_reference_fails_qualification() {
     let store = LiveFixtureStore::open(73);
     let raw = admitted_prefix(&store, 73, "substituted-program").await;
-    requalify(&store, raw.clone()).expect("the unforged admitted prefix qualifies");
+    requalify(&store, raw.clone())
+        .await
+        .expect("the unforged admitted prefix qualifies");
 
     let RunRecord::RunAdmitted(admitted) = &raw.batches[0].records[0].record else {
         panic!("first record is the admission")
@@ -162,7 +176,7 @@ async fn a_substituted_certified_program_reference_fails_qualification() {
     // The retained value is not the certified root owner, so concrete program
     // certification rejects it.
     assert_eq!(
-        requalify(&store, forged),
+        requalify(&store, forged).await,
         Err(StructuredStoreError::Certification),
         "program trust is established from the exact retained root, not a present object",
     );
@@ -179,7 +193,7 @@ async fn qualification_does_not_claim_semantic_legality() {
     qualify_recorded_structure_only(forged.clone(), &store.program_qualifier)
         .expect("structural qualification remains honest");
     assert_eq!(
-        requalify(&store, forged),
+        requalify(&store, forged).await,
         Err(StructuredStoreError::InvalidHistory),
         "the sole reducer rejects the semantically impossible digest",
     );
@@ -208,11 +222,12 @@ async fn an_unrelated_certified_program_cannot_qualify_this_run() {
     let raw = admitted_prefix(&store, 75, "foreign-program").await;
     let unrelated = mfm_store::structured::test_support::unrelated_program_qualifier();
     assert_eq!(
-        verify_offline_recorded_history(
-            raw,
-            &unrelated,
-            store.physical_binding_verifier().as_ref(),
+        verify_offline_run_closure(
+            OfflineRunClosure::new(raw, Vec::new(), Vec::new()),
+            unrelated,
+            store.physical_binding_verifier(),
         )
+        .await
         .map(|_| ()),
         Err(StructuredStoreError::Certification),
         "a nominal entry point is not a trust key",
