@@ -116,6 +116,16 @@ impl ValidatedRunAppend {
     }
 
     /// Consumes the complete inseparable backend command.
+    ///
+    /// Only a workspace-sealed persistence backend can consume the command.
+    ///
+    /// ```compile_fail
+    /// use mfm_store::structured::ValidatedRunAppend;
+    ///
+    /// fn discard_required_plans(command: ValidatedRunAppend) {
+    ///     let _ = command.into_parts(&());
+    /// }
+    /// ```
     pub fn into_parts<C: mfm_authority_seal::ValidatedAppendConsumerSeal>(
         self,
         _consumer: &C,
@@ -158,6 +168,16 @@ impl ValidatedConfigurationAppend {
     }
 
     /// Consumes the complete inseparable backend command.
+    ///
+    /// Only a workspace-sealed persistence backend can consume the command.
+    ///
+    /// ```compile_fail
+    /// use mfm_store::structured::ValidatedConfigurationAppend;
+    ///
+    /// fn discard_required_head(command: ValidatedConfigurationAppend) {
+    ///     let _ = command.into_parts(&());
+    /// }
+    /// ```
     pub fn into_parts<C: mfm_authority_seal::ValidatedAppendConsumerSeal>(
         self,
         _consumer: &C,
