@@ -10,9 +10,11 @@ use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, SchemaId, StableId, StoreScopeId,
     TenantScopeId,
 };
+use mfm_journal::structured::HistoryObject;
+use mfm_values::PersistedObjectPayload;
 use serde::{Deserialize, Serialize};
 
-use super::canonical_append::CanonicalConfigurationAppend;
+use super::validated_append::ValidatedConfigurationAppend;
 use super::{ProposedCanonicalValue, StructuredStoreError};
 
 /// Maximum bytes in one canonical structured configuration revision.
@@ -65,16 +67,6 @@ impl ConfigurationStreamKey {
     }
 }
 
-#[derive(Serialize)]
-struct RevisionPreimage<'a> {
-    key: &'a ConfigurationStreamKey,
-    sequence: u64,
-    predecessor_ref: &'a Option<ContentRef>,
-    append_request_id: &'a AppendRequestId,
-    value_contract_ref: &'a ContentRef,
-    value_ref: &'a ContentRef,
-}
-
 /// One immutable configured-value revision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,7 +78,6 @@ pub struct ConfigurationRevision {
     value_contract_ref: ContentRef,
     value_ref: ContentRef,
     canonical_value: String,
-    revision_ref: ContentRef,
 }
 
 impl mfm_values::PersistedSchema for ConfigurationRevision {
@@ -123,11 +114,7 @@ impl mfm_values::PersistedSchema for ConfigurationRevision {
             SchemaShape::named_struct(vec![
                 FieldDescriptor::required(
                     "append_request_id",
-                    SchemaShape::BoundedString {
-                        minimum_bytes: 1,
-                        maximum_bytes: 256,
-                        grammar: StringGrammar::UnicodeScalarText,
-                    },
+                    SchemaShape::identity_string(StringGrammar::StableId, 256),
                 ),
                 FieldDescriptor::required(
                     "canonical_value",
@@ -142,7 +129,6 @@ impl mfm_values::PersistedSchema for ConfigurationRevision {
                     "predecessor_ref",
                     SchemaShape::Option(Box::new(reference.clone())),
                 ),
-                FieldDescriptor::required("revision_ref", reference.clone()),
                 FieldDescriptor::required(
                     "sequence",
                     SchemaShape::UnsignedRange {
@@ -157,7 +143,15 @@ impl mfm_values::PersistedSchema for ConfigurationRevision {
     }
 
     fn validate(&self) -> mfm_values::Result<()> {
-        Ok(())
+        self.validate_payload()
+            .map_err(|_| mfm_values::ValueError::SchemaShapeMismatch)
+    }
+}
+
+impl PersistedObjectPayload for ConfigurationRevision {
+    fn object_type() -> mfm_values::Result<StableId> {
+        StableId::new(mfm_journal::structured::ADMISSION_CONFIGURATION_OBJECT_TYPE)
+            .map_err(|error| mfm_values::ValueError::Identity(error.to_string()))
     }
 }
 
@@ -167,8 +161,7 @@ impl ConfigurationRevision {
     /// Admission material and the configuration store share this identity, so
     /// the same revision bytes cannot carry two schema derivations.
     pub fn schema_id() -> Result<SchemaId, StructuredStoreError> {
-        <Self as mfm_values::PersistedSchema>::schema_id()
-            .map_err(|_| invalid("configuration revision schema identity is invalid"))
+        <Self as mfm_values::PersistedSchema>::schema_id().map_err(|_| invalid())
     }
 
     fn new(
@@ -181,14 +174,6 @@ impl ConfigurationRevision {
     ) -> Result<Self, StructuredStoreError> {
         let canonical_value = value.canonical().as_str().to_owned();
         let value_ref = content_ref(configured_value_schema_id()?, canonical_value.as_bytes())?;
-        let revision_ref = revision_ref(
-            &key,
-            sequence,
-            &predecessor_ref,
-            &append_request_id,
-            &value_contract_ref,
-            &value_ref,
-        )?;
         let revision = Self {
             key,
             sequence,
@@ -197,39 +182,29 @@ impl ConfigurationRevision {
             value_contract_ref,
             value_ref,
             canonical_value,
-            revision_ref,
         };
-        revision.validate()?;
+        revision.validate_payload()?;
         Ok(revision)
     }
 
-    fn validate(&self) -> Result<(), StructuredStoreError> {
+    fn validate_payload(&self) -> Result<(), StructuredStoreError> {
         if self.sequence == 0 {
-            return Err(invalid("configuration revision sequence is zero"));
+            return Err(invalid());
         }
         if self.canonical_value.len() > MAX_CONFIGURATION_REVISION_BYTES {
-            return Err(invalid("configuration revision exceeds its byte bound"));
+            return Err(invalid());
         }
         let canonical =
             PlainCanonicalJsonBytes::from_canonical_json_slice(self.canonical_value.as_bytes())
-                .map_err(|_| invalid("configuration value is not canonical JSON"))?;
-        if content_ref(configured_value_schema_id()?, canonical.as_bytes())? != self.value_ref
-            || revision_ref(
-                &self.key,
-                self.sequence,
-                &self.predecessor_ref,
-                &self.append_request_id,
-                &self.value_contract_ref,
-                &self.value_ref,
-            )? != self.revision_ref
-        {
-            return Err(invalid("configuration revision content address differs"));
+                .map_err(|_| invalid())?;
+        if content_ref(configured_value_schema_id()?, canonical.as_bytes())? != self.value_ref {
+            return Err(invalid());
         }
         Ok(())
     }
 
     pub(crate) fn validate_for_ingress(&self) -> Result<(), StructuredStoreError> {
-        self.validate()
+        self.validate_payload()
     }
 
     /// Returns the stream key.
@@ -266,28 +241,67 @@ impl ConfigurationRevision {
     pub fn canonical_value(&self) -> &str {
         &self.canonical_value
     }
+}
 
-    /// Returns the revision content address.
-    pub const fn revision_ref(&self) -> &ContentRef {
-        &self.revision_ref
+/// One owner-qualified configuration revision and its exact retained object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationRevisionObject {
+    object: HistoryObject,
+    decoded: ConfigurationRevision,
+}
+
+impl ConfigurationRevisionObject {
+    fn from_revision(decoded: ConfigurationRevision) -> Result<Self, StructuredStoreError> {
+        let object = HistoryObject::from_persisted(&decoded).map_err(|_| invalid())?;
+        Ok(Self { object, decoded })
+    }
+
+    /// Qualifies one exact retained configuration object.
+    #[doc(hidden)]
+    pub fn from_object(object: HistoryObject) -> Result<Self, StructuredStoreError> {
+        let decoded = object
+            .decode_persisted::<ConfigurationRevision>()
+            .map_err(|_| invalid())?;
+        decoded.validate_payload()?;
+        Ok(Self { object, decoded })
+    }
+
+    /// Returns the immutable decoded payload.
+    pub const fn revision(&self) -> &ConfigurationRevision {
+        &self.decoded
+    }
+
+    /// Returns the exact retained object.
+    pub const fn object(&self) -> &HistoryObject {
+        &self.object
+    }
+
+    /// Returns the sole content identity of this revision.
+    pub const fn content_ref(&self) -> &ContentRef {
+        &self.object.content_ref
     }
 }
 
 /// Store-verified current configured value selected for admission.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedConfiguredValue {
-    revision: ConfigurationRevision,
+    revision: ConfigurationRevisionObject,
 }
 
 impl VerifiedConfiguredValue {
     /// Returns the immutable selected revision.
     pub const fn revision(&self) -> &ConfigurationRevision {
+        self.revision.revision()
+    }
+
+    /// Returns the exact qualified revision object used by admission.
+    pub const fn revision_object(&self) -> &ConfigurationRevisionObject {
         &self.revision
     }
 
     /// Returns exact canonical value bytes.
     pub fn canonical_value(&self) -> &str {
-        self.revision.canonical_value()
+        self.revision.revision().canonical_value()
     }
 }
 
@@ -299,23 +313,23 @@ pub struct RawConfigurationHistory {
     /// Independently persisted authoritative stream head.
     pub head: Option<ConfigurationHistoryHead>,
     /// Revisions in ascending sequence order.
-    pub revisions: Vec<ConfigurationRevision>,
+    pub revisions: Vec<ConfigurationRevisionObject>,
 }
 
 /// Independently persisted authoritative head of one configured-value stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigurationHistoryHead {
     sequence: u64,
-    revision_ref: ContentRef,
+    object_ref: ContentRef,
 }
 
 impl ConfigurationHistoryHead {
     /// Constructs one physical head pointer loaded by a qualified backend.
     #[doc(hidden)]
-    pub const fn new(sequence: u64, revision_ref: ContentRef) -> Self {
+    pub const fn new(sequence: u64, object_ref: ContentRef) -> Self {
         Self {
             sequence,
-            revision_ref,
+            object_ref,
         }
     }
 
@@ -325,8 +339,8 @@ impl ConfigurationHistoryHead {
     }
 
     /// Returns the exact revision named by this head.
-    pub const fn revision_ref(&self) -> &ContentRef {
-        &self.revision_ref
+    pub const fn object_ref(&self) -> &ContentRef {
+        &self.object_ref
     }
 }
 
@@ -334,9 +348,9 @@ impl ConfigurationHistoryHead {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigurationBackendAppendOutcome {
     /// The exact revision was newly committed.
-    NewlyCommitted(ConfigurationRevision),
+    NewlyCommitted(ConfigurationRevisionObject),
     /// The append identity already names the same revision.
-    ExistingSame(ConfigurationRevision),
+    ExistingSame(ConfigurationRevisionObject),
     /// The durable predecessor differs.
     StaleHead,
     /// Commit acknowledgement must be resolved before retry.
@@ -358,10 +372,16 @@ pub trait ConfigurationHistoryBackend: Send + Sync + 'static {
         key: &'a ConfigurationStreamKey,
     ) -> ConfigurationBackendFuture<'a, Option<RawConfigurationHistory>>;
 
+    /// Captures the union of immutable revision and current-head streams in one snapshot.
+    fn load_store_snapshot(&self) -> ConfigurationBackendFuture<'_, Vec<RawConfigurationHistory>>;
+
+    /// Freshly revalidates the target authority after semantic qualification.
+    fn validate_authority(&self) -> ConfigurationBackendFuture<'_, ()>;
+
     /// Atomically appends at the exact predecessor.
     fn append<'a>(
         &'a self,
-        revision: CanonicalConfigurationAppend,
+        revision: ValidatedConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome>;
 }
 
@@ -414,14 +434,12 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
 
     async fn retry_ambiguous_append(
         &self,
-        revision: &ConfigurationRevision,
-    ) -> Result<ConfigurationRevision, StructuredStoreError> {
+        revision: &ConfigurationRevisionObject,
+    ) -> Result<ConfigurationRevisionObject, StructuredStoreError> {
         for _ in 0..MAX_CONFIGURATION_APPEND_RETRIES {
             let outcome = self
                 .backend
-                .append(CanonicalConfigurationAppend::from_store_verified(
-                    revision.clone(),
-                )?)
+                .append(ValidatedConfigurationAppend::from_object(revision.clone())?)
                 .await?;
             match outcome {
                 ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
@@ -432,15 +450,15 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 }
                 ConfigurationBackendAppendOutcome::NewlyCommitted(_)
                 | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
-                    return Err(invalid("configuration backend substituted committed bytes"));
+                    return Err(invalid());
                 }
                 ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {}
                 ConfigurationBackendAppendOutcome::StaleHead => {
-                    let resolved = self.load_for_append(revision.key()).await?;
+                    let resolved = self.load_for_append(revision.revision().key()).await?;
                     match resolved.as_ref().and_then(|history| {
                         history_append_identity(
                             history.revisions.iter(),
-                            revision.append_request_id(),
+                            revision.revision().append_request_id(),
                         )
                     }) {
                         Some(existing) if existing == revision => return Ok(revision.clone()),
@@ -449,8 +467,8 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                             history
                                 .head
                                 .as_ref()
-                                .map(ConfigurationHistoryHead::revision_ref)
-                                == revision.predecessor_ref()
+                                .map(ConfigurationHistoryHead::object_ref)
+                                == revision.revision().predecessor_ref()
                         }) => {}
                         None => return Err(StructuredStoreError::StaleHead),
                     }
@@ -464,44 +482,44 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
     pub async fn append(
         &self,
         request: ConfigurationAppendRequest,
-    ) -> Result<ConfigurationRevision, StructuredStoreError> {
+    ) -> Result<ConfigurationRevisionObject, StructuredStoreError> {
         require_store(self.backend.as_ref(), &request.key)?;
         let history = self.load_for_append(&request.key).await?;
         let verified = history
             .clone()
             .map(verify_configuration_history)
             .transpose()?;
-        let current = verified.as_ref().map(VerifiedConfiguredValue::revision);
+        let current = verified
+            .as_ref()
+            .map(VerifiedConfiguredValue::revision_object);
         if let Some(existing) = history.as_ref().and_then(|history| {
             history_append_identity(history.revisions.iter(), &request.append_request_id)
         }) {
-            return if existing.value_contract_ref == request.value_contract_ref
-                && existing.canonical_value == request.value.canonical().as_str()
+            return if existing.revision().value_contract_ref == request.value_contract_ref
+                && existing.revision().canonical_value == request.value.canonical().as_str()
             {
                 Ok(existing.clone())
             } else {
                 Err(StructuredStoreError::AppendConflict)
             };
         }
-        if current.map(ConfigurationRevision::revision_ref)
+        if current.map(ConfigurationRevisionObject::content_ref)
             != request.expected_predecessor_ref.as_ref()
         {
             return Err(StructuredStoreError::StaleHead);
         }
-        let sequence = current.map_or(1, |revision| revision.sequence + 1);
-        let revision = ConfigurationRevision::new(
+        let sequence = current.map_or(1, |revision| revision.revision().sequence + 1);
+        let revision = ConfigurationRevisionObject::from_revision(ConfigurationRevision::new(
             request.key,
             sequence,
             request.expected_predecessor_ref,
             request.append_request_id,
             request.value_contract_ref,
             &request.value,
-        )?;
+        )?)?;
         match self
             .backend
-            .append(CanonicalConfigurationAppend::from_store_verified(
-                revision.clone(),
-            )?)
+            .append(ValidatedConfigurationAppend::from_object(revision.clone())?)
             .await?
         {
             ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
@@ -511,9 +529,7 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 Ok(revision)
             }
             ConfigurationBackendAppendOutcome::NewlyCommitted(_)
-            | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
-                Err(invalid("configuration backend substituted committed bytes"))
-            }
+            | ConfigurationBackendAppendOutcome::ExistingSame(_) => Err(invalid()),
             ConfigurationBackendAppendOutcome::StaleHead => {
                 // A concurrent append with the same logical identity can win
                 // after this writer's initial read but before the backend lock.
@@ -521,39 +537,33 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryWriter<B> {
                 // race cannot turn an append conflict into an unrelated stale
                 // predecessor result.
                 for _ in 0..MAX_CONFIGURATION_APPEND_RETRIES {
-                    let resolved = self.load_for_append(revision.key()).await?;
+                    let resolved = self.load_for_append(revision.revision().key()).await?;
                     match resolved.as_ref().and_then(|history| {
                         history_append_identity(
                             history.revisions.iter(),
-                            revision.append_request_id(),
+                            revision.revision().append_request_id(),
                         )
                     }) {
                         Some(existing) if existing == &revision => return Ok(revision),
                         Some(_) => return Err(StructuredStoreError::AppendConflict),
-                        None => {
-                            match self
-                                .backend
-                                .append(CanonicalConfigurationAppend::from_store_verified(
-                                    revision.clone(),
-                                )?)
-                                .await?
+                        None => match self
+                            .backend
+                            .append(ValidatedConfigurationAppend::from_object(revision.clone())?)
+                            .await?
+                        {
+                            ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
+                            | ConfigurationBackendAppendOutcome::ExistingSame(returned)
+                                if returned == revision =>
                             {
-                                ConfigurationBackendAppendOutcome::NewlyCommitted(returned)
-                                | ConfigurationBackendAppendOutcome::ExistingSame(returned)
-                                    if returned == revision =>
-                                {
-                                    return Ok(revision)
-                                }
-                                ConfigurationBackendAppendOutcome::NewlyCommitted(_)
-                                | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
-                                    return Err(invalid(
-                                        "configuration backend substituted committed bytes",
-                                    ));
-                                }
-                                ConfigurationBackendAppendOutcome::StaleHead => {}
-                                ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {}
+                                return Ok(revision)
                             }
-                        }
+                            ConfigurationBackendAppendOutcome::NewlyCommitted(_)
+                            | ConfigurationBackendAppendOutcome::ExistingSame(_) => {
+                                return Err(invalid());
+                            }
+                            ConfigurationBackendAppendOutcome::StaleHead => {}
+                            ConfigurationBackendAppendOutcome::AcknowledgementUnknown => {}
+                        },
                     }
                     // SQL commit and external acknowledgement are separate operations. Give the
                     // winner a bounded scheduling window before the next classification attempt.
@@ -592,8 +602,8 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryReader<B> {
             .await?
             .ok_or(StructuredStoreError::RunNotFound)?;
         let verified = verify_configuration_history(history)?;
-        if verified.revision.value_contract_ref != *expected_value_contract_ref {
-            return Err(invalid("configured value contract differs"));
+        if verified.revision().value_contract_ref != *expected_value_contract_ref {
+            return Err(invalid());
         }
         Ok(verified)
     }
@@ -605,15 +615,16 @@ pub struct ConfigurationHistoryStore<B: ConfigurationHistoryBackend> {
 }
 
 impl<B: ConfigurationHistoryBackend> ConfigurationHistoryStore<B> {
-    /// Binds one qualified raw backend.
-    pub fn new(backend: B) -> Self {
+    fn from_qualified(backend: B) -> Self {
         Self {
             backend: Arc::new(backend),
         }
     }
 
     /// Separates deployment append authority from application resolve authority.
-    pub fn split(self) -> (ConfigurationHistoryWriter<B>, ConfigurationHistoryReader<B>) {
+    pub fn into_authorities(
+        self,
+    ) -> (ConfigurationHistoryWriter<B>, ConfigurationHistoryReader<B>) {
         (
             ConfigurationHistoryWriter {
                 backend: Arc::clone(&self.backend),
@@ -625,6 +636,17 @@ impl<B: ConfigurationHistoryBackend> ConfigurationHistoryStore<B> {
     }
 }
 
+/// Qualifies every configured-value stream before releasing either authority.
+pub async fn qualify_and_open_configuration_history<B: ConfigurationHistoryBackend>(
+    backend: B,
+) -> Result<ConfigurationHistoryStore<B>, StructuredStoreError> {
+    for history in backend.load_store_snapshot().await? {
+        verify_configuration_history(history)?;
+    }
+    backend.validate_authority().await?;
+    Ok(ConfigurationHistoryStore::from_qualified(backend))
+}
+
 /// In-memory conformance backend for configured-value history.
 #[derive(Clone)]
 pub struct MemoryConfigurationHistoryBackend {
@@ -634,7 +656,7 @@ pub struct MemoryConfigurationHistoryBackend {
 
 #[derive(Default)]
 struct MemoryConfigurationHistoryState {
-    revisions: BTreeMap<ConfigurationStreamKey, Vec<ConfigurationRevision>>,
+    revisions: BTreeMap<ConfigurationStreamKey, Vec<ConfigurationRevisionObject>>,
     heads: BTreeMap<ConfigurationStreamKey, ConfigurationHistoryHead>,
 }
 
@@ -647,6 +669,8 @@ impl MemoryConfigurationHistoryBackend {
         }
     }
 }
+
+impl mfm_authority_seal::ValidatedAppendConsumerSeal for MemoryConfigurationHistoryBackend {}
 
 impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
     fn store_scope_id(&self) -> &StoreScopeId {
@@ -676,38 +700,56 @@ impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
         })
     }
 
+    fn load_store_snapshot(&self) -> ConfigurationBackendFuture<'_, Vec<RawConfigurationHistory>> {
+        Box::pin(async move {
+            let state = self
+                .state
+                .lock()
+                .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let keys = state
+                .revisions
+                .keys()
+                .chain(state.heads.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            Ok(keys
+                .into_iter()
+                .map(|key| RawConfigurationHistory {
+                    revisions: state.revisions.get(&key).cloned().unwrap_or_default(),
+                    head: state.heads.get(&key).cloned(),
+                    key,
+                })
+                .collect())
+        })
+    }
+
+    fn validate_authority(&self) -> ConfigurationBackendFuture<'_, ()> {
+        Box::pin(async { Ok(()) })
+    }
+
     fn append<'a>(
         &'a self,
-        revision: CanonicalConfigurationAppend,
+        command: ValidatedConfigurationAppend,
     ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
         Box::pin(async move {
-            if !revision.is_store_verified() {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-            let revision = revision.into_revision();
+            let (revision, expected_head, successor_head) = command.into_parts(self);
+            let payload = revision.revision();
             let mut state = self
                 .state
                 .lock()
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?;
             let history = state
                 .revisions
-                .get(&revision.key)
+                .get(&payload.key)
                 .cloned()
                 .unwrap_or_default();
-            let head = state.heads.get(&revision.key).cloned();
+            let head = state.heads.get(&payload.key).cloned();
             if history.is_empty() != head.is_none() {
-                return Err(invalid("configuration revisions and head disagree"));
-            }
-            if !history.is_empty() {
-                verify_configuration_history(RawConfigurationHistory {
-                    key: revision.key.clone(),
-                    head: head.clone(),
-                    revisions: history.clone(),
-                })?;
+                return Err(invalid());
             }
             if let Some(existing) = history
                 .iter()
-                .find(|existing| existing.append_request_id == revision.append_request_id)
+                .find(|existing| existing.revision().append_request_id == payload.append_request_id)
             {
                 return if existing == &revision {
                     Ok(ConfigurationBackendAppendOutcome::ExistingSame(
@@ -717,24 +759,15 @@ impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
                     Err(StructuredStoreError::AppendConflict)
                 };
             }
-            if head.as_ref().map(ConfigurationHistoryHead::revision_ref)
-                != revision.predecessor_ref.as_ref()
-                || head
-                    .as_ref()
-                    .map_or(1, |head| head.sequence().saturating_add(1))
-                    != revision.sequence
-            {
+            if head != expected_head {
                 return Ok(ConfigurationBackendAppendOutcome::StaleHead);
             }
             state
                 .revisions
-                .entry(revision.key.clone())
+                .entry(payload.key.clone())
                 .or_default()
                 .push(revision.clone());
-            state.heads.insert(
-                revision.key.clone(),
-                ConfigurationHistoryHead::new(revision.sequence, revision.revision_ref.clone()),
-            );
+            state.heads.insert(payload.key.clone(), successor_head);
             Ok(ConfigurationBackendAppendOutcome::NewlyCommitted(revision))
         })
     }
@@ -742,59 +775,47 @@ impl ConfigurationHistoryBackend for MemoryConfigurationHistoryBackend {
 
 /// Callback-free validation shared with qualified physical backends before mutation.
 #[doc(hidden)]
-pub fn verify_configuration_history(
+pub(crate) fn verify_configuration_history(
     history: RawConfigurationHistory,
 ) -> Result<VerifiedConfiguredValue, StructuredStoreError> {
-    let head = history
-        .head
-        .as_ref()
-        .ok_or_else(|| invalid("configuration history head is absent"))?;
+    let head = history.head.as_ref().ok_or_else(invalid)?;
     if history.revisions.is_empty() {
-        return Err(invalid("configuration history revisions are absent"));
+        return Err(invalid());
     }
     let mut predecessor = None;
     let mut append_ids = BTreeSet::new();
     let mut expected_contract = None;
     for (index, revision) in history.revisions.iter().enumerate() {
-        revision.validate()?;
-        if revision.key != history.key
-            || revision.sequence
-                != u64::try_from(index + 1)
-                    .map_err(|_| invalid("configuration history sequence cannot be represented"))?
-            || revision.predecessor_ref != predecessor
-            || !append_ids.insert(revision.append_request_id.clone())
-            || expected_contract.get_or_insert_with(|| revision.value_contract_ref.clone())
-                != &revision.value_contract_ref
+        revision.revision().validate_payload()?;
+        let payload = revision.revision();
+        if payload.key != history.key
+            || payload.sequence != u64::try_from(index + 1).map_err(|_| invalid())?
+            || payload.predecessor_ref != predecessor
+            || !append_ids.insert(payload.append_request_id.clone())
+            || expected_contract.get_or_insert_with(|| payload.value_contract_ref.clone())
+                != &payload.value_contract_ref
         {
-            return Err(invalid("configuration history prefix is invalid"));
+            return Err(invalid());
         }
-        predecessor = Some(revision.revision_ref.clone());
+        predecessor = Some(revision.content_ref().clone());
     }
-    let revision = history
-        .revisions
-        .last()
-        .cloned()
-        .ok_or_else(|| invalid("configuration history is empty"))?;
-    if history.revisions.len()
-        != usize::try_from(head.sequence)
-            .map_err(|_| invalid("configuration head sequence cannot be represented"))?
-        || revision.sequence != head.sequence
-        || revision.revision_ref != head.revision_ref
+    let revision = history.revisions.last().cloned().ok_or_else(invalid)?;
+    if history.revisions.len() != usize::try_from(head.sequence).map_err(|_| invalid())?
+        || revision.revision().sequence != head.sequence
+        || revision.content_ref() != head.object_ref()
     {
-        return Err(invalid(
-            "configuration history head differs from its exact prefix",
-        ));
+        return Err(invalid());
     }
     Ok(VerifiedConfiguredValue { revision })
 }
 
 fn history_append_identity<'a>(
-    revisions: impl Iterator<Item = &'a ConfigurationRevision>,
+    revisions: impl Iterator<Item = &'a ConfigurationRevisionObject>,
     append_request_id: &AppendRequestId,
-) -> Option<&'a ConfigurationRevision> {
+) -> Option<&'a ConfigurationRevisionObject> {
     revisions
         .into_iter()
-        .find(|revision| revision.append_request_id == *append_request_id)
+        .find(|revision| revision.revision().append_request_id == *append_request_id)
 }
 
 fn require_store(
@@ -802,36 +823,9 @@ fn require_store(
     key: &ConfigurationStreamKey,
 ) -> Result<(), StructuredStoreError> {
     if key.store_scope_id != *backend.store_scope_id() {
-        return Err(invalid("configuration stream belongs to another store"));
+        return Err(invalid());
     }
     Ok(())
-}
-
-fn revision_ref(
-    key: &ConfigurationStreamKey,
-    sequence: u64,
-    predecessor_ref: &Option<ContentRef>,
-    append_request_id: &AppendRequestId,
-    value_contract_ref: &ContentRef,
-    value_ref: &ContentRef,
-) -> Result<ContentRef, StructuredStoreError> {
-    let canonical = mfm_journal::structured::canonical_json(&RevisionPreimage {
-        key,
-        sequence,
-        predecessor_ref,
-        append_request_id,
-        value_contract_ref,
-        value_ref,
-    })
-    .map_err(|_| invalid("configuration revision cannot be canonicalized"))?;
-    ContentRef::new(
-        ConfigurationRevision::schema_id()?,
-        ContentDigest::from_digest(
-            DigestAlgorithm::Sha256V1,
-            sha256_digest_bytes(canonical.as_bytes()),
-        ),
-    )
-    .map_err(|_| invalid("configuration content reference is invalid"))
 }
 
 /// Returns the owner-derived identity of one retained configured value.
@@ -844,14 +838,13 @@ fn configured_value_schema_id() -> Result<SchemaId, StructuredStoreError> {
         mfm_values::SchemaKind::PersistedContract,
         None,
         "mfm.structured-configured-value",
-        mfm_ids::SchemaVersion::new("1")
-            .map_err(|_| invalid("configured value schema version is invalid"))?,
+        mfm_ids::SchemaVersion::new("1").map_err(|_| invalid())?,
         mfm_values::SchemaShape::CanonicalJsonTerminal {
             profile: mfm_values::CanonicalJsonProfile::GeneralFloatFree,
         },
     )
     .and_then(|identity| identity.schema_id())
-    .map_err(|_| invalid("configured value schema identity is invalid"))
+    .map_err(|_| invalid())
 }
 
 fn content_ref(schema_id: SchemaId, bytes: &[u8]) -> Result<ContentRef, StructuredStoreError> {
@@ -859,10 +852,10 @@ fn content_ref(schema_id: SchemaId, bytes: &[u8]) -> Result<ContentRef, Structur
         schema_id,
         ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(bytes)),
     )
-    .map_err(|_| invalid("configuration content reference is invalid"))
+    .map_err(|_| invalid())
 }
 
-fn invalid(_message: &'static str) -> StructuredStoreError {
+const fn invalid() -> StructuredStoreError {
     StructuredStoreError::InvalidHistory
 }
 
@@ -938,9 +931,19 @@ mod tests {
             })
         }
 
+        fn load_store_snapshot(
+            &self,
+        ) -> ConfigurationBackendFuture<'_, Vec<RawConfigurationHistory>> {
+            self.inner.load_store_snapshot()
+        }
+
+        fn validate_authority(&self) -> ConfigurationBackendFuture<'_, ()> {
+            self.inner.validate_authority()
+        }
+
         fn append<'a>(
             &'a self,
-            revision: CanonicalConfigurationAppend,
+            revision: ValidatedConfigurationAppend,
         ) -> ConfigurationBackendFuture<'a, ConfigurationBackendAppendOutcome> {
             Box::pin(async move {
                 if self.ambiguous_append.swap(false, Ordering::AcqRel) {
@@ -1010,9 +1013,12 @@ mod tests {
 
     #[tokio::test]
     async fn revisions_are_append_only_and_resolve_the_current_exact_contract() {
-        let store =
-            ConfigurationHistoryStore::new(MemoryConfigurationHistoryBackend::new(store_scope()));
-        let (writer, reader) = store.split();
+        let store = qualify_and_open_configuration_history(MemoryConfigurationHistoryBackend::new(
+            store_scope(),
+        ))
+        .await
+        .expect("semantic open");
+        let (writer, reader) = store.into_authorities();
         let stream = key('2');
         let first = writer
             .append(ConfigurationAppendRequest::new(
@@ -1027,26 +1033,29 @@ mod tests {
         let second = writer
             .append(ConfigurationAppendRequest::new(
                 stream.clone(),
-                Some(first.revision_ref().clone()),
+                Some(first.content_ref().clone()),
                 AppendRequestId::new("configured/second").expect("append id"),
                 contract(),
                 ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),
             ))
             .await
             .expect("second revision");
-        assert_eq!(second.sequence(), 2);
-        assert_eq!(second.predecessor_ref(), Some(first.revision_ref()));
+        assert_eq!(second.revision().sequence(), 2);
+        assert_eq!(
+            second.revision().predecessor_ref(),
+            Some(first.content_ref())
+        );
         let resolved = reader
             .resolve(&stream, &contract())
             .await
             .expect("current revision");
-        assert_eq!(resolved.revision(), &second);
+        assert_eq!(resolved.revision_object(), &second);
         assert_eq!(resolved.canonical_value(), r#"{"revision":2}"#);
 
         let stale = writer
             .append(ConfigurationAppendRequest::new(
                 stream,
-                Some(first.revision_ref().clone()),
+                Some(first.content_ref().clone()),
                 AppendRequestId::new("configured/stale").expect("append id"),
                 contract(),
                 ProposedCanonicalValue::from_json(r#"{"revision":3}"#).expect("value"),
@@ -1059,7 +1068,10 @@ mod tests {
     async fn writer_retries_identical_append_after_unknown_acknowledgement() {
         let inner = MemoryConfigurationHistoryBackend::new(store_scope());
         let flaky = flaky_backend(inner, 0, true);
-        let (writer, reader) = ConfigurationHistoryStore::new(flaky.clone()).split();
+        let (writer, reader) = qualify_and_open_configuration_history(flaky.clone())
+            .await
+            .expect("semantic open")
+            .into_authorities();
         let stream = key('0');
         let revision = writer
             .append(ConfigurationAppendRequest::new(
@@ -1077,7 +1089,7 @@ mod tests {
                 .resolve(&stream, &contract())
                 .await
                 .expect("resolve retried append")
-                .revision(),
+                .revision_object(),
             &revision
         );
         let state = flaky.inner.state.lock().expect("memory state");
@@ -1090,9 +1102,12 @@ mod tests {
 
     #[tokio::test]
     async fn tenant_and_store_keys_do_not_alias() {
-        let store =
-            ConfigurationHistoryStore::new(MemoryConfigurationHistoryBackend::new(store_scope()));
-        let (writer, reader) = store.split();
+        let store = qualify_and_open_configuration_history(MemoryConfigurationHistoryBackend::new(
+            store_scope(),
+        ))
+        .await
+        .expect("semantic open");
+        let (writer, reader) = store.into_authorities();
         let first_tenant = key('3');
         writer
             .append(ConfigurationAppendRequest::new(
@@ -1123,9 +1138,12 @@ mod tests {
 
     #[tokio::test]
     async fn operation_and_target_keys_do_not_alias() {
-        let store =
-            ConfigurationHistoryStore::new(MemoryConfigurationHistoryBackend::new(store_scope()));
-        let (writer, reader) = store.split();
+        let store = qualify_and_open_configuration_history(MemoryConfigurationHistoryBackend::new(
+            store_scope(),
+        ))
+        .await
+        .expect("semantic open");
+        let (writer, reader) = store.into_authorities();
         let selected = key('5');
         writer
             .append(ConfigurationAppendRequest::new(
@@ -1177,14 +1195,15 @@ mod tests {
                         state.heads.insert(
                             stream.clone(),
                             ConfigurationHistoryHead::new(
-                                first.sequence(),
-                                first.revision_ref().clone(),
+                                first.revision().sequence(),
+                                first.content_ref().clone(),
                             ),
                         );
                     }
                     "mutate" => {
-                        state.revisions.get_mut(&stream).expect("revisions")[0].canonical_value =
-                            r#"{"revision":9}"#.to_owned();
+                        state.revisions.get_mut(&stream).expect("revisions")[0]
+                            .decoded
+                            .canonical_value = r#"{"revision":9}"#.to_owned();
                     }
                     "delete" => {
                         state
@@ -1196,11 +1215,12 @@ mod tests {
                     _ => unreachable!("closed attack table"),
                 }
             }
-            let (_writer, reader) = ConfigurationHistoryStore::new(backend).split();
-            assert_eq!(
-                reader.resolve(&stream, &contract()).await,
-                Err(StructuredStoreError::InvalidHistory),
-                "attack {attack} must fail closed"
+            assert!(
+                matches!(
+                    qualify_and_open_configuration_history(backend).await,
+                    Err(StructuredStoreError::InvalidHistory)
+                ),
+                "attack {attack} must fail during semantic open"
             );
         }
     }
@@ -1208,11 +1228,13 @@ mod tests {
     async fn two_revision_backend() -> (
         MemoryConfigurationHistoryBackend,
         ConfigurationStreamKey,
-        ConfigurationRevision,
+        ConfigurationRevisionObject,
     ) {
         let backend = MemoryConfigurationHistoryBackend::new(store_scope());
-        let store = ConfigurationHistoryStore::new(backend.clone());
-        let (writer, _reader) = store.split();
+        let store = qualify_and_open_configuration_history(backend.clone())
+            .await
+            .expect("semantic open");
+        let (writer, _reader) = store.into_authorities();
         let stream = key('6');
         let first = writer
             .append(ConfigurationAppendRequest::new(
@@ -1227,7 +1249,7 @@ mod tests {
         writer
             .append(ConfigurationAppendRequest::new(
                 stream.clone(),
-                Some(first.revision_ref().clone()),
+                Some(first.content_ref().clone()),
                 AppendRequestId::new("configured/tamper-second").expect("append id"),
                 contract(),
                 ProposedCanonicalValue::from_json(r#"{"revision":2}"#).expect("value"),

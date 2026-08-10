@@ -39,12 +39,13 @@ structural values; they are not instructions.
   closure become visible together or not at all.
 - Every append binds one exact predecessor, run sequence, append request identity, candidate
   digest, record hashes, object references, writer store scope, and writer epoch.
-- The store owns the sole callback-free fold and is authoritative for hostile persisted input.
+- The store owns qualification, the sole reducer, and projection, and is authoritative for hostile
+  persisted input.
   No mutable cursor row and no second reducer exist.
 - `RunClosed` shares the append that first makes the root outcome derivable, including a
   zero-state `RunAdmitted + RunClosed` append. No record is legal after closure.
 - Runtime owns the only production path that can request semantic run-history mutation through
-  `RuntimeHistoryPort`. The store's private adapter owns the sole fold and append authority.
+  `RuntimeHistoryPort`. The store's private adapter owns the sole reducer and append authority.
   Runtime performs at most one semantic transition or one audited external-access operation per
   `drive_once` call. Callers never supply a trusted run digest for admission; the journal owns the
   one `derive_run_id` rule over the store scope, tenant scope, entry-point operation, and
@@ -66,7 +67,7 @@ structural values; they are not instructions.
 - Secrets, bearer bytes, signatures, provider text, paths, endpoints, and private authority
   material never enter programs, histories, objects, facts, outputs, traces, exports, or reviewed
   errors.
-- Replay and every read projection use the store fold and perform no callback, provider, signer,
+- Replay and every read projection use the store reducer and perform no callback, provider, signer,
   wallet-authority, or other live semantic IO.
 
 ## Structured program
@@ -150,27 +151,50 @@ An unresolved barrier stops further scanning, and a re-assertable Read keeps its
 minimum action rather than exposing a later one. Joins retain declaration order independent of
 physical completion order.
 
-## Run history and fold
+## Run history and the three qualified layers
 
-`mfm-journal` owns strict data and identities. `mfm-store` owns legality and continuation. The fold
-validates canonical objects and hashes, certified-program closure, exact predecessor and writer
-lineage, record logical-key uniqueness, cursor legality, lexical provenance, access linkage,
-attempt ordinals, physical-binding evidence, fact closure, terminal closure, and the exact object
-set introduced by each append.
+`mfm-journal` owns strict data and identities. `mfm-store` owns legality and continuation, split
+across three layers with deliberately disjoint responsibilities.
 
-The fold derives:
+**Qualification** turns hostile bytes into trusted evidence. It proves canonical syntax and typed
+decode, batch bounds, run identity, sequence, predecessor, writer lineage, append request, candidate
+digest, record hash, commit digest, object identity and type, directly named references, five-family
+record decode, logical-key uniqueness, certified-root correspondence, complete certified component
+closure, and admission material. Program trust comes from one concrete operation —
+`AdmissionVerificationRegistry::verify_root` — memoized by exact operation and persisted root, never
+by a nominal entry-point identity. Qualification makes no workflow decision, so a qualified history
+may still be semantically illegal.
+
+**Reduction** is the one deterministic rule. `reduce_event` advances a run from `Unadmitted` through
+`Admitted`, walking the certified program in declaration order and resolving matches, fan-out,
+failure routing, lexical bindings, and the cursor. It emits typed artifact intents and closed
+obligations; it constructs no retained bytes and calls no verifier, backend, or registry. The
+consuming typestate is a compile-time boundary, not a convention:
+
+```text
+reduce_event  -> PendingSemanticStep   (coordinate-free, no successor)
+compare       -> ComparedReduction     (assertions matched)
+discharge     -> FinalizedReduction    (the only type exposing a successor)
+```
+
+**Projection** applies the finalized result. The compiler is the sole materializer of history
+objects; obligations discharge in one closed scope (`RetainedOnly` or `RetainedAndCurrent`, retained
+always first, never current alone); and the coordinator seals a `ValidatedRunAppend` that only it can
+construct. A backend receives that value and compares and applies it mechanically — it never matches
+a record family, frontier, or access kind to choose behavior.
+
+Reduction derives:
 
 - initial and current lexical bindings;
 - declaration-ordered actionable occurrences and active fan-out lanes;
 - outstanding Read and Effect access;
 - semantic and physical journal heads;
-- possible-entry, integrity-blocked, and closed status;
-- the exact terminal root outcome; and
-- complete records and append heads in physical chronology.
+- possible-entry, integrity-blocked, and closed status; and
+- the exact terminal root outcome.
 
 Public-read and recorded-replay purpose projections retain only the
-fold-derived `RunEvidenceStatus`; the actionable frontier and its capability,
-input, and state references remain internal to the fold and Runtime adapter.
+reducer-derived `RunEvidenceStatus`; the actionable frontier and its capability,
+input, and state references remain internal to the reducer and Runtime adapter.
 Typed operation results that cross the terminal public boundary are separate reviewed
 `PublicOutputs` contracts: they project only redaction-safe product fields, while recovery
 closures, provider attestations, signed envelopes, and other verification preimages remain
@@ -181,23 +205,23 @@ and returns an opaque `OfflineVerifiedRun` containing only recorded status and
 bounded export metadata. The complete verified cursor, objects, and bindings
 never cross the store boundary.
 
-Incremental mutation returns a successor produced by the same fold state. Refolding every complete
-prefix from raw persisted batches must produce an equivalent verified run.
-The private production adapter may retain at most one verified successor, including a non-mutating
-frontier result, for the next Runtime drive. Before reuse it compares that cached journal head with
-the backend's indexed current-head projection; a mismatch or a cache miss performs the authoritative
-full fold. The exact-head projection is the snapshot point for a non-mutating load; any later append
-is handled by the append path's exact-head compare-and-append. The one-entry cache is therefore only
-a bounded replay-cost optimization and never a source of store authority.
+Incremental mutation returns a successor produced by that same rule. Candidate authoring reduces an
+intent, lets the compiler author bytes, requalifies those exact bytes, and reduces the recorded form
+from the same predecessor — so candidate acceptance already proves the path future replay executes.
+Reducing every complete prefix from raw persisted batches must produce an equivalent verified run.
+Every Runtime drive loads a verified predecessor from one backend snapshot and compares its complete
+current projection. The exact-head projection is the snapshot point for a non-mutating load; any
+later append is handled by the append path's exact-head compare-and-append. No historical successor
+or head-only cache answer can become store authority.
 
 Production physical qualification binds an exact purpose tuple: access kind, semantic capability,
 semantic adapter, qualified adapter implementation, stable resource lineage when applicable, and
 an ordered immutable physical-target release history. Each release retains its full public
 certificate, admitted routing policy, exact target identity, predecessor certificate, and, for an
-Effect successor, the public lineage head that activated it. Callback-free verification accepts
-any retained release while refolding recorded history, but newly proposed access must select the
+Effect successor, the public lineage head that activated it. Retained verification accepts any
+retained release while reducing recorded history, but newly proposed access must select the
 current release. A refreshed Effect authorization must be a strict descendant of its exact prior
-certificate at the folded non-rollback head; supersession evidence proves that same old-to-new
+certificate at the reduced non-rollback head; supersession evidence proves that same old-to-new
 edge. Reconstructing a process with a longer retained history therefore preserves old runs while
 preventing new authorization against superseded releases.
 
@@ -216,10 +240,9 @@ Prepared<K>
   -> committed ExternalAccessAuthorized
   -> Authorized<K>
   -> exactly one registered invoker entry
-  -> PendingObservation<K>
+  -> one affine invocation result
   -> committed ExternalAccessObserved
-  -> CommittedObservation<K>
-  -> exact registered state settlement
+  -> exact returned-value or safe-failure settlement callback
 ```
 
 The closed completion algebra is:
@@ -258,12 +281,12 @@ against the dead attempt carrying one reserved kernel fault code, reaching no ad
 nothing. That closure asserts nothing about the external system — only that the invoker authority
 for the attempt is lost — and it is what keeps the single-outstanding-attempt rule unchanged on the
 Effect path. A re-assertion must carry byte-identical `occurrence_id`, `state_input_ref`, request
-contract, and request digest, which the fold verifies. The reserved code is the only thing
+contract, and request digest, which the reducer verifies. The reserved code is the only thing
 distinguishing a synthesized closure from an adapter-reported ambiguity downstream, and no domain
 may reuse it. Committed `IntegrityFault` blocks. A Read authorization with
 no observation is re-assertable at the next ordinal: a Read is defined as consuming no externally
 meaningful state, so reissuing it is sound by construction. That makes the definition load-bearing
-and a certification obligation rather than prose — the fold cannot distinguish a crashed Read from
+and a certification obligation rather than prose — the reducer cannot distinguish a crashed Read from
 a live in-flight one, because the leaf is a pure function of history and liveness is per-process, so
 two workers may invoke the same Read concurrently. This is the single-outstanding-attempt rule's
 only relaxation and it is written as an access-kind-conditional branch; the Effect path keeps the
@@ -283,7 +306,7 @@ lineage/epoch. Process identity contains semantic kind, semantic contract, and q
 implementation contract internally. Callback proposals retain that origin through candidate
 qualification. Callback, codec, contract, invalid-evidence, and rejected-candidate faults append
 nothing and leave the prior authoritative prefix unchanged; only an invoker-returned committed
-`IntegrityFault` can fold to durable `BlockedIntegrity`. Public projections may expose the phase,
+`IntegrityFault` can reduce to durable `BlockedIntegrity`. Public projections may expose the phase,
 run, occurrence, semantic kind/contract, or store identity, but never the implementation contract
 or lower-boundary diagnostic.
 
@@ -313,7 +336,7 @@ Authorization atomically records the current tenant fact frontier without advanc
 directly acknowledged new authorization mints the store's non-cloneable one-use scan permit;
 idempotent content and acknowledgement recovery do not. The permit exposes only a complete bounded
 scan through the captured frontier. The scanner follows every dense route, verifies each producer
-with the callback-free fold, applies the admitted source manifest, excludes the consumer run, and
+with the same reducer, applies the admitted source manifest, excludes the consumer run, and
 uses the fixed deterministic top-k evaluator. It cannot append history or obtain generic store
 query authority.
 
@@ -328,29 +351,29 @@ treat a merely well-shaped completeness claim as authoritative.
 ## Replay and public projections
 
 `mfm-replay` owns the portable export format and offline verifier, and projects the reviewed public
-run view, transition trace, access audit, and replay summary from the sole store fold. Pages are
-fixed to one journal head. Portable export first authorizes every recursively referenced prior-run
+run view, transition trace, access audit, and replay summary from the same qualified reduction.
+Pages are fixed to one journal head. Portable export first authorizes every referenced prior-run
 source under the sealed export purpose and only then serializes exact committed-batch envelopes,
 source relationships, and semantic/physical fixation with the exact target key, database identity,
-fence generation, release epoch, and current-incarnation reference with a closure reference; denied or incomplete
-source closures emit zero bytes. Offline verification uses only bundle bytes and an explicit trust
-snapshot against the store's read-only fold entry. The program, retained-release, and store
+fence generation, release epoch, and current-incarnation reference with a closure reference; denied
+or incomplete source closures emit zero bytes. Offline verification uses only bundle bytes and an
+explicit trust snapshot against the store's read-only semantic verification entry. The program,
+retained-release, and store
 lineage verifiers used by that snapshot are workspace-sealed deployment authorities; an
-ordinary consumer cannot substitute callbacks that accept forged fixations. Current portable exports use a bounded
-newline-delimited frame stream with media type
-`application/vnd.mfm.structured-run-export-stream.v2`; each canonical frame carries an ordinal,
-kind, payload, and predecessor digest, and a terminal seal binds the exact closure, fixation,
-per-run authenticated principal, fixed `export` grant, content-addressed policy-decision
-references, counts, bytes, and chain. Legacy monolithic JSON objects and retired bytes are
-rejected.
+ordinary consumer cannot substitute callbacks that accept forged fixations. Current portable
+exports use one bounded newline-delimited `Batch | Seal` record stream with media type
+`application/vnd.mfm.structured-run-export-stream.v3`. The complete stream has one content identity;
+individual records have none. The terminal seal binds the exact closure, fixation, authenticated
+principal, fixed `export` grant, and content-addressed policy-decision references. Legacy streams
+and retired bytes are rejected.
 
 Authorization discovery uses the requested kind's exact root cutoff and recursively advances each
 producer only to the maximum transition head required by selected fact routes. A later audit-only
 suffix therefore cannot add a semantic-export dependency. Decision references in the terminal seal
 are opaque content-addressed policy evidence; offline consumers do not resolve them live, and the
-explicit trust snapshot must bind the exact closure digest before folding.
+explicit trust snapshot must bind the exact closure digest before reduction.
 
-Recorded replay is verification-only: it folds the committed prefix and returns its bounded
+Recorded replay is verification-only: it reduces the committed prefix and returns its bounded
 summary. It never falls back to live callbacks or compares current history.
 
 ## Configuration history
@@ -482,7 +505,7 @@ PostgreSQL is currently the sole authority for append-only history. There is no 
 outside the database that retains an independent record of a stream's head.
 
 This is a deliberate, documented limitation rather than an oversight. A rolled-back database is a
-valid earlier state of itself: heads chain, digests verify, and the fold is consistent at the
+valid earlier state of itself: heads chain, digests verify, and reduction is consistent at the
 earlier revision. No predicate over the current state distinguishes "state at time T" from "state
 at time T that was later restored", so detecting a rollback requires memory of a later head held
 somewhere that did not roll back with it. Nothing in this repository holds that memory today.
@@ -502,7 +525,7 @@ effect run ahead of its journal record removes the last property this design sti
 
 The indexed head is the first decision-bearing query in every PostgreSQL snapshot, so it
 establishes the repeatable-read snapshot before any dependent query. The transaction then loads
-the selected prefix, folds it, and requires the folded head to equal the indexed head it read in
+the selected prefix, qualifies and reduces it, and requires the reduced head to equal the indexed head it read in
 that same snapshot; it revalidates its exact target before commit. Configuration and run stream
 identities are stable across successors; predecessor digests are compare-and-append preconditions
 only.
@@ -513,7 +536,7 @@ closure covers only values and history objects that the append actually retains.
 PostgreSQL backends invoke this same validator.
 
 The portable encoder receives sealed canonical batch frames and purpose-specific fact routes. It
-cannot enumerate raw `CommittedBatch` values through export evidence. Source prefixes are folded
+cannot enumerate raw `CommittedBatch` values through export evidence. Source prefixes are reduced
 once at the maximum required producer head, with recursive graph, tenant, and route checks before
 bytes are emitted. The encoder callback itself requires the workspace export-consumer seal, so a
 caller cannot turn an opaque export fragment into a second purpose product.
@@ -553,10 +576,10 @@ inject a fully qualified application.
 | Surface | Authority |
 | --- | --- |
 | Authored or serialized program | Data only until exact certification. |
-| Certified program document | Sole semantic program authority for admission and fold verification. |
+| Certified program document | Sole semantic program authority for admission and reduction verification. |
 | Structured history writer | Non-cloneable run-mutation authority held only by Runtime. |
-| Structured history reader | Cloneable callback-free purpose-read authority; each purpose returns only sealed purpose evidence. |
-| Verified structured run | Fold-derived internal semantic and chronology authority for one exact prefix; not a public purpose-read surface. |
+| Structured history reader | Cloneable purpose-read authority; each purpose returns only sealed purpose evidence. |
+| Verified structured run | Qualified immutable history plus compact reducer state for one exact prefix; not a public purpose-read surface. |
 | Purpose-sealed evidence | Public/trace/audit/replay/export newtypes that expose only that purpose's projection accessors. |
 | Prepared/authorized/pending/committed access values | Private affine Runtime protocol stages. |
 | Public physical certificate | Evidence only; cannot construct a live target session or mutation permit. |

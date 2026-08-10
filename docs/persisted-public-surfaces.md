@@ -147,11 +147,11 @@ Every bound is owned by the layer that enforces it; there is no central cross-do
 
 Every `HistoryObject` contains an object-type tag, schema id plus raw canonical-byte digest, and
 the exact canonical JSON. A retained owner is built and read through
-`HistoryObject::from_persisted`/`decode_persisted`, which bind one `HistoryObjectPayload` to both
-its declared schema identity and its one checked object type, so typed bytes cannot be paired with
-a foreign object kind. The store validates bytes and identity on admission and load. Each append
-must introduce exactly the newly reachable closure required by its records—no missing member and no
-unreferenced extra object.
+`HistoryObject::from_persisted`/`decode_persisted`, which bind the concrete persisted owner to both
+its declared schema identity and its one checked object type. Typed bytes therefore cannot be paired
+with a foreign object kind. The store validates bytes and identity on admission and load. Each
+append must introduce exactly the newly reachable closure required by its records—no missing member
+and no unreferenced extra object.
 
 The closure includes certified program components, immutable admission roots, lexical values,
 state outcomes, facts, access request/response values, and purpose-limited public physical
@@ -203,13 +203,8 @@ Target-held private keys, live sessions, transaction permits, database passwords
 signatures, and signed transaction bytes are process/deployment authority and are not persisted in
 semantic tables. SQL role and session metadata is infrastructure, not portable semantic evidence.
 
-Wallet authority retains no derivative evidence reference. The former
-`reservation_evidence_ref`, `activation_evidence_ref`, `completion_evidence_ref`,
-`winning_activation_evidence_ref`, `predecessor_activation_ref`,
-`observed_floor_ref`, and `original_terminal_witnesses_ref` digests restated
-material the closure already retains exactly, so they are gone and there is no
-replacement identity. The authoritative bindings are the permanent operation
-keys — `EvmNonceReservationKey`, `EvmCandidateOperationKey` (now carried on
+Wallet authority retains no derivative evidence reference. The authoritative bindings are the
+permanent operation keys — `EvmNonceReservationKey`, `EvmCandidateOperationKey` (carried on
 `ActiveWalletCandidate` and on the replacement permit), and
 `EvmNonceCompletionKey` — over the exact retained request, state input, and
 result, plus the signed `ProviderMutation`. The winner is selected by ordinal and

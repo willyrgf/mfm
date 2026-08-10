@@ -1,4 +1,4 @@
-//! Callback-free replay and purpose-limited projections over the sole structured-history fold.
+//! Callback-free replay and purpose-limited projections over qualified reduction.
 
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::RunId;
@@ -285,7 +285,7 @@ impl StructuredOperationOutcomeView {
     }
 }
 
-/// Replays one complete structured run through the same callback-free store fold.
+/// Replays one complete structured run through the same callback-free reducer.
 ///
 /// The reader exposes no writer, process callback, adapter, signer, or provider
 /// authority. The returned sealed evidence is derived only from committed records

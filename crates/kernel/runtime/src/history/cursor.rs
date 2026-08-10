@@ -1,10 +1,10 @@
-//! Fold-derived cursor and frontier types owned by the Runtime history surface.
+//! Reducer-derived cursor and frontier types owned by the Runtime history surface.
 
 use mfm_ids::{AccessAttemptId, ContentRef, OccurrenceId};
 use mfm_journal::structured::{LexicalValueRef, RecordRef};
 use mfm_spec::structured::{StructuralPath, StructuredExecutionKind};
 
-/// Folded state of one current executable occurrence.
+/// Reduced state of one current executable occurrence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StateLeaf {
     /// No callback or access has yet committed for this occurrence.
@@ -52,9 +52,22 @@ pub enum StateLeaf {
     /// access kind is in scope wherever it is read. What differs between the
     /// kinds is which rule admits the successor, and that lives in one place.
     Reassertable {
+        /// Immutable identity of the immediately preceding attempt.
+        access_attempt_id: AccessAttemptId,
         /// Next attempt ordinal.
         next_attempt_ordinal: u64,
     },
+}
+
+/// Operator resolution required by one current Effect-entry attention item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectEntryAttentionResolution {
+    /// Entry may have happened and requires an operator decision.
+    Manual,
+    /// Close the crashed attempt, then reassert its exact request.
+    CloseThenReassert,
+    /// Reassert the exact preceding request at the next ordinal.
+    Reassert,
 }
 
 /// One current or completed fan-out lane cursor.
@@ -96,7 +109,7 @@ pub struct ActionableState {
     pub stable_resource_lineage_contract_ref: Option<ContentRef>,
     /// Certified Pure, Read, or Effect execution kind.
     pub execution_kind: StructuredExecutionKind,
-    /// Folded local/access state.
+    /// Reduced local/access state.
     pub leaf: StateLeaf,
 }
 
@@ -150,17 +163,4 @@ pub enum StructuredFrontier {
     BlockedIntegrity,
     /// Root outcome is closed.
     Complete,
-}
-
-/// Store-owned preflight of one invoked completion before Runtime freezes its
-/// pending observation bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ObservationQualification {
-    /// The proposed completion is valid and has not already committed.
-    Ready,
-    /// The exact logical observation already committed with identical bytes.
-    ExistingSame,
-    /// Proposed Effect supersession evidence failed its purpose-limited
-    /// physical-lineage verification.
-    InvalidSupersessionEvidence,
 }

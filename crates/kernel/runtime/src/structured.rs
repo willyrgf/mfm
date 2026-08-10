@@ -1,4 +1,4 @@
-//! One-action interpreter over the sole structured RunHistory fold.
+//! One-action interpreter over the sole structured RunHistory reducer.
 
 use std::marker::PhantomData;
 use std::panic::AssertUnwindSafe;
@@ -84,13 +84,22 @@ impl RuntimeProcessRegistry {
         self.inner.author_request(state, input)
     }
 
-    fn settle_observation(
+    fn settle_returned(
         &self,
         state: &QualifiedComponentIdentity,
         input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
+        returned: &CanonicalJsonValue,
     ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
-        self.inner.settle_observation(state, input, observation)
+        self.inner.settle_returned(state, input, returned)
+    }
+
+    fn settle_safe_failure(
+        &self,
+        state: &QualifiedComponentIdentity,
+        input: &CanonicalJsonValue,
+        safe_failure: &CanonicalJsonValue,
+    ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
+        self.inner.settle_safe_failure(state, input, safe_failure)
     }
 
     fn access_adapter_identity(
@@ -125,10 +134,9 @@ impl RuntimeProcessRegistry {
 use crate::history::{
     AccessAuthorizationProposal, AccessObservationProposal, ActionableState,
     CommittedAccessAuthorization, EffectEntrySubject, HistoryAppendOutcome, HistoryError,
-    ObservationCommit, ObservationQualification, ProposedCanonicalValue,
-    ProposedObservationOutcome, RuntimeHistoryPort, StateLeaf, StateTransitionProposal,
-    StructuredAdmissionCommand, StructuredAppendAttempt, StructuredFrontier,
-    StructuredStoreIdentity, VerifiedRunView,
+    ProposedCanonicalValue, ProposedObservationOutcome, QualifiedRuntimeIntent, RuntimeHistoryPort,
+    StateLeaf, StateTransitionProposal, StructuredAdmissionCommand, StructuredAppendAttempt,
+    StructuredFrontier, StructuredStoreIdentity, VerifiedRunView,
 };
 
 /// Kernel-owned fault code for the closing observation of a crashed attempt.
@@ -158,7 +166,7 @@ pub enum RuntimeFaultCode {
     ContractFault,
     /// A state callback rejected already committed normal evidence.
     InvalidEvidence,
-    /// A proposed append or fold-derived candidate was rejected before mutation.
+    /// A proposed append or reducer-derived candidate was rejected before mutation.
     CandidateRejected,
     /// No current qualified public physical binding was available.
     PhysicalBindingUnavailable,
@@ -185,8 +193,6 @@ pub enum RuntimeFaultPhase {
     AppendCandidate,
     /// Load and callback-free verify existing history.
     LoadHistory,
-    /// Resolve the unchanged identity of an ambiguous append.
-    ResolveAppend,
 }
 
 /// Closed store disposition retained without backend diagnostics.
@@ -337,19 +343,22 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         &self,
         command: StructuredAdmissionCommand,
     ) -> Result<(RunId, StructuredAppendAttempt)> {
-        self.history.admit_run(command).await.map_err(|error| {
-            self.store_fault(
-                error,
-                RuntimeFaultPhase::AppendCandidate,
-                // Run id is not known before derivation failures; use a placeholder digest-free fault subject only via store identity.
-                RunId::from_digest(
-                    mfm_ids::DigestAlgorithm::Sha256JcsV1,
-                    mfm_canonical::sha256_digest_bytes(b"mfm.runtime.admission-fault.v1"),
-                ),
-                None,
-                None,
-            )
-        })
+        self.history
+            .commit_event(None, QualifiedRuntimeIntent::Admission(Box::new(command)))
+            .await
+            .map_err(|error| {
+                self.store_fault(
+                    error,
+                    RuntimeFaultPhase::AppendCandidate,
+                    // Run id is not known before derivation failures; use a placeholder digest-free fault subject only via store identity.
+                    RunId::from_digest(
+                        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+                        mfm_canonical::sha256_digest_bytes(b"mfm.runtime.admission-fault.v1"),
+                    ),
+                    None,
+                    None,
+                )
+            })
     }
 
     fn process_fault(
@@ -421,7 +430,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         if error == HistoryError::CandidateRejected {
             self.component_fault(
                 RuntimeFaultCode::CandidateRejected,
-                phase,
+                RuntimeFaultPhase::QualifyCandidate,
                 run_id,
                 pre_fault_head,
                 occurrence_id,
@@ -471,7 +480,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         }
     }
 
-    /// Interprets and performs at most one fold-derived semantic or audited action.
+    /// Interprets and performs at most one reducer-derived semantic or audited action.
     pub async fn drive_once(&self, run_id: &RunId) -> Result<DriveOutcome> {
         let verified = self.history.load_verified(run_id).await.map_err(|error| {
             self.store_fault(
@@ -484,16 +493,13 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         })?;
         let state = match verified.frontier() {
             StructuredFrontier::Complete => {
-                self.retain_verified(verified).await?;
                 return Ok(DriveOutcome::Closed);
             }
             StructuredFrontier::PossibleEntry(subject) => {
                 let subject = subject.clone();
-                self.retain_verified(verified).await?;
                 return Ok(DriveOutcome::PossibleEntry(subject));
             }
             StructuredFrontier::BlockedIntegrity => {
-                self.retain_verified(verified).await?;
                 return Ok(DriveOutcome::BlockedIntegrity);
             }
             StructuredFrontier::Actions(actions) => actions
@@ -552,8 +558,8 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                     access_attempt_id, ..
                 },
             ) => {
-                let observation =
-                    committed_observation(&verified, access_attempt_id).map_err(|()| {
+                let (_, observation) =
+                    verified.observation(access_attempt_id).ok_or_else(|| {
                         self.candidate_fault(
                             RuntimeFaultPhase::QualifyCandidate,
                             run_id.clone(),
@@ -561,18 +567,53 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                             Some(occurrence_id.clone()),
                         )
                     })?;
-                match self
-                    .processes
-                    .settle_observation(&state_identity, &input, &observation)
-                    .map_err(|fault| {
-                        self.process_fault(
-                            fault,
-                            RuntimeFaultPhase::SettleObservation,
+                let settlement = match &observation.outcome {
+                    ObservationOutcome::Returned { value } => self.processes.settle_returned(
+                        &state_identity,
+                        &input,
+                        &canonical_object(&verified, &value.value_ref).map_err(|()| {
+                            self.candidate_fault(
+                                RuntimeFaultPhase::QualifyCandidate,
+                                run_id.clone(),
+                                Some(pre_fault_head.clone()),
+                                Some(occurrence_id.clone()),
+                            )
+                        })?,
+                    ),
+                    ObservationOutcome::SafeFailure { value } => {
+                        self.processes.settle_safe_failure(
+                            &state_identity,
+                            &input,
+                            &canonical_object(&verified, &value.value_ref).map_err(|()| {
+                                self.candidate_fault(
+                                    RuntimeFaultPhase::QualifyCandidate,
+                                    run_id.clone(),
+                                    Some(pre_fault_head.clone()),
+                                    Some(occurrence_id.clone()),
+                                )
+                            })?,
+                        )
+                    }
+                    ObservationOutcome::SupersededBeforeEntry { .. }
+                    | ObservationOutcome::EntryUnknown { .. }
+                    | ObservationOutcome::IntegrityFault { .. } => {
+                        return Err(self.candidate_fault(
+                            RuntimeFaultPhase::QualifyCandidate,
                             run_id.clone(),
                             Some(pre_fault_head.clone()),
                             Some(occurrence_id.clone()),
-                        )
-                    })? {
+                        ));
+                    }
+                };
+                match settlement.map_err(|fault| {
+                    self.process_fault(
+                        fault,
+                        RuntimeFaultPhase::SettleObservation,
+                        run_id.clone(),
+                        Some(pre_fault_head.clone()),
+                        Some(occurrence_id.clone()),
+                    )
+                })? {
                     QualifiedStateSettlement::Proposed(proposal) => {
                         self.commit_state_proposal(verified, state, proposal).await
                     }
@@ -654,7 +695,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
                 Some(occurrence_id.clone()),
             )
         };
-        // The observation pipeline resolves the authorization out of folded
+        // The observation pipeline resolves the authorization out of reduced
         // history, so the in-process record the crash destroyed is not required.
         let authorization_ref = verified
             .authorization(&access_attempt_id)
@@ -679,129 +720,74 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             adapter_origin: capability_identity,
             _kind: PhantomData,
         };
-        match self.qualify_invoked_observation(invoked).await? {
-            Some(pending) => self.commit_pending_observation(pending).await,
-            None => Ok(DriveOutcome::AccessObserved),
-        }
-    }
-
-    async fn retain_verified(&self, verified: P::VerifiedRun) -> Result<()> {
-        let run_id = verified.run_id().clone();
-        let pre_fault_head = Some(verified.journal_head().clone());
-        self.history
-            .retain_verified(verified)
-            .await
-            .map_err(|error| {
-                self.store_fault(
-                    error,
-                    RuntimeFaultPhase::LoadHistory,
-                    run_id,
-                    pre_fault_head,
-                    None,
-                )
-            })
+        self.commit_invoked_observation(invoked).await
     }
 
     async fn commit_state_proposal(
         &self,
-        mut verified: P::VerifiedRun,
+        verified: P::VerifiedRun,
         state: ActionableState,
         proposal: QualifiedStateProposal,
     ) -> Result<DriveOutcome> {
         let run_id = verified.run_id().clone();
-        let semantic_head = verified.semantic_head().clone();
         let occurrence_id = state.occurrence_id.clone();
         let proposal_origin = proposal.origin().clone();
-        loop {
-            let pre_fault_head = verified.journal_head().clone();
-            let append_id = append_id(
-                "transition",
-                &run_id,
-                verified.journal_head(),
-                state.occurrence_id.as_str(),
+        let pre_fault_head = verified.journal_head().clone();
+        let append_id = append_id(
+            "transition",
+            &run_id,
+            verified.journal_head(),
+            state.occurrence_id.as_str(),
+        )
+        .map_err(|()| {
+            self.candidate_fault(
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
             )
-            .map_err(|()| {
-                self.candidate_fault(
-                    RuntimeFaultPhase::QualifyCandidate,
+        })?;
+        let transition = state_transition_proposal(append_id, proposal).map_err(|()| {
+            self.component_fault(
+                RuntimeFaultCode::CodecFault,
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+                proposal_origin.clone(),
+            )
+        })?;
+        let (_, attempt) = self
+            .history
+            .commit_event(
+                Some(verified),
+                QualifiedRuntimeIntent::Transition(transition),
+            )
+            .await
+            .map_err(|error| {
+                self.proposal_store_fault(
+                    error,
+                    RuntimeFaultPhase::AppendCandidate,
                     run_id.clone(),
                     Some(pre_fault_head.clone()),
                     Some(occurrence_id.clone()),
+                    proposal_origin,
                 )
             })?;
-            let transition =
-                state_transition_proposal(append_id, proposal.clone()).map_err(|()| {
-                    self.component_fault(
-                        RuntimeFaultCode::CodecFault,
-                        RuntimeFaultPhase::QualifyCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        Some(occurrence_id.clone()),
-                        proposal_origin.clone(),
-                    )
-                })?;
-            let mut attempt = self
-                .history
-                .commit_state_transition(verified, &transition)
-                .await
-                .map_err(|error| {
-                    self.proposal_store_fault(
-                        error,
-                        RuntimeFaultPhase::AppendCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        Some(occurrence_id.clone()),
-                        proposal_origin.clone(),
-                    )
-                })?;
-            match attempt.outcome() {
-                HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
-                    let closed = attempt.closed();
-                    return Ok(DriveOutcome::TransitionCommitted { closed });
-                }
-                HistoryAppendOutcome::AcknowledgementUnknown => {
-                    if self
-                        .history
-                        .resolve_attempt(&mut attempt)
-                        .await
-                        .map_err(|error| {
-                            self.store_fault(
-                                error,
-                                RuntimeFaultPhase::ResolveAppend,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            )
-                        })?
-                    {
-                        if attempt.committed().is_none() {
-                            return Err(self.candidate_fault(
-                                RuntimeFaultPhase::QualifyCandidate,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            ));
-                        }
-                        let closed = attempt.closed();
-                        return Ok(DriveOutcome::TransitionCommitted { closed });
-                    }
-                }
-                HistoryAppendOutcome::StaleHead => {}
+        match attempt.outcome() {
+            HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
+                Ok(DriveOutcome::TransitionCommitted {
+                    closed: attempt.closed(),
+                })
             }
-            let current = self.history.load_verified(&run_id).await.map_err(|error| {
-                self.store_fault(
-                    error,
-                    RuntimeFaultPhase::LoadHistory,
-                    run_id.clone(),
-                    Some(pre_fault_head),
-                    Some(occurrence_id.clone()),
-                )
-            })?;
-            if current.semantic_head() != &semantic_head
-                || minimum_action(current.frontier()) != Some(&state)
-            {
-                return Ok(DriveOutcome::ConcurrentProgress);
-            }
-            verified = current;
+            HistoryAppendOutcome::StaleHead => Ok(DriveOutcome::ConcurrentProgress),
+            HistoryAppendOutcome::AcknowledgementUnknown => Err(self.store_fault(
+                HistoryError::AcknowledgementUnknown,
+                RuntimeFaultPhase::AppendCandidate,
+                run_id,
+                Some(pre_fault_head),
+                Some(occurrence_id),
+            )),
         }
     }
 
@@ -881,6 +867,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             }
             | StateLeaf::Reassertable {
                 next_attempt_ordinal,
+                ..
             } => *next_attempt_ordinal,
             _ => {
                 return Err(self.candidate_fault(
@@ -965,10 +952,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             None => Ok(DriveOutcome::ConcurrentProgress),
             Some(authorized) => {
                 let invoked = self.invoke_authorized(authorized).await?;
-                match self.qualify_invoked_observation(invoked).await? {
-                    Some(pending) => self.commit_pending_observation(pending).await,
-                    None => Ok(DriveOutcome::AccessObserved),
-                }
+                self.commit_invoked_observation(invoked).await
             }
         }
     }
@@ -980,126 +964,92 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         let Prepared {
             state,
             binding,
-            mut verified,
+            verified,
             request_origin,
             adapter_origin,
         } = prepared;
         let run_id = verified.run_id().clone();
-        let semantic_head = verified.semantic_head().clone();
         let occurrence_id = state.occurrence_id.clone();
-        loop {
-            let pre_fault_head = verified.journal_head().clone();
-            let append_id = append_id(
-                "authorize",
-                &run_id,
-                verified.journal_head(),
-                state.occurrence_id.as_str(),
+        let pre_fault_head = verified.journal_head().clone();
+        let append_id = append_id(
+            "authorize",
+            &run_id,
+            verified.journal_head(),
+            state.occurrence_id.as_str(),
+        )
+        .map_err(|()| {
+            self.candidate_fault(
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
             )
-            .map_err(|()| {
-                self.candidate_fault(
+        })?;
+        let proposal = AccessAuthorizationProposal::new(
+            append_id,
+            state.input.clone(),
+            proposed(binding.request()).map_err(|()| {
+                self.component_fault(
+                    RuntimeFaultCode::CodecFault,
                     RuntimeFaultPhase::QualifyCandidate,
                     run_id.clone(),
                     Some(pre_fault_head.clone()),
                     Some(occurrence_id.clone()),
+                    request_origin,
+                )
+            })?,
+            binding.public_certificate().clone(),
+        );
+        let (_, attempt) = self
+            .history
+            .commit_event(
+                Some(verified),
+                QualifiedRuntimeIntent::Authorization(Box::new(proposal)),
+            )
+            .await
+            .map_err(|error| {
+                self.proposal_store_fault(
+                    error,
+                    RuntimeFaultPhase::AppendCandidate,
+                    run_id.clone(),
+                    Some(pre_fault_head.clone()),
+                    Some(occurrence_id.clone()),
+                    adapter_origin.clone(),
                 )
             })?;
-            let proposal = AccessAuthorizationProposal::new(
-                append_id,
-                state.input.clone(),
-                proposed(binding.request()).map_err(|()| {
-                    self.component_fault(
-                        RuntimeFaultCode::CodecFault,
-                        RuntimeFaultPhase::QualifyCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        Some(occurrence_id.clone()),
-                        request_origin.clone(),
-                    )
-                })?,
-                binding.public_certificate().clone(),
-            );
-            let mut attempt = self
-                .history
-                .authorize_access(verified, &proposal)
-                .await
-                .map_err(|error| {
-                    self.proposal_store_fault(
-                        error,
-                        RuntimeFaultPhase::AppendCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        Some(occurrence_id.clone()),
-                        adapter_origin.clone(),
-                    )
-                })?;
-            match attempt.outcome() {
-                HistoryAppendOutcome::NewlyCommitted(_) => {
-                    let authorization =
-                        attempt
-                            .into_committed_access_authorization()
-                            .ok_or_else(|| {
-                                self.candidate_fault(
-                                    RuntimeFaultPhase::QualifyCandidate,
-                                    run_id.clone(),
-                                    Some(pre_fault_head.clone()),
-                                    Some(occurrence_id.clone()),
-                                )
-                            })?;
-                    let verified = self.history.load_verified(&run_id).await.map_err(|error| {
-                        self.store_fault(
-                            error,
-                            RuntimeFaultPhase::LoadHistory,
-                            run_id.clone(),
-                            Some(pre_fault_head.clone()),
-                            Some(occurrence_id.clone()),
-                        )
-                    })?;
-                    return Ok(Some(Authorized {
-                        binding,
-                        authorization,
-                        predecessor_head: pre_fault_head,
-                        verified,
-                        adapter_origin,
-                    }));
-                }
-                HistoryAppendOutcome::ExistingSame(_) => {
-                    return Ok(None);
-                }
-                HistoryAppendOutcome::AcknowledgementUnknown => {
-                    if self
-                        .history
-                        .resolve_attempt(&mut attempt)
-                        .await
-                        .map_err(|error| {
-                            self.store_fault(
-                                error,
-                                RuntimeFaultPhase::ResolveAppend,
+        match attempt.outcome() {
+            HistoryAppendOutcome::NewlyCommitted(_) => {
+                let authorization =
+                    attempt
+                        .into_committed_access_authorization()
+                        .ok_or_else(|| {
+                            self.candidate_fault(
+                                RuntimeFaultPhase::QualifyCandidate,
                                 run_id.clone(),
                                 Some(pre_fault_head.clone()),
                                 Some(occurrence_id.clone()),
                             )
-                        })?
-                    {
-                        return Ok(None);
-                    }
-                }
-                HistoryAppendOutcome::StaleHead => {}
+                        })?;
+                let verified = self.history.load_verified(&run_id).await.map_err(|error| {
+                    self.store_fault(
+                        error,
+                        RuntimeFaultPhase::LoadHistory,
+                        run_id.clone(),
+                        Some(pre_fault_head.clone()),
+                        Some(occurrence_id.clone()),
+                    )
+                })?;
+                Ok(Some(Authorized {
+                    binding,
+                    authorization,
+                    predecessor_head: pre_fault_head,
+                    verified,
+                    adapter_origin,
+                }))
             }
-            let current = self.history.load_verified(&run_id).await.map_err(|error| {
-                self.store_fault(
-                    error,
-                    RuntimeFaultPhase::LoadHistory,
-                    run_id.clone(),
-                    Some(pre_fault_head),
-                    Some(occurrence_id.clone()),
-                )
-            })?;
-            if current.semantic_head() != &semantic_head
-                || minimum_action(current.frontier()) != Some(&state)
-            {
-                return Ok(None);
-            }
-            verified = current;
+            HistoryAppendOutcome::ExistingSame(_)
+            | HistoryAppendOutcome::StaleHead
+            | HistoryAppendOutcome::AcknowledgementUnknown => Ok(None),
         }
     }
 
@@ -1135,9 +1085,9 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
             || committed_authorization != authorization.authorization()
             || committed_ref.run_id != run_id
             || authorization.predecessor_head() != Some(&pre_fault_head)
-            || authorization.successor_head() != verified.journal_head()
             || expected_successor_sequence != Some(committed_ref.run_sequence)
-            || verified.journal_head().run_sequence != committed_ref.run_sequence
+            || authorization.successor_head().run_sequence != committed_ref.run_sequence
+            || verified.journal_head().run_sequence < committed_ref.run_sequence
         {
             return Err(self.store_fault(
                 HistoryError::InvalidHistory,
@@ -1184,72 +1134,6 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         })
     }
 
-    async fn qualify_invoked_observation<K: AccessMarker>(
-        &self,
-        invoked: InvokedObservation<K, P::VerifiedRun>,
-    ) -> Result<Option<PendingObservation<K, P::VerifiedRun>>> {
-        let InvokedObservation {
-            run_id,
-            authorization_ref,
-            access_attempt_id,
-            outcome,
-            verified,
-            adapter_origin,
-            ..
-        } = invoked;
-        let pre_fault_head = verified.journal_head().clone();
-        let occurrence_id = verified
-            .authorization(&access_attempt_id)
-            .map(|(_, authorization)| authorization.occurrence_id.clone())
-            .ok_or_else(|| {
-                self.candidate_fault(
-                    RuntimeFaultPhase::QualifyCandidate,
-                    run_id.clone(),
-                    Some(pre_fault_head.clone()),
-                    None,
-                )
-            })?;
-        match self
-            .history
-            .qualify_observation(&verified, &authorization_ref, &outcome)
-            .await
-            .map_err(|error| {
-                self.proposal_store_fault(
-                    error,
-                    RuntimeFaultPhase::QualifyCandidate,
-                    run_id.clone(),
-                    Some(pre_fault_head.clone()),
-                    Some(occurrence_id.clone()),
-                    adapter_origin.clone(),
-                )
-            })? {
-            ObservationQualification::Ready => Ok(Some(PendingObservation {
-                run_id,
-                authorization_ref,
-                access_attempt_id,
-                outcome,
-                verified,
-                adapter_origin,
-                _kind: PhantomData,
-            })),
-            ObservationQualification::ExistingSame => {
-                let _committed = CommittedObservation::<K> {
-                    _access_attempt_id: access_attempt_id,
-                    _kind: PhantomData,
-                };
-                Ok(None)
-            }
-            ObservationQualification::InvalidSupersessionEvidence => Err(self.component_fault(
-                RuntimeFaultCode::CandidateRejected,
-                RuntimeFaultPhase::QualifyCandidate,
-                run_id,
-                Some(pre_fault_head),
-                Some(occurrence_id),
-                adapter_origin,
-            )),
-        }
-    }
-
     fn observation_outcome<K: AccessMarker>(
         &self,
         completion: QualifiedAccessCompletion,
@@ -1283,152 +1167,75 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         }
     }
 
-    async fn commit_pending_observation<K: AccessMarker>(
+    async fn commit_invoked_observation<K: AccessMarker>(
         &self,
-        pending: PendingObservation<K, P::VerifiedRun>,
+        invoked: InvokedObservation<K, P::VerifiedRun>,
     ) -> Result<DriveOutcome> {
-        let PendingObservation {
+        let InvokedObservation {
             run_id,
             authorization_ref,
             access_attempt_id,
             outcome,
-            mut verified,
+            verified,
             adapter_origin,
             ..
-        } = pending;
-        let mut backoff = ObservationRetryBackoff::new();
-        let mut last_verified_head = Some(verified.journal_head().clone());
-        loop {
-            let pre_fault_head = verified.journal_head().clone();
-            let occurrence_id = verified
-                .authorization(&access_attempt_id)
-                .map(|(_, authorization)| authorization.occurrence_id.clone())
-                .ok_or_else(|| {
-                    self.candidate_fault(
-                        RuntimeFaultPhase::QualifyCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        None,
-                    )
-                })?;
-            let append_id = append_id(
-                "observe",
-                &run_id,
-                verified.journal_head(),
-                access_attempt_id.as_str(),
-            )
-            .map_err(|()| {
+        } = invoked;
+        let pre_fault_head = verified.journal_head().clone();
+        let occurrence_id = verified
+            .authorization(&access_attempt_id)
+            .map(|(_, authorization)| authorization.occurrence_id.clone())
+            .ok_or_else(|| {
                 self.candidate_fault(
                     RuntimeFaultPhase::QualifyCandidate,
                     run_id.clone(),
                     Some(pre_fault_head.clone()),
-                    Some(occurrence_id.clone()),
+                    None,
                 )
             })?;
-            let proposal = AccessObservationProposal::new(
-                append_id,
-                authorization_ref.clone(),
-                outcome.clone(),
-            );
-            let commit = match self.history.commit_observation(verified, &proposal).await {
-                Ok(commit) => commit,
-                Err(HistoryError::BackendUnavailable) => {
-                    backoff.wait().await;
-                    verified = loop {
-                        match self.history.load_verified(&run_id).await {
-                            Ok(current) => break current,
-                            Err(HistoryError::BackendUnavailable) => {
-                                backoff.wait().await;
-                            }
-                            Err(error) => {
-                                return Err(self.store_fault(
-                                    error,
-                                    RuntimeFaultPhase::LoadHistory,
-                                    run_id.clone(),
-                                    Some(pre_fault_head.clone()),
-                                    Some(occurrence_id.clone()),
-                                ));
-                            }
-                        }
-                    };
-                    continue;
-                }
-                Err(error) => {
-                    return Err(self.proposal_store_fault(
-                        error,
-                        RuntimeFaultPhase::AppendCandidate,
-                        run_id.clone(),
-                        Some(pre_fault_head.clone()),
-                        Some(occurrence_id.clone()),
-                        adapter_origin.clone(),
-                    ));
-                }
-            };
-            let mut attempt = match commit {
-                ObservationCommit::ExistingSame => {
-                    let _committed = CommittedObservation::<K> {
-                        _access_attempt_id: access_attempt_id,
-                        _kind: PhantomData,
-                    };
-                    return Ok(DriveOutcome::AccessObserved);
-                }
-                ObservationCommit::Attempt(attempt) => *attempt,
-            };
-            match attempt.outcome() {
-                HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
-                    let _committed = CommittedObservation::<K> {
-                        _access_attempt_id: access_attempt_id,
-                        _kind: PhantomData,
-                    };
-                    return Ok(DriveOutcome::AccessObserved);
-                }
-                HistoryAppendOutcome::AcknowledgementUnknown => loop {
-                    match self.history.resolve_attempt(&mut attempt).await {
-                        Ok(true) => {
-                            let _committed = CommittedObservation::<K> {
-                                _access_attempt_id: access_attempt_id,
-                                _kind: PhantomData,
-                            };
-                            return Ok(DriveOutcome::AccessObserved);
-                        }
-                        Ok(false) => break,
-                        Err(HistoryError::BackendUnavailable) => {
-                            backoff.wait().await;
-                        }
-                        Err(error) => {
-                            return Err(self.store_fault(
-                                error,
-                                RuntimeFaultPhase::ResolveAppend,
-                                run_id.clone(),
-                                Some(pre_fault_head.clone()),
-                                Some(occurrence_id.clone()),
-                            ));
-                        }
-                    }
-                },
-                HistoryAppendOutcome::StaleHead => {}
+        let append_id = append_id(
+            "observe",
+            &run_id,
+            verified.journal_head(),
+            access_attempt_id.as_str(),
+        )
+        .map_err(|()| {
+            self.candidate_fault(
+                RuntimeFaultPhase::QualifyCandidate,
+                run_id.clone(),
+                Some(pre_fault_head.clone()),
+                Some(occurrence_id.clone()),
+            )
+        })?;
+        let proposal = AccessObservationProposal::new(append_id, authorization_ref, outcome);
+        let (_, attempt) = self
+            .history
+            .commit_event(
+                Some(verified),
+                QualifiedRuntimeIntent::Observation(proposal),
+            )
+            .await
+            .map_err(|error| {
+                self.proposal_store_fault(
+                    error,
+                    RuntimeFaultPhase::AppendCandidate,
+                    run_id.clone(),
+                    Some(pre_fault_head.clone()),
+                    Some(occurrence_id.clone()),
+                    adapter_origin,
+                )
+            })?;
+        match attempt.outcome() {
+            HistoryAppendOutcome::NewlyCommitted(_) | HistoryAppendOutcome::ExistingSame(_) => {
+                Ok(DriveOutcome::AccessObserved)
             }
-            verified = loop {
-                match self.history.load_verified(&run_id).await {
-                    Ok(current) => break current,
-                    Err(HistoryError::BackendUnavailable) => {
-                        backoff.wait().await;
-                    }
-                    Err(error) => {
-                        return Err(self.store_fault(
-                            error,
-                            RuntimeFaultPhase::LoadHistory,
-                            run_id.clone(),
-                            Some(pre_fault_head.clone()),
-                            Some(occurrence_id.clone()),
-                        ));
-                    }
-                }
-            };
-            if last_verified_head.as_ref() != Some(verified.journal_head()) {
-                backoff.reset();
-            }
-            last_verified_head = Some(verified.journal_head().clone());
+            HistoryAppendOutcome::StaleHead => Ok(DriveOutcome::ConcurrentProgress),
+            HistoryAppendOutcome::AcknowledgementUnknown => Err(self.store_fault(
+                HistoryError::AcknowledgementUnknown,
+                RuntimeFaultPhase::AppendCandidate,
+                run_id,
+                Some(pre_fault_head),
+                Some(occurrence_id),
+            )),
         }
     }
 }
@@ -1464,40 +1271,6 @@ struct InvokedObservation<K: AccessMarker, V> {
     _kind: PhantomData<fn() -> K>,
 }
 
-struct PendingObservation<K: AccessMarker, V> {
-    run_id: RunId,
-    authorization_ref: RecordRef,
-    access_attempt_id: AccessAttemptId,
-    outcome: ProposedObservationOutcome,
-    verified: V,
-    adapter_origin: QualifiedComponentIdentity,
-    _kind: PhantomData<fn() -> K>,
-}
-
-struct CommittedObservation<K: AccessMarker> {
-    _access_attempt_id: AccessAttemptId,
-    _kind: PhantomData<fn() -> K>,
-}
-
-struct ObservationRetryBackoff {
-    next_delay_ms: u64,
-}
-
-impl ObservationRetryBackoff {
-    const fn new() -> Self {
-        Self { next_delay_ms: 10 }
-    }
-
-    const fn reset(&mut self) {
-        self.next_delay_ms = 10;
-    }
-
-    async fn wait(&mut self) {
-        tokio::time::sleep(std::time::Duration::from_millis(self.next_delay_ms)).await;
-        self.next_delay_ms = self.next_delay_ms.saturating_mul(2).min(1_000);
-    }
-}
-
 fn state_transition_proposal(
     append_request_id: AppendRequestId,
     proposal: QualifiedStateProposal,
@@ -1525,37 +1298,6 @@ fn canonical_object<V: VerifiedRunView>(
 ) -> std::result::Result<CanonicalJsonValue, ()> {
     let object = verified.object(content_ref).ok_or(())?;
     CanonicalJsonValue::from_canonical_json(object.canonical_json.as_bytes()).map_err(|_| ())
-}
-
-fn committed_observation<V: VerifiedRunView>(
-    verified: &V,
-    access_attempt_id: &AccessAttemptId,
-) -> std::result::Result<CanonicalJsonValue, ()> {
-    let (_, observation) = verified.observation(access_attempt_id).ok_or(())?;
-    let (kind, value_ref) = match &observation.outcome {
-        ObservationOutcome::Returned { value } => ("returned", &value.value_ref),
-        ObservationOutcome::SafeFailure { value } => ("safe_failure", &value.value_ref),
-        ObservationOutcome::SupersededBeforeEntry { .. }
-        | ObservationOutcome::EntryUnknown { .. }
-        | ObservationOutcome::IntegrityFault { .. } => {
-            return Err(());
-        }
-    };
-    let value = canonical_object(verified, value_ref)?;
-    CanonicalJsonValue::new(serde_json::json!({
-        "kind": kind,
-        "value": value.as_json(),
-    }))
-    .map_err(|_| ())
-}
-
-fn minimum_action(frontier: &StructuredFrontier) -> Option<&ActionableState> {
-    let StructuredFrontier::Actions(actions) = frontier else {
-        return None;
-    };
-    actions
-        .iter()
-        .min_by(|left, right| left.occurrence_path.cmp(&right.occurrence_path))
 }
 
 fn append_id(

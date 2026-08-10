@@ -1,13 +1,16 @@
 use std::pin::Pin;
 
 use mfm_canonical::{CanonicalBytes, CanonicalValue, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId};
+use mfm_ids::{
+    ContentRef, EntryPointId, InvocationIdentity, RunId, SchemaId, StableId, TenantScopeId,
+};
 use mfm_journal::structured::JournalHead;
 pub use mfm_replay::portable::{ExportKind, PORTABLE_RUN_EXPORT_MEDIA_TYPE};
 pub use mfm_replay::structured::{
     StructuredAccessAuditEntry as AccessAuditEntry, StructuredReplayResult as ReplayResponse,
     StructuredTransitionTrace as CanonicalTransitionTrace,
 };
+use mfm_runtime::history::{EffectEntryAttentionResolution, EffectEntrySubject};
 pub use mfm_spec::{PlanningProfile, PublishedEntryPoint};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -387,6 +390,152 @@ fn decode_inspection_cursor(
         complete_as_of_journal_head: decoded.at_journal_head,
         next_index: decoded.next_index,
     })
+}
+
+/// One run in the tenant that currently requires manual Effect-entry attention.
+///
+/// Every field is re-derived from qualified, reduced history. The entry names
+/// the run and its exact blocked occurrence; it grants no authority over that
+/// run and carries no capability, request, or observation material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntryAttentionEntry {
+    /// Exact run identity.
+    run_id: RunId,
+    /// Exact head at which attention was re-derived.
+    journal_head: JournalHead,
+    /// Exact unresolved Effect subject.
+    subject: EffectEntrySubject,
+    /// Reducer-derived operator resolution.
+    resolution: EffectEntryAttentionResolution,
+}
+
+impl EffectEntryAttentionEntry {
+    pub(crate) fn from_reduced(
+        run_id: RunId,
+        journal_head: JournalHead,
+        subject: EffectEntrySubject,
+        resolution: EffectEntryAttentionResolution,
+    ) -> Self {
+        Self {
+            run_id,
+            journal_head,
+            subject,
+            resolution,
+        }
+    }
+
+    /// Returns the exact run identity.
+    pub const fn run_id(&self) -> &RunId {
+        &self.run_id
+    }
+
+    /// Returns the exact head at which attention was re-derived.
+    pub const fn journal_head(&self) -> &JournalHead {
+        &self.journal_head
+    }
+
+    /// Returns the exact unresolved Effect subject.
+    pub const fn subject(&self) -> &EffectEntrySubject {
+        &self.subject
+    }
+
+    /// Returns the reducer-derived operator resolution.
+    pub const fn resolution(&self) -> EffectEntryAttentionResolution {
+        self.resolution
+    }
+}
+
+/// One bounded page of current Effect-entry attention, ordered by run identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntryAttentionPage {
+    /// Runs on this page, in strict run order.
+    entries: Vec<EffectEntryAttentionEntry>,
+    /// Opaque continuation cursor, when another page exists.
+    next_cursor: Option<String>,
+}
+
+impl EffectEntryAttentionPage {
+    pub(crate) fn from_entries(
+        entries: Vec<EffectEntryAttentionEntry>,
+        next_cursor: Option<String>,
+    ) -> Self {
+        Self {
+            entries,
+            next_cursor,
+        }
+    }
+
+    /// Returns the runs on this page, in strict run order.
+    pub fn entries(&self) -> &[EffectEntryAttentionEntry] {
+        &self.entries
+    }
+
+    /// Returns the opaque continuation cursor, when another page exists.
+    pub fn next_cursor(&self) -> Option<&str> {
+        self.next_cursor.as_deref()
+    }
+}
+
+const EFFECT_ENTRY_ATTENTION_CURSOR_PREFIX: &str = "mfm.effect-entry-attention-cursor.v1.";
+
+/// Opaque tenant-bound continuation for one attention sweep.
+///
+/// It is ordered strictly by run identity and carries nothing else. The codec
+/// and literal version are owned by this surface type: the cursor has no
+/// `SchemaId` because it is transport state, not retained content.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EffectEntryAttentionCursorWire {
+    tenant_scope_id: TenantScopeId,
+    after_run_id: RunId,
+}
+
+/// Encodes one attention continuation key.
+pub(crate) fn encode_effect_entry_attention_cursor(
+    tenant_scope_id: &TenantScopeId,
+    after_run_id: &RunId,
+) -> Result<String, PublicError> {
+    let cursor = mfm_journal::structured::canonical_json(&EffectEntryAttentionCursorWire {
+        tenant_scope_id: tenant_scope_id.clone(),
+        after_run_id: after_run_id.clone(),
+    })
+    .map_err(|_| page_cursor_encoding_failed())?;
+    if cursor.as_bytes().len() > MAX_CURSOR_BYTES {
+        return Err(page_cursor_encoding_failed());
+    }
+    Ok(format!(
+        "{EFFECT_ENTRY_ATTENTION_CURSOR_PREFIX}{}",
+        CanonicalBytes::new(cursor.as_bytes().to_vec()).encoded()
+    ))
+}
+
+/// Strictly decodes one attention continuation key for an exact tenant.
+///
+/// A cursor minted for another tenant, an unknown prefix, or an unknown field
+/// is refused rather than reinterpreted.
+pub(crate) fn decode_effect_entry_attention_cursor(
+    encoded: &str,
+    expected_tenant_scope_id: &TenantScopeId,
+) -> Result<RunId, PublicError> {
+    let encoded = encoded
+        .strip_prefix(EFFECT_ENTRY_ATTENTION_CURSOR_PREFIX)
+        .ok_or_else(page_request_invalid)?;
+    if encoded.len() > MAX_CURSOR_ENCODED_BYTES {
+        return Err(page_request_invalid());
+    }
+    let bytes = CanonicalBytes::from_base64url_no_pad(encoded.to_owned())
+        .map_err(|_| page_request_invalid())?;
+    if bytes.as_bytes().len() > MAX_CURSOR_BYTES {
+        return Err(page_request_invalid());
+    }
+    let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes.as_bytes())
+        .map_err(|_| page_request_invalid())?;
+    let decoded: EffectEntryAttentionCursorWire =
+        serde_json::from_slice(canonical.as_bytes()).map_err(|_| page_request_invalid())?;
+    if &decoded.tenant_scope_id != expected_tenant_scope_id {
+        return Err(page_request_invalid());
+    }
+    Ok(decoded.after_run_id)
 }
 
 fn page_request_invalid() -> PublicError {
@@ -920,13 +1069,25 @@ mod tests {
     use super::{
         decode_access_audit_page_request, decode_transition_trace_page_request,
         encode_inspection_cursor, AdmissionStatus, AdmitRunRequest, AdmitRunResponse,
-        DriveResponse, ExportedRun, InspectionPurpose, PageRequest, PublicRunView, ReplayMode,
-        ReplayRequest, RunId, DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX,
-        MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
+        DriveResponse, EffectEntryAttentionEntry, EffectEntryAttentionPage, ExportedRun,
+        InspectionPurpose, PageRequest, PublicRunView, ReplayMode, ReplayRequest, RunId,
+        DEFAULT_PAGE_LIMIT, INSPECTION_CURSOR_PREFIX, MAX_CURSOR_ENCODED_BYTES, MAX_PAGE_LIMIT,
     };
 
     assert_not_impl_any!(ExportedRun: Clone, Copy);
     assert_not_impl_any!(ReplayRequest: Clone, Copy);
+    assert_not_impl_any!(
+        EffectEntryAttentionEntry:
+            serde::Serialize,
+            serde::Deserialize<'static>,
+            serde::de::DeserializeOwned
+    );
+    assert_not_impl_any!(
+        EffectEntryAttentionPage:
+            serde::Serialize,
+            serde::Deserialize<'static>,
+            serde::de::DeserializeOwned
+    );
 
     /// The minimum admission request wire form.
     const ADMIT_RUN_REQUEST_WIRE: &str = r#"{"entry_point_id":"mfm.portfolio/snapshot@1","input":{},"invocation_identity":"00000000-0000-4000-8000-000000000000","version":"mfm.admit-run-request.v1"}"#;

@@ -9,10 +9,8 @@ use mfm_journal::structured::{
     RunAdmitted, SemanticHead,
 };
 use mfm_runtime::history::{
-    AccessAuthorizationProposal, AccessObservationProposal, HistoryError, HistoryFuture,
-    ObservationCommit, ObservationQualification, ProposedObservationOutcome, RuntimeHistoryPort,
-    StateTransitionProposal, StructuredAdmissionCommand, StructuredAppendAttempt,
-    StructuredFrontier, StructuredStoreIdentity, VerifiedRunView,
+    HistoryError, HistoryFuture, QualifiedRuntimeIntent, RuntimeHistoryPort,
+    StructuredAppendAttempt, StructuredFrontier, StructuredStoreIdentity, VerifiedRunView,
 };
 use mfm_runtime::structured::Runtime;
 
@@ -62,61 +60,18 @@ impl RuntimeHistoryPort for RejectPort {
         &self.identity
     }
 
-    fn admit_run<'a>(
+    fn commit_event<'a>(
         &'a self,
-        _command: StructuredAdmissionCommand,
+        _: Option<Self::VerifiedRun>,
+        _: QualifiedRuntimeIntent,
     ) -> HistoryFuture<'a, (RunId, StructuredAppendAttempt)> {
-        self.calls.lock().expect("lock").push("admit_run");
+        self.calls.lock().expect("lock").push("commit_event");
         Box::pin(async { Err(HistoryError::BackendUnavailable) })
     }
 
     fn load_verified<'a>(&'a self, _: &'a RunId) -> HistoryFuture<'a, Self::VerifiedRun> {
         self.calls.lock().expect("lock").push("load_verified");
         Box::pin(async { Err(HistoryError::RunNotFound) })
-    }
-
-    fn retain_verified<'a>(&'a self, _: Self::VerifiedRun) -> HistoryFuture<'a, ()> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn commit_state_transition<'a>(
-        &'a self,
-        _: Self::VerifiedRun,
-        _: &'a StateTransitionProposal,
-    ) -> HistoryFuture<'a, StructuredAppendAttempt> {
-        Box::pin(async { Err(HistoryError::BackendUnavailable) })
-    }
-
-    fn authorize_access<'a>(
-        &'a self,
-        _: Self::VerifiedRun,
-        _: &'a AccessAuthorizationProposal,
-    ) -> HistoryFuture<'a, StructuredAppendAttempt> {
-        Box::pin(async { Err(HistoryError::BackendUnavailable) })
-    }
-
-    fn resolve_attempt<'a>(
-        &'a self,
-        _: &'a mut StructuredAppendAttempt,
-    ) -> HistoryFuture<'a, bool> {
-        Box::pin(async { Ok(false) })
-    }
-
-    fn qualify_observation<'a>(
-        &'a self,
-        _: &'a Self::VerifiedRun,
-        _: &'a RecordRef,
-        _: &'a ProposedObservationOutcome,
-    ) -> HistoryFuture<'a, ObservationQualification> {
-        Box::pin(async { Ok(ObservationQualification::Ready) })
-    }
-
-    fn commit_observation<'a>(
-        &'a self,
-        _: Self::VerifiedRun,
-        _: &'a AccessObservationProposal,
-    ) -> HistoryFuture<'a, ObservationCommit> {
-        Box::pin(async { Ok(ObservationCommit::ExistingSame) })
     }
 }
 

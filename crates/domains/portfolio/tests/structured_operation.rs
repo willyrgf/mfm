@@ -50,9 +50,10 @@ use mfm_spec::structured::{
     SecretFreeQualificationArtifact, StructuredComponentKind, StructuredExpansionProfile,
 };
 use mfm_store::structured::{
-    assemble_in_memory_runtime, PhysicalBindingAuthorization, PhysicalBindingSupersession,
-    PhysicalTargetIdentity, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
-    StructuredAdmissionMaterial, StructuredStoreError, StructuredStoreIdentity,
+    qualify_and_open_structured_store, PhysicalBindingAuthorization, PhysicalBindingSupersession,
+    PhysicalObligationChecker, PhysicalTargetIdentity, ProposedCanonicalValue,
+    StructuredAdmissionMaterial, StructuredMemoryBackend, StructuredStoreError,
+    StructuredStoreIdentity,
 };
 use mfm_values::CanonicalJsonPersistedSchema;
 use serde_json::json;
@@ -450,8 +451,8 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
         .certify(authored)
         .expect("execution certified program")
         .into_document();
-    let assembled = assemble_in_memory_runtime(
-        StructuredStoreIdentity {
+    let assembled = qualify_and_open_structured_store(
+        StructuredMemoryBackend::new(StructuredStoreIdentity {
             store_scope_id: StoreScopeId::new(format!(
                 "{}{:032x}",
                 StoreScopeId::PREFIX,
@@ -469,10 +470,11 @@ async fn execute_portfolio_case(discriminator: u8, label: &str, assets: &[Fixtur
                     sha256_digest_bytes(&[discriminator, 6]),
                 ),
             }),
-        },
+        }),
         registry,
         Arc::new(TestPublicBindingVerifier),
     )
+    .await
     .expect("runtime assembly");
     let runtime = assembled.runtime;
     let reader = assembled.public_reader;
@@ -534,8 +536,8 @@ struct TestPublicBindingVerifier;
 
 impl mfm_authority_seal::PhysicalBindingVerifierSeal for TestPublicBindingVerifier {}
 
-impl PublicPhysicalBindingVerifier for TestPublicBindingVerifier {
-    fn verify_authorization(
+impl PhysicalObligationChecker for TestPublicBindingVerifier {
+    fn verify_retained_authorization(
         &self,
         context: &PhysicalBindingAuthorization<'_>,
         candidate: &HistoryObject,
@@ -560,7 +562,41 @@ impl PublicPhysicalBindingVerifier for TestPublicBindingVerifier {
         }
     }
 
-    fn verify_supersession(
+    fn verify_current_authorization(
+        &self,
+        context: &PhysicalBindingAuthorization<'_>,
+        candidate: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        let accepted = [
+            EvmChainIdentityCapability::adapter_id(),
+            EvmLatestAnchorCapability::adapter_id(),
+            EvmTokenDecimalsCapability::adapter_id(),
+            EvmNativeBalanceCapability::adapter_id(),
+            EvmTokenBalanceCapability::adapter_id(),
+            EvmConfirmAnchorCapability::adapter_id(),
+        ]
+        .into_iter()
+        .any(|adapter| candidate == &certificate(adapter));
+        if accepted
+            && context.stable_resource_lineage_contract_ref.is_none()
+            && context.minimum_lineage_head_ref.is_none()
+        {
+            Ok(())
+        } else {
+            Err(StructuredStoreError::Certification)
+        }
+    }
+
+    fn verify_retained_supersession(
+        &self,
+        _context: &PhysicalBindingSupersession<'_>,
+        _public_lineage_head: &HistoryObject,
+        _evidence: &HistoryObject,
+    ) -> Result<(), StructuredStoreError> {
+        Err(StructuredStoreError::Certification)
+    }
+
+    fn verify_current_supersession(
         &self,
         _context: &PhysicalBindingSupersession<'_>,
         _public_lineage_head: &HistoryObject,
@@ -822,11 +858,9 @@ fn test_admission_material(label: &str) -> StructuredAdmissionMaterial {
             ADMISSION_CONTEXT_MANIFEST_OBJECT_TYPE,
             &format!("mfm.portfolio.test.{label}.context"),
         ),
-        HistoryObject::from_persisted(
-            &PriorRunFactSourceManifest::new(Vec::new())
-                .expect("execution prior-run source manifest"),
-        )
-        .expect("execution prior-run source object"),
+        PriorRunFactSourceManifest::new(Vec::new())
+            .and_then(|manifest| HistoryObject::from_persisted(&manifest))
+            .expect("execution prior-run source manifest"),
         test_admission_object(
             ADMISSION_ROUTING_POLICY_OBJECT_TYPE,
             &format!("mfm.portfolio.test.{label}.routing"),
@@ -837,7 +871,8 @@ fn test_admission_material(label: &str) -> StructuredAdmissionMaterial {
 }
 
 fn test_admission_object(object_type: &str, schema: &str) -> HistoryObject {
-    test_history_object(stable(object_type), schema_id(schema), "{}")
+    raw_history_object(stable(object_type), schema_id(schema), "{}")
+        .expect("execution admission object")
 }
 
 struct CertifiedPrograms {
@@ -1058,31 +1093,34 @@ fn lane(
 }
 
 fn certificate(discriminator: &str) -> HistoryObject {
-    test_history_object(
+    raw_history_object(
         stable("mfm.portfolio.test/physical-certificate"),
         schema_id("mfm.portfolio.test.physical-certificate"),
-        format!("{{\"binding\":{discriminator:?}}}"),
+        &format!("{{\"binding\":{discriminator:?}}}"),
     )
+    .expect("certificate")
 }
 
-fn test_history_object(
+fn raw_history_object(
     object_type: StableId,
     schema_id: SchemaId,
-    canonical_json: impl Into<String>,
-) -> HistoryObject {
-    let canonical_json = canonical_json.into();
-    HistoryObject {
+    json: &str,
+) -> mfm_journal::structured::Result<HistoryObject> {
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(json)
+        .map_err(|_| mfm_journal::structured::StructuredJournalError::Canonical)?;
+    let content_ref = ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .map_err(|_| mfm_journal::structured::StructuredJournalError::Identity)?;
+    Ok(HistoryObject {
         object_type,
-        content_ref: ContentRef::new(
-            schema_id,
-            ContentDigest::from_digest(
-                DigestAlgorithm::Sha256V1,
-                sha256_digest_bytes(canonical_json.as_bytes()),
-            ),
-        )
-        .expect("test object content reference"),
-        canonical_json,
-    }
+        content_ref,
+        canonical_json: canonical.as_str().to_owned(),
+    })
 }
 
 fn profile(max_fan_out_depth: u8) -> StructuredExpansionProfile {

@@ -1,107 +1,156 @@
+//! Mechanical structured-history persistence contract.
+
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_ids::{AppendRequestId, ContentDigest, RunId, TenantScopeId};
+use mfm_ids::{AppendRequestId, RunId, TenantScopeId};
 use mfm_journal::structured::{CommittedBatch, JournalHead, RecordRef, TenantFactFrontier};
 
-use super::canonical_append::CanonicalRunAppend;
-use super::fact_scan::{verify_actionable_history, PriorRunFactSource};
-use super::fold::{
-    validate_resolved_batch, ProgramVerifier, StructuredStoreError, VerifiedStructuredRun,
+use super::fact_scan::PriorRunFactSource;
+use super::qualification::{
+    PhysicalObligationChecker, ProgramVerificationRegistry, StructuredStoreError,
 };
-use super::qualification::PublicPhysicalBindingVerifier;
+use super::validated_append::{RunCurrentProjection, ValidatedRunAppend};
+use super::VerifiedStructuredRun;
 
 pub use mfm_runtime::history::{PhysicalTargetIdentity, StructuredStoreIdentity};
 
-/// Boxed asynchronous structured-history backend operation.
+/// Boxed asynchronous backend operation.
 pub type StructuredBackendFuture<'a, T> =
-    Pin<Box<dyn Future<Output = std::result::Result<T, StructuredStoreError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<T, StructuredStoreError>> + Send + 'a>>;
 
-/// Complete raw durable prefix loaded from one backend.
+/// Complete raw durable run prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRunHistory {
     /// Target run.
     pub run_id: RunId,
-    /// Atomic append envelopes in exact sequence order.
+    /// Atomic append envelopes in sequence order.
     pub batches: Vec<CommittedBatch>,
 }
 
-/// One append-only dense route from a tenant publication order to its transition.
+/// One dense tenant publication route.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TenantFactPublication {
     /// Exact frontier advanced by this publication.
     pub frontier: TenantFactFrontier,
-    /// Exact non-empty state transition that published the facts.
+    /// Exact publishing transition.
     pub transition_ref: RecordRef,
+    /// Exact immutable producer prefix containing the transition.
+    pub producer_head: JournalHead,
 }
 
-/// Result of one backend exact-head transaction.
+/// Mechanical append transaction outcome.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendAppendOutcome {
-    /// This transaction atomically committed the batch.
+    /// The supplied command committed atomically.
     NewlyCommitted(CommittedBatch),
-    /// The same append identity already committed byte-identical content.
+    /// The stable key already names byte-identical immutable content.
     ExistingSame(CommittedBatch),
-    /// The locked run head differs from the exact expected predecessor.
+    /// The supplied current projection was stale.
     StaleHead,
-    /// Commit acknowledgement is unavailable and must be resolved unchanged.
+    /// Commit acknowledgement is unavailable.
     AcknowledgementUnknown,
 }
 
-/// One immutable backend snapshot containing the retained prefix and its indexed head.
-///
-/// PostgreSQL implementations return both projections from one `REPEATABLE READ` transaction;
-/// callers must never combine a prefix from one snapshot with a head from another.
+/// One immutable snapshot plus its disposable current projection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredRunSnapshot {
-    /// Complete or bounded retained prefix, when the run exists.
+    /// Complete retained history, when the run exists.
     pub history: Option<RawRunHistory>,
-    /// Indexed head observed in the same snapshot.
-    pub head: Option<JournalHead>,
+    /// Current projection observed in the same snapshot.
+    pub current_projection: Option<RunCurrentProjection>,
 }
 
-/// Raw atomic persistence seam behind the one shared structured fold.
-///
-/// Implementations perform only exact-head locking/CAS, immutable object and
-/// record persistence, logical append-id resolution, and atomic visibility.
-/// They receive no callback, cursor policy, or domain hook.
+/// One run key and both state-bearing surfaces observed in semantic snapshot `S0`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredStoreRunSnapshot {
+    /// Union key from immutable history and the disposable projection.
+    pub run_id: RunId,
+    /// Complete immutable history, when present.
+    pub history: Option<RawRunHistory>,
+    /// Complete current projection, when present.
+    pub current_projection: Option<RunCurrentProjection>,
+}
+
+/// One tenant's complete disposable fact route and head surfaces.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantFactProjectionSnapshot {
+    /// Union key from immutable routes and the disposable head.
+    pub tenant_scope_id: TenantScopeId,
+    /// Positive current head; zero is represented by absence.
+    pub current_frontier: Option<TenantFactFrontier>,
+    /// Complete immutable publication route in fact order.
+    pub publications: Vec<TenantFactPublication>,
+}
+
+/// Complete raw physical state captured by one semantic-open snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredStoreSnapshot {
+    /// Union of immutable and projection run keys.
+    pub runs: Vec<StructuredStoreRunSnapshot>,
+    /// Union of immutable fact-route and fact-head tenant keys.
+    pub tenant_facts: Vec<TenantFactProjectionSnapshot>,
+}
+
+/// Stable append lookup result, ending at the exact retained attempt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendAttemptLookup {
+    /// Immutable prefix through the attempt.
+    pub history: RawRunHistory,
+}
+
+/// Raw backend. Implementations decode, compare, insert, and CAS only.
 pub trait StructuredHistoryBackend: Send + Sync + 'static {
-    /// Returns the immutable qualified writer identity bound to this backend.
+    /// Returns the fixed store identity.
     fn identity(&self) -> &StructuredStoreIdentity;
 
-    /// Loads the complete immutable prefix and objects for one run.
-    fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
-
-    /// Loads retained history and its indexed head from one backend snapshot.
+    /// Loads immutable history and current projection from one snapshot.
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot>;
 
-    /// Returns the exact current physical head without loading the retained prefix.
-    ///
-    /// Every backend supplies this projection directly. Production PostgreSQL reads its indexed
-    /// head row; conformance backends read their equivalent exact-head state.
-    fn current_head<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, Option<JournalHead>>;
-
-    /// Loads the immutable run prefix ending at one exact retained sequence.
+    /// Loads one exact immutable prefix without consulting current projection.
     fn load_prefix<'a>(
         &'a self,
         run_id: &'a RunId,
-        through_sequence: u64,
+        through: &'a JournalHead,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
 
-    /// Returns the current dense tenant fact frontier under this store identity.
+    /// Reads the disposable current run projection.
+    fn current_run_projection<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>>;
+
+    /// Performs stable pre-authoring lookup.
+    fn lookup_append_attempt<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        append_request_id: &'a AppendRequestId,
+    ) -> StructuredBackendFuture<'a, Option<AppendAttemptLookup>>;
+
+    /// Enumerates the union of immutable and projection run keys in order.
+    fn scan_run_ids<'a>(
+        &'a self,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>>;
+
+    /// Captures every semantic-open decision surface in one physical snapshot.
+    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot>;
+
+    /// Freshly revalidates the target, fence, release, and store identity after `S0`.
+    fn validate_authority(&self) -> StructuredBackendFuture<'_, ()>;
+
+    /// Returns the current dense tenant fact frontier.
     fn tenant_fact_frontier<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
     ) -> StructuredBackendFuture<'a, TenantFactFrontier>;
 
-    /// Reads one bounded dense page of append-only tenant publication routes.
+    /// Reads one bounded dense publication page.
     fn scan_fact_publications<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
@@ -110,26 +159,35 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
         maximum_items: u32,
     ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>>;
 
-    /// Atomically compare-and-appends one shared-fold-validated batch.
+    /// Applies one sealed command atomically.
     fn append<'a>(
         &'a self,
-        batch: CanonicalRunAppend,
+        command: ValidatedRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome>;
 
-    /// Resolves one unchanged physical append identity after ambiguity.
-    fn resolve_append<'a>(
+    /// Scans the current partial Effect-attention route.
+    fn scan_effect_entry_attention_routes<'a>(
         &'a self,
-        run_id: &'a RunId,
-        append_request_id: &'a AppendRequestId,
-        candidate_digest: &'a ContentDigest,
-    ) -> StructuredBackendFuture<'a, Option<CommittedBatch>>;
+        tenant_scope_id: &'a TenantScopeId,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<EffectEntryAttentionRoute>>;
 }
 
-struct BackendPriorRunFactSource<B: StructuredHistoryBackend> {
+/// One current attention route. It is a location, never semantic evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntryAttentionRoute {
+    /// Routed run.
+    pub run_id: RunId,
+    /// Exact routed head.
+    pub journal_head: JournalHead,
+}
+
+struct BackendFactSource<B: StructuredHistoryBackend> {
     backend: Arc<B>,
 }
 
-impl<B: StructuredHistoryBackend> PriorRunFactSource for BackendPriorRunFactSource<B> {
+impl<B: StructuredHistoryBackend> PriorRunFactSource for BackendFactSource<B> {
     fn scan_publications<'a>(
         &'a self,
         tenant_scope_id: &'a TenantScopeId,
@@ -148,168 +206,111 @@ impl<B: StructuredHistoryBackend> PriorRunFactSource for BackendPriorRunFactSour
     fn load_producer_prefix<'a>(
         &'a self,
         run_id: &'a RunId,
-        through_sequence: u64,
+        through: &'a JournalHead,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        self.backend.load_prefix(run_id, through_sequence)
+        self.backend.load_prefix(run_id, through)
     }
 }
 
 pub(super) fn prior_run_fact_source<B: StructuredHistoryBackend>(
     backend: &Arc<B>,
 ) -> Arc<dyn PriorRunFactSource> {
-    Arc::new(BackendPriorRunFactSource {
+    Arc::new(BackendFactSource {
         backend: Arc::clone(backend),
     })
 }
 
-/// Private one-shot qualified store assembly before writer/read authority separation.
-pub(super) struct StructuredRunStore<B: StructuredHistoryBackend> {
-    backend: Arc<B>,
-    program_verifier: Arc<dyn ProgramVerifier>,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-}
-
-impl<B: StructuredHistoryBackend> StructuredRunStore<B> {
-    pub(super) fn new(
-        backend: B,
-        program_verifier: Arc<dyn ProgramVerifier>,
-        physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-    ) -> Self {
-        Self {
-            backend: Arc::new(backend),
-            program_verifier,
-            physical_binding_verifier,
-        }
-    }
-
-    pub(super) fn split(self) -> (StructuredRunHistoryWriter<B>, StructuredRunHistoryReader<B>) {
-        (
-            StructuredRunHistoryWriter {
-                backend: Arc::clone(&self.backend),
-                program_verifier: Arc::clone(&self.program_verifier),
-                physical_binding_verifier: Arc::clone(&self.physical_binding_verifier),
-            },
-            StructuredRunHistoryReader {
-                backend: self.backend,
-                program_verifier: self.program_verifier,
-                physical_binding_verifier: self.physical_binding_verifier,
-            },
-        )
-    }
-}
-
-/// Private non-cloneable structured RunHistory mutation authority.
+/// Non-cloneable mutation authority released only by semantic open.
 pub(super) struct StructuredRunHistoryWriter<B: StructuredHistoryBackend> {
     pub(super) backend: Arc<B>,
-    pub(super) program_verifier: Arc<dyn ProgramVerifier>,
-    pub(super) physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
+    pub(super) programs: Arc<ProgramVerificationRegistry>,
+    pub(super) physical: Arc<dyn PhysicalObligationChecker>,
 }
 
 impl<B: StructuredHistoryBackend> StructuredRunHistoryWriter<B> {
-    /// Returns the immutable qualified store identity owned by this writer.
     pub fn store_identity(&self) -> &StructuredStoreIdentity {
         self.backend.identity()
     }
 
-    /// Returns the exact current physical head without loading retained history.
-    pub async fn current_head(&self, run_id: &RunId) -> super::Result<Option<JournalHead>> {
-        self.backend.current_head(run_id).await
-    }
-
-    /// Loads and callback-free verifies one exact run for a Runtime action.
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let snapshot = self.backend.load_snapshot(run_id).await?;
-        let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
-        verify_actionable_history(
-            prior_run_fact_source(&self.backend),
-            raw,
-            Arc::clone(&self.program_verifier),
-            Arc::clone(&self.physical_binding_verifier),
+        super::semantic_open::load_and_compare(
+            &self.backend,
+            run_id,
+            &self.programs,
+            &self.physical,
         )
         .await
-        .and_then(|verified| {
-            if snapshot.head.as_ref() == Some(verified.journal_head()) {
-                Ok(verified)
-            } else {
-                Err(StructuredStoreError::InvalidHistory)
-            }
-        })
     }
 
-    /// Resolves an unchanged append identity after acknowledgement ambiguity.
-    pub async fn resolve_append(
+    pub(super) async fn commit_event(
         &self,
-        run_id: &RunId,
-        append_request_id: &AppendRequestId,
-        candidate_digest: &ContentDigest,
-    ) -> super::Result<Option<CommittedBatch>> {
-        let resolved = self
-            .backend
-            .resolve_append(run_id, append_request_id, candidate_digest)
-            .await?;
-        let Some(batch) = resolved else {
-            return Ok(None);
-        };
-        validate_resolved_batch(
-            run_id,
-            append_request_id,
-            candidate_digest,
-            self.backend.identity(),
-            &batch,
-        )?;
-        Ok(Some(batch))
+        previous: Option<VerifiedStructuredRun>,
+        intent: mfm_runtime::history::QualifiedRuntimeIntent,
+    ) -> super::Result<(RunId, mfm_runtime::history::StructuredAppendAttempt)> {
+        super::coordinator::commit_event(self, previous, intent).await
     }
 }
 
-/// Private complete-history reader used only to build sealed purpose readers.
+/// Cloneable purpose-reader authority released only by semantic open.
 pub(super) struct StructuredRunHistoryReader<B: StructuredHistoryBackend> {
-    backend: Arc<B>,
-    program_verifier: Arc<dyn ProgramVerifier>,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
+    pub(super) backend: Arc<B>,
+    pub(super) programs: Arc<ProgramVerificationRegistry>,
+    pub(super) physical: Arc<dyn PhysicalObligationChecker>,
 }
 
 impl<B: StructuredHistoryBackend> Clone for StructuredRunHistoryReader<B> {
     fn clone(&self) -> Self {
         Self {
             backend: Arc::clone(&self.backend),
-            program_verifier: Arc::clone(&self.program_verifier),
-            physical_binding_verifier: Arc::clone(&self.physical_binding_verifier),
+            programs: Arc::clone(&self.programs),
+            physical: Arc::clone(&self.physical),
         }
     }
 }
 
 impl<B: StructuredHistoryBackend> StructuredRunHistoryReader<B> {
-    /// Returns the immutable qualified store identity.
     pub fn store_identity(&self) -> &StructuredStoreIdentity {
         self.backend.identity()
     }
 
-    /// Probes backend readability without requiring an existing application run.
     pub async fn check_ready(&self) -> super::Result<()> {
         let probe = RunId::from_digest(
             mfm_ids::DigestAlgorithm::Sha256JcsV1,
             mfm_canonical::sha256_digest_bytes(b"mfm.structured-store.readiness-probe.v1"),
         );
-        self.backend.load(&probe).await.map(|_| ())
+        self.backend.load_snapshot(&probe).await.map(|_| ())
     }
 
-    /// Loads and callback-free verifies one recorded run without live IO.
+    pub(super) async fn scan_effect_entry_attention_routes(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        after_run_id: Option<&RunId>,
+        maximum_items: u32,
+    ) -> super::Result<Vec<EffectEntryAttentionRoute>> {
+        self.backend
+            .scan_effect_entry_attention_routes(tenant_scope_id, after_run_id, maximum_items)
+            .await
+    }
+
+    pub(super) async fn scan_fact_publications(
+        &self,
+        tenant_scope_id: &TenantScopeId,
+        first_order: u64,
+        through_order: u64,
+        maximum_items: u32,
+    ) -> super::Result<Vec<TenantFactPublication>> {
+        self.backend
+            .scan_fact_publications(tenant_scope_id, first_order, through_order, maximum_items)
+            .await
+    }
+
     pub async fn load_verified(&self, run_id: &RunId) -> super::Result<VerifiedStructuredRun> {
-        let snapshot = self.backend.load_snapshot(run_id).await?;
-        let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
-        verify_actionable_history(
-            prior_run_fact_source(&self.backend),
-            raw,
-            Arc::clone(&self.program_verifier),
-            Arc::clone(&self.physical_binding_verifier),
+        super::semantic_open::load_and_compare(
+            &self.backend,
+            run_id,
+            &self.programs,
+            &self.physical,
         )
         .await
-        .and_then(|verified| {
-            if snapshot.head.as_ref() == Some(verified.journal_head()) {
-                Ok(verified)
-            } else {
-                Err(StructuredStoreError::InvalidHistory)
-            }
-        })
     }
 }

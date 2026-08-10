@@ -1,37 +1,36 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-use mfm_ids::{AppendRequestId, ContentDigest, RunId, TenantScopeId};
-use mfm_journal::structured::{
-    CommittedBatch, JournalHead, RunRecord, TenantFactCoordinate, TenantFactFrontier,
-};
+use mfm_ids::{AppendRequestId, RunId, TenantScopeId};
+use mfm_journal::structured::{CommittedBatch, JournalHead, TenantFactFrontier};
 
 use super::backend::{
-    BackendAppendOutcome, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunSnapshot, StructuredStoreIdentity, TenantFactPublication,
+    AppendAttemptLookup, BackendAppendOutcome, RawRunHistory, StructuredBackendFuture,
+    StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreIdentity,
+    StructuredStoreRunSnapshot, StructuredStoreSnapshot, TenantFactProjectionSnapshot,
+    TenantFactPublication,
 };
-use super::canonical_append::CanonicalRunAppend;
-use super::fold::StructuredStoreError;
-
-type AppendKey = (RunId, AppendRequestId);
+use super::qualification::StructuredStoreError;
+use super::validated_append::{RunCurrentProjection, TenantFactProjectionPlan, ValidatedRunAppend};
 
 #[derive(Default)]
 struct MemoryState {
     histories: BTreeMap<RunId, Vec<CommittedBatch>>,
-    appends: BTreeMap<AppendKey, CommittedBatch>,
-    full_loads: usize,
+    projections: BTreeMap<RunId, RunCurrentProjection>,
     tenant_fact_heads: BTreeMap<TenantScopeId, u64>,
     tenant_fact_publications: BTreeMap<(TenantScopeId, u64), TenantFactPublication>,
     acknowledge_next_commit_as_unknown: bool,
     unavailable: bool,
 }
 
-/// Shared exact-head in-memory backend used by conformance and Runtime tests.
+/// Shared mechanical in-memory backend used by conformance tests.
 #[derive(Clone)]
 pub struct StructuredMemoryBackend {
     identity: StructuredStoreIdentity,
     state: Arc<Mutex<MemoryState>>,
 }
+
+impl mfm_authority_seal::ValidatedAppendConsumerSeal for StructuredMemoryBackend {}
 
 impl std::fmt::Debug for StructuredMemoryBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,7 +42,7 @@ impl std::fmt::Debug for StructuredMemoryBackend {
 }
 
 impl StructuredMemoryBackend {
-    /// Constructs one shared memory backend under an exact writer identity.
+    /// Constructs one memory backend under an exact writer identity.
     pub fn new(identity: StructuredStoreIdentity) -> Self {
         Self {
             identity,
@@ -58,28 +57,11 @@ impl StructuredMemoryBackend {
         Ok(())
     }
 
-    /// Toggles deterministic backend unavailability for fail-closed tests.
+    /// Toggles deterministic backend unavailability.
     #[doc(hidden)]
     pub fn set_unavailable(&self, unavailable: bool) -> super::Result<()> {
         self.lock()?.unavailable = unavailable;
         Ok(())
-    }
-
-    /// Returns the exact current head without performing a semantic fold.
-    #[doc(hidden)]
-    pub fn raw_head(&self, run_id: &RunId) -> super::Result<Option<JournalHead>> {
-        Ok(self
-            .lock()?
-            .histories
-            .get(run_id)
-            .and_then(|batches| batches.last())
-            .map(|batch| batch.head.clone()))
-    }
-
-    /// Returns the number of complete-prefix loads performed by this backend.
-    #[doc(hidden)]
-    pub fn full_loads(&self) -> super::Result<usize> {
-        Ok(self.lock()?.full_loads)
     }
 
     fn lock(&self) -> super::Result<std::sync::MutexGuard<'_, MemoryState>> {
@@ -94,81 +76,176 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
         &self.identity
     }
 
-    fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(async move {
-            let mut state = self.lock()?;
-            if state.unavailable {
-                return Err(StructuredStoreError::BackendUnavailable);
-            }
-            state.full_loads = state.full_loads.saturating_add(1);
-            Ok(state.histories.get(run_id).map(|batches| RawRunHistory {
-                run_id: run_id.clone(),
-                batches: batches.clone(),
-            }))
-        })
-    }
-
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
         Box::pin(async move {
-            let mut state = self.lock()?;
-            if state.unavailable {
-                return Err(StructuredStoreError::BackendUnavailable);
-            }
-            state.full_loads = state.full_loads.saturating_add(1);
-            let history = state.histories.get(run_id).map(|batches| RawRunHistory {
-                run_id: run_id.clone(),
-                batches: batches.clone(),
-            });
-            let head = history
-                .as_ref()
-                .and_then(|raw| raw.batches.last().map(|batch| batch.head.clone()));
-            Ok(StructuredRunSnapshot { history, head })
-        })
-    }
-
-    fn current_head<'a>(
-        &'a self,
-        run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
-        Box::pin(async move {
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            Ok(state
-                .histories
-                .get(run_id)
-                .and_then(|batches| batches.last().map(|batch| batch.head.clone())))
+            Ok(StructuredRunSnapshot {
+                history: state.histories.get(run_id).map(|batches| RawRunHistory {
+                    run_id: run_id.clone(),
+                    batches: batches.clone(),
+                }),
+                current_projection: state.projections.get(run_id).cloned(),
+            })
         })
     }
 
     fn load_prefix<'a>(
         &'a self,
         run_id: &'a RunId,
-        through_sequence: u64,
+        through: &'a JournalHead,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
-            if through_sequence == 0 {
+            let state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            Ok(state.histories.get(run_id).and_then(|batches| {
+                let position = batches.iter().position(|batch| &batch.head == through)?;
+                Some(RawRunHistory {
+                    run_id: run_id.clone(),
+                    batches: batches[..=position].to_vec(),
+                })
+            }))
+        })
+    }
+
+    fn current_run_projection<'a>(
+        &'a self,
+        run_id: &'a RunId,
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            Ok(state.projections.get(run_id).cloned())
+        })
+    }
+
+    fn lookup_append_attempt<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        append_request_id: &'a AppendRequestId,
+    ) -> StructuredBackendFuture<'a, Option<AppendAttemptLookup>> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            Ok(state.histories.get(run_id).and_then(|batches| {
+                let position = batches
+                    .iter()
+                    .position(|batch| &batch.append_request_id == append_request_id)?;
+                Some(AppendAttemptLookup {
+                    history: RawRunHistory {
+                        run_id: run_id.clone(),
+                        batches: batches[..=position].to_vec(),
+                    },
+                })
+            }))
+        })
+    }
+
+    fn scan_run_ids<'a>(
+        &'a self,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
+        Box::pin(async move {
+            if maximum_items == 0 {
                 return Err(StructuredStoreError::InvalidHistory);
             }
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            Ok(state.histories.get(run_id).and_then(|batches| {
-                let batches = batches
-                    .iter()
-                    .take_while(|batch| batch.head.run_sequence <= through_sequence)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                (!batches.is_empty()).then(|| RawRunHistory {
-                    run_id: run_id.clone(),
-                    batches,
+            let keys = state
+                .histories
+                .keys()
+                .chain(state.projections.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            Ok(keys
+                .into_iter()
+                .filter(|run_id| after_run_id.is_none_or(|after| run_id > after))
+                .take(maximum_items as usize)
+                .collect())
+        })
+    }
+
+    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot> {
+        Box::pin(async move {
+            let state = self.lock()?;
+            if state.unavailable {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            let run_ids = state
+                .histories
+                .keys()
+                .chain(state.projections.keys())
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let runs = run_ids
+                .into_iter()
+                .map(|run_id| StructuredStoreRunSnapshot {
+                    history: state.histories.get(&run_id).map(|batches| RawRunHistory {
+                        run_id: run_id.clone(),
+                        batches: batches.clone(),
+                    }),
+                    current_projection: state.projections.get(&run_id).cloned(),
+                    run_id,
                 })
-            }))
+                .collect();
+            let tenants = state
+                .tenant_fact_heads
+                .keys()
+                .chain(
+                    state
+                        .tenant_fact_publications
+                        .keys()
+                        .map(|(tenant, _)| tenant),
+                )
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let tenant_facts = tenants
+                .into_iter()
+                .map(|tenant_scope_id| TenantFactProjectionSnapshot {
+                    current_frontier: state.tenant_fact_heads.get(&tenant_scope_id).map(|order| {
+                        TenantFactFrontier::new(
+                            self.identity.store_scope_id.clone(),
+                            self.identity.store_epoch,
+                            tenant_scope_id.clone(),
+                            *order,
+                        )
+                    }),
+                    publications: state
+                        .tenant_fact_publications
+                        .range(
+                            (tenant_scope_id.clone(), u64::MIN)
+                                ..=(tenant_scope_id.clone(), u64::MAX),
+                        )
+                        .map(|(_, publication)| publication.clone())
+                        .collect(),
+                    tenant_scope_id,
+                })
+                .collect();
+            Ok(StructuredStoreSnapshot { runs, tenant_facts })
+        })
+    }
+
+    fn validate_authority(&self) -> StructuredBackendFuture<'_, ()> {
+        Box::pin(async move {
+            if self.lock()?.unavailable {
+                Err(StructuredStoreError::BackendUnavailable)
+            } else {
+                Ok(())
+            }
         })
     }
 
@@ -205,8 +282,6 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
             if first_order == 0 || maximum_items == 0 || maximum_items > 1_024 {
                 return Err(StructuredStoreError::InvalidHistory);
             }
-            let maximum_items =
-                usize::try_from(maximum_items).map_err(|_| StructuredStoreError::InvalidHistory)?;
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
@@ -220,7 +295,7 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
                     (tenant_scope_id.clone(), first_order)
                         ..=(tenant_scope_id.clone(), through_order),
                 )
-                .take(maximum_items)
+                .take(maximum_items as usize)
                 .map(|(_, publication)| publication.clone())
                 .collect())
         })
@@ -228,38 +303,25 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
 
     fn append<'a>(
         &'a self,
-        batch: CanonicalRunAppend,
+        command: ValidatedRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
-            if !batch.is_store_verified() {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-            let committed = batch.into_committed();
+            let (committed, run_plan, tenant_plan) = command.into_parts(self);
             if committed.store_scope_id != self.identity.store_scope_id
                 || committed.store_epoch != self.identity.store_epoch
             {
-                return Err(StructuredStoreError::StaleHead);
+                return Ok(BackendAppendOutcome::StaleHead);
             }
-            let run_id = committed
-                .records
-                .first()
-                .ok_or(StructuredStoreError::InvalidHistory)?
-                .record_ref
-                .run_id
-                .clone();
-            if committed
-                .records
-                .iter()
-                .any(|record| record.record_ref.run_id != run_id)
-            {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
+            let run_id = run_plan.successor().run_id.clone();
             let mut state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            let append_key = (run_id.clone(), committed.append_request_id.clone());
-            if let Some(existing) = state.appends.get(&append_key) {
+            if let Some(existing) = state.histories.get(&run_id).and_then(|batches| {
+                batches
+                    .iter()
+                    .find(|batch| batch.append_request_id == committed.append_request_id)
+            }) {
                 return if existing == &committed {
                     Ok(BackendAppendOutcome::ExistingSame(existing.clone()))
                 } else {
@@ -271,74 +333,56 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
                 .get(&run_id)
                 .and_then(|batches| batches.last())
                 .map(|batch| &batch.head);
-            if current_head != committed.predecessor.as_ref() {
+            if current_head != committed.predecessor.as_ref()
+                || state.projections.get(&run_id) != run_plan.expected()
+            {
                 return Ok(BackendAppendOutcome::StaleHead);
             }
-            let tenant_fact_publication = match &committed.tenant_fact_coordinate {
-                TenantFactCoordinate::None => None,
-                TenantFactCoordinate::FactSelectionBarrier { frontier } => {
-                    let current_order = state
-                        .tenant_fact_heads
-                        .get(&frontier.tenant_scope_id)
-                        .copied()
-                        .unwrap_or(0);
-                    if frontier.store_scope_id != self.identity.store_scope_id
-                        || frontier.store_epoch != self.identity.store_epoch
-                        || frontier.fact_order != current_order
+            match &tenant_plan {
+                TenantFactProjectionPlan::None => {}
+                TenantFactProjectionPlan::Barrier { expected_frontier } => {
+                    if current_fact_frontier(
+                        &self.identity,
+                        &state,
+                        &expected_frontier.tenant_scope_id,
+                    ) != *expected_frontier
                     {
                         return Ok(BackendAppendOutcome::StaleHead);
                     }
-                    None
                 }
-                TenantFactCoordinate::FactPublication { frontier } => {
-                    let current_order = state
-                        .tenant_fact_heads
-                        .get(&frontier.tenant_scope_id)
-                        .copied()
-                        .unwrap_or(0);
-                    if frontier.store_scope_id != self.identity.store_scope_id
-                        || frontier.store_epoch != self.identity.store_epoch
-                        || current_order.checked_add(1) != Some(frontier.fact_order)
+                TenantFactProjectionPlan::Publish {
+                    expected_predecessor,
+                    publication,
+                } => {
+                    if current_fact_frontier(
+                        &self.identity,
+                        &state,
+                        &expected_predecessor.tenant_scope_id,
+                    ) != *expected_predecessor
+                        || state.tenant_fact_publications.contains_key(&(
+                            publication.frontier.tenant_scope_id.clone(),
+                            publication.frontier.fact_order,
+                        ))
                     {
                         return Ok(BackendAppendOutcome::StaleHead);
                     }
-                    let Some(transition) = committed.records.first() else {
-                        return Err(StructuredStoreError::InvalidHistory);
-                    };
-                    let RunRecord::StateTransitionCommitted(record) = &transition.record else {
-                        return Err(StructuredStoreError::InvalidHistory);
-                    };
-                    if record.facts.is_empty() {
-                        return Err(StructuredStoreError::InvalidHistory);
-                    }
-                    Some(TenantFactPublication {
-                        frontier: frontier.clone(),
-                        transition_ref: transition.record_ref.clone(),
-                    })
                 }
-            };
-            if tenant_fact_publication.as_ref().is_some_and(|publication| {
-                state.tenant_fact_publications.contains_key(&(
-                    publication.frontier.tenant_scope_id.clone(),
-                    publication.frontier.fact_order,
-                ))
-            }) {
-                return Err(StructuredStoreError::InvalidHistory);
             }
-
             state
                 .histories
-                .entry(run_id)
+                .entry(run_id.clone())
                 .or_default()
                 .push(committed.clone());
-            state.appends.insert(append_key, committed.clone());
-            if let Some(publication) = tenant_fact_publication {
-                let tenant_scope_id = publication.frontier.tenant_scope_id.clone();
-                let fact_order = publication.frontier.fact_order;
+            state
+                .projections
+                .insert(run_id, run_plan.successor().clone());
+            if let TenantFactProjectionPlan::Publish { publication, .. } = tenant_plan {
+                let tenant = publication.frontier.tenant_scope_id.clone();
+                let order = publication.frontier.fact_order;
                 state
                     .tenant_fact_publications
-                    .insert((tenant_scope_id.clone(), fact_order), publication);
-                state.tenant_fact_heads.insert(tenant_scope_id, fact_order);
+                    .insert((tenant.clone(), order), publication);
+                state.tenant_fact_heads.insert(tenant, order);
             }
             if std::mem::take(&mut state.acknowledge_next_commit_as_unknown) {
                 Ok(BackendAppendOutcome::AcknowledgementUnknown)
@@ -348,41 +392,47 @@ impl StructuredHistoryBackend for StructuredMemoryBackend {
         })
     }
 
-    fn resolve_append<'a>(
+    fn scan_effect_entry_attention_routes<'a>(
         &'a self,
-        run_id: &'a RunId,
-        append_request_id: &'a AppendRequestId,
-        candidate_digest: &'a ContentDigest,
-    ) -> StructuredBackendFuture<'a, Option<CommittedBatch>> {
+        tenant_scope_id: &'a TenantScopeId,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<super::backend::EffectEntryAttentionRoute>> {
         Box::pin(async move {
+            if maximum_items == 0 {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
             let state = self.lock()?;
             if state.unavailable {
                 return Err(StructuredStoreError::BackendUnavailable);
             }
-            match state
-                .appends
-                .get(&(run_id.clone(), append_request_id.clone()))
-            {
-                Some(batch) if &batch.candidate_digest == candidate_digest => {
-                    Ok(Some(batch.clone()))
-                }
-                Some(_) => Err(StructuredStoreError::AppendConflict),
-                None => Ok(None),
-            }
+            Ok(state
+                .projections
+                .values()
+                .filter(|projection| {
+                    projection.has_effect_entry_attention
+                        && &projection.tenant_scope_id == tenant_scope_id
+                        && after_run_id.is_none_or(|after| &projection.run_id > after)
+                })
+                .take(maximum_items as usize)
+                .map(|projection| super::backend::EffectEntryAttentionRoute {
+                    run_id: projection.run_id.clone(),
+                    journal_head: projection.journal_head.clone(),
+                })
+                .collect())
         })
     }
 }
 
-/// Test-support assembly of an in-memory Runtime and purpose readers.
-#[cfg(any(test, feature = "test-support"))]
-pub fn assemble_in_memory_runtime(
-    identity: super::StructuredStoreIdentity,
-    registry: mfm_certify::structured::CertifiedProgramRegistry,
-    physical_binding_verifier: std::sync::Arc<dyn super::PublicPhysicalBindingVerifier>,
-) -> std::result::Result<
-    super::AssembledStructuredRuntime<StructuredMemoryBackend>,
-    mfm_runtime::history::HistoryError,
-> {
-    let backend = StructuredMemoryBackend::new(identity);
-    super::assemble_structured_runtime(backend, registry, physical_binding_verifier)
+fn current_fact_frontier(
+    identity: &StructuredStoreIdentity,
+    state: &MemoryState,
+    tenant: &TenantScopeId,
+) -> TenantFactFrontier {
+    TenantFactFrontier::new(
+        identity.store_scope_id.clone(),
+        identity.store_epoch,
+        tenant.clone(),
+        state.tenant_fact_heads.get(tenant).copied().unwrap_or(0),
+    )
 }

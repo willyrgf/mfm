@@ -1,17 +1,20 @@
 use std::collections::BTreeMap;
 
+use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, JournalCommitDigest, JournalRecordHash, RunId,
     SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::structured::{
     canonical_json, AssignedRecord, CommittedBatch, HistoryObject, JournalHead, RecordRef,
-    RunRecord, TenantFactCoordinate, TenantFactFrontier,
+    TenantFactCoordinate, TenantFactFrontier,
 };
 use mfm_store::structured::{
-    validate_envelope_frame, BackendAppendOutcome, CanonicalRunAppend, RawRunHistory,
-    StructuredBackendFuture, StructuredHistoryBackend, StructuredStoreError,
-    StructuredStoreIdentity, TenantFactPublication, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
+    AppendAttemptLookup, BackendAppendOutcome, RawRunHistory, RunCurrentProjection,
+    StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot, StructuredStoreError,
+    StructuredStoreIdentity, StructuredStoreRunSnapshot, StructuredStoreSnapshot,
+    TenantFactProjectionPlan, TenantFactProjectionSnapshot, TenantFactPublication,
+    ValidatedRunAppend, MAX_BATCH_OBJECTS, MAX_STORED_FRAME_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
@@ -19,8 +22,6 @@ use sqlx::{Postgres, QueryBuilder, Row, Transaction};
 
 use crate::session::{PostgresApplicationSessions, RoleSession, TargetBinding};
 use crate::sql_catalog::StructuredBatchQuery;
-#[cfg(feature = "test-support")]
-use crate::transaction::await_read_phase_barrier;
 use crate::transaction::{
     begin_read, begin_run_write, lock_run_and_tenant, store_identity_from_binding, LockedWriteTx,
     ReadTx,
@@ -160,28 +161,6 @@ struct StoredObjectRow {
     canonical_json: String,
 }
 
-struct PendingTenantFactPublication {
-    frontier: TenantFactFrontier,
-    transition_ref: RecordRef,
-    predecessor_order: u64,
-}
-
-struct TenantFactRouteSummary {
-    publication_count: u64,
-    minimum_order: Option<u64>,
-    maximum_order: Option<u64>,
-}
-
-impl TenantFactRouteSummary {
-    fn is_dense_through(&self, fact_order: u64) -> bool {
-        self.publication_count == fact_order
-            && match fact_order {
-                0 => self.minimum_order.is_none() && self.maximum_order.is_none(),
-                _ => self.minimum_order == Some(1) && self.maximum_order == Some(fact_order),
-            }
-    }
-}
-
 fn decode_tenant_publication(
     row: &PgRow,
     store_scope_id: &StoreScopeId,
@@ -207,6 +186,11 @@ fn decode_tenant_publication(
         .ok_or_else(|| invalid("structured PostgreSQL publication ordinal is invalid"))?;
     let record_hash = JournalRecordHash::parse(required_text(row, "transition_record_hash")?)
         .map_err(|_| invalid("structured PostgreSQL publication record hash is invalid"))?;
+    let producer_head = JournalHead {
+        run_sequence,
+        commit_digest: JournalCommitDigest::parse(&required_text(row, "head_commit_digest")?)
+            .map_err(|_| invalid("structured PostgreSQL publication head is invalid"))?,
+    };
     Ok(TenantFactPublication {
         frontier: TenantFactFrontier::new(
             store_scope_id.clone(),
@@ -220,6 +204,7 @@ fn decode_tenant_publication(
             ordinal,
             record_hash,
         },
+        producer_head,
     })
 }
 
@@ -230,6 +215,8 @@ pub struct PostgresStructuredHistoryBackend {
     target: TargetBinding,
     identity: StructuredStoreIdentity,
 }
+
+impl mfm_authority_seal::ValidatedAppendConsumerSeal for PostgresStructuredHistoryBackend {}
 
 impl std::fmt::Debug for PostgresStructuredHistoryBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -285,294 +272,171 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
         &self.identity
     }
 
-    fn load<'a>(&'a self, run_id: &'a RunId) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        Box::pin(async move {
-            let mut transaction = self.begin_read().await?;
-            let head_row = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-                   FROM run_history_heads WHERE run_id = $1",
-            )
-            .bind(run_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let indexed_head = head_row
-                .map(|row| {
-                    Ok(JournalHead {
-                        run_sequence: required_sequence(&row, "head_sequence")?,
-                        commit_digest: JournalCommitDigest::parse(&required_text(
-                            &row,
-                            "head_commit_digest",
-                        )?)
-                        .map_err(|_| {
-                            invalid("structured PostgreSQL load head digest is invalid")
-                        })?,
-                    })
-                })
-                .transpose()?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
-            transaction.validate_target(&self.target).await?;
-            let rows = select_batch_rows(
-                transaction.conn(),
-                StructuredBatchQuery::Prefix,
-                run_id,
-                None,
-            )
-            .await?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
-            if rows.is_empty() {
-                if indexed_head.is_some() {
-                    return Err(invalid(
-                        "structured PostgreSQL indexed head has no retained prefix",
-                    ));
-                }
-                transaction.commit_checked(&self.target).await?;
-                return Ok(None);
-            }
-            let mut objects = load_object_rows(transaction.conn(), run_id, None).await?;
-            let mut batches = Vec::with_capacity(rows.len());
-            for row in rows {
-                let sequence = row.run_sequence;
-                let object_rows = objects.remove(&sequence).unwrap_or_default();
-                batches.push(row.reconstruct(object_rows)?);
-            }
-            if !objects.is_empty() {
-                return Err(invalid(
-                    "structured PostgreSQL object rows have no retained batch",
-                ));
-            }
-            if batches.last().map(|batch| batch.head.clone()) != indexed_head {
-                return Err(invalid(
-                    "structured PostgreSQL retained prefix differs from indexed head",
-                ));
-            }
-            transaction.commit_checked(&self.target).await?;
-            Ok(Some(RawRunHistory {
-                run_id: run_id.clone(),
-                batches,
-            }))
-        })
-    }
-
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, mfm_store::structured::StructuredRunSnapshot> {
+    ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
         Box::pin(async move {
             let mut transaction = self.begin_read().await?;
-            // The indexed head is deliberately the first decision-bearing query. All subsequent
-            // batch/object reads belong to this same repeatable snapshot.
-            let head_row = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-                   FROM run_history_heads WHERE run_id = $1",
-            )
-            .bind(run_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let head = head_row
-                .map(|row| {
-                    Ok(JournalHead {
-                        run_sequence: required_sequence(&row, "head_sequence")?,
-                        commit_digest: JournalCommitDigest::parse(&required_text(
-                            &row,
-                            "head_commit_digest",
-                        )?)
-                        .map_err(|_| {
-                            invalid("structured PostgreSQL snapshot head digest is invalid")
-                        })?,
-                    })
-                })
-                .transpose()?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
-            transaction.validate_target(&self.target).await?;
-            let rows = select_batch_rows(
+            let snapshot = load_run_snapshot(
                 transaction.conn(),
-                StructuredBatchQuery::Prefix,
                 run_id,
-                None,
+                &self.identity,
+                self.target.schema_name(),
             )
             .await?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
-            let history = if rows.is_empty() {
-                None
-            } else {
-                let mut objects = load_object_rows(transaction.conn(), run_id, None).await?;
-                let mut batches = Vec::with_capacity(rows.len());
-                for row in rows {
-                    let sequence = row.run_sequence;
-                    let object_rows = objects.remove(&sequence).unwrap_or_default();
-                    batches.push(row.reconstruct(object_rows)?);
-                }
-                if !objects.is_empty() {
-                    return Err(invalid(
-                        "structured PostgreSQL snapshot objects have no retained batch",
-                    ));
-                }
-                let loaded_head = batches.last().map(|batch| batch.head.clone());
-                if loaded_head != head {
-                    return Err(invalid(
-                        "structured PostgreSQL snapshot head differs from retained prefix",
-                    ));
-                }
-                Some(RawRunHistory {
-                    run_id: run_id.clone(),
-                    batches,
-                })
-            };
-            if history.is_none() && head.is_some() {
-                return Err(invalid(
-                    "structured PostgreSQL snapshot head has no retained prefix",
-                ));
-            }
             transaction.commit_checked(&self.target).await?;
-            Ok(mfm_store::structured::StructuredRunSnapshot { history, head })
+            Ok(snapshot)
         })
     }
 
-    fn current_head<'a>(
+    fn current_run_projection<'a>(
         &'a self,
         run_id: &'a RunId,
-    ) -> StructuredBackendFuture<'a, Option<JournalHead>> {
+    ) -> StructuredBackendFuture<'a, Option<RunCurrentProjection>> {
         Box::pin(async move {
             let mut transaction = self.begin_read().await?;
             let row = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
+                "SELECT head_sequence::text AS head_sequence, head_commit_digest, \
+                        tenant_scope_id, has_effect_entry_attention, store_scope_id, \
+                        store_epoch::text AS store_epoch \
                    FROM run_history_heads WHERE run_id = $1",
             )
             .bind(run_id.as_str())
             .fetch_optional(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let head = row
-                .map(|row| {
-                    Ok(JournalHead {
-                        run_sequence: required_sequence(&row, "head_sequence")?,
-                        commit_digest: JournalCommitDigest::parse(&required_text(
-                            &row,
-                            "head_commit_digest",
-                        )?)
-                        .map_err(|_| invalid("structured PostgreSQL head digest is invalid"))?,
-                    })
-                })
+            let projection = row
+                .map(|row| decode_run_projection(&row, run_id, &self.identity))
                 .transpose()?;
             transaction.validate_target(&self.target).await?;
             transaction.commit_checked(&self.target).await?;
-            Ok(head)
+            Ok(projection)
         })
     }
 
     fn load_prefix<'a>(
         &'a self,
         run_id: &'a RunId,
-        through_sequence: u64,
+        through: &'a JournalHead,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
-            if through_sequence == 0 {
+            if through.run_sequence == 0 {
                 return Err(invalid(
                     "structured PostgreSQL prefix sequence must be positive",
                 ));
             }
             let mut transaction = self.begin_read().await?;
-            // Establish the repeatable-read snapshot with the indexed head before
-            // reading the requested prefix or its objects.
-            let head_row = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-                   FROM run_history_heads WHERE run_id = $1",
+            let history = load_exact_prefix(transaction.conn(), run_id, through).await?;
+            transaction.commit_checked(&self.target).await?;
+            Ok(history)
+        })
+    }
+
+    fn lookup_append_attempt<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        append_request_id: &'a AppendRequestId,
+    ) -> StructuredBackendFuture<'a, Option<AppendAttemptLookup>> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            let rows = select_batch_rows(
+                transaction.conn(),
+                StructuredBatchQuery::ByAppendRequest,
+                run_id,
+                Some(append_request_id.as_str()),
             )
-            .bind(run_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let indexed_head = head_row
-                .map(|row| {
-                    Ok(JournalHead {
-                        run_sequence: required_sequence(&row, "head_sequence")?,
-                        commit_digest: JournalCommitDigest::parse(&required_text(
-                            &row,
-                            "head_commit_digest",
-                        )?)
-                        .map_err(|_| {
-                            invalid("structured PostgreSQL prefix head digest is invalid")
-                        })?,
-                    })
-                })
-                .transpose()?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_head").await;
-            transaction.validate_target(&self.target).await?;
-            let rows = sqlx::query(
-                "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
-                        candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
-                        predecessor_commit_digest, head_commit_digest, batch_envelope_json \
-                   FROM run_history_batches \
-                  WHERE run_id = $1 AND run_sequence <= $2::numeric \
-                  ORDER BY run_history_batches.run_sequence",
-            )
-            .bind(run_id.as_str())
-            .bind(through_sequence.to_string())
-            .fetch_all(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?
-            .iter()
-            .map(StoredBatchRow::decode)
-            .collect::<Result<Vec<_>, _>>()?;
-            #[cfg(feature = "test-support")]
-            await_read_phase_barrier(self.target.schema_name(), "after_batches").await;
-            if rows.is_empty() {
-                transaction.commit_checked(&self.target).await?;
-                return Ok(None);
+            .await?;
+            let history = match exactly_one_or_none(rows)? {
+                Some(row) => {
+                    let through = JournalHead {
+                        run_sequence: row.run_sequence,
+                        commit_digest: JournalCommitDigest::parse(&row.head_commit_digest)
+                            .map_err(|_| invalid("PostgreSQL append head is invalid"))?,
+                    };
+                    load_exact_prefix(transaction.conn(), run_id, &through)
+                        .await?
+                        .map(|history| AppendAttemptLookup { history })
+                }
+                None => None,
+            };
+            transaction.commit_checked(&self.target).await?;
+            Ok(history)
+        })
+    }
+
+    fn scan_run_ids<'a>(
+        &'a self,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<RunId>> {
+        Box::pin(async move {
+            if maximum_items == 0 {
+                return Err(invalid("PostgreSQL run page is empty"));
             }
-            let mut objects =
-                load_object_rows_through(transaction.conn(), run_id, through_sequence).await?;
-            let mut batches = Vec::with_capacity(rows.len());
-            for row in rows {
-                let sequence = row.run_sequence;
-                let object_rows = objects.remove(&sequence).unwrap_or_default();
-                batches.push(row.reconstruct(object_rows)?);
+            let mut transaction = self.begin_read().await?;
+            let rows = select_run_ids(transaction.conn(), after_run_id, maximum_items).await?;
+            transaction.commit_checked(&self.target).await?;
+            Ok(rows)
+        })
+    }
+
+    fn load_store_snapshot(&self) -> StructuredBackendFuture<'_, StructuredStoreSnapshot> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            let mut runs = Vec::new();
+            let mut after = None;
+            loop {
+                let page = select_run_ids(transaction.conn(), after.as_ref(), 256).await?;
+                for run_id in &page {
+                    let snapshot = load_run_snapshot(
+                        transaction.conn(),
+                        run_id,
+                        &self.identity,
+                        self.target.schema_name(),
+                    )
+                    .await?;
+                    runs.push(StructuredStoreRunSnapshot {
+                        run_id: run_id.clone(),
+                        history: snapshot.history,
+                        current_projection: snapshot.current_projection,
+                    });
+                }
+                after = page.last().cloned();
+                if page.len() < 256 {
+                    break;
+                }
             }
-            if !objects.is_empty() {
-                return Err(invalid(
-                    "structured PostgreSQL prefix objects have no retained batch",
-                ));
-            }
-            let loaded_head = batches
-                .last()
-                .map(|batch| batch.head.clone())
-                .ok_or_else(|| invalid("structured PostgreSQL prefix has no retained batch"))?;
-            if batches
-                .first()
-                .is_none_or(|batch| batch.head.run_sequence != 1)
-                || batches.windows(2).any(|pair| {
-                    pair[1].head.run_sequence != pair[0].head.run_sequence.saturating_add(1)
-                })
-            {
-                return Err(invalid(
-                    "structured PostgreSQL prefix is not a dense retained sequence",
-                ));
-            }
-            let expected_sequence = through_sequence.min(
-                indexed_head
-                    .as_ref()
-                    .map_or(through_sequence, |head| head.run_sequence),
-            );
-            if loaded_head.run_sequence != expected_sequence
-                || (through_sequence >= indexed_head.as_ref().map_or(0, |head| head.run_sequence)
-                    && Some(loaded_head.clone()) != indexed_head)
-            {
-                return Err(invalid(
-                    "structured PostgreSQL prefix differs from indexed head",
-                ));
+            let mut tenant_facts = Vec::new();
+            let mut after_tenant = None;
+            loop {
+                let page =
+                    select_fact_tenants(transaction.conn(), after_tenant.as_ref(), 256).await?;
+                for tenant_scope_id in &page {
+                    tenant_facts.push(
+                        load_fact_projection(
+                            transaction.conn(),
+                            &self.identity,
+                            tenant_scope_id.clone(),
+                        )
+                        .await?,
+                    );
+                }
+                after_tenant = page.last().cloned();
+                if page.len() < 256 {
+                    break;
+                }
             }
             transaction.commit_checked(&self.target).await?;
-            Ok(Some(RawRunHistory {
-                run_id: run_id.clone(),
-                batches,
-            }))
+            Ok(StructuredStoreSnapshot { runs, tenant_facts })
+        })
+    }
+
+    fn validate_authority(&self) -> StructuredBackendFuture<'_, ()> {
+        Box::pin(async move {
+            let mut transaction = self.begin_read().await?;
+            transaction.validate_target(&self.target).await?;
+            transaction.commit_checked(&self.target).await
         })
     }
 
@@ -582,50 +446,35 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
     ) -> StructuredBackendFuture<'a, TenantFactFrontier> {
         Box::pin(async move {
             let mut transaction = self.begin_read().await?;
-            let rows = sqlx::query(
-                "SELECT store_scope_id, store_epoch::text AS store_epoch, \
-                        tenant_scope_id, fact_order::text AS fact_order, \
-                        publication_count::text AS publication_count, \
-                        minimum_order::text AS minimum_order, \
-                        maximum_order::text AS maximum_order \
-                   FROM tenant_fact_heads WHERE tenant_scope_id = $1",
+            let head = sqlx::query_scalar::<_, String>(
+                "SELECT fact_order::text FROM tenant_fact_heads \
+                  WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
+                    AND tenant_scope_id = $3",
             )
+            .bind(self.identity.store_scope_id.as_str())
+            .bind(self.identity.store_epoch.get().to_string())
             .bind(tenant_scope_id.as_str())
-            .fetch_all(&mut **transaction.conn())
+            .fetch_optional(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let fact_order = match rows.as_slice() {
-                [] => 0,
-                [row]
-                    if required_text(row, "store_scope_id")?
-                        == self.identity.store_scope_id.as_str()
-                        && required_text(row, "store_epoch")?
-                            == self.identity.store_epoch.get().to_string()
-                        && required_text(row, "tenant_scope_id")? == tenant_scope_id.as_str() =>
-                {
-                    let order = parse_fact_order(&required_text(row, "fact_order")?, true)?;
-                    let summary = TenantFactRouteSummary {
-                        publication_count: parse_fact_order(
-                            &required_text(row, "publication_count")?,
-                            true,
-                        )?,
-                        minimum_order: optional_text(row, "minimum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                        maximum_order: optional_text(row, "maximum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                    };
-                    if !summary.is_dense_through(order) {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head differs from dense routes",
-                        ));
-                    }
-                    order
-                }
+            let latest_route = sqlx::query_scalar::<_, String>(
+                "SELECT fact_order::text FROM tenant_fact_publications \
+                  WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
+                    AND tenant_scope_id = $3 \
+                  ORDER BY fact_order DESC LIMIT 1",
+            )
+            .bind(self.identity.store_scope_id.as_str())
+            .bind(self.identity.store_epoch.get().to_string())
+            .bind(tenant_scope_id.as_str())
+            .fetch_optional(&mut **transaction.conn())
+            .await
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            let fact_order = match (head, latest_route) {
+                (None, None) => 0,
+                (Some(head), Some(latest)) if head == latest => parse_fact_order(&head, false)?,
                 _ => {
                     return Err(invalid(
-                        "structured PostgreSQL tenant fact head changed store identity",
+                        "structured PostgreSQL tenant fact head differs from its latest route",
                     ));
                 }
             };
@@ -657,76 +506,15 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 return Ok(Vec::new());
             }
             let mut transaction = self.begin_read().await?;
-            let indexed_head = sqlx::query(
-                "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
-                        fact_order::text AS fact_order, publication_count::text AS publication_count, \
-                        minimum_order::text AS minimum_order, maximum_order::text AS maximum_order \
-                   FROM tenant_fact_heads WHERE tenant_scope_id = $1",
+            let rows = select_fact_publication_rows(
+                transaction.conn(),
+                &self.identity,
+                tenant_scope_id,
+                first_order,
+                through_order,
+                maximum_items,
             )
-            .bind(tenant_scope_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            transaction.validate_target(&self.target).await?;
-            let indexed_order = indexed_head
-                .as_ref()
-                .map(|row| {
-                    if required_text(row, "store_scope_id")?
-                        != self.identity.store_scope_id.as_str()
-                        || required_text(row, "store_epoch")?
-                            != self.identity.store_epoch.get().to_string()
-                        || required_text(row, "tenant_scope_id")? != tenant_scope_id.as_str()
-                    {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head changed store identity",
-                        ));
-                    }
-                    let order = parse_fact_order(&required_text(row, "fact_order")?, true)?;
-                    let summary = TenantFactRouteSummary {
-                        publication_count: parse_fact_order(
-                            &required_text(row, "publication_count")?,
-                            true,
-                        )?,
-                        minimum_order: optional_text(row, "minimum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                        maximum_order: optional_text(row, "maximum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                    };
-                    if !summary.is_dense_through(order) {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head differs from dense routes",
-                        ));
-                    }
-                    Ok(order)
-                })
-                .transpose()?;
-            let Some(_indexed_order) = indexed_order else {
-                let rows = Vec::new();
-                transaction.commit_checked(&self.target).await?;
-                return Ok(rows);
-            };
-            let rows = sqlx::query(
-                "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
-                        fact_order::text AS fact_order, run_id, \
-                        run_sequence::text AS run_sequence, transition_ordinal, \
-                        transition_record_hash \
-                   FROM tenant_fact_publications \
-                  WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
-                    AND tenant_scope_id = $3 \
-                    AND fact_order >= $4::numeric AND fact_order <= $5::numeric \
-                  ORDER BY fact_order LIMIT $6",
-            )
-            .bind(self.identity.store_scope_id.as_str())
-            .bind(self.identity.store_epoch.get().to_string())
-            .bind(tenant_scope_id.as_str())
-            .bind(first_order.to_string())
-            .bind(through_order.to_string())
-            .bind(i64::from(maximum_items))
-            .fetch_all(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+            .await?;
             let mut publications = Vec::with_capacity(rows.len());
             for row in rows {
                 publications.push(decode_tenant_publication(
@@ -743,42 +531,56 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
 
     fn append<'a>(
         &'a self,
-        batch: CanonicalRunAppend,
+        command: ValidatedRunAppend,
     ) -> StructuredBackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
-            if !batch.is_store_verified() {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-            let committed = batch.into_committed();
+            let (committed, run_plan, tenant_plan) = command.into_parts(self);
             if committed.store_scope_id != self.identity.store_scope_id
                 || committed.store_epoch != self.identity.store_epoch
             {
-                return Err(StructuredStoreError::StaleHead);
+                return Ok(BackendAppendOutcome::StaleHead);
             }
-            let run_id = committed
-                .records
-                .first()
-                .ok_or_else(|| invalid("validated PostgreSQL batch has no record"))?
-                .record_ref
-                .run_id
-                .clone();
-            if committed
-                .records
-                .iter()
-                .any(|record| record.record_ref.run_id != run_id)
+            let run_id = run_plan.successor().run_id.clone();
+            if committed.records.is_empty()
+                || committed
+                    .records
+                    .iter()
+                    .any(|record| record.record_ref.run_id != run_id)
+                || run_plan.successor().journal_head != committed.head
+                || run_plan
+                    .expected()
+                    .map(|projection| &projection.journal_head)
+                    != committed.predecessor.as_ref()
             {
-                return Err(invalid("validated PostgreSQL batch spans runs"));
+                return Err(invalid("validated PostgreSQL run plan is incoherent"));
             }
             let envelope = StoredBatchEnvelope::from_batch(&committed)?;
             let canonical_envelope = canonical_json(&envelope)
                 .map_err(|_| invalid("validated PostgreSQL batch envelope is not canonical"))?;
-            validate_envelope_frame(canonical_envelope.as_str())?;
+            validate_stored_frame(canonical_envelope.as_str())?;
 
-            let tenant_lock_key = match &committed.tenant_fact_coordinate {
-                TenantFactCoordinate::None => None,
-                TenantFactCoordinate::FactPublication { frontier }
-                | TenantFactCoordinate::FactSelectionBarrier { frontier } => {
-                    Some(frontier.tenant_scope_id.as_str())
+            let tenant_lock_key = match &tenant_plan {
+                TenantFactProjectionPlan::None => None,
+                TenantFactProjectionPlan::Barrier { expected_frontier } => {
+                    Some(expected_frontier.tenant_scope_id.as_str())
+                }
+                TenantFactProjectionPlan::Publish {
+                    expected_predecessor,
+                    publication,
+                } => {
+                    if publication.frontier.store_scope_id != self.identity.store_scope_id
+                        || publication.frontier.store_epoch != self.identity.store_epoch
+                        || publication.frontier.tenant_scope_id
+                            != expected_predecessor.tenant_scope_id
+                        || publication.frontier.fact_order
+                            != expected_predecessor
+                                .fact_order
+                                .checked_add(1)
+                                .ok_or_else(|| invalid("tenant fact order overflowed"))?
+                    {
+                        return Err(invalid("validated PostgreSQL fact plan is incoherent"));
+                    }
+                    Some(expected_predecessor.tenant_scope_id.as_str())
                 }
             };
             let mut transaction = self
@@ -805,173 +607,40 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 }
                 transaction.rollback().await?;
                 return if existing == committed {
-                    // Reuse the same exact-key reconstruction used after a
-                    // contention rollback. It acknowledges the run and, for
-                    // a fact publication, its tenant successor as one set.
-                    self.classify_existing_after_contention(&run_id, &committed)
-                        .await
+                    Ok(BackendAppendOutcome::ExistingSame(existing))
                 } else {
                     Err(StructuredStoreError::AppendConflict)
                 };
             }
 
-            let head = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-                   FROM run_history_heads WHERE run_id = $1 FOR UPDATE",
-            )
-            .bind(run_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
-            .await
-            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            let predecessor_matches = match (head.as_ref(), committed.predecessor.as_ref()) {
-                (None, None) => true,
-                (Some(row), Some(predecessor)) => {
-                    row.try_get::<String, _>("head_sequence").ok().as_deref()
-                        == Some(predecessor.run_sequence.to_string().as_str())
-                        && row
-                            .try_get::<String, _>("head_commit_digest")
-                            .ok()
-                            .as_deref()
-                            == Some(predecessor.commit_digest.as_str())
-                }
-                _ => false,
-            };
-            if !predecessor_matches {
+            let current_projection =
+                load_locked_run_projection(transaction.conn(), &run_id, &self.identity).await?;
+            if current_projection.as_ref() != run_plan.expected() {
                 transaction.rollback().await?;
                 return Ok(BackendAppendOutcome::StaleHead);
             }
-            let pending_tenant_publication = match &committed.tenant_fact_coordinate {
-                TenantFactCoordinate::None => None,
-                TenantFactCoordinate::FactPublication { frontier }
-                | TenantFactCoordinate::FactSelectionBarrier { frontier } => {
-                    if frontier.store_scope_id != self.identity.store_scope_id
-                        || frontier.store_epoch != self.identity.store_epoch
+            match &tenant_plan {
+                TenantFactProjectionPlan::None => {}
+                TenantFactProjectionPlan::Barrier { expected_frontier }
+                | TenantFactProjectionPlan::Publish {
+                    expected_predecessor: expected_frontier,
+                    ..
+                } => {
+                    if expected_frontier.store_scope_id != self.identity.store_scope_id
+                        || expected_frontier.store_epoch != self.identity.store_epoch
+                        || load_locked_fact_frontier(
+                            transaction.conn(),
+                            &self.identity,
+                            &expected_frontier.tenant_scope_id,
+                        )
+                        .await?
+                            != *expected_frontier
                     {
                         transaction.rollback().await?;
                         return Ok(BackendAppendOutcome::StaleHead);
                     }
-                    sqlx::query(
-                        "INSERT INTO tenant_fact_heads ( \
-                            store_scope_id, store_epoch, tenant_scope_id, fact_order, \
-                            publication_count, minimum_order, maximum_order \
-                         ) VALUES ($1, $2::numeric, $3, 0, 0, NULL, NULL) \
-                         ON CONFLICT DO NOTHING",
-                    )
-                    .bind(self.identity.store_scope_id.as_str())
-                    .bind(self.identity.store_epoch.get().to_string())
-                    .bind(frontier.tenant_scope_id.as_str())
-                    .execute(&mut **transaction.conn())
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-                    let rows = sqlx::query(
-                        "SELECT store_scope_id, store_epoch::text AS store_epoch, \
-                                tenant_scope_id, fact_order::text AS fact_order, \
-                                publication_count::text AS publication_count, \
-                                minimum_order::text AS minimum_order, \
-                                maximum_order::text AS maximum_order \
-                           FROM tenant_fact_heads WHERE tenant_scope_id = $1 FOR UPDATE",
-                    )
-                    .bind(frontier.tenant_scope_id.as_str())
-                    .fetch_all(&mut **transaction.conn())
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-                    let [head] = rows.as_slice() else {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head is not unique",
-                        ));
-                    };
-                    if required_text(head, "store_scope_id")?
-                        != self.identity.store_scope_id.as_str()
-                        || required_text(head, "store_epoch")?
-                            != self.identity.store_epoch.get().to_string()
-                        || required_text(head, "tenant_scope_id")?
-                            != frontier.tenant_scope_id.as_str()
-                    {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head changed identity",
-                        ));
-                    }
-                    let current_order =
-                        parse_fact_order(&required_text(head, "fact_order")?, true)?;
-                    let route_summary = TenantFactRouteSummary {
-                        publication_count: parse_fact_order(
-                            &required_text(head, "publication_count")?,
-                            true,
-                        )?,
-                        minimum_order: optional_text(head, "minimum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                        maximum_order: optional_text(head, "maximum_order")?
-                            .map(|value| parse_fact_order(&value, false))
-                            .transpose()?,
-                    };
-                    if !route_summary.is_dense_through(current_order) {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head differs from dense routes",
-                        ));
-                    }
-                    // Indexed probe: reject retained publications beyond the locked head without
-                    // scanning lifetime aggregates.
-                    let ahead = sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS ( \
-                             SELECT 1 FROM tenant_fact_publications \
-                              WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
-                                AND tenant_scope_id = $3 AND fact_order > $4::numeric \
-                         )",
-                    )
-                    .bind(self.identity.store_scope_id.as_str())
-                    .bind(self.identity.store_epoch.get().to_string())
-                    .bind(frontier.tenant_scope_id.as_str())
-                    .bind(current_order.to_string())
-                    .fetch_one(&mut **transaction.conn())
-                    .await
-                    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-                    if ahead {
-                        return Err(invalid(
-                            "structured PostgreSQL tenant fact head lags retained publications",
-                        ));
-                    }
-                    match &committed.tenant_fact_coordinate {
-                        TenantFactCoordinate::FactSelectionBarrier { .. } => {
-                            if frontier.fact_order != current_order {
-                                transaction.rollback().await?;
-                                return Ok(BackendAppendOutcome::StaleHead);
-                            }
-                            None
-                        }
-                        TenantFactCoordinate::FactPublication { .. } => {
-                            if current_order.checked_add(1) != Some(frontier.fact_order) {
-                                transaction.rollback().await?;
-                                return Ok(BackendAppendOutcome::StaleHead);
-                            }
-                            let transition = committed.records.first().ok_or_else(|| {
-                                invalid("structured PostgreSQL publication has no transition")
-                            })?;
-                            let RunRecord::StateTransitionCommitted(record) = &transition.record
-                            else {
-                                return Err(invalid(
-                                    "structured PostgreSQL publication route is not a transition",
-                                ));
-                            };
-                            if record.facts.is_empty() {
-                                return Err(invalid(
-                                    "structured PostgreSQL publication transition has no facts",
-                                ));
-                            }
-                            Some(PendingTenantFactPublication {
-                                frontier: frontier.clone(),
-                                transition_ref: transition.record_ref.clone(),
-                                predecessor_order: current_order,
-                            })
-                        }
-                        TenantFactCoordinate::None => {
-                            return Err(invalid(
-                                "structured PostgreSQL tenant coordinate changed while locked",
-                            ));
-                        }
-                    }
                 }
-            };
+            }
 
             let predecessor_sequence = committed
                 .predecessor
@@ -1001,8 +670,6 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             .await;
             if let Err(error) = batch_insert {
                 if is_contention_sqlstate(&error) {
-                    // Every failed SQL transaction is rolled back before classification. A
-                    // connection in the aborted state cannot safely issue the deciding query.
                     transaction.rollback().await?;
                     return self
                         .classify_existing_after_contention(&run_id, &committed)
@@ -1018,21 +685,28 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             )
             .await?;
 
-            let affected = if let Some(predecessor) = &committed.predecessor {
+            let successor = run_plan.successor();
+            let affected = if let Some(expected) = run_plan.expected() {
                 sqlx::query(
                     "UPDATE run_history_heads \
-                        SET head_sequence = $2::numeric, head_commit_digest = $3 \
+                        SET head_sequence = $2::numeric, head_commit_digest = $3, \
+                            tenant_scope_id = $8, has_effect_entry_attention = $9 \
                       WHERE run_id = $1 \
                         AND head_sequence = $4::numeric AND head_commit_digest = $5 \
-                        AND store_scope_id = $6 AND store_epoch = $7::numeric",
+                        AND store_scope_id = $6 AND store_epoch = $7::numeric \
+                        AND tenant_scope_id = $10 AND has_effect_entry_attention = $11",
                 )
                 .bind(run_id.as_str())
-                .bind(committed.head.run_sequence.to_string())
-                .bind(committed.head.commit_digest.as_str())
-                .bind(predecessor.run_sequence.to_string())
-                .bind(predecessor.commit_digest.as_str())
+                .bind(successor.journal_head.run_sequence.to_string())
+                .bind(successor.journal_head.commit_digest.as_str())
+                .bind(expected.journal_head.run_sequence.to_string())
+                .bind(expected.journal_head.commit_digest.as_str())
                 .bind(self.identity.store_scope_id.as_str())
                 .bind(self.identity.store_epoch.get().to_string())
+                .bind(successor.tenant_scope_id.as_str())
+                .bind(successor.has_effect_entry_attention)
+                .bind(expected.tenant_scope_id.as_str())
+                .bind(expected.has_effect_entry_attention)
                 .execute(&mut **transaction.conn())
                 .await
                 .map_err(|_| StructuredStoreError::BackendUnavailable)?
@@ -1040,14 +714,17 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             } else {
                 match sqlx::query(
                     "INSERT INTO run_history_heads ( \
-                        run_id, store_scope_id, store_epoch, head_sequence, head_commit_digest \
-                     ) VALUES ($1, $2, $3::numeric, $4::numeric, $5)",
+                        run_id, store_scope_id, store_epoch, tenant_scope_id, \
+                        head_sequence, head_commit_digest, has_effect_entry_attention \
+                     ) VALUES ($1, $2, $3::numeric, $4, $5::numeric, $6, $7)",
                 )
                 .bind(run_id.as_str())
                 .bind(self.identity.store_scope_id.as_str())
                 .bind(self.identity.store_epoch.get().to_string())
-                .bind(committed.head.run_sequence.to_string())
-                .bind(committed.head.commit_digest.as_str())
+                .bind(successor.tenant_scope_id.as_str())
+                .bind(successor.journal_head.run_sequence.to_string())
+                .bind(successor.journal_head.commit_digest.as_str())
+                .bind(successor.has_effect_entry_attention)
                 .execute(&mut **transaction.conn())
                 .await
                 {
@@ -1060,11 +737,15 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 }
             };
             if affected != 1 {
-                // Under the run advisory lock this is a lost CAS race, not unavailability.
                 transaction.rollback().await?;
                 return Ok(BackendAppendOutcome::StaleHead);
             }
-            if let Some(publication) = pending_tenant_publication {
+
+            if let TenantFactProjectionPlan::Publish {
+                expected_predecessor,
+                publication,
+            } = tenant_plan
+            {
                 let inserted = match sqlx::query(
                     "INSERT INTO tenant_fact_publications ( \
                         store_scope_id, store_epoch, tenant_scope_id, fact_order, \
@@ -1078,9 +759,8 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                 .bind(publication.transition_ref.run_id.as_str())
                 .bind(publication.transition_ref.run_sequence.to_string())
                 .bind(
-                    i32::try_from(publication.transition_ref.ordinal).map_err(|_| {
-                        invalid("structured PostgreSQL publication ordinal exceeds i32")
-                    })?,
+                    i32::try_from(publication.transition_ref.ordinal)
+                        .map_err(|_| invalid("PostgreSQL publication ordinal exceeds i32"))?,
                 )
                 .bind(publication.transition_ref.record_hash.as_str())
                 .execute(&mut **transaction.conn())
@@ -1093,30 +773,48 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
                     }
                     Err(_) => return Err(StructuredStoreError::BackendUnavailable),
                 };
-                let advanced = sqlx::query(
-                    "UPDATE tenant_fact_heads \
-                        SET fact_order = $4::numeric, \
-                            publication_count = $4::numeric, \
-                            minimum_order = 1, \
-                            maximum_order = $4::numeric \
-                      WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
-                        AND tenant_scope_id = $3 AND fact_order = $5::numeric \
-                        AND publication_count = $5::numeric",
-                )
-                .bind(self.identity.store_scope_id.as_str())
-                .bind(self.identity.store_epoch.get().to_string())
-                .bind(publication.frontier.tenant_scope_id.as_str())
-                .bind(publication.frontier.fact_order.to_string())
-                .bind(publication.predecessor_order.to_string())
-                .execute(&mut **transaction.conn())
-                .await
-                .map_err(|_| StructuredStoreError::BackendUnavailable)?
-                .rows_affected();
+                let advanced = if expected_predecessor.fact_order == 0 {
+                    match sqlx::query(
+                        "INSERT INTO tenant_fact_heads ( \
+                            store_scope_id, store_epoch, tenant_scope_id, fact_order \
+                         ) VALUES ($1, $2::numeric, $3, $4::numeric)",
+                    )
+                    .bind(self.identity.store_scope_id.as_str())
+                    .bind(self.identity.store_epoch.get().to_string())
+                    .bind(publication.frontier.tenant_scope_id.as_str())
+                    .bind(publication.frontier.fact_order.to_string())
+                    .execute(&mut **transaction.conn())
+                    .await
+                    {
+                        Ok(result) => result.rows_affected(),
+                        Err(error) if is_contention_sqlstate(&error) => {
+                            transaction.rollback().await?;
+                            return Ok(BackendAppendOutcome::StaleHead);
+                        }
+                        Err(_) => return Err(StructuredStoreError::BackendUnavailable),
+                    }
+                } else {
+                    sqlx::query(
+                        "UPDATE tenant_fact_heads SET fact_order = $4::numeric \
+                          WHERE store_scope_id = $1 AND store_epoch = $2::numeric \
+                            AND tenant_scope_id = $3 AND fact_order = $5::numeric",
+                    )
+                    .bind(self.identity.store_scope_id.as_str())
+                    .bind(self.identity.store_epoch.get().to_string())
+                    .bind(publication.frontier.tenant_scope_id.as_str())
+                    .bind(publication.frontier.fact_order.to_string())
+                    .bind(expected_predecessor.fact_order.to_string())
+                    .execute(&mut **transaction.conn())
+                    .await
+                    .map_err(|_| StructuredStoreError::BackendUnavailable)?
+                    .rows_affected()
+                };
                 if inserted != 1 || advanced != 1 {
                     transaction.rollback().await?;
                     return Ok(BackendAppendOutcome::StaleHead);
                 }
             }
+
             match transaction.commit_outcome(&self.target).await? {
                 crate::transaction::CommitOutcome::Committed => {
                     Ok(BackendAppendOutcome::NewlyCommitted(committed))
@@ -1127,61 +825,374 @@ impl StructuredHistoryBackend for PostgresStructuredHistoryBackend {
             }
         })
     }
-
-    fn resolve_append<'a>(
+    fn scan_effect_entry_attention_routes<'a>(
         &'a self,
-        run_id: &'a RunId,
-        append_request_id: &'a AppendRequestId,
-        candidate_digest: &'a ContentDigest,
-    ) -> StructuredBackendFuture<'a, Option<CommittedBatch>> {
+        tenant_scope_id: &'a mfm_ids::TenantScopeId,
+        after_run_id: Option<&'a RunId>,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<mfm_store::structured::EffectEntryAttentionRoute>> {
         Box::pin(async move {
+            // Exactly the partial index: tenant equality, keyset continuation by
+            // run identity, and the attention predicate. No record family,
+            // frontier, or outcome is consulted.
             let mut transaction = self.begin_read().await?;
-            let head_row = sqlx::query(
-                "SELECT head_sequence::text AS head_sequence, head_commit_digest \
-                   FROM run_history_heads WHERE run_id = $1",
+            let rows = sqlx::query(
+                "SELECT run_id, head_sequence::text AS head_sequence, head_commit_digest \
+                   FROM run_history_heads \
+                  WHERE has_effect_entry_attention \
+                    AND tenant_scope_id = $1 \
+                    AND ($2::text IS NULL OR run_id > $2::text) \
+                  ORDER BY run_id \
+                  LIMIT $3::bigint",
             )
-            .bind(run_id.as_str())
-            .fetch_optional(&mut **transaction.conn())
+            .bind(tenant_scope_id.as_str())
+            .bind(after_run_id.map(mfm_ids::RunId::as_str))
+            .bind(i64::from(maximum_items))
+            .fetch_all(&mut **transaction.conn())
             .await
             .map_err(|_| StructuredStoreError::BackendUnavailable)?;
-            // The head row is read first so it establishes this repeatable-read
-            // snapshot before the append-request lookup below; the resolution
-            // itself is keyed by append request, not by head.
-            drop(head_row);
-            transaction.validate_target(&self.target).await?;
-            let rows = select_batch_rows(
-                transaction.conn(),
-                StructuredBatchQuery::ByAppendRequest,
-                run_id,
-                Some(append_request_id.as_str()),
-            )
-            .await?;
-            let Some(row) = exactly_one_or_none(rows)? else {
-                transaction.commit_checked(&self.target).await?;
-                return Ok(None);
-            };
-            let sequence = row.run_sequence;
-            let mut object_rows =
-                load_object_rows(transaction.conn(), run_id, Some(sequence)).await?;
-            let batch = row.reconstruct(object_rows.remove(&sequence).unwrap_or_default())?;
-            if !object_rows.is_empty() {
-                return Err(invalid(
-                    "structured PostgreSQL resolved objects differ from their batch",
-                ));
-            }
-            if batch.append_request_id != *append_request_id
-                || batch.candidate_digest != *candidate_digest
-                || batch
-                    .records
-                    .first()
-                    .is_none_or(|record| record.record_ref.run_id != *run_id)
-            {
-                return Err(StructuredStoreError::AppendConflict);
-            }
             transaction.commit_checked(&self.target).await?;
-            Ok(Some(batch))
+            rows.into_iter()
+                .map(|row| {
+                    Ok(mfm_store::structured::EffectEntryAttentionRoute {
+                        run_id: RunId::parse(&required_text(&row, "run_id")?).map_err(|_| {
+                            invalid("structured PostgreSQL attention route run id is invalid")
+                        })?,
+                        journal_head: JournalHead {
+                            run_sequence: required_sequence(&row, "head_sequence")?,
+                            commit_digest: JournalCommitDigest::parse(&required_text(
+                                &row,
+                                "head_commit_digest",
+                            )?)
+                            .map_err(|_| {
+                                invalid("structured PostgreSQL attention route head is invalid")
+                            })?,
+                        },
+                    })
+                })
+                .collect()
         })
     }
+}
+
+fn decode_run_projection(
+    row: &PgRow,
+    run_id: &RunId,
+    identity: &StructuredStoreIdentity,
+) -> Result<RunCurrentProjection, StructuredStoreError> {
+    if required_text(row, "store_scope_id")? != identity.store_scope_id.as_str()
+        || required_text(row, "store_epoch")? != identity.store_epoch.get().to_string()
+    {
+        return Err(invalid("PostgreSQL run projection changed store identity"));
+    }
+    Ok(RunCurrentProjection {
+        run_id: run_id.clone(),
+        tenant_scope_id: TenantScopeId::new(required_text(row, "tenant_scope_id")?)
+            .map_err(|_| invalid("PostgreSQL run projection tenant is invalid"))?,
+        journal_head: JournalHead {
+            run_sequence: required_sequence(row, "head_sequence")?,
+            commit_digest: JournalCommitDigest::parse(&required_text(row, "head_commit_digest")?)
+                .map_err(|_| invalid("PostgreSQL run projection digest is invalid"))?,
+        },
+        has_effect_entry_attention: row
+            .try_get("has_effect_entry_attention")
+            .map_err(|_| invalid("PostgreSQL run projection attention is invalid"))?,
+    })
+}
+
+async fn load_run_snapshot(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    identity: &StructuredStoreIdentity,
+    schema_name: &str,
+) -> Result<StructuredRunSnapshot, StructuredStoreError> {
+    let projection_row = sqlx::query(
+        "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
+                head_sequence::text AS head_sequence, head_commit_digest, \
+                has_effect_entry_attention \
+           FROM run_history_heads WHERE run_id = $1",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let current_projection = projection_row
+        .map(|row| decode_run_projection(&row, run_id, identity))
+        .transpose()?;
+    #[cfg(feature = "test-support")]
+    crate::transaction::await_read_phase_barrier(schema_name, "after_head").await;
+    #[cfg(not(feature = "test-support"))]
+    let _ = schema_name;
+    let rows = select_batch_rows(transaction, StructuredBatchQuery::Prefix, run_id, None).await?;
+    #[cfg(feature = "test-support")]
+    crate::transaction::await_read_phase_barrier(schema_name, "after_batches").await;
+    let history = if rows.is_empty() {
+        None
+    } else {
+        let mut objects = load_object_rows(transaction, run_id, None).await?;
+        let mut batches = Vec::with_capacity(rows.len());
+        for row in rows {
+            let sequence = row.run_sequence;
+            batches.push(row.reconstruct(objects.remove(&sequence).unwrap_or_default())?);
+        }
+        if !objects.is_empty() {
+            return Err(invalid("PostgreSQL objects have no retained batch"));
+        }
+        Some(RawRunHistory {
+            run_id: run_id.clone(),
+            batches,
+        })
+    };
+    Ok(StructuredRunSnapshot {
+        history,
+        current_projection,
+    })
+}
+
+async fn load_exact_prefix(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    through: &JournalHead,
+) -> Result<Option<RawRunHistory>, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT run_id, run_sequence::text AS run_sequence, append_request_id, \
+                candidate_digest, predecessor_sequence::text AS predecessor_sequence, \
+                predecessor_commit_digest, head_commit_digest, batch_envelope_json \
+           FROM run_history_batches \
+          WHERE run_id = $1 AND run_sequence <= $2::numeric \
+          ORDER BY run_history_batches.run_sequence",
+    )
+    .bind(run_id.as_str())
+    .bind(through.run_sequence.to_string())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?
+    .iter()
+    .map(StoredBatchRow::decode)
+    .collect::<Result<Vec<_>, _>>()?;
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut objects = load_object_rows_through(transaction, run_id, through.run_sequence).await?;
+    let mut batches = Vec::with_capacity(rows.len());
+    for row in rows {
+        let sequence = row.run_sequence;
+        batches.push(row.reconstruct(objects.remove(&sequence).unwrap_or_default())?);
+    }
+    if !objects.is_empty() || batches.last().map(|batch| &batch.head) != Some(through) {
+        return Err(invalid(
+            "PostgreSQL prefix differs from its exact requested head",
+        ));
+    }
+    Ok(Some(RawRunHistory {
+        run_id: run_id.clone(),
+        batches,
+    }))
+}
+
+async fn select_run_ids(
+    transaction: &mut Transaction<'_, Postgres>,
+    after: Option<&RunId>,
+    maximum_items: u32,
+) -> Result<Vec<RunId>, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT run_id FROM ( \
+             SELECT run_id FROM run_history_batches \
+             UNION SELECT run_id FROM run_history_heads \
+         ) AS run_keys \
+         WHERE ($1::text IS NULL OR run_id > $1::text) \
+         ORDER BY run_id LIMIT $2::bigint",
+    )
+    .bind(after.map(RunId::as_str))
+    .bind(i64::from(maximum_items))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    rows.into_iter()
+        .map(|row| {
+            RunId::parse(required_text(&row, "run_id")?)
+                .map_err(|_| invalid("PostgreSQL run key is invalid"))
+        })
+        .collect()
+}
+
+async fn select_fact_tenants(
+    transaction: &mut Transaction<'_, Postgres>,
+    after: Option<&TenantScopeId>,
+    maximum_items: u32,
+) -> Result<Vec<TenantScopeId>, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT tenant_scope_id FROM ( \
+             SELECT tenant_scope_id FROM tenant_fact_publications \
+             UNION SELECT tenant_scope_id FROM tenant_fact_heads \
+         ) AS tenant_keys \
+         WHERE ($1::text IS NULL OR tenant_scope_id > $1::text) \
+         ORDER BY tenant_scope_id LIMIT $2::bigint",
+    )
+    .bind(after.map(TenantScopeId::as_str))
+    .bind(i64::from(maximum_items))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    rows.into_iter()
+        .map(|row| {
+            TenantScopeId::new(required_text(&row, "tenant_scope_id")?)
+                .map_err(|_| invalid("PostgreSQL fact tenant key is invalid"))
+        })
+        .collect()
+}
+
+async fn load_fact_projection(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &StructuredStoreIdentity,
+    tenant_scope_id: TenantScopeId,
+) -> Result<TenantFactProjectionSnapshot, StructuredStoreError> {
+    let head_rows = sqlx::query(
+        "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
+                fact_order::text AS fact_order \
+           FROM tenant_fact_heads WHERE tenant_scope_id = $1",
+    )
+    .bind(tenant_scope_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let current_frontier = match head_rows.as_slice() {
+        [] => None,
+        [row]
+            if required_text(row, "store_scope_id")? == identity.store_scope_id.as_str()
+                && required_text(row, "store_epoch")? == identity.store_epoch.get().to_string()
+                && required_text(row, "tenant_scope_id")? == tenant_scope_id.as_str() =>
+        {
+            Some(TenantFactFrontier::new(
+                identity.store_scope_id.clone(),
+                identity.store_epoch,
+                tenant_scope_id.clone(),
+                parse_fact_order(&required_text(row, "fact_order")?, false)?,
+            ))
+        }
+        _ => {
+            return Err(invalid(
+                "PostgreSQL fact head is not unique or changed identity",
+            ))
+        }
+    };
+    let rows = select_fact_publication_rows(
+        transaction,
+        identity,
+        &tenant_scope_id,
+        1,
+        u64::MAX,
+        u32::MAX,
+    )
+    .await?;
+    let publications = rows
+        .into_iter()
+        .map(|row| {
+            decode_tenant_publication(
+                &row,
+                &identity.store_scope_id,
+                identity.store_epoch,
+                &tenant_scope_id,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(TenantFactProjectionSnapshot {
+        tenant_scope_id,
+        current_frontier,
+        publications,
+    })
+}
+
+async fn select_fact_publication_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &StructuredStoreIdentity,
+    tenant_scope_id: &TenantScopeId,
+    first_order: u64,
+    through_order: u64,
+    maximum_items: u32,
+) -> Result<Vec<PgRow>, StructuredStoreError> {
+    sqlx::query(
+        "SELECT publication.store_scope_id, publication.store_epoch::text AS store_epoch, \
+                publication.tenant_scope_id, publication.fact_order::text AS fact_order, \
+                publication.run_id, publication.run_sequence::text AS run_sequence, \
+                publication.transition_ordinal, publication.transition_record_hash, \
+                batch.head_commit_digest \
+           FROM tenant_fact_publications AS publication \
+           JOIN run_history_batches AS batch \
+             ON batch.run_id = publication.run_id \
+            AND batch.run_sequence = publication.run_sequence \
+          WHERE publication.store_scope_id = $1 \
+            AND publication.store_epoch = $2::numeric \
+            AND publication.tenant_scope_id = $3 \
+            AND publication.fact_order >= $4::numeric \
+            AND publication.fact_order <= $5::numeric \
+          ORDER BY publication.fact_order LIMIT $6::bigint",
+    )
+    .bind(identity.store_scope_id.as_str())
+    .bind(identity.store_epoch.get().to_string())
+    .bind(tenant_scope_id.as_str())
+    .bind(first_order.to_string())
+    .bind(through_order.to_string())
+    .bind(i64::from(maximum_items))
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)
+}
+
+async fn load_locked_run_projection(
+    transaction: &mut Transaction<'_, Postgres>,
+    run_id: &RunId,
+    identity: &StructuredStoreIdentity,
+) -> Result<Option<RunCurrentProjection>, StructuredStoreError> {
+    sqlx::query(
+        "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
+                head_sequence::text AS head_sequence, head_commit_digest, \
+                has_effect_entry_attention \
+           FROM run_history_heads WHERE run_id = $1 FOR UPDATE",
+    )
+    .bind(run_id.as_str())
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?
+    .map(|row| decode_run_projection(&row, run_id, identity))
+    .transpose()
+}
+
+async fn load_locked_fact_frontier(
+    transaction: &mut Transaction<'_, Postgres>,
+    identity: &StructuredStoreIdentity,
+    tenant_scope_id: &TenantScopeId,
+) -> Result<TenantFactFrontier, StructuredStoreError> {
+    let rows = sqlx::query(
+        "SELECT store_scope_id, store_epoch::text AS store_epoch, tenant_scope_id, \
+                fact_order::text AS fact_order \
+           FROM tenant_fact_heads WHERE tenant_scope_id = $1 FOR UPDATE",
+    )
+    .bind(tenant_scope_id.as_str())
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+    let order = match rows.as_slice() {
+        [] => 0,
+        [row]
+            if required_text(row, "store_scope_id")? == identity.store_scope_id.as_str()
+                && required_text(row, "store_epoch")? == identity.store_epoch.get().to_string()
+                && required_text(row, "tenant_scope_id")? == tenant_scope_id.as_str() =>
+        {
+            parse_fact_order(&required_text(row, "fact_order")?, false)?
+        }
+        _ => {
+            return Err(invalid(
+                "PostgreSQL fact head is not unique or changed identity",
+            ))
+        }
+    };
+    Ok(TenantFactFrontier::new(
+        identity.store_scope_id.clone(),
+        identity.store_epoch,
+        tenant_scope_id.clone(),
+        order,
+    ))
 }
 
 async fn select_batch_rows(
@@ -1252,7 +1263,7 @@ async fn load_object_rows(
 async fn load_object_rows_through(
     transaction: &mut Transaction<'_, Postgres>,
     run_id: &RunId,
-    through_sequence: u64,
+    through: u64,
 ) -> Result<BTreeMap<u64, Vec<StoredObjectRow>>, StructuredStoreError> {
     let rows = sqlx::query(
         "SELECT run_sequence::text AS run_sequence, object_ordinal, object_type, \
@@ -1262,7 +1273,7 @@ async fn load_object_rows_through(
           ORDER BY run_history_batch_objects.run_sequence, object_ordinal",
     )
     .bind(run_id.as_str())
-    .bind(through_sequence.to_string())
+    .bind(through.to_string())
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| StructuredStoreError::BackendUnavailable)?;
@@ -1322,7 +1333,7 @@ async fn insert_object_rows(
 }
 
 fn decode_canonical_envelope(json: &str) -> Result<StoredBatchEnvelope, StructuredStoreError> {
-    validate_envelope_frame(json)?;
+    validate_stored_frame(json)?;
     let value: serde_json::Value = serde_json::from_str(json)
         .map_err(|_| invalid("structured PostgreSQL batch envelope cannot be strictly decoded"))?;
     // Decode the bounded record wrappers field-by-field. The derived serde visitor for the
@@ -1428,6 +1439,15 @@ fn decode_canonical_envelope(json: &str) -> Result<StoredBatchEnvelope, Structur
     Ok(envelope)
 }
 
+fn validate_stored_frame(json: &str) -> Result<(), StructuredStoreError> {
+    if json.len() < 2 || json.len() > MAX_STORED_FRAME_BYTES {
+        return Err(invalid("PostgreSQL canonical frame exceeds its bound"));
+    }
+    PlainCanonicalJsonBytes::from_canonical_json_slice(json.as_bytes())
+        .map_err(|_| invalid("PostgreSQL canonical frame is invalid"))?;
+    Ok(())
+}
+
 fn decode_objects(rows: Vec<StoredObjectRow>) -> Result<Vec<HistoryObject>, StructuredStoreError> {
     if rows.len() > MAX_BATCH_OBJECTS {
         return Err(invalid(
@@ -1476,11 +1496,6 @@ fn decode_objects(rows: Vec<StoredObjectRow>) -> Result<Vec<HistoryObject>, Stru
 fn required_text(row: &PgRow, column: &str) -> Result<String, StructuredStoreError> {
     row.try_get(column)
         .map_err(|_| invalid("structured PostgreSQL retained text is absent"))
-}
-
-fn optional_text(row: &PgRow, column: &str) -> Result<Option<String>, StructuredStoreError> {
-    row.try_get(column)
-        .map_err(|_| invalid("structured PostgreSQL optional text is invalid"))
 }
 
 fn required_sequence(row: &PgRow, column: &str) -> Result<u64, StructuredStoreError> {
@@ -1536,16 +1551,7 @@ impl PostgresStructuredHistoryBackend {
         run_id: &RunId,
         committed: &CommittedBatch,
     ) -> Result<BackendAppendOutcome, StructuredStoreError> {
-        let tenant_lock_key = match &committed.tenant_fact_coordinate {
-            TenantFactCoordinate::None => None,
-            TenantFactCoordinate::FactPublication { frontier }
-            | TenantFactCoordinate::FactSelectionBarrier { frontier } => {
-                Some(frontier.tenant_scope_id.as_str())
-            }
-        };
-        let mut transaction = self
-            .begin_locked_write(run_id.as_str(), tenant_lock_key)
-            .await?;
+        let mut transaction = self.begin_locked_write(run_id.as_str(), None).await?;
         let existing_rows = select_batch_rows(
             transaction.conn(),
             StructuredBatchQuery::ByAppendRequest,

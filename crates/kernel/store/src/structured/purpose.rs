@@ -1,6 +1,6 @@
 //! Sealed purpose-specific run history readers and evidence.
 //!
-//! Each purpose reader loads through the same callback-free fold, then wraps the
+//! Each purpose reader loads through the same qualification and reducer, then wraps the
 //! verified prefix in a purpose-sealed evidence newtype. Evidence types have no
 //! public field, no `Deref`, and expose only the accessors that purpose needs.
 //! Cross-purpose substitution is a type error: `PublicRunEvidence` cannot be
@@ -16,15 +16,14 @@ use mfm_ids::{
 use mfm_journal::structured::HistoryObject;
 use mfm_journal::structured::{
     canonical_json, AccessKind, AssignedRecord, CommittedBatch, CommittedFactRef,
-    ExternalAccessAuthorized, JournalHead, LexicalValueRef, ObservationOutcome,
-    PriorRunFactSelectionResponse, RecordRef, RunAdmitted, RunRecord, SemanticHead,
-    StateOutcomeRef, TenantFactCoordinate, TenantFactFrontier, TypedValueRef,
+    ExternalAccessAuthorized, JournalHead, LexicalValueRef, ObservationOutcome, RecordRef,
+    RunAdmitted, RunRecord, SemanticHead, StateOutcomeRef, TenantFactCoordinate,
+    TenantFactFrontier, TypedValueRef,
 };
 use mfm_spec::structured::OperationOutcome;
 
-use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader};
-use super::fold::{StructuredFrontier, VerifiedStructuredRun};
-use super::{PhysicalTargetIdentity, Result};
+use super::backend::{StructuredHistoryBackend, StructuredRunHistoryReader, TenantFactPublication};
+use super::{PhysicalTargetIdentity, Result, StructuredFrontier, VerifiedStructuredRun};
 
 /// Maximum recursively authorized source runs in one export closure.
 pub const MAX_PORTABLE_SOURCE_RUNS: usize = 4096;
@@ -32,11 +31,13 @@ pub const MAX_PORTABLE_SOURCE_RUNS: usize = 4096;
 /// Maximum fact routes carried by one export closure.
 pub const MAX_PORTABLE_FACT_ROUTES: usize = 1048576;
 
-/// Fold-derived status exposed by public and recorded-replay evidence.
+const EXPORT_FACT_ROUTE_PAGE_ITEMS: u32 = 1_024;
+
+/// Reducer-derived status exposed by public and recorded-replay evidence.
 ///
 /// Purpose projections deliberately retain only this status and never expose
 /// the actionable cursor, capability references, or other `StructuredFrontier`
-/// details owned by the internal fold.
+/// details owned by the internal reduction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunEvidenceStatus {
     /// At least one executable action is ready for the next drive.
@@ -164,6 +165,10 @@ purpose_reader_shell!(
     /// Target-bound export projection authority.
     ExportRunReader
 );
+purpose_reader_shell!(
+    /// Target-bound current-Effect-entry-attention inventory authority.
+    EffectEntryAttentionReader
+);
 
 impl<B: StructuredHistoryBackend> PublicRunReader<B> {
     /// Loads one verified run as public-read evidence only.
@@ -205,6 +210,82 @@ impl<B: StructuredHistoryBackend> ReplayRunReader<B> {
     }
 }
 
+impl<B: StructuredHistoryBackend> EffectEntryAttentionReader<B> {
+    /// Lists the runs in one tenant that currently require manual Effect-entry
+    /// attention, ordered strictly by run identity.
+    ///
+    /// The backend scan is a route, not an answer. For each route this method
+    /// loads history and the current projection from one snapshot, skips a route
+    /// whose head moved before the load as a live-sweep race, and otherwise
+    /// qualifies and reduces the complete prefix. A run whose head still matches
+    /// but whose reduction disagrees is invalid history, not an empty result.
+    pub async fn list_effect_entry_attention(
+        &self,
+        tenant_scope_id: &mfm_ids::TenantScopeId,
+        after_run_id: Option<&RunId>,
+        limit: u32,
+    ) -> Result<EffectEntryAttentionPage> {
+        if limit == 0 {
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
+        }
+        // One extra route is a sentinel proving more work exists; it is never
+        // processed and never becomes the continuation key.
+        let sentinel_limit = limit.saturating_add(1);
+        let routes = self
+            .reader
+            .scan_effect_entry_attention_routes(tenant_scope_id, after_run_id, sentinel_limit)
+            .await?;
+        let has_more = routes.len() as u32 > limit;
+        let mut entries = Vec::new();
+        let mut last_scanned = None;
+        for route in routes.into_iter().take(limit as usize) {
+            last_scanned = Some(route.run_id.clone());
+            let Some(evidence) = self.resolve_route(tenant_scope_id, &route).await? else {
+                continue;
+            };
+            entries.push(evidence);
+        }
+        Ok(EffectEntryAttentionPage {
+            entries,
+            // Advance by the last scanned route, never the last emitted result,
+            // so a race yields a sparse page rather than a skipped run.
+            next_after_run_id: has_more.then_some(last_scanned).flatten(),
+        })
+    }
+
+    /// Re-derives one route's attention, or `None` when the route lost a race.
+    async fn resolve_route(
+        &self,
+        tenant_scope_id: &mfm_ids::TenantScopeId,
+        route: &super::backend::EffectEntryAttentionRoute,
+    ) -> Result<Option<EffectEntryAttentionEntry>> {
+        let verified = match self.reader.load_verified(&route.run_id).await {
+            Ok(verified) => verified,
+            // The run was scanned and then vanished from this snapshot: a live
+            // sweep race, not a contradiction.
+            Err(super::qualification::StructuredStoreError::RunNotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if verified.journal_head() != &route.journal_head {
+            return Ok(None);
+        }
+        // Same head: tenant and attention membership must agree exactly, and the
+        // reducer must return a complete subject.
+        let attention = verified
+            .effect_entry_attention()
+            .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
+        if &verified.admission().tenant_scope_id != tenant_scope_id {
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
+        }
+        Ok(Some(EffectEntryAttentionEntry {
+            header: RunEvidenceHeader::from_admission(verified.admission()),
+            journal_head: verified.journal_head().clone(),
+            subject: attention.subject().clone(),
+            resolution: attention.resolution(),
+        }))
+    }
+}
+
 impl<B: StructuredHistoryBackend> ExportRunReader<B> {
     /// Loads one verified run as portable-export evidence only.
     pub async fn load_for_export(&self, run_id: &RunId) -> Result<ExportRunEvidence> {
@@ -213,12 +294,51 @@ impl<B: StructuredHistoryBackend> ExportRunReader<B> {
             .store_identity()
             .physical_target
             .clone()
-            .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
-        self.reader
-            .load_verified(run_id)
-            .await
-            .and_then(|verified| ExportRunEvidence::from_verified(verified, physical_target))
+            .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
+        let verified = self.reader.load_verified(run_id).await?;
+        let fact_routes = load_export_fact_routes(&self.reader, &verified).await?;
+        ExportRunEvidence::from_verified(verified, physical_target, fact_routes)
     }
+}
+
+async fn load_export_fact_routes<B: StructuredHistoryBackend>(
+    reader: &StructuredRunHistoryReader<B>,
+    verified: &VerifiedStructuredRun,
+) -> Result<Vec<ExportFactRoute>> {
+    let Some(frontier) = maximum_fact_barrier(verified.batches(), None)? else {
+        return Ok(Vec::new());
+    };
+    let mut next_order = 1_u64;
+    let mut routes = Vec::new();
+    while next_order <= frontier.fact_order {
+        let publications = reader
+            .scan_fact_publications(
+                &frontier.tenant_scope_id,
+                next_order,
+                frontier.fact_order,
+                EXPORT_FACT_ROUTE_PAGE_ITEMS,
+            )
+            .await?;
+        if publications.is_empty() || publications.len() > EXPORT_FACT_ROUTE_PAGE_ITEMS as usize {
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
+        }
+        for publication in publications {
+            if publication.frontier.store_scope_id != frontier.store_scope_id
+                || publication.frontier.store_epoch != frontier.store_epoch
+                || publication.frontier.tenant_scope_id != frontier.tenant_scope_id
+                || publication.frontier.fact_order != next_order
+                || publication.frontier.fact_order > frontier.fact_order
+            {
+                return Err(super::qualification::StructuredStoreError::InvalidHistory);
+            }
+            ensure_fact_route_capacity(routes.len())?;
+            routes.push(ExportFactRoute::from_publication(publication));
+            next_order = next_order
+                .checked_add(1)
+                .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
+        }
+    }
+    Ok(routes)
 }
 
 /// Sealed public-read evidence. Cannot be used as export, trace, audit, or replay evidence.
@@ -246,7 +366,7 @@ impl PublicTerminalOutcome {
     }
 }
 
-/// Minimum public run projection produced after the sole callback-free fold.
+/// Minimum public run projection produced after callback-free reduction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublicRunEvidence {
     run_id: RunId,
@@ -292,7 +412,7 @@ impl PublicRunEvidence {
         &self.semantic_head
     }
 
-    /// Returns the fold-derived status without exposing internal action details.
+    /// Returns the reducer-derived status without exposing internal action details.
     pub const fn status(&self) -> RunEvidenceStatus {
         self.status
     }
@@ -302,7 +422,7 @@ impl PublicRunEvidence {
         self.closed_outcome_ref.as_ref()
     }
 
-    /// Returns the fold-derived terminal public outcome, when present.
+    /// Returns the reducer-derived terminal public outcome, when present.
     pub const fn terminal_outcome(&self) -> Option<&PublicTerminalOutcome> {
         self.terminal_outcome.as_ref()
     }
@@ -360,7 +480,7 @@ impl TraceTransitionEntry {
     pub const fn semantic_call_id(&self) -> &SemanticCallId {
         &self.semantic_call_id
     }
-    /// Exact fold-derived state input.
+    /// Exact reducer-derived state input.
     pub const fn input(&self) -> &LexicalValueRef {
         &self.input
     }
@@ -404,14 +524,13 @@ impl TraceRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
         let records = verified
             .records()
-            .iter()
             .filter_map(TraceTransitionEntry::from_assigned)
             .collect();
         Self {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
-            journal_heads: verified.journal_heads().to_vec(),
+            journal_heads: verified.journal_heads().cloned().collect(),
             records,
         }
     }
@@ -517,7 +636,7 @@ impl AuditAccessEntry {
     pub const fn access_attempt_id(&self) -> &AccessAttemptId {
         &self.access_attempt_id
     }
-    /// Fold-derived access ordinal.
+    /// Reducer-derived access ordinal.
     pub const fn attempt_ordinal(&self) -> u64 {
         self.attempt_ordinal
     }
@@ -587,7 +706,7 @@ pub struct AuditRunEvidence {
 
 impl AuditRunEvidence {
     fn from_verified(verified: VerifiedStructuredRun) -> Self {
-        let all_records = verified.records();
+        let all_records = verified.records().collect::<Vec<_>>();
         let records = all_records
             .iter()
             .filter_map(|assigned| {
@@ -616,7 +735,7 @@ impl AuditRunEvidence {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
             journal_head: verified.journal_head().clone(),
-            journal_heads: verified.journal_heads().to_vec(),
+            journal_heads: verified.journal_heads().cloned().collect(),
             records,
         }
     }
@@ -647,7 +766,7 @@ impl AuditRunEvidence {
     }
 }
 
-/// Opaque result of one explicit offline replay fold.
+/// Opaque result of one explicit offline replay reduction.
 ///
 /// The store consumes the complete verified cursor and object graph before
 /// constructing this value. Replay receives only the recorded status and the
@@ -660,8 +779,6 @@ pub struct OfflineVerifiedRun {
     header: RunEvidenceHeader,
     journal_head: JournalHead,
     semantic_head: SemanticHead,
-    direct_source_run_ids: BTreeSet<RunId>,
-    fact_routes: Vec<ExportFactRoute>,
 }
 
 impl OfflineVerifiedRun {
@@ -670,8 +787,6 @@ impl OfflineVerifiedRun {
         let header = RunEvidenceHeader::from_admission(verified.admission());
         let journal_head = verified.journal_head().clone();
         let semantic_head = verified.semantic_head().clone();
-        let direct_source_run_ids = verified.direct_source_run_ids()?;
-        let fact_routes = export_fact_routes(&verified)?;
         let recorded = RecordedRunEvidence::from_verified(verified);
         Ok(Self {
             recorded,
@@ -679,42 +794,30 @@ impl OfflineVerifiedRun {
             header,
             journal_head,
             semantic_head,
-            direct_source_run_ids,
-            fact_routes,
         })
     }
 
-    /// Returns the exact folded run identity.
+    /// Returns the exact reduced run identity.
     pub const fn run_id(&self) -> &RunId {
         &self.run_id
     }
 
-    /// Returns the authenticated tenant scope fixed by the folded admission.
+    /// Returns the authenticated tenant scope fixed by the reduced admission.
     pub const fn tenant_scope_id(&self) -> &TenantScopeId {
         self.header.tenant_scope_id()
     }
 
-    /// Returns the exact folded physical head.
+    /// Returns the exact reduced physical head.
     pub const fn journal_head(&self) -> &JournalHead {
         &self.journal_head
     }
 
-    /// Returns the exact folded semantic head.
+    /// Returns the exact reduced semantic head.
     pub const fn semantic_head(&self) -> &SemanticHead {
         &self.semantic_head
     }
 
-    /// Returns bounded identifier-level prior-run dependencies.
-    pub const fn direct_source_run_ids(&self) -> &BTreeSet<RunId> {
-        &self.direct_source_run_ids
-    }
-
-    /// Returns bounded selected-fact routes for export validation.
-    pub fn fact_routes(&self) -> &[ExportFactRoute] {
-        &self.fact_routes
-    }
-
-    /// Consumes the opaque fold result into recorded-replay evidence.
+    /// Consumes the opaque reduced result into recorded-replay evidence.
     pub fn into_recorded(self) -> RecordedRunEvidence {
         self.recorded
     }
@@ -739,7 +842,7 @@ impl RecordedRunEvidence {
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
             status: RunEvidenceStatus::from_frontier(verified.frontier()),
-            record_count: verified.records().len(),
+            record_count: verified.records().count(),
         }
     }
 
@@ -763,7 +866,7 @@ impl RecordedRunEvidence {
         &self.semantic_head
     }
 
-    /// Returns the fold-derived status without exposing internal action details.
+    /// Returns the reducer-derived status without exposing internal action details.
     pub const fn status(&self) -> RunEvidenceStatus {
         self.status
     }
@@ -774,10 +877,10 @@ impl RecordedRunEvidence {
     }
 }
 
-/// Data-only fragment retained for the portable encoder after the sole fold.
+/// Data-only fragment retained for the portable encoder after reduction.
 ///
-/// This deliberately contains no verified-run authority or callback.  The fold is
-/// consumed before this product is constructed; only the bounded append envelopes
+/// This deliberately contains no verified-run authority or callback. Reduction is
+/// complete before this product is constructed; only the bounded append envelopes
 /// and identifier-level dependency metadata survive.
 struct ExportFragment {
     run_id: RunId,
@@ -793,7 +896,7 @@ struct ExportFragment {
     #[cfg(any(test, feature = "test-support"))]
     objects: Vec<(u64, HistoryObject)>,
     #[cfg(any(test, feature = "test-support"))]
-    cursor: super::fold::ProgramCursor,
+    cursor: super::ProgramCursor,
     #[cfg(any(test, feature = "test-support"))]
     closed_outcome_ref: Option<ContentRef>,
     direct_source_run_ids: BTreeSet<RunId>,
@@ -801,22 +904,30 @@ struct ExportFragment {
     fact_routes: Vec<ExportFactRoute>,
 }
 
-/// One verified selected-fact route retained for recursive export planning.
+/// One exact dense fact publication retained for recursive export planning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExportFactRoute {
-    consumer_record: RecordRef,
     producer_transition: RecordRef,
+    producer_head: JournalHead,
     publication_frontier: TenantFactFrontier,
 }
 
 impl ExportFactRoute {
-    /// Consumer record containing the selected-fact response.
-    pub const fn consumer_record(&self) -> &RecordRef {
-        &self.consumer_record
+    fn from_publication(publication: TenantFactPublication) -> Self {
+        Self {
+            producer_transition: publication.transition_ref,
+            producer_head: publication.producer_head,
+            publication_frontier: publication.frontier,
+        }
     }
+
     /// Producer transition routed by the dense publication.
     pub const fn producer_transition(&self) -> &RecordRef {
         &self.producer_transition
+    }
+    /// Exact immutable producer prefix containing the transition.
+    pub const fn producer_head(&self) -> &JournalHead {
+        &self.producer_head
     }
     /// Dense tenant frontier containing the publication.
     pub const fn publication_frontier(&self) -> &TenantFactFrontier {
@@ -884,18 +995,22 @@ impl<'a> ExportEncoderView<'a> {
     pub fn direct_source_run_ids(&self) -> &BTreeSet<RunId> {
         &self.fragment.direct_source_run_ids
     }
-    /// Exact fact frontiers captured by this folded fragment.
+    /// Exact fact frontiers captured by this reduced fragment.
     pub fn fact_frontiers(&self) -> &[TenantFactFrontier] {
         &self.fragment.fact_frontiers
     }
-    /// Verified selected-fact routes in folded record order.
+    /// Verified selected-fact routes in reduced record order.
     pub fn fact_routes(&self) -> &[ExportFactRoute] {
         &self.fragment.fact_routes
+    }
+    /// Complete dense fact routes required through one run cutoff.
+    pub fn fact_routes_through(&self, cutoff: Option<u64>) -> Vec<ExportFactRoute> {
+        self.fragment.fact_routes_through(cutoff)
     }
 }
 
 /// One encoder-only source fragment. It exposes data needed to encode a frame
-/// stream but never exposes the store fold, callbacks, or verified-run type.
+/// stream but never exposes reducer internals, callbacks, or verified-run type.
 pub struct ExportEncoderSource<'a> {
     fragment: &'a ExportFragment,
 }
@@ -940,14 +1055,19 @@ impl<'a> ExportEncoderSource<'a> {
     pub fn fact_routes(&self) -> &[ExportFactRoute] {
         &self.fragment.fact_routes
     }
+    /// Complete dense fact routes required through one source cutoff.
+    pub fn fact_routes_through(&self, cutoff: Option<u64>) -> Vec<ExportFactRoute> {
+        self.fragment.fact_routes_through(cutoff)
+    }
 }
 
 impl ExportRunEvidence {
     fn from_verified(
         verified: VerifiedStructuredRun,
         physical_target: PhysicalTargetIdentity,
+        fact_routes: Vec<ExportFactRoute>,
     ) -> Result<Self> {
-        let fragment = ExportFragment::from_verified(verified, physical_target)?;
+        let fragment = ExportFragment::from_verified(verified, physical_target, fact_routes)?;
         Ok(Self {
             header: fragment.header.clone(),
             fragment,
@@ -968,16 +1088,16 @@ impl ExportRunEvidence {
         sources: Vec<(ExportRunEvidence, Option<u64>)>,
     ) -> Result<Self> {
         if !self.authorized_sources.is_empty() {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
         }
         let supplied_count = sources.iter().try_fold(0usize, |count, (source, _)| {
             count
                 .checked_add(1)
                 .and_then(|count| count.checked_add(source.authorized_sources.len()))
-                .ok_or(super::fold::StructuredStoreError::InvalidHistory)
+                .ok_or(super::qualification::StructuredStoreError::InvalidHistory)
         })?;
         if self.authorized_sources.len().saturating_add(supplied_count) > MAX_PORTABLE_SOURCE_RUNS {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
         }
         let expected_direct = self.direct_source_run_ids_through(root_cutoff)?;
         let mut seen = BTreeSet::new();
@@ -985,7 +1105,7 @@ impl ExportRunEvidence {
         let mut source_cutoffs = BTreeMap::<RunId, Option<u64>>::new();
         for (source, cutoff) in sources {
             if !source.authorized_sources.is_empty() {
-                return Err(super::fold::StructuredStoreError::InvalidHistory);
+                return Err(super::qualification::StructuredStoreError::InvalidHistory);
             }
             if source.run_id() == self.run_id()
                 || source.header().tenant_scope_id() != self.header.tenant_scope_id()
@@ -994,18 +1114,18 @@ impl ExportRunEvidence {
                 || source.fragment.physical_target != self.fragment.physical_target
                 || !seen.insert(source.run_id().clone())
             {
-                return Err(super::fold::StructuredStoreError::InvalidHistory);
+                return Err(super::qualification::StructuredStoreError::InvalidHistory);
             }
             direct.insert(source.run_id().clone());
             if source.direct_source_run_ids_through(cutoff)?.len() > MAX_PORTABLE_SOURCE_RUNS {
-                return Err(super::fold::StructuredStoreError::InvalidHistory);
+                return Err(super::qualification::StructuredStoreError::InvalidHistory);
             }
             source_cutoffs.insert(source.run_id().clone(), cutoff);
             self.authorized_sources.push(source.fragment);
             self.authorized_sources.extend(source.authorized_sources);
         }
         if !expected_direct.is_subset(&direct) {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
         }
         self.authorized_sources
             .sort_by(|left, right| left.run_id.cmp(&right.run_id));
@@ -1020,7 +1140,7 @@ impl ExportRunEvidence {
                 || pair[0].physical_target != self.fragment.physical_target
                 || pair[1].physical_target != self.fragment.physical_target
         }) {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
         }
         let fragments = self
             .authorized_sources
@@ -1033,7 +1153,7 @@ impl ExportRunEvidence {
             let cutoff = source_cutoffs
                 .get(&fragment.run_id)
                 .copied()
-                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
+                .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
             graph.insert(
                 fragment.run_id.clone(),
                 fragment.direct_source_run_ids_through(cutoff)?,
@@ -1054,7 +1174,7 @@ impl ExportRunEvidence {
                     continue;
                 }
                 match colors.get(&run_id).copied().unwrap_or_default() {
-                    1 => return Err(super::fold::StructuredStoreError::InvalidHistory),
+                    1 => return Err(super::qualification::StructuredStoreError::InvalidHistory),
                     2 => continue,
                     _ => {}
                 }
@@ -1062,10 +1182,10 @@ impl ExportRunEvidence {
                 stack.push((run_id.clone(), true));
                 let children = graph
                     .get(&run_id)
-                    .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
+                    .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
                 for child in children.iter().rev() {
                     if child == &self.fragment.run_id || !graph.contains_key(child) {
-                        return Err(super::fold::StructuredStoreError::InvalidHistory);
+                        return Err(super::qualification::StructuredStoreError::InvalidHistory);
                     }
                     stack.push((child.clone(), false));
                 }
@@ -1079,19 +1199,19 @@ impl ExportRunEvidence {
             }
             fragments
                 .get(&run_id)
-                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?;
+                .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?;
             for nested in graph
                 .get(&run_id)
-                .ok_or(super::fold::StructuredStoreError::InvalidHistory)?
+                .ok_or(super::qualification::StructuredStoreError::InvalidHistory)?
             {
                 if nested == &self.fragment.run_id {
-                    return Err(super::fold::StructuredStoreError::InvalidHistory);
+                    return Err(super::qualification::StructuredStoreError::InvalidHistory);
                 }
                 pending.insert(nested.clone());
             }
         }
         if reachable != fragments.keys().cloned().collect() {
-            return Err(super::fold::StructuredStoreError::InvalidHistory);
+            return Err(super::qualification::StructuredStoreError::InvalidHistory);
         }
         Ok(self)
     }
@@ -1186,7 +1306,7 @@ impl ExportRunEvidence {
 
     /// Returns the sole callback-free cursor.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn cursor(&self) -> &super::fold::ProgramCursor {
+    pub fn cursor(&self) -> &super::ProgramCursor {
         &self.fragment.cursor
     }
 
@@ -1201,16 +1321,9 @@ impl ExportRunEvidence {
     }
 
     /// Returns fact routes whose consumer record is no later than the supplied
-    /// physical append sequence. `None` retains the complete folded history.
+    /// physical append sequence. `None` retains the complete reduced history.
     pub fn fact_routes_through(&self, cutoff: Option<u64>) -> Vec<ExportFactRoute> {
-        self.fragment
-            .fact_routes
-            .iter()
-            .filter(|route| {
-                cutoff.is_none_or(|sequence| route.consumer_record.run_sequence <= sequence)
-            })
-            .cloned()
-            .collect()
+        self.fragment.fact_routes_through(cutoff)
     }
 
     /// Returns distinct prior-run producers required through one exact export
@@ -1239,21 +1352,36 @@ impl ExportRunEvidence {
 }
 
 impl ExportFragment {
+    fn fact_routes_through(&self, cutoff: Option<u64>) -> Vec<ExportFactRoute> {
+        let frontier = maximum_fact_barrier(self.batches.iter(), cutoff)
+            .ok()
+            .flatten();
+        self.fact_routes
+            .iter()
+            .filter(|route| {
+                frontier.as_ref().is_some_and(|frontier| {
+                    route.publication_frontier.store_scope_id == frontier.store_scope_id
+                        && route.publication_frontier.store_epoch == frontier.store_epoch
+                        && route.publication_frontier.tenant_scope_id == frontier.tenant_scope_id
+                        && route.publication_frontier.fact_order <= frontier.fact_order
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
     fn direct_source_run_ids_through(&self, cutoff: Option<u64>) -> Result<BTreeSet<RunId>> {
-        if self.fact_routes.is_empty() {
+        if cutoff.is_none() {
             return Ok(self.direct_source_run_ids.clone());
         }
         let mut sources = BTreeSet::new();
-        for route in &self.fact_routes {
-            if cutoff.is_some_and(|sequence| route.consumer_record.run_sequence > sequence) {
-                continue;
-            }
+        for route in self.fact_routes_through(cutoff) {
             let producer = route.producer_transition.run_id.clone();
             if producer == self.run_id || sources.contains(&producer) {
                 continue;
             }
             if sources.len() >= MAX_PORTABLE_SOURCE_RUNS {
-                return Err(super::fold::StructuredStoreError::InvalidHistory);
+                return Err(super::qualification::StructuredStoreError::InvalidHistory);
             }
             sources.insert(producer);
         }
@@ -1263,14 +1391,15 @@ impl ExportFragment {
     fn from_verified(
         verified: VerifiedStructuredRun,
         physical_target: PhysicalTargetIdentity,
+        fact_routes: Vec<ExportFactRoute>,
     ) -> Result<Self> {
-        let batches = verified.batches().to_vec();
+        let batches = verified.batches().cloned().collect::<Vec<_>>();
         let batch_frames = batches
             .iter()
             .map(|batch| {
                 canonical_json(batch)
                     .map(|json| json.as_bytes().to_vec())
-                    .map_err(|_| super::fold::StructuredStoreError::InvalidHistory)
+                    .map_err(|_| super::qualification::StructuredStoreError::InvalidHistory)
             })
             .collect::<Result<Vec<_>>>()?;
         #[cfg(any(test, feature = "test-support"))]
@@ -1289,8 +1418,11 @@ impl ExportFragment {
                 TenantFactCoordinate::None => None,
             })
             .collect::<Vec<_>>();
-        let direct_source_run_ids = verified.direct_source_run_ids()?;
-        let fact_routes = export_fact_routes(&verified)?;
+        let direct_source_run_ids = fact_routes
+            .iter()
+            .map(|route| route.producer_transition.run_id.clone())
+            .filter(|run_id| run_id != verified.run_id())
+            .collect();
         Ok(Self {
             run_id: verified.run_id().clone(),
             header: RunEvidenceHeader::from_admission(verified.admission()),
@@ -1298,8 +1430,8 @@ impl ExportFragment {
             journal_head: verified.journal_head().clone(),
             semantic_head: verified.semantic_head().clone(),
             #[cfg(any(test, feature = "test-support"))]
-            journal_heads: verified.journal_heads().to_vec(),
-            records: verified.records().to_vec(),
+            journal_heads: verified.journal_heads().cloned().collect(),
+            records: verified.records().cloned().collect(),
             #[cfg(any(test, feature = "test-support"))]
             cursor: verified.cursor().clone(),
             #[cfg(any(test, feature = "test-support"))]
@@ -1315,52 +1447,42 @@ impl ExportFragment {
     }
 }
 
-/// Extracts the exact selected-fact routes from one offline-folded run.
-fn export_fact_routes(verified: &VerifiedStructuredRun) -> Result<Vec<ExportFactRoute>> {
-    let fact_response_contract = mfm_spec::structured::structured_value_contract_ref::<
-        mfm_facts::FactSelectionReadResponse,
-    >()
-    .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-    let mut routes = Vec::new();
-    for assigned in verified.records() {
-        let RunRecord::ExternalAccessObserved(observation) = &assigned.record else {
-            continue;
-        };
-        let ObservationOutcome::Returned { value } = &observation.outcome else {
-            continue;
-        };
-        if value.contract_ref != fact_response_contract {
-            continue;
-        }
-        let object = verified
-            .object(&value.value_ref)
-            .ok_or(super::StructuredStoreError::InvalidHistory)?;
-        let returned: mfm_facts::FactSelectionReadResponse = object
-            .decode_mfm_value()
-            .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-        let response = serde_json::from_str::<PriorRunFactSelectionResponse>(
-            returned.canonical_response_json(),
-        )
-        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
-        for query in response.query_results {
-            for selected in query.selected {
-                ensure_fact_route_capacity(routes.len())?;
-                routes.push(ExportFactRoute {
-                    consumer_record: assigned.record_ref.clone(),
-                    producer_transition: selected.producer_transition_ref,
-                    publication_frontier: selected.publication_frontier,
-                });
-            }
-        }
-    }
-    Ok(routes)
-}
-
 fn ensure_fact_route_capacity(current: usize) -> Result<()> {
     if current >= MAX_PORTABLE_FACT_ROUTES {
         return Err(super::StructuredStoreError::InvalidHistory);
     }
     Ok(())
+}
+
+fn maximum_fact_barrier<'a>(
+    batches: impl IntoIterator<Item = &'a CommittedBatch>,
+    cutoff: Option<u64>,
+) -> Result<Option<TenantFactFrontier>> {
+    let mut maximum: Option<TenantFactFrontier> = None;
+    for batch in batches {
+        if cutoff.is_some_and(|sequence| batch.head.run_sequence > sequence) {
+            continue;
+        }
+        let TenantFactCoordinate::FactSelectionBarrier { frontier } = &batch.tenant_fact_coordinate
+        else {
+            continue;
+        };
+        if let Some(current) = &maximum {
+            if current.store_scope_id != frontier.store_scope_id
+                || current.store_epoch != frontier.store_epoch
+                || current.tenant_scope_id != frontier.tenant_scope_id
+            {
+                return Err(super::StructuredStoreError::InvalidHistory);
+            }
+        }
+        if maximum
+            .as_ref()
+            .is_none_or(|current| current.fact_order < frontier.fact_order)
+        {
+            maximum = Some(frontier.clone());
+        }
+    }
+    Ok(maximum)
 }
 
 fn terminal_public_outcome(
@@ -1372,9 +1494,6 @@ fn terminal_public_outcome(
     let outcome_object = verified
         .object(outcome_ref)
         .ok_or(super::StructuredStoreError::InvalidHistory)?;
-    outcome_object
-        .validate()
-        .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
     let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> =
         serde_json::from_str(&outcome_object.canonical_json)
             .map_err(|_| super::StructuredStoreError::InvalidHistory)?;
@@ -1511,159 +1630,65 @@ fn reject_export_source_cycles(
 }
 
 #[cfg(test)]
-mod export_source_closure_tests {
-    use super::{
-        expand_export_source_closure, ExportRunEvidence, ExportSourceClosureError,
-        MAX_PORTABLE_FACT_ROUTES, MAX_PORTABLE_SOURCE_RUNS,
-    };
-    use mfm_ids::{DigestAlgorithm, RunId};
-    use std::collections::{BTreeMap, BTreeSet};
+#[path = "../../tests/export_source_closure_unit.rs"]
+mod export_source_closure_tests;
 
-    fn run(digit: u8) -> RunId {
-        let hex = format!("{digit:x}").repeat(64);
-        RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("run id")
+// ---------------------------------------------------------------------------
+// Current Effect-entry-attention inventory
+// ---------------------------------------------------------------------------
+
+/// One run currently requiring manual Effect-entry attention.
+///
+/// Every field is re-derived from qualified, reduced history. The index route
+/// only says *where to look*; it is never the answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntryAttentionEntry {
+    header: RunEvidenceHeader,
+    journal_head: JournalHead,
+    subject: mfm_runtime::history::EffectEntrySubject,
+    resolution: mfm_runtime::history::EffectEntryAttentionResolution,
+}
+
+impl EffectEntryAttentionEntry {
+    /// Minimum redaction-safe run header.
+    pub const fn header(&self) -> &RunEvidenceHeader {
+        &self.header
     }
 
-    #[test]
-    fn multi_hop_shared_and_deterministic() {
-        let root = run(1);
-        let mid = run(2);
-        let shared = run(3);
-        let other = run(4);
-        // root -> mid, other; mid -> shared; other -> shared
-        let graph = BTreeMap::from([
-            (root.clone(), BTreeSet::from([mid.clone(), other.clone()])),
-            (mid.clone(), BTreeSet::from([shared.clone()])),
-            (other.clone(), BTreeSet::from([shared.clone()])),
-            (shared.clone(), BTreeSet::new()),
-        ]);
-        let first = expand_export_source_closure(&root, graph[&root].clone(), |id| {
-            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
-        })
-        .expect("shared dag");
-        let second = expand_export_source_closure(&root, graph[&root].clone(), |id| {
-            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
-        })
-        .expect("shared dag again");
-        assert_eq!(first, second);
-        assert_eq!(first, BTreeSet::from([mid, other, shared]));
+    /// Exact head at which attention was re-derived.
+    pub const fn journal_head(&self) -> &JournalHead {
+        &self.journal_head
     }
 
-    #[test]
-    fn cyclic_source_graph_is_rejected() {
-        let root = run(1);
-        let a = run(2);
-        let b = run(3);
-        let graph = BTreeMap::from([
-            (root.clone(), BTreeSet::from([a.clone()])),
-            (a.clone(), BTreeSet::from([b.clone()])),
-            (b.clone(), BTreeSet::from([a.clone()])),
-        ]);
-        let error = expand_export_source_closure(&root, graph[&root].clone(), |id| {
-            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
-        })
-        .expect_err("cycle");
-        assert_eq!(error, ExportSourceClosureError::Cycle);
+    /// Exact occurrence, attempt, and capability awaiting resolution.
+    pub const fn subject(&self) -> &mfm_runtime::history::EffectEntrySubject {
+        &self.subject
     }
 
-    #[test]
-    fn over_budget_source_graph_is_rejected() {
-        let root = run(0);
-        let mut pending = BTreeSet::new();
-        let mut graph = BTreeMap::new();
-        // root fans out past the fixed budget.
-        for index in 1..=(MAX_PORTABLE_SOURCE_RUNS + 1) {
-            let digit = (index % 15) as u8;
-            // Distinct run ids via algorithm domain not available; use digest hex.
-            let hex = format!("{index:064x}");
-            let source = RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("distinct run id");
-            pending.insert(source.clone());
-            graph.insert(source, BTreeSet::new());
-            let _ = digit;
-            let _ = DigestAlgorithm::Sha256JcsV1;
-        }
-        graph.insert(root.clone(), pending.clone());
-        let error = expand_export_source_closure(&root, pending, |id| {
-            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
-        })
-        .expect_err("over budget");
-        assert_eq!(error, ExportSourceClosureError::OverBudget);
+    /// Exact reducer-derived resolution required for this entry.
+    pub const fn resolution(&self) -> mfm_runtime::history::EffectEntryAttentionResolution {
+        self.resolution
+    }
+}
+
+/// One bounded page of current attention, ordered strictly by run identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectEntryAttentionPage {
+    entries: Vec<EffectEntryAttentionEntry>,
+    next_after_run_id: Option<RunId>,
+}
+
+impl EffectEntryAttentionPage {
+    /// Runs on this page, in strict run order.
+    pub fn entries(&self) -> &[EffectEntryAttentionEntry] {
+        &self.entries
     }
 
-    #[test]
-    fn fanout_pending_bound_rejects_before_enqueue() {
-        let root = run(1);
-        let first = run(2);
-        let mut fanout = BTreeSet::new();
-        let mut graph = BTreeMap::new();
-        for index in 3..=(MAX_PORTABLE_SOURCE_RUNS + 2) {
-            let hex = format!("{index:064x}");
-            let leaf = RunId::parse(format!("run:sha256-jcs-v1:{hex}")).expect("leaf run id");
-            fanout.insert(leaf.clone());
-            graph.insert(leaf, BTreeSet::new());
-        }
-        graph.insert(root.clone(), BTreeSet::from([first.clone()]));
-        graph.insert(first.clone(), fanout);
-        let error = expand_export_source_closure(&root, graph[&root].clone(), |id| {
-            Ok::<_, ExportSourceClosureError>(graph.get(id).cloned().unwrap_or_default())
-        })
-        .expect_err("pending fanout bound");
-        assert_eq!(error, ExportSourceClosureError::OverBudget);
-    }
-
-    fn rename_export(
-        evidence: &mut ExportRunEvidence,
-        run_id: RunId,
-        direct_source_run_ids: BTreeSet<RunId>,
-    ) {
-        evidence.fragment.run_id = run_id.clone();
-        evidence.fragment.header.run_id = run_id.clone();
-        evidence.header.run_id = run_id;
-        evidence.fragment.direct_source_run_ids = direct_source_run_ids;
-    }
-
-    #[tokio::test]
-    async fn flattened_multi_hop_source_closure_is_accepted() {
-        let root_id = run(1);
-        let middle_id = run(2);
-        let leaf_id = run(3);
-        let mut root = super::super::test_support::zero_state_export(1)
-            .await
-            .expect("root fixture")
-            .export;
-        let mut middle = super::super::test_support::zero_state_export(1)
-            .await
-            .expect("middle fixture")
-            .export;
-        let mut leaf = super::super::test_support::zero_state_export(1)
-            .await
-            .expect("leaf fixture")
-            .export;
-        rename_export(
-            &mut root,
-            root_id.clone(),
-            BTreeSet::from([middle_id.clone()]),
-        );
-        rename_export(
-            &mut middle,
-            middle_id.clone(),
-            BTreeSet::from([leaf_id.clone()]),
-        );
-        rename_export(&mut leaf, leaf_id.clone(), BTreeSet::new());
-
-        let sealed = root
-            .with_authorized_sources(None, vec![(middle, None), (leaf, None)])
-            .expect("flattened recursive closure");
-        let source_ids = sealed
-            .authorized_source_prefixes()
-            .map(|source| source.run_id().clone())
-            .collect::<Vec<_>>();
-        assert_eq!(source_ids, vec![middle_id, leaf_id]);
-    }
-
-    #[test]
-    fn fact_route_bound_rejects_before_insert() {
-        assert!(super::ensure_fact_route_capacity(MAX_PORTABLE_FACT_ROUTES - 1).is_ok());
-        assert!(super::ensure_fact_route_capacity(MAX_PORTABLE_FACT_ROUTES).is_err());
+    /// Continuation key, or `None` when the sweep reached the end.
+    ///
+    /// This advances by the last *scanned* route, not the last emitted result,
+    /// so a live-sweep race yields a sparse page rather than a skipped run.
+    pub const fn next_after_run_id(&self) -> Option<&RunId> {
+        self.next_after_run_id.as_ref()
     }
 }

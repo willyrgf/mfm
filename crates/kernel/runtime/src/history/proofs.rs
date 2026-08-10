@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use mfm_facts::FactSelectionRequest;
-use mfm_ids::{AccessAttemptId, AppendRequestId, ContentDigest};
+use mfm_ids::{AccessAttemptId, AppendRequestId};
 use mfm_journal::structured::{CommittedBatch, ExternalAccessAuthorized, JournalHead, RecordRef};
 
 pub use mfm_certify::structured::{CertifiedAccessAuthorization, PriorRunFactScanCompletion};
@@ -105,8 +105,6 @@ pub enum HistoryAppendOutcome {
 /// Production construction is limited to the store adapter.
 pub struct StructuredAppendAttempt {
     append_request_id: AppendRequestId,
-    candidate_digest: ContentDigest,
-    candidate: CommittedBatch,
     outcome: HistoryAppendOutcome,
     authorization: Option<CommittedAccessAuthorization>,
     closed: bool,
@@ -124,21 +122,17 @@ impl std::fmt::Debug for StructuredAppendAttempt {
 }
 
 impl StructuredAppendAttempt {
-    /// Store-adapter construction after one fold-validated append attempt.
+    /// Store-adapter construction after one reducer-validated append attempt.
     #[doc(hidden)]
     #[cfg(feature = "store-authority")]
     pub fn from_store_attempt(
         append_request_id: AppendRequestId,
-        candidate_digest: ContentDigest,
-        candidate: CommittedBatch,
         outcome: HistoryAppendOutcome,
         authorization: Option<CommittedAccessAuthorization>,
         closed: bool,
     ) -> Self {
         Self {
             append_request_id,
-            candidate_digest,
-            candidate,
             outcome,
             authorization,
             closed,
@@ -148,11 +142,6 @@ impl StructuredAppendAttempt {
     /// Returns the stable physical append identity.
     pub const fn append_request_id(&self) -> &AppendRequestId {
         &self.append_request_id
-    }
-
-    /// Returns the exact candidate digest required for ambiguity resolution.
-    pub const fn candidate_digest(&self) -> &ContentDigest {
-        &self.candidate_digest
     }
 
     /// Returns the exact backend disposition.
@@ -174,12 +163,6 @@ impl StructuredAppendAttempt {
         }
     }
 
-    /// Returns the exact candidate envelope (store resolve path).
-    #[doc(hidden)]
-    pub const fn candidate(&self) -> &CommittedBatch {
-        &self.candidate
-    }
-
     /// Consumes a directly acknowledged new authorization append into its
     /// one-use invocation permit.
     pub fn into_committed_access_authorization(self) -> Option<CommittedAccessAuthorization> {
@@ -188,20 +171,4 @@ impl StructuredAppendAttempt {
         }
         self.authorization
     }
-
-    /// Confirms an unresolved attempt resolved to existing identical content.
-    #[doc(hidden)]
-    pub fn confirm_existing_same(&mut self) {
-        self.outcome = HistoryAppendOutcome::ExistingSame(self.candidate.clone());
-        self.authorization = None;
-    }
-}
-
-/// Store-owned resolution of one stable pending observation.
-#[derive(Debug)]
-pub enum ObservationCommit {
-    /// The exact logical observation already exists with identical content.
-    ExistingSame,
-    /// One predecessor-bound physical append was attempted.
-    Attempt(Box<StructuredAppendAttempt>),
 }

@@ -18,7 +18,7 @@ name = "mfm_store"
 path = "src/lib.rs"
 
 [features]
-test-support = []
+test-support = ["dep:mfm-program"]
 backend-conformance = ["test-support"]
 
 [dependencies]
@@ -29,6 +29,8 @@ mfm-runtime = { path = "../runtime", features = ["store-authority"] }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
+mfm-program = { path = "../program", optional = true }
+mfm-program-derive = { path = "../program-derive" }
 mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
@@ -58,6 +60,11 @@ path = "tests/api_surface.rs"
 [[test]]
 name = "structured-runtime"
 path = "tests/structured_runtime.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "structured-history-qualification"
+path = "tests/structured_history_qualification.rs"
 required-features = ["test-support"]
 
 [[test]]

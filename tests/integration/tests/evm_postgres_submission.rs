@@ -18,9 +18,9 @@ use axum::{Json, Router};
 use k256::ecdsa::SigningKey;
 use mfm_app::{
     connect_production_application, AccessPolicyError, AccessTarget, AdmitRunRequest,
-    AuthorizedTenant, EvmWalletDeployment, EvmWalletDeploymentAssemblyInput,
-    EvmWalletDeploymentReleaseMaterial, ExportKind, ExportRequest, PageRequest, PublicJsonResponse,
-    ReplayRequest, RunAccessGrant, RunAccessPolicy, SecretCredential,
+    ApplicationAccessGrant, ApplicationAccessPolicy, AuthorizedTenant, EvmWalletDeployment,
+    EvmWalletDeploymentAssemblyInput, EvmWalletDeploymentReleaseMaterial, ExportKind,
+    ExportRequest, PageRequest, PublicJsonResponse, ReplayRequest, SecretCredential,
 };
 use mfm_canonical::{limits::MAX_CANONICAL_JSON_BYTES, sha256_digest_bytes};
 use mfm_certify::structured::ProgramRegistryBuilder;
@@ -99,7 +99,7 @@ use mfm_storage_postgres::{
 };
 use mfm_store::structured::{
     ConfigurationAppendRequest, ConfigurationStreamKey, PhysicalBindingAuthorization,
-    PhysicalBindingSupersession, ProposedCanonicalValue, PublicPhysicalBindingVerifier,
+    PhysicalBindingSupersession, PhysicalObligationChecker, ProposedCanonicalValue,
     RunEvidenceStatus, StructuredAdmissionMaterial, StructuredStoreError,
 };
 use ring::hmac;
@@ -113,7 +113,7 @@ use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::prelude::*;
 use zeroize::Zeroizing;
 
-use mfm_values::MfmValue;
+use mfm_values::{CanonicalJsonPersistedSchema, MfmValue};
 use mfm_wallet_authority_provider_test_support::{
     postgres_proxy::{CommitFault, PostgresCommitFaultProxy},
     ProviderDeploymentAssemblyPolicy, ProviderProcess, ProviderProcessConfig,
@@ -173,17 +173,15 @@ const KEYSTORE_PASSWORD: &str = "integration-only-strong-password";
 
 static SCHEMA_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+fn integration_sender_path_inventory_digest(nonce_domain: &WalletNonceDomain) -> ContentDigest {
+    let canonical = canonical_json(nonce_domain).expect("sender inventory preimage");
+    let mut preimage = b"mfm.evm.integration/sender-path-inventory.v1\0".to_vec();
+    preimage.extend_from_slice(canonical.as_bytes());
+    ContentDigest::from_digest(DigestAlgorithm::Sha256V1, sha256_digest_bytes(&preimage))
+}
+
 fn fixture_routing_policy(fixture: &Fixture) -> HistoryObject {
-    HistoryObject::new(
-        stable(ADMISSION_ROUTING_POLICY_OBJECT_TYPE),
-        EvmRoutingCatalogDescriptor::schema_id().expect("routing catalog schema"),
-        fixture
-            .routing_catalog
-            .canonical()
-            .expect("canonical routing catalog")
-            .as_str(),
-    )
-    .expect("routing policy object")
+    HistoryObject::from_persisted(&fixture.routing_catalog).expect("routing policy object")
 }
 
 fn deployment_semantic_contract_refs() -> Vec<ContentRef> {
@@ -807,11 +805,11 @@ struct AllowTenantPolicy {
 }
 
 #[async_trait::async_trait]
-impl RunAccessPolicy for AllowTenantPolicy {
+impl ApplicationAccessPolicy for AllowTenantPolicy {
     async fn authorize(
         &self,
         credential: &SecretCredential,
-        _grant: RunAccessGrant,
+        _grant: ApplicationAccessGrant,
         _target: &AccessTarget,
     ) -> Result<AuthorizedTenant, AccessPolicyError> {
         if credential.expose_to_policy() != SECRET_CREDENTIAL_CANARY.as_bytes() {
@@ -1178,7 +1176,7 @@ async fn production_deployment_material(
         2,
     );
     let prior_run_source_manifest = PriorRunFactSourceManifest::new(Vec::new())
-        .and_then(|manifest| manifest.to_history_object())
+        .and_then(|manifest| HistoryObject::from_persisted(&manifest))
         .expect("prior-run source manifest");
     let rpc_certificate = certificate("rpc-certificate", 5);
     let signer_certificate = certificate("signer-certificate", 6);
@@ -1778,11 +1776,11 @@ async fn verify_production_projections(
     assert_eq!(audit_seal["payload"]["kind"], "audit");
     assert_eq!(
         semantic_seal["payload"]["version"],
-        "mfm.structured-portable-run-export-stream.v2"
+        mfm_replay::portable::PORTABLE_EXPORT_VERSION
     );
     assert_eq!(
         audit_seal["payload"]["version"],
-        "mfm.structured-portable-run-export-stream.v2"
+        mfm_replay::portable::PORTABLE_EXPORT_VERSION
     );
     let post_telemetry_application = application.clone();
     let router = mfm_rest_api::make_app(mfm_rest_api::AppState::new(application));
@@ -2106,8 +2104,8 @@ fn portable_seal(frame: &[u8]) -> Value {
 }
 
 struct RuntimeAssembly {
-    registry: mfm_certify::structured::QualifiedProgramRegistry,
-    physical_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
+    registry: mfm_certify::structured::CertifiedProgramRegistry,
+    physical_verifier: Arc<dyn PhysicalObligationChecker>,
     document: mfm_spec::structured::CertifiedProgramDocument,
     admission_material: StructuredAdmissionMaterial,
     request: EvmSubmissionRequest,
@@ -2322,7 +2320,7 @@ async fn assemble_runtime(
     let wallet_resource_ref = WalletNonceAuthorityResource::contract()
         .and_then(|contract| contract.content_ref().map_err(Into::into))
         .expect("wallet resource contract");
-    let physical_verifier: Arc<dyn PublicPhysicalBindingVerifier> =
+    let physical_verifier: Arc<dyn PhysicalObligationChecker> =
         Arc::new(ExactPhysicalBindingVerifier::new(
             &document,
             routing_policy.content_ref.clone(),
@@ -2346,7 +2344,7 @@ async fn assemble_runtime(
             2,
         ),
         PriorRunFactSourceManifest::new(Vec::new())
-            .and_then(|manifest| manifest.to_history_object())
+            .and_then(|manifest| HistoryObject::from_persisted(&manifest))
             .expect("prior-run source manifest"),
         routing_policy,
         vec![broadcast_resource_ref, wallet_resource_ref],
@@ -2366,7 +2364,7 @@ fn qualified_submission_registry(
     wallet: Arc<EvmStructuredWalletBindings>,
     authored: mfm_spec::structured::AuthoredStructuredProgram,
     reverse_registration_order: bool,
-) -> mfm_certify::structured::QualifiedProgramRegistry {
+) -> mfm_certify::structured::CertifiedProgramRegistry {
     let mut registry = ProgramRegistryBuilder::new();
     let executable_identity_ref = registry
         .register_executable_identity(SecretFreeExecutableIdentity {
@@ -2706,11 +2704,7 @@ impl Fixture {
             non_exportable_target_public_key_ref: common_ref.clone(),
             target_attestation_contract_ref: common_ref.clone(),
         };
-        let inventory = mfm_journal::structured::domain_content_digest(
-            "mfm.evm.integration/sender-path-inventory.v1",
-            &nonce_domain,
-        )
-        .expect("sender-path inventory");
+        let inventory = integration_sender_path_inventory_digest(&nonce_domain);
         let activation_record = WalletNonceDomainActivationRecord {
             activation_contract_ref: common_ref.clone(),
             qualified_activation_registry_lineage_ref: registry_lineage_ref.clone(),
@@ -2859,13 +2853,9 @@ impl Fixture {
             .generation_ref()
             .expect("cross-chain route generation");
         activation_record.exhaustive_sender_path_inventory_digest =
-            mfm_journal::structured::domain_content_digest(
-                "mfm.evm.integration/sender-path-inventory.v1",
-                &nonce_domain,
-            )
-            .expect("cross-chain sender inventory")
-            .as_str()
-            .to_owned();
+            integration_sender_path_inventory_digest(&nonce_domain)
+                .as_str()
+                .to_owned();
         activation_record
             .validate()
             .expect("cross-chain activation record");
@@ -2985,8 +2975,8 @@ impl ExactPhysicalBindingVerifier {
     }
 }
 
-impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
-    fn verify_authorization(
+impl PhysicalObligationChecker for ExactPhysicalBindingVerifier {
+    fn verify_retained_authorization(
         &self,
         context: &PhysicalBindingAuthorization<'_>,
         certificate: &HistoryObject,
@@ -3022,13 +3012,30 @@ impl PublicPhysicalBindingVerifier for ExactPhysicalBindingVerifier {
         }
     }
 
-    fn verify_supersession(
+    fn verify_current_authorization(
+        &self,
+        context: &PhysicalBindingAuthorization<'_>,
+        certificate: &HistoryObject,
+    ) -> std::result::Result<(), StructuredStoreError> {
+        self.verify_retained_authorization(context, certificate)
+    }
+
+    fn verify_retained_supersession(
         &self,
         _context: &PhysicalBindingSupersession<'_>,
         _public_lineage_head: &HistoryObject,
         _evidence: &HistoryObject,
     ) -> std::result::Result<(), StructuredStoreError> {
         Err(StructuredStoreError::Certification)
+    }
+
+    fn verify_current_supersession(
+        &self,
+        context: &PhysicalBindingSupersession<'_>,
+        public_lineage_head: &HistoryObject,
+        evidence: &HistoryObject,
+    ) -> std::result::Result<(), StructuredStoreError> {
+        self.verify_retained_supersession(context, public_lineage_head, evidence)
     }
 }
 
@@ -3398,16 +3405,20 @@ impl HistoryAudit {
 
     fn root_outcome<T, F>(&self, batches: &[CommittedBatch]) -> Option<OperationOutcome<T, F>>
     where
-        T: serde::de::DeserializeOwned,
-        F: serde::de::DeserializeOwned,
+        T: MfmValue,
+        F: MfmValue,
     {
         let reference = self.root_outcome_ref.as_ref()?;
-        let outcome = batches
+        let object = batches
             .iter()
             .flat_map(|batch| &batch.objects)
-            .find(|object| &object.content_ref == reference)?
-            .decode()
-            .ok()?;
+            .find(|object| &object.content_ref == reference)?;
+        object.validate().ok()?;
+        if object.object_type.as_str() != "structured.operation_outcome" {
+            return None;
+        }
+        let outcome: OperationOutcome<LexicalValueRef, LexicalValueRef> =
+            serde_json::from_str(&object.canonical_json).ok()?;
         match outcome {
             OperationOutcome::<LexicalValueRef, LexicalValueRef>::Success(reference) => {
                 resolve_history_value(batches, &reference).map(OperationOutcome::Success)
@@ -3419,7 +3430,7 @@ impl HistoryAudit {
     }
 }
 
-fn resolve_history_value<T: serde::de::DeserializeOwned>(
+fn resolve_history_value<T: MfmValue>(
     batches: &[CommittedBatch],
     reference: &LexicalValueRef,
 ) -> Option<T> {
@@ -3427,7 +3438,7 @@ fn resolve_history_value<T: serde::de::DeserializeOwned>(
         .iter()
         .flat_map(|batch| &batch.objects)
         .find(|object| object.content_ref == reference.value.value_ref)?
-        .decode()
+        .decode_mfm_value()
         .ok()
 }
 
@@ -4009,33 +4020,57 @@ fn stable(value: &str) -> StableId {
 }
 
 fn admission_object(object_type: &str, schema_name: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
-        stable(object_type),
-        SchemaId::new(
-            schema_name,
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(format!("mfm.structured-schema.v1:{schema_name}:1").as_bytes()),
-        )
-        .expect("admission schema"),
-        format!("{{\"discriminator\":{discriminator}}}"),
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&format!(
+        "{{\"discriminator\":{discriminator}}}"
+    ))
+    .expect("admission object canonical JSON");
+    let schema_id = SchemaId::new(
+        schema_name,
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(format!("{schema_name}.v1").as_bytes()),
     )
-    .expect("admission object")
+    .expect("admission schema");
+    let content_ref = ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .expect("admission object reference");
+    HistoryObject {
+        object_type: stable(object_type),
+        content_ref,
+        canonical_json: canonical.as_str().to_owned(),
+    }
 }
 
 fn certificate(name: &str, discriminator: u8) -> HistoryObject {
-    HistoryObject::new(
-        stable(&format!("mfm.evm.integration/{name}")),
-        SchemaId::new(
-            "mfm.evm.integration-certificate",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            sha256_digest_bytes(b"mfm.structured-schema.v1:mfm.evm.integration-certificate:1"),
-        )
-        .expect("certificate schema"),
-        format!("{{\"discriminator\":{discriminator}}}"),
+    let canonical = mfm_canonical::PlainCanonicalJsonBytes::from_json_str(&format!(
+        "{{\"discriminator\":{discriminator}}}"
+    ))
+    .expect("certificate canonical JSON");
+    let schema_id = SchemaId::new(
+        "mfm.evm.integration-certificate",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        sha256_digest_bytes(b"mfm.evm.integration-certificate.v1"),
     )
-    .expect("certificate")
+    .expect("certificate schema");
+    let content_ref = ContentRef::new(
+        schema_id,
+        ContentDigest::from_digest(
+            DigestAlgorithm::Sha256V1,
+            sha256_digest_bytes(canonical.as_bytes()),
+        ),
+    )
+    .expect("certificate reference");
+    HistoryObject {
+        object_type: stable(&format!("mfm.evm.integration/{name}")),
+        content_ref,
+        canonical_json: canonical.as_str().to_owned(),
+    }
 }
 
 fn authority_reference(name: &str, discriminator: u8) -> EvmWalletReference {

@@ -13,9 +13,6 @@ pub trait RuntimeHistoryPortSeal: Send + Sync {}
 /// Marker required by the store's physical-binding verifier.
 pub trait PhysicalBindingVerifierSeal: Send + Sync {}
 
-/// Marker required by the store's deterministic program verifier.
-pub trait ProgramVerifierSeal: Send + Sync {}
-
 /// Marker required by offline replay's retained-release trust.
 pub trait RetainedPhysicalReleaseTrustSeal: Send + Sync {}
 
@@ -36,3 +33,6 @@ pub trait DeploymentCredentialBrokerSeal: Send {}
 
 /// Marker carried by the one workspace-owned Runtime assembly cutover.
 pub trait RuntimeAssemblyConsumerSeal {}
+
+/// Marker required to consume a sealed append into its inseparable backend plans.
+pub trait ValidatedAppendConsumerSeal {}

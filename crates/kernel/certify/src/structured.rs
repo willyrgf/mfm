@@ -31,7 +31,7 @@ use mfm_journal::structured::{
 };
 use mfm_program::structured::{
     closed_sum_contract, runtime_effect_capability_contract, runtime_read_capability_contract,
-    state_contract, CapabilityExpansion, ClosedSum, CommittedObservation, PolicyExpansionRecipe,
+    state_contract, CapabilityExpansion, ClosedSum, PolicyExpansionRecipe,
     PriorRunFactSelectionCapability, RuntimeEffectAdapter, RuntimeEffectCapability,
     RuntimeReadAdapter, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner, State,
     StateSettlement, StructuredStateCallbacks,
@@ -4206,27 +4206,6 @@ impl CertifiedProcessRegistry {
         callbacks
             .author_request_runtime(input)
             .map_err(|code| QualifiedProcessFault::new(code.into(), state.clone()))
-    }
-
-    /// Settles one exact already-committed normal observation.
-    pub fn settle_observation(
-        &self,
-        state: &QualifiedComponentIdentity,
-        input: &CanonicalJsonValue,
-        observation: &CanonicalJsonValue,
-    ) -> std::result::Result<QualifiedStateSettlement, QualifiedProcessFault> {
-        let observation = decode_runtime_process_value::<
-            CommittedObservation<CanonicalJsonValue, CanonicalJsonValue>,
-        >(observation)
-        .map_err(|code| QualifiedProcessFault::new(code.into(), state.clone()))?;
-        match &observation {
-            CommittedObservation::Returned(returned) => {
-                self.settle_returned(state, input, returned)
-            }
-            CommittedObservation::SafeFailure(safe_failure) => {
-                self.settle_safe_failure(state, input, safe_failure)
-            }
-        }
     }
 
     /// Settles one exact already-committed returned value.

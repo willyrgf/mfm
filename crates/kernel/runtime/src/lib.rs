@@ -5,7 +5,7 @@
 //! request and observation proofs, affine live-access authority, and
 //! deterministic one-action scheduling. History mutation is requested only
 //! through [`history::RuntimeHistoryPort`]; production adapters and the sole
-//! fold remain owned by `mfm-store`.
+//! reducer remain owned by `mfm-store`.
 
 pub mod history;
 pub mod structured;

@@ -1,28 +1,30 @@
 # mfm-store
 
-Sole callback-free fold, private production history adapter, and purpose readers for structured
-runs.
+Hostile-input qualification, pure event reduction, compilation, obligation discharge, semantic
+open, a private production history adapter, and purpose readers for structured runs.
 
-The fold validates complete raw history, re-certifies the persisted program via the concrete
+Qualification validates complete raw history, re-certifies the persisted program via the concrete
 `AdmissionVerificationRegistry`, enforces writer lineage and exact heads, checks record logical
 keys/cursor legality/access linkage/lexical provenance, validates exact object and fact closure,
-and derives one `VerifiedStructuredRun`. That view contains chronology, semantic/journal heads,
-lexical bindings, fan-out cursors, waiting or blocked state, and terminal outcome.
+and produces immutable typed history. Callback-free `reduce_event` interprets only that history and
+derives compact semantic continuation. The compiler authors and compares records and projections;
+obligations discharge external/current checks; semantic open audits stored projections; backends
+apply sealed plans mechanically. Their completed result is one `VerifiedStructuredRun`.
 
-The private Runtime adapter retains at most one same-fold verified successor after admission,
+The private Runtime adapter retains at most one same-reducer verified successor after admission,
 mutation, or a non-mutating frontier. Each reuse first compares its journal head with the backend's
-indexed current head; a stale or absent entry performs the complete fold, so this bounded
+indexed current head; a stale or absent entry re-reduces the complete history, so this bounded
 optimization cannot become a second authority or hide an external append. The indexed-head read
 defines the snapshot point for a non-mutating load; exact-head compare-and-append still rejects a
 mutation based on a later external append.
 
-Production assembly consumes one complete `QualifiedProgramRegistry` and a backend, then returns
+Production assembly consumes one complete `CertifiedProgramRegistry` and a backend, then returns
 only `Runtime` plus sealed purpose readers (public-read, trace, audit, replay, export). Each
 purpose reader returns only its purpose-sealed evidence newtype (`PublicRunEvidence`,
 `TraceRunEvidence`, `AuditRunEvidence`, `RecordedRunEvidence`, `ExportRunEvidence`); none expose
 complete `VerifiedStructuredRun` publicly, and cross-purpose evidence substitution is a type error.
-Public and recorded-replay evidence expose only a fold-derived status tag; actionable frontier
-details and capability references remain internal to the fold.
+Public and recorded-replay evidence expose only a reducer-derived status tag; actionable frontier
+details and capability references remain internal to the store.
 The explicit offline verifier returns only an opaque recorded-status/export-metadata summary;
 the complete `VerifiedStructuredRun` is not part of the crate's public API.
 Assembly never returns a store, writer, port, backend, pool, proposal constructor, or append

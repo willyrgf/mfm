@@ -1,8 +1,8 @@
 //! Authority and identity proofs for sealed runtime/store assembly.
 
 use mfm_store::structured::{
-    AuditRunReader, ExportRunReader, PublicRunReader, ReplayRunReader, StoreHistoryAdapter,
-    StructuredMemoryBackend, TraceRunReader,
+    AuditRunReader, ExportRunReader, PublicRunReader, ReplayRunReader, StructuredMemoryBackend,
+    StructuredRuntime, TraceRunReader,
 };
 
 #[test]
@@ -30,7 +30,5 @@ fn purpose_readers_are_distinct_types() {
 
 #[test]
 fn production_adapter_type_is_runtime_port() {
-    let _ = std::any::type_name::<
-        mfm_runtime::structured::Runtime<StoreHistoryAdapter<StructuredMemoryBackend>>,
-    >();
+    let _ = std::any::type_name::<StructuredRuntime<StructuredMemoryBackend>>();
 }

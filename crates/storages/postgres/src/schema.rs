@@ -9,7 +9,7 @@ use crate::roles::{TargetKey, TargetRoleKind, TargetRoleNames};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v6";
+pub(crate) const SCHEMA_CONTRACT_VERSION: &str = "mfm.structured-run-history-postgres.v7";
 
 /// Applies the current destructive baseline for integration fixtures.
 #[cfg(feature = "test-support")]
@@ -25,16 +25,16 @@ pub async fn migrate_test_database(database_url: &str) -> Result<()> {
 
 // These SHA-256 values bind canonical, schema-name-independent catalog rows. They are
 // regenerated only with the destructive baseline and deliberately fail closed across
-// PostgreSQL catalog-rendering changes. Placeholders are filled after the first online
-// catalog probe against the v4 baseline.
+// PostgreSQL catalog-rendering changes. The v7 baseline changed relation,
+// constraint, index, and generated-trigger rows; its ACL remains unchanged.
 const RELATION_MANIFEST_SHA256: &str =
-    "cf3b8c51d969611e9f6ca7ca9585ac58aab35358cd3bbd46418b29a05adcbb76";
+    "928b08d781d5259be1b4ce243d7afcc0d6bdfbe19d0fd54f2c694b339f7e82df";
 const CONSTRAINT_MANIFEST_SHA256: &str =
-    "d50e4a03598024f35e9f00b52e6630784b85f464cc5e561dd120579b67dc60e2";
+    "5f718799607f23e127797bf904fcb261d996ae55420186ad882d891233b779d6";
 const INDEX_MANIFEST_SHA256: &str =
-    "8ae2874ce7db6d9186a54776764748579716aeec882a739a6189281aacb4ee81";
+    "e59ba599be14f3e94f992b86f4e77f9dc83557e156b1409d76e43e54b8e3b9f4";
 const EXECUTABLE_MANIFEST_SHA256: &str =
-    "665fd6cb23c59ee9116c63c9b80f42cd85fc32d6fd994a30a3c11a538f58b920";
+    "3a0aa2500f53766c5a301eb4d8d03e3afa233ab0e5dae5ebed8a85d2620015b3";
 const ACL_MANIFEST_SHA256: &str =
     "69446804600c06508b741bdce8f681b1182c8174088b7072352ab90e90be2de6";
 
@@ -91,7 +91,6 @@ async fn validate_authoritative_schema_inner(
     let roles = validate_managed_roles(connection).await?;
     let identity = validate_identity(connection).await?;
     validate_target_authority(connection, &roles).await?;
-    validate_prefix_integrity(connection, &identity).await?;
     transaction
         .commit()
         .await
@@ -862,206 +861,6 @@ async fn validate_identity(connection: &mut PgConnection) -> Result<ValidatedSto
         store_epoch: StoreEpoch::parse(string(&row, "store_epoch")?)
             .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?,
     })
-}
-
-async fn validate_prefix_integrity(
-    connection: &mut PgConnection,
-    identity: &ValidatedStoreIdentity,
-) -> Result<()> {
-    let invalid = sqlx::query_scalar::<_, i64>(
-        "WITH ordered AS ( \
-             SELECT batch.*, \
-                    lag(run_sequence) OVER (PARTITION BY run_id ORDER BY run_sequence) AS prior_sequence, \
-                    lag(head_commit_digest) OVER (PARTITION BY run_id ORDER BY run_sequence) AS prior_digest \
-               FROM run_history_batches AS batch \
-         ), invalid_batches AS ( \
-             SELECT 1 FROM ordered \
-              WHERE (run_sequence = 1 AND (predecessor_sequence IS NOT NULL OR predecessor_commit_digest IS NOT NULL)) \
-                 OR (run_sequence > 1 AND (predecessor_sequence <> prior_sequence OR predecessor_commit_digest <> prior_digest)) \
-                 OR prior_sequence IS DISTINCT FROM CASE WHEN run_sequence = 1 THEN NULL ELSE run_sequence - 1 END \
-         ), invalid_heads AS ( \
-             SELECT 1 FROM run_history_heads AS head \
-              LEFT JOIN LATERAL ( \
-                    SELECT run_sequence, head_commit_digest FROM run_history_batches \
-                     WHERE run_id = head.run_id ORDER BY run_sequence DESC LIMIT 1 \
-              ) AS last_batch ON TRUE \
-              WHERE head.store_scope_id <> $1 OR head.store_epoch::text <> $2 \
-                 OR last_batch.run_sequence IS NULL \
-                 OR head.head_sequence <> last_batch.run_sequence \
-                 OR head.head_commit_digest <> last_batch.head_commit_digest \
-         ), orphan_batches AS ( \
-             SELECT 1 FROM run_history_batches AS batch \
-              LEFT JOIN run_history_heads AS head USING (run_id) WHERE head.run_id IS NULL \
-         ), object_counts AS ( \
-             SELECT batch.run_id, batch.run_sequence, \
-                    batch.batch_envelope_json::jsonb ->> 'object_count' AS declared_count, \
-                    count(object.object_ordinal) AS actual_count, \
-                    min(object.object_ordinal) AS first_ordinal, \
-                    max(object.object_ordinal) AS last_ordinal \
-               FROM run_history_batches AS batch \
-               LEFT JOIN run_history_batch_objects AS object \
-                 USING (run_id, run_sequence) \
-              GROUP BY batch.run_id, batch.run_sequence, batch.batch_envelope_json \
-         ), invalid_objects AS ( \
-             SELECT 1 FROM object_counts \
-              WHERE declared_count IS NULL \
-                 OR declared_count !~ '^(0|[1-9][0-9]{0,5})$' \
-                 OR CASE \
-                        WHEN declared_count ~ '^(0|[1-9][0-9]{0,5})$' \
-                        THEN declared_count::bigint > 65536 \
-                          OR declared_count::bigint <> actual_count \
-                        ELSE TRUE \
-                    END \
-                 OR (actual_count > 0 AND (first_ordinal <> 0 OR last_ordinal::bigint <> actual_count - 1)) \
-         ), ordered_fact_publications AS ( \
-             SELECT publication.*, \
-                    row_number() OVER ( \
-                        PARTITION BY store_scope_id, store_epoch, tenant_scope_id \
-                        ORDER BY fact_order \
-                    ) AS dense_order \
-               FROM tenant_fact_publications AS publication \
-         ), invalid_fact_publications AS ( \
-             SELECT 1 FROM ordered_fact_publications AS publication \
-               JOIN run_history_batches AS batch \
-                 ON batch.run_id = publication.run_id \
-                AND batch.run_sequence = publication.run_sequence \
-              WHERE publication.store_scope_id <> $1 \
-                 OR publication.store_epoch::text <> $2 \
-                 OR publication.fact_order <> publication.dense_order \
-                 OR batch.batch_envelope_json::jsonb #>> '{tenant_fact_coordinate,kind}' \
-                        <> 'fact_publication' \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{tenant_fact_coordinate,frontier,store_scope_id}' <> $1 \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{tenant_fact_coordinate,frontier,store_epoch}' <> $2 \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{tenant_fact_coordinate,frontier,tenant_scope_id}' \
-                        <> publication.tenant_scope_id \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{tenant_fact_coordinate,frontier,fact_order}' \
-                        <> publication.fact_order::text \
-                 OR batch.batch_envelope_json::jsonb #>> '{records,0,record_ref,run_id}' \
-                        <> publication.run_id \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{records,0,record_ref,run_sequence}' \
-                        <> publication.run_sequence::text \
-                 OR batch.batch_envelope_json::jsonb #>> '{records,0,record_ref,ordinal}' \
-                        <> publication.transition_ordinal::text \
-                 OR batch.batch_envelope_json::jsonb \
-                        #>> '{records,0,record_ref,record_hash}' \
-                        <> publication.transition_record_hash \
-         ), invalid_fact_heads AS ( \
-             SELECT 1 FROM tenant_fact_heads AS head \
-              WHERE head.store_scope_id <> $1 OR head.store_epoch::text <> $2 \
-                 OR head.publication_count <> head.fact_order \
-                 OR (head.fact_order = 0 AND (head.minimum_order IS NOT NULL OR head.maximum_order IS NOT NULL)) \
-                 OR (head.fact_order > 0 AND (head.minimum_order <> 1 OR head.maximum_order <> head.fact_order)) \
-                 OR ( \
-                        SELECT count(*)::numeric FROM tenant_fact_publications AS publication \
-                         WHERE publication.store_scope_id = head.store_scope_id \
-                           AND publication.store_epoch = head.store_epoch \
-                           AND publication.tenant_scope_id = head.tenant_scope_id \
-                    ) <> head.publication_count \
-                 OR ( \
-                        SELECT min(publication.fact_order) FROM tenant_fact_publications AS publication \
-                         WHERE publication.store_scope_id = head.store_scope_id \
-                           AND publication.store_epoch = head.store_epoch \
-                           AND publication.tenant_scope_id = head.tenant_scope_id \
-                    ) IS DISTINCT FROM head.minimum_order \
-                 OR ( \
-                        SELECT max(publication.fact_order) FROM tenant_fact_publications AS publication \
-                         WHERE publication.store_scope_id = head.store_scope_id \
-                           AND publication.store_epoch = head.store_epoch \
-                           AND publication.tenant_scope_id = head.tenant_scope_id \
-                    ) IS DISTINCT FROM head.maximum_order \
-             UNION ALL \
-             SELECT 1 FROM tenant_fact_publications AS publication \
-              LEFT JOIN tenant_fact_heads AS head \
-                ON head.store_scope_id = publication.store_scope_id \
-               AND head.store_epoch = publication.store_epoch \
-               AND head.tenant_scope_id = publication.tenant_scope_id \
-              WHERE head.tenant_scope_id IS NULL \
-         ), ordered_configuration AS ( \
-             SELECT revision.*, \
-                    lag(revision_sequence) OVER configuration_stream AS prior_sequence, \
-                    lag(revision_schema_id) OVER configuration_stream AS prior_schema_id, \
-                    lag(revision_digest) OVER configuration_stream AS prior_digest, \
-                    count(*) OVER configuration_stream_all AS stream_count, \
-                    count(*) OVER configuration_contract AS contract_count \
-               FROM configuration_revisions AS revision \
-             WINDOW configuration_stream AS ( \
-                        PARTITION BY store_scope_id, tenant_scope_id, \
-                                     entry_point_operation_id, target_id \
-                        ORDER BY revision_sequence \
-                    ), \
-                    configuration_stream_all AS ( \
-                        PARTITION BY store_scope_id, tenant_scope_id, \
-                                     entry_point_operation_id, target_id \
-                    ), \
-                    configuration_contract AS ( \
-                        PARTITION BY store_scope_id, tenant_scope_id, \
-                                     entry_point_operation_id, target_id, \
-                                     value_contract_schema_id, value_contract_digest \
-                    ) \
-         ), configuration_revision_heads AS ( \
-             SELECT DISTINCT ON ( \
-                        store_scope_id, tenant_scope_id, entry_point_operation_id, target_id \
-                    ) \
-                    store_scope_id, tenant_scope_id, entry_point_operation_id, target_id, \
-                    revision_sequence, revision_schema_id, revision_digest, \
-                    count(*) OVER configuration_stream_all AS stream_count, \
-                    min(revision_sequence) OVER configuration_stream_all AS minimum_sequence \
-               FROM configuration_revisions \
-             WINDOW configuration_stream_all AS ( \
-                        PARTITION BY store_scope_id, tenant_scope_id, \
-                                     entry_point_operation_id, target_id \
-                    ) \
-              ORDER BY store_scope_id, tenant_scope_id, entry_point_operation_id, target_id, \
-                       revision_sequence DESC \
-         ), invalid_configuration_heads AS ( \
-             SELECT 1 FROM configuration_heads AS head \
-              FULL OUTER JOIN configuration_revision_heads AS revisions \
-                ON revisions.store_scope_id = head.store_scope_id \
-               AND revisions.tenant_scope_id = head.tenant_scope_id \
-               AND revisions.entry_point_operation_id = head.entry_point_operation_id \
-               AND revisions.target_id = head.target_id \
-              WHERE head.store_scope_id IS NULL OR revisions.store_scope_id IS NULL \
-                 OR head.store_scope_id <> $1 \
-                 OR revisions.minimum_sequence <> 1 \
-                 OR revisions.stream_count <> revisions.revision_sequence \
-                 OR head.revision_sequence <> revisions.revision_sequence \
-                 OR head.revision_schema_id <> revisions.revision_schema_id \
-                 OR head.revision_digest <> revisions.revision_digest \
-         ), invalid_configuration AS ( \
-             SELECT 1 FROM ordered_configuration \
-              WHERE store_scope_id <> $1 \
-                 OR prior_sequence IS DISTINCT FROM \
-                    CASE WHEN revision_sequence = 1 THEN NULL ELSE revision_sequence - 1 END \
-                 OR (revision_sequence = 1 \
-                     AND (predecessor_schema_id IS NOT NULL OR predecessor_digest IS NOT NULL)) \
-                 OR (revision_sequence > 1 \
-                     AND (predecessor_schema_id <> prior_schema_id \
-                          OR predecessor_digest <> prior_digest)) \
-                 OR stream_count <> contract_count \
-         ) \
-         SELECT (SELECT count(*) FROM invalid_batches) \
-              + (SELECT count(*) FROM invalid_heads) \
-              + (SELECT count(*) FROM orphan_batches) \
-              + (SELECT count(*) FROM invalid_objects) \
-              + (SELECT count(*) FROM invalid_fact_publications) \
-              + (SELECT count(*) FROM invalid_fact_heads) \
-              + (SELECT count(*) FROM invalid_configuration_heads) \
-              + (SELECT count(*) FROM invalid_configuration)",
-    )
-    .bind(identity.store_scope_id.as_str())
-    .bind(identity.store_epoch.get().to_string())
-    .fetch_one(&mut *connection)
-    .await
-    .map_err(|_| PostgresStoreError::SchemaAuthorityMismatch)?;
-    if invalid != 0 {
-        return Err(PostgresStoreError::SchemaAuthorityMismatch);
-    }
-    Ok(())
 }
 
 fn string(row: &sqlx::postgres::PgRow, column: &str) -> Result<String> {

@@ -1,14 +1,15 @@
 //! Immutable store lineage identity visible to Runtime.
 
 use mfm_ids::{ContentDigest, StoreEpoch, StoreScopeId};
+use mfm_program_derive::PersistedSchema;
 use serde::{Deserialize, Serialize};
 
 /// Exact physical target state qualified for one store lineage.
 ///
 /// This value is retained only when deployment has supplied a target-bound
-/// store identity. Offline folds may validate lineage without knowing the
+/// store identity. Offline verification may validate lineage without knowing the
 /// physical target and therefore carry `None` in [`StructuredStoreIdentity`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, PersistedSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PhysicalTargetIdentity {
     /// Stable deployment target key.

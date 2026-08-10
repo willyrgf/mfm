@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use mfm_certify::structured::CertifiedProgramRegistry;
 use mfm_store::structured::{
-    assemble_structured_runtime, AssembledStructuredRuntime, ConfigurationHistoryStore,
-    PublicPhysicalBindingVerifier,
+    qualify_and_open_configuration_history, qualify_and_open_structured_store,
+    ConfigurationHistoryStore, OpenedStructuredStore, PhysicalObligationChecker,
 };
 
 use crate::configuration::PostgresConfigurationHistoryBackend;
@@ -23,11 +23,12 @@ use crate::structured::PostgresStructuredHistoryBackend;
 pub async fn open_structured_authoritative(
     sessions: PostgresApplicationSessions,
     registry: CertifiedProgramRegistry,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
-) -> Result<AssembledStructuredRuntime<PostgresStructuredHistoryBackend>> {
+    physical_binding_verifier: Arc<dyn PhysicalObligationChecker>,
+) -> Result<OpenedStructuredStore<PostgresStructuredHistoryBackend>> {
     let backend = PostgresStructuredHistoryBackend::from_application_sessions(sessions);
-    assemble_structured_runtime(backend, registry, physical_binding_verifier)
-        .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))
+    qualify_and_open_structured_store(backend, registry, physical_binding_verifier)
+        .await
+        .map_err(|_| PostgresStoreError::Corruption("runtime semantic open failed"))
 }
 
 /// Opens structured RunHistory together with append-only configured-value history.
@@ -38,52 +39,56 @@ pub async fn open_structured_authoritative(
 pub async fn open_structured_authoritative_with_configuration(
     sessions: PostgresCombinedSessions,
     registry: CertifiedProgramRegistry,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
+    physical_binding_verifier: Arc<dyn PhysicalObligationChecker>,
 ) -> Result<(
-    AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,
+    OpenedStructuredStore<PostgresStructuredHistoryBackend>,
     ConfigurationHistoryStore<PostgresConfigurationHistoryBackend>,
 )> {
     let (run_reader, run_writer, configuration_reader, configuration_writer, target) =
         sessions.into_parts();
-    let configuration_backend = PostgresConfigurationHistoryBackend::from_sessions(
-        configuration_reader,
-        Some(configuration_writer),
-        target.clone(),
-    );
+    let configuration =
+        qualify_and_open_configuration_history(PostgresConfigurationHistoryBackend::from_sessions(
+            configuration_reader,
+            Some(configuration_writer),
+            target.clone(),
+        ))
+        .await
+        .map_err(|_| PostgresStoreError::Corruption("configuration semantic open failed"))?;
     let run_backend =
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target);
     let assembled =
-        assemble_structured_runtime(run_backend, registry, physical_binding_verifier)
-            .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))?;
-    Ok((
-        assembled,
-        ConfigurationHistoryStore::new(configuration_backend),
-    ))
+        qualify_and_open_structured_store(run_backend, registry, physical_binding_verifier)
+            .await
+            .map_err(|_| PostgresStoreError::Corruption("runtime semantic open failed"))?;
+    Ok((assembled, configuration))
 }
 
 /// Opens the application boundary with structured RunHistory and resolve-only configuration.
 pub async fn open_structured_authoritative_application(
     sessions: PostgresApplicationSessions,
     registry: CertifiedProgramRegistry,
-    physical_binding_verifier: Arc<dyn PublicPhysicalBindingVerifier>,
+    physical_binding_verifier: Arc<dyn PhysicalObligationChecker>,
 ) -> Result<(
-    AssembledStructuredRuntime<PostgresStructuredHistoryBackend>,
+    OpenedStructuredStore<PostgresStructuredHistoryBackend>,
     mfm_store::structured::ConfigurationHistoryReader<PostgresConfigurationHistoryBackend>,
 )> {
     let (run_reader, run_writer, configuration_reader, target) = sessions.into_application_parts();
     let configuration =
-        ConfigurationHistoryStore::new(PostgresConfigurationHistoryBackend::from_sessions(
+        qualify_and_open_configuration_history(PostgresConfigurationHistoryBackend::from_sessions(
             configuration_reader,
             None,
             target.clone(),
-        ));
-    let assembled = assemble_structured_runtime(
+        ))
+        .await
+        .map_err(|_| PostgresStoreError::Corruption("configuration semantic open failed"))?;
+    let assembled = qualify_and_open_structured_store(
         PostgresStructuredHistoryBackend::from_run_parts(run_reader, run_writer, target),
         registry,
         physical_binding_verifier,
     )
-    .map_err(|_| PostgresStoreError::Corruption("runtime assembly seal mismatch"))?;
-    let (_writer, reader) = configuration.split();
+    .await
+    .map_err(|_| PostgresStoreError::Corruption("runtime semantic open failed"))?;
+    let (_writer, reader) = configuration.into_authorities();
     Ok((assembled, reader))
 }
 
@@ -94,11 +99,13 @@ pub async fn open_configuration_maintenance(
 {
     let (configuration_reader, configuration_writer, target) = sessions.into_parts();
     let configuration =
-        ConfigurationHistoryStore::new(PostgresConfigurationHistoryBackend::from_sessions(
+        qualify_and_open_configuration_history(PostgresConfigurationHistoryBackend::from_sessions(
             configuration_reader,
             Some(configuration_writer),
             target,
-        ));
-    let (writer, _reader) = configuration.split();
+        ))
+        .await
+        .map_err(|_| PostgresStoreError::Corruption("configuration semantic open failed"))?;
+    let (writer, _reader) = configuration.into_authorities();
     Ok(writer)
 }

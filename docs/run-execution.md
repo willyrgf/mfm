@@ -13,7 +13,7 @@ typed request
   -> deterministic authored program
   -> qualified pure certification
   -> RunAdmitted
-  -> callback-free fold derives cursor
+  -> qualify -> reduce -> cursor
   -> repeated drive_once calls
   -> RunClosed beside the transition that derives the root outcome
 ```
@@ -24,19 +24,19 @@ submits the complete certified closure and immutable admission material to Runti
 re-certifies the persisted authored object, checks the exact certified root/document, and appends
 the admission atomically.
 
-An operation with no state appends `RunAdmitted` and `RunClosed` together. Otherwise the fold
+An operation with no state appends `RunAdmitted` and `RunClosed` together. Otherwise the reducer
 derives the first actionable `State` occurrence. Structural `Match`, `FanOut`, child fragment, join,
 and outcome expressions are normalized without control records.
 
 ## Cursor selection
 
-Outside fan-out there is one current state. Inside fan-out the fold exposes declaration-ordered
+Outside fan-out there is one current state. Inside fan-out reduction exposes declaration-ordered
 actionable lane paths. Runtime selects the minimum path. A structural barrier or possible Effect
 entry stops the scan, and an unobserved Read keeps its lane actionable rather than exposing a later
 one, because it is re-assertable rather than waiting. A join is derived only after every lane has one canonical lane outcome, and its values
 are ordered by declaration rather than completion time.
 
-The fold reports one of:
+The reducer reports one of:
 
 - actionable state occurrences;
 - possible Effect entry;
@@ -91,6 +91,18 @@ meaningful state; nothing is synthetically completed. Only committed `Superseded
 a new attempt for the same Effect occurrence. A stale worker cannot self-upgrade its physical
 authority.
 
+Current Effect-entry attention is derived from the reduced leaf, never from an index or transport:
+
+| Reduced Effect state | Resolution | Required action |
+| --- | --- | --- |
+| Authorized without observation, or terminal `EntryUnknown` | `Manual` | Inspect and resolve without automatic re-entry. |
+| Absorbing attempt authorized without observation, with budget remaining | `CloseThenReassert` | Commit the reserved lost-invoker closure, then re-assert. |
+| Absorbing attempt observed `EntryUnknown`, with budget remaining | `Reassert` | Re-authorize the byte-identical request at the next ordinal. |
+
+The inventory carries the exact occurrence, path, attempt, and capability contract plus this closed
+resolution. Its route and keyset cursor are disposable locations; each returned item is re-derived
+from qualified history at the exact reported head.
+
 ## Settlement and failure handling
 
 Only `Returned` and `SafeFailure` reach registered state settlement, through distinct callbacks:
@@ -137,7 +149,7 @@ Runtime distinguishes:
 - `AcknowledgementUnknown` when durability cannot yet be determined.
 
 The PostgreSQL backend persists raw assigned batches and objects. A fresh process opens through the
-same deployment fence, loads the full prefix, re-runs the callback-free fold, and continues from
+same deployment fence, loads the full prefix, re-qualifies and re-reduces it, and continues from
 the same cursor. It never restores callback state or delegates to memory.
 
 ## Writer fencing
@@ -150,7 +162,7 @@ sibling lineages fail closed. This fence is independent from the EVM wallet targ
 
 Run read, replay verification, transition trace, access audit, and portable export each load
 through a distinct purpose reader and receive only that purpose's sealed evidence newtype. The
-shared fold still derives one internal `VerifiedStructuredRun`, but purpose APIs never return it:
+shared reduction still derives one internal `VerifiedStructuredRun`, but purpose APIs never return it:
 public-read, trace, audit, replay, and export evidence types are not interchangeable. They do not
 execute callbacks or live IO. Trace/audit pages bind one exact journal head and use stable
 zero-based positions. Portable exports contain the exact records and content-addressed object
@@ -173,7 +185,7 @@ CLI and REST expose this bounded behavior. They do not loop a run to completion.
 
 - `mfm-program`, `mfm-spec`, and `mfm-certify`: authoring, substitution, bounds, failure plans,
   exhaustive Match, nominal results, and expansion/certification goldens.
-- `mfm-store`: hostile history, exact closure, atomicity, fold equivalence, and memory semantics.
+- `mfm-store`: hostile history, exact closure, atomicity, reduction equivalence, and memory semantics.
 - `mfm-runtime`: callback counts, affine access, ambiguity, settlement, and concurrent progress.
 - `mfm-storage-postgres`: SQL rollback, fresh-process continuation, numeric ordering, and writer
   qualification.

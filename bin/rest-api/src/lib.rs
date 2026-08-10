@@ -120,6 +120,10 @@ pub fn make_app(state: AppState) -> Router {
         .route("/v1/runs/:run_id/trace", exact_get(read_transition_trace))
         .route("/v1/runs/:run_id/audit", exact_get(read_access_audit))
         .route("/v1/runs/:run_id/exports", exact_post(export_run))
+        .route(
+            "/v1/effect-entry-attention",
+            exact_get(list_effect_entry_attention),
+        )
         .fallback(not_found)
         .layer(
             TraceLayer::new_for_http()
@@ -321,6 +325,28 @@ async fn read_access_audit(
     let response = state
         .application
         .read_access_audit(credential, run_id, page)
+        .await?;
+    public_json_response(StatusCode::OK, &response)
+}
+
+/// Lists the authenticated tenant's runs that currently require manual
+/// Effect-entry attention.
+///
+/// The route names no run: it is a tenant inventory and grants no authority over
+/// the runs it returns.
+async fn list_effect_entry_attention(
+    State(state): State<AppState>,
+    RawQuery(query): RawQuery,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let credential = bearer_credential(&headers)?;
+    let body = request_body(body, MAX_REQUEST_BODY_BYTES).await?;
+    require_empty_body(&body)?;
+    let page = decode_page_query(query.as_deref())?.into_request()?;
+    let response = state
+        .application
+        .list_effect_entry_attention(credential, page)
         .await?;
     public_json_response(StatusCode::OK, &response)
 }

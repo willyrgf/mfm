@@ -14,7 +14,7 @@ CLI / REST
   -> pure expansion + certification
   -> Runtime (sole RunHistory writer and one-action interpreter)
        -> registered Read/Effect invokers -> transports, signers, resource authorities
-  -> mfm-store (atomic append and sole callback-free fold)
+  -> mfm-store (qualification, pure event reduction, compilation, and atomic append)
        -> memory conformance or fenced PostgreSQL
   -> mfm-replay (reader-only projections and export)
 ```
@@ -43,7 +43,7 @@ libraries and inject a qualified application.
 - declaration order, exhaustive Match, and bounded collect-all FanOut;
 - one content-addressed certified program closure;
 - exactly five append-only run record families and atomic object closure;
-- one callback-free history fold shared by mutation, replay, trace, audit, and export;
+- one callback-free `reduce_event` shared by mutation, replay, trace, audit, and export;
 - affine authorization/invocation/observation handling inside Runtime;
 - append-only configured-value history with deployment write/app resolve roles;
 - real PostgreSQL run-history and wallet-authority qualification;
@@ -60,7 +60,6 @@ libraries and inject a qualified application.
 - [Persisted/public surfaces](docs/persisted-public-surfaces.md)
 - [Build and verification](docs/build-and-verification.md)
 - [Known gaps](docs/known-gaps.md)
-- [Effect entry resolution](docs/effect-entry-resolution.md)
 - [CLI](bin/cli/README.md) and [REST API](bin/rest-api/README.md)
 
 ## Development

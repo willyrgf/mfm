@@ -18,8 +18,8 @@ mod stream_spool;
 mod surface;
 
 pub use self::access::{
-    AccessPolicyError, AccessTarget, AuthorizedTenant, RunAccessGrant, RunAccessPolicy,
-    SecretCredential, SecretCredentialError, MAX_SECRET_CREDENTIAL_BYTES,
+    AccessPolicyError, AccessTarget, ApplicationAccessGrant, ApplicationAccessPolicy,
+    AuthorizedTenant, SecretCredential, SecretCredentialError, MAX_SECRET_CREDENTIAL_BYTES,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub use self::application::{
