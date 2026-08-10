@@ -562,6 +562,10 @@ fail closed.
 
 `mfm-app` owns qualified registry assembly, access policy, tenant isolation, configuration
 resolution, admission, one-action drive, purpose-limited reads, and reviewed DTO rendering.
+Each app-owned response has one private typed wire owner that validates its required version,
+checked identities, exact variants, unknown-field exclusion, cross-field relations, and canonical
+re-encoding before constructing the public byte wrapper; there is no generic response decoder or
+cross-owner response type.
 Normal app, CLI, and REST paths receive no raw database pool, registry administration, fence
 issuer, signer secret, mutation permit, or generic invoker authority.
 

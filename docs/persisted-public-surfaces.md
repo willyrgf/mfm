@@ -224,9 +224,22 @@ The reviewed application surfaces are:
 - callback-free replay results; and
 - streamed current structured portable exports.
 
-All JSON rendering uses a strict one-current schema. Cursor and content-reference strings are
-opaque identity, not authorization. Every protected method independently authenticates and
-authorizes its exact purpose and tenant/run target.
+The three app-owned response codecs accept only their complete current languages. Admission
+requires `mfm.admit-run-response.v1`, checked run/entry-point/invocation identities, one closed
+admission disposition, and a content reference carrying the exact current `PlanningProfile`
+schema. Drive requires `mfm.drive-response.v1` and is the closed union `advanced | waiting |
+closed`: `advanced` and `closed` carry a required null reason, while `waiting` carries exactly
+`operational_block` or `integrity_block`. The public run view requires
+`mfm.public-run-view.v1`, a semantic record reference in the same run no newer than the journal
+head, and an outcome exactly when status is `closed`; the included canonical outcome bytes must
+hash to their nested typed value reference.
+
+All JSON rendering uses an owner-specific strict one-current schema. Required fields, checked
+identities, field types, variants, cross-field relations, unknown fields, and exact canonical
+re-encoding are validated before a response wrapper is constructed. Bytes accepted by one owner
+cannot be substituted for another. Cursor and content-reference strings are opaque identity, not
+authorization. Every protected method independently authenticates and authorizes its exact purpose
+and tenant/run target.
 
 ## Portable export
 

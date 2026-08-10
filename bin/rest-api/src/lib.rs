@@ -211,7 +211,7 @@ async fn admit_run(
     let body = request_body(body, MAX_REQUEST_BODY_BYTES).await?;
     let request = mfm_app::AdmitRunRequest::decode_json(&body)?;
     let response = state.application.admit_run(credential, request).await?;
-    let status = match response.admission()? {
+    let status = match response.admission() {
         AdmissionStatus::NewlyAdmitted => StatusCode::CREATED,
         AdmissionStatus::Attached => StatusCode::OK,
         AdmissionStatus::OutcomeUnknown => StatusCode::ACCEPTED,
