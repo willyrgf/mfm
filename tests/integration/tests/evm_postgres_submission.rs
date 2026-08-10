@@ -72,8 +72,8 @@ use mfm_program::structured::{
     RuntimeEffectCapability, RuntimeReadCapability, RuntimeResourceAuthority, RuntimeSigner,
 };
 use mfm_replay::portable::PortableRunExport;
-use mfm_runtime::history::StructuredAdmissionCommand;
-use mfm_runtime::structured::DriveOutcome;
+use mfm_runtime::history::{EffectEntryAttentionResolution, StructuredAdmissionCommand};
+use mfm_runtime::structured::{DriveOutcome, INVOKER_AUTHORITY_LOST};
 use mfm_signing::{
     GenerationGuardedDeterministicSigningProvider, PublicKeyBytes, PublicSigningIdentity,
     QualifiedReadSigningProvider, ReadAttestationQualificationFuture, SignatureBytes, SignerRef,
@@ -149,7 +149,6 @@ const COMPLETION_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(1_200);
 const PORTFOLIO_INVOCATION: &str = "00000000-0000-4000-8000-000000000061";
 const SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000062";
 const CROSS_CHAIN_INVOCATION: &str = "00000000-0000-4000-8000-000000000063";
-const RECOVERY_SUBMISSION_INVOCATION: &str = "00000000-0000-4000-8000-000000000064";
 const SUBMISSION_TOKEN: &str = "integration-submission";
 const CROSS_CHAIN_SUBMISSION_TOKEN: &str = "cross-chain-submission";
 const MAX_RETAINED_DOCUMENT_BYTES: usize = MAX_CANONICAL_JSON_BYTES;
@@ -406,19 +405,35 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
     assert_eq!(rpc.accepted_transaction_count(), 1);
 
-    run_worker_expect_completion_acknowledgement_loss(
-        &database,
-        rpc.endpoint(),
-        PHASE_PRODUCTION_RECOVER,
-        &activation,
-        &provider,
-    )
-    .await;
-    // Two invocations, one transaction: the repeat was absorbed.
-    assert_eq!(rpc.operation_count("eth_sendRawTransaction"), 2);
-    assert_eq!(rpc.accepted_transaction_count(), 1);
+    let submission_run_id = derive_application_run_id(
+        &history_store_scope_id(&database.database_url, &database.history_schema).await,
+        &fixture.tenant,
+        &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
+        &InvocationIdentity::new(SUBMISSION_INVOCATION).expect("submission invocation identity"),
+    );
+    let parked_batches = database.history_batches(submission_run_id.clone()).await;
+    let parked_audit = HistoryAudit::from_batches(&parked_batches);
+    assert!(!parked_audit.closed);
+    let unmatched_attempts = parked_audit
+        .authorizations
+        .iter()
+        .filter(|(attempt, _)| !parked_audit.observations.contains_key(*attempt))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        unmatched_attempts.len(),
+        1,
+        "pre-commit process loss must leave exactly one unmatched authorization"
+    );
+    let (unmatched_attempt, unmatched_capability) = unmatched_attempts[0];
+    let completion_capability = effect_capability_ref::<CompleteWalletNonceCapability>();
+    assert_eq!(unmatched_capability, &completion_capability);
+    assert_eq!(
+        parked_audit.authorization_ordinals.get(unmatched_attempt),
+        Some(&0),
+        "the original completion attempt must be ordinal zero"
+    );
 
-    run_worker_expect_crash_after_completion(
+    run_worker_expect_completion_acknowledgement_loss_then_crash(
         &database,
         rpc.endpoint(),
         PHASE_PRODUCTION_RECOVER,
@@ -445,22 +460,7 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert!(rpc.operation_count("eth_chainId") >= 1);
     assert!(rpc.operation_count("eth_getBalance") >= 1);
 
-    let submission_run_id = derive_application_run_id(
-        &history_store_scope_id(&database.database_url, &database.history_schema).await,
-        &fixture.tenant,
-        &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
-        &InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
-            .expect("recovery submission invocation identity"),
-    );
-    let original_submission_run_id = derive_application_run_id(
-        &history_store_scope_id(&database.database_url, &database.history_schema).await,
-        &fixture.tenant,
-        &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
-        &InvocationIdentity::new(SUBMISSION_INVOCATION)
-            .expect("original submission invocation identity"),
-    );
     let batches = database.history_batches(submission_run_id).await;
-    let original_batches = database.history_batches(original_submission_run_id).await;
     assert!(
         batches.iter().any(|batch| {
             canonical_json(batch)
@@ -475,26 +475,43 @@ async fn qualified_evm_submission_production_restarts_after_one_broadcast_and_co
     assert!(audit.closed);
     assert_eq!(audit.authorizations.len(), audit.observations.len());
     assert!(audit
-        .observations
-        .values()
-        .all(|outcome| matches!(outcome, ObservationOutcome::Returned { .. })));
-    let original_audit = HistoryAudit::from_batches(&original_batches);
-    assert!(
-        !original_audit.closed,
-        "the pre-completion process-loss run must remain parked for recovery"
-    );
-    assert!(
-        original_audit.authorizations.len() > original_audit.observations.len(),
-        "the parked run must retain an unmatched completion authorization"
-    );
-    let mut audited_capabilities = original_audit.capability_refs.clone();
-    audited_capabilities.extend(audit.capability_refs.iter().cloned());
+        .authorizations
+        .keys()
+        .all(|attempt| audit.observations.contains_key(attempt)));
     for capability in expected_access_capabilities() {
         assert!(
-            audited_capabilities.contains(&capability),
+            audit.capability_refs.contains(&capability),
             "missing audited capability {capability:?}"
         );
     }
+    let mut completion_attempts = audit
+        .authorizations
+        .iter()
+        .filter(|(_, capability)| *capability == &completion_capability)
+        .map(|(attempt, _)| {
+            (
+                *audit
+                    .authorization_ordinals
+                    .get(attempt)
+                    .expect("completion authorization ordinal"),
+                attempt,
+            )
+        })
+        .collect::<Vec<_>>();
+    completion_attempts.sort_by_key(|(ordinal, _)| *ordinal);
+    assert_eq!(completion_attempts.len(), 2);
+    assert_eq!(completion_attempts[0].0, 0);
+    assert_eq!(completion_attempts[1].0, 1);
+    assert_ne!(completion_attempts[0].1, completion_attempts[1].1);
+    assert!(matches!(
+        audit.observations.get(completion_attempts[0].1),
+        Some(ObservationOutcome::EntryUnknown { fault_code })
+            if fault_code.as_str() == INVOKER_AUTHORITY_LOST
+    ));
+    assert!(matches!(
+        audit.observations.get(completion_attempts[1].1),
+        Some(ObservationOutcome::Returned { .. })
+    ));
 
     let outcome = audit
         .root_outcome::<EvmSubmissionOutput, EvmSubmissionFailure>(&batches)
@@ -1044,16 +1061,13 @@ async fn run_production_application_worker(
             let crash_after_receipt = std::env::var_os(INJECTED_CRASH_AFTER_RECEIPT_ENV).is_some();
             let crash_after_finality =
                 std::env::var_os(INJECTED_CRASH_AFTER_FINALITY_ENV).is_some();
-            let crash_after_completion =
-                std::env::var_os(INJECTED_CRASH_AFTER_COMPLETION_ENV).is_some();
-            if crash_after_receipt || crash_after_finality || crash_after_completion {
+            if crash_after_receipt || crash_after_finality {
                 drive_application_to_closed_with_injected_crash(
                     &application,
                     &submission_run_id,
                     &history_control,
                     crash_after_receipt,
                     crash_after_finality,
-                    crash_after_completion,
                 )
                 .await;
             } else {
@@ -1079,60 +1093,106 @@ async fn run_production_application_worker(
             .await;
         }
         PHASE_PRODUCTION_RECOVER => {
-            // The portfolio run was closed before submission recovery began. The
-            // original submission run may remain parked at the possible-entry
-            // boundary after process loss, so recovery must admit a fresh run
-            // against the retained wallet intent instead of re-driving that run.
-            let recovery_invocation = InvocationIdentity::new(RECOVERY_SUBMISSION_INVOCATION)
-                .expect("recovery submission invocation identity");
-            let recovery_selector = EvmSubmitTransactionSelector::new(
-                material
-                    .submission
-                    .transaction_intent()
-                    .template()
-                    .target()
-                    .clone(),
-                EvmCallerSubmissionToken::new(SUBMISSION_TOKEN).expect("recovery caller token"),
-            );
-            let recovery_admission = application
-                .admit_run(
-                    credential(),
-                    admission_request(
-                        EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
-                        recovery_invocation.clone(),
-                        &recovery_selector,
-                    ),
-                )
-                .await
-                .expect("admit recovery EVM submission");
-            let recovery_run_id = response_run_id(&recovery_admission);
-            assert_eq!(
-                recovery_run_id,
-                derive_application_run_id(
-                    &store_scope_id,
-                    &fixture.tenant,
-                    &stable(EVM_SUBMIT_TRANSACTION_OPERATION_ID),
-                    &recovery_invocation,
-                ),
-                "recovery response must bind the derived run identity"
-            );
-            let crash_after_receipt = std::env::var_os(INJECTED_CRASH_AFTER_RECEIPT_ENV).is_some();
-            let crash_after_finality =
-                std::env::var_os(INJECTED_CRASH_AFTER_FINALITY_ENV).is_some();
             let crash_after_completion =
                 std::env::var_os(INJECTED_CRASH_AFTER_COMPLETION_ENV).is_some();
-            if crash_after_receipt || crash_after_finality || crash_after_completion {
-                drive_application_to_closed_with_injected_crash(
-                    &application,
-                    &recovery_run_id,
-                    &history_control,
-                    crash_after_receipt,
-                    crash_after_finality,
-                    crash_after_completion,
-                )
-                .await;
+            if crash_after_completion {
+                let completion_capability =
+                    effect_capability_ref::<CompleteWalletNonceCapability>();
+                let wallet_counts_before_close =
+                    wallet_mutation_counts(base_url, wallet_schema).await;
+                let close_page = application
+                    .list_effect_entry_attention(
+                        credential(),
+                        PageRequest::new(None, Some(10)).expect("completion attention page"),
+                    )
+                    .await
+                    .expect("list completion attention before closing the crashed attempt");
+                assert!(close_page.next_cursor().is_none());
+                let [close_entry] = close_page.entries() else {
+                    panic!("completion recovery must discover exactly one parked run")
+                };
+                assert_eq!(close_entry.run_id(), &submission_run_id);
+                assert_eq!(
+                    close_entry.subject().capability_contract_ref,
+                    completion_capability
+                );
+                assert_eq!(
+                    close_entry.resolution(),
+                    EffectEntryAttentionResolution::CloseThenReassert
+                );
+                let crashed_subject = close_entry.subject().clone();
+                let crashed_head = close_entry.journal_head().clone();
+                let inventory_run_id = close_entry.run_id().clone();
+                let close_response = application
+                    .drive_once(credential(), inventory_run_id.clone())
+                    .await
+                    .expect("close the crashed completion attempt from public attention");
+                assert_eq!(
+                    close_response
+                        .public_json()
+                        .expect("render crashed-attempt closure")["kind"],
+                    "advanced"
+                );
+                assert_eq!(
+                    wallet_mutation_counts(base_url, wallet_schema).await,
+                    wallet_counts_before_close,
+                    "closing the crashed attempt must not reach the wallet adapter"
+                );
+
+                let reassert_page = application
+                    .list_effect_entry_attention(
+                        credential(),
+                        PageRequest::new(None, Some(10)).expect("completion reassertion page"),
+                    )
+                    .await
+                    .expect("list completion attention after closing the crashed attempt");
+                assert!(reassert_page.next_cursor().is_none());
+                let [reassert_entry] = reassert_page.entries() else {
+                    panic!("completion recovery must discover exactly one reassertable run")
+                };
+                assert_eq!(reassert_entry.run_id(), &inventory_run_id);
+                assert_eq!(reassert_entry.subject(), &crashed_subject);
+                assert!(
+                    reassert_entry.journal_head().run_sequence > crashed_head.run_sequence,
+                    "the reassertion inventory must bind the later closure head"
+                );
+                assert_eq!(
+                    reassert_entry.resolution(),
+                    EffectEntryAttentionResolution::Reassert
+                );
+                let reassert_run_id = reassert_entry.run_id().clone();
+                let reassert_response = application
+                    .drive_once(credential(), reassert_run_id)
+                    .await
+                    .expect("reassert the exact completion request from public attention");
+                assert_eq!(
+                    reassert_response
+                        .public_json()
+                        .expect("render recovered completion observation")["kind"],
+                    "advanced"
+                );
+                assert!(
+                    capability_observation_exists(
+                        &history_control,
+                        &submission_run_id,
+                        &completion_capability,
+                    )
+                    .await,
+                    "the reasserted completion must persist its returned observation"
+                );
+                history_control.close().await;
+                std::process::exit(137);
             } else {
-                drive_application_to_closed(&application, &recovery_run_id).await;
+                let attention = application
+                    .list_effect_entry_attention(
+                        credential(),
+                        PageRequest::new(None, Some(10)).expect("settlement attention page"),
+                    )
+                    .await
+                    .expect("list attention after recovered completion observation");
+                assert!(attention.entries().is_empty());
+                assert!(attention.next_cursor().is_none());
+                drive_application_to_closed(&application, &submission_run_id).await;
             }
             let wallet_pool = isolated_pool(base_url, wallet_schema).await;
             let completion_json = sqlx::query_scalar::<_, String>(
@@ -1148,7 +1208,7 @@ async fn run_production_application_worker(
                 verify_production_projections(
                     application,
                     &portfolio_run_id,
-                    &recovery_run_id,
+                    &submission_run_id,
                     &material.portfolio,
                     &expected_completion,
                 )
@@ -1540,7 +1600,6 @@ async fn drive_application_to_closed_with_injected_crash(
     history_control: &PgPool,
     crash_after_receipt: bool,
     crash_after_finality: bool,
-    crash_after_completion: bool,
 ) {
     let receipt_capability = read_capability_ref::<EvmReceiptLookupCapability>();
     let finality_capability = read_capability_ref::<EvmFinalizedHeadCapability>();
@@ -1563,10 +1622,6 @@ async fn drive_application_to_closed_with_injected_crash(
         }
         let rendered = response.public_json().expect("render drive response");
         match rendered["kind"].as_str() {
-            Some("closed") if crash_after_completion => {
-                history_control.close().await;
-                std::process::exit(137);
-            }
             Some("closed") => {
                 panic!("production application run closed before injected observation crash")
             }
@@ -3388,6 +3443,7 @@ fn exact_requested_hash(state: &LoopbackRpcState, params: &[Value]) -> Option<St
 
 struct HistoryAudit {
     authorizations: BTreeMap<mfm_ids::AccessAttemptId, ContentRef>,
+    authorization_ordinals: BTreeMap<mfm_ids::AccessAttemptId, u64>,
     observations: BTreeMap<mfm_ids::AccessAttemptId, ObservationOutcome>,
     capability_refs: BTreeSet<ContentRef>,
     root_outcome_ref: Option<ContentRef>,
@@ -3397,6 +3453,7 @@ struct HistoryAudit {
 impl HistoryAudit {
     fn from_batches(batches: &[CommittedBatch]) -> Self {
         let mut authorizations = BTreeMap::new();
+        let mut authorization_ordinals = BTreeMap::new();
         let mut observations = BTreeMap::new();
         let mut capability_refs = BTreeSet::new();
         let mut root_outcome_ref = None;
@@ -3404,6 +3461,10 @@ impl HistoryAudit {
             match &assigned.record {
                 RunRecord::ExternalAccessAuthorized(authorization) => {
                     capability_refs.insert(authorization.capability_contract_ref.clone());
+                    authorization_ordinals.insert(
+                        authorization.access_attempt_id.clone(),
+                        authorization.attempt_ordinal,
+                    );
                     authorizations.insert(
                         authorization.access_attempt_id.clone(),
                         authorization.capability_contract_ref.clone(),
@@ -3424,6 +3485,7 @@ impl HistoryAudit {
         let closed = root_outcome_ref.is_some();
         Self {
             authorizations,
+            authorization_ordinals,
             observations,
             capability_refs,
             root_outcome_ref,
@@ -3688,7 +3750,7 @@ async fn run_worker_expect_crash_before_completion_commit(
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
 }
 
-async fn run_worker_expect_completion_acknowledgement_loss(
+async fn run_worker_expect_completion_acknowledgement_loss_then_crash(
     database: &TestDatabase,
     endpoint: &str,
     mode: &str,
@@ -3717,7 +3779,7 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         mode,
         activation,
         provider,
-        None,
+        Some(InjectedCrashBoundary::Completion),
         WorkerCommandOptions {
             nonce_application_url: Some(&proxy_nonce_url),
             ready_path: Some(&ready_path),
@@ -3810,14 +3872,6 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         stdout,
         stderr,
     };
-    assert_canaries_absent("completion-ack stdout", &output.stdout);
-    assert_canaries_absent("completion-ack stderr", &output.stderr);
-    assert!(
-        output.status.success(),
-        "completion acknowledgement worker failed with status {:?}: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr),
-    );
     let wallet_pool = database.wallet_pool().await;
     let retained = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM wallet_nonce_completions")
         .fetch_one(&wallet_pool)
@@ -3828,26 +3882,7 @@ async fn run_worker_expect_completion_acknowledgement_loss(
         retained, 1,
         "initial completion acknowledgement loss must retain exactly one row"
     );
-    eprint!("{}", String::from_utf8_lossy(&output.stderr));
-}
-
-async fn run_worker_expect_crash_after_completion(
-    database: &TestDatabase,
-    endpoint: &str,
-    mode: &str,
-    activation: &mfm_evm::WalletNonceDomainActivationAttestation,
-    provider: &ProviderProcess,
-) {
-    let output = run_worker_process(
-        database,
-        endpoint,
-        mode,
-        activation,
-        provider,
-        Some(InjectedCrashBoundary::Completion),
-    )
-    .await;
-    assert_injected_worker_crash(output, mode, "completion");
+    assert_injected_worker_crash(output, mode, "recovered completion observation");
 }
 
 fn assert_injected_worker_crash(output: Output, mode: &str, boundary: &str) {
