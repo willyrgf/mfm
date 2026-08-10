@@ -2919,9 +2919,16 @@ async fn load_candidate_by_key(
         let retained_ordinal: i32 = row
             .try_get("candidate_ordinal")
             .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
+        let expected_key = derive_evm_candidate_operation_key(
+            &candidate.attested_candidate.semantic_reservation_key,
+            candidate.attested_candidate.candidate_ordinal,
+        )
+        .map_err(|_| PostgresEvmWalletError::InvalidAuthority)?;
         if request.next_candidate != candidate.attested_candidate
-            || retained_key != candidate_key
-            || request.candidate_operation_key.as_str() != candidate_key
+            || retained_key != expected_key.as_str()
+            || candidate_key != expected_key.as_str()
+            || request.candidate_operation_key != expected_key
+            || candidate.candidate_operation_key != expected_key
             || retained_reservation_key
                 != candidate
                     .attested_candidate

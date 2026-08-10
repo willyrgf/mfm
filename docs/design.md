@@ -524,6 +524,12 @@ without mutation. One incomplete stable intent owns the domain at a time. Candid
 a contiguous bounded prefix, completion is canonical and permanent, and later runs can resume the
 same intent independently of `run_id`.
 
+Every active candidate carries the exact permanent operation key derived by `mfm-evm` from its
+attested semantic reservation key and candidate ordinal. A parseable digest is not identity proof:
+prefix validation, activation permits, capability ingress and settlement, broadcast ingress, and
+PostgreSQL hostile-row qualification all rederive and compare that same key. An activation return
+must equal the exact prepared attested candidate and operation key before it can advance state.
+
 Every mutation consumes a fresh non-cloneable permit bound to the exact target, database session,
 transaction, store lineage, and writer epoch. Deployment infrastructure owns target-held keys,
 revocation, promotion, and sender-path fencing. Repository production assembly requires that

@@ -19,10 +19,10 @@ use mfm_evm::{
     AttestedWalletCandidate, CandidateActivationPermit, CanonicalTerminalOutcome,
     ChainInstanceDeclaration, ChainInstanceRegistryAttestation, CompleteEvmNonceRequest,
     CompleteWalletNonceResponse, CompletedWalletNonce, EvmCandidateFamily,
-    EvmFinalizedHeadObservation, EvmInclusionBlockObservation, EvmReceiptLookupObservation,
-    EvmRoutingCatalogDescriptor, EvmRoutingGenerationDescriptor, EvmSubmissionFailure,
-    EvmTransactionIntent, EvmTransactionLookupObservation, EvmTransactionTarget,
-    EvmWalletFeeCandidate, EvmWalletReference, EvmWalletTransactionAction,
+    EvmCandidateOperationKey, EvmFinalizedHeadObservation, EvmInclusionBlockObservation,
+    EvmReceiptLookupObservation, EvmRoutingCatalogDescriptor, EvmRoutingGenerationDescriptor,
+    EvmSubmissionFailure, EvmTransactionIntent, EvmTransactionLookupObservation,
+    EvmTransactionTarget, EvmWalletFeeCandidate, EvmWalletReference, EvmWalletTransactionAction,
     EvmWalletTransactionTemplate, ExclusiveCurrentControl, ExecutionDisposition,
     ObservedPendingNonceFloor, PriorEffectDisposition, PriorResourceDisposition,
     QualifiedPendingNonceFloor, QualifiedPendingNonceObservation, ReadEvmWalletNonceStatusRequest,
@@ -1591,6 +1591,27 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
 
     let (activation_request, expected_unsigned_digest) =
         fixture.activation_request(&request, &reservation);
+    let mut wrong_candidate_key = activation_request.clone();
+    wrong_candidate_key.candidate_operation_key = derive_evm_candidate_operation_key(
+        &reservation.semantic_reservation_key,
+        activation_request
+            .next_candidate
+            .candidate_ordinal
+            .checked_add(1)
+            .expect("wrong candidate ordinal"),
+    )
+    .expect("syntactically valid wrong candidate operation key");
+    assert!(wrong_candidate_key
+        .candidate_operation_key
+        .validate()
+        .is_ok());
+    assert!(matches!(
+        authority_a
+            .activate_candidate(&state_input, &wrong_candidate_key)
+            .await,
+        EffectAdapterCompletion::IntegrityFault(_)
+    ));
+    assert_candidate_absent(&probe_pool, &wrong_candidate_key).await;
     let busy_ack_target = commit_proxy
         .arm_held_lost_acknowledgement()
         .expect("arm held busy disposition acknowledgement fault");
@@ -1759,7 +1780,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
     skipped_replacement.activation_permit = CandidateActivationPermit::Replacement {
         predecessor_candidate_operation_key: derive_evm_candidate_operation_key(
             &reservation.semantic_reservation_key,
-            0,
+            1,
         )
         .expect("predecessor candidate operation key"),
         predecessor_ordinal: 1,
@@ -1783,7 +1804,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
         authority_a
             .activate_candidate(&state_input, &wrong_predecessor)
             .await,
-        EffectAdapterCompletion::Returned(ActivateCandidateResponse::CandidateProgressionConflict)
+        EffectAdapterCompletion::IntegrityFault(_)
     ));
     assert_candidate_absent(&probe_pool, &wrong_predecessor).await;
 
@@ -3067,6 +3088,61 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             ..
         }) if retained_completion == &completion
     ));
+    let wrong_retained_key = derive_evm_candidate_operation_key(
+        &reservation.semantic_reservation_key,
+        replacement_request
+            .next_candidate
+            .candidate_ordinal
+            .checked_add(1)
+            .expect("wrong retained candidate ordinal"),
+    )
+    .expect("syntactically valid wrong retained candidate key");
+    let original_candidate_json = corrupt_candidate_operation_key(
+        &mut admin_connection,
+        &schema,
+        replacement_request.candidate_operation_key.as_str(),
+        &wrong_retained_key,
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .activate_candidate(&state_input, &replacement_request)
+            .await,
+        EffectAdapterCompletion::IntegrityFault(_)
+    ));
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &status_request)
+            .await,
+        ReadAdapterCompletion::IntegrityFault(_)
+    ));
+    restore_candidate_json(
+        &mut admin_connection,
+        &schema,
+        replacement_request.candidate_operation_key.as_str(),
+        original_candidate_json,
+    )
+    .await;
+    assert!(matches!(
+        successor_authority
+            .activate_candidate(&state_input, &replacement_request)
+            .await,
+        EffectAdapterCompletion::Returned(ActivateCandidateResponse::Activated {
+            candidate: ref retained,
+        })
+        | EffectAdapterCompletion::Returned(ActivateCandidateResponse::AlreadyRetained {
+            candidate: ref retained,
+        }) if retained == &replacement_candidate
+    ));
+    assert!(matches!(
+        successor_authority
+            .read_status(&state_input, &status_request)
+            .await,
+        ReadAdapterCompletion::Returned(WalletNonceStatus::Completed {
+            completion: ref retained_completion,
+            ..
+        }) if retained_completion == &completion
+    ));
     let original_candidate_provider_attestation = corrupt_candidate_provider_attestation(
         &mut admin_connection,
         &schema,
@@ -3079,7 +3155,7 @@ async fn real_sql_authority_preserves_activation_nonce_and_role_boundaries_inner
             .await,
         ReadAdapterCompletion::IntegrityFault(_)
     ));
-    restore_candidate_provider_attestation(
+    restore_candidate_json(
         &mut admin_connection,
         &schema,
         replacement_request.candidate_operation_key.as_str(),
@@ -5113,7 +5189,56 @@ async fn corrupt_candidate_provider_attestation(
     original_candidate_json
 }
 
-async fn restore_candidate_provider_attestation(
+async fn corrupt_candidate_operation_key(
+    connection: &mut PgConnection,
+    schema: &str,
+    candidate_operation_key: &str,
+    wrong_key: &EvmCandidateOperationKey,
+) -> String {
+    let original_candidate_json = sqlx::query_scalar::<_, String>(AssertSqlSafe(format!(
+        "SELECT active_candidate_json FROM {schema}.wallet_nonce_candidates \
+         WHERE semantic_candidate_operation_key = $1"
+    )))
+    .bind(candidate_operation_key)
+    .fetch_one(&mut *connection)
+    .await
+    .expect("load candidate for operation-key corruption probe");
+    let mut candidate: serde_json::Value =
+        serde_json::from_str(&original_candidate_json).expect("active candidate JSON");
+    candidate["candidate_operation_key"] =
+        serde_json::to_value(wrong_key).expect("wrong candidate operation key JSON");
+    let forged_candidate_json =
+        serde_json::to_string(&candidate).expect("canonical forged active candidate JSON");
+    sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates DISABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await
+    .expect("disable candidate trigger for operation-key probe");
+    let update = sqlx::query(AssertSqlSafe(format!(
+        "UPDATE {schema}.wallet_nonce_candidates SET active_candidate_json = $2 \
+         WHERE semantic_candidate_operation_key = $1"
+    )))
+    .bind(candidate_operation_key)
+    .bind(forged_candidate_json)
+    .execute(&mut *connection)
+    .await;
+    let reenable = sqlx::query(AssertSqlSafe(format!(
+        "ALTER TABLE {schema}.wallet_nonce_candidates ENABLE TRIGGER USER"
+    )))
+    .execute(&mut *connection)
+    .await;
+    reenable.expect("restore candidate trigger after operation-key probe");
+    assert_eq!(
+        update
+            .expect("inject forged candidate operation key")
+            .rows_affected(),
+        1
+    );
+    original_candidate_json
+}
+
+async fn restore_candidate_json(
     connection: &mut PgConnection,
     schema: &str,
     candidate_operation_key: &str,
@@ -5124,7 +5249,7 @@ async fn restore_candidate_provider_attestation(
     )))
     .execute(&mut *connection)
     .await
-    .expect("disable candidate trigger for provider proof restoration");
+    .expect("disable candidate trigger for JSON restoration");
     let update = sqlx::query(AssertSqlSafe(format!(
         "UPDATE {schema}.wallet_nonce_candidates SET active_candidate_json = $2 \
          WHERE semantic_candidate_operation_key = $1"
@@ -5138,10 +5263,10 @@ async fn restore_candidate_provider_attestation(
     )))
     .execute(&mut *connection)
     .await;
-    reenable.expect("re-enable candidate trigger after provider proof restoration");
+    reenable.expect("re-enable candidate trigger after JSON restoration");
     assert_eq!(
         update
-            .expect("restore provider activation proof")
+            .expect("restore active candidate JSON")
             .rows_affected(),
         1
     );

@@ -1082,11 +1082,12 @@ pub(crate) fn settle_candidate_activation(
             ProposedStateOutcome::Success(CandidateActivationDecision::Reconcile),
         ),
         ActivateCandidateResponse::Activated { candidate: active }
-            if candidate
-                .attested_candidate
-                .as_ref()
-                .is_some_and(|attested| active.attested_candidate == *attested)
-                && active.candidate_operation_key.validate().is_ok() =>
+            if candidate.attested_candidate.as_ref()
+                == Some(&prepared.activation_request.next_candidate)
+                && active.attested_candidate == prepared.activation_request.next_candidate
+                && active.candidate_operation_key
+                    == prepared.activation_request.candidate_operation_key
+                && super::wallet_authority::active_candidate_operation_key_is_exact(active) =>
         {
             StateSettlement::Proposed(ProposedStateOutcome::Success(
                 CandidateActivationDecision::Activated {
@@ -1098,11 +1099,12 @@ pub(crate) fn settle_candidate_activation(
             ))
         }
         ActivateCandidateResponse::AlreadyRetained { candidate: active }
-            if candidate
-                .attested_candidate
-                .as_ref()
-                .is_some_and(|attested| active.attested_candidate == *attested)
-                && active.candidate_operation_key.validate().is_ok() =>
+            if candidate.attested_candidate.as_ref()
+                == Some(&prepared.activation_request.next_candidate)
+                && active.attested_candidate == prepared.activation_request.next_candidate
+                && active.candidate_operation_key
+                    == prepared.activation_request.candidate_operation_key
+                && super::wallet_authority::active_candidate_operation_key_is_exact(active) =>
         {
             // The database already contains this exact candidate. Reconcile
             // through the fresh wallet-status read; the state machine's
