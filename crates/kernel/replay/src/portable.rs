@@ -19,10 +19,9 @@ use mfm_journal::structured::{
 };
 use mfm_program_derive::PersistedSchema;
 use mfm_store::structured::{
-    verify_offline_recorded_history, verify_offline_run_closure, ExportEncoderView,
-    ExportRunEvidence, OfflineRunClosure, PhysicalObligationChecker, PhysicalTargetIdentity,
-    ProgramVerificationRegistry, RawRunHistory, RecordedRunEvidence, StructuredStoreError,
-    TenantFactPublication,
+    verify_offline_run_closure, ExportEncoderView, ExportRunEvidence, OfflineRunClosure,
+    PhysicalObligationChecker, PhysicalTargetIdentity, ProgramVerificationRegistry, RawRunHistory,
+    RecordedRunEvidence, StructuredStoreError, TenantFactPublication,
 };
 use mfm_values::{CanonicalJsonLinesPersistedSchema, CanonicalJsonPersistedSchema};
 use serde::{Deserialize, Serialize};
@@ -617,27 +616,8 @@ impl PortableRunExport {
                 return Err(PortableExportError::Invalid);
             }
         }
-        let mut verified_sources = BTreeMap::new();
+        let mut declared_sources = BTreeMap::new();
         for prefix in &self.source_prefixes {
-            let source = verify_offline_recorded_history(
-                RawRunHistory {
-                    run_id: prefix.run_id.clone(),
-                    batches: prefix.batches.clone(),
-                },
-                trust.program_qualifier.as_ref(),
-                trust.physical_binding_verifier.as_ref(),
-            )
-            .map_err(classify_verification_error)?;
-            if source.run_id() != &prefix.run_id
-                || source.tenant_scope_id() != &self.tenant_scope_id
-                || source.journal_head() != &prefix.fixation.journal_head
-                || source.semantic_head() != &prefix.fixation.semantic_head
-                || verified_sources
-                    .insert(prefix.run_id.clone(), BTreeSet::new())
-                    .is_some()
-            {
-                return Err(PortableExportError::Invalid);
-            }
             let nested = route_source_run_ids(&prefix.run_id, &prefix.fact_routes);
             if nested
                 .iter()
@@ -645,7 +625,12 @@ impl PortableRunExport {
             {
                 return Err(PortableExportError::Invalid);
             }
-            verified_sources.insert(prefix.run_id.clone(), nested);
+            if declared_sources
+                .insert(prefix.run_id.clone(), nested)
+                .is_some()
+            {
+                return Err(PortableExportError::Invalid);
+            }
         }
         let root_sources = route_source_run_ids(&self.run_id, &self.fact_routes);
         if root_sources
@@ -654,7 +639,7 @@ impl PortableRunExport {
         {
             return Err(PortableExportError::Invalid);
         }
-        let mut source_graph = verified_sources.clone();
+        let mut source_graph = declared_sources.clone();
         source_graph.insert(self.run_id.clone(), root_sources.clone());
         let mut colors = BTreeMap::<RunId, u8>::new();
         for start in source_graph.keys().cloned().collect::<Vec<_>>() {
@@ -691,7 +676,7 @@ impl PortableRunExport {
             if !reachable.insert(run_id.clone()) {
                 continue;
             }
-            let nested = verified_sources
+            let nested = declared_sources
                 .get(&run_id)
                 .ok_or(PortableExportError::Invalid)?;
             for child in nested {
@@ -739,6 +724,14 @@ impl PortableRunExport {
             || verified.tenant_scope_id() != &self.tenant_scope_id
             || verified.journal_head() != &self.fixation.journal_head
             || verified.semantic_head() != &self.fixation.semantic_head
+            || self.source_prefixes.iter().any(|prefix| {
+                !verified.matches_verified_prefix(
+                    &prefix.run_id,
+                    &prefix.tenant_scope_id,
+                    &prefix.fixation.journal_head,
+                    &prefix.fixation.semantic_head,
+                )
+            })
             || reachable != self.source_run_ids.iter().cloned().collect()
         {
             return Err(PortableExportError::Invalid);

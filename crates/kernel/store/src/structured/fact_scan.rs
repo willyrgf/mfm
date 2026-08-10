@@ -300,7 +300,7 @@ impl PrefixVerificationMemo {
         Ok(())
     }
 
-    pub(super) fn verified_run_ids(&self) -> super::Result<BTreeSet<RunId>> {
+    pub(super) fn verified_prefixes(&self) -> super::Result<Vec<Arc<VerifiedStructuredRun>>> {
         let entries = self
             .entries
             .lock()
@@ -311,7 +311,19 @@ impl PrefixVerificationMemo {
         {
             return Err(StructuredStoreError::InvalidHistory);
         }
-        Ok(entries.iter().map(|entry| entry.run_id.clone()).collect())
+        entries
+            .iter()
+            .map(|entry| match &entry.state {
+                SharedPrefixMemoState::Verified { run, .. }
+                    if run.run_id() == &entry.run_id && run.journal_head() == &entry.head =>
+                {
+                    Ok(Arc::clone(run))
+                }
+                SharedPrefixMemoState::Visiting | SharedPrefixMemoState::Verified { .. } => {
+                    Err(StructuredStoreError::InvalidHistory)
+                }
+            })
+            .collect()
     }
 }
 
@@ -1109,21 +1121,12 @@ pub(super) async fn qualify_and_reduce_for_scan_with_publications_and_memo(
         let RunRecord::ExternalAccessAuthorized(authorization) = &assigned.record else {
             return Err(invalid());
         };
-        let Some((_, observation)) = verified.observation(&authorization.access_attempt_id) else {
-            continue;
-        };
-        let ObservationOutcome::Returned { value } = &observation.outcome else {
-            continue;
-        };
         let request_object = verified
             .object(&authorization.request.value_ref)
             .ok_or_else(invalid)?;
         let request =
             FactSelectionRequest::from_canonical_json(request_object.canonical_json.as_bytes())
                 .map_err(|_| invalid())?;
-        let returned_object = verified.object(&value.value_ref).ok_or_else(invalid)?;
-        let recorded: FactSelectionReadResponse =
-            serde_json::from_str(&returned_object.canonical_json).map_err(|_| invalid())?;
         let port = BackendFactScanPort {
             source: Arc::clone(&source),
             program_verifier: Arc::clone(&program_verifier),
@@ -1138,11 +1141,27 @@ pub(super) async fn qualify_and_reduce_for_scan_with_publications_and_memo(
             frontier,
             integrity_fault_code: integrity_fault_code.clone(),
         };
-        match port.scan(request).await {
-            Ok(recomputed) if recomputed == recorded => {}
-            Err(ScanError::Unavailable) => return Err(StructuredStoreError::BackendUnavailable),
-            Ok(_) | Err(ScanError::Safe(_) | ScanError::Integrity) => {
-                return Err(invalid());
+        let recomputed = port.scan(request).await;
+        match &recomputed {
+            Err(ScanError::Unavailable) => {
+                return Err(StructuredStoreError::BackendUnavailable);
+            }
+            Err(ScanError::Integrity) => return Err(invalid()),
+            Ok(_) | Err(ScanError::Safe(_)) => {}
+        }
+        if let Some((_, observation)) = verified.observation(&authorization.access_attempt_id) {
+            if let ObservationOutcome::Returned { value } = &observation.outcome {
+                let returned_object = verified.object(&value.value_ref).ok_or_else(invalid)?;
+                let recorded: FactSelectionReadResponse =
+                    serde_json::from_str(&returned_object.canonical_json).map_err(|_| invalid())?;
+                match recomputed {
+                    Ok(recomputed) if recomputed == recorded => {}
+                    Ok(_) | Err(ScanError::Safe(_)) => return Err(invalid()),
+                    Err(ScanError::Unavailable) => {
+                        return Err(StructuredStoreError::BackendUnavailable);
+                    }
+                    Err(ScanError::Integrity) => return Err(invalid()),
+                }
             }
         }
     }

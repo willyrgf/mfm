@@ -315,7 +315,9 @@ recovery closure for completed wallet state.
 
 Portable export evidence hands the encoder canonical batch frames rather than mutable store batch
 objects. Recursive source closure is checked for exact direct dependencies, cycles, and maximum
-required producer heads before encoding.
+required producer heads before encoding. The store exposes no raw-prefix offline verification
+shortcut: its one asynchronous offline door consumes the complete root/source/publication closure,
+and only that traversal can mint the opaque replay evidence and its bounded source-fixation checks.
 
 ## Contributor checks
 

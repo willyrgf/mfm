@@ -39,9 +39,7 @@ pub use configuration::{
 pub use fact_scan::PriorRunFactScanCompletion;
 #[cfg(any(test, feature = "test-support"))]
 pub use memory::StructuredMemoryBackend;
-pub use qualification::{
-    verify_offline_recorded_history, ProgramVerificationRegistry, StructuredStoreError,
-};
+pub use qualification::{ProgramVerificationRegistry, StructuredStoreError};
 pub use semantic_open::{
     qualify_and_open_structured_store, verify_offline_run_closure, OfflineRunClosure,
     OpenedStructuredStore, StructuredRuntime,
