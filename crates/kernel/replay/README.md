@@ -14,6 +14,10 @@ The crate verifies recorded history through a reader and projects:
 It owns the only portable export frame stream, chain/seal digest rules, and offline validator. It owns
 no writer, callback, scheduler, process registry, provider, transport, signer, wallet authority, or
 alternate reducer. Recorded replay is verification-only and never compares against live state.
+Replay summary, transition trace, and access audit use separate closed typed codecs. Transition
+entries re-derive their assigned record hashes; audit entries bind status to their optional
+observation and re-derive an included observation hash. A fixed-head audit never projects an
+observation from a later suffix.
 Offline verification uses only bundle bytes, the caller's expected complete-stream `ContentRef`, and
 an explicit trust snapshot against the store's read-only qualification entry.
 
