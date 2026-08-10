@@ -554,7 +554,7 @@ impl LiveFixtureStore {
     pub async fn raw_prefix(&self) -> super::Result<super::backend::RawRunHistory> {
         use super::backend::StructuredHistoryBackend;
         self.backend
-            .load_snapshot(&self.run_id)
+            .load_snapshot(&self.run_id, super::backend::RawHistoryLoadLimit::run())
             .await?
             .history
             .ok_or(StructuredStoreError::InvalidHistory)
@@ -1269,12 +1269,12 @@ mod offline_closure_tests {
             .await
             .map_err(|_| StructuredStoreError::InvalidHistory)?;
         let root = backend
-            .load_snapshot(&consumer_run)
+            .load_snapshot(&consumer_run, crate::structured::RawHistoryLoadLimit::run())
             .await?
             .history
             .ok_or(StructuredStoreError::InvalidHistory)?;
         let source = backend
-            .load_snapshot(&producer_run)
+            .load_snapshot(&producer_run, crate::structured::RawHistoryLoadLimit::run())
             .await?
             .history
             .ok_or(StructuredStoreError::InvalidHistory)?;

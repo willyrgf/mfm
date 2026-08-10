@@ -20,6 +20,133 @@ pub use mfm_runtime::history::{PhysicalTargetIdentity, StructuredStoreIdentity};
 pub type StructuredBackendFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, StructuredStoreError>> + Send + 'a>>;
 
+/// Maximum atomic appends retained by one openable run.
+pub const MAX_RUN_HISTORY_BATCHES: usize = 65_536;
+
+/// Maximum retained objects across one openable run.
+pub const MAX_RUN_HISTORY_OBJECTS: usize = 1_048_576;
+
+/// Maximum canonical committed-batch bytes across one openable run.
+pub const MAX_RUN_HISTORY_CANONICAL_BYTES: usize = 536_870_912;
+
+/// Exact remaining capacity supplied to a raw-prefix loader.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawHistoryLoadLimit {
+    batches: usize,
+    objects: usize,
+    canonical_bytes: usize,
+}
+
+impl RawHistoryLoadLimit {
+    /// Returns the complete fixed capacity for an ordinary run load.
+    pub const fn run() -> Self {
+        Self {
+            batches: MAX_RUN_HISTORY_BATCHES,
+            objects: MAX_RUN_HISTORY_OBJECTS,
+            canonical_bytes: MAX_RUN_HISTORY_CANONICAL_BYTES,
+        }
+    }
+
+    /// Constructs one smaller caller-owned remaining budget.
+    pub const fn new(batches: usize, objects: usize, canonical_bytes: usize) -> Self {
+        Self {
+            batches,
+            objects,
+            canonical_bytes,
+        }
+    }
+
+    /// Returns the remaining batch count.
+    pub const fn batches(self) -> usize {
+        self.batches
+    }
+
+    /// Returns the remaining retained-object count.
+    pub const fn objects(self) -> usize {
+        self.objects
+    }
+
+    /// Returns the remaining canonical-byte count.
+    pub const fn canonical_bytes(self) -> usize {
+        self.canonical_bytes
+    }
+
+    /// Rejects a prefix before it can be cloned into another resident owner.
+    pub fn validate_batches(self, batches: &[CommittedBatch]) -> Result<(), StructuredStoreError> {
+        self.validate_batch_iter(batches.iter())
+    }
+
+    /// Enforces the budget over a repeatable borrowed batch iterator.
+    pub fn validate_batch_iter<'a, I>(self, batches: I) -> Result<(), StructuredStoreError>
+    where
+        I: Clone + Iterator<Item = &'a CommittedBatch>,
+    {
+        self.validate_batch_iter_with_reserve(batches, 0, 0, 0)
+    }
+
+    /// Enforces the budget while reserving capacity for mandatory successor evidence.
+    pub fn validate_batch_iter_with_reserve<'a, I>(
+        self,
+        batches: I,
+        reserved_batches: usize,
+        reserved_objects: usize,
+        reserved_canonical_bytes: usize,
+    ) -> Result<(), StructuredStoreError>
+    where
+        I: Clone + Iterator<Item = &'a CommittedBatch>,
+    {
+        let batch_limit = self
+            .batches
+            .checked_sub(reserved_batches)
+            .ok_or(StructuredStoreError::CapacityExceeded)?;
+        let object_limit = self
+            .objects
+            .checked_sub(reserved_objects)
+            .ok_or(StructuredStoreError::CapacityExceeded)?;
+        let byte_limit = self
+            .canonical_bytes
+            .checked_sub(reserved_canonical_bytes)
+            .ok_or(StructuredStoreError::CapacityExceeded)?;
+        let mut batch_count = 0_usize;
+        let mut object_count = 0_usize;
+        let mut retained_payload_bytes = 0_usize;
+        for batch in batches.clone() {
+            batch_count = batch_count
+                .checked_add(1)
+                .ok_or(StructuredStoreError::CapacityExceeded)?;
+            if batch_count > batch_limit {
+                return Err(StructuredStoreError::CapacityExceeded);
+            }
+            object_count = object_count
+                .checked_add(batch.objects.len())
+                .ok_or(StructuredStoreError::CapacityExceeded)?;
+            if object_count > object_limit {
+                return Err(StructuredStoreError::CapacityExceeded);
+            }
+            for object in &batch.objects {
+                retained_payload_bytes = retained_payload_bytes
+                    .checked_add(object.canonical_json.len())
+                    .ok_or(StructuredStoreError::CapacityExceeded)?;
+                if retained_payload_bytes > byte_limit {
+                    return Err(StructuredStoreError::CapacityExceeded);
+                }
+            }
+        }
+        let mut canonical_bytes = 0_usize;
+        for batch in batches {
+            let canonical = mfm_journal::structured::canonical_json(batch)
+                .map_err(|_| StructuredStoreError::InvalidHistory)?;
+            canonical_bytes = canonical_bytes
+                .checked_add(canonical.as_bytes().len())
+                .ok_or(StructuredStoreError::CapacityExceeded)?;
+            if canonical_bytes > byte_limit {
+                return Err(StructuredStoreError::CapacityExceeded);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Complete raw durable run prefix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawRunHistory {
@@ -27,6 +154,16 @@ pub struct RawRunHistory {
     pub run_id: RunId,
     /// Atomic append envelopes in sequence order.
     pub batches: Vec<CommittedBatch>,
+}
+
+impl RawRunHistory {
+    /// Enforces one caller-supplied bounded-load contract.
+    pub fn validate_load_limit(
+        &self,
+        limit: RawHistoryLoadLimit,
+    ) -> Result<(), StructuredStoreError> {
+        limit.validate_batches(&self.batches)
+    }
 }
 
 /// One dense tenant publication route.
@@ -109,6 +246,7 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot>;
 
     /// Loads one exact immutable prefix without consulting current projection.
@@ -116,6 +254,7 @@ pub trait StructuredHistoryBackend: Send + Sync + 'static {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
 
     /// Reads the disposable current run projection.
@@ -207,8 +346,9 @@ impl<B: StructuredHistoryBackend> PriorRunFactSource for BackendFactSource<B> {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
-        self.backend.load_prefix(run_id, through)
+        self.backend.load_prefix(run_id, through, limit)
     }
 }
 
@@ -278,7 +418,10 @@ impl<B: StructuredHistoryBackend> StructuredRunHistoryReader<B> {
             mfm_ids::DigestAlgorithm::Sha256JcsV1,
             mfm_canonical::sha256_digest_bytes(b"mfm.structured-store.readiness-probe.v1"),
         );
-        self.backend.load_snapshot(&probe).await.map(|_| ())
+        self.backend
+            .load_snapshot(&probe, RawHistoryLoadLimit::run())
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn scan_effect_entry_attention_routes(

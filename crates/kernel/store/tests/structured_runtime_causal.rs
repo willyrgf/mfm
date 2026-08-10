@@ -54,9 +54,9 @@ use mfm_spec::structured::{
 use mfm_store::structured::{
     qualify_and_open_structured_store as open_structured_runtime, AppendAttemptLookup,
     BackendAppendOutcome, PhysicalBindingAuthorization, PhysicalBindingSupersession,
-    PhysicalObligationChecker, PhysicalTargetIdentity, RawRunHistory, RunCurrentProjection,
-    StructuredBackendFuture, StructuredHistoryBackend, StructuredMemoryBackend,
-    StructuredRunSnapshot, StructuredStoreError, StructuredStoreIdentity,
+    PhysicalObligationChecker, PhysicalTargetIdentity, RawHistoryLoadLimit, RawRunHistory,
+    RunCurrentProjection, StructuredBackendFuture, StructuredHistoryBackend,
+    StructuredMemoryBackend, StructuredRunSnapshot, StructuredStoreError, StructuredStoreIdentity,
     StructuredStoreRunSnapshot, StructuredStoreSnapshot, TenantFactPublication, ValidatedRunAppend,
 };
 use mfm_values::{CanonicalJsonPersistedSchema, PersistedObjectPayload};
@@ -1102,6 +1102,7 @@ impl StructuredHistoryBackend for InjectingBackend {
     fn load_snapshot<'a>(
         &'a self,
         run_id: &'a RunId,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, StructuredRunSnapshot> {
         Box::pin(async move {
             self.loads.fetch_add(1, Ordering::SeqCst);
@@ -1112,10 +1113,11 @@ impl StructuredHistoryBackend for InjectingBackend {
                 .as_ref()
                 .filter(|raw| &raw.run_id == run_id)
                 .cloned();
-            let inner = self.inner.load_snapshot(run_id).await?;
+            let inner = self.inner.load_snapshot(run_id, limit).await?;
             let Some(history) = override_history else {
                 return Ok(inner);
             };
+            history.validate_load_limit(limit)?;
             let current_projection = self
                 .override_projection
                 .lock()
@@ -1133,6 +1135,7 @@ impl StructuredHistoryBackend for InjectingBackend {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
             let history = self
@@ -1151,9 +1154,10 @@ impl StructuredHistoryBackend for InjectingBackend {
                     return Ok(None);
                 };
                 history.batches.truncate(position + 1);
+                history.validate_load_limit(limit)?;
                 return Ok(Some(history));
             }
-            self.inner.load_prefix(run_id, through).await
+            self.inner.load_prefix(run_id, through, limit).await
         })
     }
 
@@ -1308,7 +1312,10 @@ impl StructuredHistoryBackend for InjectingBackend {
             match self.injection {
                 InjectAppend::ObservationConcurrentDifferent => {
                     let conflicting = conflicting_observation_batch(committed)?;
-                    let snapshot = self.inner.load_snapshot(&run_id).await?;
+                    let snapshot = self
+                        .inner
+                        .load_snapshot(&run_id, RawHistoryLoadLimit::run())
+                        .await?;
                     let mut history = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
                     history.batches.push(conflicting.clone());
                     let mut projection = snapshot
@@ -1564,7 +1571,7 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
         .journal_head()
         .clone();
     let raw_before = backend_probe
-        .load_snapshot(&run_id)
+        .load_snapshot(&run_id, RawHistoryLoadLimit::run())
         .await
         .map(|snapshot| snapshot.history)
         .expect("raw pre-fault history")
@@ -1598,7 +1605,7 @@ async fn pure_callback_fault_is_repeatable_attributed_and_history_preserving() {
     assert!(!format!("{first:?}").contains("opaque callback failure"));
     assert_eq!(
         backend_probe
-            .load_snapshot(&run_id)
+            .load_snapshot(&run_id, RawHistoryLoadLimit::run())
             .await
             .map(|snapshot| snapshot.history)
             .expect("raw post-fault history")
@@ -1669,7 +1676,7 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
         .journal_head()
         .clone();
     let raw_before = backend_probe
-        .load_snapshot(&run_id)
+        .load_snapshot(&run_id, RawHistoryLoadLimit::run())
         .await
         .map(|snapshot| snapshot.history)
         .expect("raw pre-fault history")
@@ -1690,7 +1697,7 @@ async fn callback_output_codec_fault_is_attributed_without_candidate_authority()
     assert!(!format!("{fault:?}").contains("opaque codec failure"));
     assert_eq!(
         backend_probe
-            .load_snapshot(&run_id)
+            .load_snapshot(&run_id, RawHistoryLoadLimit::run())
             .await
             .map(|snapshot| snapshot.history)
             .expect("raw post-fault history")
@@ -1922,7 +1929,7 @@ async fn successful_callback_facts_commit_with_the_exact_atomic_object_closure()
     assert_eq!(callback_calls.load(Ordering::SeqCst), 1);
 
     let raw = backend_probe
-        .load_snapshot(&run_id)
+        .load_snapshot(&run_id, RawHistoryLoadLimit::run())
         .await
         .map(|snapshot| snapshot.history)
         .expect("raw memory history")

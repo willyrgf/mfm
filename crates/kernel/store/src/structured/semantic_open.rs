@@ -7,9 +7,9 @@ use mfm_journal::structured::{TenantFactCoordinate, TenantFactFrontier};
 
 use super::adapter::StoreHistoryAdapter;
 use super::backend::{
-    prior_run_fact_source, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
-    StructuredRunHistoryReader, StructuredRunHistoryWriter, StructuredStoreSnapshot,
-    TenantFactProjectionSnapshot, TenantFactPublication,
+    prior_run_fact_source, RawHistoryLoadLimit, RawRunHistory, StructuredBackendFuture,
+    StructuredHistoryBackend, StructuredRunHistoryReader, StructuredRunHistoryWriter,
+    StructuredStoreSnapshot, TenantFactProjectionSnapshot, TenantFactPublication,
 };
 use super::compiler::{compile_preview, ComparedReduction};
 use super::obligations::{discharge, FinalizedReduction, ObligationDischargeScope};
@@ -165,7 +165,9 @@ pub(super) async fn load_and_compare<B: StructuredHistoryBackend>(
     programs: &Arc<ProgramVerificationRegistry>,
     physical: &Arc<dyn PhysicalObligationChecker>,
 ) -> super::Result<VerifiedStructuredRun> {
-    let snapshot = backend.load_snapshot(run_id).await?;
+    let snapshot = backend
+        .load_snapshot(run_id, RawHistoryLoadLimit::run())
+        .await?;
     let raw = snapshot.history.ok_or(StructuredStoreError::RunNotFound)?;
     let verified = super::fact_scan::qualify_and_reduce_for_scan(
         prior_run_fact_source(backend),
@@ -420,17 +422,24 @@ impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
         &'a self,
         run_id: &'a mfm_ids::RunId,
         through: &'a mfm_journal::structured::JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
         Box::pin(async move {
-            Ok(self.histories.get(run_id).and_then(|history| {
-                let position = history
-                    .batches
-                    .iter()
-                    .position(|batch| &batch.head == through)?;
-                Some(RawRunHistory {
-                    run_id: run_id.clone(),
-                    batches: history.batches[..=position].to_vec(),
-                })
+            let Some(history) = self.histories.get(run_id) else {
+                return Ok(None);
+            };
+            let Some(position) = history
+                .batches
+                .iter()
+                .position(|batch| &batch.head == through)
+            else {
+                return Ok(None);
+            };
+            let batches = &history.batches[..=position];
+            limit.validate_batches(batches)?;
+            Ok(Some(RawRunHistory {
+                run_id: run_id.clone(),
+                batches: batches.to_vec(),
             }))
         })
     }

@@ -23,9 +23,10 @@ mod validated_append;
 
 pub use backend::{
     AppendAttemptLookup, BackendAppendOutcome, EffectEntryAttentionRoute, PhysicalTargetIdentity,
-    RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend, StructuredRunSnapshot,
-    StructuredStoreIdentity, StructuredStoreRunSnapshot, StructuredStoreSnapshot,
-    TenantFactProjectionSnapshot, TenantFactPublication,
+    RawHistoryLoadLimit, RawRunHistory, StructuredBackendFuture, StructuredHistoryBackend,
+    StructuredRunSnapshot, StructuredStoreIdentity, StructuredStoreRunSnapshot,
+    StructuredStoreSnapshot, TenantFactProjectionSnapshot, TenantFactPublication,
+    MAX_RUN_HISTORY_BATCHES, MAX_RUN_HISTORY_CANONICAL_BYTES, MAX_RUN_HISTORY_OBJECTS,
 };
 pub use configuration::{
     qualify_and_open_configuration_history, ConfigurationAppendRequest,

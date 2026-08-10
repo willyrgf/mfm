@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use mfm_ids::RunId;
 use mfm_journal::structured::{
-    CommittedBatch, RunRecord, TenantFactCoordinate, TenantFactFrontier,
+    CommittedBatch, RunRecord, TenantFactCoordinate, TenantFactFrontier, MAX_APPEND_OBJECTS,
 };
 use mfm_runtime::history::{
     CommittedAccessAuthorization, HistoryAppendOutcome, QualifiedRuntimeIntent,
@@ -15,8 +15,8 @@ use mfm_runtime::history::{
 };
 
 use super::backend::{
-    prior_run_fact_source, AppendAttemptLookup, BackendAppendOutcome, RawRunHistory,
-    StructuredHistoryBackend, StructuredRunHistoryWriter,
+    prior_run_fact_source, AppendAttemptLookup, BackendAppendOutcome, RawHistoryLoadLimit,
+    RawRunHistory, StructuredHistoryBackend, StructuredRunHistoryWriter,
 };
 use super::compiler::{compile_preview, ComparedReduction, FactScanPermitSpec};
 use super::obligations::{discharge, FinalizedReduction, ObligationDischargeScope};
@@ -28,7 +28,7 @@ use super::reducer::{
     reduce_event, PendingSemanticStep, QualifiedEvent, QualifiedIntentEvent, ReducedRunState,
     TenantFactRequirement,
 };
-use super::validated_append::{RunCurrentProjection, ValidatedRunAppend};
+use super::validated_append::{RunCurrentProjection, ValidatedRunAppend, MAX_STORED_FRAME_BYTES};
 use super::VerifiedStructuredRun;
 
 pub(super) struct AppendSeal(());
@@ -105,6 +105,18 @@ pub(super) async fn commit_event<B: StructuredHistoryBackend>(
         )
         .map_err(candidate_rejected)?,
     };
+    let (reserved_batches, reserved_objects, reserved_bytes) =
+        if matches!(prepared.event, QualifiedIntentEvent::Authorization { .. }) {
+            (2, 2 * MAX_APPEND_OBJECTS, 2 * MAX_STORED_FRAME_BYTES)
+        } else {
+            (0, 0, 0)
+        };
+    RawHistoryLoadLimit::run().validate_batch_iter_with_reserve(
+        history.batches.iter().map(|batch| &batch.committed),
+        reserved_batches,
+        reserved_objects,
+        reserved_bytes,
+    )?;
     let recorded_batch = history.batches.last().ok_or_else(invalid)?;
     let recorded = reduce_event(
         &history.context,

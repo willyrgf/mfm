@@ -9,6 +9,9 @@ pub enum HistoryError {
     /// Durable bytes or successor semantics are invalid.
     #[error("structured history is invalid")]
     InvalidHistory,
+    /// A valid run or retained prefix exceeds the fixed working-set contract.
+    #[error("structured history capacity is exceeded")]
+    CapacityExceeded,
     /// A proposed semantic candidate was rejected before backend append.
     #[error("structured history candidate was rejected")]
     CandidateRejected,

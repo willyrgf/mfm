@@ -18,7 +18,10 @@ use mfm_journal::structured::{
 };
 use mfm_values::CanonicalJsonPersistedSchema;
 
-use super::backend::{RawRunHistory, StructuredBackendFuture, TenantFactPublication};
+use super::backend::{
+    RawHistoryLoadLimit, RawRunHistory, StructuredBackendFuture, TenantFactPublication,
+    MAX_RUN_HISTORY_OBJECTS,
+};
 use super::compiler::FactScanPermitSpec;
 use super::qualification::{
     PhysicalObligationChecker, ProgramVerificationRegistry, StructuredStoreError,
@@ -51,6 +54,7 @@ pub(super) trait PriorRunFactSource: Send + Sync {
         &'a self,
         run_id: &'a RunId,
         through: &'a JournalHead,
+        limit: RawHistoryLoadLimit,
     ) -> StructuredBackendFuture<'a, Option<RawRunHistory>>;
 }
 
@@ -741,11 +745,29 @@ impl BackendFactScanPort {
                         .ok_or(ScanError::Integrity)?;
                     count_fact_scan_producer_prefix_load(&session.counter_scope);
                 }
+                let remaining_bytes = session
+                    .maximum_retained_source_bytes
+                    .checked_sub(session.producer_history_bytes)
+                    .ok_or(ScanError::Integrity)?;
+                let remaining_batches = session
+                    .maximum_producer_fold_batches
+                    .checked_sub(session.fold_work)
+                    .ok_or(ScanError::Integrity)?;
+                let limit = RawHistoryLoadLimit::new(
+                    usize::try_from(remaining_batches).map_err(|_| ScanError::Integrity)?,
+                    MAX_RUN_HISTORY_OBJECTS,
+                    usize::try_from(remaining_bytes).map_err(|_| ScanError::Integrity)?,
+                );
                 let raw = self
                     .source
-                    .load_producer_prefix(producer, through)
+                    .load_producer_prefix(producer, through, limit)
                     .await
-                    .map_err(classify_backend_scan_error)?
+                    .map_err(|error| match error {
+                        StructuredStoreError::CapacityExceeded => ScanError::Safe(
+                            FactSelectionReadFailureCode::RetainedSourceBoundExceeded,
+                        ),
+                        error => classify_backend_scan_error(error),
+                    })?
                     .ok_or(ScanError::Integrity)?;
                 if raw.batches.last().map(|batch| &batch.head) != Some(through) {
                     return Err(ScanError::Integrity);
@@ -758,20 +780,7 @@ impl BackendFactScanPort {
                             .len(),
                     )
                     .map_err(|_| ScanError::Integrity)?;
-                    let object_bytes = batch.objects.iter().try_fold(0_u64, |total, object| {
-                        let bytes = u64::try_from(
-                            canonical_json(object)
-                                .map_err(|_| ScanError::Integrity)?
-                                .as_bytes()
-                                .len(),
-                        )
-                        .map_err(|_| ScanError::Integrity)?;
-                        total.checked_add(bytes).ok_or(ScanError::Integrity)
-                    })?;
-                    total
-                        .checked_add(batch_bytes)
-                        .and_then(|total| total.checked_add(object_bytes))
-                        .ok_or(ScanError::Integrity)
+                    total.checked_add(batch_bytes).ok_or(ScanError::Integrity)
                 })?;
                 fold_batches =
                     u64::try_from(raw.batches.len()).map_err(|_| ScanError::Integrity)?;

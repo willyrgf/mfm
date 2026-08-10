@@ -24,7 +24,7 @@ pub const MAX_FACT_SCAN_RESPONSE_BYTES: u64 = 16777216;
 pub const MAX_FACT_SCAN_DISTINCT_PRODUCERS: u64 = 4096;
 
 /// Maximum producer fold batches one prior-run fact scan may replay.
-pub const MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES: u64 = 16000000;
+pub const MAX_FACT_SCAN_PRODUCER_FOLD_BATCHES: u64 = 65536;
 
 /// Maximum pages one prior-run fact scan may return.
 pub const MAX_FACT_SCAN_PAGES: u64 = 1000000;

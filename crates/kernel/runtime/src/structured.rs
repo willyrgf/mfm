@@ -202,6 +202,8 @@ pub enum RuntimeStoreFaultKind {
     RunNotFound,
     /// Durable history failed structural verification.
     InvalidHistory,
+    /// Valid retained history exceeded the fixed run-capacity contract.
+    CapacityExceeded,
     /// Persisted certification failed qualified verification.
     Certification,
     /// The exact expected append head changed.
@@ -452,6 +454,7 @@ impl<P: RuntimeHistoryPort> Runtime<P> {
         let store_fault_kind = match error {
             HistoryError::RunNotFound => RuntimeStoreFaultKind::RunNotFound,
             HistoryError::InvalidHistory => RuntimeStoreFaultKind::InvalidHistory,
+            HistoryError::CapacityExceeded => RuntimeStoreFaultKind::CapacityExceeded,
             HistoryError::CandidateRejected => {
                 return self.candidate_fault(phase, run_id, pre_fault_head, occurrence_id);
             }

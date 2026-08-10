@@ -692,6 +692,7 @@ fn classify_store_error(error: StructuredStoreError) -> StructuredReplayError {
             StructuredReplayError::StoreUnavailable
         }
         StructuredStoreError::InvalidHistory
+        | StructuredStoreError::CapacityExceeded
         | StructuredStoreError::CandidateRejected
         | StructuredStoreError::Certification
         | StructuredStoreError::StaleHead

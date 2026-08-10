@@ -15,7 +15,8 @@ use mfm_store::structured::test_support::{
     verify_incremental_reduction_equivalence, LiveFixtureStore,
 };
 use mfm_store::structured::{
-    verify_offline_run_closure, OfflineRunClosure, RawRunHistory, StructuredStoreError,
+    verify_offline_run_closure, OfflineRunClosure, RawHistoryLoadLimit, RawRunHistory,
+    StructuredStoreError,
 };
 
 /// Admits the fixture run and returns its exact raw persisted prefix.
@@ -87,6 +88,59 @@ async fn a_real_admitted_prefix_qualifies() {
     requalify(&store, raw)
         .await
         .expect("the unforged admitted prefix qualifies");
+}
+
+/// Raw history capacity is exact on every retained working-set dimension.
+#[tokio::test]
+async fn raw_history_load_limits_reject_before_a_second_owner() {
+    let store = LiveFixtureStore::open(81);
+    let raw = admitted_prefix(&store, 81, "capacity").await;
+    let batch_count = raw.batches.len();
+    let object_count = raw
+        .batches
+        .iter()
+        .map(|batch| batch.objects.len())
+        .sum::<usize>();
+    let canonical_bytes = raw
+        .batches
+        .iter()
+        .map(|batch| {
+            mfm_journal::structured::canonical_json(batch)
+                .expect("canonical committed batch")
+                .as_bytes()
+                .len()
+        })
+        .sum::<usize>();
+    raw.validate_load_limit(RawHistoryLoadLimit::new(
+        batch_count,
+        object_count,
+        canonical_bytes,
+    ))
+    .expect("exact run capacity");
+    assert_eq!(
+        raw.validate_load_limit(RawHistoryLoadLimit::new(
+            batch_count - 1,
+            object_count,
+            canonical_bytes,
+        )),
+        Err(StructuredStoreError::CapacityExceeded),
+    );
+    assert_eq!(
+        raw.validate_load_limit(RawHistoryLoadLimit::new(
+            batch_count,
+            object_count - 1,
+            canonical_bytes,
+        )),
+        Err(StructuredStoreError::CapacityExceeded),
+    );
+    assert_eq!(
+        raw.validate_load_limit(RawHistoryLoadLimit::new(
+            batch_count,
+            object_count,
+            canonical_bytes - 1,
+        )),
+        Err(StructuredStoreError::CapacityExceeded),
+    );
 }
 
 /// A forgery that keeps the envelope and the admitted record in agreement is

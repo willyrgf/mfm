@@ -99,6 +99,14 @@ ingress applies that document budget before parsing and
 again to the canonicalized bytes. These ceilings remain separate from the smaller string,
 portable-export, and provider-proof budgets: they admit the largest qualified structured-program
 value while keeping every transport and retained payload bound explicit.
+One openable run is additionally capped at 65,536 atomic batches, 1,048,576 retained objects, and
+512 MiB of canonical committed-batch bytes. Store lifetime and run count remain unlimited. Raw
+loaders preflight those dimensions before cloning or accumulating a prefix and report a distinct
+capacity failure for otherwise valid evidence. The same ceilings apply at append; before an
+external authorization, accounting reserves two maximum successor batches for its observation and
+settlement so entering a provider cannot strand the required durable evidence. Prior-run selection
+uses the request's remaining byte and fold budgets before loading a producer prefix, and one scan
+may fold at most 65,536 producer batches.
 Typed base64url ingress applies its generated character budget before decoding, so hostile wire
 strings are rejected before the decoded allocation; trusted byte construction remains subject to
 the enclosing canonical-value or retained-payload bound.
