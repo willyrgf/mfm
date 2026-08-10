@@ -9,7 +9,8 @@ use super::adapter::StoreHistoryAdapter;
 use super::backend::{
     prior_run_fact_source, RawHistoryLoadLimit, RawRunHistory, StructuredBackendFuture,
     StructuredHistoryBackend, StructuredRunHistoryReader, StructuredRunHistoryWriter,
-    StructuredStoreSnapshot, TenantFactProjectionSnapshot, TenantFactPublication,
+    StructuredSemanticOpenAudit, StructuredStoreIdentity, TenantFactPublication,
+    SEMANTIC_OPEN_KEY_PAGE_ITEMS, SEMANTIC_OPEN_ROUTE_PAGE_ITEMS,
 };
 use super::compiler::{compile_preview, ComparedReduction};
 use super::obligations::{discharge, FinalizedReduction, ObligationDischargeScope};
@@ -120,7 +121,9 @@ pub async fn qualify_and_open_structured_store<B: StructuredHistoryBackend>(
     let (admission, processes, token) = registry.into_runtime_parts(StoreAssemblyConsumer);
     let programs = Arc::new(ProgramVerificationRegistry::new(admission));
     let backend = Arc::new(backend);
-    qualify_store_snapshot(backend.load_store_snapshot().await?, &programs, &physical).await?;
+    let identity = backend.identity().clone();
+    let audit = backend.begin_semantic_open_audit().await?;
+    qualify_store_audit(audit, &identity, &programs, &physical).await?;
     backend.validate_authority().await?;
     let writer = StructuredRunHistoryWriter {
         backend: Arc::clone(&backend),
@@ -297,42 +300,168 @@ pub(super) fn verify_incremental_equivalence(
     Ok(())
 }
 
-struct SnapshotFactSource {
-    histories: BTreeMap<mfm_ids::RunId, RawRunHistory>,
-    publications: BTreeMap<mfm_ids::TenantScopeId, Vec<TenantFactPublication>>,
-    scanned_publications: Option<Mutex<BTreeSet<(mfm_ids::TenantScopeId, u64)>>>,
+#[derive(Clone)]
+struct SemanticAuditHandle {
+    audit: Arc<Mutex<Option<Box<dyn StructuredSemanticOpenAudit>>>>,
 }
 
-impl SnapshotFactSource {
-    fn new(snapshot: &StructuredStoreSnapshot) -> super::Result<Self> {
-        let mut histories = BTreeMap::new();
-        for run in &snapshot.runs {
-            if let Some(history) = &run.history {
-                if history.run_id != run.run_id
-                    || histories
-                        .insert(run.run_id.clone(), history.clone())
-                        .is_some()
-                {
-                    return Err(StructuredStoreError::InvalidHistory);
-                }
-            }
+impl SemanticAuditHandle {
+    fn new(audit: Box<dyn StructuredSemanticOpenAudit>) -> Self {
+        Self {
+            audit: Arc::new(Mutex::new(Some(audit))),
         }
-        let mut publications = BTreeMap::new();
-        for tenant in &snapshot.tenant_facts {
-            if publications
-                .insert(tenant.tenant_scope_id.clone(), tenant.publications.clone())
-                .is_some()
+    }
+
+    fn take(&self) -> super::Result<Box<dyn StructuredSemanticOpenAudit>> {
+        self.audit
+            .lock()
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?
+            .take()
+            .ok_or(StructuredStoreError::BackendUnavailable)
+    }
+
+    fn replace(&self, audit: Box<dyn StructuredSemanticOpenAudit>) -> super::Result<()> {
+        let mut slot = self
+            .audit
+            .lock()
+            .map_err(|_| StructuredStoreError::BackendUnavailable)?;
+        if slot.replace(audit).is_some() {
+            return Err(StructuredStoreError::BackendUnavailable);
+        }
+        Ok(())
+    }
+
+    async fn scan_run_ids(
+        &self,
+        after: Option<&mfm_ids::RunId>,
+    ) -> super::Result<Vec<mfm_ids::RunId>> {
+        let mut audit = self.take()?;
+        let result = audit.scan_run_ids(after).await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn load_run_projection(
+        &self,
+        run_id: &mfm_ids::RunId,
+    ) -> super::Result<Option<RunCurrentProjection>> {
+        let mut audit = self.take()?;
+        let result = audit.load_run_projection(run_id).await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn load_run_history(
+        &self,
+        run_id: &mfm_ids::RunId,
+        through: Option<&mfm_journal::structured::JournalHead>,
+        limit: RawHistoryLoadLimit,
+    ) -> super::Result<Option<RawRunHistory>> {
+        let mut audit = self.take()?;
+        let result = audit.load_run_history_bounded(run_id, through, limit).await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn scan_run_publications(
+        &self,
+        run_id: &mfm_ids::RunId,
+        after_run_sequence: Option<u64>,
+    ) -> super::Result<Vec<TenantFactPublication>> {
+        let mut audit = self.take()?;
+        let result = audit
+            .scan_run_publications(run_id, after_run_sequence)
+            .await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn scan_fact_tenants(
+        &self,
+        after: Option<&mfm_ids::TenantScopeId>,
+    ) -> super::Result<Vec<mfm_ids::TenantScopeId>> {
+        let mut audit = self.take()?;
+        let result = audit.scan_fact_tenants(after).await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn load_fact_head(
+        &self,
+        tenant: &mfm_ids::TenantScopeId,
+    ) -> super::Result<Option<TenantFactFrontier>> {
+        let mut audit = self.take()?;
+        let result = audit.load_fact_head(tenant).await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn scan_tenant_publications(
+        &self,
+        tenant: &mfm_ids::TenantScopeId,
+        after_fact_order: Option<u64>,
+    ) -> super::Result<Vec<TenantFactPublication>> {
+        let mut audit = self.take()?;
+        let result = audit
+            .scan_tenant_publications(tenant, after_fact_order)
+            .await;
+        self.replace(audit)?;
+        result
+    }
+
+    async fn finish(self) -> super::Result<()> {
+        let audit = self.take()?;
+        audit.finish().await
+    }
+}
+
+impl super::fact_scan::PriorRunFactSource for SemanticAuditHandle {
+    fn scan_publications<'a>(
+        &'a self,
+        tenant_scope_id: &'a mfm_ids::TenantScopeId,
+        first_order: u64,
+        through_order: u64,
+        maximum_items: u32,
+    ) -> StructuredBackendFuture<'a, Vec<TenantFactPublication>> {
+        Box::pin(async move {
+            if first_order == 0
+                || maximum_items == 0
+                || maximum_items > SEMANTIC_OPEN_ROUTE_PAGE_ITEMS
             {
                 return Err(StructuredStoreError::InvalidHistory);
             }
-        }
-        Ok(Self {
-            histories,
-            publications,
-            scanned_publications: None,
+            if first_order > through_order {
+                return Ok(Vec::new());
+            }
+            let page = self
+                .scan_tenant_publications(tenant_scope_id, first_order.checked_sub(1))
+                .await?;
+            validate_route_page_len(&page)?;
+            Ok(page
+                .into_iter()
+                .take_while(|publication| publication.frontier.fact_order <= through_order)
+                .take(maximum_items as usize)
+                .collect())
         })
     }
 
+    fn load_producer_prefix<'a>(
+        &'a self,
+        run_id: &'a mfm_ids::RunId,
+        through: &'a mfm_journal::structured::JournalHead,
+        limit: RawHistoryLoadLimit,
+    ) -> StructuredBackendFuture<'a, Option<RawRunHistory>> {
+        Box::pin(async move { self.load_run_history(run_id, Some(through), limit).await })
+    }
+}
+
+struct OfflineClosureFactSource {
+    histories: BTreeMap<mfm_ids::RunId, RawRunHistory>,
+    publications: BTreeMap<mfm_ids::TenantScopeId, Vec<TenantFactPublication>>,
+    scanned_publications: Mutex<BTreeSet<(mfm_ids::TenantScopeId, u64)>>,
+}
+
+impl OfflineClosureFactSource {
     fn from_offline_closure(closure: &OfflineRunClosure) -> super::Result<Self> {
         let mut histories = BTreeMap::new();
         for history in std::iter::once(&closure.root).chain(&closure.source_prefixes) {
@@ -363,7 +492,7 @@ impl SnapshotFactSource {
         Ok(Self {
             histories,
             publications,
-            scanned_publications: Some(Mutex::new(BTreeSet::new())),
+            scanned_publications: Mutex::new(BTreeSet::new()),
         })
     }
 
@@ -371,15 +500,13 @@ impl SnapshotFactSource {
         &self,
     ) -> super::Result<BTreeSet<(mfm_ids::TenantScopeId, u64)>> {
         self.scanned_publications
-            .as_ref()
-            .ok_or(StructuredStoreError::InvalidHistory)?
             .lock()
             .map(|coordinates| coordinates.clone())
             .map_err(|_| StructuredStoreError::InvalidHistory)
     }
 }
 
-impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
+impl super::fact_scan::PriorRunFactSource for OfflineClosureFactSource {
     fn scan_publications<'a>(
         &'a self,
         tenant_scope_id: &'a mfm_ids::TenantScopeId,
@@ -403,17 +530,16 @@ impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
                 .take(maximum_items as usize)
                 .cloned()
                 .collect::<Vec<_>>();
-            if let Some(scanned) = &self.scanned_publications {
-                let mut scanned = scanned
-                    .lock()
-                    .map_err(|_| StructuredStoreError::InvalidHistory)?;
-                scanned.extend(publications.iter().map(|publication| {
-                    (
-                        publication.frontier.tenant_scope_id.clone(),
-                        publication.frontier.fact_order,
-                    )
-                }));
-            }
+            let mut scanned = self
+                .scanned_publications
+                .lock()
+                .map_err(|_| StructuredStoreError::InvalidHistory)?;
+            scanned.extend(publications.iter().map(|publication| {
+                (
+                    publication.frontier.tenant_scope_id.clone(),
+                    publication.frontier.fact_order,
+                )
+            }));
             Ok(publications)
         })
     }
@@ -445,98 +571,172 @@ impl super::fact_scan::PriorRunFactSource for SnapshotFactSource {
     }
 }
 
-async fn qualify_store_snapshot(
-    snapshot: StructuredStoreSnapshot,
+async fn qualify_store_audit(
+    raw_audit: Box<dyn StructuredSemanticOpenAudit>,
+    identity: &StructuredStoreIdentity,
     programs: &Arc<ProgramVerificationRegistry>,
     physical: &Arc<dyn PhysicalObligationChecker>,
 ) -> super::Result<()> {
-    let source: Arc<dyn super::fact_scan::PriorRunFactSource> =
-        Arc::new(SnapshotFactSource::new(&snapshot)?);
-    let prefix_memo = Arc::new(super::fact_scan::PrefixVerificationMemo::default());
-    let mut seen_runs = BTreeSet::new();
-    let mut expected_publications = BTreeMap::new();
-    for run in &snapshot.runs {
-        if !seen_runs.insert(run.run_id.clone()) {
-            return Err(StructuredStoreError::InvalidHistory);
-        }
-        let (raw, current) = match (&run.history, &run.current_projection) {
-            (Some(raw), Some(current)) if raw.run_id == run.run_id => (raw.clone(), current),
-            _ => return Err(StructuredStoreError::InvalidHistory),
-        };
-        let (verified, publications) =
-            super::fact_scan::qualify_and_reduce_for_scan_with_publications_and_memo(
-                Arc::clone(&source),
-                raw,
-                Arc::clone(programs),
-                Arc::clone(physical),
-                Arc::clone(&prefix_memo),
-            )
-            .await?;
-        if current != &verified.current_projection() {
-            return Err(StructuredStoreError::InvalidHistory);
-        }
-        for publication in publications {
-            let key = (
-                publication.frontier.tenant_scope_id.clone(),
-                publication.frontier.fact_order,
-            );
-            if expected_publications.insert(key, publication).is_some() {
-                return Err(StructuredStoreError::InvalidHistory);
-            }
-        }
-    }
-    compare_fact_projections(&snapshot.tenant_facts, expected_publications)
+    let audit = SemanticAuditHandle::new(raw_audit);
+    qualify_run_pages(&audit, programs, physical).await?;
+    qualify_tenant_pages(&audit, identity).await?;
+    audit.finish().await
 }
 
-fn compare_fact_projections(
-    actual: &[TenantFactProjectionSnapshot],
-    expected: BTreeMap<(mfm_ids::TenantScopeId, u64), TenantFactPublication>,
+async fn qualify_run_pages(
+    audit: &SemanticAuditHandle,
+    programs: &Arc<ProgramVerificationRegistry>,
+    physical: &Arc<dyn PhysicalObligationChecker>,
 ) -> super::Result<()> {
-    let mut actual_by_tenant = BTreeMap::new();
-    for projection in actual {
-        if actual_by_tenant
-            .insert(projection.tenant_scope_id.clone(), projection)
-            .is_some()
-        {
-            return Err(StructuredStoreError::InvalidHistory);
+    let mut after = None;
+    loop {
+        let page = audit.scan_run_ids(after.as_ref()).await?;
+        validate_key_page(&page, after.as_ref(), SEMANTIC_OPEN_KEY_PAGE_ITEMS)?;
+        if page.is_empty() {
+            return Ok(());
+        }
+        for run_id in &page {
+            let current = audit
+                .load_run_projection(run_id)
+                .await?
+                .ok_or(StructuredStoreError::InvalidHistory)?;
+            let raw = audit
+                .load_run_history(run_id, None, RawHistoryLoadLimit::run())
+                .await?
+                .ok_or(StructuredStoreError::InvalidHistory)?;
+            if raw.run_id != *run_id {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            let source: Arc<dyn super::fact_scan::PriorRunFactSource> = Arc::new(audit.clone());
+            let (verified, expected_publications) =
+                super::fact_scan::qualify_and_reduce_for_scan_with_publications_and_memo(
+                    source,
+                    raw,
+                    Arc::clone(programs),
+                    Arc::clone(physical),
+                    Arc::new(super::fact_scan::PrefixVerificationMemo::default()),
+                )
+                .await?;
+            if current != verified.current_projection() {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            compare_run_publications(audit, run_id, &expected_publications).await?;
+        }
+        after = page.last().cloned();
+    }
+}
+
+async fn compare_run_publications(
+    audit: &SemanticAuditHandle,
+    run_id: &mfm_ids::RunId,
+    expected: &[TenantFactPublication],
+) -> super::Result<()> {
+    let mut after_sequence = None;
+    let mut expected_index = 0_usize;
+    loop {
+        let page = audit.scan_run_publications(run_id, after_sequence).await?;
+        validate_route_page_len(&page)?;
+        if page.is_empty() {
+            return if expected_index == expected.len() {
+                Ok(())
+            } else {
+                Err(StructuredStoreError::InvalidHistory)
+            };
+        }
+        for publication in &page {
+            let sequence = publication.transition_ref.run_sequence;
+            if publication.transition_ref.run_id != *run_id
+                || after_sequence.is_some_and(|after| sequence <= after)
+                || expected.get(expected_index) != Some(publication)
+            {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            expected_index = expected_index
+                .checked_add(1)
+                .ok_or(StructuredStoreError::InvalidHistory)?;
+            after_sequence = Some(sequence);
         }
     }
-    let tenants = actual_by_tenant
-        .keys()
-        .chain(expected.keys().map(|(tenant, _)| tenant))
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for tenant in tenants {
-        let expected_publications = expected
-            .range((tenant.clone(), u64::MIN)..=(tenant.clone(), u64::MAX))
-            .map(|(_, publication)| publication.clone())
-            .collect::<Vec<_>>();
-        if expected_publications
-            .iter()
-            .enumerate()
-            .any(|(index, publication)| {
-                publication.frontier.fact_order != (index as u64).saturating_add(1)
-            })
-        {
-            return Err(StructuredStoreError::InvalidHistory);
+}
+
+async fn qualify_tenant_pages(
+    audit: &SemanticAuditHandle,
+    identity: &StructuredStoreIdentity,
+) -> super::Result<()> {
+    let mut after = None;
+    loop {
+        let page = audit.scan_fact_tenants(after.as_ref()).await?;
+        validate_key_page(&page, after.as_ref(), SEMANTIC_OPEN_KEY_PAGE_ITEMS)?;
+        if page.is_empty() {
+            return Ok(());
         }
-        let expected_frontier = expected_publications
-            .last()
-            .map(|publication| publication.frontier.clone());
-        let (actual_frontier, actual_publications) =
-            actual_by_tenant
-                .get(&tenant)
-                .map_or((None, &[][..]), |projection| {
-                    (
-                        projection.current_frontier.as_ref(),
-                        projection.publications.as_slice(),
-                    )
-                });
-        if actual_frontier != expected_frontier.as_ref()
-            || actual_publications != expected_publications
-        {
-            return Err(StructuredStoreError::InvalidHistory);
+        for tenant in &page {
+            qualify_tenant_routes(audit, identity, tenant).await?;
         }
+        after = page.last().cloned();
+    }
+}
+
+async fn qualify_tenant_routes(
+    audit: &SemanticAuditHandle,
+    identity: &StructuredStoreIdentity,
+    tenant: &mfm_ids::TenantScopeId,
+) -> super::Result<()> {
+    let head = audit.load_fact_head(tenant).await?;
+    if head.as_ref().is_some_and(|frontier| {
+        frontier.store_scope_id != identity.store_scope_id
+            || frontier.store_epoch != identity.store_epoch
+            || frontier.tenant_scope_id != *tenant
+            || frontier.fact_order == 0
+    }) {
+        return Err(StructuredStoreError::InvalidHistory);
+    }
+    let mut after_order = None;
+    let mut expected_order = 1_u64;
+    let mut last_frontier = None;
+    loop {
+        let page = audit.scan_tenant_publications(tenant, after_order).await?;
+        validate_route_page_len(&page)?;
+        if page.is_empty() {
+            if head != last_frontier {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            return Ok(());
+        }
+        for publication in &page {
+            let frontier = &publication.frontier;
+            if frontier.store_scope_id != identity.store_scope_id
+                || frontier.store_epoch != identity.store_epoch
+                || frontier.tenant_scope_id != *tenant
+                || frontier.fact_order != expected_order
+                || after_order.is_some_and(|after| frontier.fact_order <= after)
+            {
+                return Err(StructuredStoreError::InvalidHistory);
+            }
+            expected_order = expected_order
+                .checked_add(1)
+                .ok_or(StructuredStoreError::InvalidHistory)?;
+            after_order = Some(frontier.fact_order);
+            last_frontier = Some(frontier.clone());
+        }
+    }
+}
+
+fn validate_key_page<T: Ord>(page: &[T], after: Option<&T>, maximum: u32) -> super::Result<()> {
+    if page.len() > maximum as usize
+        || page.windows(2).any(|pair| pair[0] >= pair[1])
+        || page
+            .first()
+            .is_some_and(|first| after.is_some_and(|cursor| first <= cursor))
+    {
+        return Err(StructuredStoreError::InvalidHistory);
+    }
+    Ok(())
+}
+
+fn validate_route_page_len(page: &[TenantFactPublication]) -> super::Result<()> {
+    if page.len() > SEMANTIC_OPEN_ROUTE_PAGE_ITEMS as usize {
+        return Err(StructuredStoreError::InvalidHistory);
     }
     Ok(())
 }
@@ -614,7 +814,7 @@ pub async fn verify_offline_run_closure(
     if expected_publications.len() != closure.fact_publications.len() {
         return Err(StructuredStoreError::InvalidHistory);
     }
-    let snapshot = Arc::new(SnapshotFactSource::from_offline_closure(&closure)?);
+    let snapshot = Arc::new(OfflineClosureFactSource::from_offline_closure(&closure)?);
     let source: Arc<dyn super::fact_scan::PriorRunFactSource> = snapshot.clone();
     let prefix_memo = Arc::new(super::fact_scan::PrefixVerificationMemo::default());
     let (verified, _) = super::fact_scan::qualify_and_reduce_for_scan_with_publications_and_memo(

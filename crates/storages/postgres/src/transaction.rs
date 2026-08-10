@@ -245,10 +245,10 @@ pub(crate) enum CommitOutcome {
 }
 
 /// Begins a read-only transaction on a reader session.
-pub(crate) async fn begin_read<'a>(
-    session: &'a RoleSession,
+pub(crate) async fn begin_read(
+    session: &RoleSession,
     binding: &TargetBinding,
-) -> Result<ReadTx<'a>, StructuredStoreError> {
+) -> Result<ReadTx<'static>, StructuredStoreError> {
     if !matches!(
         session.kind(),
         SessionKind::RunReader | SessionKind::ConfigurationReader
@@ -260,10 +260,10 @@ pub(crate) async fn begin_read<'a>(
 }
 
 /// Begins a writable run transaction and returns it unlocked.
-pub(crate) async fn begin_run_write<'a>(
-    session: &'a RoleSession,
+pub(crate) async fn begin_run_write(
+    session: &RoleSession,
     binding: &TargetBinding,
-) -> Result<WriteTx<'a>, StructuredStoreError> {
+) -> Result<WriteTx<'static>, StructuredStoreError> {
     if session.kind() != SessionKind::RunWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
@@ -296,11 +296,11 @@ pub(crate) async fn lock_run_and_tenant<'a>(
 }
 
 /// Begins a configuration write transaction and acquires the stream lock.
-pub(crate) async fn begin_configuration_write_locked<'a>(
-    session: &'a RoleSession,
+pub(crate) async fn begin_configuration_write_locked(
+    session: &RoleSession,
     binding: &TargetBinding,
     stream_lock_key: &str,
-) -> Result<LockedConfigurationWriteTx<'a>, StructuredStoreError> {
+) -> Result<LockedConfigurationWriteTx<'static>, StructuredStoreError> {
     if session.kind() != SessionKind::ConfigurationWriter {
         return Err(StructuredStoreError::BackendUnavailable);
     }
@@ -315,21 +315,21 @@ pub(crate) async fn begin_configuration_write_locked<'a>(
 }
 
 /// Begins a configuration read transaction.
-pub(crate) async fn begin_configuration_read<'a>(
-    session: &'a RoleSession,
+pub(crate) async fn begin_configuration_read(
+    session: &RoleSession,
     binding: &TargetBinding,
-) -> Result<ReadTx<'a>, StructuredStoreError> {
+) -> Result<ReadTx<'static>, StructuredStoreError> {
     if session.kind() != SessionKind::ConfigurationReader {
         return Err(StructuredStoreError::BackendUnavailable);
     }
     begin_read(session, binding).await
 }
 
-async fn begin_base<'a>(
-    session: &'a RoleSession,
+async fn begin_base(
+    session: &RoleSession,
     binding: &TargetBinding,
     read_only: bool,
-) -> Result<Transaction<'a, Postgres>, StructuredStoreError> {
+) -> Result<Transaction<'static, Postgres>, StructuredStoreError> {
     let mut transaction = session
         .pool()
         .begin()
