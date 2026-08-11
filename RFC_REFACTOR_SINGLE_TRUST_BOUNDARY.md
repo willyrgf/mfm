@@ -12,14 +12,21 @@ contract and must not retain compatibility paths between them.
 
 MFM has one rule for immutable data trust:
 
-> Bytes are authenticated where applicable, bounded, strictly decoded, canonicalized, and
+> Bytes are protocol-authenticated where applicable, bounded, strictly decoded, canonicalized, and
 > semantically validated exactly once when they enter the process trust base. Successful ingress
 > returns an opaque immutable value that carries that evidence. Crossing an internal crate or module
 > boundary does not erase it, and no downstream layer reconstructs or revalidates the same fact.
 
-This is a data-ingress rule, not a claim that one process owns every form of authority. Caller
-authorization, current leases and fences, exact-head comparison, durability acknowledgement,
-redaction, and secret lifetime are different propositions with explicit owners.
+This is a data-ingress rule, not an application access-control system. MFM does not authenticate end
+users, accept or manage caller credentials, evaluate roles, ACLs, or grants, or keep capability
+bindings live-revocable.
+Exact-head comparison, durability acknowledgement, redaction, secret lifetime, and adapter protocol
+authenticity are different propositions with explicit owners.
+
+MFM is reachable only behind a trusted embedding/deployment boundary. That owner admits callers,
+controls network and process exposure, and selects the tenant-scoped facade. The credential-free
+REST service must not be exposed directly to untrusted callers. Public/untrusted exposure would be
+a new product requirement and requires an access-control design outside this RFC.
 
 The target design has a small set of load-bearing values and no generic validation layers between
 them:
@@ -31,29 +38,60 @@ configuration source/row bytes -- one ingress --> ResolvedConfiguration<T>@G
 
 raw run prefix -- one cold ingress + fold --> QualifiedRun@H
 
-QualifiedRun@H + RuntimeAssemblyBrand + RunDriverPermit --> RunSession@H
+QualifiedRun@H + RuntimeAssemblyBrand --> RunSession@H
 
 typed proposal -----------------------> ResolvedEvent
 qualified record bytes ---------------> ResolvedEvent
 
 RunSession@H + ResolvedEvent
     -> PreparedAppend { batch, successor: PreparedSuccessor@H' }
-    -> exact-head compare-and-append
-    -> NewlyCommitted -> RunSession@H'
+    -> private PreparedDrive::{Plain, Access, Observation}
+       // each variant owns session + append + its exact continuation
+    -> RuntimeCommitCoordinator::commit(PreparedDrive)
+       -> backend exact-head compare-and-append
+       -> direct backend NewlyCommitted
+       -> private CommittedDrive::{Plain, Access, Observation}
 ```
+
+`CommittedDrive::Plain` owns only the advanced session; `Access` additionally owns the matching
+`ReadyToInvoke`; `Observation` owns the selected committed observation needed for settlement. No
+other backend outcome constructs a committed variant.
 
 New-run spawn follows the same preparation/commit path from locally typed admission inputs and an
 absent predecessor. It does not cold-load unrelated retained runs; only explicitly selected
 program, configuration, or prior-run fact evidence is a dependency of that admission.
 
 `Program` is valid by construction. `QualifiedRun@H` is callback-free semantic evidence for one
-exact journal prefix. Only Runtime can combine it with the exact assembly brand and a fenced,
-affine per-run driver permit to create `RunSession@H`; purpose readers never receive drive
-authority. `ResolvedConfiguration<T>@G` carries the analogous typed configuration evidence.
-`ResolvedEvent` is the sole run-semantic input. `PreparedAppend` binds the bytes and
-not-yet-authoritative successor that were derived together. Only the direct `NewlyCommitted`
-outcome advances the session to that successor. It does not cause the process to distrust and
-reconstruct its own values.
+exact journal prefix. Only Runtime can combine it with the exact assembly brand to create an affine
+`RunSession@H`; purpose readers never receive drive authority. Multiple workers may construct
+sessions, but exact-head compare-and-append selects one successor and only that call's direct
+commit branch releases its retained one-use invocation. The backend's payloadless
+`NewlyCommitted` is never exposed as a free proof token. `ResolvedConfiguration<T>@G`
+carries the analogous typed configuration evidence. `ResolvedEvent` is the sole run-semantic input.
+`PreparedAppend` binds the bytes and not-yet-authoritative successor that were derived together. A
+positive commit does not cause the process to distrust and reconstruct its own values.
+
+External access uses journal reservation, not security authorization:
+
+```text
+PreparedDrive::Access {
+    RunSession@H,
+    append: PreparedAppend<ExternalAccessReserved>,
+    PreparedAccess<K>
+}
+    -> RuntimeCommitCoordinator::commit
+    -> direct backend NewlyCommitted
+    -> { RunSession@H_next, ReadyToInvoke<K> }
+    -> invoke_once -> response ingress -> PendingAccessObservation<K>
+    -> commit ExternalAccessObserved
+    -> settle state
+```
+
+`ExternalAccessReserved` means only that MFM durably reserved one exact journal attempt before
+invocation. It does not reserve a provider resource, grant permission, or claim that invocation
+occurred. Qualified cold history and a `Found` attempt classified as `ExistingSame` can prove that
+the reservation exists but can never reconstruct `ReadyToInvoke`; stale and indeterminate outcomes
+do not prove existence.
 
 An **exact-head compare-and-append** atomically requires the current head to equal the prepared
 predecessor, inserts the immutable batch, updates its append-atomic projections, and advances the
@@ -79,28 +117,31 @@ The PostgreSQL and readiness choices are settled: PostgreSQL is the durability/c
 authority within one admitted store epoch, and ordinary readiness never qualifies dormant history.
 These remaining choices require owner rulings before implementation begins.
 
-1. **Session ownership and cold-resume latency**
+1. **Outstanding non-idempotent Effect recovery**
 
-   - **Choice:** an active driver owns one Runtime-branded affine `RunSession` and its externally
-     fenced per-run permit; there is no global run-state LRU or persisted semantic checkpoint. A
-     genuinely new resume qualifies and folds the bounded complete prefix once, then must acquire
-     that permit before it becomes drive authority.
+   - **Choice:** an unobserved `EntryOnce` reservation parks as unresolved and requires operator
+     attention. Only an explicitly duplicate-absorbing Effect may reserve a bounded new ordinal
+     under its capability-specific idempotency/absorption contract.
+   - **Why uncertain:** the product may expect automatic cross-process continuation after a hard
+     crash even when the provider exposes no status or idempotency evidence.
+   - **If wrong:** automatic recovery would require a generic provider fence or could duplicate a
+     real-world Effect, contradicting this product decision.
+   - **Resolution:** confirm that ordinary non-idempotent Effects use manual attention after an
+     unobserved reservation; otherwise require a capability-specific provider proof instead of a
+     generic Runtime lease.
+
+2. **Session ownership and cold-resume latency**
+
+   - **Choice:** an active executor owns one Runtime-branded affine `RunSession`; there is no global
+     run-state LRU, cross-process run lease, or persisted semantic checkpoint. A genuinely new
+     resume qualifies and folds the bounded complete prefix once.
    - **Why uncertain:** the current public one-action API encourages independent
      `drive_once(run_id)` calls, and worst-supported cold-resume time has not been measured.
    - **If wrong:** stateless calls routed across workers may repeatedly replay a large prefix and
      miss the product latency target.
-   - **Resolution:** define how long a driver may retain a session and benchmark maximum supported
-     histories. Consider a separately designed checkpoint only if an explicit cold-resume SLO is
-     missed.
-
-2. **Revocation completion semantics**
-
-   - **Choice:** driver/resource revocation prevents new provider entries after its linearization
-     point; work admitted before that point may drain.
-   - **Why uncertain:** the product does not say whether “revoked” also means every previously
-     admitted call has completed.
-   - **If wrong:** revocation may report success while pre-cutover work remains in flight.
-   - **Resolution:** define whether each revocation API waits for admitted work to drain.
+   - **Resolution:** define how long an executor may retain a session and benchmark maximum
+     supported histories. Consider a separately designed checkpoint only if an explicit cold-resume
+     SLO is missed.
 
 3. **Effect-attention inventory**
 
@@ -125,13 +166,55 @@ These remaining choices require owner rulings before implementation begins.
    - **Resolution:** classify the factual-trust requirement of every production capability and
      narrow its returned type to the evidence actually established.
 
+5. **EVM sender/domain cutover**
+
+   - **Choice:** remove the authenticated-issuer layer and derive the new submission intent from
+     `TenantScopeId`, wallet nonce domain, and `SubmissionIdempotencyKey`. Activate it only in a
+     fresh wallet/store domain; reuse a physical sender only after the old process is drained and
+     every prior allocation/effect is terminal with its pending nonce reconciled.
+   - **Why uncertain:** the repository has no proven inventory of externally retained incomplete
+     submissions or sender reuse obligations.
+   - **If wrong:** a new identity domain could collide with or strand old nonce/effect progress.
+   - **Resolution:** prove terminal old state and exclusive sender control, or require a fresh
+     sender for the new domain. The repository audit found no non-policy issuer-namespace owner, and
+     this RFC deliberately retains none.
+
+6. **Cold binding evidence**
+
+   - **Choice:** persisted programs and reservations retain only the immutable secret-free binding
+     descriptors/refs needed for callback-free replay and exact matching. Process construction
+     deterministically qualifies those refs to live adapter handles once; no current-release
+     history or live binding certificate survives.
+   - **Why uncertain:** current physical-release certificates may encode a non-currentness
+     proposition used by an offline or restart consumer that has not yet been identified.
+   - **If wrong:** deleting the certificate wholesale could make a legitimate historical binding
+     impossible to interpret or could silently drop a real immutable invariant.
+   - **Resolution:** inventory every certificate field and consumer before the process-binding
+     cutover. Move each surviving immutable proposition into the binding descriptor/ingress and
+     delete everything whose only owner is hot replacement, lineage, or revocation.
+
+7. **Dormant runs across binding replacement**
+
+   - **Choice:** a retained program resumes only in an assembly satisfying its exact immutable
+     binding descriptors. Rebuilding with a changed binding does not rewrite or silently replan the
+     old program; those runs must already be terminal, continue under an assembly for the old
+     binding, or remain read/replay-only.
+   - **Why uncertain:** the product has not stated whether nonterminal dormant runs must continue
+     after an operator replaces a provider/adapter binding.
+   - **If wrong:** the static-binding cutover could strand valid nonterminal runs during ordinary
+     deployment reconfiguration.
+   - **Resolution:** define the deployment drain contract and inventory nonterminal-run retention.
+     If rebinding old runs is required, design an explicit versioned capability-specific handoff or
+     state migration separately; do not reintroduce generic live currentness.
+
 ---
 
 ## 1. Scope
 
 This RFC owns one cutover across typed program construction, state capability declarations,
 configuration history, journal reduction, run spawning/resumption and session ownership, append
-acknowledgement, and internal read projections.
+acknowledgement, tenant-scoped application facades, portable export/EVM identity cutovers, and
+internal read projections.
 
 It deliberately excludes:
 
@@ -144,13 +227,13 @@ It deliberately excludes:
 Those are separate product or deployment decisions. Mixing them into this refactor would make the
 single-ingress rule depend on unrelated authority choices.
 
-The current journal hash algorithm and `RunAdmitted` serialization remain unchanged. The new
-program-document schema changes program content references, so deployment initializes a fresh
-namespace, `StoreScopeId`, and writer epoch rather than mixing or rewriting chains in place. This is
-a store-identity cutover, not a journal hash-version or in-store chain reset. Candidate, record, and
-commit digest domains remain byte-for-byte unchanged. The configuration revision
-content/predecessor format also remains unchanged; its qualification and commit ownership change,
-not its wire identity.
+The journal hash algorithm and candidate/record/commit domain separators remain unchanged, and
+`RunAdmitted` keeps its tenant-partition shape. Renaming `ExternalAccessAuthorized` to
+`ExternalAccessReserved` changes the record schema and therefore record/commit bytes. Program,
+portable-export, and EVM submission schemas also change. Deployment initializes a fresh namespace,
+`StoreScopeId`, writer epoch, portable format, and affected wallet/domain activation; it never
+mixes, rewrites, or decodes the old forms. New golden vectors freeze the one current schema. The
+configuration revision content/predecessor format remains unchanged.
 
 ---
 
@@ -163,8 +246,32 @@ The process TCB includes:
 - compiled MFM crates and their dependencies;
 - registered application state callbacks;
 - concrete adapters, signers, transports, and storage implementations;
-- the Rust compiler/toolchain used to build them; and
-- process assembly that selects the exact registry and configuration issuers.
+- the Rust compiler/toolchain used to build them;
+- process assembly that selects the exact registry, configuration sources, and immutable bindings;
+  and
+- the trusted embedding/deployment supervisor that controls caller admission, exposure, process
+  lifetime, and tenant-facade selection.
+
+The trusted embedding constructs each application facade with one `TenantScopeId`. Public calls on
+that facade accept neither credentials nor a tenant selector; every admission, lookup, fact query,
+attention query, replay, and export is scoped by the captured tenant. A process serving several
+tenants exposes separately constructed facades, and the trusted embedding selects among them.
+A run id absent from the facade's tenant partition yields `RunNotFound`, never an authentication or
+grant decision. If the backend nevertheless returns a retained row for that partition whose
+`RunAdmitted.tenant_scope_id` disagrees, byte ingress reports `InvalidHistory`; an imported bundle
+with inconsistent tenant closure is an invalid import. Corruption is not hidden as absence.
+
+`ProgramCatalog`, `ProcessRegistry`, capability adapters, provider bindings, and signer/transport
+dependencies are immutable after the composed process is exposed. Replacing any binding means the
+embedding stops accepting work, drains the complete reservation/invocation/observation/settlement
+bracket defined in section 4.4, drops the composed process, qualifies new configuration once, and
+constructs a new process. A forced stop can leave ordinary possible-entry journal evidence; MFM
+does not infer that an invocation failed to enter merely because the old process disappeared. There
+is no generic Runtime API to replace, revoke, lease, refresh, or reselect a binding in place.
+
+A persisted program may resume only under an assembly that satisfies its exact immutable binding
+descriptors. A different binding creates a different program/assembly contract; rebuilding the
+process does not silently reinterpret existing program bytes.
 
 A bug or malicious dependency inside that TCB can violate MFM's contract. Re-serializing and
 revalidating its output inside the same process does not create isolation from it.
@@ -192,7 +299,7 @@ size bound
   -> canonical representation
   -> intrinsic value invariants
   -> content identity
-  -> authentication and request/response binding, where applicable
+  -> protocol authentication and request/response binding, where applicable
   -> opaque domain value
 ```
 
@@ -222,7 +329,7 @@ durability point required by that profile. Every production profile must at leas
 and restart of the admitted PostgreSQL primary. Store qualification therefore rejects `fsync =
 off`, `synchronous_commit = off`, or any weaker effective session/server setting. If the product
 claims survival of primary-host loss, the profile additionally requires and qualifies the named
-synchronous replica/quorum acknowledgement. MFM releases no provider entry permit under a weaker
+synchronous replica/quorum acknowledgement. Runtime creates no `ReadyToInvoke` under a weaker
 profile. A settings change that weakens the qualified profile invalidates the store epoch rather
 than silently changing `NewlyCommitted` semantics.
 
@@ -230,43 +337,28 @@ An actively lying DBA or storage service is outside this threat model. If that a
 neither immediate readback nor repeated replay against the same service supplies an independent
 witness.
 
-`NewlyCommitted` for the exact sealed append advances the already-proved in-process successor. It
-causes no readback. A restore or replacement starts a new store identity/epoch; a self-consistent
-older database is never silently presented as a continuation of the same epoch.
-
-The store writer authority also owns one cross-process, fenced driver permit per active run. Permit
-acquisition/revocation and writer-epoch transfer are linearized by that authority. The permit is
-carried by `RunSession`, checked by every append, and consumed or rechecked by the MFM access-entry
-owner immediately before provider I/O. Thus a separately reconstructed semantic prefix is not drive
-authority, and a fenced former driver cannot use a previously committed authorization after a new
-driver wins.
-
-The entry operation is explicit: `RunDriverAuthority::enter(generation)` either returns one affine
-`DriverEntryPermit` and registers that call as admitted, or rejects before provider I/O. Driver
-transfer/revocation serializes with `enter`; after transfer wins, no old generation can enter. What
-transfer waits for already-admitted calls is the revocation-completion choice in Material
-uncertainty 2. This may require a lightweight currentness interaction with the authority, but it
-never reloads or revalidates journal history.
+The coordinator consumes `NewlyCommitted` for the exact sealed append to advance its already-proved
+in-process successor. It causes no readback. A restore or replacement starts a new store
+identity/epoch; a self-consistent older database is never silently presented as a continuation of
+the same epoch.
 
 On a later process start or explicit resume, retained rows are nevertheless bytes, because Rust
 construction evidence did not survive serialization. They cross ingress and fold once before
-becoming `QualifiedRun`; Runtime must still bind its exact assembly brand and acquire the driver
-permit before sealing a `RunSession`. This is reconstruction of lost process evidence, not
-posterior skepticism about the value that originally produced the rows.
+becoming `QualifiedRun`; Runtime must still bind its exact immutable assembly brand before sealing
+a `RunSession`. This is reconstruction of lost process evidence, not posterior skepticism about the
+value that originally produced the rows.
 
 ### 2.4 Checks that are not byte validation
 
 | Proposition | Owner | When checked |
 | --- | --- | --- |
-| Caller may act for tenant | Application access policy | Each public call |
-| Observed journal head is current at that snapshot | Backend snapshot head read | At resume or latest-read |
+| Run is in the facade's fixed tenant | Tenant-scoped lookup/ingress | Admission/load |
+| Journal head is current at that snapshot | Backend head read | Resume/latest-read |
 | Prepared append extends the current journal head | Exact-head compare-and-append | At commit |
 | Store writer epoch is current | Writer-epoch fence check | At append |
-| Caller owns this run's drive authority | Run-driver permit owner | At session seal, append, and access entry |
-| Required tenant fact frontier is current | Exact-frontier barrier or compare-and-publish | At dependent append |
-| Capability resource is current | Resource lease/fence owner | Authorization or adapter entry |
+| Required fact frontier is current | Exact-frontier operation | Dependent append |
 | Append is durably acknowledged | Qualified backend | Before releasing any MFM-mediated invoker |
-| Nonce/operation key is unique | Resource authority transaction | At reservation/mutation |
+| Nonce/operation key is unique | Domain adapter transaction | At reservation/mutation |
 | Public output contains no secret | Public DTO/render boundary | Before emission |
 
 These checks remain because their facts are contextual or can change. They must be named after the
@@ -276,9 +368,11 @@ property they establish, not hidden behind a generic `validate` layer.
 
 | Check class | Target disposition |
 | --- | --- |
-| External byte bounds, decode, canonicalization, authentication | Keep at the owning ingress |
+| External byte bounds, decode, canonicalization, protocol authentication | Keep at owning ingress |
 | Private constructor and global invariant check | Keep once at construction |
-| Head/frontier concurrency, leases, fences, revocation, caller policy | Keep at the owning authority |
+| Head/frontier, writer epoch, domain atomicity | Keep at the owning coordinator |
+| Caller credentials, principals, grants, and policy decisions | Delete |
+| Generic capability live-currentness/revocation | Delete; bindings are immutable |
 | Redaction, zeroization, and secret sink control | Keep |
 | Same-process serialize/decode/re-certify | Delete |
 | Requalifying a locally compiled append | Delete |
@@ -304,8 +398,8 @@ The typed DSL may use opaque, private-field, non-deserializable `ProgramCandidat
 `ProgramFragment` values while authoring and expanding recipes. They are construction IR, not a
 third authority: store, reducer, and Runtime cannot consume them. The normalized graph and its
 complete callback-free compiler live in `mfm-program`. That compiler owns recipe
-expansion/lowering, normalized-graph and policy validation, manifest and document construction,
-schema/lexical indexes, and the private graph-invariant pass.
+expansion/lowering, normalized-graph and program-profile validation, manifest and document
+construction, schema/lexical indexes, and the private graph-invariant pass.
 
 Operation expansion remains a required pure construction stage. The authority collapse does not
 collapse the compiler pipeline:
@@ -329,9 +423,9 @@ Expansion may introduce more operations, states, matches, and fan-outs. Only nor
 executable after completion; stable semantic paths may retain construction provenance for tracing.
 Every injected state and every configuration-dependent execution choice is visible in the final
 graph. Planning consumes the already-ingressed typed configuration directly and performs no
-ambient I/O. Live provider handles, credentials, and secrets remain in `ProcessRegistry`; the
-program contains only secret-free binding identities.
-Live process assembly, invocation thunks, and their private permit transition move into
+ambient I/O. Live provider handles, protocol credentials, and keystore secrets remain in
+`ProcessRegistry`; the program contains only secret-free binding identities. Live process
+assembly, invocation thunks, and their private reservation-to-invocation transition move into
 `mfm-runtime`. Remaining non-authoritative helpers move to their `mfm-program` or `mfm-runtime`
 owner, and the superseded `mfm-certify` crate/authority wrappers are deleted rather than retained as
 a facade.
@@ -347,7 +441,7 @@ catalog-local interning key also includes the frozen registry fingerprint, so eq
 component names under different assemblies cannot alias.
 
 `Program` retains the normalized executable graph, canonical document/reference, value-schema and
-lexical-slot indexes, entry signature/profile/policy coverage, and permitted
+lexical-slot indexes, entry signature and program-profile coverage, and permitted
 semantic/implementation support envelope. The refactor removes duplicated proof authorities, not
 the data Runtime and replay actually need.
 
@@ -378,12 +472,12 @@ Construction proves, for one exact frozen registry/profile identity:
 - exact state input/output/failure types;
 - one `Pure`, `Read<C>`, or `Effect<C>` execution/access declaration per state;
 - capability request/returned/safe-failure ABI;
-- satisfaction of the normalized executable graph's frozen entry/profile/policy language;
+- satisfaction of the normalized executable graph's frozen entry/program-profile language;
 - exhaustive Match and bounded FanOut;
 - failure routing and one total root outcome;
 - unique identities and complete graph/component closure;
 - every graph/profile construction, depth, and count bound plus an explicit canonical-document byte
-  bound owned by ingress/frozen entry policy; and
+  bound owned by ingress/frozen program profile; and
 - exact secret-free implementation/catalog identities needed for restart and audit.
 
 These facts cannot become false while the immutable `Program` and its frozen catalog fingerprint
@@ -431,13 +525,13 @@ RuntimeAssemblyBuilder::finish()
 
 - typed state and capability registrations;
 - frozen entry profiles and construction bounds;
-- complete callback-free recipe expansion/lowering, policy/graph validation, manifest/index/document
-  construction, and hot DSL completion; and
+- complete callback-free recipe expansion/lowering, program-profile/graph validation,
+  manifest/index/document construction, and hot DSL completion; and
 - hostile `ProgramDocument` ingress.
 
 Runtime-private `ProcessRegistry` owns the exact callbacks and adapters selected for invocation.
-`RuntimeAssemblyBuilder`, `ProcessRegistry`, `ErasedInvocationThunk`, `PreparedAccess`,
-`CommittedAccessPendingEntry`, and `EnteredAccess` are all defined in the same `mfm-runtime` crate;
+`RuntimeAssemblyBuilder`, `ProcessRegistry`, `ErasedInvocationThunk`, `PreparedAccess`, and
+`ReadyToInvoke` are all defined in the same `mfm-runtime` crate;
 no friend-crate visibility or reversed dependency is required. `Program` binds their immutable
 secret-free identities, never their live handles. Store and offline replay receive
 the callback-free catalog only; Runtime receives the live registry. Both products carry the same
@@ -446,7 +540,7 @@ logic. Runtime alone receives the pairing seal, registry, and private invocation
 
 Runtime resolves a program semantically through `ProgramCatalog` and resolves its implementation
 identities separately through `ProcessRegistry` only at execution. Cloning `Arc<Program>` therefore
-cannot clone an invoker or grant the store/offline tooling access to a callback.
+cannot clone an invoker or give store/offline tooling access to a callback.
 
 This replaces the separate authoring certifier, persisted verifier, borrowed entry certifier,
 duplicated verification snapshots, and later root/document equality checks. The catalog may intern
@@ -481,9 +575,10 @@ registry construction.
 Each capability owns invariant-safe opaque request/returned values and a capability-specific
 safe-failure sum. A broad domain failure enum is not accepted and then checked for an allowed
 subset on every call; the EVM submission capabilities receive narrow wrappers/sums in this
-cutover. Relations that inherently join a response to its request remain one check at response
-ingress or settlement, because that is a new contextual proposition rather than revalidation of
-either value in isolation.
+cutover. Every relation needed to bind a response to its request or make the observation legal is
+checked once at response ingress before `PendingAccessObservation` exists. Settlement may interpret
+that already-valid observation against the state input; it cannot discover a capability relation
+whose failure would invalidate the durable observation.
 
 The unrelated capability-lowering vocabulary currently named `State::Capability`, `Direct`, and
 `RequiresCapability` is renamed to `Lowering` or `Expansion`. It must not compete with live-access
@@ -507,8 +602,8 @@ Consequently it is unrepresentable to:
 - associate a nominally typed `C2` adapter with a hot `Read<C1>` registration;
 - attach access callbacks to Pure;
 - disagree about request, returned, or safe-failure types;
-- place Effect in a FanOut policy that admits only Pure/Read; or
-- invoke an adapter without the exact typed authorization.
+- place Effect in a FanOut rule that admits only Pure/Read; or
+- invoke an adapter without the exact directly committed reservation package.
 
 Type erasure preserves the mode as a private sealed callable enum:
 
@@ -545,52 +640,79 @@ capabilities expands into multiple visible states rather than hiding accesses in
 
 ### 4.4 Invocation authority and adapter trust
 
-Dynamic programs require internal type erasure, but erasure is not permission. `mfm-runtime` owns a
-crate-private `PreparedAccess` containing the exact access kind, capability identity, request, run,
-program occurrence, private Runtime assembly brand, driver generation, process-registry identity,
-adapter implementation, physical binding/lineage, durable authorization intent, driver/resource
-entry requirements, and an inaccessible existential one-use invocation. It contains no entry
-permit. Only the data-only authorization intent and secret-free currentness-requirement metadata cross the injected
-`QualifiedHistoryPort`. That port is an opaque store product paired through `RuntimeAssemblySeal`;
-application code cannot install a raw/forged port into Runtime.
+Dynamic programs require internal type erasure, but erasure is not invocation authority.
+`mfm-runtime` owns a crate-private `PreparedAccess<K>` containing the exact access kind, capability,
+request, state-input fixation, run, program occurrence, immutable assembly/registry identity,
+adapter implementation, binding identity, attempt ordinal, and an inaccessible existential one-use
+invocation. It contains no caller credential, principal, grant, resource lease, freshness
+requirement, revocation generation, or provider-entry permit. Only its data-only
+`AccessReservation` event may enter the sealed `PreparedAppend`.
 
-The history port returns `NewlyCommitted` only for the direct commit. A crate-private Runtime
-transition consumes that result together with the still-private `PreparedAccess` and produces
-`CommittedAccessPendingEntry`. Runtime then asks the driver/resource owners to enter. Only their
-positive post-commit outcomes construct `EnteredAccess`, which alone contains the affine entry
-permits and can reach the invocation thunk. None of these constructors or handles is public under
-any Cargo feature. The store never constructs or returns the invocation package. The erased
-dispatcher preserves the same tuple when selecting the registered adapter.
+A private constructor inseparably owns `(RunSession, PreparedAppend, PreparedAccess<K>)` as
+`PreparedDrive::Access<K>`. `RuntimeCommitCoordinator::commit` consumes that whole package and
+passes only the callback-free append view to the injected `QualifiedHistoryPort`. That port is an
+opaque store product paired through `RuntimeAssemblySeal`; application code cannot install a raw or
+forged port into Runtime. The backend's payloadless `NewlyCommitted` outcome remains inside this
+one consuming coordinator call. It is never returned as a proof value that another in-flight
+preparation could use.
 
-Every durable authorization field and attempt-id preimage remains. The cutover deletes only the
-copied `ExpectedAuthorization` shadow and repeated comparison after the private package makes that
-mismatch unrepresentable. It also preserves Effect refresh mode/evidence, resource lineage, entry
-mode and key contract, semantic adapter dependency, access-fault contract, and the store-minted
-one-use prior-run fact-scan permit. The non-zero `MAX_ENTRIES` bounds `EntryUnknown` re-entry;
-`EffectRefreshMode` and its evidence govern `SupersededBeforeEntry` refresh/attempt ordinals on a
-separate axis.
+On that direct branch, the coordinator already owns the matching predecessor session, prepared
+successor, and `PreparedAccess<K>`, so it produces `ReadyToInvoke<K>` alongside the advanced
+`RunSession`. Every definite non-new or invalid branch destroys the inaccessible invocation and
+returns no ready package. `AcknowledgementUnknown` instead quarantines the entire still-inaccessible
+package as private affine `UnresolvedPreparedDrive`; it installs no successor and cannot invoke.
+Its bounded resolver consumes that same package. `Found`/`ExistingSame` destroys it without
+invocation; a proven absent append at the unchanged predecessor may resubmit it, and only that
+retry's direct new branch can produce the committed variant. Continued ambiguity retains the
+quarantine for another explicit resolution or drops it without invocation. Cold history never
+reconstructs it. `ReadyToInvoke<K>` is private,
+non-`Clone`, non-serializable, and binds the resulting `reservation_ref` plus the exact tuple above.
+It alone can consume the captured thunk once. There is no intermediate entry typestate because no
+post-commit generic freshness decision exists. None of these constructors or handles is public
+under any Cargo feature, and neither history port nor backend constructs or returns an invocation
+package. Qualified cold history and `Found -> ExistingSame` can prove that a reservation record
+exists but can never reconstruct `ReadyToInvoke`. `StaleHead` and `AcknowledgementUnknown` prove
+neither existence nor absence and likewise cannot construct it.
+
+Every durable attempt-identity field and attempt-id preimage remains. The cutover deletes the copied
+`ExpectedAuthorization` shadow and repeated comparison only after the private
+`PreparedDrive::Access -> CommittedDrive::Access` transition structurally owns every relation they
+currently protect. It preserves Effect entry mode, ambiguity and absorption contracts, semantic
+adapter dependency, access-fault contract, and the store-minted one-use prior-run fact-scan
+continuation.
+The non-zero `MAX_ENTRIES` continues to bound only capability-declared duplicate-absorbing
+re-entry; generic refresh and supersession ordinals disappear.
 
 Public unqualified `ReadAdapterInvoker`/`EffectAdapterInvoker` entry points and any `invoke(None)`
-fallback are deleted. Adapter registration captures the concrete adapter value/closure immediately
-into a non-cloneable private `ErasedInvocationThunk` inside `ProcessRegistry`; the current public
+fallback are deleted. Adapter registration captures the concrete adapter value or closure into a
+private `ErasedInvocationThunk` inside the immutable `ProcessRegistry`; the current public
 cross-crate `Qualified*PhysicalBinding::invoke_authorized` surface disappears. Runtime can reach the
-thunk only by consuming `EnteredAccess`. Trusted adapter code may still call its own internal
-client, but MFM exposes no invocation path that bypasses the committed package.
+thunk only by consuming `ReadyToInvoke`. Trusted adapter code may still call its own internal
+client, but MFM exposes no invocation path that bypasses the directly committed package.
+
+Process assembly still performs one exact resolution from every immutable secret-free binding
+descriptor to its adapter, provider/route, signer, and Effect domain. A missing, ambiguous, or
+mismatched component rejects assembly before any facade is exposed. The cutover deletes only
+latest/current generation selection and recurring checks; it does not weaken this one-time exact
+binding proposition.
 
 The framework does not create a second nested capability system for adapter internals. Callable
-signer/resource process handles are deleted; concrete adapters own their transports, signers, and
-resource clients as TCB internals. Secret-free dependency identities, resource lineage, and live
-lease/fence obligations remain represented for audit and currentness. `Read<C>` classifies the
-behavior of the whole trusted adapter, including those internals. This is a reviewed TCB assertion:
-because Read may be retried or fanned out, code that may consume or mutate externally meaningful
-state must be `Effect<C>`.
+signer/resource process handles are deleted; concrete adapters own transports, signers, and
+resource clients as TCB internals. Secret-free immutable binding and dependency identities remain
+represented for journal fixation and cold binding checks. `Read<C>` classifies the behavior of the
+whole trusted adapter, including those internals. This is a reviewed TCB assertion: because Read may
+be retried or fanned out, code that may consume or mutate externally meaningful state must be
+`Effect<C>`.
 
-An active `RunSession` never freezes live revocation. Program and ordinary process bindings are
-immutable for one process lifetime. When a capability promises live revocation, its resource owner
-serializes revocation against consumption of the affine entry permit immediately before provider
-I/O or key access. If revocation linearizes first, entry is refused; if permit consumption
-linearizes first, the already-admitted call follows the published drain contract. Historical
-program/run validity never substitutes for that changing entry decision.
+Binding replacement has no hot Runtime protocol. The embedding stops intake and drains every
+`UnresolvedPreparedDrive::Access`, `ReadyToInvoke`, provider call, `PendingAccessObservation`,
+ambiguous observation acknowledgement, and resulting settlement until each access has a durable
+observation/settlement or a deliberate durable terminal park. Only then does it drop the old
+assembly and construct a newly qualified process. If it forces shutdown instead, any committed but
+not durably observed access remains ordinary conservative possible-entry evidence. A later process
+may repeat a Read under its retry contract; an `EntryOnce` Effect parks; and an `EntryAbsorbing`
+Effect may use a new ordinal only when its capability-specific contract and the exact immutable
+binding/effect domain permit it.
 
 ### 4.5 Honest limitation
 
@@ -750,8 +872,8 @@ second-preimage resistance, H10 establishes:
 - equality between the process's reduced state and the prefix from which it was established.
 
 A public deserialized `JournalHead` establishes none of this by itself. Semantic evidence comes
-from opaque `QualifiedRun`; drive authority additionally requires the Runtime brand and live
-driver permit described below.
+from opaque `QualifiedRun`; callback execution additionally requires the exact immutable Runtime
+assembly brand described below.
 
 ### 6.3 Non-guarantees
 
@@ -783,55 +905,54 @@ state, and cumulative capacity accounting required to project or continue that p
 ```text
 RunSession@H {
     qualified: QualifiedRun@H,
-    assembly: private RuntimeAssemblyBrand,
-    driver: affine fenced RunDriverPermit,
+    assembly: private immutable RuntimeAssemblyBrand,
 }
 ```
 
 Purpose readers may borrow callback-free `QualifiedRun` internally and return a DTO. They cannot
 seal a `RunSession`, extract the assembly brand, reach `ProcessRegistry`, or invoke even a Pure
 callback. Runtime seals a session only after proving that the program/catalog identity belongs to
-its exact private `RuntimeAssemblySeal` and after acquiring the per-run permit. Every callback
-dispatch requires that brand structurally; `PreparedAccess` adds the exact adapter/binding identity
-for Read/Effect.
+its exact private `RuntimeAssemblySeal`. Every callback dispatch requires that brand structurally;
+`PreparedAccess` adds the exact immutable adapter/binding identity for Read/Effect.
 
 `QualifiedRun` can arise only from complete-prefix ingress/fold or a local prepared successor after
 direct commit. `RunSession` can arise only from Runtime-branded spawn/resume or direct advancement
 of the same session. A raw/deserialized run id, head, `ProgramRef`, reducer snapshot, or
 callback-free qualified value cannot create drive authority.
 
-### 7.1 Active ownership, not a cache
+### 7.1 Active continuation, not a cache or global lock
 
-The Runtime core exposes an explicit session lifecycle. An in-process driver qualifies and acquires
-once, then owns the affine branded session across deterministic drive steps until terminal
-completion, an external wait, or explicit release. Driving consumes and returns the session, or
-mutably advances it under equivalent exclusive ownership. The proof is not thrown away after each
-internal step.
+The Runtime core exposes an explicit session lifecycle. An in-process executor qualifies once, then
+owns its affine branded continuation across deterministic drive steps until terminal completion, an
+external wait, or drop. Driving consumes and returns the session, or mutably advances it under
+equivalent exclusive Rust ownership. The proof is not thrown away after each internal step.
 
-There is no shared semantic run-state LRU, warm-head lookup, suffix-refresh protocol, eviction policy, or
-process-wide semantic run map in this target. Those mechanisms only compensate for a stateless API
-that repeatedly opens the same run. Catalog-local `Program` interning by exact `ProgramRef` is
-unrelated: it shares immutable executable structure and carries no run currentness or invocation
-authority.
+There is no shared semantic run-state LRU, warm-head lookup, suffix-refresh protocol, eviction
+policy, or process-wide semantic run map in this target. Those mechanisms only compensate for a
+stateless API that repeatedly opens the same run. Catalog-local `Program` interning by exact
+`ProgramRef` is unrelated: it shares immutable executable structure and carries no run currentness
+or invocation authority.
 
-Multiple callers may independently obtain callback-free qualified evidence, but the fenced
-run-driver owner mints at most one live drive permit for a run/store epoch. Dropping or releasing a
-session ends that permit and deliberately loses its process continuation evidence. A later driver
-performs explicit cold resume and acquires a new generation. Writer failover/revocation and provider
-entry serialize against that generation, so an old session cannot append or enter an MFM capability
-after the new generation wins.
+Non-cloneability prevents duplicating one in-process continuation; it does not pretend to establish
+global exclusive run ownership. Multiple workers may independently resume the same H and construct
+separate branded sessions. Their prepared successors race at exact-head compare-and-append. At most
+one append is newly committed; its direct caller alone advances its retained successor and, for an
+access reservation, receives `ReadyToInvoke`. Every loser consumes or drops its stale session,
+installs nothing, invokes nothing, and must explicitly resume before further work. No run-driver
+lease, generation, transfer, expiry, or revocation protocol exists.
 
 ### 7.2 Direct advancement and durability
 
-A direct `NewlyCommitted` result advances `RunSession@H` to its retained successor at H' with zero
-history reads, decoding, or reduction. The compare-and-append transaction checked the session's
-writer epoch and driver generation, and PostgreSQL acknowledged the qualified durability point for
-the exact sealed bytes. Asking it to echo those bytes cannot strengthen that claim.
+The direct committed branch of the consuming coordinator advances its owned `RunSession@H` to the
+retained successor at H' with zero history reads, decoding, or reduction. The compare-and-append
+transaction checked the store writer epoch and exact predecessor, and PostgreSQL acknowledged the
+qualified durability point for the exact sealed bytes. Asking it to echo those bytes cannot
+strengthen that claim.
 
-`StaleHead`, a typed append-precondition failure, and `AcknowledgementUnknown` install no successor.
-The unknown outcome releases no Effect invoker until exact append identity is resolved. Resolution
-may allow a later explicit resume, but it never manufactures the direct one-use invocation permit
-that only the original `NewlyCommitted` authorization owns.
+`StaleHead`, a typed append-precondition failure, and `AcknowledgementUnknown` install no successor
+and release no invoker. Resolving the exact append identity may allow a later explicit resume, but
+it never reconstructs a lost one-use invocation package. Only a direct committed branch that still
+owns the original or quarantined preparation can create one.
 
 A fresh process, explicit replay/export, or new resume fails if required historical bytes are
 missing or malformed. The active session is not required to reread its prefix before every Effect:
@@ -863,16 +984,15 @@ measurement and a separate design; it is not hidden inside an LRU.
 ### 8.1 Prepared append
 
 Applying one `ResolvedEvent` produces `PendingAppend`; deterministic assignment, projection, stable
-physical-obligation discharge, and exact enumeration of changing-currentness requirement metadata
-then seal one private coherent value:
+binding discharge, and exact index enumeration then seal one private coherent value:
 
 ```text
 PreparedAppend {
     batch,
     successor: PreparedSuccessor@H_next,
-    projection/index deltas including needs_effect_attention,
-    writer epoch + run-driver generation,
-    secret-free resource-currentness requirement metadata
+    projection/index deltas,
+    optional needs_effect_attention delta when that product surface is enabled,
+    store identity/epoch + expected predecessor + fact-frontier preconditions
 }
 ```
 
@@ -880,27 +1000,29 @@ Every field is derived from the same event, predecessor, and qualified `AppendCo
 callers cannot supply a batch, successor, and projection that merely happen to be wrapped together.
 
 The seal proves exact record/object projection (including absence of surplus objects), assigned
-record/head binding, direct object/value/first-seen/fact-scan index extension, and all stable
-retained physical obligations. It carries the exact lease/fence obligations to their named use
-boundary as durable requirement metadata only; it does not own the live lease/token or prove a
-changing resource current forever. `PreparedAccess` carries only owner identities, generations,
-requirements, and its inaccessible invocation before commit. Driver/resource entry permits can be
-minted only after direct `NewlyCommitted` and exist only in `EnteredAccess`. The append constructor
-is private and cannot mix a batch, successor, or index plan from different preparations.
+record/head binding, direct object/value/first-seen/fact-scan index extension, and exact immutable
+program/configuration/adapter/binding fixations. An access preparation separately retains its
+inaccessible invocation inside `PreparedAccess`; neither the journal batch nor `PreparedAppend`
+contains a callable. The append constructor is private and cannot mix a batch, successor, or index
+plan from different preparations. Runtime's private pairing constructor then consumes the exact
+predecessor session, prepared append, and mode-specific access/observation continuation into the
+corresponding `PreparedDrive` variant; callers cannot omit or transpose any of them between commits.
 
 The backend interprets no record-family semantics. It owns only:
 
 - transaction atomicity;
 - exact-head compare-and-append and affected-row checks;
-- append-atomic exact replacement of the run-head/attention projection;
-- store-writer/run-driver fences and tenant-fact-frontier preconditions;
+- append-atomic exact replacement of the run-head projection and, when enabled, its attention
+  projection;
+- store-writer epoch and tenant-fact-frontier preconditions;
 - append identity and idempotency lookup;
 - database-native parameter/frame constraints; and
 - ambiguous-acknowledgement classification.
 
-Semantic append capacity, retained-history totals, and the two-successor authorization reserve are
-proved while constructing `PreparedAppend`. Resource-specific currentness remains with the named
-resource authority or physical-obligation checker; the run backend does not absorb it.
+Semantic append capacity, retained-history totals, and the two-successor access-reservation reserve
+are proved while constructing `PreparedAppend`. Adapter-specific nonce locks, operation keys, and
+transactions remain inside the owning adapter when their domain contract requires them; the run
+backend does not absorb them into a generic capability-freshness model.
 
 Database constraints may redundantly protect mechanical row relationships. The backend does not
 re-run program qualification, reduction, object semantic closure, or cross-field facts already
@@ -916,80 +1038,137 @@ BackendAppendOutcome =
   | AcknowledgementUnknown
 ```
 
+This raw outcome is visible only inside the one consuming `RuntimeCommitCoordinator::commit` call;
+it is not a proof type returned to Runtime code.
+
 The backend is deliberately not a semantic equality oracle. `Found` returns a bounded raw retained
 attempt. The store ingress owner qualifies it and is the sole classifier of
 `ExistingSame | AppendConflict | InvalidHistory | CapacityExceeded`; only a well-formed unequal
 attempt becomes `AppendConflict`. The coordinator does not ask the backend to classify it and then
 repeat the comparison.
 
-`StaleHead` means only that the exact-head comparison failed. Writer-fence expiry,
+`StaleHead` means only that the exact-head comparison failed. Writer-epoch expiry,
 fact-frontier mismatch, capacity, and projection inconsistency remain distinct typed failures; they
 are not relabelled as a stale journal head.
 
-| Store disposition | Active session | May create `CommittedAccessPendingEntry` |
+| Coordinator branch | Active session | May create `ReadyToInvoke` |
 | --- | --- | --- |
-| `NewlyCommitted` | Advance the consumed predecessor session; no reload | Only for an authorization append |
+| `NewlyCommitted` | Advance session; no reload | Only for that direct reservation |
 | `Found` -> `ExistingSame` | Compare once; do not install candidate | Never |
 | `Found` -> `AppendConflict` | Fail closed; install nothing | Never |
 | `Found` -> invalid/capacity error | Fail closed; install nothing | Never |
 | `StaleHead` | Consume the stale session; explicit resume is required | Never |
 | `AcknowledgementUnknown` | Install nothing; resolve exact identity | Never |
 
+The unknown branch may retain only private affine `UnresolvedPreparedDrive`, never an advanced
+session or invoker. Exact resolution consumes it: an existing same append releases nothing; a
+proven absent append at the unchanged predecessor may retry the same owned preparation, and only
+that retry's direct `NewlyCommitted` branch can advance/invoke. Dropping or losing the quarantine
+leaves cold recovery conservative.
+
 `NewlyCommitted` is payloadless because the positive value would only echo the sealed candidate the
-backend consumed. A found stored attempt remains real database ingress: its retained bytes are
+backend consumed. The coordinator still owns the consumed `PreparedDrive`, so payloadless does not
+mean unbound. A found stored attempt remains real database ingress: its retained bytes are
 qualified and compared once against the candidate because it may describe a historical append
 followed by later heads. Equal bytes establish idempotency only; they do not establish that the
 attempt is still the current run head.
 
-There is no unnamed deployment serializer or shared publication race: preparing an append requires
-the private live `RunDriverPermit`, and the store transaction checks its exact generation. The
-cross-process permit owner cannot mint a second live generation until revocation/expiry of the
-first has linearized. Exact-head compare-and-append still protects journal ordering; the driver
-fence separately proves who may continue or release an invoker.
-
-The table describes progression toward new entry authority, not whether earlier work happened.
-`NewlyCommitted` alone is still insufficient for provider I/O: the post-commit driver/resource
-entry transition must produce `EnteredAccess`. An authorization append's non-new outcome calls
-neither `enter` owner and invokes zero times. An observation append occurs after an invocation, so
-its non-new outcome releases no new invoker and causes no additional invocation.
+Two workers may prepare from the same predecessor. Exact-head compare-and-append admits at most one
+successor. Only the direct branch of the coordinator call that consumed the corresponding
+`PreparedDrive::Access` can construct `ReadyToInvoke`; a raw outcome cannot be transposed from
+another append. Every losing or indeterminate path installs nothing and invokes zero times. An
+observation append occurs after an invocation, so its non-new outcome releases no new invoker and
+causes no additional invocation.
 
 ### 8.3 Durable external access
 
 The MFM-mediated access bracket remains:
 
 ```text
-PreparedAccess<K>                       // requirements + inaccessible invocation; no entry permit
-  -> commit ExternalAccessAuthorized
-  -> CommittedAccessPendingEntry<K>      // only from direct NewlyCommitted
-  -> driver.enter(generation) + resource.enter(requirement)
-  -> EnteredAccess<K>                    // owns affine entry permits
+PreparedDrive::Access { session, append, PreparedAccess<K> }
+  -> RuntimeCommitCoordinator::commit
+  -> direct backend NewlyCommitted
+  -> ReadyToInvoke<K> + RunSession@H_next // affine; no cold/retry constructor
   -> consume once into exact adapter/provider I/O
   -> validate external response once
+  -> PendingAccessObservation<K>
   -> commit ExternalAccessObserved
   -> settle state
 ```
 
-Runtime never passes the adapter or invoker to the state callback. The affine authorization binds
-the exact capability, access kind, request, program occurrence, physical binding, and committed
-head. `PreparedAccess` binds the session's assembly brand, driver generation, and resource
-requirement but cannot enter. Direct commit moves those facts and the still-inaccessible invocation
-into `CommittedAccessPendingEntry`. Only then, immediately before provider I/O, do the named owners
-serialize entry against driver transfer and resource revocation and mint the affine permits inside
-`EnteredAccess`.
+Runtime never passes the adapter or invoker to the state callback. The affine package binds the
+exact capability, access kind, request, state-input fixation, run, program occurrence, immutable
+assembly/registry, adapter implementation, binding identity, attempt ordinal, reservation record,
+and committed head. The consuming coordinator's direct branch moves those facts and the
+still-inaccessible invocation from its owned `PreparedDrive::Access` into `ReadyToInvoke`.
+Consuming that once performs provider I/O; response ingress then creates a
+`PendingAccessObservation` that preserves the same tuple through observation commit. No generic
+resource owner is consulted between journal commit and provider I/O.
 
-If resource revocation wins while the run driver remains current, Runtime invokes zero times and
-commits `SupersededBeforeEntry`. If the run-driver generation itself is lost, the former driver
-invokes zero times and cannot append; the successor driver resumes the durable pending authorization
-and applies the conservative recovery protocol. A crash before a known pre-entry disposition is
-durable remains `PossibleEntry`; the absence of provider entry cannot be inferred from authorization
-alone.
+No other call can perform that move. `Found`/`ExistingSame`, a cold resume, a replay, a stale
+predecessor, an append conflict, or an ambiguous acknowledgement can never recreate the thunk or
+invocation package. The post-reservation full reload and field-by-field comparison are deleted:
+they only reconstructed a value the process had just created and could not make an
+indeterminate/non-new outcome safe to invoke.
 
-Only direct `NewlyCommitted` lets Runtime create the pending-entry package; only `EnteredAccess`
-lets it consume the invocation. Runtime performs no history reload and advances the active session
-directly.
+Observation append has an explicit no-reinvocation recovery path. The first attempt consumes
+`(RunSession@H_reserved, PendingAccessObservation)` into a prepared observation append. If its
+exact-head comparison loses, Runtime retains only the opaque pending observation. Each explicit
+fresh resume permits one reducer-owned rebase operation:
 
-The post-authorization full reload and field-by-field comparison are deleted. They do not strengthen
-the database commit and only reconstruct a value the process just created.
+```text
+rebase_observation(PendingAccessObservation, RunSession@H_latest)
+  -> PreparedDrive::Observation       // same attempt is still selected and unobserved
+  | ObservationAlreadyRecorded        // same exact observation exists
+  | ObservationNoLongerSelected       // retry/absorption closure selected another attempt
+  | ObservationConflict               // different observation exists for that attempt
+```
+
+Rebase checks the exact reservation/attempt tuple and never calls an adapter. The reservation's
+logical key admits at most one observation. A prepared rebased observation may append at the latest
+head; if that append also becomes stale, the same pending observation may be retained for another
+explicit, work-bounded resume/rebase. There is no hidden retry loop. Only a direct committed branch
+can supply the selected observation to state settlement.
+`ObservationAlreadyRecorded` requires ordinary resume/settlement from the recorded value rather
+than settling the duplicate package. `ObservationNoLongerSelected` consumes the late response
+without state settlement; the journal already contains the retry/absorption closure that made it
+non-selected. `ObservationConflict` fails closed. None of these paths invokes again or revalidates
+the already-ingressed response bytes.
+
+`AcknowledgementUnknown` for an observation does not discard that evidence or settle state. The
+coordinator quarantines the exact affine prepared/pending observation as
+`UnresolvedPreparedDrive::Observation` and resolves its append identity:
+
+- if the exact same observation was committed, ordinary qualified resume determines whether that
+  recorded observation is still selected and settles only from that value;
+- if the append is proven absent and its predecessor is still current, the same quarantined
+  preparation may retry, and only its direct new branch may settle;
+- if the append is absent but the head advanced, Runtime recovers the unchanged pending observation
+  and performs the explicit resume/rebase protocol above;
+- repeated ambiguity remains quarantined under the normal work bound; and
+- different found bytes, invalid history, or an observation conflict fail closed.
+
+Every branch preserves the already-ingressed response, invokes zero times, and either reaches one
+durable selected observation before settlement or a typed non-settling disposition.
+
+An unobserved reservation is a blocking journal state, not evidence that entry did or did not
+occur. A fresh process never invokes that ordinal. A Read may create a new ordinal because Read's
+published semantics permit repetition. An `EntryOnce` Effect remains `PossibleEntry` and requires
+manual attention. An `EntryAbsorbing` Effect may close/reassert a bounded new ordinal only under its
+explicit duplicate-absorption/idempotency contract and only for the exact same immutable binding
+and effect domain; otherwise it also parks. No timeout, process replacement, or binding change may
+record “did not enter.”
+
+Because there is no live lease, a new Read or `EntryAbsorbing` ordinal may race a slow still-live
+`ReadyToInvoke` from the older reservation. That is legal only because repetition or duplicate
+absorption is the capability's explicit semantic contract. The race may consume the bounded attempt
+budget and leave the run parked; the framework promises safety, not automatic liveness. `EntryOnce`
+never takes this path.
+
+This protocol is deterministic journal coordination, not authentication or authorization. It
+ensures durable intent before invocation, at most one release of the exact prepared attempt,
+the selected observation before its settlement, and conservative recovery without a generic
+live-resource control plane.
 
 ---
 
@@ -997,15 +1176,16 @@ the database commit and only reconstruct a value the process just created.
 
 ### 9.1 One demand-triggered ingress
 
-Resume/drive and per-run read, trace, replay, and export requests use the same bounded prefix-ingress
-and reducer implementation. An active driver passes its `RunSession` directly; a genuinely separate
-read-only request constructs callback-free `QualifiedRun`, projects the requested DTO, and drops the
-evidence. It never acquires a driver permit or Runtime assembly brand. Distinct public DTOs and
-caller-policy checks remain because they own disclosure, not history validity.
+Resume/drive and per-run read, trace, replay, and export requests use the same bounded
+prefix-ingress and reducer implementation. An active executor passes its `RunSession` directly; a
+genuinely separate read-only request constructs callback-free `QualifiedRun`, projects the requested
+DTO, and drops the evidence. It never receives a Runtime assembly brand. Distinct public DTOs and
+the facade's fixed tenant partition remain because they own disclosure boundaries, not history
+validity.
 
-Effect-attention listing reads only the append-atomic routing projection. It cannot execute or
-settle a run. Any recovery action selected from that list must explicitly resume the named run
-through the same ingress before acting.
+If tenant-wide Effect recovery discovery is enabled, its listing reads only the append-atomic
+routing projection. It cannot execute or settle a run. Any recovery action selected from that list
+must explicitly resume the named run through the same ingress before acting.
 
 An outbound export that needs raw retained bytes loads those bytes through database/object ingress
 and content-checks them once before the export sink emits them. An imported bundle crosses import
@@ -1032,7 +1212,7 @@ route fixes the exact producer record and head. A gap, missing route, wrong prod
 exact-frontier precondition mismatch is therefore an integrity/currentness failure, not a
 disposable-index miss.
 This load-bearing negative-completeness chain is distinct from per-run semantic projections and
-Effect-attention routing, which never grants execution authority.
+Effect-attention routing, which never creates execution authority.
 
 The frontier establishes a changing cross-run fact, but it is not a reason to revalidate every
 already-retained producer prefix.
@@ -1050,7 +1230,7 @@ Ordinary store open verifies:
 
 - schema and store identity;
 - backend channel and durability profile;
-- writer fence/epoch;
+- writer epoch;
 - registry and process assembly; and
 - ability to execute bounded snapshot loads and exact-head compare-and-append transactions.
 
@@ -1071,7 +1251,7 @@ rejects that admission. Malformed unrelated retained history cannot.
 `audit_store` is a separate read-only operator action that deliberately qualifies all visible run
 and configuration histories plus the dense fact frontier in one fixed repeatable-read snapshot. It
 reports corruption with explicit progress. Its result is diagnostic: it does not become readiness
-authority, grant invocation authority, repair history, or persist a proof after the result is
+authority, create invocation authority, repair history, or persist a proof after the result is
 discarded.
 
 ### 9.4 Configuration history follows the same ingress rule
@@ -1082,9 +1262,16 @@ until their owning ingress returns an opaque `ResolvedConfiguration<T>@Configura
 constructed typed value already satisfies the same intrinsic invariants and is not serialized and
 reparsed for reassurance. Program planning consumes this typed value directly.
 
-Persisted `ConfigurationValue` remains secret-free. Secret-bearing input is admitted into a
-non-serializable issuer/resource handle with explicit lifetime and redaction; it is never projected
-into a configuration revision, journal record, fact, export, or diagnostic.
+Persisted `ConfigurationValue` remains secret-free. At process assembly, secret-bearing input
+crosses its configuration/keystore ingress and is consumed into concrete immutable
+adapter/provider/signer internals owned by `ProcessRegistry`; no generic callable signer/resource
+process handle is created. Secret material is never projected into a configuration revision, journal
+record, fact, export, or diagnostic and retains its domain-specific zeroization/redaction lifetime.
+
+A concrete adapter may renew a protocol token internally only when renewal preserves the exact MFM
+binding descriptor and provider/effect identity. That is provider-protocol implementation inside
+the adapter TCB, not an MFM lease/currentness API. Changing the binding descriptor, provider
+identity, signer authority, or effect domain requires stop/drain/drop/rebuild.
 
 The writer constructs one private coherent value:
 
@@ -1095,19 +1282,23 @@ PreparedConfigurationAppend {
 }
 ```
 
-The revision binds its exact predecessor and content reference. The backend performs an exact-head
-compare-and-append and returns the same payloadless `NewlyCommitted | Found(raw) | StaleHead |
-AcknowledgementUnknown` protocol used for run appends. Only direct `NewlyCommitted` promotes the
-retained successor. `Found(raw)` crosses configuration ingress once and becomes either
-`ExistingSame`, a typed conflict, or an invalid/capacity error; no positive backend echo is compared
-by a second owner.
+The revision binds its exact predecessor and content reference.
+`ConfigurationCommitCoordinator::commit` consumes `PreparedConfigurationAppend`, calls the backend
+exact-head compare-and-append, and keeps the payloadless `NewlyCommitted | Found(raw) | StaleHead |
+AcknowledgementUnknown` outcome internal to that call. Only its direct `NewlyCommitted` branch
+promotes the owned retained successor. `Found(raw)` crosses configuration ingress once and becomes
+either `ExistingSame`, a typed conflict, or an invalid/capacity error; no positive backend echo is
+compared by a second owner and no raw outcome can advance another preparation.
+`AcknowledgementUnknown` may quarantine that exact affine prepared append for bounded resolution;
+found-same promotes nothing, while a proven absent append may resubmit the same owned preparation.
 
 The active configuration owner retains the locally prepared successor after direct commit; there is
 no shared semantic configuration cache. A later selection for planning, resume, replay, export, or
 audit qualifies the bounded predecessor chain once. A malformed selected revision rejects that
 consumer, while a dormant malformed revision does not block startup or a new run that does not
-select it. Selecting whether a revision is currently active is a changing head/policy proposition
-and remains an explicit query; it is not another validation of immutable revision bytes.
+select it. Selecting whether a revision is currently active is a changing head/activation
+proposition and remains an explicit query; it is not another validation of immutable revision
+bytes.
 
 The current writer-side full-prefix reload, repeated `ValidatedConfigurationAppend::from_object`
 on locally created revisions, positive echo comparison, reader-specific replay, and eager
@@ -1119,7 +1310,74 @@ the same ingress law.
 
 ## 10. API and deletion cutover
 
-### 10.1 Program and certification
+### 10.1 Tenant-scoped application and policy deletion
+
+The target application surface is construction-scoped:
+
+```text
+Application::new(TenantScopeId, qualified process/store assembly) -> Application
+
+application.admit(...)
+application.resume(run_id)
+application.read(run_id)
+application.replay(run_id)
+application.export(run_id)
+```
+
+If the owner retains tenant-wide Effect recovery discovery, the same facade additionally exposes
+`application.list_effect_attention(...)`; otherwise neither that method nor its projection exists.
+
+No public call accepts a credential, authenticated principal, grant, policy-decision reference, or
+tenant selector. The facade supplies its captured tenant to every backend operation. Admission
+persists that same tenant partition; a retained run or recursive source outside it is not visible
+through the facade. A trusted multi-tenant embedding constructs multiple facades and selects one
+outside MFM.
+
+Delete the application access-control model completely:
+
+- `SecretCredential`, `MAX_SECRET_CREDENTIAL_BYTES`, and `SecretCredentialError`;
+- `ApplicationAccessPolicy`, `ApplicationAccessGrant`, `AccessTarget`, `AuthorizedTenant`, and
+  `AccessPolicyError`;
+- authenticated-principal identities, policy-decision references, grant typestates,
+  `AuthorizedRunCall`, `AuthorizedAdmissionCall`, `run_grant`, and per-call policy evaluation;
+- recursive export-source policy callbacks;
+- `AuthenticationRequired`, `GrantDenied`, `SourceRunExportDenied`, and policy-only
+  `Unauthorized`/`Forbidden` error classes;
+- the CLI `--access-token-file` option, token reader/support module, and every credential argument;
+  and
+- REST bearer/`Authorization` parsing, credential extraction, and policy-only 401/403 mappings.
+
+Do not replace those surfaces with tenant headers, CLI tenant flags, inert optional fields, or a
+default-allow policy implementation. PostgreSQL credentials, keystore secrets, provider protocol
+authentication/signatures, and response-authenticity checks remain because they protect different
+boundaries.
+
+Persisted/exported policy evidence is also deleted:
+
+- `AuthorizedExportClosure` becomes structural `ExportClosure` and contains no principal, grant,
+  decision, or policy reference;
+- `PortableAuthorizationDecision`, `export_decisions`, grant constants, and decision validation
+  disappear;
+- structural helpers named `authorized_sources`, `authorized_source_prefixes`, and
+  `with_authorized_sources` become neutral source-closure/source-prefix terms;
+- recursive export still proves a bounded, acyclic, same-tenant, exact-head source closure;
+- the redundant `authorized_closure_digest` disappears because the portable stream's complete
+  `ContentRef` already fixes the exact closure bytes; and
+- portable export advances to one new format version with no legacy decoder.
+
+`RunAdmitted` retains `TenantScopeId` as domain partition/provenance and gains no security identity.
+EVM submission removes `authenticated_principal_id`, `AuthenticatedIntentIssuerId`, and the
+policy-only issuer namespace layer, including `IntentIssuerPreimage`,
+`derive_authenticated_intent_issuer_id`, and `issuer_namespace_contract_ref`.
+`EvmCallerSubmissionToken` becomes
+`SubmissionIdempotencyKey`. The new `SubmissionIntentId` is domain-separated over
+`TenantScopeId`, wallet nonce domain, and `SubmissionIdempotencyKey`; that key is an ordinary
+non-secret idempotency input, not a credential. All affected value/hash
+domains and stored wallet shapes cut over under a fresh activation with no compatibility reader;
+an old physical sender is reused only after its previous process is drained and nonce/effect state
+is proven terminal and reconciled.
+
+### 10.2 Program and certification
 
 Replace with one current API:
 
@@ -1143,7 +1401,7 @@ Delete or absorb:
 - self-verification of a document just constructed locally; and
 - exact document reconstruction/equality on the hot admission path.
 
-### 10.2 State and capabilities
+### 10.3 State and capabilities
 
 Delete or replace:
 
@@ -1163,34 +1421,75 @@ Delete or replace:
 - the older parallel `EffectSpec`/`CapabilitySpec`/`CapabilitySet`/role algebra, its trybuild suite,
   the otherwise-unused `SigningCapability` bridge and Cargo dependency, and identities/tests owned
   only by that obsolete algebra;
-- callable signer/resource process handles, while retaining secret-free semantic dependency
-  identities and lineage;
-- feature-gated public authorization constructors, replaced by one crate-private Runtime transition;
-  and
+- callable signer/resource process handles, while retaining secret-free immutable semantic
+  dependency and binding identities;
+- `NoRefresh`, `NoRefreshEvidence`, `Refreshable`, `EffectRefreshMode`,
+  `EffectCapabilityContract::Refresh`, the refresh-evidence parameter and
+  `SupersededBeforeEntry` variant of `EffectAdapterCompletion`, and every refresh-evidence
+  validator;
+- `RuntimeEffectCapability::RefreshBinding`, `RuntimeEffectRefreshBinding`, `NoRefreshBinding`,
+  `RefreshableBinding`, `RuntimeResourceAuthority`, and refresh-only Resource components;
+- persisted `StructuredEffectRefreshContract`, `RetainedPhysicalReleaseTrust` and its seal, public
+  `EvmPhysicalBindingRelease*`, dynamic current-binding selection, release histories,
+  minimum/stable resource-lineage heads, `PhysicalBindingSupersession`, generation-guarded
+  signer/provider wrappers, and generic per-call target-currentness checks;
+- `PhysicalBindingAuthorization`, `SemanticObligation::PhysicalAuthorization`, and
+  `PhysicalObligationChecker::{verify_retained_authorization, verify_current_authorization}`;
+- capability lease/fence requirement metadata, tokens, epochs, entry-freshness callbacks, and every
+  public or private hot-replacement/revocation API;
+- feature-gated public invocation-package constructors, replaced by one crate-private Runtime
+  transition; and
 - the copied `ExpectedAuthorization` shadow and repeated runtime comparisons only after the private
-  `PreparedAccess -> CommittedAccessPendingEntry -> EnteredAccess` package structurally owns every
-  relation they currently protect.
+  `PreparedDrive::Access -> CommittedDrive::Access` package structurally owns every relation they
+  currently protect.
 
 Retain:
 
 - one exact capability per state;
 - `Read<C>` and `Effect<C>` request/return/failure contracts;
 - opaque invariant-safe capability values, capability-specific safe-failure sums, and the one
-  request/response relational check at adapter ingress/settlement;
-- Effect entry, ambiguity, absorption, and refresh semantics;
+  request/response relational check at response ingress before observation construction;
+- Effect entry, ambiguity, and absorption semantics;
 - distinct Read/Effect completion types, including Effect-only entry dispositions;
 - safe-failure disposition types;
-- FanOut's type-level Effect exclusion; and
-- affine authorization and invocation, including dynamic erasure and all durable authorization
+- FanOut's type-level Effect exclusion;
+- affine reservation and invocation, including dynamic erasure and all durable exact-attempt
   identity fields;
-- exact adapter/signer/resource dependency identities and the reserved one-use fact scanner; and
+- exact adapter/signer/resource dependency identities and the reserved one-use fact scanner;
+- one-time immutable descriptor-to-adapter/provider/route/signer/effect-domain resolution and
+  assembly-time mismatch rejection; and
 - panic containment and redaction-safe fault conversion.
 
 Existing domain `valid_*` functions are not blindly deleted. Intrinsic unary invariants move to
 private constructors/custom deserialization, request-response relations move to the one adapter
-ingress or settlement, and mutable facts become named lease/fence checks.
+response ingress before observation construction, and state-specific interpretation remains at
+settlement. Operation-specific nonce locks, SQL transaction guards, and idempotency keys remain
+inside the adapter that owns their domain semantics. They do not surface as a generic Runtime
+capability-currentness framework.
 
-### 10.3 Store and runtime
+### 10.4 Store and runtime
+
+The journal/API terminology cutover is exact:
+
+- `ExternalAccessAuthorized` becomes `ExternalAccessReserved`;
+- `RecordLogicalKey::Authorization` becomes `RecordLogicalKey::AccessReservation`;
+- `AccessAuthorizationProposal` becomes `AccessReservationProposal`;
+- `QualifiedRuntimeIntent::Authorization`, `PrimaryIntent::Authorization`, and
+  `AuthorizationIntent` are absorbed by `ResolvedEvent::AccessReservation`, with no alias or second
+  intent representation;
+- every access `authorization_ref` becomes `reservation_ref`;
+- authorization barriers/frontiers become access-reservation barriers/frontiers;
+- public/certified/committed authorization wrappers disappear into the private
+  `PreparedDrive::Access -> CommittedDrive::Access` transition;
+- reducer `AuthorizationEntry` becomes `ReservationEntry`; Runtime `Authorized<K, V>` is replaced by
+  the private `ReadyToInvoke<K>` path; and live EVM `AuthorizedCallOrigin` /
+  `AuthorizedProviderCall` become reservation-named coordination wrappers;
+- the post-call typed package is `PendingAccessObservation`; and
+- `ExternalAccessObserved` remains the observation record name.
+
+The five journal families are therefore `RunAdmitted`, `StateTransitionCommitted`,
+`ExternalAccessReserved`, `ExternalAccessObserved`, and `RunClosed`. Old enum tags, aliases,
+decoders, schemas, and fact-mode spellings are not retained.
 
 Delete:
 
@@ -1199,7 +1498,7 @@ Delete:
 - `qualify_recorded_successor` on local batches;
 - dual reducer branches and comparison typestates;
 - positive committed-batch echo/comparison;
-- Runtime's post-authorization reload and recheck;
+- Runtime's post-reservation reload and recheck;
 - application pre-drive and post-drive verified loads;
 - `drive_once(run_id)` as the Runtime-core ownership API, replaced by explicit spawn/resume and an
   affine caller-owned session;
@@ -1211,8 +1510,8 @@ Delete:
 Keep:
 
 - strict demand-triggered complete-prefix qualification for explicit resume/read/replay/export;
-- callback-free `QualifiedRun` for semantic projections and Runtime-branded, driver-fenced
-  `RunSession` for execution;
+- callback-free `QualifiedRun` for semantic projections and Runtime-branded `RunSession` for
+  execution;
 - exact content/object closure for newly entered bytes;
 - direct extension of the prepared successor's object/value/first-seen/fact-scan indexes from the
   resolved typed artifacts, rejecting surplus objects and ignored record fields at cold ingress;
@@ -1220,13 +1519,13 @@ Keep:
 - atomic exact-head compare-and-append;
 - one exact stored-attempt ingress comparison against the already-built candidate;
 - ambiguous acknowledgement recovery;
-- backend-owned writer/run-driver/fact-frontier currentness plus resource-owner leases/fences; and
+- backend-owned writer-epoch/fact-frontier currentness; and
 - separate redaction-safe public projections.
 
 Do not introduce a global semantic run cache, suffix-refresh protocol, cloneable session, or durable
 reducer checkpoint in this cutover.
 
-### 10.4 Configuration
+### 10.5 Configuration
 
 Replace configuration writer/reader/open-audit verification paths with one typed configuration
 ingress, `ResolvedConfiguration<T>`, private `PreparedConfigurationAppend`, and payloadless positive
@@ -1250,20 +1549,26 @@ Implementation changes the following documents in the same commits as their code
   while retaining no ambient I/O as a coding obligation.
 - Replace authored/expanded/certified execution authority with `ProgramDocument` and opaque
   `Program`.
-- Freeze `RunAdmitted`/journal serialization while requiring a fresh store identity for the new
-  program-document schema.
+- Keep `RunAdmitted` tenant-partition semantics while cutting the renamed access-reservation record
+  and new program-document schema into a fresh store identity with new golden vectors.
+- Define one deployment-supplied tenant per application facade and delete caller authentication,
+  grants, policy decisions, and credential-bearing calls.
+- State that caller admission/network exposure belongs to the trusted embedding and that the
+  credential-free REST service is not a public trust boundary.
 - Separate callback-free program/catalog authority from Runtime's live process registry.
+- Make the process registry and every adapter/binding immutable for process lifetime; replacement is
+  stop, drain, drop, and rebuild, with no generic live-currentness or revocation model.
 - Replace the three-layer write comparison with `ResolvedEvent` and one reducer.
 - Distinguish callback-free `QualifiedRun@H` from Runtime-branded affine `RunSession@H`; describe
-  demand-triggered full resume, the cross-process run-driver fence, exact-head compare-and-append,
-  and direct successor advancement.
+  demand-triggered full resume, racing staleable sessions, exact-head compare-and-append, and direct
+  successor advancement.
 - State that spawning a new run opens no unrelated retained history and malformed dormant history
   is isolated to operations that actually consume it.
 - State that no shared run/configuration semantic cache or durable reducer checkpoint exists.
 - Apply the same local-construction/direct-commit versus independent-ingress distinction to
   configuration history.
-- Replace mandatory authorization reread with direct positive commit acknowledgement and retained
-  successor.
+- Replace mandatory post-reservation reread with direct positive commit acknowledgement,
+  `ReadyToInvoke`, and the retained successor.
 - State the trusted PostgreSQL epoch/immutability contract and the unchanged inability to prove
   rollback freshness after every independent anchor is lost.
 - Define the minimum `DurabilityProfile` that `NewlyCommitted` must satisfy before provider entry
@@ -1279,9 +1584,11 @@ Implementation changes the following documents in the same commits as their code
 - Define `Pure | Read<C> | Effect<C>` as framework-issued capability classification.
 - Remove claims that ordinary Rust closure purity is type-enforced.
 - Remove comparison-token and complete-prefix-per-load architecture.
-- Show one registry assembly with least-authority views, one privately branded driver owning one
-  fenced affine run session, one reducer, and purpose projections borrowing callback-free qualified
-  evidence rather than acquiring drive authority.
+- Show one immutable registry assembly with least-authority views, private Runtime-branded affine
+  sessions that may race at an exact head, one reducer, and purpose projections borrowing
+  callback-free qualified evidence rather than acquiring callback authority.
+- Delete the application access-control components and generic capability refresh/resource-authority
+  components instead of leaving empty architecture boxes.
 
 ### `docs/run-execution.md`
 
@@ -1292,27 +1599,65 @@ Implementation changes the following documents in the same commits as their code
   historical dependencies.
 - Describe full-prefix resume once, repeated direct advancement of the active session, and explicit
   resume after the session is dropped or loses the head comparison.
-- Describe run-driver acquisition/failover and the entry-fence rule preventing an old driver from
-  invoking after its generation loses.
+- Describe direct-new-commit-only creation of `ReadyToInvoke`, affine single consumption, and why
+  cold/non-new outcomes cannot invoke.
+- Describe the blocking recovery state for unobserved Effects, including `EntryOnce` manual
+  attention and capability-specific bounded `EntryAbsorbing` reassertion.
 - Describe typed configuration construction, direct writer promotion, and independent cold
   selection without a cache.
 - Make positive append acknowledgement payloadless.
-- Preserve authorization-before-invocation and observation-before-settlement.
+- Preserve reservation-before-invocation and observation-before-settlement.
 
 ### Other documentation
 
-Update the READMEs for program, capabilities, certification, store, runtime, app, and replay, plus
-`docs/persisted-public-surfaces.md`, including the golden-frozen journal/configuration formats and
-fresh store-identity program cutover. Updating `docs/known-gaps.md` is mandatory: it must record
-demand-time history qualification and failure isolation, the separate diagnostic `audit_store`,
+Update the READMEs for program, capabilities, certification, store, runtime, app, replay, CLI, and
+REST, plus `docs/persisted-public-surfaces.md` and the EVM submission/wallet contracts. Document the
+portable vNext, EVM identity-domain reset, renamed journal record, unchanged hash algorithm, new
+goldens, and fresh store/wallet activations. Updating `docs/known-gaps.md` is mandatory: it must
+record demand-time history qualification and failure isolation, the separate diagnostic
+`audit_store`,
 the absence of a durable semantic checkpoint, the PostgreSQL epoch/restore assumption, and the
-unchanged inability to detect a self-consistent rollback after every outside anchor is lost.
+unchanged inability to detect a self-consistent rollback after every outside anchor is lost. Delete
+credential, principal, grant, policy-decision, live-refresh, and revocation documentation rather
+than marking it legacy.
 
 ---
 
 ## 12. Verification plan
 
-### 12.1 Program and capability construction
+### 12.1 Tenant facade and persisted policy deletion
+
+- Facade construction fixes exactly one `TenantScopeId`; no public application call accepts a
+  credential or tenant override.
+- Two facades sharing process/store internals can admit, read, drive, trace, replay, and export only
+  within their own partitions. If tenant-wide Effect discovery is retained, listing is scoped by
+  the same rule. Cross-partition run ids and recursive sources return the partition-local
+  `RunNotFound` disposition, never a grant denial.
+- A backend row returned inside one tenant lookup with a different `RunAdmitted` tenant fails as
+  `InvalidHistory`, and a portable bundle with inconsistent tenant closure fails import; neither is
+  downgraded to not-found.
+- REST succeeds without an `Authorization` header, arbitrary headers cannot select a tenant, and no
+  policy-only 401/403 response remains.
+- CLI exposes no access-token option or credential file reader and does not replace it with a tenant
+  selector.
+- The portable vNext stream contains no principal, grant, or decision field; structural closure
+  mutation is still caught by the whole-stream `ContentRef`, and the old format is rejected.
+- `RunAdmitted` retains only tenant partition/provenance, not a principal or policy result.
+- EVM submission identity is derived exactly from tenant, wallet nonce domain, and
+  `SubmissionIdempotencyKey`; changing any component changes the vNext identity, and no principal or
+  issuer-policy layer remains.
+- No `EvmCallerSubmissionToken`, `IntentIssuerPreimage`, authenticated-issuer derivation, or
+  policy-only issuer-namespace symbol remains; no old
+  authorized-source helper name remains in replay/store APIs.
+- Activation uses fresh run-store and wallet-domain identities. Reusing a physical sender requires
+  an auditable proof that the old process drained, every prior allocation and Effect is terminal,
+  the pending nonce is reconciled, and sender control is exclusive; otherwise the activation uses a
+  fresh sender.
+- Public API/error-schema and source-tree checks prove that the deleted access-policy types,
+  credential plumbing, authenticated call wrappers, and policy-decision persistence have no
+  compatibility aliases or inert replacements.
+
+### 12.2 Program and capability construction
 
 Compile-fail tests prove:
 
@@ -1324,9 +1669,17 @@ Compile-fail tests prove:
 - request, returned, and safe-failure ABI come only from `C`;
 - Effect remains forbidden in FanOut;
 - erased Pure/Read/Effect dispatch cannot select a wrong-mode method;
-- no public MFM adapter invocation entry exists outside private `EnteredAccess`;
+- no public MFM adapter invocation entry exists outside private `ReadyToInvoke`;
 - no consumer can mint that package under the actual production dependency/feature graph; and
-- affine authorization cannot be cloned or consumed twice.
+- the affine reservation-to-invocation package cannot be cloned or consumed twice.
+
+API/source/schema-contract checks also prove that `PhysicalBindingAuthorization`,
+physical-authorization semantic obligations/checker methods, every named refresh mode/evidence/
+binding/resource/release family in section 10.3, current-binding selection, and the other deleted
+generic currentness types have no definition, compatibility alias, persisted field, or call site.
+Before deletion, a checked inventory maps every current physical-release certificate field and
+consumer either to the exact surviving immutable binding descriptor/ingress proposition or to an
+explicit deletion rationale. The cutover cannot land with an unmapped field or consumer.
 
 Behavior tests prove:
 
@@ -1336,9 +1689,12 @@ Behavior tests prove:
   `ProgramDocument`, normalized graph, schema/lexical indexes, and registry fingerprint;
 - a bare `ProgramRef` cannot drive reduction or invocation, and the callback-free catalog view
   cannot invoke;
-- cold ingress proves the normalized graph's frozen policy predicate; omitted source/trace metadata
-  cannot grant authority;
+- cold ingress proves the normalized graph's frozen program-profile predicate; omitted source/trace
+  metadata cannot create execution authority;
 - hostile access-label, capability, component, and graph substitutions fail at ingress;
+- assembly resolves every immutable descriptor to the exact adapter/provider/route/signer/effect
+  domain once; missing/ambiguous/mismatched components reject before facade construction, while
+  later calls increment no latest/current-generation check counter;
 - recursive child-operation/state expansion, configuration specialization, fan-out, and
   pre/proceed/post/failure injection remain present and visible in the final normalized graph;
 - planning consumes `ResolvedConfiguration<T>` without a second decode/validation pass;
@@ -1351,10 +1707,22 @@ Behavior tests prove:
 
 No test claims that an arbitrary Rust closure cannot perform ambient I/O.
 
-### 12.2 Event and journal
+### 12.3 Event and journal
 
-- Golden `RunAdmitted`, H1/H2, and configuration-revision vectors freeze the unchanged wire and hash
-  preimages before the refactor begins.
+- Golden `RunAdmitted`, new `ExternalAccessReserved`, H1/H2, portable vNext, EVM identity, and
+  configuration-revision vectors freeze the one current wire shapes. Hash algorithm/domain
+  separators that this RFC does not replace are checked independently from changed record payloads.
+- Canonical fact-request/response goldens contain only access-reservation frontier terminology; no
+  old authorization mode string remains accepted.
+- Exact source/API absence checks reject `ExternalAccessAuthorized`, access `authorization_ref`,
+  `RecordLogicalKey::Authorization`, `QualifiedRuntimeIntent::Authorization`,
+  `PrimaryIntent::Authorization`, `AccessAuthorizationProposal`, `AuthorizationIntent`,
+  `ExpectedAuthorization`, `CertifiedAccessAuthorization`, and `CommittedAccessAuthorization`;
+  the strict decoder rejects the retired record tag and reference field. These checks are
+  deliberately exact so provider protocol authentication terminology may remain.
+- Path-scoped absence checks also reject coordination-only `AuthorizationEntry`, Runtime
+  `Authorized<K, V>`, `AuthorizedCallOrigin`, and `AuthorizedProviderCall`, while explicitly
+  retaining provider-protocol `EvmRpcAuthorization` and `EvmRpcInventoryFinishAuthorization`.
 - Mutation of every predecessor/program/config/input/output/fact/request/observation/object field
   changes or invalidates the terminal commitment.
 - Typed construction -> encode -> cold ingress produces the same `ResolvedEvent`; binding under the
@@ -1370,15 +1738,17 @@ No test claims that an arbitrary Rust closure cannot perform ambient I/O.
   those commits.
 - No intent/recorded dual reducer remains for a test corpus to reconcile.
 
-### 12.3 Session ownership, demand qualification, and concurrency
+### 12.4 Session ownership, demand qualification, and concurrency
 
 - `QualifiedRun` and `RunSession` cannot be deserialized or publicly constructed; `RunSession`
   cannot be cloned or used across store identity, epoch, tenant, run, program catalog, or private
   Runtime assembly identity.
-- A callback-free purpose reader cannot acquire a driver permit, invoke a Pure callback, or seal its
-  `QualifiedRun` into `RunSession`.
+- A callback-free purpose reader cannot invoke a Pure callback or seal its `QualifiedRun` into
+  `RunSession`.
 - Runtime rejects substitution of a qualified prefix/program from another
   `RuntimeAssemblySeal`/`ProcessRegistry` before any callback dispatch.
+- A replacement assembly with a changed immutable binding cannot seal or drive an old program;
+  reassembling the exact retained binding can resume it.
 - A raw/deserialized `JournalHead` and an uncommitted `PreparedSuccessor` cannot construct qualified
   evidence or advance a session.
 - Service/store startup performs zero retained-run and configuration-history reads.
@@ -1392,10 +1762,10 @@ No test claims that an arbitrary Rust closure cannot perform ambient I/O.
   replays after the initial resume.
 - Direct local advancement and a fresh full resume at the resulting head produce equal reduced
   state, object indexes, fact dependencies, and capacity accounting.
-- Concurrent drive-resume attempts may both qualify bytes, but the cross-process owner mints only
-  one live `RunDriverPermit`; a fenced old generation cannot append or enter an MFM capability.
-- Exact-head compare-and-append still admits only one prepared successor for a predecessor; a stale
-  or precondition-losing session installs nothing and must resume explicitly.
+- Concurrent resumes may both create branded sessions at H. Exact-head compare-and-append admits
+  only one prepared successor; only its direct caller advances and can receive `ReadyToInvoke`,
+  while every stale or precondition-losing session installs nothing, invokes zero times, and must
+  resume explicitly.
 - Dropping a session or restarting causes the next continuation to perform a new complete ingress.
 - No global run-state map/LRU, suffix-refresh path, session serialization, or durable semantic
   checkpoint is written or consulted.
@@ -1404,50 +1774,75 @@ No test claims that an arbitrary Rust closure cannot perform ambient I/O.
 - A legitimate PostgreSQL restore uses a new store identity/epoch; same-epoch historical mutation is
   tested as a storage-contract violation.
 - Store qualification rejects a durability profile that can return commit success before the
-  authorization WAL is durable across its admitted failure domain, including `fsync = off` or
+  access-reservation WAL is durable across its admitted failure domain, including `fsync = off` or
   `synchronous_commit = off`; stronger host-loss claims require their named synchronous quorum.
 
-### 12.4 Append and external access
+### 12.5 Append and external access
 
-- `NewlyCommitted` advances the exact consumed session with zero head query, history read, decode,
-  or reducer replay.
-- Before direct `NewlyCommitted`, Runtime calls neither `RunDriverAuthority::enter` nor the resource
-  entry owner, and no type can reach the invocation thunk.
-- Direct `NewlyCommitted` creates only `CommittedAccessPendingEntry`; provider I/O remains
-  impossible until both post-commit entry operations succeed and construct `EnteredAccess`.
-- An authorization `Found` classified as `ExistingSame` installs no candidate session and releases
-  no invoker.
-- Authorization-append `StaleHead`, `AcknowledgementUnknown`, invalid found bytes, capacity failure,
-  and typed `AppendConflict` call no entry owner and invoke zero times; no non-authorization append
-  releases a new invoker.
+- The consuming coordinator's direct `NewlyCommitted` branch advances its owned exact session with
+  zero head query, history read, decode, or reducer replay; the raw backend outcome never escapes.
+- Before that branch, no type can reach the invocation thunk. Its owned
+  `PreparedDrive::Access` is the only constructor input of `ReadyToInvoke`.
+- Two in-flight appends with payloadless backend outcomes cannot transpose predecessor sessions,
+  prepared successors, index plans, or `PreparedAccess`; private constructors and coordinator API
+  shape make such a test fail to compile.
+- An access-reservation `Found` classified as `ExistingSame` installs no candidate session and
+  releases no invoker.
+- Access-reservation `StaleHead`, `AcknowledgementUnknown`, invalid found bytes, capacity failure,
+  and typed `AppendConflict` invoke zero times; no unrelated append releases an invoker.
 - `Found` under the same append identity with well-formed different bytes returns `AppendConflict`
   after exactly one stored-attempt comparison.
-- `AcknowledgementUnknown` followed by exact retry leaves one append and never duplicates
-  invocation.
-- Every framework invocation has a distinct, directly acknowledged `NewlyCommitted` authorization,
-  and its affine permit is consumed at most once; a crash may leave zero invocations.
-- Observation recovery may retain the same authorization reference but never recreates or reuses
-  its consumed invocation permit and never invokes that attempt again.
-- A later Effect invocation requires a new committed attempt ordinal. `MAX_ENTRIES` bounds
-  entry-unknown re-entry; refresh evidence governs supersession ordinals separately.
-- `EnteredAccess` permits cannot be paired with another same-`C` request, run, occurrence, process registry,
-  adapter implementation, physical binding, or resource-lineage head.
-- The special prior-run fact-scan permit remains store-minted, one-use, and direct-new-commit-only.
-- A retained session does not bypass a live capability lease/fence check at the declared entry
-  boundary.
-- For a capability promising adapter-entry freshness, revocation after authorization commit but
-  before entry causes zero adapter invocations and durably records `SupersededBeforeEntry` when the
-  process observes that pre-entry result.
-- Run-driver transfer/fencing after authorization commit but before entry causes zero adapter
-  invocations; the old driver cannot append an observation or disposition, and the new driver sees
-  the durable pending authorization through conservative recovery.
+- `AcknowledgementUnknown` quarantines the exact preparation and installs/invokes nothing. If the
+  original append exists, resolution returns found-same and invokes zero; if it is proven absent at
+  the same predecessor, resubmitting that quarantine can return direct new and invokes exactly once;
+  dropping it or cold recovery invokes zero.
+- Every framework invocation has a distinct directly committed `ExternalAccessReserved`, and its
+  `ReadyToInvoke` is consumed at most once; a crash may leave zero invocations.
+- Observation recovery may retain the same `reservation_ref` but never recreates or reuses its
+  consumed invocation package and never invokes that ordinal again.
+- An observation that loses the head comparison performs at most one reducer rebase per explicit
+  resume. If another head race occurs, the same pending observation may be retained for another
+  explicit, work-bounded resume; there is no hidden retry loop. Still-selected appends,
+  already-recorded idempotency, no-longer-selected late response, and conflicting-observation
+  branches are distinct and invoke zero times.
+- Observation `AcknowledgementUnknown` quarantines the exact pending value and settles nothing.
+  Tests cover exact found-same followed by qualified settlement, proven-absent direct retry,
+  absent-plus-advanced-head rebase, repeated unknown, and conflict/invalid failure; every branch
+  invokes zero times and validates response bytes zero additional times.
+- Only a direct committed selected observation can settle state. Already-recorded settlement comes
+  from ordinary qualified resume, a late non-selected response never settles, and a different
+  observation for the same attempt fails closed.
+- `ReadyToInvoke` cannot be paired with another same-`C` request, state input, run, occurrence,
+  process registry, adapter implementation, immutable binding, attempt ordinal, or reservation
+  record.
+- The special prior-run fact-scan continuation remains store-minted, one-use, and
+  direct-new-commit-only.
+- A cold process cannot invoke an outstanding reservation. Read repetition uses a new ordinal;
+  `EntryOnce` Effect recovery parks as `PossibleEntry`; and bounded `EntryAbsorbing` reassertion
+  requires its explicit duplicate-absorption contract plus the exact same immutable binding/effect
+  domain.
+- A slow old `ReadyToInvoke` racing a new Read/`EntryAbsorbing` ordinal may cause both distinct
+  attempts to invoke, but only under that capability's repetition/absorption contract. The attempt
+  budget remains bounded and exhaustion parks; `EntryOnce` never creates the second ordinal.
+- Two workers racing from one head yield one direct reservation winner/`ReadyToInvoke`; every
+  `ExistingSame`, stale, conflict, invalid, or acknowledgement-unknown path invokes zero times.
+- The immutable `ProcessRegistry` exposes no replace, revoke, lease, refresh, current-binding, or
+  provider-entry-freshness API. Stop/drain/rebuild is tested at the embedding lifecycle boundary;
+  it resolves or deliberately parks every ambiguous reservation/observation package, and forced
+  shutdown never manufactures a “did not enter” disposition.
+- Same-binding protocol-token renewal remains private adapter behavior and cannot change the MFM
+  binding/provider/effect identity; any such identity change requires process rebuild.
 - Every provider success/failure response crosses one bounded adapter ingress into opaque
   `C::Returned`/`C::SafeFailure`; settlement performs no second wire/schema validation.
+- A response that fails capability/request binding is rejected before
+  `PendingAccessObservation` construction and appends no observation. Settlement only interprets an
+  already-valid observation against state input; it cannot invalidate the persisted capability
+  relation.
 - Observation is committed before state settlement succeeds.
 - PostgreSQL snapshot, atomicity, restore/epoch, exact-head compare-and-append contention, numeric
   ordering, malformed-row, and fresh-process continuation tests remain.
 
-### 12.5 Facts and purpose projections
+### 12.6 Facts and purpose projections
 
 - A selected fact dependency is qualified once within the consuming session/load scope.
 - A previously qualified exact producer head is reused within that scope; an independent resume is
@@ -1459,35 +1854,40 @@ No test claims that an arbitrary Rust closure cannot perform ambient I/O.
 - Public/trace/replay/export projections derived during one session cause no second semantic fold
   while preserving output redaction.
 - Ordinary readiness performs no history scan; `audit_store` reports dormant run, configuration,
-  and fact-frontier corruption without changing readiness or granting invocation authority.
+  and fact-frontier corruption without changing readiness or creating invocation authority.
 - When Effect-attention inventory is enabled, append, head advance, and
   `needs_effect_attention` update are atomic; the partial index is snapshot-complete under the
   PostgreSQL contract.
-- Effect-attention listing invokes zero callbacks. Any selected recovery action explicitly resumes
-  and qualifies the named run before acting.
+- When enabled, Effect-attention listing invokes zero callbacks. Any selected recovery action
+  explicitly resumes and qualifies the named run before acting.
 
-### 12.6 Configuration history
+### 12.7 Configuration history
 
 - Typed/local configuration construction increments no ingress-validation counter.
 - Hostile file/environment/API and database revisions are bounded and admitted exactly once.
-- Secret-bearing configuration produces only a non-serializable live handle; secret canaries never
-  appear in revision bytes, history, exports, or diagnostics.
+- Secret-bearing configuration is consumed at assembly only into concrete immutable
+  adapter/provider/signer internals; secret canaries never appear in revision bytes, history,
+  exports, diagnostics, or a generic callable resource handle.
 - Full independent configuration ingress produces the same exact head/value as direct local writer
   advancement at every revision.
-- `NewlyCommitted` advances the active configuration owner with no echo or readback.
+- The consuming configuration coordinator's direct `NewlyCommitted` branch advances only its owned
+  prepared successor with no echo/readback; concurrent raw outcomes cannot be transposed.
 - Found-same, conflict, stale, and unknown acknowledgement behavior preserves idempotency and never
   installs an uncommitted successor.
 - A later independent configuration selection performs one complete bounded ingress; no shared
   configuration cache, suffix refresh, or checkpoint is consulted.
 - Malformed dormant configuration does not block readiness or a new run that does not select it;
   selecting it fails before planning receives `ResolvedConfiguration<T>`.
-- A changing active-revision selection is checked as head/policy currentness, not by revalidating
-  the selected immutable value.
+- A changing active-revision selection is checked as head/activation currentness, not by
+  revalidating the selected immutable value.
 - Wire/schema ingress acceptance and a state's contextual interpretation/settlement are tested as
   different propositions; the latter is not mislabeled duplicate byte validation.
 
 The performance acceptance criterion is measured work and load counts, not an unsupported global
-asymptotic claim.
+asymptotic claim. Before implementation, the product owner fixes the maximum supported retained
+prefix and a cold-resume latency SLO, or explicitly records that no latency SLO exists beyond
+bounded completion. A benchmark of that maximum prefix must satisfy the ruling; a miss blocks this
+no-checkpoint target and requires a separate checkpoint decision.
 
 ---
 
@@ -1496,71 +1896,80 @@ asymptotic claim.
 Every commit updates affected contracts, tests, fixtures, and public documentation. No old/new API
 pair, compatibility decoder, or fallback survives its cutover commit.
 
-1. **`freeze current run and configuration fixation formats`**
+1. **`scope application facades by tenant`**
 
-   Add golden `RunAdmitted`, candidate, record, commit, H1/H2, and configuration-revision vectors
-   before moving any producer. Document that the following work preserves those exact wire/hash
-   formats and uses a fresh store identity for the new program-document schema.
+   Give `Application` one construction-time `TenantScopeId` and cut the app, CLI, REST, backend
+   facade calls, public errors, tests, and documentation to credential-free tenant-scoped APIs.
+   Delete policy/principal/grant/decision persistence in the same commit: introduce portable vNext
+   structural closure, direct EVM submission identity, and fresh export, run-store, and wallet
+   identities. Remove every old field, decoder, error, policy callback, and compatibility alias
+   together. Activate with a fresh sender unless an auditable gate proves the complete drain,
+   terminal allocation/Effect, reconciled nonce, and exclusive-control preconditions for reuse.
 
 2. **`relocate the callback-free program compiler`**
 
-   Move recipe expansion/lowering, policy and normalized-graph validation, manifest/document
-   construction, and schema/lexical indexes into `mfm-program` behind the current public API. Prove
-   byte-for-byte output equality; introduce no second compiler and change no persisted bytes.
+   Move recipe expansion/lowering, program-profile and normalized-graph validation,
+   manifest/document construction, and schema/lexical indexes into `mfm-program` behind the one
+   current API. Prove byte-for-byte output equality for unchanged projections; introduce no second
+   compiler.
 
-3. **`make state execution mode-safe without wire changes`**
+3. **`make state access and immutable execution valid by type`**
 
-   Derive callback ABI from `Pure | Read<C> | Effect<C>`, introduce mode-indexed typed and erased
-   callable representations, move live `ProcessRegistry`/invocation-thunk ownership into
-   `mfm-runtime` behind the current API, and preserve every existing canonical capability/state
-   contract byte. Delete callback/ABI repair, unqualified invokers/test fallbacks, obsolete
-   capability-set/signing algebra, and callable signer/resource process handles. Keep generic
-   capability validators, their erased handles, durable authorization fields, and
-   `ExpectedAuthorization` until their replacements land in later commits.
+   Derive callback ABI from `Pure | Read<C> | Effect<C>`, introduce mode-indexed typed/erased
+   callables, opaque capability values and narrow safe failures, `ProgramDocument`, opaque
+   `Program`, callback-free `ProgramCatalog`, immutable Runtime-private `ProcessRegistry`, and the
+   assembly seal. Cut every producer/consumer/export/fixture to those APIs. Delete callback/ABI
+   repairs, unqualified invokers, obsolete capability algebra, duplicated certifier/registry
+   authorities, generic validators made redundant by opaque values, and the emptied `mfm-certify`
+   boundary only after every live compiler/assembly/invocation owner below has moved. Program wire
+   changes start only in a fresh store identity with no decoder or in-place migration.
 
-4. **`make program and capability values valid by construction`**
+   Introduce `ResolvedEvent`, `PendingAppend`, `AppendContext`, complete
+   `RetainedBatchFixation`, and inseparable `PreparedAppend { batch, successor, index plan }` for
+   every event family. Introduce callback-free `QualifiedRun`, Runtime-branded non-cloneable
+   `RunSession`, explicit spawn/resume, direct session advancement, private
+   `PreparedDrive -> CommittedDrive` variants including `ReadyToInvoke`, qualified history-port
+   outcomes, and payloadless backend `NewlyCommitted` retained inside the consuming coordinator.
+   Rename `ExternalAccessAuthorized` and every durable authorization
+   intent/ref/frontier surface to `ExternalAccessReserved` and reservation terminology; proof
+   wrappers collapse into the final private transition.
 
-   Introduce opaque capability request/returned values and capability-specific safe-failure sums,
-   then introduce `ProgramDocument`, opaque `Program`, callback-free `ProgramCatalog`, and the
-   assembly seal around the already Runtime-private `ProcessRegistry`. Cut every
-   producer/consumer/export/fixture to the one API, delete the replaced generic capability
-   validators/erased handles, old program/certifier/registry authority surfaces, and the now-empty
-   `mfm-certify` boundary. Initialize all wire-changing types only in a fresh store
-   namespace/identity. Keep no decoder or in-place migration.
+   Freeze capability/adapter/signer/provider bindings for process lifetime and delete
+   refresh/resource-authority/current-release histories, lease/fence metadata, supersession,
+   recurring signing/provider freshness checks, and every hot replacement/revocation API vertically
+   across spec, program, certification, runtime, store, PostgreSQL adapters, EVM, tests, and docs.
+   Establish the changed journal schema under a fresh store scope/epoch with new golden vectors;
+   retain exact attempt binding, ambiguity/absorption, writer epoch, domain transaction
+   locks/idempotency, explicit observation rebase, and selected-observation-before-settlement.
 
-5. **`resolve appends and advance affine run sessions`**
+   Before deleting physical-release certificates, land the checked field/consumer inventory that
+   maps every surviving immutable proposition to its descriptor/ingress owner and gives a deletion
+   rationale for every other field. No unmapped currentness evidence may disappear or survive inert.
 
-   Introduce `ResolvedEvent`, `PendingAppend`, `AppendContext`, full `RetainedBatchFixation`, and
-   structurally inseparable `PreparedAppend { batch, successor, index plan }` for every event family
-   in one cutover. Introduce callback-free `QualifiedRun`, Runtime-branded non-cloneable
-   `RunSession`, the cross-process fenced `RunDriverPermit`, explicit spawn/resume, direct session
-   advancement, Runtime-private `PreparedAccess -> CommittedAccessPendingEntry -> EnteredAccess`
-   invocation typestate, qualified history-port outcome handling, and payloadless
-   `NewlyCommitted`. State and qualify the PostgreSQL
-   exact-head/minimum-durability/epoch contract here. In the same commit delete both reducer branches,
-   semantic equality/comparison typestates, local requalification, backend semantic echoes,
+   State and qualify the PostgreSQL exact-head/minimum-durability/epoch contract. In the same commit
+   delete committed/certified authorization wrappers and `ExpectedAuthorization` shadows, dual
+   reducers/comparison typestates, local requalification, backend semantic echoes,
    `drive_once(run_id)` core ownership, app/Runtime post-commit reloads, stale-head automatic
-   continuation, public/feature-gated authorization minting, and `ExpectedAuthorization` shadows.
-   The old guard is removed only when its projection, binding, obligation, ordering, and session
-   ownership jobs have structural replacements in this commit.
+   continuation, and consumer-callable invocation mints. The old guards disappear only when every
+   projection, binding, ordering, and affine-use job has its structural replacement.
 
-6. **`qualify retained history only when consumed`**
+4. **`qualify retained history only when consumed`**
 
    Unify bounded complete-prefix resume, read, replay, export, audit, and producer-closure ingress
    behind the one event/reducer path. Make ordinary startup and unrelated new-run spawn perform zero
-   retained-history scans. Cut purpose projections to borrow callback-free evidence from an active
-   session or explicitly qualify an ephemeral `QualifiedRun`, keep the dense fact frontier
-   load-bearing, and make Effect-attention an
-   append-atomic Boolean projection if tenant-wide discovery remains a product surface. Add the
-   diagnostic `audit_store`; add no shared semantic cache, suffix-refresh protocol, attention
-   rebuild authority, or reducer checkpoint.
+   retained-history scans. Purpose projections borrow callback-free evidence from an active session
+   or explicitly qualify an ephemeral `QualifiedRun`; the dense fact frontier remains load-bearing.
+   Keep Effect attention as an append-atomic Boolean projection only if tenant-wide discovery is a
+   product surface. Add diagnostic `audit_store`; add no shared semantic cache, suffix-refresh
+   protocol, attention rebuild authority, or reducer checkpoint.
 
-7. **`make configuration history single-ingress without a cache`**
+5. **`make configuration history single-ingress without a cache`**
 
-   Introduce `ResolvedConfiguration<T>` and private prepared successors, make direct
-   `NewlyCommitted` advance the active configuration owner with no readback, and make every
-   independent selection one bounded complete-history ingress. Preserve exact-head
-   compare-and-append, idempotency, acknowledgement ambiguity, and the revision wire/hash format;
+   Introduce `ResolvedConfiguration<T>` and private prepared successors; make a consuming
+   configuration coordinator keep the raw backend outcome bound and advance its active owner with
+   no readback. Make every independent selection one bounded complete-history ingress. Preserve
+   exact-head compare-and-append, idempotency, acknowledgement ambiguity, and the revision wire/hash
+   format;
    delete local revision revalidation, echo comparison, purpose-specific replay, cache/suffix plans,
    and configuration scanning from ordinary readiness.
 
@@ -1573,6 +1982,19 @@ old guard has been deleted.
 
 The refactor is complete only when all of the following are true:
 
+- Deployment contracts make the trusted embedding responsible for caller admission and exposure;
+  credential-free REST is never presented as safe for direct untrusted/public reachability.
+- `Application` is fixed to one deployment-supplied tenant; public calls accept no caller
+  credential, principal, grant, policy-decision reference, or tenant override.
+- The app, CLI, REST, errors, tests, and documentation contain no internal end-user authentication
+  or authorization model. Multiple tenants are exposed only through separately constructed facades.
+- Portable export contains only the bounded structural same-tenant closure and one whole-stream
+  content fixation; no principal/grant/decision evidence or compatibility decoder remains.
+- EVM submission intent is derived directly from tenant, wallet nonce domain, and submission
+  idempotency key under the new domain; no authenticated-issuer layer remains.
+- The EVM cutover uses fresh run-store and wallet-domain identities and either a fresh physical
+  sender or auditable proof of complete old-process drain, terminal allocations/Effects, reconciled
+  pending nonce, and exclusive sender control.
 - No public-field or deserializable value is accepted as execution authority; only opaque `Program`
   is.
 - A bare `ProgramRef` is never authority, and callback-free store/replay code cannot invoke.
@@ -1582,63 +2004,84 @@ The refactor is complete only when all of the following are true:
 - Pure recursive operation expansion, configuration specialization, and injected
   pre/proceed/post/failure states remain part of construction and are completely represented in the
   final normalized `Program`; resume never reruns them.
-- The changed program-document schema starts under a fresh store identity while `RunAdmitted` and
-  journal fixation formats remain golden-frozen.
+- Changed program, access-reservation, portable, and EVM schemas start under their declared fresh
+  identities/activations. `RunAdmitted` retains tenant partitioning, the recursive journal hash
+  algorithm remains an exact-prefix commitment, and new golden vectors freeze the one current wire.
 - Every state has exactly one type-level `Pure`, `Read<C>`, or `Effect<C>` declaration.
 - MFM gives state callbacks no transport, signer, store, or generic live capability.
 - Adapter-owned dependencies remain adapter TCB internals rather than callable nested framework
-  capabilities; their identities/lineage remain represented, and Read classifies whole-adapter
-  behavior.
-- Retained session evidence never bypasses live resource currentness, including revocation between
-  authorization commit and adapter entry; a known pre-entry rejection is durably closed as
-  `SupersededBeforeEntry`.
+  capabilities; their immutable secret-free identities remain represented, and Read classifies
+  whole-adapter behavior.
+- Every deleted physical-release certificate field and consumer is accounted for by a checked
+  inventory mapping it to a surviving immutable descriptor/ingress proposition or an explicit
+  deletion rationale; no unmapped or inert currentness evidence remains.
+- `ProgramCatalog`, `ProcessRegistry`, adapters, provider bindings, and signer/transports are
+  immutable for a composed process lifetime. No generic replace/revoke/lease/refresh/entry-freshness
+  API, metadata, persisted disposition, or test remains; binding replacement is stop, drain, drop,
+  and rebuild.
+- A changed binding never silently reinterprets a retained program; the exact old binding assembly,
+  terminal/read-only disposition, or a separately specified migration is required.
 - The documentation does not claim arbitrary Rust closures are sandboxed or provably pure.
 - Intent and recorded bytes converge before one reducer; no dual semantic implementation remains.
 - The current journal hash format is frozen by golden tests and documented as an exact-prefix
   commitment.
 - `QualifiedRun` is callback-free semantic evidence. `RunSession` is opaque, Runtime-assembly
-  branded, driver-fenced, affine, non-serializable, and non-cloneable; no purpose reader, raw head,
+  branded, affine, non-serializable, and non-cloneable; no purpose reader, raw head,
   foreign assembly, or uncommitted successor can construct or advance drive authority.
 - Store/service startup qualifies no retained run or configuration history.
 - Spawning a new run opens no unrelated history and succeeds despite a malformed dormant run;
   consuming a malformed selected dependency fails locally before typed authority is returned.
-- One explicit resume folds one complete bounded prefix once. Every directly `NewlyCommitted`
-  append then advances that exact active session with zero head query, reload, decode, or replay.
-- At most one cross-process `RunDriverPermit` generation is live per run; an old generation cannot
-  append or enter an MFM capability after transfer/revocation wins.
+- One explicit resume folds one complete bounded prefix once. Every consuming coordinator's direct
+  committed branch then advances its owned active session with zero head query, reload, decode, or
+  replay.
+- Multiple sessions may race from one head; exact-head compare-and-append advances only the direct
+  winner, while every stale/non-new/indeterminate session installs nothing and invokes zero times.
 - No shared run/configuration semantic cache, LRU, suffix-refresh protocol, or durable reducer
   checkpoint exists.
-- Only a directly `NewlyCommitted` authorization can create `CommittedAccessPendingEntry`; only
-  successful post-commit driver/resource entry can create `EnteredAccess` and reach the candidate's
-  invoker.
-- No consumer-callable authorization mint exists under the production feature graph, and exact
-  same-`C` request/run/occurrence/registry/adapter/binding/lineage substitution is impossible.
-- Authorization-append found-same, stale, unknown, invalid, capacity, conflict, regression, and fork
-  paths call no entry owner and release no invoker; non-authorization failures release no new
-  invoker or cause an additional invocation.
-- Observation recovery never recreates a consumed permit; Effect entry and refresh ordinals retain
-  their separate typed contracts.
+- The owner has fixed the maximum supported retained prefix and either a cold-resume latency SLO or
+  an explicit no-latency-SLO ruling; the maximum-prefix benchmark satisfies that contract before
+  the no-checkpoint session design is accepted.
+- Only a consuming `PreparedDrive::Access` coordinator call whose exact
+  `ExternalAccessReserved` append is directly new can create `ReadyToInvoke`; the raw backend
+  outcome never escapes or pairs with another preparation, and no cold/non-new outcome can invoke.
+- No consumer-callable invocation mint exists under the production feature graph, and exact
+  same-`C` request/state-input/run/occurrence/registry/adapter/binding/attempt/reservation
+  substitution is impossible.
+- Reservation found-same, stale, unknown, invalid, capacity, conflict, regression, and fork paths
+  release no invoker; unrelated append failures release no new invoker or cause an additional
+  invocation.
+- Observation recovery never recreates a consumed `ReadyToInvoke`. A cold unobserved `EntryOnce`
+  Effect parks; a duplicate-absorbing reassertion uses a new bounded ordinal only under the exact
+  capability and immutable binding/effect-domain contract.
+- A stale `PendingAccessObservation` can only rebase against an explicitly resumed session, never
+  reinvokes, admits at most one stored observation per attempt, and distinguishes selected,
+  already-recorded, no-longer-selected, and conflicting outcomes.
+- Every external invocation is reserved durably first, and every returned response crosses byte
+  ingress once. Only a selected observation may settle state, and that exact observation is
+  committed before settlement; a late non-selected response never settles.
 - Configuration history has the same local-construction/cold-ingress/prepared-commit discipline and
-  no independent writer/reader/readiness replay paths.
+  no independent writer/reader/readiness replay paths. Its consuming commit coordinator also keeps
+  payloadless backend outcomes bound to the exact prepared configuration successor.
 - The dense fact frontier remains load-bearing completeness evidence. If tenant-wide Effect
   discovery remains, its Boolean projection and partial index update append-atomically but never
-  grant execution authority.
+  create execution authority.
 - Purpose readers borrow callback-free evidence from one active session or explicitly qualify one
   ephemeral `QualifiedRun`; no purpose can drive or owns another semantic verifier.
 - Provider response bytes cross one adapter ingress into opaque capability values; downstream code
   does not confuse protocol validity with factual truth beyond the capability's provider/evidence
   contract.
-- PostgreSQL's truthful outcome, immutable-row, durability, writer-lineage, and store-epoch contract
+- PostgreSQL's truthful outcome, immutable-row, durability, sealed-writer, and store-epoch contract
   is explicit; `NewlyCommitted` satisfies the qualified crash-durability profile before any provider
   entry, and legitimate restore rotates the identity/epoch.
-- Intrinsic validators have moved to opaque construction/ingress; changing facts have explicitly
-  named authority owners; redundant shadows are deleted.
-- Safe-failure values are capability-specific valid types; Effect-only completion variants, keyed
-  entry/bounds, refresh evidence, resource lineage, dependency identities, and the reserved fact
-  scanner remain represented.
+- Intrinsic validators have moved to opaque construction/ingress; contextual head/frontier and
+  domain transaction checks have explicit owners; redundant shadows are deleted.
+- Safe-failure values are capability-specific valid types; Effect entry/ambiguity/absorption,
+  dependency identities, domain operation keys, and the reserved fact scanner remain represented
+  without generic refresh/resource-lineage machinery.
 - The final report measures product-code and public-type deltas and itemizes every new concept or
   net addition; no increase is justified merely as scaffolding for a later cleanup.
 
 When these conditions hold, MFM will rely on the properties it already built: Rust construction,
 content identity, an exact recursive journal commitment, atomic exact-head compare-and-append, and
-typed access authority. It will stop paying every internal layer to distrust the preceding one.
+typed one-use invocation coordination. It will stop paying every internal layer to distrust the
+preceding one.
