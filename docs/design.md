@@ -1,10 +1,19 @@
 # MFM Design Contract
 
-Status: authoritative structured-runtime design contract
+Status: superseded implementation contract during the accepted single-ingress cutover
 
-This document defines the one current runtime, history, storage, replay, and application design.
-Each persisted type derives its own schema identity from the exact shape its Rust owner declares;
-that owner is authoritative for bytes.
+Normative target: [`RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`](../RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md)
+
+Implementation decomposition:
+[`IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`](../IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md)
+
+The accepted RFC is the platform-wide source of truth for the target design. Until the cutover
+rewrites this document alongside its owning implementation commits, the text below describes the
+implementation being replaced and is evidence/inventory only where it conflicts with the RFC.
+
+The text below previously defined the runtime, history, storage, replay, and application design now
+being replaced. Its persisted schemas and Rust types remain an exact inventory of the old bytes;
+they do not constrain the incompatible target cutover.
 
 ## Material uncertainties
 

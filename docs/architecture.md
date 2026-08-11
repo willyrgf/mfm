@@ -1,9 +1,13 @@
 # Architecture
 
-Status: contributor responsibility and placement guide
+Status: superseded implementation placement guide during the accepted single-ingress cutover
 
-`docs/design.md` is the normative contract. This document owns taxonomy, package placement, and
-dependency direction.
+[`RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`](../RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md) is the
+platform-wide normative target, and
+[`IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`](../IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md)
+owns its implementation decomposition. Until the cutover rewrites this document alongside its
+owning implementation commits, the text below describes the package placement being replaced and
+is evidence/inventory only where it conflicts with the accepted target.
 
 ## Material uncertainties
 
