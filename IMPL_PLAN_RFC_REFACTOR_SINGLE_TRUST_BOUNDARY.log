@@ -1,0 +1,119 @@
+2026-08-12 — initial cutover audit
+
+- Worktree is clean at `94fa8a485` (`settle single trust boundary preflight rulings`), on
+  `refact-runtime-trust-bound`.
+- The RFC and implementation plan are treated as immutable normative inputs. This log is the
+  implementation record; neither source document will be edited.
+- The current source is still the pre-cutover implementation: the workspace includes
+  `mfm-spec`, `mfm-certify`, and `mfm-authority-seal`; `mfm-store` depends on `mfm-runtime`; the
+  journal README and module describe five-family history; and the source contains reservation,
+  observation, closure, FanOut/lane, multi-root, generic currentness, and Effect-attention
+  surfaces.
+- No implementation-plan progress log existed before this entry.
+
+Non-solved problems at audit start:
+
+1. U3/U5 capability and immutable-binding inventory has not yet been checked in.
+2. U8/U11 typed ABI compile proof and final context table have not yet been checked in.
+3. U1/U7/U9 derived capacity envelope, maximum fixtures, bound-plus-one tests, and conclusion
+   reservation proof have not yet been checked in.
+4. The complete incompatible cutover remains unimplemented: package ownership, State/Match-only
+   Program, singular cumulative context, three-family journal, Store/Runtime inversion, direct-new
+   committed-call execution, pending conclusions, tenant facade, portable export, configuration
+   limits, PostgreSQL schema, EVM/Portfolio cutover, deletion manifest, and final verification.
+
+Next action: map the current two production entry points and record the three bounded preflight
+artifacts before changing implementation contracts.
+
+2026-08-12 — preflight inventory (current source, before cutover)
+
+U3 capability inventory for the two supported entry points:
+
+| entry point | State/capability | current raw ingress | accepted evidence required by target | entry policy | target disposition |
+| --- | --- | --- | --- | --- | --- |
+| `mfm.portfolio/snapshot@1` | chain identity Read | authenticated JSON-RPC chain-id response | exact chain identity or bounded safe failure | Read, max 3 attempts | provider assertion only; raw RPC discarded |
+| `mfm.portfolio/snapshot@1` | latest anchor Read | authenticated JSON-RPC block response | bounded block anchor or safe failure | Read, max 3 attempts | provider assertion only; no chain-truth claim |
+| `mfm.portfolio/snapshot@1` | token decimals Read | authenticated JSON-RPC call response | bounded decimal response or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.portfolio/snapshot@1` | native balance Read | authenticated JSON-RPC quantity response | bounded quantity or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.portfolio/snapshot@1` | token balance Read | authenticated JSON-RPC quantity response | bounded quantity or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.portfolio/snapshot@1` | anchor confirmation Read | authenticated JSON-RPC block response | bounded matching anchor or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | wallet nonce status Read | wallet-authority PostgreSQL response | bounded nonce status or safe failure | Read, max 3 attempts | mechanical wallet assertion |
+| `mfm.evm/submit-transaction@1` | pending nonce Read | authenticated JSON-RPC response | bounded pending nonce floor or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | candidate identity Read | signer/provider response | bounded attested candidate or safe failure | Read, max 3 attempts | signer/provider assertion; signed bytes discarded |
+| `mfm.evm/submit-transaction@1` | transaction lookup Read | authenticated JSON-RPC response | bounded transaction observation or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | receipt lookup Read | authenticated JSON-RPC response | bounded receipt observation or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | finalized head Read | authenticated JSON-RPC response | bounded finalized-head observation or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | inclusion block Read | authenticated JSON-RPC response | bounded inclusion observation or safe failure | Read, max 3 attempts | provider assertion only |
+| `mfm.evm/submit-transaction@1` | reserve wallet nonce Effect | wallet-authority transaction response | returned reservation, bounded rejection, or integrity block | EntryOnce | no absorption proof; no replacement |
+| `mfm.evm/submit-transaction@1` | activate wallet candidate Effect | wallet-authority transaction response | returned activation, bounded rejection, or integrity block | EntryOnce | no absorption proof; no replacement |
+| `mfm.evm/submit-transaction@1` | broadcast exact candidate Effect | authenticated JSON-RPC broadcast response plus durable operation-key/post-state proof | returned submitted proof, bounded rejection, or integrity block | EntryAbsorbing<3> only after durable absorption proof | deterministic tx identity and permanent operation key |
+| `mfm.evm/submit-transaction@1` | complete wallet nonce Effect | wallet-authority transaction response | returned completion, bounded rejection, or integrity block | EntryOnce | no absorption proof; no replacement |
+
+The table is the complete reachable inventory observed in `structured_balance.rs` and
+`submission_registry.rs`. All variants are finite domain-owned values; no raw provider payload,
+provider diagnostic, credential, signer secret, or signed transaction bytes is retained. The
+broadcast row is the only candidate for `EntryAbsorbing<3>`: its stable transaction hash,
+permanent wallet operation key, durable wallet transaction, and post-state proof must be carried
+through the final adapter tests. If any one of those claims cannot be proven in the final cutover,
+the capability must be changed to `EntryOnce` and the replacement path deleted.
+
+U5 immutable binding inventory:
+
+- retained descriptor fields: exact State implementation identity, capability contract identity,
+  adapter implementation identity, physical route/target identity (including chain instance),
+  Effect domain where applicable, and public signer key-instance identity where applicable;
+- balance Reads retain route/target and no signer; submission Reads retain route/target and the
+  relevant public signer identity only for candidate attestation; submission Effects retain route,
+  wallet nonce domain, sender, adapter identity, and public signer key-instance identity;
+- provider protocol authentication, request/call correlation, target, signer, and capability
+  identity are checked once at adapter ingress; raw material is dropped;
+- current `executable_identity_ref`, `qualification_artifact_ref`, release history, generation,
+  promotion, revocation, and currentness lineage are not target descriptor fields and are deletion
+  candidates. The final descriptor must not preserve them under renamed aliases.
+
+U8/U11 final context table (contract names to be implemented):
+
+| entry point | admitted `C0` | nonterminal cumulative successor | terminal root result | failure/recovery context |
+| --- | --- | --- | --- | --- |
+| Portfolio snapshot | `PortfolioSnapshotInput` | `PortfolioSnapshotContext`, retaining validated demand, declaration position, completed collections, remaining work, and opaque caller correlation | `PortfolioPublicOutputs` | `PortfolioSnapshotFailure`; prior context only when an explicit domain recovery value carries it |
+| EVM balance child | domain-planned `EvmBalanceContext<K>` | same complete `EvmBalanceContext<K>` with current stage/source and completed/remaining source work | `EvmBalanceCollectionCompletion<K>` | typed EVM failure only; no implicit history |
+| EVM submission | `EvmSubmissionRequest` | one complete `EvmSubmissionContext` retaining transaction identity, nonce/candidate stage, durable domain data, and redacted status | `EvmSubmissionOutput` | explicit EVM failure value; no ambient context |
+
+The child handoff is consuming: `K` is an owned, opaque, non-`Clone` domain value and is returned
+unchanged beside the EVM collection result. Match arms select one exact closed-sum payload and
+converge on one identical continuation contract. The kernel does not define a context map or
+decode the opaque continuation.
+
+The U8/U11 compile proof is not complete yet. The current source has the old `Value<T>`/callback
+ABI, multiple input bindings, and handler futures coupled to the five-family Runtime; it cannot be
+used as evidence for the target. A disposable target-ABI spike is required before the Program and
+Runtime cutover and must cover non-`Clone` Pure/Access handoff, Match convergence, EVM/Portfolio
+opaque continuation, affine call/result owners, cancellation, `Send` futures, and a dedicated
+`!Send + !Sync` keystore owner. No compatibility fallback is permitted if the spike fails.
+
+The disposable spike was compiled successfully in the pinned Nix shell after adding the missing
+`mfm-ids` macro dependency. It proved that a derived `MfmValue` need not implement `Clone`, that a
+closed Match payload can be consumed into one arm, that a generic opaque continuation can be moved
+through an EVM completion, that a non-clone call becomes one pending conclusion in a `Send` future,
+and that a `!Send + !Sync` keystore can be split into an owned `Send` command. This is a type-shape
+proof only; the target Program/Runtime implementation still has to compile these properties at
+its real boundaries.
+
+U1/U7/U9 provisional envelope (outer bounds already fixed by the RFC):
+
+- frame: 32 MiB; run: 65,536 frames, 1,048,576 reachable objects, 512 MiB canonical frame
+  bytes; configuration: 16 MiB per revision, 1,024 revisions, 64 MiB cumulative canonical
+  stream bytes; portfolio: 64 total EVM sources; Read/proven absorbing Effect: 3 total attempts;
+  EntryOnce Effect: 1 attempt;
+- the inner context/conclusion reservations are not measured yet. They must be derived from the
+  two production contracts, with one maximum fixture per entry point, exact-bound and bound-plus-
+  one rejection, and a pre-entry reservation that includes evidence, output, facts, projections,
+  and database rows;
+- no latency or structural-sharing target is assumed. If a maximum fixture cannot fit the fixed
+  outer bounds, the admitted workload is reduced rather than adding a collection or checkpoint
+  path.
+
+Settled operational rules recorded for the implementation: trusted fixed-tenant embedding;
+separate genesis admission; same-epoch CAS races without a process lease; `PrimaryCrashRestart`
+durability only; Store-scope/writer-epoch rotation for binding replacement; old nonterminal runs
+are replay-only; and response loss before durable `StateConcluded` is deliberately neutral.
