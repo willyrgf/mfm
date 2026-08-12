@@ -1,6 +1,6 @@
 # RFC: refactor to a single byte-ingress trust boundary
 
-Status: accepted platform target; implementation pending the owner rulings listed below
+Status: accepted platform target; implementation pending three bounded preflight proofs
 
 Relationship: this RFC supersedes `rfc_single_trust_boundary.md` and is the normative architecture
 for the complete MFM platform cutover. Current code and authoritative docs describe the
@@ -158,162 +158,80 @@ No MFM-generated successful output or definite provider result becomes public be
 
 ## Material uncertainties
 
-The response-loss policy, separate admission, access-only preparation, `EntryOnce` parking,
-bounded `EntryAbsorbing` recovery, exactly one semantic run record per append, catalog-qualified
-domain evidence, explicit upstream States for provider-affecting facts, one access mode per
-capability type, State/Match-only structured control, sequential fail-fast execution, and
-domain-owned cumulative contexts, singular domain-planned `C0`, CAS-linearized worker races, and
-mode-neutral terminal roots are settled. The following implementation gates remain.
+The architecture and product choices are settled. The implementation supports only the two current
+entry points, `mfm.portfolio/snapshot@1` and `mfm.evm/submit-transaction@1`; a future product need
+must justify a future RFC rather than leave a dormant branch in this cutover.
 
-1. **Session retention and cold-resume latency**
+The settled rulings are:
 
-   - **Choice:** an executor retains one affine Runtime session and its latest qualified typed
-     cumulative context across steps; a genuinely new resume folds the complete bounded prefix and
-     recovers the latest concluded context. There is no LRU, suffix protocol, context checkpoint,
-     structural sharing, or history compaction.
-   - **Why uncertain:** the maximum supported hot context size, cold-resume cost, and caller
-     retention policy have not been fixed.
-   - **If wrong:** stateless traffic or an `O(n^2)` cumulative-context history may miss latency or
-     memory targets.
-   - **Resolution:** fix the maximum context and prefix bounds, session-retention contract, and
-     either a cold-resume SLO or explicit no-SLO ruling; benchmark maximum hot advancement and cold
-     resume before implementation acceptance.
+1. **U1 — session retention:** the caller-owned affine session retains the latest qualified typed
+   cumulative context. Dropping it makes the next resume fold the complete bounded prefix. There is
+   no global retention, LRU, suffix protocol, checkpoint, structural sharing, compaction, or cold-
+   resume SLO.
+2. **U2 — Effect attention:** absent. Callers retain run ids. Delete the projection, column, index,
+   backend method, DTO/API, CLI/REST/operator surface, bounds, documentation, and tests. There is no
+   scheduler or inventory replacement.
+3. **U3 — capability evidence:** inventory only capabilities reachable from the two current entry
+   points. Each owns one strict, secret-free intent/evidence contract and exact call binding.
+   Authenticated JSON-RPC results are provider assertions, not independent chain truth. Raw provider
+   material and secrets are discarded. An Effect is `EntryOnce` unless durable absorption for the
+   full recovery horizon and post-state-convergent evidence are proven.
+4. **U4 — EVM activation:** submission identity is tenant plus wallet nonce domain plus bounded
+   non-secret idempotency key. Activation uses a fresh logical Store scope/writer epoch, wallet
+   domain, and sender; those identities may use the same PostgreSQL service. There is no sender-
+   reuse drain or migration path.
+5. **U5 — immutable binding evidence:** retain one content-addressed, secret-free descriptor with
+   only the exact State/capability/adapter implementation identities, physical target/route, Effect
+   domain, and public signer key-instance identity needed for callback-free replay and exact process
+   association. Delete release, generation, promotion, revocation, and currentness lineage.
+6. **U6 — binding replacement:** rotate the Store scope or writer epoch. Old nonterminal runs are
+   read/replay-only. Do not rebind them or retain old live assemblies.
+7. **U7 — configuration history:** retain the existing 16 MiB per-revision ceiling and add fixed
+   experimental limits of 1,024 revisions and 64 MiB cumulative canonical bytes per stream. Enforce
+   all three identically at every ingress/load/write path. There is no configuration-load SLO.
+8. **U8 — typed erasure:** Program owns canonical bytes, exact contract identity, catalog brand, and
+   one safely erased owned typed value. Runtime privately and fallibly downcasts under that brand;
+   no unchecked/public downcast, unsafe code, public erasure API, or duplicate decode path exists.
+   A `Send` future never captures the `!Send + !Sync` keystore; its dedicated owner retains it, and
+   the future may carry only owned prepared data and a bounded `Send` command handle.
+9. **U9 — capacity:** retain one complete frame per append and the existing outer ceilings: 32 MiB
+   per frame; 65,536 frames, 1,048,576 reachable objects, and 512 MiB of canonical frame bytes per
+   run. The MVP portfolio admits at most 64 total EVM sources. Reads and proven absorbing Effects
+   admit at most three total attempts, including the initial attempt; `EntryOnce` admits exactly
+   one. Derive secondary context/object/fact/database limits from the two production contracts
+   rather than exposing independent knobs. Before external entry, reserve the complete maximum
+   mandatory conclusion, including facts and projections. The EVM preparation durably fixes the
+   deterministic transaction identity before broadcast.
+10. **U10 — PostgreSQL topology:** promise primary crash/restart durability only, not primary-host
+    loss, failover, replica, quorum, or multi-primary survival. Multiple qualified processes may use
+    the same Store scope/epoch and are linearized by exact-head CAS; the epoch is not a process
+    lock.
+11. **U11 — cumulative-context ABI:** freeze complete context tables only for the two current entry
+    points. Every successful nonterminal State returns the complete typed successor; Match selects
+    one exact complete variant payload; failure carries prior context only in an explicit domain
+    failure value; and EVM carries the opaque typed Portfolio continuation unchanged. The handoff is
+    consuming and supports non-`Clone` `MfmValue`; no bounded-clone alternative or untyped context
+    map exists.
 
-2. **Effect-attention inventory**
+Three narrow implementation proofs remain:
 
-   - **Choice:** retain an append-atomic `needs_effect_attention` projection and bounded listing
-     only if operators must discover parked Effects without knowing run ids.
-   - **Why uncertain:** known-run recovery may be the only required product surface.
-   - **If wrong:** MFM either carries an unused durable/public surface or cannot discover abandoned
-     Effects proactively.
-   - **Resolution:** choose enabled or absent before freezing PostgreSQL schema. Land or delete the
-     column, partial index, DTO/API, bounds, docs, and tests as one slice.
+1. **Capability and binding inventory (U3/U5).** The exact reachable evidence variants, absorption
+   claims, and immutable descriptor fields have not yet been mapped. Missing one could overstate
+   provider truth, duplicate an Effect, or resume under the wrong binding. Check in one table for
+   the two current entry points; default every unproven Effect to `EntryOnce` and delete every
+   unmapped temporal field.
+2. **Typed ABI compile proof (U8/U11).** The safe erased representation, consuming non-`Clone`
+   handoff, EVM/Portfolio continuation, affine call/result future, cancellation, and keystore/`Send`
+   split have not yet compiled together. Failure changes private Runtime mechanics. Prove this in a
+   disposable spike, record the final type/context table, and stop rather than add a fallback if it
+   fails.
+3. **MVP capacity envelope (U1/U7/U9).** The exact context/conclusion limits derived beneath the
+   fixed outer ceilings have not yet been measured. A wrong value may reject one intended maximum
+   workflow or fail to reserve a mandatory post-entry conclusion. Record one maximum fixture for
+   each current entry point plus exact-bound/bound-plus-one and reservation tests. There is no
+   latency acceptance threshold.
 
-3. **Production capability evidence and factual trust**
-
-   - **Choice:** every capability owns one strict, secret-free evidence sum and states what adapter
-     ingress proves. A configured provider remains part of the capability TCB unless the contract
-     explicitly requires cryptographic, quorum, or independent evidence.
-   - **Why uncertain:** current contracts sometimes use “verified” for both protocol validity and
-     factual truth.
-   - **If wrong:** authenticated but false provider data may be overstated, or an unavailable proof
-     contract may be imposed accidentally.
-   - **Resolution:** inventory every production capability's intent, response ingress,
-     authentication, correlation, definite-pre-entry evidence, integrity evidence, factual-trust
-     assumption, and convergence obligation.
-
-4. **EVM sender/domain cutover**
-
-   - **Choice:** derive submission identity from tenant, wallet nonce domain, and a non-secret
-     idempotency key, under fresh run-store and wallet-domain identities and preferably a fresh
-     sender.
-   - **Why uncertain:** externally retained incomplete submissions and sender-reuse obligations have
-     not been proven absent.
-   - **If wrong:** a new identity domain can collide with or strand old nonce/effect progress.
-   - **Resolution:** use a fresh sender or produce an auditable drain, terminality, pending-nonce,
-     and exclusive-control proof before activation.
-
-5. **Cold immutable binding evidence**
-
-   - **Choice:** persist only immutable, secret-free descriptors needed for callback-free replay and
-     exact process association; delete current-release and revocation lineage.
-   - **Why uncertain:** some current certificate fields may encode a legitimate immutable restart or
-     audit proposition despite currentness-oriented names.
-   - **If wrong:** deletion can make retained history uninterpretable, while careless retention can
-     recreate the rejected live-currentness system.
-   - **Resolution:** map every certificate field and consumer to a surviving descriptor/ingress
-     proposition or an explicit deletion rationale before the binding cutover.
-
-6. **Dormant runs after binding replacement**
-
-   - **Choice:** a retained Program resumes only under an assembly satisfying its exact immutable
-     binding. A changed binding never silently replans or reinterprets it.
-   - **Why uncertain:** the deployment policy for nonterminal dormant runs is not fixed.
-   - **If wrong:** ordinary reconfiguration may strand valid runs or execute them under a binding
-     they never fixed.
-   - **Resolution:** choose drain-to-terminal, retain the old immutable assembly, or mark those runs
-     read/replay-only. Any rebinding protocol requires a separate RFC.
-
-7. **Total configuration-history bounds**
-
-   - **Choice:** every configuration stream has maximum revision-count and cumulative canonical-byte
-     bounds in addition to the per-revision bound.
-   - **Why uncertain:** the concrete limits and worst-case load target are not fixed.
-   - **If wrong:** one valid selected stream can monopolize memory and CPU.
-   - **Resolution:** set both limits and enforce them identically in memory, PostgreSQL, import,
-     audit, and tests.
-
-8. **Erased typed intent/evidence representation**
-
-   - **Choice:** Program owns an opaque canonical-bytes, exact-contract, erased-typed-value product
-     that crosses Program, Store, and Runtime under one exact catalog instance.
-   - **Why uncertain:** the final representation must cover hostile ingress, maximum cumulative
-     contexts, access evidence, direct downcast, and `Send` movement without a duplicate decode
-     escape hatch.
-   - **If wrong:** crate ownership or private erasure mechanics must change.
-   - **Resolution:** prove the final representation and affine `CommittedCall` future in a
-     disposable compile spike before the vertical execution cut.
-
-9. **Capacity and attempt bounds**
-
-   - **Choice:** one bounded complete frame is stored per append; the sole selected unresolved
-     preparation reserves one full maximum legal conclusion. Complete cumulative contexts are
-     retained in successive conclusions even when this makes aggregate canonical run retention
-     `O(n^2)`. Program/capability contracts also bound total Read and absorbing attempts, including
-     the initial attempt.
-   - **Why uncertain:** concrete source/occurrence/context/frame/conclusion/run/object/fact/
-     projection/database-parameter and attempt limits are not fixed.
-   - **If wrong:** a legal cumulative successor may not fit after external entry, or valid workloads
-     may be rejected.
-   - **Resolution:** set and benchmark all bounds together: initial/maximum context construction,
-     every context append, maximum hot advancement, maximum cold resume, exact source/context/run
-     bounds, and every bound-plus-one case. If the representation exceeds a backend limit, enlarge
-     the bounded backend contract or reduce the admitted workload; do not introduce a parallel
-     collection construct as an optimization. The deleted FanOut value `4,096` is not a justified
-     source limit; retain it only if independent domain/product measurements support it.
-
-10. **PostgreSQL failure-domain claim**
-
-   - **Choice:** the initial profile promises primary crash/restart durability, not primary-host
-     loss. The writer epoch is an immutable persisted Store/run identity and append precondition,
-     not a live process lock. Multiple qualified Runtime workers or processes may use the same
-     admitted Store scope and epoch; exact-head compare-and-append, direct-new call construction,
-     and occurrence-level conclusion uniqueness linearize their commands.
-   - **Why uncertain:** an out-of-tree deployment may advertise synchronous replica or quorum
-     survival.
-   - **If wrong:** Runtime could enter a provider after an acknowledgement weaker than the product
-     durability claim.
-   - **Resolution:** confirm the local profile or name and qualify the exact stronger synchronous
-     topology, then test its actual failure domain. Epoch rotation remains a restore/new-identity
-     operation and U6 owns the disposition of old runs. Cross-process exclusive execution is not
-     part of this RFC; any future requirement for it needs a separate design.
-
-11. **Concrete cumulative-context ABI**
-
-   - **Choice:** each operation owns one nominal admitted `C0`; operations and domain fragments own
-     their later entry/successor contexts and final-result types. The domain-planned `C0` crosses
-     every entry/admission/journal representation, and a child receives one current fragment-entry
-     context rather than an ordered input binding. Every successful nonterminal State returns the
-     complete typed successor context; a terminal State of any mode returns the exact root
-     contract; every continuing Match arm returns the one contract required by its
-     continuation; and a recovery State receives prior context only through its explicit failure-
-     route input. `Match` selects and qualifies one complete closed-sum variant payload as the
-     arm's cumulative input. EVM carries an opaque typed caller continuation without interpreting
-     it. No blanket `Clone` bound is assumed: Commit 0 must prove the private consuming input-owner
-     handoff through ordinary Outcome/State-failure paths, or deliberately choose and bound cloning.
-     Callback-free integrity blocking is excluded.
-   - **Why uncertain:** the exact State-by-State context schemas, final projection boundaries, and
-     EVM/Portfolio continuation type and typed input-ownership mechanics have not been frozen
-     against the production workload.
-   - **If wrong:** implementations could add an untyped context map, lose required early data,
-     reinterpret caller semantics inside EVM, or require another persisted-format cut.
-   - **Resolution:** before the Program cut, check in the complete
-     C0/State-input/State-output/final-result table for every production operation, including Match
-     variant projection, convergence, and failure routes; compile the EVM/Portfolio generic typed-
-     continuation and consuming-input shapes and fix their strict schema identities.
-
-Apart from these product, deployment, and numeric gates, no material architectural uncertainty
-remains.
+No other material uncertainty remains.
 
 ## 1. Scope and incompatible cutover
 
@@ -415,17 +333,18 @@ durability profile. The epoch qualifies persisted lineage and append preconditio
 grant mutually exclusive process liveness. Qualified workers may race against the same Store
 scope/epoch, and only exact-head/direct-new results create successor or invocation authority.
 
-`NewlyCommitted` means the exact transaction crossed that durability point. The minimum selected
-profile survives a crash/restart of the admitted primary; Store qualification rejects weaker
-effective settings. A stronger host-loss claim requires qualification of its named synchronous
-topology. A weakening setting or writer-epoch change invalidates the Store rather than changing the
-meaning of direct-new.
+`NewlyCommitted` means the exact transaction crossed that durability point. The selected profile
+survives a crash/restart of the admitted primary; Store qualification rejects weaker effective
+settings. A stronger host-loss or failover claim is outside this design and requires a future RFC.
+A weakening setting or writer-epoch change invalidates the Store rather than changing the meaning
+of direct-new.
 
 A normal process restart may retain the epoch and resume from qualified durable history. A
-legitimate database restore rotates Store identity or epoch and does not continue old runs. After
-every independent later-head anchor is lost, MFM cannot distinguish a self-consistent rollback from
-a Store that never advanced. An actively lying database or administrator is outside this threat
-model, and a post-commit readback against the same authority does not strengthen it.
+legitimate database restore or binding replacement rotates Store identity or epoch; old
+nonterminal runs become read/replay-only. After every independent later-head anchor is lost, MFM
+cannot distinguish a self-consistent rollback from a Store that never advanced. An actively lying
+database or administrator is outside this threat model, and a post-commit readback against the same
+authority does not strengthen it.
 
 ## 3. Program, State, implementation, and assembly
 
@@ -572,6 +491,9 @@ For an absorbing Effect, the capability additionally defines a callback-free abs
 projection. It may be the canonical intent's content identity or a capability-owned subvalue; the
 kernel does not require a second universal `StableOperationKey` field.
 
+`total_attempt_bound` is one for `EntryOnce` and at most three for a Read or proven absorbing
+Effect, including the initial attempt. Catalog finalization rejects zero or larger bounds.
+
 Provider-affecting prior facts must already be explicit in `S::Input`. Program expansion models
 their acquisition as an earlier Read State whose complete successor context contains the reviewed
 fact interpretation consumed by this State. The post-commit fact selection projected from intent
@@ -595,11 +517,9 @@ Read<C> / Effect<C>:
   execute(CommittedCall<S, C>) -> Future<Output = AccessHandlerResolution<S, C>>
 ```
 
-These signatures describe responsibilities, not a settled input-ownership ABI. Because `MfmValue`
-does not imply `Clone`, U11 must freeze the settled Pure-evaluation, Access accepted/unresolved, and
-explicit-failure signatures: either the affine action/wrapper supplies a consuming input-owner
-handoff, or the domain opts into an explicit bounded clone contract. Implementation must not
-silently assume a blanket clone.
+These signatures describe responsibilities; private wrappers provide the settled consuming input-
+owner handoff through Pure evaluation, Access accepted/unresolved handling, and explicit failure.
+`MfmValue` does not imply `Clone`, and the implementation has no bounded-clone alternative.
 
 `AccessHandlerResolution<S, C>` is a public opaque, private-field value because it appears in the
 constructor closure signature; it is not a public enum and has no free constructor. Only consuming,
@@ -764,6 +684,10 @@ The exact occurrence's Program declaration and selected predecessor supply the i
 cumulative input and its content identity, access mode, capability, entry discipline, evidence
 contract, effect domain, and attempt budget. Store supplies coordinates, ordinal, append identity,
 and the assigned typed `StatePreparationRef`; state code constructs none of them.
+
+For the EVM broadcast capability, the canonical intent fixes the deterministic transaction identity
+before `StatePrepared` becomes durable and before provider entry. Secret signed bytes remain outside
+the journal.
 
 `StateConcluded` is a strict sum:
 
@@ -1212,7 +1136,7 @@ conclusion publishing facts compares and advances the current dense publication 
 
 One Store transaction atomically appends the conclusion and object closure, advances the run head
 and reducer projections, publishes at most one dense fact route, advances the tenant fact head, and
-updates terminal and optional attention projections. Rollback is all-or-nothing.
+updates the terminal projection. Rollback is all-or-nothing.
 
 ### 8.2 Qualified history and Runtime sessions
 
@@ -1272,6 +1196,10 @@ direct-successor promotion, idempotency, and acknowledgement recovery. The three
 does not rename configuration revisions or collapse the two domains into a generic history API.
 Secret-bearing configuration is consumed into live adapter internals and never persists.
 
+Each configuration stream admits at most 1,024 revisions, 64 MiB of cumulative canonical revision
+bytes, and 16 MiB for any one revision. Every ingress, selection, audit, and write path enforces the
+same limits. No configuration-load latency is promised.
+
 ## 9. Application, export, and deployment surface
 
 `Application` is fixed at construction to one deployment-supplied `TenantScopeId`. Operational
@@ -1286,8 +1214,8 @@ rejected. Offline qualification is read-only and does not create an App/CLI/REST
 surface.
 
 EVM submission identity uses tenant, wallet nonce domain, and a bounded non-secret idempotency key.
-Delete the authenticated-issuer/policy namespace and activate the changed domain only under the
-fresh Store/wallet/sender gate in Material uncertainties.
+Delete the authenticated-issuer/policy namespace and activate the changed domain only with the
+fresh logical Store scope/writer epoch, wallet domain, and sender required by U4.
 
 Concrete adapters own transports, signers, keystore actors, protocol credentials, wallet/nonce
 transactions, and permanent operation keys. Delete generic live binding refresh, release lineage,
@@ -1316,7 +1244,7 @@ EvmBalanceContext<K: MfmValue> {
 `K` is carried unchanged and has no EVM interpretation API. It is never erased bytes,
 `QualifiedValue`, a history reference, or a heterogeneous map. Commit 0 must prove the exact
 monomorphized value-contract/identity scheme or use a concrete nominal instantiation per caller.
-Separately, one bounded `EvmBalanceResultMetadata` (exact U11 name) carries the caller-owned
+Separately, one bounded `EvmBalanceResultMetadata` carries the caller-owned
 collection ordinal and canonical correlation fields required by the existing public EVM result.
 EVM may move those fields unchanged into `EvmBalanceCollectionResult` but cannot inspect or derive
 Portfolio semantics from them; they are not a serialization of `K`.
@@ -1332,7 +1260,7 @@ State or source is prepared.
 There is no Runtime loop declaration. Before `RunAdmitted`, bounded pure planning/child expansion
 unrolls one declaration-ordered stage chain for every admitted source. Each stage is a stable State
 occurrence with a direct or Match-arm continuation; confirmation proceeds to the statically next
-expanded source occurrence.
+expanded source occurrence. Planning rejects an empty demand or more than 64 total EVM sources.
 
 After exhaustion, a Pure `EvmBalanceConsolidation<K>` consumes the complete context and owns demand
 realization, collection/binding consistency, common-anchor validation, duplicate/missing/foreign-
@@ -1342,10 +1270,10 @@ conceptual nominal successor
 EvmBalanceCollectionResult }`. `EvmBalanceConsolidation` itself constructs that final EVM result;
 the wrapper only returns the opaque continuation beside it for reuse. Portfolio's Pure resume
 consumes that one value. A standalone EVM root uses a concrete standalone continuation and adds a
-caller-owned Pure projection that unwraps the already-produced result. U11 freezes the exact
-consuming ownership, caller-correlation representation, and schema names and allocates every public
-field once; current public canonical bytes remain unchanged unless U11 proves a field redundant and
-approves its deletion. This is one typed successor, not a generic multi-result product.
+caller-owned Pure projection that unwraps the already-produced result. The U8/U11 preflight records
+the exact consuming ownership and strict schema identities; `EvmBalanceResultMetadata` allocates
+every public field once. Current public canonical bytes remain unchanged. This is one typed
+successor, not a generic multi-result product.
 
 ### 9.2 Sequential Portfolio context
 
@@ -1368,7 +1296,7 @@ scheduler.
 
 A final Pure Portfolio consolidation consumes the complete accumulated context and owns extraction,
 cross-collection validation, totals, and public-output construction. Preserve existing public EVM
-and Portfolio result semantics unless Commit 0 proves a field redundant. Delete the current
+and Portfolio result semantics. Delete the current
 caller-context JSON echo/decode, source/collection selectors, lane inputs/cursors/results, nested
 fan-out authoring, joins, and fan-out-specific failure mapping. A collection failure terminates or
 takes one explicit Portfolio domain recovery route before any later collection is prepared.
@@ -1568,9 +1496,9 @@ Tests prove:
   preparation, execute, and provider counts;
 - affine execution owners, accepted wrappers, fact continuations, and pending conclusions cannot be
   serialized, deserialized, copied, defaulted, cloned, or consumed twice;
-- the U11 fixture either moves a non-`Clone` cumulative `MfmValue` exactly once through Pure,
-  ordinary Access Outcome/State-failure, Match, and EVM/Portfolio continuation paths, or proves the
-  explicitly chosen bounded clone alternative without implicit duplication;
+- the U8/U11 fixture moves a non-`Clone` cumulative `MfmValue` exactly once through Pure, ordinary
+  Access Outcome/State-failure, Match, and EVM/Portfolio continuation paths without implicit
+  duplication;
 - same-type transposition attempts across Store, run, occurrence, input, intent, preparation,
   implementation, adapter, binding, domain, fact continuation, and call correlation fail; and
 - cancellation or panic before provider entry does not detach a framework-owned provider future.
@@ -1670,12 +1598,10 @@ API pair, decoder, reducer, or fallback survives a cutover commit.
 
 0. **`resolve prepared-call execution gates`**
 
-   Record all U1-U11 rulings, including the exact cumulative-context table, explicit failure-
-   context routes, EVM/Portfolio typed continuation, numeric bounds, evidence/absorption audit,
-   singular `C0`/child handoff, CAS worker-race contract, binding disposition, deployment
-   activation, and compile/benchmark
-   spike results. Inventory and delete the rejected FanOut/Collect design branches from both
-   documents.
+   Record the three bounded preflight artifacts: the two-entry-point capability/binding inventory,
+   final cumulative-context/type table plus U8/U11 compile-spike result, and U1/U7/U9 MVP capacity
+   envelope. Record the settled activation, dormant-run, and primary-crash/restart rules. Inventory
+   and delete the rejected FanOut/Collect and Effect-attention branches from both documents.
 
 1. **`scope application facades by tenant`**
 
@@ -1693,7 +1619,7 @@ API pair, decoder, reducer, or fallback survives a cutover commit.
    Delete FanOut/lanes/joins from Program/spec/certification plus directly coupled Journal origins,
    Store/Runtime walkers, EVM/Portfolio authoring, schemas, fixtures, and UI tests. Authored child
    fragments expand away.
-   The Commit-0 U5/U8/U11 rulings fix immutable descriptors and final cumulative
+   The Commit-0 U3/U5 inventory and U8/U11 proof fix immutable descriptors and final cumulative
    Input/Output/Failure value identities plus callback implementations under the retained access
    ABI. Retain no compatibility Program variant or cursor. Commit 4 replaces any intermediate
    access-State Program identity while preserving those cumulative value identities.
@@ -1704,13 +1630,13 @@ API pair, decoder, reducer, or fallback survives a cutover commit.
    callback-free Store ownership with one reducer/binder path over the unchanged pre-cutover
    backend/schema, singular preparation capacity, typed Facts response ownership, configuration
    reads, and planning prerequisites. Retain only the one coherent current access protocol. The
-   complete-frame SPI, attention schema, and final PostgreSQL v8 all land in Commit 4.
+   complete-frame SPI and final PostgreSQL v8 land in Commit 4.
 
 4. **`execute committed preparations and conclude states atomically`**
 
    One inseparable vertical cut across Program/Capabilities, Journal, Store, Runtime,
    State/adapter registration, facts, projections, replay/export v5, complete-frame Store SPI,
-   Memory/PostgreSQL v8 and attention, App, and the sequential EVM/Portfolio live execution ABI and
+   Memory/PostgreSQL v8, App, and the sequential EVM/Portfolio live execution ABI and
    registration using the cumulative value identities fixed in Commit 2, plus goldens, tests, and
    documentation. Introduce the three families, `PreparedExecution`, `CommittedCall`, capability
    evidence, and `PendingConclusion`; delete the complete five-family protocol and reject every old
