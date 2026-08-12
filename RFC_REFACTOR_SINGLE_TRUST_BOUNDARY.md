@@ -48,25 +48,45 @@ The final visible Program algebra is only `State | Match`. Execution is determin
 and fail-fast:
 
 ```text
-admission input -> C0
+one admission value C0
   -> State 1(C0) -> C1
   -> State 2(C1) -> C2
   -> ...
-  -> State N(Cn-1) -> Cn
-  -> final Pure domain consolidation/projection
-  -> public result
+  -> nonterminal State N(Cn-1) -> Cn
+  -> terminal State T(Cn)
+  -> declared root result
 ```
+
+Every operation has exactly one domain-owned typed admission value, and that value is `C0`.
+Domain/application planning constructs `C0`; Runtime and Store only qualify, persist, and transport
+it. `C0` is not a list of independently bound roots, and Runtime and Store never assemble, merge,
+split, reorder, or interpret its domain fields. A child operation likewise consumes one exact
+current value as its singular fragment-entry context; pure expansion substitutes that nominal value
+unchanged, and the child returns one successor value to the caller continuation. When a child's
+entry contract differs from the caller's current context, an explicit caller-owned State must first
+construct the wrapper; expansion performs no runtime value transformation.
 
 Each `Cn` is an ordinary bounded, secret-free, valid-by-representation domain `MfmValue`. It is the
 complete successor context chosen by the State implementation, normally retaining admitted input,
 prior domain results needed later, current and remaining work, and caller correlation. Runtime,
 Store, and Program do not define a generic run-context container, search history for State code, or
-interpret how the domain accumulates data. Except for a zero-state Program becoming terminal at
-admission, every successful normal root ends in a final Pure consolidation/projection, which may
-return the final domain or public result instead of another cumulative context.
+interpret how the domain accumulates data. Every successful nonterminal State returns the complete
+successor context. A terminal State of any mode may instead return the exact declared root result;
+for Read or Effect this is the accepted, interpreted typed output in `StateConcluded::Access`.
+Runtime releases no root result until Store has durably committed that conclusion or qualified an
+identical recorded conclusion. A zero-state Program means the expanded sequential control form is
+empty. It is certifiable only when its declared root result is the exact identity `C0`
+contract/value, so reducing `RunAdmitted` returns that same content identity without a callback.
+Every nonempty successful path, including a selected Match arm, must end in a terminal State; a
+Match-only or empty-arm terminal path is invalid. Any admission-only operation requiring
+transformation must contain an explicit Pure terminal State.
 
-For one run there is at most one reachable actionable State, one selected unresolved preparation,
-one live `CommittedCall`, and one `PendingConclusion` at a time. A declared failure route is
+For one durable run prefix there is at most one reachable actionable State and one selected
+unresolved preparation. Each affine worker owner contains at most one `CommittedCall` or one
+`PendingConclusion`, and each directly committed preparation releases at most one call. Competing
+workers may race the same sequential occurrence; exact-head compare-and-append and reducer
+selection decide which durable successor survives. Read and absorbing recovery attempts may
+therefore overlap without creating a parallel Program construct. A declared failure route is
 selected immediately and later normal States are not evaluated. `FanOut` is deleted and is not
 replaced by
 `Collect`, `Gather`, `Join`, lanes, barriers, `state_many`, an ambient output map, or another
@@ -142,7 +162,8 @@ The response-loss policy, separate admission, access-only preparation, `EntryOnc
 bounded `EntryAbsorbing` recovery, exactly one semantic run record per append, catalog-qualified
 domain evidence, explicit upstream States for provider-affecting facts, one access mode per
 capability type, State/Match-only structured control, sequential fail-fast execution, and
-domain-owned cumulative contexts are settled. The following implementation gates remain.
+domain-owned cumulative contexts, singular domain-planned `C0`, CAS-linearized worker races, and
+mode-neutral terminal roots are settled. The following implementation gates remain.
 
 1. **Session retention and cold-resume latency**
 
@@ -254,34 +275,33 @@ domain-owned cumulative contexts are settled. The following implementation gates
 10. **PostgreSQL failure-domain claim**
 
    - **Choice:** the initial profile promises primary crash/restart durability, not primary-host
-     loss. The writer epoch is an immutable run/fencing identity, not a live process lock. One
-     separately qualified `QualifiedWriterProcessLease` for the same admitted Store scope
-     and epoch prevents two Runtime processes from owning runs concurrently. Normal process restart
-     resumes an old run under that same epoch only after the prior process is proven fenced or its
-     lease released. Epoch rotation remains a restore/new-identity operation; it does not silently
-     continue an old run.
+     loss. The writer epoch is an immutable persisted Store/run identity and append precondition,
+     not a live process lock. Multiple qualified Runtime workers or processes may use the same
+     admitted Store scope and epoch; exact-head compare-and-append, direct-new call construction,
+     and occurrence-level conclusion uniqueness linearize their commands.
    - **Why uncertain:** an out-of-tree deployment may advertise synchronous replica or quorum
-     survival, and the exact live-writer exclusion mechanism--for example a dedicated PostgreSQL
-     advisory-lock session coupled to fail-stop supervisor fencing--is not fixed. A session lock
-     alone is insufficient because its connection may disappear while the process continues.
+     survival.
    - **If wrong:** Runtime could enter a provider after an acknowledgement weaker than the product
-     claim, or two processes could create live authority for one run.
+     durability claim.
    - **Resolution:** confirm the local profile or name and qualify the exact stronger synchronous
-     topology; choose a live lease/fence with a linearizable call-scoped entry permit or equivalent
-     process-death guarantee, prove takeover fences the old process before same-epoch cold recovery,
-     and test two independent Runtime processes. U6 continues to own old-run disposition after a
-     real epoch/scope rotation.
+     topology, then test its actual failure domain. Epoch rotation remains a restore/new-identity
+     operation and U6 owns the disposition of old runs. Cross-process exclusive execution is not
+     part of this RFC; any future requirement for it needs a separate design.
 
 11. **Concrete cumulative-context ABI**
 
-   - **Choice:** each operation/domain fragment owns nominal `C0..Cn` types; every successful
-     nonterminal State returns the complete typed successor context, every continuing Match arm
-     returns the one contract required by its continuation, and a recovery State receives prior
-     context only through its explicit failure-route input. `Match` selects and qualifies one
-     complete closed-sum variant payload as the arm's cumulative input. EVM carries an opaque typed
-     caller continuation without interpreting it. No blanket `Clone` bound is assumed: Commit 0
-     must prove the private consuming input-owner handoff through ordinary Outcome/State-failure
-     paths, or deliberately choose and bound cloning. Callback-free integrity blocking is excluded.
+   - **Choice:** each operation owns one nominal admitted `C0`; operations and domain fragments own
+     their later entry/successor contexts and final-result types. The domain-planned `C0` crosses
+     every entry/admission/journal representation, and a child receives one current fragment-entry
+     context rather than an ordered input binding. Every successful nonterminal State returns the
+     complete typed successor context; a terminal State of any mode returns the exact root
+     contract; every continuing Match arm returns the one contract required by its
+     continuation; and a recovery State receives prior context only through its explicit failure-
+     route input. `Match` selects and qualifies one complete closed-sum variant payload as the
+     arm's cumulative input. EVM carries an opaque typed caller continuation without interpreting
+     it. No blanket `Clone` bound is assumed: Commit 0 must prove the private consuming input-owner
+     handoff through ordinary Outcome/State-failure paths, or deliberately choose and bound cloning.
+     Callback-free integrity blocking is excluded.
    - **Why uncertain:** the exact State-by-State context schemas, final projection boundaries, and
      EVM/Portfolio continuation type and typed input-ownership mechanics have not been frozen
      against the production workload.
@@ -341,8 +361,9 @@ Program catalogs, Runtime assemblies, State implementations, qualified adapters,
 their concrete dependencies are immutable for one composed-process lifetime. Replacement means
 stop intake; drain every pending conclusion to a terminal Store disposition; drain or
 conservatively park every prepared execution, committed call, and live provider call; then drop the
-assembly, release the live writer-process lease, and construct a new one. A replacement process may
-take over the same epoch only after the prior process is fenced or has released that lease.
+assembly and construct a new one. This is an operational drain discipline, not a global
+single-writer-process safety mechanism: independently composed workers may overlap and their Store
+commands still linearize through the same exact-head protocol.
 Explicitly forcing destruction of a `PendingConclusion` accepts the documented response-loss window
 and leaves only the conservative durable state already present.
 
@@ -390,9 +411,9 @@ Contextual checks remain at their owners:
 Within one admitted Store identity and writer epoch, MFM trusts PostgreSQL and its sealed writer
 path to report outcomes truthfully, preserve immutable committed bytes atomically, enforce exact-
 head compare-and-append and dense fact publication, and retain commits across the admitted
-durability profile. Separately from per-run guards, one Store-qualified
-`QualifiedWriterProcessLease`
-prevents two Runtime processes from using that same scope and epoch simultaneously.
+durability profile. The epoch qualifies persisted lineage and append preconditions; it does not
+grant mutually exclusive process liveness. Qualified workers may race against the same Store
+scope/epoch, and only exact-head/direct-new results create successor or invocation authority.
 
 `NewlyCommitted` means the exact transaction crossed that durability point. The minimum selected
 profile survives a crash/restart of the admitted primary; Store qualification rejects weaker
@@ -400,10 +421,10 @@ effective settings. A stronger host-loss claim requires qualification of its nam
 topology. A weakening setting or writer-epoch change invalidates the Store rather than changing the
 meaning of direct-new.
 
-A normal process restart may retain the epoch only after the old process is fenced. A legitimate
-database restore rotates Store identity or epoch and does not continue old runs. After every
-independent later-head anchor is lost, MFM cannot distinguish a self-consistent rollback from a
-Store that never advanced. An actively lying database or administrator is outside this threat
+A normal process restart may retain the epoch and resume from qualified durable history. A
+legitimate database restore rotates Store identity or epoch and does not continue old runs. After
+every independent later-head anchor is lost, MFM cannot distinguish a self-consistent rollback from
+a Store that never advanced. An actively lying database or administrator is outside this threat
 model, and a post-commit readback against the same authority does not strengthen it.
 
 ## 3. Program, State, implementation, and assembly
@@ -435,6 +456,17 @@ construction. No authored or expanded `FanOut`, lane, join, barrier, or multi-re
 survives. Resume consumes the persisted final sequential control form and never reruns expansion
 under current code or configuration.
 
+Admission cardinality is singular by representation across authored, expanded, and certified
+Program forms, entry-point contracts, admission commands, and `RunAdmitted`. Every operation
+declares exactly one nominal `C0` contract and receives exactly one typed `Value<C0>` constructed
+by domain/application planning. There is no repeated root-declaration API, ordered root list,
+`initial_bindings` collection, or ordered child-input bijection. A child authoring call consumes
+one exact current `Value<Cn>` as its singular fragment-entry value; expansion substitutes it
+unchanged and returns one successor value. `C0` names the admitted root value, not every nested
+fragment entry. A different child entry contract requires an explicit State-produced wrapper.
+Zero-state Programs still admit exactly one `C0` and may terminate only by selecting that exact
+value as the root identity result.
+
 The final control form uses one minimal callback-free `SequentialControlAddress` derived from the
 declaration ordinal plus enclosing Match arm tags. It addresses State occurrences and Match
 selectors only; it has no lane, fragment, lexical-slot, producer, origin, or generic structural-
@@ -443,13 +475,18 @@ strict address and reject every old structural-path identity.
 
 Certification validates declaration order, exact nominal context-contract continuity, Match
 exhaustiveness and arm convergence, failure routing, all finite bounds, implementation closure, and
-one total root result produced by a final Pure consolidation/projection for every nonzero successful
-root. `Match` is deterministic structured choice over a closed-sum complete context. The reducer
-selects and qualifies exactly one declared variant payload; that payload is itself the complete
-cumulative context and exact content identity received by the arm's first State. Only that arm
-advances, and every continuing arm must produce the exact cumulative-context contract required by
-the shared continuation. No State receives both an outer selector value and an unrelated projected
-payload, and Match is not a multi-result merge.
+one total root result on every successful terminal path, independent of whether the terminal State
+is Pure, Read, or Effect. `Match` is deterministic structured choice over a closed-sum complete
+context. The reducer selects and qualifies exactly one declared variant payload; that payload is
+itself the complete cumulative context and exact content identity received by the arm's first
+State. Only that arm advances, and every continuing arm must produce the exact cumulative-context
+contract required by the shared continuation. No State receives both an outer selector value and
+an unrelated projected payload, and Match is not a multi-result merge.
+
+The admission-derived zero-state exception exists only when the expanded control form contains no
+State or Match declaration and the root result is exact `C0` identity. Every nonempty successful
+path must reach a terminal State. Certification rejects a Match-only path or a selected empty arm
+that would otherwise attempt to become terminal without a conclusion.
 
 `ProgramCatalog` owns callback-free declarations, codecs, pure expansion, sequential control-form
 construction, bounds, and hostile ingress. `RuntimeAssembly` is constructed afterward from that
@@ -471,8 +508,9 @@ For every successful nonterminal occurrence, `S::Output` is the complete domain-
 context. A cumulative context is a bounded, secret-free `MfmValue`, valid by representation. Its
 nominal type may contain admitted domain input, prior interpreted domain outputs needed later,
 current stage, completed results, remaining work, and a caller continuation/correlation. The exact
-shape belongs to the operation or reusable domain fragment, not the kernel. A terminal
-consolidation or public-projection State may instead return the final domain/public result.
+shape belongs to the operation or reusable domain fragment, not the kernel. A terminal State of
+any mode may instead return the exact declared root result. For Access, that result remains a typed
+State output and becomes public only through the durable, qualified `StateConcluded::Access` path.
 
 The predecessor-to-successor contract is exact: across a direct State edge, State N receives the
 typed value and content identity concluded by State N-1. When a declared `Match` intervenes, its
@@ -558,10 +596,10 @@ Read<C> / Effect<C>:
 ```
 
 These signatures describe responsibilities, not a settled input-ownership ABI. Because `MfmValue`
-does not imply `Clone`, U11 must freeze the final Pure, Access accepted/unresolved, and explicit-
-failure signatures: either the affine action/wrapper supplies a consuming input-owner handoff, or
-the domain opts into an explicit bounded clone contract. Implementation must not silently assume a
-blanket clone.
+does not imply `Clone`, U11 must freeze the settled Pure-evaluation, Access accepted/unresolved, and
+explicit-failure signatures: either the affine action/wrapper supplies a consuming input-owner
+handoff, or the domain opts into an explicit bounded clone contract. Implementation must not
+silently assume a blanket clone.
 
 `AccessHandlerResolution<S, C>` is a public opaque, private-field value because it appears in the
 constructor closure signature; it is not a public enum and has no free constructor. Only consuming,
@@ -702,10 +740,12 @@ RecordLogicalKey =
   | StateConclusion(occurrence)
 ```
 
-`RunAdmitted` fixes the run id and tenant, final Program, admitted root/domain input as the exact
-initial cumulative context `C0`, configuration, source dependencies, Store/catalog identities, and
-every admission bound. It is always the first and only genesis record. Admission is never batched
-with the first State.
+`RunAdmitted` fixes the run id and tenant, final Program, exactly one admitted domain value as the
+exact initial cumulative context `C0`, configuration, source dependencies, Store/catalog identities,
+and every admission bound. It contains no root list or binding collection. Domain/application
+planning constructs `C0`; Runtime and Store preserve its exact nominal contract and content
+identity without interpreting its fields. `RunAdmitted` is always the first and only genesis
+record. Admission is never batched with the first State.
 
 `StatePrepared` represents one exact logical Read or Effect attempt:
 
@@ -760,7 +800,8 @@ Its logical key is the state occurrence, never the preparation. This is what enf
 conclusion across retry attempts. Fact objects and publication routes share the conclusion append.
 Every successful nonterminal `StateConcluded` retains the complete successor cumulative context in
 its output closure. It is not a delta, lane result, generic output-map entry, or implicit reference
-to earlier history.
+to earlier history. A successful terminal `StateConcluded` instead retains the exact declared root
+result, regardless of whether its variant is Pure or Access.
 
 Keep these identities distinct:
 
@@ -827,10 +868,9 @@ Conclusion classification precedence is mode-aware:
    `NoLongerSelected`;
 3. an already-durable different conclusion for the Pure occurrence or the same selected Access
    preparation is `Conflict`;
-4. a retained Pure candidate with no durable conclusion whose occurrence is no longer ready is
-   `NoLongerReady`; and
-5. a foreign, absent, cross-run, or cross-occurrence preparation reference is invalid correlation
-   or invalid history.
+4. a foreign, absent, cross-run, or cross-occurrence preparation reference is invalid correlation
+   or invalid history. A Pure occurrence lacking a durable conclusion must remain ready; any
+   retained history where it does not is invalid rather than a semantic disposition.
 
 Byte-equal outcomes from different preparations are not duplicate conclusions.
 
@@ -841,8 +881,17 @@ reachable occurrence has a selected unresolved preparation. Once terminal, every
 `StatePrepared` or `StateConcluded` is illegal; cold ingress rejects a trailing record. A database
 `closed` field may remain only as an append-atomic checked projection.
 
-A zero-state admission retains every newly reachable root-result object and updates the terminal
-projection in the same transaction as `RunAdmitted`.
+A zero-state admission has an empty expanded control form, uses its exact admitted `C0` contract/
+content identity as the root result, and updates the terminal projection in the same transaction as
+`RunAdmitted`; it creates no second root object or callback-derived projection. Certification
+rejects a different root contract/value, any Match-only control form, or a selected empty Match arm
+without a terminal State.
+
+For a nonzero run, terminality is mode-neutral: the reducer derives it only after the selected
+terminal State concludes with the exact declared root-result contract and no reachable
+continuation. A Pure root uses `StateConcluded::Pure`; a Read or Effect root uses
+`StateConcluded::Access`. A context-shaped value is legal as a root when it is the declared root
+contract; an output is rejected only when its contract is wrong or a continuation remains.
 
 The sole selected unresolved preparation reserves one complete maximum legal conclusion against run
 bytes, object counts and bytes, evidence/outcome variants, facts, dense publication rows, indexes,
@@ -887,18 +936,26 @@ not semantic evidence; only opaque `QualifiedRun` establishes a qualified prefix
 
 ### 6.1 Admission coordination
 
-Before Store selection, Runtime atomically acquires the exact per-run execution guard; a concurrent
-spawn or resume returns `Busy` without an append or callback. Admission consumes that guard with one
-owner-bound typed Program/root/input/context/configuration/source product and appends `RunAdmitted`
-alone against an absent predecessor. Direct-new returns the exact admitted session or reducer-
-derived zero-state terminal result. Found-identical promotes no local successor and resumes only
-from qualified recorded history; found-different conflicts.
+Admission consumes one owner-bound typed Program/`C0`/configuration/source product and appends
+`RunAdmitted` alone against an absent predecessor. Concurrent spawn or resume workers may race.
+Direct-new returns the exact admitted session or reducer-derived zero-state terminal result. Raw
+`Found` is reserved for lookup of the same physical append id: found-identical promotes no local
+successor and may resume only from qualified recorded history; found-different conflicts. A
+distinct-id genesis loser receives raw `StaleHead`; Store qualifies the existing `RunAdmitted` and
+compares the semantic admission candidate without physical coordinates. Exact-same returns the
+recorded active/terminal history, different conflicts, and malformed/invalid history fails
+integrity qualification. No local mutex or process lease substitutes for append-id idempotency and
+exact-head comparison.
 
-An unknown acknowledgement retains the exact admission append, guard, and owner. Resolution
+An unknown acknowledgement retains the exact admission append and owner. Resolution
 serializes on the same physical identity: found-identical qualifies recorded history; proven
 absence with the genesis precondition still current may resubmit, and only that resubmission's
-direct-new branch advances; repeated unknown retains the quarantine. No admission branch invokes
-State, adapter, or provider code. This is why admission stays separate from the first State.
+direct-new branch advances. If another physical id commits genesis before that resubmission, raw
+`StaleHead` consumes the suspended owner through the same semantic admission comparison: exact-same
+returns qualified recorded history, different conflicts, and invalid history fails integrity
+qualification. It does not resubmit again. Repeated unknown retains the quarantine. No admission
+branch invokes State, adapter, or provider code. This is why admission stays separate from the
+first State.
 
 ### 6.2 Prepared execution and direct-new authority
 
@@ -921,7 +978,7 @@ the still-owned continuation to construct `CommittedCall`.
 `CommittedCall` is private-field, non-`Clone`, non-Serde, and binds at least:
 
 - exact catalog instance, Runtime assembly brand, Store identity/epoch, durability profile, and
-  the affine live writer-process fence/witness required at provider entry;
+  exact committed Store head;
 - tenant, run, Program, occurrence identity/`SequentialControlAddress`, exact immutable cumulative
   input plus its nominal contract and content identity, access mode, and capability;
 - canonical intent, State implementation, qualified adapter, execution binding, provider/target/
@@ -930,16 +987,15 @@ the still-owned continuation to construct `CommittedCall`.
 - one process-local call-correlation identity and Store-minted conclusion correlation; and
 - when declared, the exact one-use prior-run fact continuation.
 
-There is no independently usable `RunSession` beside a live `CommittedCall` or its pending
-conclusion. The active committed successor moves through the call-correlation owner and returns to a
-session only after unresolved execution or conclusion disposition.
+Within that same affine worker owner there is no independently usable `RunSession` beside a live
+`CommittedCall` or its pending conclusion. The active committed successor moves through the call-
+correlation owner and returns to that worker's session only after unresolved execution or
+conclusion disposition. Other workers may retain independently qualified, potentially stale
+sessions with no authority derived from this call.
 
-The official adapter entry consumes the call token once and must verify/consume a still-current
-writer-process fence witness immediately before constructing or polling provider work. Fence loss
-after preparation commit therefore creates no provider future and cannot overlap an unfenced
-takeover. Private fields and non-cloneability are supplemented by process-local per-call correlation
-carried through adapter ingress, so a shared same-capability adapter cannot substitute a completion
-retained from another call.
+The official adapter entry consumes the call token once. Private fields and non-cloneability are
+supplemented by process-local per-call correlation carried through adapter ingress, so a shared
+same-capability adapter cannot substitute a completion retained from another call.
 The consuming entry method accepts no caller-supplied adapter, binding, request, target, signer, or
 provider argument: it moves the exact qualified adapter and private binding witness already sealed
 into `CommittedCall` and derives request bytes from the committed intent.
@@ -1001,11 +1057,13 @@ constructs the callback-free canonical `PreparedConclusion`: record proposal,
 preparation/occurrence correlation, the original cumulative input's nominal contract/content
 identity, object closure, capacity discharge, and physical-append owner.
 Runtime combines it with the inert session continuation into affine `PendingConclusion`; there is
-no independently usable session beside it. Store never owns Runtime brand/dispatch state or hot
-accepted evidence. `PendingConclusion` is secret-free, non-Serde, and contains no adapter, raw
-response, invoker, implementation callback, scanner, or means to perform provider/fact/state-
-callback I/O. Runtime's coordinator may use its inner owner only for the required Store
-conclusion-commit and acknowledgement-recovery I/O.
+no independently usable session beside it within that same affine worker owner. Other workers may
+hold separately qualified, potentially stale sessions, but cannot derive authority from this
+pending owner. Store never owns Runtime brand/dispatch state or hot accepted evidence.
+`PendingConclusion` is secret-free, non-Serde, and contains no adapter, raw response, invoker,
+implementation callback, scanner, or means to perform provider/fact/state-callback I/O. Runtime's
+coordinator may use its inner owner only for the required Store conclusion-commit and
+acknowledgement-recovery I/O.
 
 The coordinate-free canonical conclusion excludes predecessor, sequence, record hash, append id,
 publication coordinate, and physical new-object deltas. A physical append binds that same semantic
@@ -1019,7 +1077,6 @@ Runtime's consuming coordinator exposes this generic semantic result after movin
 Committed(active direct successor)
 AlreadyConcludedSame(qualified recorded history)
 NoLongerSelected(qualified latest history)  // Access only
-NoLongerReady(qualified latest history)     // Pure only
 Conflict(qualified latest history, typed conflict)
 AcknowledgementUnknown(PendingConclusion)
 ```
@@ -1034,13 +1091,17 @@ selected `StatePrepared` and `CommittedCall`; Pure qualification matches the rea
 selected predecessor context. Rebinding never widens, refreshes, substitutes, or reinterprets that
 input.
 
-For a stale run head or conclusion-time fact-publication frontier, Runtime consumes the outer owner,
-moves its inner `PreparedConclusion` through Store, and receives a new inner owner or qualified
-history before reconstructing the outer result. Common Store/epoch/tenant/run/Program,
-nonterminality, fact-dependency, and exact-capacity checks must pass. Access additionally requires
-its exact preparation to remain selected and unresolved; Pure requires its exact occurrence to
-remain ready. Only then may Store bind a new physical append. No branch re-executes State logic,
-the adapter, response ingress, interpretation, or a fact scan.
+A same-run head change cannot preserve the same ready/selected conclusion precondition in this
+three-family sequential model. Runtime consumes the outer owner, qualifies the new head, and must
+classify it as the same or conflicting conclusion, another preparation selected, terminality, or
+invalid history; it never rebinds the conclusion across that head. A Pure occurrence lacking its
+conclusion must still be ready. Only the
+independent conclusion-time fact-publication frontier may move while the run occurrence/selection
+remains current. In that case Runtime moves the inner `PreparedConclusion` through Store, verifies
+Store/epoch/tenant/run/Program, fact dependency, exact capacity, and the same Access selection or
+Pure-ready occurrence, then binds a new physical append/fact coordinate after the prior attempt is
+proven absent or definitely precommit. No branch re-executes State logic, the adapter, response
+ingress, interpretation, or a fact scan.
 
 An ambiguous conclusion acknowledgement first resolves its exact physical append identity:
 
@@ -1051,48 +1112,50 @@ An ambiguous conclusion acknowledgement first resolves its exact physical append
   conclusion;
 - replacement selected for Access: `NoLongerSelected`;
 - different durable conclusion: `Conflict`;
-- Pure occurrence no longer ready with no durable conclusion: `NoLongerReady`;
+- Pure occurrence no longer ready with no durable conclusion: invalid history;
 - repeated ambiguity or retryable failure: retain the same `PendingConclusion`; and
 - explicit owner loss: cold history contains either the durable conclusion or the prior reducer
   state--a ready Pure occurrence or the selected Access preparation.
 
-### 6.5 Concurrency linearization
+### 6.5 CAS worker linearization
 
-Before either admission selection or resume qualification, Runtime atomically acquires one private
-execution-ownership guard keyed by the exact Store, writer epoch, tenant, and run. The guard
-registry is owned by the unique Store/Runtime composition coordinator, not by an individual facade
-or assembly. Store open first acquires the single backend/store-identity-wide
-`QualifiedWriterProcessLease`, so a cloned backend cannot create a second live coordinator;
-composition also rejects a second live Runtime assembly over the coordinator. The guard moves
-through the admission append/acknowledgement owner, `RunSession`, selected action, `CommittedCall`,
-and `PendingConclusion`. Every returned live session, suspended owner, or unresolved session still
-carries it. Runtime releases it only for a callback-free result with no live owner
-(terminal/cold parked/conflict/failure) or deliberate owner destruction. A concurrent spawn or
-resume in the same process is `Busy`/already owned and constructs no State or call authority. A
-same `QualifiedWriterProcessLease` prevents another Runtime process under the admitted Store scope
-and epoch; same-epoch takeover may occur only after the prior process is proven fenced or has
-released the lease. It is separate from per-run guards, not a second process lease.
+MFM adds no per-run execution guard, `Busy` lifecycle, backend-wide Runtime-process lease, or
+cross-process takeover protocol. A worker independently qualifies one exact prefix and consumes
+its affine local session into a candidate. Another worker may qualify the same prefix. The Store's
+route-scoped append-id lookup, exact-head compare-and-append, callback-free reducer, and semantic
+disposition are the shared linearization boundary. The writer epoch remains an immutable persisted
+identity and append precondition, not a live mutex.
 
-A replacement becomes framework-live-eligible only after the prior owner returned `Unresolved`, or
-after same-epoch cold recovery has conservatively lost the prior process owner behind that fence.
-Thus one surviving Runtime owns at most one live MFM `CommittedCall` for the run. An external
-operation orphaned by process loss may still continue while absorbing recovery later re-enters;
-the full-horizon absorption and convergent-evidence contract covers that unavoidable overlap.
+At any durable head the reducer exposes at most one actionable occurrence and one selected
+unresolved preparation. Local affinity ensures that one worker owner contains at most one live
+call or pending conclusion, while the direct-new rule ensures that one preparation releases at
+most one framework invocation. It does not claim process-global exclusion. A slow Read or
+absorbing attempt may remain live while another worker commits a permitted replacement; an old
+result is accepted only if its preparation is still selected. `EntryAbsorbing` must cover this
+full overlap horizon. This worker contention is not a Program scheduler, lane, or multi-result
+workflow construct.
 
 The required races linearize as follows:
 
-- hostile Store preparation versus preparation: one direct-new winner may invoke; a loser invokes
-  zero times and can create a later replacement only through guarded reducer recovery rules;
+- concurrent identical admissions: one direct-new genesis wins; a distinct-id `StaleHead` loser
+  qualifies the existing admission and returns recorded history if semantically same or conflict
+  if different; same-id `Found` remains acknowledgement/idempotency recovery and likewise resumes
+  only from qualified history;
+- preparation versus preparation at one head: one direct-new winner may invoke; every loser invokes
+  zero times and may propose a later replacement only after requalifying the reducer-selected head;
 - conclusion versus another conclusion for the same selected preparation: one append wins; the
   other becomes identical or conflict;
 - conclusion versus replacement: a conclusion winner closes the occurrence; a replacement winner
   supersedes the old preparation and makes its result `NoLongerSelected`;
-- conclusion versus unrelated run-head or fact-publication movement: rebind only after proving the
-  same Access selection or Pure-ready occurrence;
+- conclusion versus another same-run append: classify the new head as same/conflicting conclusion,
+  another preparation selected, terminal, or invalid; never rebind across it;
+- conclusion versus independent fact-publication movement: rebind only after proving the same
+  Access selection or Pure-ready occurrence;
 - terminal-producing conclusion versus any stale candidate: the terminal winner commits and the
   stale candidate cannot rebind; and
-- two in-flight same-capability calls on different runs cannot transpose Runtime shells,
-  preparation refs, adapter results, fact continuations, or conclusion owners.
+- in-flight same-capability calls, whether on different runs or different permitted attempts of one
+  run, cannot transpose Runtime shells, preparation refs, adapter results, fact continuations, or
+  conclusion owners.
 
 ## 7. Recovery and entry semantics
 
@@ -1116,7 +1179,8 @@ actions exposed by its capability contract:
 
 1. repeated external entry is actually absorbed;
 2. the adapter transmits or enforces the mechanism;
-3. absorption lasts for the entire recovery horizon, including uncertainty across process loss;
+3. absorption lasts for the entire recovery horizon, including a slow prior attempt overlapping a
+   replacement and uncertainty across process loss;
    and
 4. every accepted result is a function of external post-state rather than whether one exchange was
    first.
@@ -1156,12 +1220,13 @@ updates terminal and optional attention projections. Rollback is all-or-nothing.
 `ActiveQualifiedRun@H` adds the private Store coordinator. `RunSession@H` adds the exact Runtime
 assembly brand and is affine, non-serializable, and non-cloneable.
 
-Purpose readers receive only callback-free evidence. The per-run execution guard rejects a second
-live spawn or resume; the Store-qualified writer-process lease/fence excludes a second process and
-permits same-epoch cold takeover only after its predecessor is fenced. Store exact-head comparison
-still defends against stale/hostile commands. Direct admission and conclusion commits advance the
-retained session without reload. A direct-new preparation commit transfers its successor into
-`CommittedCall` and then `PendingConclusion`; there is no second session.
+Purpose readers receive only callback-free evidence. Store exact-head comparison and reducer
+qualification classify competing workers and stale/hostile
+commands. Direct admission and conclusion commits advance that worker's retained session without
+reload. A direct-new preparation commit transfers its successor into that worker's
+`CommittedCall` and then `PendingConclusion`; that affine owner contains no second local session.
+Other workers may hold independently qualified sessions, but no non-direct-new branch can borrow
+or reconstruct this one's call authority.
 
 The conclusion path performs its one required canonical encoding, while the hot session retains the
 already-qualified typed latest cumulative context and passes that same object into the next
@@ -1177,12 +1242,12 @@ state work do not block the async runtime.
 
 ### 8.3 Demand-time qualification and replay
 
-Ordinary Store open acquires the backend/store-identity-wide `QualifiedWriterProcessLease`, then
-qualifies schema, Store identity/epoch, backend channel and durability, writer role, exact Program
-catalog, and bounded transaction ability. A second open against the same Memory or PostgreSQL
-writer identity fails before producing a coordinator. Store open does not know Runtime assembly or
-enumerate retained run/configuration history. Runtime composition separately validates the exact
-catalog-to-assembly association before any session can exist.
+Ordinary Store open qualifies schema, Store identity/epoch, backend channel and durability, writer
+role, exact Program catalog, and bounded transaction ability. Multiple Store/Runtime workers may
+open against the same admitted writer identity; their mutations share the backend's exact-head and
+append-id linearization. Store open does not know Runtime assembly or enumerate retained run/
+configuration history. Runtime composition separately validates the exact catalog-to-assembly
+association before any session can exist.
 
 A retained run crosses ingress only when resume, read, trace, replay, export, explicit audit, or a
 selected fact dependency consumes it. Malformed dormant history fails that operation without
@@ -1288,11 +1353,14 @@ Portfolio owns a bounded cumulative snapshot context containing its admitted inp
 routing/configuration, current collection position, completed EVM collections, remaining collection
 demand, and final work. A nominal `PortfolioContinuation` owns that complete context and is valid by
 representation: admitted demand equals completed plus the current collection plus the remaining
-collections, with dense ordinal, declaration order, and binding consistency. Portfolio invokes the
-EVM fragment sequentially with that continuation as `K`. EVM returns it unchanged with one
-`EvmBalanceCollectionResult`; a Portfolio-owned Pure resume State validates the continuation,
-appends the result's collection, and advances to the next collection. EVM never interprets
-Portfolio semantics.
+collections, with dense ordinal, declaration order, and binding consistency. Before each child
+call, a Portfolio-owned Pure entry State consumes the current Portfolio context and constructs the
+complete nominal `EvmBalanceContext<PortfolioContinuation>` wrapper, including the opaque
+continuation and EVM-owned source/result metadata. The EVM fragment consumes that exact singular
+entry value; pure expansion does not synthesize or transform it. EVM returns the continuation
+unchanged with one `EvmBalanceCollectionResult`; a Portfolio-owned Pure resume State validates the
+continuation, appends the result's collection, and advances to the next collection. EVM never
+interprets Portfolio semantics.
 
 Pure expansion likewise unrolls one EVM collection fragment and Portfolio resume State per admitted
 collection. The sequential Program contains no runtime collection loop, selector cursor, or dynamic
@@ -1324,6 +1392,15 @@ sequential pipeline carries only the current typed `Value<C>`; Match consumes th
 does not retain an ambient binding/provenance map. Do not replace them with `Collect`, `Gather`,
 workflow `Join`, lanes, barriers, `state_many`, an ambient output map, or a generic cumulative-
 context type.
+
+Delete the old plural admission and child-binding contract in the same Program cut, including
+`OperationBuilder::input`, `AuthoredStructuredProgram::input_roots`,
+`ExpandedStructuredProgram::input_roots`, normalized `input_root_slot_refs`, admission
+`initial_values`, journal/Store `initial_bindings`, plural entry-contract input refs,
+`Value::bind_child`, `ChildInputBinding`, `FragmentInputBinding`, and ordered child/capability/
+policy input-bijection machinery. Fresh Program, entry-point, admission, and `RunAdmitted` forms
+expose exactly one `C0` contract/value and reject the old plural fields and identities without a
+compatibility decoder.
 
 ### 10.2 State and access API
 
@@ -1364,8 +1441,7 @@ remain where they describe real external concepts.
 
 ### 10.3 Store and PostgreSQL
 
-Keep exact-head append atomicity, writer epoch, the exclusive live writer-process lease/fence,
-qualified durability, complete-frame bounds,
+Keep exact-head append atomicity, writer epoch, qualified durability, complete-frame bounds,
 found-attempt ingress, acknowledgement ambiguity, dense fact publication, content addressing, and
 Memory/PostgreSQL conformance.
 
@@ -1390,6 +1466,11 @@ They must describe:
   terminality;
 - State/Match-only sequential control, exact cumulative-context continuity, and one-preparation
   maximum-conclusion capacity;
+- singular domain-planned `C0`, exact one-context child expansion, and rejection of the plural
+  root/binding wire;
+- CAS-linearized same-run worker races with no per-run guard or global Runtime-process lease;
+- mode-neutral terminal root production, with Access output released only after durable qualified
+  conclusion;
 - sequential EVM balance and Portfolio cumulative contexts and their Pure consolidations;
 - callback-free demand qualification, facts, replay, and projections; and
 - PostgreSQL durability and rollback limitations.
@@ -1416,7 +1497,12 @@ Compile-fail and API tests prove:
   Store/reducer/journal authority, ambient output map, or context outside `S::Input`, and ordinary
   domain crates cannot import those owners;
 - the strict final Program declaration algebra contains only State/Match, with authored children
-  expanded away; and
+  expanded away;
+- exactly one domain-planned typed `C0` crosses every authored/expanded/certified entry contract,
+  admission command, and `RunAdmitted`; repeated roots and ordered child-input bindings are
+  unrepresentable, and negative tests reject `OperationBuilder::input`,
+  `AuthoredStructuredProgram::input_roots`, `ExpandedStructuredProgram::input_roots`,
+  `initial_bindings`, and the other deleted plural carriers; and
 - old five-family and FanOut/lane/join/Collect types, packages, feature bridges, aliases, and
   decoder surfaces are absent.
 
@@ -1425,21 +1511,29 @@ Compile-fail and API tests prove:
 Golden and hostile tests cover:
 
 - exactly the three record families and three logical keys; old tags and fields reject;
-- separate admission, one-record batches, zero-state terminality, and no `RunClosed`;
+- separate admission, one-record batches, zero-state terminality as the exact admitted `C0`
+  contract/content identity, rejection of any different value/contract or extra root object, and no
+  `RunClosed`;
+- same-id admission `Found` recovery versus distinct-id genesis `StaleHead` races, whose qualified
+  existing admission classifies semantic same/different/invalid without callbacks, including
+  unknown -> proven-absent resubmission -> `StaleHead`;
 - every Program/input/intent/binding/replacement/evidence/outcome/fact/object/capacity mutation;
 - linear replacement ordinals, exact parent selection, no branch/cycle/gap, and mode-specific
   replacement rules;
 - one conclusion per occurrence across preparations, exact duplicate idempotency,
-  Access `NoLongerSelected`, Pure `NoLongerReady`, conflicts, and invalid
-  correlations;
+  Access `NoLongerSelected`, Pure same/conflict classification, and invalid correlations;
 - every valid prefix exposes at most one actionable occurrence and rejects preparation of a later
   occurrence while the current one is ready or prepared;
 - exact predecessor-to-successor context continuity, including rejection of stale, truncated,
   reordered, foreign, wrong-contract, or extra cumulative values;
 - Match exhaustiveness, selected-arm determinism, exact continuation-context convergence, and zero
   callbacks for unselected arms;
-- zero-state admission is terminal, a nonzero final Pure consolidation produces the root result,
-  and certification rejects an Access-emitted root result or unfinished cumulative-context root;
+- zero-state admission is terminal; nonzero terminal Pure, terminal Read, and terminal Effect
+  States each produce an exact declared root result; a mismatched root contract or remaining
+  continuation rejects; terminal Access acknowledgement-unknown -> found-same returns the recorded
+  root without re-entry; and no Access result is public before its durable qualified conclusion;
+- zero-state means an empty expanded control form with exact `C0` identity; Match-only and selected
+  empty-arm terminal paths reject rather than synthesizing a root without `StateConcluded`;
 - one selected-preparation reservation, cumulative-context/conclusion/run exact bounds, and each
   independent bound-plus-one; and
 - rejection of every state record after terminality, including hostile retained suffixes.
@@ -1460,15 +1554,16 @@ Tests prove:
   and cold-history branch has execute and provider counts zero;
 - ambiguity resolution covers found-same/different/invalid, proven-absent direct-new,
   stale/terminal/other-preparation-selected, repeated unknown, explicit drop, and cold restart;
-- hostile/adversarial same-head preparation commands yield one committed-call owner;
-- concurrent spawn/spawn, spawn/resume, and resume/resume attempts yield one guarded owner and
-  `Busy` losers with zero callbacks while the winner is suspended in admission acknowledgement,
-  `RunSession`, `CommittedCall`, and `PendingConclusion`; two facades/assembly attempts over one
-  Store coordinator cannot bypass the registry, a second open of the same Memory/PostgreSQL writer
-  identity fails before coordinator authority, and a different run still advances;
-- writer-fence loss is injected after preparation commit, during call construction, immediately
-  before adapter entry, and while append is in flight; the old owner creates no new provider work
-  after loss and same-epoch takeover waits for fencing;
+- hostile/adversarial same-head preparation commands yield one direct-new committed-call owner for
+  that head, while every losing command has zero execute/provider entry;
+- concurrent spawn/spawn, spawn/resume, and resume/resume workers may qualify and speculatively
+  evaluate/prepare the same sequential occurrence, but identical admission and preparation races
+  produce one direct-new admission append and, for a preparation race, one call authority; every
+  non-new preparation branch has zero execute/provider entry, and stale workers resume or
+  reprepare only from newly qualified history;
+- Memory and PostgreSQL allow multiple qualified workers/processes for one Store scope/epoch and
+  produce identical CAS dispositions; no `Busy`, execution-guard, exclusive-open, or live-writer-
+  process-lease API exists;
 - failure immediately follows its declared route and every later normal State has zero evaluation,
   preparation, execute, and provider counts;
 - affine execution owners, accepted wrappers, fact continuations, and pending conclusions cannot be
@@ -1495,12 +1590,15 @@ The closed result matrix covers:
   context recovery;
 - raw responses, provider diagnostics, and wrong request/route/target/signer/binding never reach
   state interpretation or persistence; and
-- accepted evidence, interpretation, conclusion canonicalization, and public result each occur at
-  most once.
+- each direct-new call owner performs accepted-evidence ingress and State interpretation at most
+  once; each `PendingConclusion` canonicalizes once; conclusion recovery repeats neither; and each
+  consuming Runtime owner returns at most one public result. Competing workers may independently
+  perform their own speculative Pure evaluation or directly authorized Access path.
 
 Conclusion recovery tests cover direct commit, identical existing conclusion, different conclusion,
-late result, replacement race, stale-head rebind, fact-publication movement, acknowledgement found/
-invalid-or-over-limit/absent/alternate-physical-same/repeated-unknown, explicit owner loss,
+late result, replacement race, same-run-head rebind rejection, fact-publication rebind,
+acknowledgement found/invalid-or-over-limit/absent/alternate-physical-same/repeated-unknown,
+explicit owner loss,
 same-type pending-conclusion transposition, and process restart. Provider invocation, ingress, and
 interpretation counters remain unchanged throughout recovery.
 
@@ -1519,8 +1617,8 @@ Tests cover:
 - Read bounded replacement and exact canonical intent preservation;
 - `EntryOnce` parking with no second preparation;
 - `EntryAbsorbing` exact intent/binding/domain/identity/input preservation, total-entry budget, an
-  old external operation continuing after owner/process loss while cold recovery re-enters, full
-  retention horizon, and convergent post-state evidence;
+  old slow operation or pending result overlapping a permitted replacement, including after
+  owner/process loss, full retention horizon, and convergent post-state evidence;
 - direct-new-only, one-use, non-transposable prior-fact continuation; fixed preparation selection
   frontier; dense negative completeness; and atomic conclusion/fact publication;
 - explicit upstream Read/cumulative-input modeling for provider-affecting facts and rejection of any
@@ -1548,9 +1646,9 @@ Tests cover:
 
 Memory/PostgreSQL conformance and PostgreSQL-specific tests cover exact-head contention, transaction
 rollback at every conclusion/publication statement, acknowledgement ambiguity, primary crash/
-restart durability before provider entry, weak durability rejection, writer-epoch and live-writer-
-lease loss, same-epoch two-process fencing/takeover, schema and SQL inventory, tenant-first lookup,
-hostile rows, derived terminal projection, and old-schema rejection.
+restart durability before provider entry, weak durability rejection, writer-epoch mismatch,
+same-epoch multi-process CAS races, schema and SQL inventory, tenant-first lookup, hostile rows,
+derived terminal projection, and old-schema rejection.
 
 Application/transport tests retain fixed-tenant isolation, credential/policy deletion, strict
 portable closure, EVM identity, redacted errors, and non-interactive behavior. EVM/Portfolio tests
@@ -1574,7 +1672,8 @@ API pair, decoder, reducer, or fallback survives a cutover commit.
 
    Record all U1-U11 rulings, including the exact cumulative-context table, explicit failure-
    context routes, EVM/Portfolio typed continuation, numeric bounds, evidence/absorption audit,
-   per-run execution guard, binding disposition, deployment activation, and compile/benchmark
+   singular `C0`/child handoff, CAS worker-race contract, binding disposition, deployment
+   activation, and compile/benchmark
    spike results. Inventory and delete the rejected FanOut/Collect design branches from both
    documents.
 
@@ -1588,9 +1687,12 @@ API pair, decoder, reducer, or fallback survives a cutover commit.
 
    In one compiling cut, land opaque Program/value/catalog/compiler authority, State/Match-only
    Program documents, cumulative context contracts, callback-free State declarations, and the
-   minimal sequential cursor in every schema-coupled consumer. Delete FanOut/lanes/joins from
-   Program/spec/certification plus directly coupled Journal origins, Store/Runtime walkers,
-   EVM/Portfolio authoring, schemas, fixtures, and UI tests. Authored child fragments expand away.
+   minimal sequential cursor in every schema-coupled consumer. Cut singular `C0` through Program,
+   entry contracts, App admission commands, the current coherent `RunAdmitted`, and Store
+   qualification/compiler/reducer in this same commit; retain no length-one plural container.
+   Delete FanOut/lanes/joins from Program/spec/certification plus directly coupled Journal origins,
+   Store/Runtime walkers, EVM/Portfolio authoring, schemas, fixtures, and UI tests. Authored child
+   fragments expand away.
    The Commit-0 U5/U8/U11 rulings fix immutable descriptors and final cumulative
    Input/Output/Failure value identities plus callback implementations under the retained access
    ABI. Retain no compatibility Program variant or cursor. Commit 4 replaces any intermediate
@@ -1657,9 +1759,9 @@ The cutover is complete only when:
   capability evidence, with no raw diagnostic persistence;
 - definite results conclude, unresolved operational outcomes remain ephemeral, and generic errors
   grant no `EntryOnce` retry authority;
-- one secret-free `PendingConclusion` owns all conclusion retries, rebases, fact-frontier movement,
-  and acknowledgement ambiguity without provider/fact/state-callback I/O or repeated
-  interpretation; only conclusion Store I/O remains;
+- each result's one secret-free `PendingConclusion` owns its conclusion retries, physical-id
+  recovery, fact-frontier-only rebinding, and acknowledgement ambiguity without provider/fact/
+  state-callback I/O or repeated interpretation; only conclusion Store I/O remains;
 - loss of an Access owner before conclusion durability yields only `StatePrepared`; loss of a Pure
   owner yields the prior ready/admitted prefix; no successful result escapes before conclusion
   durability;
@@ -1667,6 +1769,12 @@ The cutover is complete only when:
   distinguishes identical, superseded, conflicting, and invalid results;
 - the final Program algebra is exactly State/Match, every valid prefix has at most one actionable
   occurrence, and no FanOut/Collect/parallel workflow identity or compatibility decoder survives;
+- every operation admits exactly one domain-planned typed value as `C0`; Program, entry,
+  admission, journal, and child-expansion contracts contain no root list, initial-binding list, or
+  ordered input bijection;
+- only an empty expanded control form may terminate from admission by returning exact `C0`;
+  Match-only and selected empty-arm terminal paths reject, while every nonempty successful path
+  ends in a terminal State;
 - each successful nonterminal conclusion commits the complete successor cumulative context; a
   direct next State receives that exact value, while Match qualifies the exact declared variant
   payload as its selected arm's complete input;
@@ -1682,15 +1790,14 @@ The cutover is complete only when:
 - hot advancement canonically encodes the conclusion once but passes the already-typed latest
   context without a serialization/redecode round trip; cold resume recovers the identical next
   context callback-free, and replay invokes no callbacks;
-- admission and resume share one per-run guard, permitting at most one framework-owned live
-  session/call/pending conclusion; unrelated runs remain concurrent and no second session exists
-  beside a live call or pending conclusion;
+- competing workers linearize only through qualified exact-head Store operations: the durable head
+  exposes one action/selection, one preparation releases at most one call, one affine worker owner
+  contains at most one call/pending conclusion, and permitted Read/absorbing attempts may overlap;
 - Store readiness opens no dormant history, while explicit consumers reject malformed selected
   history before returning authority or output;
-- PostgreSQL qualifies the admitted durability profile, writer epoch, and exclusive live writer-
-  process lease/fence before any direct-new call can exist; normal same-epoch process takeover
-  first fences the old process, while legitimate restore rotates identity/epoch and does not append
-  to the old run;
+- PostgreSQL qualifies the admitted durability profile and writer epoch before any direct-new call
+  can exist; multiple same-epoch workers use CAS without a process lease, while legitimate restore
+  rotates identity/epoch and does not append to the old run;
 - fixed-tenant App, credential/policy deletion, strict portable export, EVM identity, configuration,
   redaction, and secret contracts remain satisfied;
 - sequential EVM sources and Portfolio collections preserve their public results, ordering,
