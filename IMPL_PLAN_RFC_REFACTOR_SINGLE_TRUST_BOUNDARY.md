@@ -124,13 +124,20 @@ admission:
   typed admitted input -> RunAdmitted append -> direct session or terminal zero-state result
 
 Pure:
-  selected occurrence -> evaluate once -> Pure-scoped PendingConclusion
+  selected occurrence -> Runtime invokes StateImplementation.evaluate(input)
+  -> ProposedStateOutcome -> Store Pure-scoped PreparedConclusion
+  -> Runtime Pure-scoped PendingConclusion
   -> exact-head conclusion commit -> session/terminal
 
 Read / Effect:
-  selected occurrence -> canonical intent -> PreparedExecution
+  selected occurrence -> Runtime invokes StateImplementation.prepare(input) -> canonical intent
+  -> PreparedExecution
   -> direct-new StatePrepared commit -> CommittedCall
-  -> qualified adapter + state interpretation -> Access-scoped PendingConclusion
+  -> Runtime invokes StateImplementation.execute(CommittedCall)
+       -> bound adapter entry and qualified ingress
+       -> state evidence interpretation
+       -> conclusive AccessHandlerResolution
+  -> Store Access-scoped PreparedConclusion -> Runtime Access-scoped PendingConclusion
   -> exact-head selected conclusion commit -> session/terminal
 ```
 
