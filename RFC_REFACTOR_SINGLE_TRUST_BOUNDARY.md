@@ -49,21 +49,29 @@ The two execution paths are:
 ```text
 Pure:
   selected occurrence
-    -> deterministic implementation
-    -> secret-free Pure PendingConclusion
+    -> Runtime invokes StateImplementation.evaluate(input)
+         -> ProposedStateOutcome
+    -> Store qualifies the proposal into a Pure-scoped PreparedConclusion
+    -> Runtime combines it with the inert session continuation
+         -> secret-free Pure PendingConclusion
     -> Store commits StateConcluded::Pure
     -> reducer advances
 
 Read / Effect:
   selected occurrence
-    -> StateImplementation.prepare(input)
+    -> Runtime invokes StateImplementation.prepare(input)
+         -> canonical intent
     -> PreparedExecution { StatePrepared append, inert continuation }
     -> consuming Store commit
     -> direct-new branch only constructs CommittedCall
-    -> StateImplementation.execute(CommittedCall)
-    -> qualified adapter ingress
-    -> state interprets accepted capability evidence
-    -> secret-free Access PendingConclusion
+    -> Runtime invokes StateImplementation.execute(CommittedCall)
+         -> state orchestrates bound adapter entry
+         -> qualified adapter performs response ingress
+         -> state interprets accepted capability evidence
+         -> conclusive AccessHandlerResolution
+    -> Store qualifies the resolution into an Access-scoped PreparedConclusion
+    -> Runtime combines it with the inert session continuation
+         -> secret-free Access PendingConclusion
     -> Store commits StateConcluded::Access
     -> reducer advances
 ```
