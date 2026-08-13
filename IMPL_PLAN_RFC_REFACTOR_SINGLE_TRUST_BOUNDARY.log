@@ -83,3 +83,51 @@ conclusion durability, and the two fixed entry points. The fixed-tenant App faca
 callback-free structural drive/read/replay and leaves live State/adapter registration to the
 trusted Runtime embedding; it never exposes a successful output before a matching durable
 conclusion. No external credential or tenant override is admitted by the public facades.
+
+2026-08-12 — architect audit correction (no code implementation)
+
+The prior completion statement is not supported by the committed tree. The following required
+surfaces remain unimplemented and block completion:
+
+- `mfm-runtime` has typed low-level owners and `RunSession<T>`, but no public `Runtime`,
+  `AdmissionInput`, `ResumeInput`, `RuntimeStep`, exhaustive admission/resume lifecycle, or
+  owner-fate coordinator. The fixed-tenant Application therefore performs callback-free reduction
+  only and cannot drive a live State through the required lifecycle.
+- `mfm-store` still exposes the memory-only `RunStore` semantic/mechanical object. There is no
+  branded `StructuredStore::open`, split history/configuration/audit ports, `ActiveQualifiedRun`,
+  or composite backend SPI. PostgreSQL independently duplicates semantic append/load behavior
+  instead of implementing the Store mechanical boundary.
+- The repository has no checked-in U3/U5 capability-binding inventory, U8/U11 typed ABI proof,
+  or U1/U7/U9 capacity/reservation artifact. The log's prose claim is not an artifact or a
+  machine-checked proof.
+- There is no external API/trybuild exclusion suite, common Memory/PostgreSQL backend conformance
+  harness, test-only owner/callback counters, finite state-model harness, or managed PostgreSQL
+  crash/CAS verification task. The existing `test-support`, `backend-conformance`, and
+  `parity-tests` features are empty placeholders.
+
+Architectural ruling: complete the cutover with one branded composite Store/backend boundary and
+one Runtime owner-fate coordinator. Keep the RFC/plan/manifest immutable. Replace the current
+public low-level orchestration helpers rather than layering a compatibility facade; make the
+application and transports consume the new owner-carrying lifecycle, and land the three preflight
+artifacts plus the conformance/model harness before final verification. The detailed target API,
+deletion scope, tests, and commit order are supplied by the architect audit in the continuation
+record.
+
+Continuation audit (2026-08-12): the prior completion claim was too strong. Current evidence
+confirms the three-family journal, strict Program/Store validation, direct-new call gates, typed
+Runtime owners, domain decoder hardening, PostgreSQL mechanical checks, and the final Nixfied gate,
+but it does not yet prove every plan requirement. In particular, the checked-in U3/U5 inventory,
+U8/U11 compile-spike/context table, and U1/U7/U9 measured capacity artifact are absent; Runtime
+does not yet expose the plan's high-level admission/resume/drive owner-fate coordinator; Store has
+no composite mechanical backend SPI or opened branded ports; PostgreSQL lacks executable crash/
+multi-process conformance tests; and the requested counter/model/type-boundary matrices are only
+partially represented by unit tests. These are active implementation items, not accepted limits.
+
+The three preflight artifacts are now checked in:
+
+- `docs/preflight/capability-binding-inventory.md` records the U3/U5 capability, factual-trust,
+  absorption, and immutable descriptor inventory.
+- `docs/preflight/cumulative-context-abi.md` records the two complete C0-to-result tables and
+  the current U8/U11 typed-handoff evidence.
+- `docs/preflight/capacity-envelope.md` records the fixed bounds, reservation law, fixtures, and
+  the still-pending hot/cold high-water measurement harness.
