@@ -37,7 +37,7 @@ use mfm_store::{
     AppendDisposition, RunAction, StoreError, StoreWorkLimits, StructuredStore,
     StructuredStoreIdentity,
 };
-use mfm_values::MfmValue;
+use mfm_values::{string_contains_secret_marker, MfmValue};
 use serde::{Deserialize, Serialize};
 
 /// Maximum canonical admission body accepted by every transport.
@@ -1401,19 +1401,7 @@ fn contains_float(value: &serde_json::Value) -> bool {
 
 fn contains_secret_marker(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => {
-            let lower = text.to_ascii_lowercase();
-            [
-                "password",
-                "mnemonic",
-                "private_key",
-                "privatekey",
-                "secret",
-                "access_token",
-            ]
-            .iter()
-            .any(|marker| lower.contains(marker))
-        }
+        serde_json::Value::String(text) => string_contains_secret_marker(text),
         serde_json::Value::Array(values) => values.iter().any(contains_secret_marker),
         serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
             contains_secret_marker(&serde_json::Value::String(key.clone()))

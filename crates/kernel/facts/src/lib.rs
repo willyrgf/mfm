@@ -4,6 +4,7 @@
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
 use mfm_program_derive::MfmValue;
+use mfm_values::string_contains_secret_marker;
 use serde::{Deserialize, Serialize};
 
 /// Maximum producer/source identities in one fact request.
@@ -14,19 +15,7 @@ pub const MAX_SELECTED_FACTS: usize = 256;
 pub const MAX_FACT_VALUE_BYTES: usize = 4 * 1024 * 1024;
 
 fn contains_secret_marker(input: &str) -> bool {
-    let lower = input.to_ascii_lowercase();
-    [
-        "password",
-        "passphrase",
-        "mnemonic",
-        "private_key",
-        "privatekey",
-        "secret",
-        "access_token",
-        "api_key",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    string_contains_secret_marker(input)
 }
 
 /// Redaction-safe fact contract error.

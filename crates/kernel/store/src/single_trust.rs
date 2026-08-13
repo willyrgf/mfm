@@ -19,7 +19,7 @@ use mfm_journal::single_trust::{
     PreparationRef, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
 };
 use mfm_program::single_trust::{Declaration, ExecutionMode, ProgramDocument, StateDeclaration};
-use mfm_values::MfmValue;
+use mfm_values::{string_contains_secret_marker, MfmValue};
 
 /// Process-local identity of one opened semantic Store.
 ///
@@ -2669,21 +2669,7 @@ fn configuration_content_ref(bytes: &[u8]) -> Result<ContentRef> {
 
 fn contains_secret_marker(value: &serde_json::Value) -> bool {
     match value {
-        serde_json::Value::String(text) => {
-            let text = text.to_ascii_lowercase();
-            [
-                "password",
-                "passphrase",
-                "mnemonic",
-                "private_key",
-                "privatekey",
-                "secret",
-                "access_token",
-                "api_key",
-            ]
-            .iter()
-            .any(|marker| text.contains(marker))
-        }
+        serde_json::Value::String(text) => string_contains_secret_marker(text),
         serde_json::Value::Array(values) => values.iter().any(contains_secret_marker),
         serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
             contains_secret_marker(&serde_json::Value::String(key.clone()))
