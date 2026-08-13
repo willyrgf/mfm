@@ -10,7 +10,9 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mfm_canonical::raw_content_digest;
-use mfm_facts::{FactCompleteness, FactSelection, FactSelectionFrontier, FactSelectionRequest};
+use mfm_facts::{
+    FactCompleteness, FactProposalSet, FactSelection, FactSelectionFrontier, FactSelectionRequest,
+};
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, RunId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
@@ -37,6 +39,9 @@ pub enum BackendError {
     /// The physical append or configuration identity conflicts.
     #[error("backend append conflicts")]
     Conflict,
+    /// The tenant fact publication head changed while this append was prepared.
+    #[error("backend fact frontier changed")]
+    FactFrontierChanged,
     /// The expected physical head is no longer current.
     #[error("backend head is stale")]
     StaleHead,
@@ -307,6 +312,7 @@ pub struct BackendAppendCommand<'a> {
     previous_head_digest: Option<&'a ContentDigest>,
     admission: bool,
     fact_publication: Option<&'a RawFactPublication>,
+    fact_frontier: Option<u64>,
 }
 
 impl<'a> BackendAppendCommand<'a> {
@@ -335,6 +341,7 @@ impl<'a> BackendAppendCommand<'a> {
             previous_head_digest,
             admission,
             fact_publication,
+            fact_frontier: None,
         }
     }
 
@@ -387,6 +394,17 @@ impl<'a> BackendAppendCommand<'a> {
     pub const fn fact_publication(&self) -> Option<&RawFactPublication> {
         self.fact_publication
     }
+
+    /// Returns the preparation-time fact frontier precondition, if any.
+    pub const fn fact_frontier(&self) -> Option<u64> {
+        self.fact_frontier
+    }
+
+    /// Binds a preparation-time fact frontier to this mechanical command.
+    pub(crate) fn with_fact_frontier(mut self, fact_frontier: Option<u64>) -> Self {
+        self.fact_frontier = fact_frontier;
+        self
+    }
 }
 
 /// Physical append result with no semantic payload echo.
@@ -428,7 +446,12 @@ pub enum BackendConfigurationOutcome {
 #[derive(Debug)]
 pub enum ConclusionCommitOutcome {
     /// The conclusion append has a known mechanical disposition.
-    Disposition(AppendDisposition),
+    Disposition {
+        /// The physical append disposition.
+        disposition: AppendDisposition,
+        /// The exact frame after Store bound any fact publication coordinate.
+        frame: mfm_journal::single_trust::RunFrame,
+    },
     /// The transaction outcome is unknown; the same semantic owner must be resolved explicitly.
     AcknowledgementUnknown(crate::single_trust::PreparedConclusion),
     /// A known Store failure occurred before an append could be accepted; the exact owner remains
@@ -569,7 +592,7 @@ pub struct RawFactPublication {
     publication_sequence: u64,
     run_id: RunId,
     run_sequence: u64,
-    selection_ref: ContentRef,
+    proposal_set_ref: ContentRef,
 }
 
 impl RawFactPublication {
@@ -578,7 +601,7 @@ impl RawFactPublication {
         publication_sequence: u64,
         run_id: RunId,
         run_sequence: u64,
-        selection_ref: ContentRef,
+        proposal_set_ref: ContentRef,
     ) -> BackendResult<Self> {
         if publication_sequence == 0
             || publication_sequence as usize > mfm_journal::single_trust::MAX_RUN_FRAMES
@@ -591,7 +614,7 @@ impl RawFactPublication {
             publication_sequence,
             run_id,
             run_sequence,
-            selection_ref,
+            proposal_set_ref,
         })
     }
 
@@ -607,9 +630,9 @@ impl RawFactPublication {
     pub const fn run_sequence(&self) -> u64 {
         self.run_sequence
     }
-    /// Returns the selected response identity.
-    pub const fn selection_ref(&self) -> &ContentRef {
-        &self.selection_ref
+    /// Returns the published proposal-set identity.
+    pub const fn proposal_set_ref(&self) -> &ContentRef {
+        &self.proposal_set_ref
     }
 }
 
@@ -830,8 +853,14 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
             }
             if let Some(publication) = publication.as_ref() {
                 if publication.publication_sequence() != fact_head + 1 {
-                    return Err(BackendError::Conflict);
+                    return Err(BackendError::FactFrontierChanged);
                 }
+            }
+            if command
+                .fact_frontier()
+                .is_some_and(|frontier| frontier != fact_head)
+            {
+                return Err(BackendError::FactFrontierChanged);
             }
             let raw = RawFrameBytes::new(
                 command.expected_sequence(),
@@ -1286,19 +1315,36 @@ impl OpenedStructuredStore {
         let mut selected = BTreeMap::new();
         for publication in snapshot.publications().iter().rev() {
             let producer = self.load(publication.run_id()).await?;
-            let object = producer
+            let frame = producer
                 .frames()
-                .iter()
-                .flat_map(|frame| frame.objects())
-                .find(|object| object.content_ref() == publication.selection_ref())
+                .get(
+                    usize::try_from(publication.run_sequence().saturating_sub(1))
+                        .map_err(|_| StoreError::InvalidHistory)?,
+                )
                 .ok_or(StoreError::InvalidHistory)?;
-            let selection: FactSelection = serde_json::from_str(object.canonical_json())
+            let RunRecord::StateConcluded(conclusion) = frame.record() else {
+                return Err(StoreError::InvalidHistory);
+            };
+            let Some(recorded_publication) = conclusion.fact_publication() else {
+                return Err(StoreError::InvalidHistory);
+            };
+            if recorded_publication.publication_sequence() != publication.publication_sequence()
+                || recorded_publication.proposal_set_ref().value_ref()
+                    != publication.proposal_set_ref()
+            {
+                return Err(StoreError::InvalidHistory);
+            }
+            let object = frame
+                .objects()
+                .iter()
+                .find(|object| object.content_ref() == publication.proposal_set_ref())
+                .ok_or(StoreError::InvalidHistory)?;
+            let proposals: FactProposalSet = serde_json::from_str(object.canonical_json())
                 .map_err(|_| StoreError::InvalidHistory)?;
-            selection
-                .frontier
+            proposals
                 .validate()
                 .map_err(|_| StoreError::InvalidHistory)?;
-            for fact in selection.facts {
+            for fact in proposals.facts {
                 if request.source_refs.contains(&fact.source_ref)
                     && fact.subject_ref == request.subject_ref
                 {
@@ -1317,7 +1363,7 @@ impl OpenedStructuredStore {
         let frontier = FactSelectionFrontier::new(
             fact_stream_ref(self.identity().tenant())?,
             snapshot.head_sequence(),
-            head.selection_ref().clone(),
+            head.proposal_set_ref().clone(),
         )
         .map_err(|_| StoreError::InvalidRecord)?;
         let selection = FactSelection::new(
@@ -1439,7 +1485,7 @@ impl OpenedStructuredStore {
     /// Commits one conclusion owner through this exact opened Store.
     pub async fn commit_conclusion(
         &self,
-        owner: crate::single_trust::PreparedConclusion,
+        mut owner: crate::single_trust::PreparedConclusion,
     ) -> Result<ConclusionCommitOutcome> {
         if !owner.belongs_to(self.identity(), &self.inner.brand) {
             return Ok(ConclusionCommitOutcome::Rejected {
@@ -1447,15 +1493,83 @@ impl OpenedStructuredStore {
                 error: StoreError::Identity,
             });
         }
+        if let Some(proposals_ref) = owner.frame().record().fact_proposals() {
+            let object = match owner
+                .frame()
+                .objects()
+                .iter()
+                .find(|object| object.content_ref() == proposals_ref.value_ref())
+            {
+                Some(object) => object,
+                None => {
+                    return Ok(ConclusionCommitOutcome::Rejected {
+                        owner,
+                        error: StoreError::InvalidRecord,
+                    })
+                }
+            };
+            let proposals: mfm_facts::FactProposalSet =
+                match serde_json::from_str(object.canonical_json()) {
+                    Ok(proposals) => proposals,
+                    Err(_) => {
+                        return Ok(ConclusionCommitOutcome::Rejected {
+                            owner,
+                            error: StoreError::InvalidRecord,
+                        })
+                    }
+                };
+            if proposals.validate().is_err() {
+                return Ok(ConclusionCommitOutcome::Rejected {
+                    owner,
+                    error: StoreError::InvalidRecord,
+                });
+            }
+            if !proposals.is_empty() && owner.frame().record().fact_publication().is_none() {
+                let snapshot = match self.inner.backend.load_facts().await {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Ok(ConclusionCommitOutcome::Rejected {
+                            owner,
+                            error: map_backend_error(error),
+                        })
+                    }
+                };
+                let sequence = match snapshot.head_sequence().checked_add(1) {
+                    Some(sequence) => sequence,
+                    None => {
+                        return Ok(ConclusionCommitOutcome::Rejected {
+                            owner,
+                            error: StoreError::Capacity,
+                        })
+                    }
+                };
+                if owner.bind_fact_publication(sequence).is_err() {
+                    return Ok(ConclusionCommitOutcome::Rejected {
+                        owner,
+                        error: StoreError::InvalidRecord,
+                    });
+                }
+            }
+        }
         let frame = owner.frame().clone();
         let disposition = match self.history_port().append_frame(frame).await {
             Ok(disposition) => disposition,
+            Err(StoreError::FactFrontierChanged) => {
+                owner.clear_fact_publication()?;
+                return Ok(ConclusionCommitOutcome::Rejected {
+                    owner,
+                    error: StoreError::FactFrontierChanged,
+                });
+            }
             Err(error) => return Ok(ConclusionCommitOutcome::Rejected { owner, error }),
         };
         if matches!(disposition, AppendDisposition::AcknowledgementUnknown) {
             return Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner));
         }
-        Ok(ConclusionCommitOutcome::Disposition(disposition))
+        Ok(ConclusionCommitOutcome::Disposition {
+            disposition,
+            frame: owner.frame().clone(),
+        })
     }
 
     /// Reduces one qualified prefix without exposing a history handle to State callbacks.
@@ -1768,11 +1882,12 @@ impl QualifiedHistoryPort {
                     publication.publication_sequence(),
                     frame.run_id().clone(),
                     frame.expected_sequence(),
-                    publication.selection().value_ref().clone(),
+                    publication.proposal_set_ref().value_ref().clone(),
                 )
             })
             .transpose()
             .map_err(map_backend_error)?;
+        let fact_frontier = preparation_fact_frontier(&frame)?;
         let command = BackendAppendCommand::new(
             &self.inner.identity,
             frame.run_id(),
@@ -1784,7 +1899,8 @@ impl QualifiedHistoryPort {
             previous_digest,
             frame.record().is_admission(),
             fact_publication.as_ref(),
-        );
+        )
+        .with_fact_frontier(fact_frontier);
         let result = match self.inner.backend.compare_and_append(&command).await {
             Ok(result) => result,
             Err(BackendError::AcknowledgementUnknown) => {
@@ -2091,10 +2207,32 @@ fn decode_raw_frames(
     Ok(frames)
 }
 
+fn preparation_fact_frontier(frame: &mfm_journal::single_trust::RunFrame) -> Result<Option<u64>> {
+    let RunRecord::StatePrepared(prepared) = frame.record() else {
+        return Ok(None);
+    };
+    let Some(selection_ref) = prepared.fact_selection() else {
+        return Ok(None);
+    };
+    let object = frame
+        .objects()
+        .iter()
+        .find(|object| object.content_ref() == selection_ref.value_ref())
+        .ok_or(StoreError::InvalidRecord)?;
+    let selection: FactSelection =
+        serde_json::from_str(object.canonical_json()).map_err(|_| StoreError::InvalidRecord)?;
+    selection
+        .frontier
+        .validate()
+        .map_err(|_| StoreError::InvalidRecord)?;
+    Ok(Some(selection.frontier.through_sequence))
+}
+
 fn map_backend_error(error: BackendError) -> StoreError {
     match error {
         BackendError::Identity => StoreError::Identity,
         BackendError::Conflict => StoreError::Conflict,
+        BackendError::FactFrontierChanged => StoreError::FactFrontierChanged,
         BackendError::StaleHead => StoreError::NotActionable,
         BackendError::Capacity => StoreError::Capacity,
         BackendError::AcknowledgementUnknown
@@ -2105,6 +2243,8 @@ fn map_backend_error(error: BackendError) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use super::*;
     use crate::single_trust::ConfigurationAppendDisposition;
     use mfm_canonical::raw_content_digest;
@@ -2163,6 +2303,179 @@ mod tests {
             .expect("object")],
         )
         .expect("frame")
+    }
+
+    fn fact_source(seed: u8) -> ContentRef {
+        let schema = SchemaId::new(
+            "mfm.test.fact-source",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([seed; 32]),
+        )
+        .expect("source schema");
+        ContentRef::new(schema, raw_content_digest(&[seed])).expect("source")
+    }
+
+    fn sourced_admission_frame(
+        identity: &StructuredStoreIdentity,
+        source: ContentRef,
+    ) -> mfm_journal::single_trust::RunFrame {
+        let base = admission_frame(identity);
+        let RunRecord::RunAdmitted(admitted) = base.record() else {
+            panic!("expected admission")
+        };
+        let admission = mfm_journal::single_trust::RunAdmitted::new(
+            identity.scope().clone(),
+            identity.epoch(),
+            base.run_id().clone(),
+            identity.tenant().clone(),
+            admitted.entry_point_id().clone(),
+            admitted.program_ref().clone(),
+            admitted.admitted_context().clone(),
+            admitted.configuration_ref().clone(),
+            vec![source],
+        )
+        .expect("sourced admission");
+        mfm_journal::single_trust::RunFrame::new(
+            base.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            1,
+            AppendRequestId::new("backend-fact-admission-0123456789").expect("request"),
+            RunRecord::RunAdmitted(admission),
+            base.objects().to_vec(),
+        )
+        .expect("sourced frame")
+    }
+
+    fn proposal(seed: u8) -> (ValueRef, mfm_journal::single_trust::ImmutableObject) {
+        let source = fact_source(seed);
+        let subject = fact_source(seed.saturating_add(1));
+        let canonical_value = format!(r#"{{"value":{seed}}}"#);
+        let value_ref =
+            mfm_facts::content_ref_for_value(canonical_value.as_bytes()).expect("fact value ref");
+        let fact = mfm_facts::FactValue::new(
+            source,
+            subject,
+            mfm_ids::StableId::new(format!("mfm.test.fact-{seed}")).expect("fact id"),
+            value_ref,
+            canonical_value,
+        )
+        .expect("fact");
+        let proposals = mfm_facts::FactProposalSet::new(vec![fact]).expect("proposals");
+        let canonical =
+            mfm_journal::single_trust::canonical_json(&proposals).expect("proposal canonical");
+        let proposal_ref = ContentRef::new(
+            mfm_facts::FactProposalSet::schema_id().expect("proposal schema"),
+            raw_content_digest(canonical.as_bytes()),
+        )
+        .expect("proposal ref");
+        let object = mfm_journal::single_trust::ImmutableObject::new(
+            mfm_ids::StableId::new("mfm.value").expect("object type"),
+            proposal_ref.clone(),
+            canonical.as_str().to_owned(),
+        )
+        .expect("proposal object");
+        (ValueRef::new(proposal_ref.clone(), proposal_ref), object)
+    }
+
+    struct InjectingFactBackend {
+        inner: Arc<MemoryStructuredBackend>,
+        injected: AtomicBool,
+    }
+
+    impl InjectingFactBackend {
+        fn new(inner: Arc<MemoryStructuredBackend>) -> Self {
+            Self {
+                inner,
+                injected: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl StructuredStoreBackend for InjectingFactBackend {
+        fn identity(&self) -> StructuredStoreIdentity {
+            self.inner.identity()
+        }
+
+        fn load_complete_prefix<'a>(
+            &'a self,
+            run_id: &'a RunId,
+            limit: RawHistoryLoadLimit,
+        ) -> BackendFuture<'a, Option<RawRunPrefix>> {
+            self.inner.load_complete_prefix(run_id, limit)
+        }
+
+        fn compare_and_append<'a>(
+            &'a self,
+            command: &'a BackendAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendAppendOutcome> {
+            let inner = Arc::clone(&self.inner);
+            let inject =
+                command.fact_publication().is_some() && !self.injected.swap(true, Ordering::SeqCst);
+            Box::pin(async move {
+                if inject {
+                    let identity = inner.identity();
+                    let run_id = RunId::parse(
+                        "run:sha256-jcs-v1:5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .map_err(|_| BackendError::Storage)?;
+                    let bytes = br#"{}"#;
+                    let frame_digest = raw_content_digest(bytes);
+                    let head_digest = raw_content_digest(b"injected-head");
+                    let request = AppendRequestId::new("injected-fact-0123456789abcdef")
+                        .map_err(|_| BackendError::Storage)?;
+                    let schema = SchemaId::new(
+                        "mfm.test.injected-proposals",
+                        "1",
+                        DigestAlgorithm::Sha256JcsV1,
+                        DigestBytes::from_array([9; 32]),
+                    )
+                    .map_err(|_| BackendError::Storage)?;
+                    let proposal_ref = ContentRef::new(schema, raw_content_digest(b"injected"))
+                        .map_err(|_| BackendError::Storage)?;
+                    let publication = RawFactPublication::new(1, run_id.clone(), 1, proposal_ref)?;
+                    let injected = BackendAppendCommand::new(
+                        &identity,
+                        &run_id,
+                        1,
+                        &request,
+                        bytes,
+                        &frame_digest,
+                        &head_digest,
+                        None,
+                        true,
+                        Some(&publication),
+                    );
+                    if !matches!(
+                        inner.compare_and_append(&injected).await?,
+                        BackendAppendOutcome::NewlyCommitted
+                    ) {
+                        return Err(BackendError::Conflict);
+                    }
+                }
+                inner.compare_and_append(command).await
+            })
+        }
+
+        fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
+            self.inner.load_configuration()
+        }
+
+        fn compare_and_append_configuration<'a>(
+            &'a self,
+            command: &'a ConfigurationAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendConfigurationOutcome> {
+            self.inner.compare_and_append_configuration(command)
+        }
+
+        fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
+            self.inner.load_facts()
+        }
+
+        fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
+            self.inner.audit_run_ids()
+        }
     }
 
     #[tokio::test]
@@ -2382,6 +2695,257 @@ mod tests {
             second.qualify_appended(&first_run, foreign_candidate),
             Err(StoreError::Identity)
         ));
+    }
+
+    #[tokio::test]
+    async fn prior_fact_scan_reads_state_proposal_publications() {
+        let identity = identity();
+        let source = fact_source(40);
+        let admission = sourced_admission_frame(&identity, source.clone());
+        let (entry, contract) = match admission.record() {
+            RunRecord::RunAdmitted(admitted) => (
+                admitted.entry_point_id().clone(),
+                admitted.admitted_context().contract_ref().clone(),
+            ),
+            _ => panic!("expected admission"),
+        };
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            entry,
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let opened =
+            StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
+                .expect("opened store");
+        opened
+            .append_admission(admission.clone())
+            .await
+            .expect("admission");
+
+        let subject = fact_source(41);
+        let value_ref = mfm_facts::content_ref_for_value(br#"{"value":1}"#).expect("fact value");
+        let fact = mfm_facts::FactValue::new(
+            source.clone(),
+            subject.clone(),
+            mfm_ids::StableId::new("mfm.test.fact").expect("fact id"),
+            value_ref,
+            r#"{"value":1}"#.to_owned(),
+        )
+        .expect("fact");
+        let proposals = mfm_facts::FactProposalSet::new(vec![fact]).expect("proposals");
+        let canonical =
+            mfm_journal::single_trust::canonical_json(&proposals).expect("proposal canonical");
+        let proposal_content_ref = ContentRef::new(
+            mfm_facts::FactProposalSet::schema_id().expect("proposal schema"),
+            raw_content_digest(canonical.as_bytes()),
+        )
+        .expect("proposal ref");
+        let proposal_value =
+            ValueRef::new(proposal_content_ref.clone(), proposal_content_ref.clone());
+        let proposal_object = mfm_journal::single_trust::ImmutableObject::new(
+            mfm_ids::StableId::new("mfm.value").expect("object type"),
+            proposal_content_ref.clone(),
+            canonical.as_str().to_owned(),
+        )
+        .expect("proposal object");
+        let RunRecord::RunAdmitted(admitted) = admission.record() else {
+            panic!("expected admission")
+        };
+        let outcome = admitted.admitted_context().clone();
+        let conclusion = mfm_journal::single_trust::StateConcluded::Pure {
+            occurrence: mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+                .expect("occurrence"),
+            outcome: mfm_journal::single_trust::StateOutcome::Success(outcome.clone()),
+            fact_proposals: Some(proposal_value.clone()),
+            fact_publication: Some(
+                mfm_journal::single_trust::FactPublication::new(1, proposal_value)
+                    .expect("publication"),
+            ),
+        };
+        let conclusion_frame = mfm_journal::single_trust::RunFrame::new(
+            admission.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            2,
+            AppendRequestId::new("backend-fact-conclusion-0123456789").expect("request"),
+            RunRecord::StateConcluded(conclusion),
+            vec![admission.objects()[0].clone(), proposal_object],
+        )
+        .expect("conclusion frame");
+        assert_eq!(
+            opened
+                .history_port()
+                .append_frame(conclusion_frame)
+                .await
+                .expect("publication append"),
+            AppendDisposition::NewlyCommitted { sequence: 2 }
+        );
+
+        let current = opened.load(admission.run_id()).await.expect("current");
+        let request = mfm_facts::FactSelectionRequest::new(
+            mfm_ids::StableId::new("mfm.test.request").expect("request id"),
+            vec![source],
+            subject,
+        )
+        .expect("selection request");
+        let (selection_ref, selection_object) = opened
+            .select_prior_facts(&current, &request)
+            .await
+            .expect("select prior facts");
+        assert_eq!(
+            selection_ref.contract_ref().schema_id(),
+            &mfm_facts::FactSelection::schema_id().expect("selection schema")
+        );
+        let selection: mfm_facts::FactSelection =
+            serde_json::from_str(selection_object.canonical_json()).expect("selection");
+        selection
+            .validate_for(&request)
+            .expect("selection validation");
+        assert_eq!(selection.facts.len(), 1);
+        assert_eq!(selection.frontier.through_sequence, 1);
+    }
+
+    #[tokio::test]
+    async fn conclusion_rebinds_only_its_fact_coordinate_after_frontier_race() {
+        let identity = identity();
+        let base = admission_frame(&identity);
+        let (entry, contract, context, configuration) = match base.record() {
+            RunRecord::RunAdmitted(admitted) => (
+                admitted.entry_point_id().clone(),
+                admitted.admitted_context().contract_ref().clone(),
+                admitted.admitted_context().clone(),
+                admitted.configuration_ref().clone(),
+            ),
+            _ => panic!("expected admission"),
+        };
+        let state = mfm_program::single_trust::StateDeclaration::new(
+            mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+                .expect("occurrence"),
+            fact_source(80),
+            contract.clone(),
+            contract.clone(),
+            None,
+            mfm_program::single_trust::ExecutionMode::Pure,
+            true,
+        )
+        .expect("state");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            entry,
+            contract.clone(),
+            contract,
+            vec![mfm_program::Declaration::State(Box::new(state))],
+        )
+        .expect("document");
+        let program_ref = document.program_ref().expect("program ref");
+        let admission = mfm_journal::single_trust::RunFrame::new(
+            base.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            1,
+            AppendRequestId::new("backend-rebind-admission-0123456789").expect("request"),
+            RunRecord::RunAdmitted(
+                mfm_journal::single_trust::RunAdmitted::new(
+                    identity.scope().clone(),
+                    identity.epoch(),
+                    base.run_id().clone(),
+                    identity.tenant().clone(),
+                    match base.record() {
+                        RunRecord::RunAdmitted(admitted) => admitted.entry_point_id().clone(),
+                        _ => unreachable!(),
+                    },
+                    program_ref,
+                    context.clone(),
+                    configuration,
+                    Vec::new(),
+                )
+                .expect("admission"),
+            ),
+            vec![base.objects()[0].clone()],
+        )
+        .expect("admission frame");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let injecting = Arc::new(InjectingFactBackend::new(Arc::clone(&backend)));
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(document.clone())
+            .expect("catalog");
+        let opened = StructuredStore::open(
+            injecting,
+            identity.clone(),
+            catalog,
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("opened store");
+        opened
+            .append_admission(admission.clone())
+            .await
+            .expect("admission");
+        let current = opened.load(admission.run_id()).await.expect("current");
+        let reduced = opened
+            .reduce_qualified(&current, document.clone())
+            .expect("reduced");
+        let (proposal_value, proposal_object) = proposal(90);
+        let conclusion = mfm_journal::single_trust::StateConcluded::Pure {
+            occurrence: mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+                .expect("occurrence"),
+            outcome: mfm_journal::single_trust::StateOutcome::Success(context.clone()),
+            fact_proposals: Some(proposal_value.clone()),
+            fact_publication: None,
+        };
+        let owner = opened
+            .prepare_conclusion_qualified_with_reduced(
+                &current,
+                &document,
+                &reduced,
+                1,
+                AppendRequestId::new("backend-rebind-conclusion-0123456789").expect("request"),
+                conclusion,
+                vec![base.objects()[0].clone(), proposal_object],
+                mfm_journal::single_trust::MAX_FRAME_BYTES as u64,
+            )
+            .expect("conclusion owner");
+        let owner = match opened.commit_conclusion(owner).await.expect("first commit") {
+            ConclusionCommitOutcome::Rejected {
+                owner,
+                error: StoreError::FactFrontierChanged,
+            } => {
+                assert!(owner.frame().record().fact_publication().is_none());
+                owner
+            }
+            other => panic!("unexpected first commit: {other:?}"),
+        };
+        let (disposition, frame) = match opened
+            .commit_conclusion(owner)
+            .await
+            .expect("rebound commit")
+        {
+            ConclusionCommitOutcome::Disposition { disposition, frame } => (disposition, frame),
+            other => panic!("unexpected rebound commit: {other:?}"),
+        };
+        assert_eq!(
+            disposition,
+            AppendDisposition::NewlyCommitted { sequence: 2 }
+        );
+        assert_eq!(
+            frame
+                .record()
+                .fact_publication()
+                .map(|publication| publication.publication_sequence()),
+            Some(2)
+        );
+        assert_eq!(
+            frame
+                .record()
+                .fact_publication()
+                .map(|publication| publication.proposal_set_ref()),
+            Some(proposal_value.clone()).as_ref()
+        );
+        let facts = opened.split().into_parts().3.facts().await.expect("facts");
+        assert_eq!(facts.head_sequence(), 2);
+        assert_eq!(facts.publications().len(), 2);
     }
 
     #[tokio::test]

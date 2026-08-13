@@ -410,7 +410,7 @@ impl StructuredStoreBackend for PostgresStore {
             if command.is_admission() != (actual == 0) {
                 return Err(BackendError::Conflict);
             }
-            if let Some(publication) = command.fact_publication() {
+            if command.fact_publication().is_some() || command.fact_frontier().is_some() {
                 let fact_head: Option<i64> = sqlx::query_scalar(
                     "SELECT publication_sequence FROM mfm_fact_heads
                      WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
@@ -422,12 +422,21 @@ impl StructuredStoreBackend for PostgresStore {
                 .fetch_optional(&mut *transaction)
                 .await
                 .map_err(|_| BackendError::Storage)?;
-                let expected_fact = fact_head.unwrap_or(0).saturating_add(1);
-                if i64::try_from(publication.publication_sequence())
-                    .map_err(|_| BackendError::Capacity)?
-                    != expected_fact
+                let actual_fact = fact_head.unwrap_or(0);
+                if let Some(publication) = command.fact_publication() {
+                    let expected_fact = actual_fact.saturating_add(1);
+                    if i64::try_from(publication.publication_sequence())
+                        .map_err(|_| BackendError::Capacity)?
+                        != expected_fact
+                    {
+                        return Err(BackendError::FactFrontierChanged);
+                    }
+                }
+                if command
+                    .fact_frontier()
+                    .is_some_and(|frontier| i64::try_from(frontier).ok() != Some(actual_fact))
                 {
-                    return Err(BackendError::Conflict);
+                    return Err(BackendError::FactFrontierChanged);
                 }
             }
 
@@ -470,7 +479,7 @@ impl StructuredStoreBackend for PostgresStore {
                 sqlx::query(
                     "INSERT INTO mfm_fact_publications
                      (store_scope_id, store_epoch, tenant_scope_id, publication_sequence,
-                      run_id, run_sequence, selection_ref)
+                      run_id, run_sequence, proposal_set_ref)
                      VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 )
                 .bind(self.scope.as_str())
@@ -483,7 +492,7 @@ impl StructuredStoreBackend for PostgresStore {
                         .map_err(|_| BackendError::Capacity)?,
                 )
                 .bind(
-                    serde_json::to_string(publication.selection_ref())
+                    serde_json::to_string(publication.proposal_set_ref())
                         .map_err(|_| BackendError::Storage)?,
                 )
                 .execute(&mut *transaction)
@@ -736,7 +745,7 @@ impl StructuredStoreBackend for PostgresStore {
             .await
             .map_err(|_| BackendError::Storage)?;
             let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(
-                "SELECT publication_sequence, run_id, run_sequence, selection_ref
+                "SELECT publication_sequence, run_id, run_sequence, proposal_set_ref
                  FROM mfm_fact_publications
                  WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
                  ORDER BY publication_sequence ASC
@@ -755,13 +764,13 @@ impl StructuredStoreBackend for PostgresStore {
             let publications = rows
                 .into_iter()
                 .map(
-                    |(publication_sequence, run_id, run_sequence, selection_ref)| {
+                    |(publication_sequence, run_id, run_sequence, proposal_set_ref)| {
                         RawFactPublication::new(
                             u64::try_from(publication_sequence)
                                 .map_err(|_| BackendError::Storage)?,
                             RunId::parse(run_id).map_err(|_| BackendError::Storage)?,
                             u64::try_from(run_sequence).map_err(|_| BackendError::Storage)?,
-                            serde_json::from_str(&selection_ref)
+                            serde_json::from_str(&proposal_set_ref)
                                 .map_err(|_| BackendError::Storage)?,
                         )
                     },

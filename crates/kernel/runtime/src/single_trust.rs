@@ -573,8 +573,8 @@ impl<S: State, C: AccessCapabilityContract> CommittedCall<S, C> {
         &self.execution_binding_ref
     }
 
-    /// Returns the one-use preparation-bound fact identity, if this State declared prior facts.
-    pub fn fact_selection(&self) -> Option<&mfm_journal::single_trust::ValueRef> {
+    /// Returns the Store-selected fact response, if this State declared prior facts.
+    pub fn fact_selection(&self) -> Option<&mfm_facts::FactSelection> {
         self.fact_continuation
             .as_ref()
             .map(FactContinuation::selection)
