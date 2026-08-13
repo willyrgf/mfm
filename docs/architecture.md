@@ -83,7 +83,9 @@ publication.
 
 App exposes a fixed-tenant structural facade. Storage reports mechanical dispositions and admitted
 durability; it does not rerun Program semantics. PostgreSQL scope and writer epoch are immutable
-append preconditions, not process locks.
+append preconditions, not process locks. The database records the active deployment identity; a
+trusted restore explicitly rotates it, making already-open old-identity handles fail closed while
+preserving same-identity multiple opens.
 
 ## Recovery
 

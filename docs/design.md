@@ -91,7 +91,9 @@ complete prefix without callbacks.
 The App is a fixed-tenant facade constructed by trusted embedding. Public calls contain no
 credential, principal, policy, or tenant override. PostgreSQL owns mechanical ordering within one
 Store scope and writer epoch. The admitted durability claim is primary crash/restart only. Restore
-or binding replacement rotates scope or epoch; old nonterminal runs are replay-only.
+or binding replacement rotates scope or epoch through an explicit persisted deployment-identity
+cutover; old handles fail their next readiness/backend check and old nonterminal runs are
+replay-only.
 
 EVM and Portfolio domains own their bounded cumulative contexts. EVM source States are expanded in
 declaration order, and Portfolio passes one opaque continuation through each child collection.

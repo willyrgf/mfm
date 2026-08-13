@@ -106,8 +106,8 @@ impl PostgresStore {
         })
     }
 
-    /// Applies the destructive fresh baseline to a caller-selected database.
-    pub async fn migrate(pool: &PgPool) -> Result<()> {
+    /// Applies the fresh baseline and records its initial Store scope and writer epoch.
+    pub async fn migrate(pool: &PgPool, scope: &StoreScopeId, epoch: StoreEpoch) -> Result<()> {
         for statement in include_str!("../migrations/0001_single_trust.sql").split(';') {
             let statement = statement.trim();
             if !statement.is_empty() {
@@ -117,11 +117,92 @@ impl PostgresStore {
                     .map_err(|_| PostgresError::Storage)?;
             }
         }
-        Ok(())
+        let epoch = i64::try_from(epoch.get()).map_err(|_| PostgresError::Identity)?;
+        sqlx::query(
+            "INSERT INTO mfm_store_schema (schema_contract, store_scope_id, store_epoch)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (schema_contract) DO NOTHING",
+        )
+        .bind(SCHEMA_CONTRACT)
+        .bind(scope.as_str())
+        .bind(epoch)
+        .execute(pool)
+        .await
+        .map_err(|_| PostgresError::Schema)?;
+        let recorded: Option<(String, i64)> = sqlx::query_as(
+            "SELECT store_scope_id, store_epoch
+             FROM mfm_store_schema
+             WHERE schema_contract = $1",
+        )
+        .bind(SCHEMA_CONTRACT)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| PostgresError::Schema)?;
+        match recorded {
+            Some((recorded_scope, recorded_epoch))
+                if recorded_scope == scope.as_str() && recorded_epoch == epoch =>
+            {
+                Ok(())
+            }
+            _ => Err(PostgresError::Identity),
+        }
+    }
+
+    /// Rotates a restored database to a fresh Store scope or writer epoch.
+    ///
+    /// The previous pair is checked under a row lock. Existing frame partitions are not
+    /// rewritten; callers must construct a new backend with the next pair after this commits.
+    pub async fn rotate_identity(
+        pool: &PgPool,
+        previous_scope: &StoreScopeId,
+        previous_epoch: StoreEpoch,
+        next_scope: &StoreScopeId,
+        next_epoch: StoreEpoch,
+    ) -> Result<()> {
+        if previous_scope == next_scope && previous_epoch == next_epoch {
+            return Err(PostgresError::Identity);
+        }
+        let previous_epoch =
+            i64::try_from(previous_epoch.get()).map_err(|_| PostgresError::Identity)?;
+        let next_epoch = i64::try_from(next_epoch.get()).map_err(|_| PostgresError::Identity)?;
+        let mut transaction = pool.begin().await.map_err(|_| PostgresError::Storage)?;
+        let recorded: Option<(String, i64)> = sqlx::query_as(
+            "SELECT store_scope_id, store_epoch
+             FROM mfm_store_schema
+             WHERE schema_contract = $1
+             FOR UPDATE",
+        )
+        .bind(SCHEMA_CONTRACT)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PostgresError::Schema)?;
+        if recorded != Some((previous_scope.as_str().to_owned(), previous_epoch)) {
+            return Err(PostgresError::Identity);
+        }
+        sqlx::query(
+            "UPDATE mfm_store_schema
+             SET store_scope_id = $1, store_epoch = $2
+             WHERE schema_contract = $3",
+        )
+        .bind(next_scope.as_str())
+        .bind(next_epoch)
+        .bind(SCHEMA_CONTRACT)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PostgresError::Storage)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PostgresError::AcknowledgementUnknown)
     }
 
     /// Checks only schema, identity, and admitted primary durability; it never enumerates runs.
     pub async fn check_ready(&self) -> Result<()> {
+        self.check_schema_and_durability().await?;
+        self.verify_open_identity().await
+    }
+
+    async fn check_schema_and_durability(&self) -> Result<()> {
         if !matches!(self.profile, DurabilityProfile::PrimaryCrashRestart) {
             return Err(PostgresError::Durability);
         }
@@ -146,6 +227,60 @@ impl PostgresStore {
             return Err(PostgresError::Durability);
         }
         Ok(())
+    }
+
+    async fn verify_open_identity(&self) -> Result<()> {
+        let epoch = i64::try_from(self.epoch.get()).map_err(|_| PostgresError::Identity)?;
+        let recorded: Option<(String, i64)> = sqlx::query_as(
+            "SELECT store_scope_id, store_epoch
+             FROM mfm_store_schema
+             WHERE schema_contract = $1",
+        )
+        .bind(SCHEMA_CONTRACT)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| PostgresError::Schema)?;
+        match recorded {
+            Some((scope, recorded_epoch))
+                if scope == self.scope.as_str() && recorded_epoch == epoch =>
+            {
+                Ok(())
+            }
+            _ => Err(PostgresError::Identity),
+        }
+    }
+
+    async fn verify_transaction_identity(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> BackendResult<()> {
+        let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+        let recorded: Option<(String, i64)> = sqlx::query_as(
+            "SELECT store_scope_id, store_epoch
+             FROM mfm_store_schema
+             WHERE schema_contract = $1
+             FOR SHARE",
+        )
+        .bind(SCHEMA_CONTRACT)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(|_| BackendError::Storage)?;
+        match recorded {
+            Some((scope, recorded_epoch))
+                if scope == self.scope.as_str() && recorded_epoch == epoch =>
+            {
+                Ok(())
+            }
+            _ => Err(BackendError::Identity),
+        }
+    }
+
+    fn map_identity_check(error: PostgresError) -> BackendError {
+        match error {
+            PostgresError::Identity => BackendError::Identity,
+            PostgresError::Capacity => BackendError::Capacity,
+            _ => BackendError::Storage,
+        }
     }
 
     /// Returns the admitted durability profile.
@@ -181,6 +316,7 @@ impl StructuredStoreBackend for PostgresStore {
                 .map_err(|error| match error {
                     PostgresError::Durability => BackendError::Unsupported,
                     PostgresError::Schema => BackendError::Unsupported,
+                    PostgresError::Identity => BackendError::Identity,
                     _ => BackendError::Storage,
                 })
         })
@@ -192,8 +328,12 @@ impl StructuredStoreBackend for PostgresStore {
         limit: RawHistoryLoadLimit,
     ) -> BackendFuture<'a, Option<RawRunPrefix>> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            self.verify_transaction_identity(&mut transaction).await?;
             let rows: Vec<(i64, String, Vec<u8>, String, String)> = sqlx::query_as(
                 "SELECT run_sequence, append_request_id, frame_bytes, frame_digest, head_digest
                  FROM mfm_run_frames
@@ -275,6 +415,9 @@ impl StructuredStoreBackend for PostgresStore {
         command: &'a BackendAppendCommand<'a>,
     ) -> BackendFuture<'a, BackendAppendOutcome> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             if command.identity()
                 != &StructuredStoreIdentity::new(
                     self.scope.clone(),
@@ -291,6 +434,7 @@ impl StructuredStoreBackend for PostgresStore {
                 return Err(BackendError::Capacity);
             }
             let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            self.verify_transaction_identity(&mut transaction).await?;
             // A missing head row cannot be locked with `FOR UPDATE`.  Serialize only this
             // identity's short transaction so concurrent genesis commands resolve through the
             // same Found/stale-head path as an already materialized head row; this is not a
@@ -540,6 +684,9 @@ impl StructuredStoreBackend for PostgresStore {
 
     fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let head: Option<(i64, i64)> = sqlx::query_as(
                 "SELECT head_sequence, total_bytes
@@ -614,6 +761,9 @@ impl StructuredStoreBackend for PostgresStore {
         command: &'a ConfigurationAppendCommand<'a>,
     ) -> BackendFuture<'a, BackendConfigurationOutcome> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             if command.identity()
                 != &StructuredStoreIdentity::new(
                     self.scope.clone(),
@@ -630,6 +780,7 @@ impl StructuredStoreBackend for PostgresStore {
                 return Err(BackendError::Capacity);
             }
             let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            self.verify_transaction_identity(&mut transaction).await?;
             // Configuration has the same absent-head race as a new run.  The advisory lock is
             // transaction-scoped and only closes that gap before the ordinary head row lock.
             sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
@@ -748,6 +899,9 @@ impl StructuredStoreBackend for PostgresStore {
 
     fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let head: Option<i64> = sqlx::query_scalar(
                 "SELECT publication_sequence FROM mfm_fact_heads
@@ -803,6 +957,9 @@ impl StructuredStoreBackend for PostgresStore {
 
     fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
         Box::pin(async move {
+            self.verify_open_identity()
+                .await
+                .map_err(PostgresStore::map_identity_check)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let rows: Vec<String> = sqlx::query_scalar(
                 "SELECT run_id FROM mfm_run_heads
@@ -826,9 +983,11 @@ impl StructuredStoreBackend for PostgresStore {
 mod managed_postgres_tests {
     use super::*;
     use mfm_canonical::raw_content_digest;
+    use sqlx::postgres::PgConnectOptions;
     use std::fs;
     use std::path::PathBuf;
     use std::process::Command;
+    use std::str::FromStr;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1020,7 +1179,7 @@ mod managed_postgres_tests {
             .connect(&database_url)
             .await
             .expect("isolated primary connection");
-        PostgresStore::migrate(&pool)
+        PostgresStore::migrate(&pool, identity.scope(), identity.epoch())
             .await
             .expect("isolated primary schema");
         let store = Arc::new(
@@ -1269,6 +1428,7 @@ mod managed_postgres_tests {
             .connect(&database_url)
             .await
             .expect("managed PostgreSQL service");
+        let identity = process_race_identity();
         sqlx::query(
             "DROP TABLE IF EXISTS mfm_run_frames, mfm_run_heads, mfm_fact_heads,
              mfm_fact_publications, mfm_configuration_revisions, mfm_configuration_heads,
@@ -1277,7 +1437,7 @@ mod managed_postgres_tests {
         .execute(&pool)
         .await
         .expect("isolated PostgreSQL baseline");
-        PostgresStore::migrate(&pool)
+        PostgresStore::migrate(&pool, identity.scope(), identity.epoch())
             .await
             .expect("fresh PostgreSQL baseline");
         sqlx::query(
@@ -1287,7 +1447,6 @@ mod managed_postgres_tests {
         .execute(&pool)
         .await
         .expect("isolated conformance schema");
-        let identity = process_race_identity();
         let store = Arc::new(
             PostgresStore::from_pool(
                 pool.clone(),
@@ -1577,5 +1736,165 @@ mod managed_postgres_tests {
                 .expect("reconnected count");
         assert_eq!(remaining, 0);
         clear_abort_triggers(&pool).await;
+
+        let source_database: String = sqlx::query_scalar("SELECT current_database()")
+            .fetch_one(&pool)
+            .await
+            .expect("source database name");
+        drop(target);
+        drop(backend);
+        drop(store);
+        pool.close().await;
+
+        let admin_options = PgConnectOptions::from_str(&database_url)
+            .expect("parse managed database URL")
+            .database("template1");
+        let admin_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(admin_options)
+            .await
+            .expect("managed PostgreSQL administrator");
+        let clone_database = format!(
+            "mfm_restore_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("restore clock")
+                .as_nanos()
+        );
+        let quote_identifier = |value: &str| format!("\"{}\"", value.replace('"', "\"\""));
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "CREATE DATABASE {} TEMPLATE {}",
+            quote_identifier(&clone_database),
+            quote_identifier(&source_database),
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("copy database for restore");
+
+        let clone_options = PgConnectOptions::from_str(&database_url)
+            .expect("parse clone database URL")
+            .database(&clone_database);
+        let clone_pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect_with(clone_options)
+            .await
+            .expect("connect copied database");
+        let old_clone = PostgresStore::from_pool(
+            clone_pool.clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            identity.tenant().clone(),
+            DurabilityProfile::PrimaryCrashRestart,
+        )
+        .expect("old copied identity");
+        old_clone
+            .check_ready()
+            .await
+            .expect("copied database retains old identity");
+        let restored_scope =
+            StoreScopeId::new("mfm.store_scope.v1:abcdefabcdefabcdefabcdefabcdefab")
+                .expect("restored scope");
+        let restored_epoch = StoreEpoch::new(2);
+        PostgresStore::rotate_identity(
+            &clone_pool,
+            identity.scope(),
+            identity.epoch(),
+            &restored_scope,
+            restored_epoch,
+        )
+        .await
+        .expect("rotate copied database identity");
+        assert_eq!(old_clone.check_ready().await, Err(PostgresError::Identity));
+        let restored = PostgresStore::from_pool(
+            clone_pool.clone(),
+            restored_scope.clone(),
+            restored_epoch,
+            identity.tenant().clone(),
+            DurabilityProfile::PrimaryCrashRestart,
+        )
+        .expect("restored store");
+        restored.check_ready().await.expect("restored readiness");
+        let restored_backend: Arc<dyn StructuredStoreBackend> = Arc::new(restored);
+        assert!(
+            restored_backend
+                .load_complete_prefix(
+                    &process_race_run,
+                    RawHistoryLoadLimit::new(2, mfm_journal::single_trust::MAX_FRAME_BYTES * 2),
+                )
+                .await
+                .expect("new identity lookup")
+                .is_none(),
+            "old run partitions are not resumable under the fresh identity"
+        );
+        let restored_identity =
+            StructuredStoreIdentity::new(restored_scope, restored_epoch, identity.tenant().clone());
+        let restored_run = mfm_store::backend_conformance::append_primary_restart_probe(
+            restored_backend.clone(),
+            restored_identity.clone(),
+        )
+        .await
+        .expect("append after restore");
+        mfm_store::backend_conformance::verify_primary_restart_probe(
+            restored_backend,
+            restored_run,
+        )
+        .await
+        .expect("verify append after restore");
+        let second_restored = PostgresStore::from_pool(
+            clone_pool.clone(),
+            restored_identity.scope().clone(),
+            restored_identity.epoch(),
+            restored_identity.tenant().clone(),
+            DurabilityProfile::PrimaryCrashRestart,
+        )
+        .expect("second restored open");
+        second_restored
+            .check_ready()
+            .await
+            .expect("same restored identity can open twice");
+        clone_pool.close().await;
+        let reopened_options = PgConnectOptions::from_str(&database_url)
+            .expect("parse reopened clone URL")
+            .database(&clone_database);
+        let reopened_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(reopened_options)
+            .await
+            .expect("reconnect copied database");
+        let reopened = PostgresStore::from_pool(
+            reopened_pool.clone(),
+            restored_identity.scope().clone(),
+            restored_identity.epoch(),
+            restored_identity.tenant().clone(),
+            DurabilityProfile::PrimaryCrashRestart,
+        )
+        .expect("reopened restored store");
+        reopened
+            .check_ready()
+            .await
+            .expect("rotated identity survives reconnect");
+        let reused = PostgresStore::from_pool(
+            reopened_pool.clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            identity.tenant().clone(),
+            DurabilityProfile::PrimaryCrashRestart,
+        )
+        .expect("old identity construction");
+        assert_eq!(
+            reused.check_ready().await,
+            Err(PostgresError::Identity),
+            "a restored deployment cannot reuse the old scope/epoch"
+        );
+        reopened_pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {}",
+            quote_identifier(&clone_database)
+        )))
+        .execute(&admin_pool)
+        .await
+        .expect("remove copied restore database");
+        admin_pool.close().await;
     }
 }
