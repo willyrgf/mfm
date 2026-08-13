@@ -109,6 +109,24 @@ pub enum EvmProviderResponse {
         /// Stable redacted rejection code.
         code: String,
     },
+    /// The provider returned a reviewed, definite safe failure before entry.
+    SafeFailure {
+        /// Call correlation echoed by the provider transport.
+        call_id: StableId,
+        /// Operation correlation echoed by the provider transport.
+        operation: StableId,
+        /// Stable redacted failure code.
+        code: String,
+    },
+    /// The provider reported that an EntryOnce operation may already have entered.
+    PossibleEntry {
+        /// Call correlation echoed by the provider transport.
+        call_id: StableId,
+        /// Operation correlation echoed by the provider transport.
+        operation: StableId,
+        /// Deterministic candidate identity associated with the possible entry.
+        candidate_id: String,
+    },
     /// The adapter authenticated an integrity failure that is safe to conclude as blocked.
     IntegrityBlocked {
         /// Call correlation echoed by the provider transport.
@@ -285,6 +303,16 @@ impl EvmAdapterBinding {
                     code,
                 }
             }
+            EvmProviderResponse::SafeFailure {
+                call_id,
+                operation: response_operation,
+                code,
+            } if call_id == *call.call_id() && response_operation == operation => {
+                EvmReadEvidence::SafeFailure {
+                    operation: intent.operation.clone(),
+                    code,
+                }
+            }
             EvmProviderResponse::IntegrityBlocked {
                 call_id,
                 operation: response_operation,
@@ -393,6 +421,16 @@ impl EvmAdapterBinding {
                     code,
                 }
             }
+            EvmProviderResponse::PossibleEntry {
+                call_id,
+                operation: response_operation,
+                candidate_id,
+            } if call_id == *call.call_id()
+                && response_operation == operation
+                && candidate_id == intent.candidate_id =>
+            {
+                BroadcastEvidence::PossibleEntry { candidate_id }
+            }
             EvmProviderResponse::IntegrityBlocked {
                 call_id,
                 operation: response_operation,
@@ -456,6 +494,11 @@ fn response_within_bound(response: &EvmProviderResponse) -> bool {
             operation,
             code,
         }
+        | EvmProviderResponse::SafeFailure {
+            call_id,
+            operation,
+            code,
+        }
         | EvmProviderResponse::IntegrityBlocked {
             call_id,
             operation,
@@ -465,6 +508,15 @@ fn response_within_bound(response: &EvmProviderResponse) -> bool {
             .len()
             .saturating_add(operation.as_str().len())
             .saturating_add(code.len()),
+        EvmProviderResponse::PossibleEntry {
+            call_id,
+            operation,
+            candidate_id,
+        } => call_id
+            .as_str()
+            .len()
+            .saturating_add(operation.as_str().len())
+            .saturating_add(candidate_id.len()),
     };
     size <= MAX_EVM_PROVIDER_RESPONSE_BYTES
 }
@@ -472,4 +524,66 @@ fn response_within_bound(response: &EvmProviderResponse) -> bool {
 /// Converts a capability error into the sole redacted adapter fault.
 pub const fn redact_capability_error(_: CapabilityError) -> EvmAdapterError {
     EvmAdapterError::Authentication
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn correlations() -> (StableId, StableId) {
+        (
+            StableId::new("mfm.evm.call@1").expect("call id"),
+            StableId::new("mfm.evm.read@1").expect("operation id"),
+        )
+    }
+
+    #[test]
+    fn every_definite_response_variant_is_bounded() {
+        let (call_id, operation) = correlations();
+        let responses = [
+            EvmProviderResponse::Read {
+                call_id: call_id.clone(),
+                operation: operation.clone(),
+                value: "0x01".to_owned(),
+                anchor: "mfm.anchor@1".to_owned(),
+            },
+            EvmProviderResponse::Broadcast {
+                call_id: call_id.clone(),
+                operation: operation.clone(),
+                transaction_hash: "0xabc".to_owned(),
+            },
+            EvmProviderResponse::Rejected {
+                call_id: call_id.clone(),
+                operation: operation.clone(),
+                code: "rejected".to_owned(),
+            },
+            EvmProviderResponse::SafeFailure {
+                call_id: call_id.clone(),
+                operation: operation.clone(),
+                code: "safe-failure".to_owned(),
+            },
+            EvmProviderResponse::PossibleEntry {
+                call_id: call_id.clone(),
+                operation: operation.clone(),
+                candidate_id: "candidate-1".to_owned(),
+            },
+            EvmProviderResponse::IntegrityBlocked {
+                call_id,
+                operation,
+                code: "integrity".to_owned(),
+            },
+        ];
+        assert!(responses.iter().all(response_within_bound));
+    }
+
+    #[test]
+    fn oversized_definite_response_is_rejected_before_interpretation() {
+        let (call_id, operation) = correlations();
+        let response = EvmProviderResponse::PossibleEntry {
+            call_id,
+            operation,
+            candidate_id: "x".repeat(MAX_EVM_PROVIDER_RESPONSE_BYTES),
+        };
+        assert!(!response_within_bound(&response));
+    }
 }

@@ -684,13 +684,7 @@ enum SuspendedOwner {
         runtime: Runtime,
         frame: RunFrame,
     },
-    Conclusion {
-        runtime: Runtime,
-        owner: mfm_store::single_trust::PreparedConclusion,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
-        successor: Option<ErasedValue>,
-    },
+    Conclusion(PendingConclusion),
     Preparation {
         runtime: Runtime,
         prepared: Box<dyn DynamicPrepared>,
@@ -706,6 +700,70 @@ enum SuspendedOwner {
         replaces: Option<mfm_journal::single_trust::PreparationRef>,
         disposition: Option<AppendDisposition>,
     },
+}
+
+/// Runtime-owned affine conclusion handoff.
+///
+/// This owner contains the Store append authority and the retained session continuation, but no
+/// provider, State implementation, raw response, or callback.  It can only be resolved through
+/// the owning Runtime and cannot be cloned, serialized, or field-constructed by callers.
+pub struct PendingConclusion {
+    runtime: Runtime,
+    owner: mfm_store::single_trust::PreparedConclusion,
+    run: QualifiedRun,
+    reduced: ReducedRunState,
+    successor: Option<ErasedValue>,
+}
+
+impl PendingConclusion {
+    fn new(
+        runtime: Runtime,
+        owner: mfm_store::single_trust::PreparedConclusion,
+        run: QualifiedRun,
+        reduced: ReducedRunState,
+        successor: Option<ErasedValue>,
+    ) -> Self {
+        Self {
+            runtime,
+            owner,
+            run,
+            reduced,
+            successor,
+        }
+    }
+
+    /// Returns the run identity retained by this conclusion owner.
+    pub fn run_id(&self) -> &RunId {
+        self.run.run_id()
+    }
+
+    async fn resolve(self) -> RuntimeStep {
+        let Self {
+            runtime,
+            owner,
+            run,
+            reduced,
+            successor,
+        } = self;
+        let conclusion_frame = owner.frame().clone();
+        match runtime.inner.store.commit_conclusion(owner).await {
+            Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => RuntimeStep::Suspended(
+                SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
+            ),
+            Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => RuntimeStep::Suspended(
+                SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
+            ),
+            Ok(ConclusionCommitOutcome::Disposition(disposition)) => {
+                runtime
+                    .finish_conclusion(run, reduced, conclusion_frame, disposition, successor)
+                    .await
+            }
+            Err(error) => RuntimeStep::Failed {
+                history: run,
+                error: error.into(),
+            },
+        }
+    }
 }
 
 enum AdmissionResolution {
@@ -735,13 +793,9 @@ impl SuspendedRun {
         successor: Option<ErasedValue>,
     ) -> Self {
         Self {
-            owner: SuspendedOwner::Conclusion {
-                runtime,
-                owner,
-                run,
-                reduced,
-                successor,
-            },
+            owner: SuspendedOwner::Conclusion(PendingConclusion::new(
+                runtime, owner, run, reduced, successor,
+            )),
         }
     }
 
@@ -784,7 +838,7 @@ impl SuspendedRun {
     pub fn run_id(&self) -> &RunId {
         match &self.owner {
             SuspendedOwner::Admission { frame, .. } => frame.run_id(),
-            SuspendedOwner::Conclusion { run, .. } => run.run_id(),
+            SuspendedOwner::Conclusion(owner) => owner.run_id(),
             SuspendedOwner::Preparation { run, .. } => run.run_id(),
         }
     }
@@ -806,40 +860,7 @@ impl SuspendedRun {
                     Err(_) => RuntimeStep::Suspended(SuspendedRun::admission(runtime, frame)),
                 }
             }
-            SuspendedOwner::Conclusion {
-                runtime,
-                owner,
-                run,
-                reduced,
-                successor,
-            } => {
-                let conclusion_frame = owner.frame().clone();
-                match runtime.inner.store.commit_conclusion(owner).await {
-                    Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
-                        RuntimeStep::Suspended(SuspendedRun::conclusion(
-                            runtime, owner, run, reduced, successor,
-                        ))
-                    }
-                    Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => RuntimeStep::Suspended(
-                        SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
-                    ),
-                    Ok(ConclusionCommitOutcome::Disposition(disposition)) => {
-                        runtime
-                            .finish_conclusion(
-                                run,
-                                reduced,
-                                conclusion_frame,
-                                disposition,
-                                successor,
-                            )
-                            .await
-                    }
-                    Err(error) => RuntimeStep::Failed {
-                        history: run,
-                        error: error.into(),
-                    },
-                }
-            }
+            SuspendedOwner::Conclusion(owner) => owner.resolve().await,
             SuspendedOwner::Preparation {
                 runtime,
                 prepared,

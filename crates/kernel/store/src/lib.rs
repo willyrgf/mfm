@@ -21,7 +21,7 @@ pub use backend::{
     StructuredStore, StructuredStoreBackend, StructuredStoreIdentity,
 };
 pub use single_trust::{
-    AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
+    validate_prefix, AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
     ConfigurationSnapshot, FactContinuation, PreparationAppend, PreparedConclusion, QualifiedRun,
     ReducedRunState, Result, RunAction, RunReducer, StoreError,
 };

@@ -8,9 +8,9 @@ pub mod lifecycle;
 pub mod single_trust;
 
 pub use lifecycle::{
-    AdmissionConflict, AdmissionFailure, AdmissionInput, ParkReason, ParkedRun, ResumeFailure,
-    ResumeInput, ResumeStep, RunSession, Runtime, RuntimeStep, SpawnStep, SuspendedRun,
-    TerminalRun,
+    AdmissionConflict, AdmissionFailure, AdmissionInput, ParkReason, ParkedRun, PendingConclusion,
+    ResumeFailure, ResumeInput, ResumeStep, RunSession, Runtime, RuntimeStep, SpawnStep,
+    SuspendedRun, TerminalRun,
 };
 pub use single_trust::{
     AcceptedIntegrityAccess, AcceptedOutcomeAccess, AccessHandlerResolution, AccessImplementation,

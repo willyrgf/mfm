@@ -1,0 +1,15 @@
+error[E0624]: associated function `qualify_prefix` is private
+ --> tests/ui/qualified_run_owner_constructor_is_private.rs:5:27
+  |
+5 |       let _ = QualifiedRun::qualify_prefix(
+  |                             ^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/single_trust.rs
+  |
+  | /     pub(crate) fn qualify_prefix(
+  | |         scope: StoreScopeId,
+  | |         epoch: StoreEpoch,
+  | |         tenant: TenantScopeId,
+  | |         frames: Vec<RunFrame>,
+  | |     ) -> Result<Self> {
+  | |_____________________- private associated function defined here

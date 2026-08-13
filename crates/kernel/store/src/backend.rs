@@ -17,7 +17,7 @@ use mfm_program::ProgramCatalog;
 use crate::single_trust::{
     advance_reduced, prepare_access_from_current, prepare_conclusion_from_current,
     reduce_qualified, AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
-    ConfigurationSnapshot, QualifiedRun, Result, StoreError,
+    ConfigurationSnapshot, QualifiedRun, Result, StoreBrand, StoreError,
 };
 
 /// Bounded asynchronous backend result used by every mechanical Store capability.
@@ -993,9 +993,6 @@ struct OpenedStoreInner {
     brand: Arc<StoreBrand>,
 }
 
-#[derive(Debug)]
-pub(crate) struct StoreBrand;
-
 /// Entry point for one composite Store open.
 pub struct StructuredStore;
 
@@ -1161,10 +1158,12 @@ impl OpenedStructuredStore {
         if current.scope() != self.identity().scope()
             || current.epoch() != self.identity().epoch()
             || current.tenant() != self.identity().tenant()
+            || !current.belongs_to_store(&self.inner.brand)
+            || !reduced.belongs_to_store(&self.inner.brand)
         {
             return Err(StoreError::Identity);
         }
-        let candidate = prepare_access_from_current(
+        let mut candidate = prepare_access_from_current(
             self.identity().scope(),
             self.identity().epoch(),
             self.identity().tenant(),
@@ -1177,6 +1176,7 @@ impl OpenedStructuredStore {
             prepared,
             objects,
         )?;
+        candidate.append.bind_store(Arc::clone(&self.inner.brand));
         let Some(frame) = candidate.frame else {
             return Ok(candidate.append);
         };
@@ -1254,6 +1254,7 @@ impl OpenedStructuredStore {
         if current.scope() != self.identity().scope()
             || current.epoch() != self.identity().epoch()
             || current.tenant() != self.identity().tenant()
+            || !current.belongs_to_store(&self.inner.brand)
         {
             return Err(StoreError::Identity);
         }
@@ -1318,10 +1319,13 @@ impl OpenedStructuredStore {
         if run.scope() != self.identity().scope()
             || run.epoch() != self.identity().epoch()
             || run.tenant() != self.identity().tenant()
+            || !run.belongs_to_store(&self.inner.brand)
         {
             return Err(StoreError::Identity);
         }
-        reduce_qualified(run, document)
+        let mut reduced = reduce_qualified(run, document)?;
+        reduced.bind_store(Arc::clone(&self.inner.brand));
+        Ok(reduced)
     }
 
     /// Advances a retained reducer result over one hot conclusion without re-folding its prefix.
@@ -1338,10 +1342,15 @@ impl OpenedStructuredStore {
             || next.scope() != self.identity().scope()
             || next.epoch() != self.identity().epoch()
             || next.tenant() != self.identity().tenant()
+            || !previous.belongs_to_store(&self.inner.brand)
+            || !next.belongs_to_store(&self.inner.brand)
+            || !reduced.belongs_to_store(&self.inner.brand)
         {
             return Err(StoreError::Identity);
         }
-        advance_reduced(reduced, previous, next, document)
+        let mut advanced = advance_reduced(reduced, previous, next, document)?;
+        advanced.bind_store(Arc::clone(&self.inner.brand));
+        Ok(advanced)
     }
 
     /// Qualifies a candidate prefix whose predecessor was already held by Runtime.
@@ -1355,6 +1364,7 @@ impl OpenedStructuredStore {
             || predecessor.tenant() != self.identity().tenant()
             || frame.run_id() != predecessor.run_id()
             || frame.expected_sequence() != predecessor.head_sequence().saturating_add(1)
+            || !predecessor.belongs_to_store(&self.inner.brand)
         {
             return Err(StoreError::Identity);
         }
@@ -1372,12 +1382,13 @@ impl OpenedStructuredStore {
         if !frame.record().is_admission() {
             return Err(StoreError::InvalidRecord);
         }
-        let qualified = QualifiedRun::qualify_prefix(
+        let mut qualified = QualifiedRun::qualify_prefix(
             self.identity().scope().clone(),
             self.identity().epoch(),
             self.identity().tenant().clone(),
             vec![frame],
         )?;
+        qualified.bind_store(Arc::clone(&self.inner.brand));
         self.validate_qualified_limits(&qualified)?;
         Ok(qualified)
     }
@@ -1476,7 +1487,8 @@ impl QualifiedHistoryPort {
             .await
             .map_err(map_backend_error)?
             .ok_or(StoreError::NotFound)?;
-        let qualified = qualify_raw_prefix(&self.inner.identity, raw)?;
+        let mut qualified = qualify_raw_prefix(&self.inner.identity, raw)?;
+        qualified.bind_store(Arc::clone(&self.inner.brand));
         let store = OpenedStructuredStore {
             inner: Arc::clone(&self.inner),
         };
@@ -1714,7 +1726,9 @@ impl ConfigurationStore {
                 )
             })
             .collect::<Result<Vec<_>>>()?;
-        ConfigurationSnapshot::from_revisions(revisions)
+        let mut snapshot = ConfigurationSnapshot::from_revisions(revisions)?;
+        snapshot.bind_store(Arc::clone(&self.inner.brand));
+        Ok(snapshot)
     }
 
     /// Prepares one validated configuration successor from a fixed snapshot without reading the
@@ -1725,6 +1739,9 @@ impl ConfigurationStore {
         append_request_id: AppendRequestId,
         canonical_json: String,
     ) -> Result<PreparedConfigurationWrite> {
+        if !current.belongs_to_store(&self.inner.brand) {
+            return Err(StoreError::Identity);
+        }
         if current.head_sequence() as usize
             >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
         {
@@ -2091,6 +2108,140 @@ mod tests {
             .await
             .expect("backend load")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn qualified_history_and_reduction_cannot_cross_store_openings() {
+        let identity = identity();
+        let frame = admission_frame(&identity);
+        let (contract, value_ref) = match frame.record() {
+            mfm_journal::single_trust::RunRecord::RunAdmitted(admitted) => (
+                admitted.admitted_context().contract_ref().clone(),
+                admitted.admitted_context().value_ref().clone(),
+            ),
+            _ => panic!("expected admission"),
+        };
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(
+                mfm_program::single_trust::ProgramDocument::new(
+                    mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
+                    contract.clone(),
+                    contract.clone(),
+                    Vec::new(),
+                )
+                .expect("document"),
+            )
+            .expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let first = StructuredStore::open(
+            backend.clone(),
+            identity.clone(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("first opening");
+        let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
+            .await
+            .expect("second opening");
+        assert!(!first.same_open(&second));
+        first
+            .append_admission(frame.clone())
+            .await
+            .expect("admission");
+        let first_run = first.load(frame.run_id()).await.expect("first run");
+        let second_run = second.load(frame.run_id()).await.expect("second run");
+        assert_eq!(first_run.frames(), second_run.frames());
+        let foreign_candidate = mfm_journal::single_trust::RunFrame::new(
+            frame.run_id().clone(),
+            frame.store_scope_id().clone(),
+            frame.store_epoch(),
+            2,
+            AppendRequestId::new("backend-store-brand-0123456789").expect("request"),
+            mfm_journal::single_trust::RunRecord::StateConcluded(
+                mfm_journal::single_trust::StateConcluded::Pure {
+                    occurrence: mfm_journal::single_trust::SequentialControlAddress::new(
+                        0,
+                        Vec::new(),
+                    )
+                    .expect("occurrence"),
+                    outcome: mfm_journal::single_trust::StateOutcome::Success(
+                        mfm_journal::single_trust::ValueRef::new(
+                            contract.clone(),
+                            value_ref.clone(),
+                        ),
+                    ),
+                    fact_publication: None,
+                },
+            ),
+            vec![mfm_journal::single_trust::ImmutableObject::new(
+                mfm_ids::StableId::new("mfm.value").expect("object"),
+                value_ref,
+                r#"{"value":1}"#.to_owned(),
+            )
+            .expect("object")],
+        )
+        .expect("candidate");
+        assert!(matches!(
+            second.qualify_appended(&first_run, foreign_candidate),
+            Err(StoreError::Identity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn configuration_snapshots_cannot_cross_store_openings() {
+        let identity = identity();
+        let frame = admission_frame(&identity);
+        let contract = match frame.record() {
+            mfm_journal::single_trust::RunRecord::RunAdmitted(admitted) => {
+                admitted.admitted_context().contract_ref().clone()
+            }
+            _ => panic!("expected admission"),
+        };
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(
+                mfm_program::single_trust::ProgramDocument::new(
+                    mfm_ids::StableId::new("mfm.test.configuration-brand-entry").expect("entry"),
+                    contract.clone(),
+                    contract,
+                    Vec::new(),
+                )
+                .expect("document"),
+            )
+            .expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let first = StructuredStore::open(
+            backend.clone(),
+            identity.clone(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("first opening");
+        let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
+            .await
+            .expect("second opening");
+        let (_, _, first_configuration, _) = first.split().into_parts();
+        let (_, _, second_configuration, _) = second.split().into_parts();
+        let first_snapshot = first_configuration.load().await.expect("first snapshot");
+        let second_snapshot = second_configuration.load().await.expect("second snapshot");
+        assert_eq!(first_snapshot, second_snapshot);
+        assert!(matches!(
+            first_configuration.prepare_append(
+                &second_snapshot,
+                AppendRequestId::new("configuration-foreign-0123456789").expect("request"),
+                "{\"mode\":\"foreign\"}".to_owned(),
+            ),
+            Err(StoreError::Identity)
+        ));
+        assert!(matches!(
+            second_configuration.prepare_append(
+                &first_snapshot,
+                AppendRequestId::new("configuration-foreign-012345678a").expect("request"),
+                "{\"mode\":\"foreign\"}".to_owned(),
+            ),
+            Err(StoreError::Identity)
+        ));
     }
 
     #[tokio::test]

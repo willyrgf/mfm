@@ -21,6 +21,14 @@ use mfm_journal::single_trust::{
 use mfm_program::single_trust::{Declaration, ExecutionMode, ProgramDocument, StateDeclaration};
 use mfm_values::MfmValue;
 
+/// Process-local identity of one opened semantic Store.
+///
+/// The value is intentionally private to Store.  Persisted scope, epoch, and tenant fields
+/// identify a durable partition, but they are not enough to move an in-memory owner between two
+/// independent catalog/Store openings.
+#[derive(Debug)]
+pub(crate) struct StoreBrand;
+
 /// Result of one mechanical exact-head append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppendDisposition {
@@ -86,6 +94,7 @@ pub struct QualifiedRun {
     object_map: BTreeMap<ContentRef, mfm_journal::single_trust::ImmutableObject>,
     logical_keys: BTreeSet<mfm_journal::single_trust::RecordLogicalKey>,
     reserved_conclusion_bytes: u64,
+    store_brand: Option<Arc<StoreBrand>>,
 }
 
 impl QualifiedRun {
@@ -175,17 +184,38 @@ impl QualifiedRun {
             object_map,
             logical_keys,
             reserved_conclusion_bytes: reserved,
+            store_brand: None,
         })
     }
 
     /// Qualifies one complete retained prefix under one Store identity.
-    pub fn qualify_prefix(
+    pub(crate) fn qualify_prefix(
         scope: StoreScopeId,
         epoch: StoreEpoch,
         tenant: TenantScopeId,
         frames: Vec<RunFrame>,
     ) -> Result<Self> {
         Self::new(scope, epoch, tenant, frames)
+    }
+
+    /// Validates one complete prefix without returning a transferable Store owner.
+    pub fn validate_prefix(
+        scope: StoreScopeId,
+        epoch: StoreEpoch,
+        tenant: TenantScopeId,
+        frames: Vec<RunFrame>,
+    ) -> Result<()> {
+        Self::new(scope, epoch, tenant, frames).map(|_| ())
+    }
+
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
+        self.store_brand = Some(brand);
+    }
+
+    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
+        self.store_brand
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
     /// Returns the qualified Store scope.
@@ -352,6 +382,16 @@ impl QualifiedRun {
     }
 }
 
+/// Validates one complete retained prefix without returning a transferable Store owner.
+pub fn validate_prefix(
+    scope: StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: TenantScopeId,
+    frames: Vec<RunFrame>,
+) -> Result<()> {
+    QualifiedRun::new(scope, epoch, tenant, frames).map(|_| ())
+}
+
 /// A secret-free Store-owned owner for one conclusion append.
 #[derive(Debug)]
 pub struct PreparedConclusion {
@@ -359,7 +399,7 @@ pub struct PreparedConclusion {
     epoch: StoreEpoch,
     tenant: TenantScopeId,
     frame: RunFrame,
-    store_brand: Option<Arc<crate::backend::StoreBrand>>,
+    store_brand: Option<Arc<StoreBrand>>,
 }
 
 impl PreparedConclusion {
@@ -378,14 +418,14 @@ impl PreparedConclusion {
         &self.frame
     }
 
-    pub(crate) fn bind_store(&mut self, brand: Arc<crate::backend::StoreBrand>) {
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
         self.store_brand = Some(brand);
     }
 
     pub(crate) fn belongs_to(
         &self,
         identity: &crate::backend::StructuredStoreIdentity,
-        brand: &Arc<crate::backend::StoreBrand>,
+        brand: &Arc<StoreBrand>,
     ) -> bool {
         self.scope == *identity.scope()
             && self.epoch == identity.epoch()
@@ -427,6 +467,7 @@ pub struct FactContinuation {
     preparation: PreparationRef,
     request: ValueRef,
     selection: ValueRef,
+    store_brand: Option<Arc<StoreBrand>>,
 }
 
 impl FactContinuation {
@@ -447,7 +488,12 @@ impl FactContinuation {
             preparation,
             request,
             selection,
+            store_brand: None,
         }
+    }
+
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
+        self.store_brand = Some(brand);
     }
 
     /// Returns the fixed prior-fact request identity without exposing its bytes.
@@ -492,6 +538,12 @@ impl FactContinuation {
 }
 
 impl PreparationAppend {
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
+        if let Some(fact_continuation) = self.fact_continuation.as_mut() {
+            fact_continuation.bind_store(brand);
+        }
+    }
+
     pub(crate) fn with_disposition(self, disposition: AppendDisposition) -> Self {
         let direct_new = matches!(disposition, AppendDisposition::NewlyCommitted { .. });
         Self {
@@ -1097,7 +1149,7 @@ pub enum AccessActionMode {
 }
 
 /// Callback-free result of one complete-prefix reduction.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ReducedRunState {
     /// Exact latest complete cumulative context.
     latest_context: mfm_journal::single_trust::ValueRef,
@@ -1108,7 +1160,20 @@ pub struct ReducedRunState {
     action: RunAction,
     run_id: RunId,
     head_sequence: u64,
+    store_brand: Option<Arc<StoreBrand>>,
 }
+
+impl PartialEq for ReducedRunState {
+    fn eq(&self, other: &Self) -> bool {
+        self.latest_context == other.latest_context
+            && self.latest_context_object == other.latest_context_object
+            && self.action == other.action
+            && self.run_id == other.run_id
+            && self.head_sequence == other.head_sequence
+    }
+}
+
+impl Eq for ReducedRunState {}
 
 impl ReducedRunState {
     fn new(
@@ -1123,11 +1188,28 @@ impl ReducedRunState {
             action,
             run_id: run.run_id().clone(),
             head_sequence: run.head_sequence(),
+            store_brand: None,
         }
     }
 
     pub(crate) fn belongs_to(&self, run: &QualifiedRun) -> bool {
-        self.run_id == *run.run_id() && self.head_sequence == run.head_sequence()
+        self.run_id == *run.run_id()
+            && self.head_sequence == run.head_sequence()
+            && match (&self.store_brand, &run.store_brand) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
+        self.store_brand = Some(brand);
+    }
+
+    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
+        self.store_brand
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
     /// Returns the latest complete cumulative context identity.
@@ -1158,7 +1240,7 @@ impl ReducedRunState {
         {
             return Err(StoreError::Identity);
         }
-        Ok(Self::new(
+        let mut next = Self::new(
             run,
             self.latest_context.clone(),
             self.latest_context_object.clone(),
@@ -1166,7 +1248,9 @@ impl ReducedRunState {
                 occurrence,
                 preparation,
             },
-        ))
+        );
+        next.store_brand = self.store_brand.clone();
+        Ok(next)
     }
 }
 
@@ -2339,11 +2423,20 @@ impl ConfigurationRevision {
 }
 
 /// One fixed, fully qualified configuration snapshot.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ConfigurationSnapshot {
     revisions: Vec<ConfigurationRevision>,
     total_bytes: usize,
+    store_brand: Option<Arc<StoreBrand>>,
 }
+
+impl PartialEq for ConfigurationSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        self.revisions == other.revisions && self.total_bytes == other.total_bytes
+    }
+}
+
+impl Eq for ConfigurationSnapshot {}
 
 impl ConfigurationSnapshot {
     pub(crate) fn from_revisions(revisions: Vec<ConfigurationRevision>) -> Result<Self> {
@@ -2364,7 +2457,18 @@ impl ConfigurationSnapshot {
         Ok(Self {
             revisions,
             total_bytes,
+            store_brand: None,
         })
+    }
+
+    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
+        self.store_brand = Some(brand);
+    }
+
+    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
+        self.store_brand
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
     /// Returns the current one-based configuration head, or zero for an empty stream.
@@ -2394,7 +2498,9 @@ impl ConfigurationSnapshot {
         }
         let mut revisions = self.revisions.clone();
         revisions.push(revision);
-        Self::from_revisions(revisions)
+        let mut snapshot = Self::from_revisions(revisions)?;
+        snapshot.store_brand = self.store_brand.clone();
+        Ok(snapshot)
     }
 }
 
