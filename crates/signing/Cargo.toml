@@ -2,7 +2,7 @@
 name = "mfm-signing"
 version = "0.1.0"
 edition = "2021"
-description = "Generic signer capability contracts for MFM"
+description = "Public signing metadata and bounded signer contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -10,14 +10,6 @@ license = "MIT"
 layer = "signing"
 
 [dependencies]
+mfm-ids = { path = "../kernel/ids" }
 serde = { workspace = true }
 thiserror = { workspace = true }
-zeroize = "1.7"
-
-mfm-canonical = { path = "../kernel/canonical" }
-mfm-capabilities = { path = "../kernel/capabilities" }
-mfm-ids = { path = "../kernel/ids" }
-mfm-values = { path = "../kernel/values" }
-
-[dev-dependencies]
-tokio = { workspace = true }

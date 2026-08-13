@@ -1,5 +1,0 @@
-error[E0599]: no variant, associated function, or constant named `EntryUnknown` found for enum `ReadAdapterCompletion<Returned, SafeFailure>` in the current scope
- --> tests/ui/structured/fail/read_cannot_report_effect_disposition.rs:8:75
-  |
-8 |     let _: ReadAdapterCompletion<Output, Output> = ReadAdapterCompletion::EntryUnknown(
-  |                                                                           ^^^^^^^^^^^^ variant, associated function, or constant not found in `ReadAdapterCompletion<_, _>`

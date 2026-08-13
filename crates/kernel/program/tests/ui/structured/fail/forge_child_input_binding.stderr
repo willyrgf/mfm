@@ -1,7 +1,0 @@
-error[E0451]: fields `root_id` and `slot` of struct `ChildInputBinding` are private
- --> tests/ui/structured/fail/forge_child_input_binding.rs:6:25
-  |
-6 |     ChildInputBinding { root_id, slot }
-  |                         ^^^^^^^  ^^^^ private field
-  |                         |
-  |                         private field

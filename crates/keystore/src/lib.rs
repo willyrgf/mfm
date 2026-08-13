@@ -1,70 +1,108 @@
-#![allow(clippy::disallowed_methods)]
 #![warn(missing_docs)]
-//! Encrypted key storage and keystore-backed signing for MFM.
+//! Bounded secret custody primitive for MFM.
 //!
-//! Raw private-key access stays inside this crate. Callers may import keys, inspect public
-//! metadata, delete entries, or bind the generation-guarded wallet signer.
-//!
-//! # Examples
-//!
-//! ```rust,no_run
-//! use mfm_keystore::{Keystore, KeystoreConfig};
-//!
-//! let path = std::env::temp_dir().join("mfm-keystore-doc-example.json");
-//! let mut keystore =
-//!     Keystore::new_with_config(&path, KeystoreConfig::insecure_integration_test())?;
-//! keystore.unlock("correct horse battery staple")?;
-//! # Ok::<(), mfm_keystore::KeystoreError>(())
-//! ```
-//!
-//! Raw key wrappers and retrieval are deliberately not public. Decrypted material
-//! moves only as a protected zeroizing allocation into the crate-private
-//! `SecureKey`; there is no plaintext-array constructor on that type.
-//!
-//! ```compile_fail
-//! use mfm_keystore::SecureKey;
-//! ```
-//!
-//! ```compile_fail
-//! // SecureKey is crate-private and has no plaintext `[u8; 32]` constructor.
-//! // Even if the type were visible, `SecureKey::new([0u8; 32])` is not an API.
-//! fn _plaintext_secure_key_ctor() {
-//!     let _ = mfm_keystore::SecureKey::new([0u8; 32]);
-//! }
-//! ```
-//!
-//! ```compile_fail
-//! use mfm_keystore::Keystore;
-//! use uuid::Uuid;
-//!
-//! fn raw_key(keystore: &mut Keystore, id: Uuid) {
-//!     let _ = keystore.get_private_key(id);
-//! }
-//! ```
-//!
-//! Administration operations are deliberately absent from the current public surface:
-//!
-//! ```compile_fail
-//! use mfm_keystore::Keystore;
-//!
-//! fn explicit_lock(keystore: &mut Keystore) {
-//!     keystore.lock();
-//! }
-//! ```
-//!
-//! ```compile_fail
-//! use mfm_keystore::Keystore;
-//!
-//! fn rotate_password(keystore: &mut Keystore) {
-//!     keystore.change_password("old password", "new password");
-//! }
-//! ```
+//! `Keystore` intentionally contains an `Rc` marker and is therefore neither `Send` nor `Sync`.
+//! A caller that needs an async signer must retain this owner on a dedicated thread and expose a
+//! bounded command handle; this crate never turns the key material into a generic `Send` future.
 
-mod crypto;
-mod keystore;
-mod signer;
+use std::collections::BTreeMap;
+use std::rc::Rc;
 
-pub use self::keystore::{KeyInfo, KeyType, Keystore, KeystoreConfig, KeystoreError};
-pub use self::signer::{
-    KeystoreSignerProvider, QualifiedKeystoreSigner, KEYSTORE_SIGNING_IMPLEMENTATION_ID,
-};
+use mfm_ids::StableId;
+use zeroize::{Zeroize, Zeroizing};
+
+/// Redaction-safe keystore error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KeystoreError {
+    /// The public identifier or bounded operation was invalid.
+    #[error("keystore operation is invalid")]
+    Invalid,
+    /// The requested entry was not present.
+    #[error("keystore entry was not found")]
+    NotFound,
+}
+
+/// Minimal non-secret keystore configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeystoreConfig {
+    /// Maximum number of retained entries.
+    pub maximum_entries: usize,
+}
+
+impl Default for KeystoreConfig {
+    fn default() -> Self {
+        Self {
+            maximum_entries: 64,
+        }
+    }
+}
+
+/// Public key metadata without private material.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyInfo {
+    /// Stable key identity.
+    pub key_id: StableId,
+}
+
+struct SecretBytes(Zeroizing<Vec<u8>>);
+
+impl Drop for SecretBytes {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+/// Non-`Send`, non-`Sync` secret owner.
+pub struct Keystore {
+    config: KeystoreConfig,
+    entries: BTreeMap<StableId, SecretBytes>,
+    _thread_affinity: Rc<()>,
+}
+
+impl Keystore {
+    /// Creates an empty in-memory keystore.
+    pub fn new(config: KeystoreConfig) -> Result<Self, KeystoreError> {
+        if config.maximum_entries == 0 {
+            return Err(KeystoreError::Invalid);
+        }
+        Ok(Self {
+            config,
+            entries: BTreeMap::new(),
+            _thread_affinity: Rc::new(()),
+        })
+    }
+
+    /// Inserts one bounded secret into the thread-affine owner.
+    pub fn insert(
+        &mut self,
+        key_id: StableId,
+        secret: Zeroizing<Vec<u8>>,
+    ) -> Result<KeyInfo, KeystoreError> {
+        if secret.is_empty()
+            || secret.len() > 16 * 1024
+            || (!self.entries.contains_key(&key_id)
+                && self.entries.len() >= self.config.maximum_entries)
+        {
+            return Err(KeystoreError::Invalid);
+        }
+        self.entries.insert(key_id.clone(), SecretBytes(secret));
+        Ok(KeyInfo { key_id })
+    }
+
+    /// Lists only public key identities.
+    pub fn list(&self) -> Vec<KeyInfo> {
+        self.entries
+            .keys()
+            .cloned()
+            .map(|key_id| KeyInfo { key_id })
+            .collect()
+    }
+
+    /// Removes one secret entry and immediately drops its zeroizing owner.
+    pub fn remove(&mut self, key_id: &StableId) -> Result<(), KeystoreError> {
+        self.entries
+            .remove(key_id)
+            .map(|_| ())
+            .ok_or(KeystoreError::NotFound)
+    }
+}

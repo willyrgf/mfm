@@ -1,7 +1,12 @@
 #![warn(missing_docs)]
-//! Canonical five-family append-only history values for structured runs.
+//! Strict append-only run frames and the three-family semantic journal.
 //!
-//! Store atomicity, successor validation, folding, scheduling, replay,
-//! callbacks, and ambient access are deliberately outside this crate.
+//! Journal owns bytes, identities, and hashable record shape.  It never owns callbacks, Runtime
+//! sessions, provider authority, or ambient I/O.  Store is the only semantic reducer.
 
-pub mod structured;
+pub mod single_trust;
+
+pub use single_trust::{
+    BindingDescriptor, ImmutableObject, PreparationRef, RecordLogicalKey, RunAdmitted, RunFrame,
+    RunRecord, SequentialControlAddress, StateConcluded, StateOutcome, StatePrepared, ValueRef,
+};

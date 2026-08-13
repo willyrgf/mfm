@@ -30,16 +30,6 @@ pub enum StringGrammar {
     SemanticDigest,
     /// `run:sha256-jcs-v1:<64 lowercase hex>` owned by `RunId`.
     RunId,
-    /// `occurrence:sha256-jcs-v1:<64 lowercase hex>` owned by `OccurrenceId`.
-    OccurrenceId,
-    /// `semantic-call:sha256-jcs-v1:<64 lowercase hex>` owned by `SemanticCallId`.
-    SemanticCallId,
-    /// `fragment-boundary:sha256-jcs-v1:<64 lowercase hex>` owned by `FragmentBoundaryId`.
-    FragmentBoundaryId,
-    /// `failure-plan:sha256-jcs-v1:<64 lowercase hex>` owned by `FailurePlanId`.
-    FailurePlanId,
-    /// `access-attempt:sha256-jcs-v1:<64 lowercase hex>` owned by `AccessAttemptId`.
-    AccessAttemptId,
     /// `artifact:sha256-jcs-v1:<64 lowercase hex>` owned by `ArtifactId`.
     ArtifactId,
     /// `schema:<name>:<version>:sha256-jcs-v1:<64 lowercase hex>` owned by `SchemaId`.
@@ -54,8 +44,6 @@ pub enum StringGrammar {
     StoreScopeId,
     /// `mfm.tenant_scope.v1:<32 lowercase hex>` owned by `TenantScopeId`.
     TenantScopeId,
-    /// RFC 4122 version 4 UUID.
-    UuidV4,
     /// `0|[1-9][0-9]{0,19}` canonical unsigned text.
     CanonicalUnsignedText,
     /// `[a-z0-9][a-z0-9._/-]*` lowercase path token.
@@ -72,11 +60,6 @@ impl StringGrammar {
             Self::ContentDigest => "content_digest",
             Self::SemanticDigest => "semantic_digest",
             Self::RunId => "run_id",
-            Self::OccurrenceId => "occurrence_id",
-            Self::SemanticCallId => "semantic_call_id",
-            Self::FragmentBoundaryId => "fragment_boundary_id",
-            Self::FailurePlanId => "failure_plan_id",
-            Self::AccessAttemptId => "access_attempt_id",
             Self::ArtifactId => "artifact_id",
             Self::SchemaId => "schema_id",
             Self::SemanticTypeId => "semantic_type_id",
@@ -84,7 +67,6 @@ impl StringGrammar {
             Self::StableId => "stable_id",
             Self::StoreScopeId => "store_scope_id",
             Self::TenantScopeId => "tenant_scope_id",
-            Self::UuidV4 => "uuid_v4",
             Self::CanonicalUnsignedText => "canonical_unsigned_text",
             Self::LowerPathToken => "lower_path_token",
             Self::MediaType => "media_type",

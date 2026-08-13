@@ -1,11 +1,17 @@
 #![warn(missing_docs)]
-//! One-action interpreter for certified structured MFM runs.
+//! Immutable live Runtime assembly and affine State execution ownership.
 //!
-//! The runtime owns qualified live-capability selection, private committed
-//! request and observation proofs, affine live-access authority, and
-//! deterministic one-action scheduling. History mutation is requested only
-//! through [`history::RuntimeHistoryPort`]; production adapters and the sole
-//! reducer remain owned by `mfm-store`.
+//! Runtime depends on Store for semantic append owners.  Store and Replay cannot depend on this
+//! crate and therefore cannot invoke live State implementations.
 
-pub mod history;
-pub mod structured;
+pub mod single_trust;
+
+pub use single_trust::{
+    is_direct_new, prepare_access_resolution, prepare_pure_success, qualify_success,
+    AcceptedIntegrityAccess, AcceptedOutcomeAccess, AccessConclusion, AccessHandlerResolution,
+    AccessImplementation, AccessResolution, AccessResolutionFuture, BoxFuture, CommittedCall,
+    Effect, PendingConclusion, PendingFailure, PreparationError, PreparedExecution, Pure,
+    PureImplementation, QualifiedAdapter, Read, Result, RunSession, RuntimeAssembly,
+    RuntimeAssemblyBuilder, RuntimeError, State, StoreAppendResult, UnresolvedAccess,
+    UnresolvedClassification,
+};

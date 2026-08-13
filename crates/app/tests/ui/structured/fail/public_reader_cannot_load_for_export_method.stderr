@@ -1,5 +1,0 @@
-error[E0599]: no method named `load_for_export` found for reference `&PublicRunReader<PostgresStructuredHistoryBackend>` in the current scope
- --> tests/ui/structured/fail/public_reader_cannot_load_for_export_method.rs:8:24
-  |
-8 |         let _ = reader.load_for_export(run_id).await;
-  |                        ^^^^^^^^^^^^^^^ method not found in `&PublicRunReader<PostgresStructuredHistoryBackend>`

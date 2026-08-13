@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `CertifiedProgram` in the current scope
- --> tests/ui/structured/fail/clone_certified_program.rs:4:30
-  |
-4 |     let _duplicate = program.clone();
-  |                              ^^^^^ method not found in `CertifiedProgram`

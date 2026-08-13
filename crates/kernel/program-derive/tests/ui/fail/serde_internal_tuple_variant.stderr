@@ -1,5 +1,0 @@
-error: internally tagged MFM enum variants must be unit or named-field variants
- --> tests/ui/fail/serde_internal_tuple_variant.rs:7:5
-  |
-7 |     Tuple(String),
-  |     ^^^^^

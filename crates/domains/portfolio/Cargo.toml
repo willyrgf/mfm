@@ -3,7 +3,7 @@ name = "mfm-portfolio"
 version = "0.1.0"
 edition = "2021"
 autotests = false
-description = "Pure portfolio model, state, and operation contracts for MFM"
+description = "Secret-free sequential Portfolio contexts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -13,40 +13,10 @@ domain = "portfolio"
 domain-role = "aggregate"
 
 [dependencies]
-alloy-primitives = { workspace = true }
-num-bigint = "0.4"
-num-traits = "0.2"
+mfm-evm = { path = "../evm" }
+mfm-ids = { path = "../../kernel/ids" }
+mfm-program-derive = { path = "../../kernel/program-derive" }
+mfm-values = { path = "../../kernel/values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-mfm-bitcoin = { path = "../bitcoin" }
-mfm-canonical = { path = "../../kernel/canonical" }
-mfm-certify = { path = "../../kernel/certify" }
-mfm-evm = { path = "../evm" }
-mfm-ids = { path = "../../kernel/ids" }
-mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-spec = { path = "../../kernel/spec" }
-mfm-values = { path = "../../kernel/values" }
-
-[dev-dependencies]
-mfm-authority-seal = { path = "../../kernel/authority-seal" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-journal = { path = "../../kernel/journal" }
-mfm-replay = { path = "../../kernel/replay" }
-mfm-runtime = { path = "../../kernel/runtime" }
-mfm-store = { path = "../../kernel/store", features = ["test-support"] }
-tokio = { workspace = true }
-
-[[test]]
-name = "portfolio-config"
-path = "tests/portfolio_config.rs"
-
-[[test]]
-name = "symbol-config"
-path = "tests/symbol_config.rs"
-
-[[test]]
-name = "structured-operation"
-path = "tests/structured_operation.rs"

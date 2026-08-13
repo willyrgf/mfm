@@ -17,12 +17,13 @@ name = "mfm_capabilities"
 path = "src/lib.rs"
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
 mfm-canonical = { path = "../canonical" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }
 
 [dev-dependencies]
+mfm-program-derive = { path = "../program-derive" }
+serde = { workspace = true }
 trybuild = "1.0"

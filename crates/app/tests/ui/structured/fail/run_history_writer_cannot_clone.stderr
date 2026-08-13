@@ -1,5 +1,0 @@
-error[E0432]: unresolved import `mfm_store::structured::StructuredRunHistoryWriter`
- --> tests/ui/structured/fail/run_history_writer_cannot_clone.rs:2:5
-  |
-2 | use mfm_store::structured::StructuredRunHistoryWriter;
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `StructuredRunHistoryWriter` in `structured`

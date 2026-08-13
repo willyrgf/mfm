@@ -2,44 +2,29 @@
 name = "mfm-storage-postgres"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
 autotests = false
+description = "Durable PostgreSQL frame adapter for MFM"
+repository = "https://github.com/willyrgf/mfm"
+license = "MIT"
 
 [package.metadata.mfm]
 layer = "storage"
+binary-facing = false
+
+[lib]
+name = "mfm_storage_postgres"
+path = "src/lib.rs"
+
+[features]
+parity-tests = []
+test-support = []
 
 [dependencies]
-fs2 = { version = "0.4.3", optional = true }
-mfm-authority-seal = { path = "../../kernel/authority-seal" }
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-ids = { path = "../../kernel/ids" }
 mfm-journal = { path = "../../kernel/journal" }
 mfm-store = { path = "../../kernel/store" }
-mfm-certify = { path = "../../kernel/certify" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate"] }
-tokio = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-syn = { version = "2.0", features = ["full", "visit"] }
-proc-macro2 = { version = "1.0", features = ["span-locations"] }
-mfm-certify = { path = "../../kernel/certify" }
-mfm-facts = { path = "../../kernel/facts" }
-mfm-program = { path = "../../kernel/program" }
-mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-replay = { path = "../../kernel/replay" }
-mfm-runtime = { path = "../../kernel/runtime" }
-mfm-spec = { path = "../../kernel/spec" }
-mfm-store = { path = "../../kernel/store", features = ["backend-conformance"] }
-mfm-values = { path = "../../kernel/values" }
-
-[features]
-test-support = ["dep:fs2"]
-parity-tests = ["mfm-store/backend-conformance", "test-support"]
-
-[[test]]
-name = "structured-history"
-path = "tests/structured_history.rs"
-required-features = ["parity-tests"]

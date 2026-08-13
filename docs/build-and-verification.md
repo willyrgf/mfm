@@ -15,7 +15,7 @@ endpoints, runtime state, and run evidence.
 | Lane | Entry points | Artifact location | Policy |
 | --- | --- | --- | --- |
 | Focused development | Cargo inside the default `nix develop` shell | normal worktree `target` | mutable, incremental, developer-owned |
-| Broad verification | `nix run .#check`, `.#test`, `.#test-db`, `.#ci` | worktree `target/verification` | mutable, compact, nonincremental |
+| Broad verification | `nix run .#ci` | worktree `target/verification` | mutable, compact, nonincremental |
 | Release packaging | `nix build .#mfm` | Nix store | immutable package output |
 
 These are assurance and artifact boundaries, not competing Cargo and Nix
@@ -24,8 +24,8 @@ and native dependencies supplied by Nix. Release packaging does not act as a
 test cache, and mutable Cargo artifacts are never release inputs or trusted
 verification results.
 
-`nix run .#mfm` is a project CLI convenience, not a separate build lane. Its managed database
-lifecycle and raw execution alternatives are owned by the [CLI reference](../bin/cli/README.md).
+`nix run .#mfm` is a project CLI convenience, not a separate build lane. It is a credential-free
+transport wrapper over the fixed-tenant application facade.
 
 ## Responsibility boundary
 
@@ -70,34 +70,9 @@ whole-package test before a workspace test. Expand to affected dependents when
 a public crate contract changes. Do not duplicate broad verification in both
 the development and verification targets without a change-specific reason.
 
-For a one-off check that already exists as a Nixfied leaf, invoke that task
-directly instead of its enclosing gate:
-
-```bash
-nix run .#run -- --task cargo-metadata-contract
-nix run .#run -- --task mfm-store-default-api-surface
-nix run .#run -- --task structured-history-postgres-qualification
-nix run .#run -- --task postgres-sql-inventory-check
-nix run .#run -- --task parity-bitcoin-core
-```
-
-The task invocation starts only its declared service requirements. Task ids
-come from `nixfied.nix`; the examples above run the metadata contract without a
-service, the store compile-fail surface under its supported default feature set,
-the complete structured-history PostgreSQL qualification target with managed PostgreSQL, the
-dynamic SQL inventory leaf without a database, and the Bitcoin parity target with managed Bitcoin
-Core. Direct task runs use the broad verification target and retain Nixfied evidence.
-
-Leaf task ids are focused internal entry points, not stable public verbs.
-Confirm the current id in `nixfied.nix`. Selecting a leaf runs that leaf and its
-declared service requirements; it does not inherit predecessor tasks that an
-enclosing composite adds. Use a leaf only when its test is independently valid.
-
-For repeated parity debugging, the incremental lane can be faster: start the
-required service once, set explicit variables such as `DATABASE_URL` or
-provider values referenced by an explicit `--runtime-config <PATH>`, and
-repeatedly run the focused Cargo test. This caller-managed path does not
-produce Nixfied service or run evidence.
+The Nixfied task ids are internal to `nixfied.nix`; the public verification
+surface is the composite `.#ci`. Use focused Cargo commands in the development
+shell when isolating a failure.
 
 ## Selecting verification scope
 
@@ -110,11 +85,11 @@ the smallest final gate set that covers it.
 | --- | --- |
 | Prose, comments, or non-executable documentation | Check changed links, examples, and command claims, then run `git diff --check`. No Rust or service gate is required unless the documentation changes an executable/generated contract or makes claims that need validation against one. |
 | Local behavior within one crate | Run rustfmt, a package-scoped check or Clippy invocation, and the affected package/test targets. Include dependent packages when a public contract changed. |
-| Cargo manifest, workspace metadata, Cargo-enforced crate taxonomy, or dependency-boundary configuration | Run affected package checks/tests and `nix run .#run -- --task cargo-metadata-contract`. Add `.#check` when workspace resolution or all-feature lint coverage changed broadly. |
-| Cross-crate public API, proc-macro output, shared kernel/runtime semantics, or multi-crate behavior | Run `nix run .#check` and `nix run .#test`, unless a final `.#ci` run will cover them. |
-| PostgreSQL migration, SQLx metadata/query, store behavior, or DB-backed CLI/REST behavior | Run focused tests during development, then `nix run .#test-db`. Add other gates only for surfaces they cover. |
-| Nixfied model or verification graph | Run `nix run .#model-check` early and exercise the changed task/gate. Run `nix run .#ci` once on the final revision; use component gates separately only for diagnosis. |
-| Flake output, package/dev-shell definition, flake dependency pin, or hosted workflow | Run `nix flake check --no-build` for early evaluation, then exercise the affected output or invocation. Add `.#ci` when the toolchain, Nixfied runtime, gate execution, or cross-platform behavior changed. |
+| Cargo manifest, workspace metadata, Cargo-enforced crate taxonomy, or dependency-boundary configuration | Run affected package checks/tests, then `nix run .#ci` for the final cross-crate graph. |
+| Cross-crate public API, proc-macro output, shared kernel/runtime semantics, or multi-crate behavior | Run focused package checks while iterating, then `nix run .#ci`. |
+| PostgreSQL migration, SQLx metadata/query, store behavior, or DB-backed transport behavior | Run focused package checks while iterating, then `nix run .#ci`; the current graph has no managed database service. |
+| Nixfied model or verification graph | Run `nix run .#model-check` early, then `nix run .#ci` once on the final revision. |
+| Flake output, package/dev-shell definition, flake dependency pin, or hosted workflow | Run `nix flake check --no-build` for early evaluation, then `nix run .#ci`. |
 | Security-sensitive, persisted-contract, scheduler/recovery, cross-cutting, release, or explicit full local merge-readiness validation | Run targeted checks first, then `nix run .#ci` once on the final revision. |
 
 When a change spans rows, combine only non-overlapping coverage. Editing an
@@ -151,8 +126,8 @@ Trybuild groups in `.config/nextest.toml` also avoid competing nested Cargo
 writers within one Nextest run.
 
 `NIXFIED_STATE_DIR` selects only Nixfied runtime state and evidence. It does
-not relocate or clean Cargo artifacts, and `nix run .#clean` leaves
-`target/verification` untouched.
+not relocate or clean Cargo artifacts, and the Cargo cleanup command above
+leaves Nixfied state untouched.
 
 ## Artifact lifecycle and trust
 
@@ -172,32 +147,10 @@ nix develop -c cargo clean --target-dir target/verification
 | Command | Contract |
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
-| `nix run .#check` | Run formatting, Clippy, architecture/Cargo metadata contracts, and offline SQLx checking. |
-| `nix run .#test` | Run main-workspace Nextest and doctests without managed external services. |
-| `nix run .#test-db` | Start managed PostgreSQL, check online SQLx metadata and the authoritative run-history and wallet schemas (including a hostile mutation probe), run structured-history conformance, and run the wallet-nonce PostgreSQL qualification matrix. |
-| `nix run .#ci` | Run the complete graph, including the component gates and feature-gated parity coverage. |
+| `nix run .#run -- --task negative-scan` | Run the immutable cutover-manifest negative scan. |
+| `nix run .#ci` | Run the one final cross-crate gate for the cutover. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or
-task counts evolve. `.#ci` composes `.#check`, `.#test`, and `.#test-db`, then
-adds Bitcoin Core parity coverage before the closing source revision.
-Do not run the three component gates immediately before `.#ci` on the same
-revision: that repeats their work in separate Nixfied runs. Run a component
-independently when it is the smallest sufficient boundary gate or when isolating
-a failure.
-
-The `parity-bitcoin-core` leaf starts an isolated loopback-only regtest node from
-the root flake's pinned `pkgs.bitcoind`. The current executable version is
-asserted as Bitcoin Core 31.0, both at Nix evaluation and service startup, and
-must remain at least 28. The task mines a deterministic fixture, then exercises
-the public checked Bitcoin batch transport against the live node for chain/IBD
-validation, one multi-descriptor scan, scan-height hash confirmation,
-zero/nonzero balances, and redacted authentication failure. Its data directory,
-port, process lifetime, and ephemeral cookie credential at one deterministic
-managed path are Nixfied-owned; no credential value enters the compiled model,
-arguments, or logs, and the task never uses a host `bitcoind`. The flake lock is
-the version pin. The transport contract tracks the official
-[JSON-RPC interface](https://github.com/bitcoin/bitcoin/blob/v31.0/doc/JSON-RPC-interface.md),
-[`scantxoutset`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/scantxoutset/),
-[`getblockchaininfo`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockchaininfo/),
-and [`getblockhash`](https://bitcoincore.org/en/doc/31.0.0/rpc/blockchain/getblockhash/)
-contracts.
+task counts evolve. `.#ci` is the one final cross-crate gate for the cutover.
+The composite is the one final cross-crate gate for the cutover; do not duplicate
+its component tasks immediately before it on the same revision.

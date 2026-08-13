@@ -1,11 +1,10 @@
 [package]
 name = "mfm-keystore"
-version = "0.1.30"
+version = "0.1.0"
 edition = "2021"
-description = "MFM encrypted keystore and keystore-backed signing provider"
+description = "Thread-affine bounded secret custody for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
-readme = "README.md"
 
 [package.metadata.mfm]
 layer = "secret-provider"
@@ -15,30 +14,6 @@ name = "mfm_keystore"
 path = "src/lib.rs"
 
 [dependencies]
-serde = "1.0"
-serde_json = "1.0"
-subtle = "2.6.1"
-
-tiny-keccak = { version = "2.0", features = ["keccak"] }
-argon2 = "0.5.3"
-aes-gcm = "0.10.1"
-bip39 = "2.0.0"
-bip32 = "0.5.3"
-k256 = { version = "0.13.0", features = ["ecdsa"] }
-uuid = { version = "1.8.0", features = ["serde", "v4"] }
-zeroize = { version = "1.7.0", features = ["zeroize_derive"] }
-chrono = { version = "0.4.38", features = ["serde"] }
-rand = "0.9.3"
-alloy-primitives = { workspace = true, features = ["serde", "k256"] }
-hex = "0.4.3"
-ring = "0.17.14"
-fs2 = "0.4.3"
-thiserror = { workspace = true }
-tokio = { workspace = true }
-
-mfm-signing = { path = "../signing" }
 mfm-ids = { path = "../kernel/ids" }
-
-[dev-dependencies]
-tempfile = "3.8"
-static_assertions = "1"   # compile-time trait assertions
+thiserror = { workspace = true }
+zeroize = "1.7"
