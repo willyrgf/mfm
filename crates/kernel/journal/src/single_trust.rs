@@ -10,6 +10,7 @@ use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId,
     StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
+use mfm_values::string_contains_secret_marker;
 use serde::{Deserialize, Serialize};
 
 /// Maximum canonical bytes in one retained frame.
@@ -228,19 +229,7 @@ impl ImmutableObject {
 }
 
 fn contains_secret_marker(input: &str) -> bool {
-    let lower = input.to_ascii_lowercase();
-    [
-        "password",
-        "passphrase",
-        "mnemonic",
-        "private_key",
-        "privatekey",
-        "secret",
-        "access_token",
-        "api_key",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    string_contains_secret_marker(input)
 }
 
 /// The sole genesis record of a run.

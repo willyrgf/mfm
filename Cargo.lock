@@ -975,6 +975,7 @@ version = "0.1.0"
 dependencies = [
  "mfm-canonical",
  "mfm-ids",
+ "mfm-values",
  "serde",
  "serde_json",
  "thiserror",

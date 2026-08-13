@@ -62,6 +62,7 @@ const SECRET_MARKERS: &[&str] = &[
     "accesskey",
     "secret_key",
     "secretkey",
+    "secret",
     "aws_access_key_id",
     "aws_secret_access_key",
     "access_token",
@@ -2629,4 +2630,43 @@ fn reject_duplicate_names<'a>(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod secret_marker_tests {
+    use super::string_contains_secret_marker;
+
+    #[test]
+    fn policy_covers_persisted_secret_canaries() {
+        for marker in [
+            "password",
+            "passphrase",
+            "mnemonic",
+            "private_key",
+            "privatekey",
+            "seed phrase",
+            "api_key",
+            "apikey",
+            "x-api-key",
+            "access_key",
+            "secret_key",
+            "aws_access_key_id",
+            "access_token",
+            "refresh_token",
+            "id_token",
+            "bearer token",
+            "secret",
+        ] {
+            assert!(
+                string_contains_secret_marker(marker),
+                "secret marker was not rejected: {marker}"
+            );
+        }
+        assert!(string_contains_secret_marker(
+            "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima"
+        ));
+        assert!(!string_contains_secret_marker(
+            "public operation identifier"
+        ));
+    }
 }

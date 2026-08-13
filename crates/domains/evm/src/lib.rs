@@ -11,7 +11,7 @@ use std::num::NonZeroU16;
 use mfm_capabilities::{AccessCapabilityContract, EffectMode, EntryOnce, NoPriorFacts, ReadMode};
 use mfm_ids::StableId;
 use mfm_program_derive::MfmValue;
-use mfm_values::MfmValue as MfmValueTrait;
+use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
@@ -1180,16 +1180,7 @@ impl AccessCapabilityContract for BroadcastTransaction {
 }
 
 fn contains_secret_marker(value: &str) -> bool {
-    let lower = value.to_ascii_lowercase();
-    [
-        "password",
-        "mnemonic",
-        "private_key",
-        "secret",
-        "access_token",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
+    string_contains_secret_marker(value)
 }
 
 fn is_decimal_integer(value: &str) -> bool {
