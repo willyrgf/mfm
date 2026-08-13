@@ -1012,6 +1012,8 @@ name = "mfm-program"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-capabilities",
+ "mfm-facts",
  "mfm-ids",
  "mfm-program-derive",
  "mfm-values",
@@ -1124,6 +1126,7 @@ name = "mfm-store"
 version = "0.1.0"
 dependencies = [
  "mfm-canonical",
+ "mfm-capabilities",
  "mfm-facts",
  "mfm-ids",
  "mfm-journal",

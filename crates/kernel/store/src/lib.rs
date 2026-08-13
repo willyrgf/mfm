@@ -12,8 +12,8 @@ pub mod single_trust;
 pub mod backend_conformance;
 
 pub use backend::{
-    AccessConclusionProposal, AccessPreparationOutcome, AdmissionOutcome, BackendAppendCommand,
-    BackendAppendOutcome, BackendConfigurationOutcome, BackendError, BackendFuture, BackendResult,
+    AccessPreparationOutcome, AdmissionOutcome, BackendAppendCommand, BackendAppendOutcome,
+    BackendConfigurationOutcome, BackendError, BackendFuture, BackendResult,
     ConfigurationAppendCommand, ConfigurationCommitOutcome, ConfigurationStore,
     ConfigurationWriteSession, HistoryReader, MemoryStructuredBackend, OpenedStructuredStore,
     PreparedAdmission, PreparedConfigurationAppend, QualifiedHistoryPort, RawConfigurationRevision,

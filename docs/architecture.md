@@ -29,8 +29,9 @@ consume App.
 ### Program
 
 Program owns strict document ingress, pure expansion, State/Match declarations, contracts,
-the sole exact nominal-contract/schema-descriptor/Rust-type association table, catalog-branded
-typed values, and binding descriptors. Program data is callback-free and cannot invoke I/O. Runtime
+the sole exact nominal-contract/schema-descriptor/Rust-type and capability intent/evidence/mode
+association tables, catalog-branded typed values, and declaration-owned binding descriptors.
+Program data is callback-free and cannot invoke I/O. Runtime
 State and capability registrations must match the finalized table before an assembly exists; their
 private `TypeId` correlation is not a second value registry.
 
@@ -43,8 +44,9 @@ intent and call.
 ### Journal and Store
 
 Journal owns strict wire syntax and validation for canonical frames and the three public run-record
-DTO families; it owns no semantic append authority. Store alone converts coordinate-free typed
-proposals into frames and supplies every journal coordinate. Store owns the reducer,
+DTO families; it owns no semantic append authority. Store alone converts catalog-qualified typed
+proposals into frames, derives their journal refs/object closures, validates exact capability and
+evidence binding, and supplies every journal coordinate. Store owns the reducer,
 sequential cursor, cumulative-context continuity, preparation selection, source-manifest-bounded
 prior-fact selection, occurrence conclusion uniqueness, object/fact publication closure,
 typed configuration ingress and bounds, fact-frontier preconditions, publication-coordinate assignment, and
@@ -77,8 +79,9 @@ not scheduling or per-run ownership. `SuspendedRun` is the exhaustive owner-fate
 admission, preparation, and conclusion acknowledgement boundaries; its conclusion variant is the
 Runtime-owned affine `PendingConclusion`. A State implementation cannot
 access Store, journal, replay, or arbitrary prior output through its supported callback. Access
-registration requires the immutable binding descriptor; preparation has no caller-supplied binding
-substitution path. Conclusion recovery preserves Store classifications for same-run races,
+registration names only the live State implementation and adapter callback; Program supplies the
+immutable binding and capability association, so preparation has no caller-supplied substitution
+path. Conclusion recovery preserves Store classifications for same-run races,
 including identical semantic conclusions, superseded Access preparations, conflicts, and invalid
 history; permanent Store rejection remains a distinct owner-bearing result rather than becoming a
 retryable suspension.

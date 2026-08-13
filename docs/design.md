@@ -18,7 +18,8 @@ sandbox linked Rust code.
 
 `mfm-program` owns one opaque `Program`, its strict serializable document, a callback-free catalog,
 and catalog-branded typed values. Before finalization, the catalog registers each exact nominal
-contract, schema-descriptor identity, and Rust value type. A schema ID, `ProgramRef`, or
+contract, schema-descriptor identity, Rust value type, and capability's intent/evidence/mode/fact
+association. Access declarations retain their complete immutable binding descriptor. A schema ID, `ProgramRef`, or
 content-equal Program is not catalog authority, and retained bytes reenter through the same exact
 association. The declaration algebra is exactly `State | Match`. Authoring fragments are expanded
 before a Program is constructed; no runtime collection or ambient value map exists.
@@ -37,8 +38,9 @@ semantic mutation authority. Its public checked DTOs contain only:
 2. `StatePrepared`, an access-only preparation; and
 3. `StateConcluded`, a Pure or Access conclusion.
 
-Store alone converts coordinate-free typed admission, intent, outcome, evidence, and fact-proposal
-material into those DTOs for normal execution. It supplies occurrence, predecessor/head,
+Store alone converts catalog-qualified admission, intent, outcome, and evidence plus concrete fact
+values into those DTOs for normal execution. It validates the exact capability association and
+evidence-to-intent binding, derives every `ValueRef` and immutable object, and supplies occurrence, predecessor/head,
 sequence, preparation ordinal/replacement/reference, append identity, and publication coordinates.
 Each append contains one semantic record and its object/fact closure atomically. Store compares the
 exact current head, rejects stale or conflicting logical keys, and selects at most one conclusion
@@ -87,8 +89,9 @@ An integrity-blocked Access result is a capability-certified, callback-free term
 declared failure contract supplies one static typed failure value; callers cannot choose a failure,
 successor context, retry authority, or new fact publication on that route.
 
-Access assembly retains the complete immutable binding descriptor at registration. The Runtime
-preparation bridge does not accept a caller-supplied replacement descriptor, and the opened Store
+Program retains the complete immutable binding descriptor in each Access declaration. Runtime
+registration and preparation derive it from that declaration, accept no replacement descriptor,
+and the opened Store
 has no generic public frame append; admission and qualified conclusion ownership are separate
 ingress paths. Runtime receives only its exact non-Clone mutation port and never returns that port
 or an opened Store. Multiple Runtime assemblies over one persisted identity use independent

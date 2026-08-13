@@ -1933,7 +1933,7 @@ fn select_match_payload(
     Ok((selected, variant.entry_address().clone(), selected_object))
 }
 
-fn object_for_value(
+pub(crate) fn object_for_value(
     run: &QualifiedRun,
     value: &ValueRef,
 ) -> Result<mfm_journal::single_trust::ImmutableObject> {
@@ -1949,17 +1949,13 @@ fn validate_preparation_contract(
     prepared: &StatePrepared,
     state: &mfm_program::single_trust::StateDeclaration,
 ) -> Result<()> {
-    let binding_ref = prepared
-        .binding()
+    let binding_ref = state
+        .execution_binding()
+        .ok_or(StoreError::InvalidRecord)?
         .content_ref()
         .map_err(|_| StoreError::InvalidRecord)?;
     if state.execution().is_pure()
         || prepared.input().contract_ref() != state.input_contract_ref()
-        || prepared.execution_binding_ref()
-            != state
-                .execution_binding_ref()
-                .ok_or(StoreError::InvalidRecord)?
-        || prepared.binding().state_implementation_ref() != state.state_implementation_ref()
         || binding_ref != *prepared.execution_binding_ref()
         || prepared.maximum_conclusion_bytes() != state.maximum_conclusion_bytes()
         || prepared.fact_request().is_some() != prepared.fact_selection().is_some()
@@ -1967,39 +1963,17 @@ fn validate_preparation_contract(
     {
         return Err(StoreError::InvalidRecord);
     }
-    let capability_ref = prepared
-        .binding()
-        .capability_contract_ref()
-        .ok_or(StoreError::InvalidRecord)?;
-    if prepared.binding().adapter_implementation_ref().is_none() {
-        return Err(StoreError::InvalidRecord);
-    }
     match (state.execution(), prepared.mode()) {
         (
             ExecutionMode::Read {
-                capability_contract_ref,
                 total_attempt_bound,
                 ..
             },
             mfm_journal::single_trust::PreparationMode::Read {
                 total_attempt_bound: prepared_bound,
             },
-        ) if capability_contract_ref == capability_ref
-            && total_attempt_bound == prepared_bound
-            && prepared.binding().effect_domain().is_none() =>
-        {
-            Ok(())
-        }
-        (
-            ExecutionMode::Effect {
-                capability_contract_ref,
-                effect_domain,
-                ..
-            },
-            mfm_journal::single_trust::PreparationMode::Effect,
-        ) if capability_contract_ref == capability_ref
-            && prepared.binding().effect_domain() == Some(effect_domain) =>
-        {
+        ) if total_attempt_bound == prepared_bound => Ok(()),
+        (ExecutionMode::Effect { .. }, mfm_journal::single_trust::PreparationMode::Effect) => {
             Ok(())
         }
         _ => Err(StoreError::InvalidRecord),
@@ -2601,9 +2575,10 @@ mod tests {
     use mfm_canonical::raw_content_digest;
     use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
     use mfm_journal::single_trust::{
-        BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
-        RunAdmitted, SequentialControlAddress, StateOutcome, ValueRef,
+        ConfigurationHeadProjection, ImmutableObject, PreparationMode, RunAdmitted,
+        SequentialControlAddress, StateOutcome, ValueRef,
     };
+    use mfm_program::BindingDescriptor;
 
     fn content(seed: u8) -> ContentRef {
         ContentRef::new(
@@ -2897,7 +2872,7 @@ mod tests {
             true,
         )
         .expect("state")
-        .with_execution_binding(execution_binding_ref.clone())
+        .with_execution_binding(binding.clone())
         .expect("execution binding");
         let document = ProgramDocument::new(
             StableId::new("mfm.test-access").expect("entry"),
@@ -2944,7 +2919,6 @@ mod tests {
             PreparationMode::Read {
                 total_attempt_bound: 1,
             },
-            binding,
             execution_binding_ref,
             None,
             mfm_journal::single_trust::MAX_FRAME_BYTES as u64,
@@ -3004,7 +2978,7 @@ mod tests {
             true,
         )
         .expect("state")
-        .with_execution_binding(execution_binding_ref.clone())
+        .with_execution_binding(binding.clone())
         .expect("execution binding")
         .with_maximum_conclusion_bytes(4096)
         .expect("conclusion bound");
@@ -3052,7 +3026,6 @@ mod tests {
             None,
             None,
             PreparationMode::Effect,
-            binding.clone(),
             execution_binding_ref.clone(),
             None,
             maximum_conclusion_bytes,
@@ -3085,7 +3058,6 @@ mod tests {
             None,
             None,
             PreparationMode::Effect,
-            binding,
             execution_binding_ref,
             Some(first_ref),
             maximum_conclusion_bytes,

@@ -7,8 +7,8 @@
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 pub use mfm_ids::SequentialControlAddress;
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId,
-    StableId, StoreEpoch, StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RunId, StableId, StoreEpoch,
+    StoreScopeId, TenantScopeId,
 };
 use mfm_values::string_contains_secret_marker;
 use serde::{Deserialize, Serialize};
@@ -78,95 +78,6 @@ impl ValueRef {
     /// Returns whether the value bytes use the nominal contract's schema.
     pub fn is_schema_bound(&self) -> bool {
         self.contract_ref.schema_id() == self.value_ref.schema_id()
-    }
-}
-
-/// One secret-free immutable State/capability/adapter association.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BindingDescriptor {
-    state_implementation_ref: ContentRef,
-    capability_contract_ref: Option<ContentRef>,
-    adapter_implementation_ref: Option<ContentRef>,
-    physical_target_ref: ContentRef,
-    effect_domain: Option<StableId>,
-    public_signer_key_instance_ref: Option<ContentRef>,
-}
-
-impl BindingDescriptor {
-    /// Constructs the sole immutable binding descriptor shape.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        state_implementation_ref: ContentRef,
-        capability_contract_ref: Option<ContentRef>,
-        adapter_implementation_ref: Option<ContentRef>,
-        physical_target_ref: ContentRef,
-        effect_domain: Option<StableId>,
-        public_signer_key_instance_ref: Option<ContentRef>,
-    ) -> Result<Self> {
-        if capability_contract_ref.is_none() != adapter_implementation_ref.is_none() {
-            return Err(JournalError::InvalidRecord);
-        }
-        Ok(Self {
-            state_implementation_ref,
-            capability_contract_ref,
-            adapter_implementation_ref,
-            physical_target_ref,
-            effect_domain,
-            public_signer_key_instance_ref,
-        })
-    }
-
-    /// Validates a descriptor that came from strict retained bytes.
-    pub fn validate(&self) -> Result<()> {
-        if self.capability_contract_ref.is_none() != self.adapter_implementation_ref.is_none() {
-            return Err(JournalError::InvalidRecord);
-        }
-        Ok(())
-    }
-
-    /// Returns the exact State implementation identity.
-    pub const fn state_implementation_ref(&self) -> &ContentRef {
-        &self.state_implementation_ref
-    }
-
-    /// Returns the capability contract identity for Access, if present.
-    pub const fn capability_contract_ref(&self) -> Option<&ContentRef> {
-        self.capability_contract_ref.as_ref()
-    }
-
-    /// Returns the qualified adapter identity for Access, if present.
-    pub const fn adapter_implementation_ref(&self) -> Option<&ContentRef> {
-        self.adapter_implementation_ref.as_ref()
-    }
-
-    /// Returns the immutable physical route/target identity.
-    pub const fn physical_target_ref(&self) -> &ContentRef {
-        &self.physical_target_ref
-    }
-
-    /// Returns the Effect domain, if the State is an Effect.
-    pub const fn effect_domain(&self) -> Option<&StableId> {
-        self.effect_domain.as_ref()
-    }
-
-    /// Returns the public signer key-instance identity, if applicable.
-    pub const fn public_signer_key_instance_ref(&self) -> Option<&ContentRef> {
-        self.public_signer_key_instance_ref.as_ref()
-    }
-
-    /// Returns the content identity of this exact canonical binding descriptor.
-    pub fn content_ref(&self) -> Result<ContentRef> {
-        let schema = SchemaId::new(
-            "mfm.execution-binding",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([0; 32]),
-        )
-        .map_err(|_| JournalError::Canonical)?;
-        let canonical = canonical_json(self)?;
-        ContentRef::new(schema, raw_content_digest(canonical.as_bytes()))
-            .map_err(|_| JournalError::Canonical)
     }
 }
 
@@ -444,7 +355,6 @@ pub struct StatePrepared {
     fact_request: Option<ValueRef>,
     fact_selection: Option<ValueRef>,
     mode: PreparationMode,
-    binding: BindingDescriptor,
     execution_binding_ref: ContentRef,
     replaces: Option<PreparationRef>,
     maximum_conclusion_bytes: u64,
@@ -461,7 +371,6 @@ impl StatePrepared {
         fact_request: Option<ValueRef>,
         fact_selection: Option<ValueRef>,
         mode: PreparationMode,
-        binding: BindingDescriptor,
         execution_binding_ref: ContentRef,
         replaces: Option<PreparationRef>,
         maximum_conclusion_bytes: u64,
@@ -476,10 +385,6 @@ impl StatePrepared {
                 .as_ref()
                 .is_some_and(|selection| !selection.is_schema_bound())
             || fact_selection.is_some() && fact_request.is_none()
-            || binding.validate().is_err()
-            || binding.capability_contract_ref().is_none()
-            || binding.adapter_implementation_ref().is_none()
-            || binding.content_ref()? != execution_binding_ref
         {
             return Err(JournalError::InvalidRecord);
         }
@@ -497,7 +402,6 @@ impl StatePrepared {
             fact_request,
             fact_selection,
             mode,
-            binding,
             execution_binding_ref,
             replaces,
             maximum_conclusion_bytes,
@@ -537,11 +441,6 @@ impl StatePrepared {
     /// Returns the fixed prior-fact request identity, if this capability uses one.
     pub const fn fact_selection(&self) -> Option<&ValueRef> {
         self.fact_selection.as_ref()
-    }
-
-    /// Returns the immutable binding evidence.
-    pub const fn binding(&self) -> &BindingDescriptor {
-        &self.binding
     }
 
     /// Returns the exact immutable execution-binding identity.
@@ -961,14 +860,6 @@ impl RunFrame {
                     || prepared.maximum_conclusion_bytes() == 0
                     || prepared.maximum_conclusion_bytes() as usize > MAX_FRAME_BYTES
                     || prepared.mode.validate().is_err()
-                    || prepared.binding().validate().is_err()
-                    || prepared.binding().capability_contract_ref().is_none()
-                    || prepared.binding().adapter_implementation_ref().is_none()
-                    || prepared
-                        .binding()
-                        .content_ref()
-                        .map_err(|_| JournalError::InvalidRecord)?
-                        != *prepared.execution_binding_ref()
                     || prepared
                         .replaces()
                         .is_some_and(|replacement| replacement.run_id() != &self.run_id)
@@ -1309,7 +1200,7 @@ mod tests {
     }
 
     #[test]
-    fn access_frames_bind_preparations_and_execution_descriptors() {
+    fn access_frames_bind_preparations_and_execution_descriptor_refs() {
         let scope = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
             .expect("scope");
         let epoch = StoreEpoch::new(1);
@@ -1318,14 +1209,7 @@ mod tests {
         )
         .expect("run");
         let occurrence = SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
-        let state = ref_for(11);
-        let capability = ref_for(12);
-        let adapter = ref_for(13);
-        let target = ref_for(14);
-        let binding =
-            BindingDescriptor::new(state, Some(capability), Some(adapter), target, None, None)
-                .expect("binding");
-        let binding_ref = binding.content_ref().expect("binding ref");
+        let binding_ref = ref_for(14);
         let input = ValueRef::new(ref_for(15), ref_for(16));
         let intent = ValueRef::new(ref_for(17), ref_for(18));
         let prepared = StatePrepared::new(
@@ -1338,7 +1222,6 @@ mod tests {
             PreparationMode::Read {
                 total_attempt_bound: 1,
             },
-            binding.clone(),
             binding_ref.clone(),
             None,
             4096,
@@ -1365,7 +1248,6 @@ mod tests {
             PreparationMode::Read {
                 total_attempt_bound: 1,
             },
-            binding.clone(),
             binding_ref,
             None,
             4096,
@@ -1379,25 +1261,6 @@ mod tests {
             AppendRequestId::new("journal-request-only-012345").expect("request"),
             RunRecord::StatePrepared(request_only),
             Vec::new(),
-        )
-        .is_err());
-
-        let unbound = BindingDescriptor::new(ref_for(19), None, None, ref_for(20), None, None)
-            .expect("unbound descriptor");
-        assert!(StatePrepared::new(
-            occurrence.clone(),
-            0,
-            ValueRef::new(ref_for(21), ref_for(22)),
-            ValueRef::new(ref_for(23), ref_for(24)),
-            None,
-            None,
-            PreparationMode::Read {
-                total_attempt_bound: 1,
-            },
-            unbound,
-            ref_for(25),
-            None,
-            4096,
         )
         .is_err());
 

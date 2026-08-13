@@ -38,6 +38,8 @@ ObservationRebaseInput
 ObservationRebase
 UnresolvedObservationAppend
 PendingObservationRecovery
+AccessConclusionProposal
+register_access_with_binding
 external_access_authorized
 external_access_reserved
 external_access_observed

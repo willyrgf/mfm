@@ -10,6 +10,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
+use mfm_capabilities::ProposedStateOutcome;
 use mfm_facts::{
     FactCompleteness, FactProposalSet, FactProvenance, FactSelection, FactSelectionFrontier,
     FactSelectionRequest,
@@ -19,17 +20,17 @@ use mfm_ids::{
     StoreScopeId, TenantScopeId,
 };
 use mfm_journal::single_trust::{
-    BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
-    PreparationRef, RunRecord, StatePrepared, ValueRef,
+    ConfigurationHeadProjection, ImmutableObject, PreparationMode, PreparationRef, RunRecord,
+    StateOutcome, StatePrepared, ValueRef,
 };
-use mfm_program::ProgramCatalog;
+use mfm_program::{canonical_value, ProgramCatalog, QualifiedValue};
 use mfm_values::{string_contains_secret_marker, MfmConfig, MfmValue, ValidatedConfig};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
-    advance_selected, prepare_access_from_current, prepare_conclusion_from_current,
-    reduce_qualified, AppendDisposition, QualifiedRun, Result, RunAction, SelectedRun, StoreBrand,
-    StoreError,
+    advance_selected, object_for_value, prepare_access_from_current,
+    prepare_conclusion_from_current, reduce_qualified, AppendDisposition, QualifiedRun, Result,
+    RunAction, SelectedRun, StoreBrand, StoreError,
 };
 
 /// Bounded asynchronous backend result used by every mechanical Store capability.
@@ -1415,7 +1416,6 @@ impl OpenedStructuredStore {
             Some(request_ref),
             Some(selection_ref),
             *prepared.mode(),
-            prepared.binding().clone(),
             prepared.execution_binding_ref().clone(),
             prepared.replaces().cloned(),
             prepared.maximum_conclusion_bytes(),
@@ -1869,6 +1869,12 @@ impl OpenedStructuredStore {
         run: &QualifiedRun,
         document: mfm_program::single_trust::ProgramDocument,
     ) -> Result<SelectedRun> {
+        self.inner
+            .catalog
+            .program(document.clone())
+            .map_err(|_| StoreError::InvalidHistory)?;
+        self.history_port()
+            .validate_typed_material(run, &document)?;
         let selection = reduce_qualified(run, document.clone())?;
         Ok(SelectedRun::new(
             run.clone(),
@@ -2017,35 +2023,6 @@ pub enum AccessPreparationOutcome {
         /// Redaction-safe rejection.
         error: StoreError,
     },
-}
-
-/// Coordinate-free typed material proposed for one Access conclusion.
-#[derive(Debug)]
-pub struct AccessConclusionProposal {
-    evidence: ValueRef,
-    evidence_object: ImmutableObject,
-    outcome: mfm_journal::single_trust::StateOutcome,
-    outcome_object: ImmutableObject,
-    fact_proposals: Option<(ValueRef, ImmutableObject)>,
-}
-
-impl AccessConclusionProposal {
-    /// Groups typed evidence, outcome, and optional fact proposals without journal coordinates.
-    pub fn new(
-        evidence: ValueRef,
-        evidence_object: ImmutableObject,
-        outcome: mfm_journal::single_trust::StateOutcome,
-        outcome_object: ImmutableObject,
-        fact_proposals: Option<(ValueRef, ImmutableObject)>,
-    ) -> Self {
-        Self {
-            evidence,
-            evidence_object,
-            outcome,
-            outcome_object,
-            fact_proposals,
-        }
-    }
 }
 
 /// Affine Store-owned conclusion append paired with its exact selected predecessor.
@@ -2318,6 +2295,7 @@ impl QualifiedHistoryPort {
         {
             return Err(StoreError::Identity);
         }
+        self.validate_typed_material(&run, program.document())?;
         let document = program.document().clone();
         let selection = reduce_qualified(&run, document.clone())?;
         Ok(SelectedRun::new(
@@ -2335,27 +2313,15 @@ impl QualifiedHistoryPort {
     pub fn prepare_selected_access<'a>(
         &'a self,
         selected: SelectedRun,
-        intent: ValueRef,
-        intent_object: ImmutableObject,
-        fact_request: Option<(ValueRef, ImmutableObject)>,
-        binding: BindingDescriptor,
+        intent: &'a QualifiedValue,
     ) -> Pin<Box<dyn Future<Output = AccessPreparationOutcome> + Send + 'a>> {
-        Box::pin(self.prepare_selected_access_inner(
-            selected,
-            intent,
-            intent_object,
-            fact_request,
-            binding,
-        ))
+        Box::pin(self.prepare_selected_access_inner(selected, intent))
     }
 
     async fn prepare_selected_access_inner(
         &self,
         selected: SelectedRun,
-        intent: ValueRef,
-        intent_object: ImmutableObject,
-        fact_request: Option<(ValueRef, ImmutableObject)>,
-        binding: BindingDescriptor,
+        intent: &QualifiedValue,
     ) -> AccessPreparationOutcome {
         if !selected.belongs_to_store(&self.inner.brand) {
             return AccessPreparationOutcome::Rejected {
@@ -2364,6 +2330,9 @@ impl QualifiedHistoryPort {
             };
         }
         let (run, document, selection) = selected.into_parts();
+        let reselect = |run, document, selection| {
+            SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand))
+        };
         let (occurrence, input) = match selection.action() {
             RunAction::ReadyAccess {
                 occurrence, input, ..
@@ -2371,12 +2340,7 @@ impl QualifiedHistoryPort {
             RunAction::WaitingPreparation { occurrence, .. } => {
                 let Some((prepared, _)) = run.selected_preparation(occurrence) else {
                     return AccessPreparationOutcome::Rejected {
-                        selected: SelectedRun::new(
-                            run,
-                            document,
-                            selection,
-                            Arc::clone(&self.inner.brand),
-                        ),
+                        selected: reselect(run, document, selection),
                         error: StoreError::InvalidHistory,
                     };
                 };
@@ -2384,19 +2348,14 @@ impl QualifiedHistoryPort {
             }
             _ => {
                 return AccessPreparationOutcome::Rejected {
-                    selected: SelectedRun::new(
-                        run,
-                        document,
-                        selection,
-                        Arc::clone(&self.inner.brand),
-                    ),
+                    selected: reselect(run, document, selection),
                     error: StoreError::NotActionable,
                 }
             }
         };
         let Some(mfm_program::Declaration::State(state)) = document.declaration(&occurrence) else {
             return AccessPreparationOutcome::Rejected {
-                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                selected: reselect(run, document, selection),
                 error: StoreError::InvalidHistory,
             };
         };
@@ -2410,21 +2369,62 @@ impl QualifiedHistoryPort {
             mfm_program::ExecutionMode::Effect { .. } => PreparationMode::Effect,
             mfm_program::ExecutionMode::Pure => {
                 return AccessPreparationOutcome::Rejected {
-                    selected: SelectedRun::new(
-                        run,
-                        document,
-                        selection,
-                        Arc::clone(&self.inner.brand),
-                    ),
+                    selected: reselect(run, document, selection),
                     error: StoreError::NotActionable,
                 }
             }
         };
-        let Some(execution_binding_ref) = state.execution_binding_ref().cloned() else {
+        let Some(binding) = state.execution_binding() else {
             return AccessPreparationOutcome::Rejected {
-                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                selected: reselect(run, document, selection),
                 error: StoreError::InvalidHistory,
             };
+        };
+        let Some(capability_contract_ref) = state.execution().capability_contract_ref() else {
+            return AccessPreparationOutcome::Rejected {
+                selected: reselect(run, document, selection),
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let fact_request = match self
+            .inner
+            .catalog
+            .validate_access_intent(capability_contract_ref, intent)
+        {
+            Ok(request) if request.is_some() == state.fact_selection_required() => request,
+            _ => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: reselect(run, document, selection),
+                    error: StoreError::InvalidRecord,
+                }
+            }
+        };
+        let (intent_ref, intent_object) = match qualified_material(&self.inner.catalog, intent) {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: reselect(run, document, selection),
+                    error,
+                }
+            }
+        };
+        let fact_request = match fact_request.as_ref().map(concrete_material).transpose() {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: reselect(run, document, selection),
+                    error,
+                }
+            }
+        };
+        let execution_binding_ref = match binding.content_ref() {
+            Ok(value) => value,
+            Err(_) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: reselect(run, document, selection),
+                    error: StoreError::InvalidRecord,
+                }
+            }
         };
         let (ordinal, replaces) = match run.selected_preparation(&occurrence) {
             Some((previous, previous_ref)) => (
@@ -2437,11 +2437,10 @@ impl QualifiedHistoryPort {
             occurrence.clone(),
             ordinal,
             input,
-            intent,
+            intent_ref,
             fact_request.as_ref().map(|(request, _)| request.clone()),
             None,
             mode,
-            binding,
             execution_binding_ref,
             replaces,
             state.maximum_conclusion_bytes(),
@@ -2449,12 +2448,7 @@ impl QualifiedHistoryPort {
             Ok(prepared) => prepared,
             Err(_) => {
                 return AccessPreparationOutcome::Rejected {
-                    selected: SelectedRun::new(
-                        run,
-                        document,
-                        selection,
-                        Arc::clone(&self.inner.brand),
-                    ),
+                    selected: reselect(run, document, selection),
                     error: StoreError::InvalidRecord,
                 }
             }
@@ -2595,9 +2589,7 @@ impl QualifiedHistoryPort {
     pub fn prepare_selected_pure_conclusion(
         &self,
         selected: SelectedRun,
-        outcome: mfm_journal::single_trust::StateOutcome,
-        outcome_object: ImmutableObject,
-        fact_proposals: Option<(ValueRef, ImmutableObject)>,
+        proposal: ProposedStateOutcome<QualifiedValue, QualifiedValue>,
     ) -> SelectedConclusionPreparationOutcome {
         let occurrence = match selected.action() {
             RunAction::ReadyPure { occurrence, .. } => occurrence.clone(),
@@ -2606,6 +2598,17 @@ impl QualifiedHistoryPort {
                     selected,
                     error: StoreError::NotActionable,
                 }
+            }
+        };
+        let (outcome, outcome_object, fact_proposals) = match proposed_outcome(
+            &self.inner.catalog,
+            selected.document(),
+            &occurrence,
+            proposal,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return SelectedConclusionPreparationOutcome::Rejected { selected, error }
             }
         };
         let conclusion = mfm_journal::single_trust::StateConcluded::Pure {
@@ -2630,7 +2633,8 @@ impl QualifiedHistoryPort {
     pub fn prepare_selected_access_conclusion(
         &self,
         selected: SelectedRun,
-        proposal: AccessConclusionProposal,
+        evidence: QualifiedValue,
+        proposal: ProposedStateOutcome<QualifiedValue, QualifiedValue>,
         fact_continuation: Option<crate::single_trust::FactContinuation>,
     ) -> SelectedConclusionPreparationOutcome {
         let (occurrence, preparation) = match selected.action() {
@@ -2643,6 +2647,73 @@ impl QualifiedHistoryPort {
                     selected,
                     error: StoreError::NotActionable,
                 }
+            }
+        };
+        let Some((prepared, _)) = selected.qualified_run().selected_preparation(&occurrence) else {
+            return SelectedConclusionPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let Some(mfm_program::Declaration::State(state)) =
+            selected.document().declaration(&occurrence)
+        else {
+            return SelectedConclusionPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let Some(capability_contract_ref) = state.execution().capability_contract_ref() else {
+            return SelectedConclusionPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let intent_object = match object_for_value(selected.qualified_run(), prepared.intent()) {
+            Ok(value) => value,
+            Err(error) => {
+                return SelectedConclusionPreparationOutcome::Rejected { selected, error }
+            }
+        };
+        let intent = match self.inner.catalog.qualify_retained_erased(
+            prepared.intent().contract_ref().clone(),
+            intent_object.canonical_json().as_bytes(),
+        ) {
+            Ok(value) => value,
+            Err(_) => {
+                return SelectedConclusionPreparationOutcome::Rejected {
+                    selected,
+                    error: StoreError::InvalidHistory,
+                }
+            }
+        };
+        if self
+            .inner
+            .catalog
+            .validate_access_evidence(capability_contract_ref, &intent, &evidence)
+            .is_err()
+        {
+            return SelectedConclusionPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::InvalidRecord,
+            };
+        }
+        let (evidence_ref, evidence_object) =
+            match qualified_material(&self.inner.catalog, &evidence) {
+                Ok(value) => value,
+                Err(error) => {
+                    return SelectedConclusionPreparationOutcome::Rejected { selected, error }
+                }
+            };
+        let (outcome, outcome_object, fact_proposals) = match proposed_outcome(
+            &self.inner.catalog,
+            selected.document(),
+            &occurrence,
+            proposal,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return SelectedConclusionPreparationOutcome::Rejected { selected, error }
             }
         };
         let fact_selection = match fact_continuation {
@@ -2666,17 +2737,14 @@ impl QualifiedHistoryPort {
         let conclusion = mfm_journal::single_trust::StateConcluded::Access {
             occurrence,
             preparation,
-            evidence: proposal.evidence,
-            outcome: proposal.outcome,
-            fact_proposals: proposal
-                .fact_proposals
-                .as_ref()
-                .map(|(value, _)| value.clone()),
+            evidence: evidence_ref,
+            outcome,
+            fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
             fact_selection,
             fact_publication: None,
         };
-        let mut objects = vec![proposal.evidence_object, proposal.outcome_object];
-        if let Some((_, object)) = proposal.fact_proposals {
+        let mut objects = vec![evidence_object, outcome_object];
+        if let Some((_, object)) = fact_proposals {
             objects.push(object);
         }
         match self.prepare_selected_conclusion(selected, conclusion, objects) {
@@ -2827,6 +2895,11 @@ impl QualifiedHistoryPort {
         history: QualifiedRun,
         document: mfm_program::ProgramDocument,
     ) -> Result<SelectedRun> {
+        self.inner
+            .catalog
+            .program(document.clone())
+            .map_err(|_| StoreError::InvalidHistory)?;
+        self.validate_typed_material(&history, &document)?;
         let selection = reduce_qualified(&history, document.clone())?;
         Ok(SelectedRun::new(
             history,
@@ -2834,6 +2907,99 @@ impl QualifiedHistoryPort {
             selection,
             Arc::clone(&self.inner.brand),
         ))
+    }
+
+    fn validate_typed_material(
+        &self,
+        run: &QualifiedRun,
+        document: &mfm_program::ProgramDocument,
+    ) -> Result<()> {
+        let qualify = |value: &ValueRef| {
+            let object = object_for_value(run, value)?;
+            self.inner
+                .catalog
+                .qualify_retained_erased(
+                    value.contract_ref().clone(),
+                    object.canonical_json().as_bytes(),
+                )
+                .map_err(|_| StoreError::InvalidHistory)
+        };
+        let state = |occurrence| {
+            document
+                .declaration(occurrence)
+                .and_then(|declaration| match declaration {
+                    mfm_program::Declaration::State(state) => Some(state.as_ref()),
+                    mfm_program::Declaration::Match(_) => None,
+                })
+                .ok_or(StoreError::InvalidHistory)
+        };
+        for frame in run.frames() {
+            match frame.record() {
+                RunRecord::RunAdmitted(admitted) => {
+                    if admitted.admitted_context().contract_ref()
+                        != document.admitted_context_contract_ref()
+                    {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                    qualify(admitted.admitted_context())?;
+                }
+                RunRecord::StatePrepared(prepared) => {
+                    let state = state(prepared.occurrence())?;
+                    if prepared.input().contract_ref() != state.input_contract_ref() {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                    qualify(prepared.input())?;
+                    let intent = qualify(prepared.intent())?;
+                    let capability = state
+                        .execution()
+                        .capability_contract_ref()
+                        .ok_or(StoreError::InvalidHistory)?;
+                    let request = self
+                        .inner
+                        .catalog
+                        .validate_access_intent(capability, &intent)
+                        .map_err(|_| StoreError::InvalidHistory)?;
+                    let request_ref = request
+                        .as_ref()
+                        .map(concrete_material)
+                        .transpose()
+                        .map_err(|_| StoreError::InvalidHistory)?;
+                    if prepared.fact_request() != request_ref.as_ref().map(|(value, _)| value) {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                }
+                RunRecord::StateConcluded(concluded) => {
+                    let state = state(concluded.occurrence())?;
+                    let (outcome, expected_contract) = match concluded.outcome() {
+                        StateOutcome::Success(value) => (value, Some(state.output_contract_ref())),
+                        StateOutcome::Failure(value) => (value, state.failure_contract_ref()),
+                    };
+                    if expected_contract != Some(outcome.contract_ref()) {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                    qualify(outcome)?;
+                    if let mfm_journal::StateConcluded::Access { evidence, .. } = concluded {
+                        let (prepared, _) = run
+                            .selected_preparation(concluded.occurrence())
+                            .ok_or(StoreError::InvalidHistory)?;
+                        let intent = qualify(prepared.intent())?;
+                        let evidence = qualify(evidence)?;
+                        self.inner
+                            .catalog
+                            .validate_access_evidence(
+                                state
+                                    .execution()
+                                    .capability_contract_ref()
+                                    .ok_or(StoreError::InvalidHistory)?,
+                                &intent,
+                                &evidence,
+                            )
+                            .map_err(|_| StoreError::InvalidHistory)?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
@@ -3095,6 +3261,78 @@ impl QualifiedHistoryPort {
             return Err(StoreError::FactFrontierChanged);
         }
         Ok(Some(frontier_sequence))
+    }
+}
+
+fn qualified_material(
+    catalog: &ProgramCatalog,
+    value: &QualifiedValue,
+) -> Result<(ValueRef, ImmutableObject)> {
+    if !value.belongs_to_catalog(catalog) {
+        return Err(StoreError::Identity);
+    }
+    let value_ref = ValueRef::new(value.contract_ref().clone(), value.value_ref().clone());
+    let object = ImmutableObject::new(
+        mfm_ids::StableId::new("mfm.value").map_err(|_| StoreError::InvalidRecord)?,
+        value.value_ref().clone(),
+        std::str::from_utf8(value.canonical_bytes())
+            .map_err(|_| StoreError::InvalidRecord)?
+            .to_owned(),
+    )
+    .map_err(|_| StoreError::InvalidRecord)?;
+    Ok((value_ref, object))
+}
+
+fn concrete_material<T: MfmValue>(value: &T) -> Result<(ValueRef, ImmutableObject)> {
+    let canonical = canonical_value(value).map_err(|_| StoreError::InvalidRecord)?;
+    let content_ref = ContentRef::new(
+        T::schema_id().map_err(|_| StoreError::InvalidRecord)?,
+        raw_content_digest(canonical.as_bytes()),
+    )
+    .map_err(|_| StoreError::InvalidRecord)?;
+    let value_ref = ValueRef::new(content_ref.clone(), content_ref.clone());
+    let object = ImmutableObject::new(
+        mfm_ids::StableId::new("mfm.value").map_err(|_| StoreError::InvalidRecord)?,
+        content_ref,
+        canonical.as_str().to_owned(),
+    )
+    .map_err(|_| StoreError::InvalidRecord)?;
+    Ok((value_ref, object))
+}
+
+#[allow(clippy::type_complexity)]
+fn proposed_outcome(
+    catalog: &ProgramCatalog,
+    document: &mfm_program::ProgramDocument,
+    occurrence: &mfm_program::SequentialControlAddress,
+    proposal: ProposedStateOutcome<QualifiedValue, QualifiedValue>,
+) -> Result<(
+    StateOutcome,
+    ImmutableObject,
+    Option<(ValueRef, ImmutableObject)>,
+)> {
+    let Some(mfm_program::Declaration::State(state)) = document.declaration(occurrence) else {
+        return Err(StoreError::InvalidHistory);
+    };
+    match proposal {
+        ProposedStateOutcome::Success { output, facts } => {
+            if output.contract_ref() != state.output_contract_ref() {
+                return Err(StoreError::InvalidRecord);
+            }
+            facts.validate().map_err(|_| StoreError::InvalidRecord)?;
+            let (output_ref, object) = qualified_material(catalog, &output)?;
+            let facts = (!facts.is_empty())
+                .then(|| concrete_material(&facts))
+                .transpose()?;
+            Ok((StateOutcome::Success(output_ref), object, facts))
+        }
+        ProposedStateOutcome::Failure { failure } => {
+            if state.failure_contract_ref() != Some(failure.contract_ref()) {
+                return Err(StoreError::InvalidRecord);
+            }
+            let (failure_ref, object) = qualified_material(catalog, &failure)?;
+            Ok((StateOutcome::Failure(failure_ref), object, None))
+        }
     }
 }
 
@@ -3689,6 +3927,7 @@ fn retained_preparation_ref(
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU16;
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     use super::*;
@@ -3700,6 +3939,39 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct BackendValue {
         value: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct OtherBackendValue {
+        value: u64,
+    }
+
+    struct BackendRead;
+
+    impl mfm_capabilities::AccessCapabilityContract for BackendRead {
+        type Mode = mfm_capabilities::ReadMode;
+        type Intent = BackendValue;
+        type Evidence = BackendValue;
+        type Facts = mfm_capabilities::NoPriorFacts;
+
+        fn contract_id() -> mfm_capabilities::Result<StableId> {
+            StableId::new("mfm.test.backend-read")
+                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
+        }
+
+        fn total_attempt_bound() -> NonZeroU16 {
+            NonZeroU16::new(2).expect("nonzero")
+        }
+
+        fn bind_evidence(
+            intent: &Self::Intent,
+            evidence: &Self::Evidence,
+        ) -> mfm_capabilities::Result<()> {
+            (intent.value == evidence.value)
+                .then_some(())
+                .ok_or(mfm_capabilities::CapabilityError::EvidenceBinding)
+        }
     }
 
     #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmConfig)]
@@ -3752,6 +4024,9 @@ mod tests {
             .register_value::<BackendValue>()
             .expect("backend value");
         builder
+            .register_capability::<BackendRead>()
+            .expect("backend read");
+        builder
     }
 
     fn identity() -> StructuredStoreIdentity {
@@ -3762,6 +4037,154 @@ mod tests {
             TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
                 .expect("tenant"),
         )
+    }
+
+    #[test]
+    fn store_rejects_catalog_qualified_output_for_another_contract() {
+        let mut builder = backend_catalog_builder();
+        let other_contract = builder
+            .register_value::<OtherBackendValue>()
+            .expect("other value");
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let occurrence =
+            mfm_program::SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
+        let document = mfm_program::ProgramDocument::new(
+            StableId::new("mfm.test.typed-output").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            vec![mfm_program::Declaration::State(Box::new(
+                mfm_program::StateDeclaration::new(
+                    occurrence.clone(),
+                    fact_source(1),
+                    contract.clone(),
+                    contract,
+                    None,
+                    mfm_program::ExecutionMode::Pure,
+                    true,
+                )
+                .expect("state"),
+            ))],
+        )
+        .expect("document");
+        let (catalog, _) = builder.finish(document.clone()).expect("catalog");
+        let output = catalog
+            .qualify(other_contract, OtherBackendValue { value: 1 })
+            .expect("qualified")
+            .erase();
+        assert!(matches!(
+            proposed_outcome(
+                &catalog,
+                &document,
+                &occurrence,
+                ProposedStateOutcome::Success {
+                    output,
+                    facts: FactProposalSet::empty(),
+                },
+            ),
+            Err(StoreError::InvalidRecord)
+        ));
+    }
+
+    #[tokio::test]
+    async fn store_rejects_correct_schema_with_invalid_retained_output_bytes() {
+        let identity = identity();
+        let base = admission_frame(&identity);
+        let RunRecord::RunAdmitted(base_admission) = base.record() else {
+            panic!("expected admission")
+        };
+        let contract = base_admission.admitted_context().contract_ref().clone();
+        let occurrence =
+            mfm_program::SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
+        let document = mfm_program::ProgramDocument::new(
+            base_admission.entry_point_id().clone(),
+            contract.clone(),
+            contract.clone(),
+            vec![mfm_program::Declaration::State(Box::new(
+                mfm_program::StateDeclaration::new(
+                    occurrence.clone(),
+                    fact_source(1),
+                    contract.clone(),
+                    contract.clone(),
+                    None,
+                    mfm_program::ExecutionMode::Pure,
+                    true,
+                )
+                .expect("state"),
+            ))],
+        )
+        .expect("document");
+        let admission = mfm_journal::RunAdmitted::new(
+            identity.scope().clone(),
+            identity.epoch(),
+            base.run_id().clone(),
+            identity.tenant().clone(),
+            base_admission.entry_point_id().clone(),
+            document.program_ref().expect("program ref"),
+            base_admission.admitted_context().clone(),
+            base_admission.configuration().clone(),
+            Vec::new(),
+        )
+        .expect("admission");
+        let admission = mfm_journal::RunFrame::new(
+            base.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            1,
+            AppendRequestId::new("invalid-output-admission-0123456789").expect("request"),
+            RunRecord::RunAdmitted(admission),
+            base.objects().to_vec(),
+        )
+        .expect("admission frame");
+        let (catalog, _) = backend_catalog_builder()
+            .finish(document.clone())
+            .expect("catalog");
+        let opened =
+            StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
+                .expect("opened store");
+        let configuration = configuration_head(&opened).await;
+        opened
+            .test_append_admission(admission.clone(), &configuration)
+            .await
+            .expect("append admission");
+
+        let invalid_bytes = r#"{"value":"not-a-number"}"#;
+        let invalid_content = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(invalid_bytes.as_bytes()),
+        )
+        .expect("invalid content");
+        let invalid_output = ValueRef::new(contract, invalid_content.clone());
+        let invalid_object = ImmutableObject::new(
+            StableId::new("mfm.value").expect("object type"),
+            invalid_content,
+            invalid_bytes.to_owned(),
+        )
+        .expect("invalid object");
+        let conclusion = mfm_journal::RunFrame::new(
+            base.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            2,
+            AppendRequestId::new("invalid-output-conclusion-0123456789").expect("request"),
+            RunRecord::StateConcluded(mfm_journal::StateConcluded::Pure {
+                occurrence,
+                outcome: StateOutcome::Success(invalid_output),
+                fact_proposals: None,
+                fact_publication: None,
+            }),
+            vec![invalid_object],
+        )
+        .expect("conclusion frame");
+        opened
+            .history_port()
+            .append_frame(conclusion)
+            .await
+            .expect("append structurally valid conclusion");
+        let retained = opened.load(base.run_id()).await.expect("retained history");
+        assert!(matches!(
+            opened.test_select_qualified(&retained, document),
+            Err(StoreError::InvalidHistory)
+        ));
     }
 
     fn admission_frame(identity: &StructuredStoreIdentity) -> mfm_journal::single_trust::RunFrame {
@@ -4350,9 +4773,14 @@ mod tests {
         )
         .await
         .expect("first opening");
-        let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
-            .await
-            .expect("second opening");
+        let second = StructuredStore::open(
+            backend,
+            identity,
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("second opening");
         let first_configuration = configuration_head(&first).await;
         assert!(!first.test_same_open(&second));
         first
@@ -4746,9 +5174,14 @@ mod tests {
         )
         .await
         .expect("opened store");
-        let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
-            .await
-            .expect("second opening");
+        let second = StructuredStore::open(
+            backend,
+            identity,
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("second opening");
         let configuration_head = configuration_head(&opened).await;
         opened
             .test_append_admission(admission.clone(), &configuration_head)
@@ -4758,11 +5191,19 @@ mod tests {
         let selected = opened
             .test_select_qualified(&current, document.clone())
             .expect("selected");
+        let output = catalog
+            .qualify_retained::<BackendValue>(
+                context.contract_ref().clone(),
+                base.objects()[0].canonical_json().as_bytes(),
+            )
+            .expect("qualified output")
+            .erase();
         let selected = match second.history_port().prepare_selected_pure_conclusion(
             selected,
-            mfm_journal::single_trust::StateOutcome::Success(context.clone()),
-            base.objects()[0].clone(),
-            None,
+            ProposedStateOutcome::Success {
+                output,
+                facts: FactProposalSet::empty(),
+            },
         ) {
             SelectedConclusionPreparationOutcome::Rejected {
                 selected,
@@ -4877,9 +5318,10 @@ mod tests {
         let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
             .expect("occurrence");
         let implementation_ref = fact_source(82);
-        let capability_ref = fact_source(83);
+        let capability_ref =
+            mfm_program::capability_contract_ref::<BackendRead>().expect("capability");
         let adapter_ref = fact_source(84);
-        let binding = mfm_journal::single_trust::BindingDescriptor::new(
+        let binding = mfm_program::BindingDescriptor::new(
             implementation_ref.clone(),
             Some(capability_ref.clone()),
             Some(adapter_ref.clone()),
@@ -4903,7 +5345,7 @@ mod tests {
             true,
         )
         .expect("state")
-        .with_execution_binding(binding_ref.clone())
+        .with_execution_binding(binding.clone())
         .expect("execution binding");
         let maximum_conclusion_bytes = state.maximum_conclusion_bytes();
         let document = mfm_program::single_trust::ProgramDocument::new(
@@ -4964,7 +5406,6 @@ mod tests {
             mfm_journal::single_trust::PreparationMode::Read {
                 total_attempt_bound: 2,
             },
-            binding.clone(),
             binding_ref.clone(),
             None,
             maximum_conclusion_bytes,
@@ -5020,7 +5461,6 @@ mod tests {
             mfm_journal::single_trust::PreparationMode::Read {
                 total_attempt_bound: 2,
             },
-            binding,
             binding_ref,
             Some(initial_ref),
             maximum_conclusion_bytes,

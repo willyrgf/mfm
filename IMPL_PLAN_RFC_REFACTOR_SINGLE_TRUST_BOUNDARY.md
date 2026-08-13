@@ -581,6 +581,11 @@ other or pair evidence with another call. Failure owns no facts; integrity block
 output or facts. Exact generic spelling may differ, but these consuming authorities and illegal-
 pair exclusions may not.
 
+At Store ingress this opaque Runtime result is reduced to catalog-branded `QualifiedValue`
+material and `ProposedStateOutcome<QualifiedValue, QualifiedValue>`. Store exposes no public raw
+`AccessConclusionProposal` DTO: it validates the registered capability/evidence association and
+constructs all journal `ValueRef`, object-closure, outcome, preparation, and binding coordinates.
+
 ### 2.4 Callback-free bindings and live assembly
 
 Reserve `StateImplementation` for the live object. Callback-free Program/catalog types use:

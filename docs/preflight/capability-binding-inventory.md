@@ -22,7 +22,7 @@ only through the capability-certified failure route and grants no retry authorit
 
 ## Immutable binding descriptor
 
-`mfm-journal::single_trust::BindingDescriptor` retains exactly these public propositions:
+`mfm-program::single_trust::BindingDescriptor` retains exactly these public propositions:
 
 - State implementation identity;
 - capability contract identity, when the State is Access;
@@ -48,7 +48,7 @@ resource-currentness lineage have no consumer in the final surface.
 | Prior-fact request/selection | Preparation-bound continuation | Preparation objects and Access conclusion selection | Exact structural refs only |
 
 The inventory is implemented by `crates/domains/evm/src/lib.rs`,
-`crates/live/evm/src/lib.rs`, `crates/kernel/journal/src/single_trust.rs`, and
+`crates/live/evm/src/lib.rs`, `crates/kernel/program/src/single_trust.rs`, and
 `crates/kernel/runtime/src/single_trust.rs`. The focused checks are
 `admission_and_result_deserialization_reenter_domain_validation`,
 `adapter_future_panics_are_contained_as_unresolved`, the Store preparation/conclusion tests, and

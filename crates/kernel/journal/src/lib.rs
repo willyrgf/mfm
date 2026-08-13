@@ -7,6 +7,6 @@
 pub mod single_trust;
 
 pub use single_trust::{
-    BindingDescriptor, ImmutableObject, PreparationRef, RecordLogicalKey, RunAdmitted, RunFrame,
-    RunRecord, SequentialControlAddress, StateConcluded, StateOutcome, StatePrepared, ValueRef,
+    ImmutableObject, PreparationRef, RecordLogicalKey, RunAdmitted, RunFrame, RunRecord,
+    SequentialControlAddress, StateConcluded, StateOutcome, StatePrepared, ValueRef,
 };

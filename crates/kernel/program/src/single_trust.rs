@@ -10,8 +10,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
+use mfm_capabilities::{AccessCapabilityContract, EffectMode, FactSelectionMode, ReadMode};
+use mfm_facts::FactSelectionRequest;
 pub use mfm_ids::SequentialControlAddress;
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
 use mfm_values::MfmValue;
 use serde::de;
 use serde::{Deserialize, Serialize};
@@ -46,6 +48,87 @@ pub enum ProgramError {
     /// A fixed Program or context limit was exceeded.
     #[error("program capacity bound exceeded")]
     Capacity,
+}
+
+/// One secret-free immutable State/capability/adapter association.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingDescriptor {
+    state_implementation_ref: ContentRef,
+    capability_contract_ref: Option<ContentRef>,
+    adapter_implementation_ref: Option<ContentRef>,
+    physical_target_ref: ContentRef,
+    effect_domain: Option<StableId>,
+    public_signer_key_instance_ref: Option<ContentRef>,
+}
+
+impl BindingDescriptor {
+    /// Constructs the sole immutable binding descriptor shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        state_implementation_ref: ContentRef,
+        capability_contract_ref: Option<ContentRef>,
+        adapter_implementation_ref: Option<ContentRef>,
+        physical_target_ref: ContentRef,
+        effect_domain: Option<StableId>,
+        public_signer_key_instance_ref: Option<ContentRef>,
+    ) -> Result<Self> {
+        if capability_contract_ref.is_none() != adapter_implementation_ref.is_none() {
+            return Err(ProgramError::InvalidContract);
+        }
+        Ok(Self {
+            state_implementation_ref,
+            capability_contract_ref,
+            adapter_implementation_ref,
+            physical_target_ref,
+            effect_domain,
+            public_signer_key_instance_ref,
+        })
+    }
+
+    /// Returns the exact State implementation identity.
+    pub const fn state_implementation_ref(&self) -> &ContentRef {
+        &self.state_implementation_ref
+    }
+
+    /// Returns the capability contract identity for Access, if present.
+    pub const fn capability_contract_ref(&self) -> Option<&ContentRef> {
+        self.capability_contract_ref.as_ref()
+    }
+
+    /// Returns the qualified adapter identity for Access, if present.
+    pub const fn adapter_implementation_ref(&self) -> Option<&ContentRef> {
+        self.adapter_implementation_ref.as_ref()
+    }
+
+    /// Returns the immutable physical route/target identity.
+    pub const fn physical_target_ref(&self) -> &ContentRef {
+        &self.physical_target_ref
+    }
+
+    /// Returns the Effect domain, if the State is an Effect.
+    pub const fn effect_domain(&self) -> Option<&StableId> {
+        self.effect_domain.as_ref()
+    }
+
+    /// Returns the public signer key-instance identity, if applicable.
+    pub const fn public_signer_key_instance_ref(&self) -> Option<&ContentRef> {
+        self.public_signer_key_instance_ref.as_ref()
+    }
+
+    /// Returns the content identity of this exact canonical binding descriptor.
+    pub fn content_ref(&self) -> Result<ContentRef> {
+        let schema = SchemaId::new(
+            "mfm.execution-binding",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0; 32]),
+        )
+        .map_err(|_| ProgramError::Canonical)?;
+        let canonical = canonical_json(self)?;
+        ContentRef::new(schema, raw_content_digest(canonical.as_bytes()))
+            .map_err(|_| ProgramError::Canonical)
+    }
 }
 
 /// One callback-free execution mode declared by a State.
@@ -145,7 +228,7 @@ pub struct StateDeclaration {
     terminal: bool,
     next_address: Option<SequentialControlAddress>,
     failure_next_address: Option<SequentialControlAddress>,
-    execution_binding_ref: Option<ContentRef>,
+    execution_binding: Option<BindingDescriptor>,
     maximum_conclusion_bytes: u64,
 }
 
@@ -166,7 +249,7 @@ impl<'de> Deserialize<'de> for StateDeclaration {
             terminal: bool,
             next_address: Option<SequentialControlAddress>,
             failure_next_address: Option<SequentialControlAddress>,
-            execution_binding_ref: Option<ContentRef>,
+            execution_binding: Option<BindingDescriptor>,
             maximum_conclusion_bytes: u64,
         }
 
@@ -196,7 +279,7 @@ impl<'de> Deserialize<'de> for StateDeclaration {
         if let Some(next) = wire.failure_next_address {
             state = state.with_failure_next(next).map_err(de::Error::custom)?;
         }
-        if let Some(binding) = wire.execution_binding_ref {
+        if let Some(binding) = wire.execution_binding {
             state = state
                 .with_execution_binding(binding)
                 .map_err(de::Error::custom)?;
@@ -230,7 +313,7 @@ impl StateDeclaration {
             terminal,
             next_address: None,
             failure_next_address: None,
-            execution_binding_ref: None,
+            execution_binding: None,
             maximum_conclusion_bytes: MAX_STATE_CONCLUSION_BYTES,
         })
     }
@@ -275,11 +358,15 @@ impl StateDeclaration {
     }
 
     /// Associates the State with its immutable process binding descriptor.
-    pub fn with_execution_binding(mut self, binding_ref: ContentRef) -> Result<Self> {
+    pub fn with_execution_binding(mut self, binding: BindingDescriptor) -> Result<Self> {
         if self.execution.is_pure() {
             return Err(ProgramError::InvalidContract);
         }
-        self.execution_binding_ref = Some(binding_ref);
+        if binding.capability_contract_ref.is_none() != binding.adapter_implementation_ref.is_none()
+        {
+            return Err(ProgramError::InvalidContract);
+        }
+        self.execution_binding = Some(binding);
         Ok(self)
     }
 
@@ -337,9 +424,9 @@ impl StateDeclaration {
         self.failure_next_address.as_ref()
     }
 
-    /// Returns the immutable execution binding descriptor identity, if this is Access.
-    pub const fn execution_binding_ref(&self) -> Option<&ContentRef> {
-        self.execution_binding_ref.as_ref()
+    /// Returns the immutable execution binding descriptor, if this is Access.
+    pub const fn execution_binding(&self) -> Option<&BindingDescriptor> {
+        self.execution_binding.as_ref()
     }
 
     /// Returns the complete conclusion reservation.
@@ -586,7 +673,7 @@ impl ProgramDocument {
                 {
                     return Err(ProgramError::InvalidContract);
                 }
-                if state.execution().is_pure() != state.execution_binding_ref().is_none() {
+                if state.execution().is_pure() != state.execution_binding().is_none() {
                     return Err(ProgramError::InvalidContract);
                 }
                 if state.maximum_conclusion_bytes() == 0
@@ -804,7 +891,6 @@ impl ProgramDocument {
 }
 
 /// Opaque immutable callback-free Program authority.
-#[derive(Debug)]
 pub struct Program {
     document: ProgramDocument,
     program_ref: ProgramRef,
@@ -848,20 +934,47 @@ impl Program {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
 struct ValueAssociation {
     type_id: TypeId,
     schema_id: mfm_ids::SchemaId,
     descriptor_identity: Vec<u8>,
+    reify: fn(&[u8]) -> Result<Box<dyn Any + Send + Sync>>,
 }
 
-#[derive(Debug)]
+impl PartialEq for ValueAssociation {
+    fn eq(&self, other: &Self) -> bool {
+        self.type_id == other.type_id
+            && self.schema_id == other.schema_id
+            && self.descriptor_identity == other.descriptor_identity
+    }
+}
+
+impl Eq for ValueAssociation {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CapabilityMode {
+    Read,
+    Effect,
+}
+
+struct CapabilityAssociation {
+    type_id: TypeId,
+    intent_contract_ref: ContentRef,
+    evidence_contract_ref: ContentRef,
+    mode: CapabilityMode,
+    total_attempt_bound: u16,
+    fact_selection_required: bool,
+    bind_evidence: fn(&dyn Any, &dyn Any) -> Result<()>,
+    prior_fact_selection: fn(&dyn Any) -> Result<Option<FactSelectionRequest>>,
+}
+
 struct ProgramCatalogInner {
     associations: BTreeMap<ContentRef, ValueAssociation>,
+    capabilities: BTreeMap<ContentRef, CapabilityAssociation>,
 }
 
 /// Cloneable callback-free catalog owner.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProgramCatalog {
     inner: Arc<ProgramCatalogInner>,
 }
@@ -871,6 +984,7 @@ impl ProgramCatalog {
     pub fn builder() -> ProgramCatalogBuilder {
         ProgramCatalogBuilder {
             associations: BTreeMap::new(),
+            capabilities: BTreeMap::new(),
         }
     }
 
@@ -881,7 +995,7 @@ impl ProgramCatalog {
 
     /// Qualifies one additional normalized Program under this exact catalog brand.
     pub fn program(&self, document: ProgramDocument) -> Result<Program> {
-        validate_program_associations(&self.inner.associations, &document)?;
+        validate_program_associations(&self.inner, &document)?;
         Program::new(document, Arc::clone(&self.inner))
     }
 
@@ -895,6 +1009,21 @@ impl ProgramCatalog {
                     .associations
                     .get(contract_ref)
                     .is_some_and(|registered| registered == &expected)
+        })
+    }
+
+    /// Returns whether the catalog contains this exact capability association.
+    pub fn contains_capability<C: AccessCapabilityContract>(
+        &self,
+        contract_ref: &ContentRef,
+    ) -> bool {
+        capability_contract_ref::<C>().is_ok_and(|expected| {
+            &expected == contract_ref
+                && self
+                    .inner
+                    .capabilities
+                    .get(contract_ref)
+                    .is_some_and(|registered| registered.type_id == TypeId::of::<C>())
         })
     }
 
@@ -933,24 +1062,30 @@ impl ProgramCatalog {
         contract_ref: ContentRef,
         bytes: &[u8],
     ) -> Result<QualifiedTypedValue<T>> {
-        if !self.contains_value::<T>(&contract_ref) {
-            return Err(ProgramError::InvalidValue);
-        }
+        self.qualify_retained_erased(contract_ref.clone(), bytes)?
+            .try_downcast(self, &contract_ref)
+    }
+
+    /// Strictly qualifies retained bytes through their registered nominal association.
+    pub fn qualify_retained_erased(
+        &self,
+        contract_ref: ContentRef,
+        bytes: &[u8],
+    ) -> Result<QualifiedValue> {
+        let association = self
+            .inner
+            .associations
+            .get(&contract_ref)
+            .ok_or(ProgramError::InvalidValue)?;
         let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
             .map_err(|_| ProgramError::Canonical)?;
-        let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidCatalog)?;
-        descriptor
-            .identity()
-            .validate_canonical_value(canonical.as_bytes())
-            .map_err(|_| ProgramError::InvalidValue)?;
-        let value =
-            serde_json::from_slice(canonical.as_bytes()).map_err(|_| ProgramError::InvalidValue)?;
+        let value = (association.reify)(canonical.as_bytes())?;
         let value_ref = ContentRef::new(
             contract_ref.schema_id().clone(),
             ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
         )
         .map_err(|_| ProgramError::InvalidValue)?;
-        Ok(QualifiedTypedValue {
+        Ok(QualifiedValue {
             contract_ref,
             value_ref,
             canonical_json: canonical,
@@ -959,23 +1094,52 @@ impl ProgramCatalog {
         })
     }
 
-    /// Erases one owned typed value while retaining its exact catalog brand.
-    #[allow(dead_code)]
-    pub(crate) fn erase<T: MfmValue>(&self, value: QualifiedTypedValue<T>) -> QualifiedValue {
-        QualifiedValue {
-            contract_ref: value.contract_ref,
-            value_ref: value.value_ref,
-            canonical_json: value.canonical_json,
-            value: Box::new(value.value),
-            catalog: value.catalog,
+    /// Validates an erased intent against the exact registered capability association.
+    pub fn validate_access_intent(
+        &self,
+        capability_contract_ref: &ContentRef,
+        intent: &QualifiedValue,
+    ) -> Result<Option<FactSelectionRequest>> {
+        let capability = self
+            .inner
+            .capabilities
+            .get(capability_contract_ref)
+            .ok_or(ProgramError::InvalidCatalog)?;
+        if !intent.belongs_to_catalog(self)
+            || intent.contract_ref() != &capability.intent_contract_ref
+        {
+            return Err(ProgramError::InvalidValue);
         }
+        (capability.prior_fact_selection)(intent.value.as_ref())
+    }
+
+    /// Validates erased evidence and its binding to the exact registered capability intent.
+    pub fn validate_access_evidence(
+        &self,
+        capability_contract_ref: &ContentRef,
+        intent: &QualifiedValue,
+        evidence: &QualifiedValue,
+    ) -> Result<()> {
+        let capability = self
+            .inner
+            .capabilities
+            .get(capability_contract_ref)
+            .ok_or(ProgramError::InvalidCatalog)?;
+        if !intent.belongs_to_catalog(self)
+            || !evidence.belongs_to_catalog(self)
+            || intent.contract_ref() != &capability.intent_contract_ref
+            || evidence.contract_ref() != &capability.evidence_contract_ref
+        {
+            return Err(ProgramError::InvalidValue);
+        }
+        (capability.bind_evidence)(intent.value.as_ref(), evidence.value.as_ref())
     }
 }
 
 /// Builder for callback-free Program catalog values.
-#[derive(Debug)]
 pub struct ProgramCatalogBuilder {
     associations: BTreeMap<ContentRef, ValueAssociation>,
+    capabilities: BTreeMap<ContentRef, CapabilityAssociation>,
 }
 
 impl ProgramCatalogBuilder {
@@ -992,11 +1156,45 @@ impl ProgramCatalogBuilder {
         }
     }
 
+    /// Registers one capability and its exact intent/evidence associations.
+    pub fn register_capability<C: AccessCapabilityContract>(&mut self) -> Result<ContentRef> {
+        C::validate().map_err(|_| ProgramError::InvalidCatalog)?;
+        let intent_contract_ref = self.register_value::<C::Intent>()?;
+        let evidence_contract_ref = self.register_value::<C::Evidence>()?;
+        let capability_contract_ref = capability_contract_ref::<C>()?;
+        let association = CapabilityAssociation {
+            type_id: TypeId::of::<C>(),
+            intent_contract_ref,
+            evidence_contract_ref,
+            mode: if TypeId::of::<C::Mode>() == TypeId::of::<ReadMode>() {
+                CapabilityMode::Read
+            } else if TypeId::of::<C::Mode>() == TypeId::of::<EffectMode>() {
+                CapabilityMode::Effect
+            } else {
+                return Err(ProgramError::InvalidCatalog);
+            },
+            total_attempt_bound: C::total_attempt_bound().get(),
+            fact_selection_required: C::Facts::REQUIRED,
+            bind_evidence: bind_capability_evidence::<C>,
+            prior_fact_selection: capability_prior_fact_selection::<C>,
+        };
+        match self.capabilities.get(&capability_contract_ref) {
+            Some(existing) if existing.type_id == association.type_id => {}
+            Some(_) => return Err(ProgramError::InvalidCatalog),
+            None => {
+                self.capabilities
+                    .insert(capability_contract_ref.clone(), association);
+            }
+        }
+        Ok(capability_contract_ref)
+    }
+
     /// Finalizes the exact catalog and one normalized Program.
     pub fn finish(self, document: ProgramDocument) -> Result<(ProgramCatalog, Program)> {
         let catalog = ProgramCatalog {
             inner: Arc::new(ProgramCatalogInner {
                 associations: self.associations,
+                capabilities: self.capabilities,
             }),
         };
         let program = catalog.program(document)?;
@@ -1071,10 +1269,20 @@ impl<T: MfmValue> QualifiedTypedValue<T> {
     pub fn into_value(self) -> T {
         self.value
     }
+
+    /// Erases the Rust type while retaining the exact catalog qualification.
+    pub fn erase(self) -> QualifiedValue {
+        QualifiedValue {
+            contract_ref: self.contract_ref,
+            value_ref: self.value_ref,
+            canonical_json: self.canonical_json,
+            value: Box::new(self.value),
+            catalog: self.catalog,
+        }
+    }
 }
 
 /// One safely erased owned value. There is no public unchecked downcast or free constructor.
-#[allow(dead_code)]
 pub struct QualifiedValue {
     contract_ref: ContentRef,
     value_ref: ContentRef,
@@ -1083,7 +1291,6 @@ pub struct QualifiedValue {
     catalog: Arc<ProgramCatalogInner>,
 }
 
-#[allow(dead_code)]
 impl QualifiedValue {
     /// Returns the nominal contract identity.
     pub const fn contract_ref(&self) -> &ContentRef {
@@ -1100,19 +1307,16 @@ impl QualifiedValue {
         self.canonical_json.as_bytes()
     }
 
+    /// Returns whether this value belongs to the exact catalog instance.
+    pub fn belongs_to_catalog(&self, catalog: &ProgramCatalog) -> bool {
+        Arc::ptr_eq(&self.catalog, &catalog.inner)
+    }
+
     /// Fallibly downcasts this value under the exact catalog brand and nominal contract.
     ///
     /// The operation consumes the erased owner.  It never decodes canonical bytes and cannot
     /// succeed for a foreign catalog, a different contract, or a different Rust value type.
-    pub(crate) fn try_downcast<T: MfmValue>(
-        self,
-        catalog: &ProgramCatalog,
-        contract_ref: &ContentRef,
-    ) -> Result<QualifiedTypedValue<T>> {
-        self.downcast(catalog, contract_ref)
-    }
-
-    fn downcast<T: MfmValue>(
+    pub fn try_downcast<T: MfmValue>(
         self,
         catalog: &ProgramCatalog,
         contract_ref: &ContentRef,
@@ -1158,12 +1362,13 @@ fn value_association<T: MfmValue>() -> Result<(ContentRef, ValueAssociation)> {
             type_id: TypeId::of::<T>(),
             schema_id,
             descriptor_identity,
+            reify: reify_value::<T>,
         },
     ))
 }
 
 fn validate_program_associations(
-    associations: &BTreeMap<ContentRef, ValueAssociation>,
+    catalog: &ProgramCatalogInner,
     document: &ProgramDocument,
 ) -> Result<()> {
     let mut contracts = BTreeSet::from([
@@ -1188,11 +1393,112 @@ fn validate_program_associations(
             }
         }
     }
-    contracts
+    if !contracts
         .into_iter()
-        .all(|contract| associations.contains_key(contract))
-        .then_some(())
-        .ok_or(ProgramError::InvalidCatalog)
+        .all(|contract| catalog.associations.contains_key(contract))
+    {
+        return Err(ProgramError::InvalidCatalog);
+    }
+    document.declarations().iter().try_for_each(|declaration| {
+        let Declaration::State(state) = declaration else {
+            return Ok(());
+        };
+        let Some(binding) = state.execution_binding() else {
+            return state
+                .execution()
+                .is_pure()
+                .then_some(())
+                .ok_or(ProgramError::InvalidCatalog);
+        };
+        if binding.state_implementation_ref() != state.state_implementation_ref()
+            || binding.capability_contract_ref() != state.execution().capability_contract_ref()
+        {
+            return Err(ProgramError::InvalidCatalog);
+        }
+        let capability = catalog
+            .capabilities
+            .get(
+                state
+                    .execution()
+                    .capability_contract_ref()
+                    .ok_or(ProgramError::InvalidCatalog)?,
+            )
+            .ok_or(ProgramError::InvalidCatalog)?;
+        let valid_mode = match state.execution() {
+            ExecutionMode::Read {
+                total_attempt_bound,
+                fact_selection_required,
+                ..
+            } => {
+                capability.mode == CapabilityMode::Read
+                    && capability.total_attempt_bound == *total_attempt_bound
+                    && capability.fact_selection_required == *fact_selection_required
+                    && binding.effect_domain().is_none()
+            }
+            ExecutionMode::Effect {
+                effect_domain,
+                fact_selection_required,
+                ..
+            } => {
+                capability.mode == CapabilityMode::Effect
+                    && capability.fact_selection_required == *fact_selection_required
+                    && binding.effect_domain() == Some(effect_domain)
+            }
+            ExecutionMode::Pure => false,
+        };
+        valid_mode.then_some(()).ok_or(ProgramError::InvalidCatalog)
+    })
+}
+
+/// Returns the one canonical identity for an Access capability contract.
+pub fn capability_contract_ref<C: AccessCapabilityContract>() -> Result<ContentRef> {
+    let contract_id = C::contract_id().map_err(|_| ProgramError::InvalidCatalog)?;
+    let schema = SchemaId::new(
+        "mfm.capability-contract",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([0; 32]),
+    )
+    .map_err(|_| ProgramError::InvalidCatalog)?;
+    ContentRef::new(schema, raw_content_digest(contract_id.as_str().as_bytes()))
+        .map_err(|_| ProgramError::InvalidCatalog)
+}
+
+fn reify_value<T: MfmValue>(bytes: &[u8]) -> Result<Box<dyn Any + Send + Sync>> {
+    let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidCatalog)?;
+    descriptor
+        .identity()
+        .validate_canonical_value(bytes)
+        .map_err(|_| ProgramError::InvalidValue)?;
+    serde_json::from_slice::<T>(bytes)
+        .map(|value| Box::new(value) as Box<dyn Any + Send + Sync>)
+        .map_err(|_| ProgramError::InvalidValue)
+}
+
+fn bind_capability_evidence<C: AccessCapabilityContract>(
+    intent: &dyn Any,
+    evidence: &dyn Any,
+) -> Result<()> {
+    C::bind_evidence(
+        intent
+            .downcast_ref::<C::Intent>()
+            .ok_or(ProgramError::InvalidValue)?,
+        evidence
+            .downcast_ref::<C::Evidence>()
+            .ok_or(ProgramError::InvalidValue)?,
+    )
+    .map_err(|_| ProgramError::InvalidValue)
+}
+
+fn capability_prior_fact_selection<C: AccessCapabilityContract>(
+    intent: &dyn Any,
+) -> Result<Option<FactSelectionRequest>> {
+    C::prior_fact_selection(
+        intent
+            .downcast_ref::<C::Intent>()
+            .ok_or(ProgramError::InvalidValue)?,
+    )
+    .map_err(|_| ProgramError::InvalidValue)
 }
 
 /// Canonicalizes one MFM value without a serialize/decode round trip.
@@ -1301,6 +1607,39 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct NonClone {
         text: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct OtherValue {
+        text: String,
+    }
+
+    struct CatalogRead;
+
+    impl AccessCapabilityContract for CatalogRead {
+        type Mode = ReadMode;
+        type Intent = NonClone;
+        type Evidence = NonClone;
+        type Facts = mfm_capabilities::NoPriorFacts;
+
+        fn contract_id() -> mfm_capabilities::Result<StableId> {
+            StableId::new("mfm.test.catalog-read")
+                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
+        }
+
+        fn total_attempt_bound() -> std::num::NonZeroU16 {
+            std::num::NonZeroU16::new(1).expect("nonzero")
+        }
+
+        fn bind_evidence(
+            intent: &Self::Intent,
+            evidence: &Self::Evidence,
+        ) -> mfm_capabilities::Result<()> {
+            (intent.text == evidence.text)
+                .then_some(())
+                .ok_or(mfm_capabilities::CapabilityError::EvidenceBinding)
+        }
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -1432,11 +1771,67 @@ mod tests {
                 },
             )
             .expect("qualified");
-        let erased = catalog.erase(qualified);
+        let erased = qualified.erase();
         let typed: QualifiedTypedValue<NonClone> = erased
             .try_downcast(&catalog, &contract_ref)
             .expect("downcast");
         assert_eq!(typed.as_ref().text, "cumulative");
+    }
+
+    #[test]
+    fn catalog_rejects_unregistered_access_material_and_invalid_typed_bytes() {
+        let mut builder = ProgramCatalog::builder();
+        let capability = builder
+            .register_capability::<CatalogRead>()
+            .expect("capability");
+        let other = builder.register_value::<OtherValue>().expect("other value");
+        let contract = nominal_contract_ref::<NonClone>().expect("contract");
+        let (catalog, _) = builder
+            .finish(empty_document(contract.clone()))
+            .expect("catalog");
+        let intent = catalog
+            .qualify(
+                contract.clone(),
+                NonClone {
+                    text: "bound".to_owned(),
+                },
+            )
+            .expect("intent")
+            .erase();
+        let unregistered = catalog
+            .qualify(
+                other,
+                OtherValue {
+                    text: "bound".to_owned(),
+                },
+            )
+            .expect("other")
+            .erase();
+        assert!(catalog
+            .validate_access_intent(&capability, &unregistered)
+            .is_err());
+        assert!(catalog
+            .validate_access_evidence(&capability, &intent, &unregistered)
+            .is_err());
+
+        let mismatched = catalog
+            .qualify(
+                contract,
+                NonClone {
+                    text: "fabricated".to_owned(),
+                },
+            )
+            .expect("evidence")
+            .erase();
+        assert!(catalog
+            .validate_access_evidence(&capability, &intent, &mismatched)
+            .is_err());
+        assert!(catalog
+            .qualify_retained_erased(
+                nominal_contract_ref::<NonClone>().expect("contract"),
+                br#"{"text":1}"#,
+            )
+            .is_err());
     }
 
     #[test]
@@ -1550,7 +1945,8 @@ mod tests {
         assert!(qualified.belongs_to_catalog(&left));
         assert!(!qualified.belongs_to_catalog(&right));
         assert!(matches!(
-            left.erase(qualified)
+            qualified
+                .erase()
                 .try_downcast::<NonClone>(&right, &left_contract),
             Err(ProgramError::InvalidCatalog)
         ));
