@@ -8,4 +8,5 @@ and assigns conclusion publication coordinates atomically with the fact head. A 
 returns the same semantic owner for coordinate-only rebinding. Qualified runs, reductions,
 configuration snapshots, fact continuations, and append owners are tied to the exact Store
 opening; matching persisted identity fields do not permit transposition. It cannot invoke Runtime
-or provider code.
+or provider code. Acknowledgement recovery retries the same physical append identity and returns
+the retained frame on `Found`, so fact publication is not duplicated.
