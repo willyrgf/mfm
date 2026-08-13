@@ -1382,7 +1382,8 @@ fn map_store_error(error: StoreError) -> PublicError {
         | StoreError::Conflict
         | StoreError::Capacity
         | StoreError::NotActionable
-        | StoreError::InvalidHistory => PublicError::Internal,
+        | StoreError::InvalidHistory
+        | StoreError::FactFrontierChanged => PublicError::Internal,
     }
 }
 
