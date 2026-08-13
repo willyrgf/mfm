@@ -787,9 +787,30 @@ impl PendingConclusion {
             Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => RuntimeStep::Suspended(
                 SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
             ),
-            Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => RuntimeStep::Suspended(
-                SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
-            ),
+            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
+                let suspended = SuspendedRun::conclusion(runtime, owner, run, reduced, successor);
+                match error {
+                    mfm_store::StoreError::FactFrontierChanged
+                    | mfm_store::StoreError::Conflict
+                    | mfm_store::StoreError::NotActionable => RuntimeStep::Suspended(suspended),
+                    _ => RuntimeStep::ConclusionRejected {
+                        owner: suspended,
+                        error: error.into(),
+                    },
+                }
+            }
+            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
+            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
+                runtime.reloaded_step(history).await
+            }
+            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+                history,
+                error: RuntimeError::Conclusion,
+            },
+            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+                history,
+                error: RuntimeError::Conclusion,
+            },
             Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
                 runtime
                     .finish_conclusion(run, reduced, frame, disposition, successor)
@@ -1048,6 +1069,13 @@ pub enum RuntimeStep {
     },
     /// A live owner retains a physical acknowledgement or conclusion boundary.
     Suspended(SuspendedRun),
+    /// A conclusion owner is retained with a permanent redaction-safe Store rejection.
+    ConclusionRejected {
+        /// The owner may be explicitly discarded or inspected by a supervisor.
+        owner: SuspendedRun,
+        /// The permanent rejection classification.
+        error: RuntimeError,
+    },
     /// The consumed session raced with a different semantic head.
     Conflict {
         /// Qualified callback-free history at the competing head.
@@ -1488,21 +1516,11 @@ impl Runtime {
                 (StateOutcome::Failure(value_ref), None, object, None)
             }
         };
-        let conclusion_id = match conclusion_append_id(run.run_id(), conclusion_sequence) {
-            Ok(id) => id,
-            Err(error) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error,
-                }
-            }
-        };
         let owner = match self.inner.store.prepare_conclusion_qualified_with_reduced(
             &run,
             self.inner.assembly.program().document(),
             &reduced,
             conclusion_sequence,
-            conclusion_id,
             StateConcluded::Access {
                 occurrence,
                 preparation: resolution.preparation,
@@ -1543,15 +1561,36 @@ impl Runtime {
                     successor,
                 ))
             }
-            Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(
+            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
+                let suspended = SuspendedRun::conclusion(
                     self.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ))
+                );
+                match error {
+                    mfm_store::StoreError::FactFrontierChanged
+                    | mfm_store::StoreError::Conflict
+                    | mfm_store::StoreError::NotActionable => RuntimeStep::Suspended(suspended),
+                    _ => RuntimeStep::ConclusionRejected {
+                        owner: suspended,
+                        error: error.into(),
+                    },
+                }
             }
+            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
+            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
+                self.reloaded_step(history).await
+            }
+            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+                history,
+                error: RuntimeError::Conclusion,
+            },
+            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+                history,
+                error: RuntimeError::Conclusion,
+            },
             Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
                 self.finish_conclusion(run, reduced, frame, disposition, successor)
                     .await
@@ -1645,7 +1684,9 @@ impl Runtime {
                 history: previous,
                 error: RuntimeError::Unresolved,
             },
-            AppendDisposition::StaleHead { .. } => RuntimeStep::Conflict {
+            // Store classifies a stale conclusion before returning a disposition. Reaching this
+            // branch means the Store boundary violated that contract.
+            AppendDisposition::StaleHead { .. } => RuntimeStep::Failed {
                 history: previous,
                 error: RuntimeError::Conclusion,
             },
@@ -2202,15 +2243,6 @@ impl RunSession {
             }
         };
         drop(_active_permit);
-        let append_request_id = match conclusion_append_id(run.run_id(), run.head_sequence()) {
-            Ok(value) => value,
-            Err(error) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error,
-                }
-            }
-        };
         let owner = match runtime
             .inner
             .store
@@ -2219,7 +2251,6 @@ impl RunSession {
                 runtime.inner.assembly.program().document(),
                 &reduced,
                 run.head_sequence(),
-                append_request_id,
                 StateConcluded::Pure {
                     occurrence,
                     outcome: recorded,
@@ -2253,15 +2284,36 @@ impl RunSession {
                     successor,
                 ))
             }
-            Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(
+            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
+                let suspended = SuspendedRun::conclusion(
                     runtime.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ))
+                );
+                match error {
+                    mfm_store::StoreError::FactFrontierChanged
+                    | mfm_store::StoreError::Conflict
+                    | mfm_store::StoreError::NotActionable => RuntimeStep::Suspended(suspended),
+                    _ => RuntimeStep::ConclusionRejected {
+                        owner: suspended,
+                        error: error.into(),
+                    },
+                }
             }
+            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
+            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
+                runtime.reloaded_step(history).await
+            }
+            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+                history,
+                error: RuntimeError::Conclusion,
+            },
+            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+                history,
+                error: RuntimeError::Conclusion,
+            },
             Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
                 runtime
                     .finish_conclusion(run, reduced, frame, disposition, successor)
@@ -2380,15 +2432,6 @@ impl<T: MfmValue> ResumeInput<T> {
             _marker: PhantomData,
         })
     }
-}
-
-fn conclusion_append_id(run_id: &RunId, sequence: u64) -> LifecycleResult<AppendRequestId> {
-    AppendRequestId::new(format!(
-        "runtime-conclusion-{}-{}",
-        short_stable_id_fragment(run_id.as_str(), 96),
-        sequence + 1
-    ))
-    .map_err(|_| RuntimeError::Identity)
 }
 
 #[cfg(test)]
@@ -3207,6 +3250,7 @@ mod tests {
             RuntimeStep::Unresolved { .. } => "unresolved",
             RuntimeStep::Parked { .. } => "parked",
             RuntimeStep::Suspended(_) => "suspended",
+            RuntimeStep::ConclusionRejected { .. } => "conclusion-rejected",
             RuntimeStep::Conflict { .. } => "conflict",
             RuntimeStep::Failed { .. } => "failed",
         }
