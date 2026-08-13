@@ -108,7 +108,10 @@ impl ErasedValue {
 }
 
 pub(crate) enum DynamicOutcome {
-    Success(ErasedValue),
+    Success {
+        value: ErasedValue,
+        facts: mfm_facts::FactProposalSet,
+    },
     Failure(ErasedValue),
 }
 
@@ -242,6 +245,26 @@ fn qualify_erased<T: MfmValue>(
     ErasedValue::from_qualified(assembly.catalog(), witness, qualified)
 }
 
+fn fact_proposals_object(
+    facts: &mfm_facts::FactProposalSet,
+) -> LifecycleResult<(ValueRef, ImmutableObject)> {
+    facts.validate().map_err(|_| RuntimeError::Value)?;
+    let canonical = canonical_value(facts).map_err(|_| RuntimeError::Value)?;
+    let value_ref = ContentRef::new(
+        mfm_facts::FactProposalSet::schema_id().map_err(|_| RuntimeError::Value)?,
+        raw_content_digest(canonical.as_bytes()),
+    )
+    .map_err(|_| RuntimeError::Value)?;
+    let value = ValueRef::new(value_ref.clone(), value_ref.clone());
+    let object = ImmutableObject::new(
+        StableId::new("mfm.value").map_err(|_| RuntimeError::Value)?,
+        value_ref,
+        canonical.as_str().to_owned(),
+    )
+    .map_err(|_| RuntimeError::Value)?;
+    Ok((value, object))
+}
+
 fn try_reify<T: MfmValue>(
     catalog: &ProgramCatalog,
     witness: &Arc<RuntimeWitness>,
@@ -272,16 +295,20 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
             input.into_qualified::<S::Input>(assembly.catalog(), witness, input_contract)?;
         let outcome = self.implementation.evaluate_contained(input.as_ref())?;
         match outcome {
-            mfm_capabilities::ProposedStateOutcome::Success(value) => Ok(DynamicOutcome::Success(
-                qualify_erased(assembly, witness, output_contract.clone(), value)?,
-            )),
-            mfm_capabilities::ProposedStateOutcome::Failure(value) => {
+            mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
+                facts.validate().map_err(|_| RuntimeError::Value)?;
+                Ok(DynamicOutcome::Success {
+                    value: qualify_erased(assembly, witness, output_contract.clone(), output)?,
+                    facts,
+                })
+            }
+            mfm_capabilities::ProposedStateOutcome::Failure { failure } => {
                 let failure_contract = failure_contract.ok_or(RuntimeError::Value)?;
                 Ok(DynamicOutcome::Failure(qualify_erased(
                     assembly,
                     witness,
                     failure_contract.clone(),
-                    value,
+                    failure,
                 )?))
             }
         }
@@ -551,20 +578,24 @@ impl DynamicResolution {
             .transpose()?;
         let outcome = outcome
             .map(|outcome| match outcome {
-                mfm_capabilities::ProposedStateOutcome::Success(value) => {
-                    Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Success(qualify_erased(
-                        assembly,
-                        witness,
-                        nominal_contract_ref::<S::Output>()?,
-                        value,
-                    )?))
+                mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
+                    facts.validate().map_err(|_| RuntimeError::Value)?;
+                    Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Success {
+                        value: qualify_erased(
+                            assembly,
+                            witness,
+                            nominal_contract_ref::<S::Output>()?,
+                            output,
+                        )?,
+                        facts,
+                    })
                 }
-                mfm_capabilities::ProposedStateOutcome::Failure(value) => {
+                mfm_capabilities::ProposedStateOutcome::Failure { failure } => {
                     Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Failure(qualify_erased(
                         assembly,
                         witness,
                         nominal_contract_ref::<S::Failure>()?,
-                        value,
+                        failure,
                     )?))
                 }
             })
@@ -1411,8 +1442,8 @@ impl Runtime {
                     .await;
             }
         };
-        let (recorded_outcome, successor, outcome_object) = match outcome {
-            DynamicOutcome::Success(value) => {
+        let (recorded_outcome, successor, outcome_object, fact_proposals) = match outcome {
+            DynamicOutcome::Success { value, facts } => {
                 let value_ref = value.as_value_ref();
                 let object = match value.object() {
                     Ok(object) => object,
@@ -1426,7 +1457,24 @@ impl Runtime {
                             .await;
                     }
                 };
-                (StateOutcome::Success(value_ref), Some(value), object)
+                let fact_proposals = match fact_proposals_object(&facts) {
+                    Ok(value) => Some(value),
+                    Err(_) => {
+                        return self
+                            .neutral_access(
+                                run,
+                                reduced.clone(),
+                                UnresolvedClassification::InvalidResponse,
+                            )
+                            .await;
+                    }
+                };
+                (
+                    StateOutcome::Success(value_ref),
+                    Some(value),
+                    object,
+                    fact_proposals,
+                )
             }
             DynamicOutcome::Failure(value) => {
                 let value_ref = value.as_value_ref();
@@ -1442,7 +1490,7 @@ impl Runtime {
                             .await;
                     }
                 };
-                (StateOutcome::Failure(value_ref), None, object)
+                (StateOutcome::Failure(value_ref), None, object, None)
             }
         };
         let conclusion_id = match conclusion_append_id(run.run_id(), conclusion_sequence) {
@@ -1465,6 +1513,7 @@ impl Runtime {
                 preparation: resolution.preparation,
                 evidence: evidence_ref,
                 outcome: recorded_outcome,
+                fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
                 fact_selection: resolution
                     .fact_continuation
                     .as_ref()
@@ -1472,7 +1521,13 @@ impl Runtime {
                     .cloned(),
                 fact_publication: None,
             },
-            vec![intent_object, evidence_object, outcome_object],
+            {
+                let mut objects = vec![intent_object, evidence_object, outcome_object];
+                if let Some((_, object)) = fact_proposals {
+                    objects.push(object);
+                }
+                objects
+            },
             state.maximum_conclusion_bytes(),
         ) {
             Ok(owner) => owner,
@@ -2110,8 +2165,8 @@ impl RunSession {
                 };
             }
         };
-        let (recorded, successor, object) = match outcome {
-            DynamicOutcome::Success(value) => {
+        let (recorded, successor, object, fact_proposals) = match outcome {
+            DynamicOutcome::Success { value, facts } => {
                 let value_ref = value.as_value_ref();
                 let object = match value.object() {
                     Ok(object) => object,
@@ -2122,7 +2177,21 @@ impl RunSession {
                         }
                     }
                 };
-                (StateOutcome::Success(value_ref), Some(value), object)
+                let fact_proposals = match fact_proposals_object(&facts) {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        return RuntimeStep::Failed {
+                            history: run,
+                            error,
+                        }
+                    }
+                };
+                (
+                    StateOutcome::Success(value_ref),
+                    Some(value),
+                    object,
+                    fact_proposals,
+                )
             }
             DynamicOutcome::Failure(value) => {
                 let value_ref = value.as_value_ref();
@@ -2135,7 +2204,7 @@ impl RunSession {
                         }
                     }
                 };
-                (StateOutcome::Failure(value_ref), None, object)
+                (StateOutcome::Failure(value_ref), None, object, None)
             }
         };
         drop(_active_permit);
@@ -2160,9 +2229,16 @@ impl RunSession {
                 StateConcluded::Pure {
                     occurrence,
                     outcome: recorded,
+                    fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
                     fact_publication: None,
                 },
-                vec![object],
+                {
+                    let mut objects = vec![object];
+                    if let Some((_, object)) = fact_proposals {
+                        objects.push(object);
+                    }
+                    objects
+                },
                 state.maximum_conclusion_bytes(),
             ) {
             Ok(owner) => owner,
@@ -2466,9 +2542,12 @@ mod tests {
         .expect("document");
         let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
         let implementation = PureImplementation::<TestPure>::new(|input| {
-            mfm_capabilities::ProposedStateOutcome::Success(TestContext {
-                value: input.value + 1,
-            })
+            mfm_capabilities::ProposedStateOutcome::Success {
+                output: TestContext {
+                    value: input.value + 1,
+                },
+                facts: mfm_facts::FactProposalSet::empty(),
+            }
         });
         let mut builder =
             crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
@@ -2552,9 +2631,12 @@ mod tests {
         let pure_entries_for_state = Arc::clone(&pure_entries);
         let pure_implementation = PureImplementation::<TestPure>::new(move |input| {
             pure_entries_for_state.fetch_add(1, Ordering::SeqCst);
-            mfm_capabilities::ProposedStateOutcome::Success(TestContext {
-                value: input.value + 1,
-            })
+            mfm_capabilities::ProposedStateOutcome::Success {
+                output: TestContext {
+                    value: input.value + 1,
+                },
+                facts: mfm_facts::FactProposalSet::empty(),
+            }
         });
         builder
             .register_pure(implementation_ref, pure_implementation.clone())
@@ -2796,7 +2878,10 @@ mod tests {
                                         value: accepted.evidence().value,
                                     };
                                     Ok(accepted.conclude(
-                                        mfm_capabilities::ProposedStateOutcome::Success(output),
+                                        mfm_capabilities::ProposedStateOutcome::Success {
+                                            output,
+                                            facts: mfm_facts::FactProposalSet::empty(),
+                                        },
                                     ))
                                 }
                                 crate::single_trust::AccessResolution::BlockedIntegrity(

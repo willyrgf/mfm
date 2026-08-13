@@ -158,9 +158,17 @@ pub trait AccessCapabilityContract: Send + Sync + 'static {
 #[derive(Debug, PartialEq, Eq)]
 pub enum ProposedStateOutcome<O, F> {
     /// Complete successor context or declared root result.
-    Success(O),
+    Success {
+        /// Complete successor context or declared root result.
+        output: O,
+        /// New fact values proposed by this State.
+        facts: mfm_facts::FactProposalSet,
+    },
     /// Typed fail-fast failure.
-    Failure(F),
+    Failure {
+        /// Typed failure value.
+        failure: F,
+    },
 }
 
 /// Cold retained evidence qualified only against one recorded preparation.

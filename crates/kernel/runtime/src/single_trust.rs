@@ -268,9 +268,9 @@ impl<S: State, C: AccessCapabilityContract> AcceptedIntegrityAccess<S, C> {
             call_id: self.call_id,
             intent: self.intent,
             evidence: Some(self.evidence),
-            outcome: Some(ProposedStateOutcome::Failure(
-                S::Failure::integrity_blocked(),
-            )),
+            outcome: Some(ProposedStateOutcome::Failure {
+                failure: S::Failure::integrity_blocked(),
+            }),
             classification: None,
             preparation: self.preparation,
             fact_continuation: self.fact_continuation,
@@ -1625,10 +1625,11 @@ mod tests {
         builder
             .register_pure::<PureState>(
                 implementation_ref.clone(),
-                PureImplementation::<PureState>::new(|input| {
-                    ProposedStateOutcome::Success(Context {
+                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
+                    output: Context {
                         value: input.value + 1,
-                    })
+                    },
+                    facts: mfm_facts::FactProposalSet::empty(),
                 }),
             )
             .expect("registration");
@@ -1638,7 +1639,10 @@ mod tests {
             .expect("implementation");
         assert_eq!(
             implementation.evaluate(&Context { value: 4 }),
-            ProposedStateOutcome::Success(Context { value: 5 })
+            ProposedStateOutcome::Success {
+                output: Context { value: 5 },
+                facts: mfm_facts::FactProposalSet::empty(),
+            }
         );
     }
 
