@@ -213,6 +213,10 @@ impl QualifiedRun {
         self.frames.len() as u64
     }
 
+    pub(crate) const fn total_frame_bytes(&self) -> usize {
+        self.total_frame_bytes
+    }
+
     /// Returns the recursive head content address for this qualified prefix.
     pub fn head_digest(&self) -> Result<ContentDigest> {
         Ok(self.head_digest.clone())

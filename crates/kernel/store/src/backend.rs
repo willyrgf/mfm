@@ -131,6 +131,7 @@ impl StoreWorkLimits {
             || self.max_run_objects > mfm_journal::single_trust::MAX_RUN_OBJECTS
             || self.max_run_frame_bytes == 0
             || self.max_run_frame_bytes > mfm_journal::single_trust::MAX_RUN_FRAME_BYTES
+            || self.max_frame_bytes > self.max_run_frame_bytes
         {
             return Err(BackendError::Capacity);
         }
@@ -684,6 +685,8 @@ pub trait StructuredStoreBackend: Send + Sync + 'static {
 pub struct MemoryStructuredBackend {
     identity: StructuredStoreIdentity,
     state: Arc<Mutex<MemoryBackendState>>,
+    #[cfg(feature = "test-support")]
+    faults: Arc<Mutex<MemoryBackendFaults>>,
 }
 
 #[derive(Default)]
@@ -693,12 +696,37 @@ struct MemoryBackendState {
     facts: Vec<RawFactPublication>,
 }
 
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct MemoryBackendFaults {
+    history_unknown_after_commit: bool,
+    configuration_unknown_after_commit: bool,
+}
+
 impl MemoryStructuredBackend {
     /// Creates one empty mechanical backend.
     pub fn new(identity: StructuredStoreIdentity) -> Self {
         Self {
             identity,
             state: Arc::new(Mutex::new(MemoryBackendState::default())),
+            #[cfg(feature = "test-support")]
+            faults: Arc::new(Mutex::new(MemoryBackendFaults::default())),
+        }
+    }
+
+    /// Makes the next successful history append report an unknown acknowledgement.
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_history_acknowledgement(&self) {
+        if let Ok(mut faults) = self.faults.lock() {
+            faults.history_unknown_after_commit = true;
+        }
+    }
+
+    /// Makes the next successful configuration append report an unknown acknowledgement.
+    #[cfg(feature = "test-support")]
+    pub fn fail_next_configuration_acknowledgement(&self) {
+        if let Ok(mut faults) = self.faults.lock() {
+            faults.configuration_unknown_after_commit = true;
         }
     }
 }
@@ -811,6 +839,15 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
             if let Some(publication) = publication {
                 state.facts.push(publication);
             }
+            #[cfg(feature = "test-support")]
+            if self
+                .faults
+                .lock()
+                .map(|mut faults| std::mem::take(&mut faults.history_unknown_after_commit))
+                .map_err(|_| BackendError::Storage)?
+            {
+                return Ok(BackendAppendOutcome::AcknowledgementUnknown);
+            }
             Ok(BackendAppendOutcome::NewlyCommitted)
         })
     }
@@ -894,6 +931,15 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                 command.content_ref().clone(),
             )?;
             state.configurations.push(revision);
+            #[cfg(feature = "test-support")]
+            if self
+                .faults
+                .lock()
+                .map(|mut faults| std::mem::take(&mut faults.configuration_unknown_after_commit))
+                .map_err(|_| BackendError::Storage)?
+            {
+                return Ok(BackendConfigurationOutcome::AcknowledgementUnknown);
+            }
             Ok(BackendConfigurationOutcome::NewlyCommitted)
         })
     }
@@ -1312,7 +1358,10 @@ impl OpenedStructuredStore {
         {
             return Err(StoreError::Identity);
         }
-        predecessor.clone().append_validated(frame)
+        self.validate_frame_against_limits(&frame, predecessor.total_frame_bytes())?;
+        let qualified = predecessor.clone().append_validated(frame)?;
+        self.validate_qualified_limits(&qualified)?;
+        Ok(qualified)
     }
 
     /// Qualifies one direct-new admission frame without a post-commit backend read.
@@ -1323,12 +1372,63 @@ impl OpenedStructuredStore {
         if !frame.record().is_admission() {
             return Err(StoreError::InvalidRecord);
         }
-        QualifiedRun::qualify_prefix(
+        let qualified = QualifiedRun::qualify_prefix(
             self.identity().scope().clone(),
             self.identity().epoch(),
             self.identity().tenant().clone(),
             vec![frame],
-        )
+        )?;
+        self.validate_qualified_limits(&qualified)?;
+        Ok(qualified)
+    }
+
+    fn validate_frame_against_limits(
+        &self,
+        frame: &mfm_journal::single_trust::RunFrame,
+        prior_bytes: usize,
+    ) -> Result<usize> {
+        let bytes = frame
+            .canonical_bytes()
+            .map_err(|_| StoreError::InvalidRecord)?
+            .as_bytes()
+            .len();
+        if bytes > self.inner.limits.max_frame_bytes
+            || prior_bytes
+                .checked_add(bytes)
+                .is_none_or(|total| total > self.inner.limits.max_run_frame_bytes)
+        {
+            return Err(StoreError::Capacity);
+        }
+        Ok(bytes)
+    }
+
+    fn validate_qualified_limits(&self, run: &QualifiedRun) -> Result<()> {
+        if run.frames().len() > self.inner.limits.max_run_frames
+            || run.total_frame_bytes() > self.inner.limits.max_run_frame_bytes
+        {
+            return Err(StoreError::Capacity);
+        }
+        let mut objects = std::collections::BTreeSet::new();
+        for frame in run.frames() {
+            let bytes = frame
+                .canonical_bytes()
+                .map_err(|_| StoreError::InvalidHistory)?
+                .as_bytes()
+                .len();
+            if bytes > self.inner.limits.max_frame_bytes {
+                return Err(StoreError::Capacity);
+            }
+            objects.extend(
+                frame
+                    .objects()
+                    .iter()
+                    .map(|object| object.content_ref().clone()),
+            );
+        }
+        if objects.len() > self.inner.limits.max_run_objects {
+            return Err(StoreError::Capacity);
+        }
+        Ok(())
     }
 
     fn history_port(&self) -> QualifiedHistoryPort {
@@ -1376,7 +1476,12 @@ impl QualifiedHistoryPort {
             .await
             .map_err(map_backend_error)?
             .ok_or(StoreError::NotFound)?;
-        qualify_raw_prefix(&self.inner.identity, raw)
+        let qualified = qualify_raw_prefix(&self.inner.identity, raw)?;
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        store.validate_qualified_limits(&qualified)?;
+        Ok(qualified)
     }
 
     /// Performs one semantic-free mechanical append after strict local frame validation.
@@ -1396,6 +1501,22 @@ impl QualifiedHistoryPort {
             .load_complete_prefix(frame.run_id(), self.limit())
             .await
             .map_err(map_backend_error)?;
+        let prior_bytes = current.as_ref().map_or(0, |prefix| {
+            prefix
+                .frames()
+                .iter()
+                .map(|stored| stored.frame_bytes().len())
+                .sum()
+        });
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        store.validate_frame_against_limits(&frame, prior_bytes)?;
+        if let Some(prefix) = current.as_ref() {
+            if prefix.frames().len() > self.inner.limits.max_run_frames {
+                return Err(StoreError::Capacity);
+            }
+        }
         let previous_digest = current
             .as_ref()
             .and_then(|prefix| {
@@ -1415,6 +1536,13 @@ impl QualifiedHistoryPort {
         current: &QualifiedRun,
         frame: mfm_journal::single_trust::RunFrame,
     ) -> Result<AppendDisposition> {
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        store.validate_frame_against_limits(&frame, current.total_frame_bytes())?;
+        if current.head_sequence() as usize >= self.inner.limits.max_run_frames {
+            return Err(StoreError::Capacity);
+        }
         let previous_digest = if frame.expected_sequence() == 1 {
             None
         } else {
@@ -1750,6 +1878,7 @@ fn map_backend_error(error: BackendError) -> StoreError {
 mod tests {
     use super::*;
     use crate::single_trust::ConfigurationAppendDisposition;
+    use mfm_canonical::raw_content_digest;
     use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
 
     fn identity() -> StructuredStoreIdentity {
@@ -1760,6 +1889,105 @@ mod tests {
             TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
                 .expect("tenant"),
         )
+    }
+
+    fn admission_frame(identity: &StructuredStoreIdentity) -> mfm_journal::single_trust::RunFrame {
+        let schema = SchemaId::new(
+            "mfm.test.backend-limit",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([2; 32]),
+        )
+        .expect("schema");
+        let contract =
+            ContentRef::new(schema.clone(), raw_content_digest(b"contract")).expect("contract");
+        let value_bytes = br#"{"value":1}"#;
+        let value = ContentRef::new(schema, raw_content_digest(value_bytes)).expect("value");
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run");
+        let admitted = mfm_journal::single_trust::RunAdmitted::new(
+            identity.scope().clone(),
+            identity.epoch(),
+            run_id.clone(),
+            identity.tenant().clone(),
+            mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
+            contract.clone(),
+            mfm_journal::single_trust::ValueRef::new(contract.clone(), value.clone()),
+            contract.clone(),
+            Vec::new(),
+        )
+        .expect("admission");
+        mfm_journal::single_trust::RunFrame::new(
+            run_id,
+            identity.scope().clone(),
+            identity.epoch(),
+            1,
+            AppendRequestId::new("backend-limit-admission-0123456789").expect("request"),
+            mfm_journal::single_trust::RunRecord::RunAdmitted(admitted),
+            vec![mfm_journal::single_trust::ImmutableObject::new(
+                mfm_ids::StableId::new("mfm.value").expect("object"),
+                value,
+                String::from_utf8(value_bytes.to_vec()).expect("value bytes"),
+            )
+            .expect("object")],
+        )
+        .expect("frame")
+    }
+
+    #[tokio::test]
+    async fn opened_limits_reject_frame_before_backend_ingress() {
+        let identity = identity();
+        let frame = admission_frame(&identity);
+        let frame_bytes = frame
+            .canonical_bytes()
+            .expect("canonical frame")
+            .as_bytes()
+            .len();
+        let root_contract = match frame.record() {
+            mfm_journal::single_trust::RunRecord::RunAdmitted(admitted) => {
+                admitted.admitted_context().contract_ref().clone()
+            }
+            _ => panic!("expected admission"),
+        };
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
+            root_contract.clone(),
+            root_contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity.clone(),
+            catalog,
+            StoreWorkLimits::new(
+                frame_bytes.saturating_sub(1),
+                mfm_journal::single_trust::MAX_RUN_FRAMES,
+                mfm_journal::single_trust::MAX_RUN_OBJECTS,
+                mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+            ),
+        )
+        .await
+        .expect("opened store");
+        assert_eq!(opened.append(frame).await, Err(StoreError::Capacity));
+        assert!(backend
+            .load_complete_prefix(
+                &RunId::parse(
+                    "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                )
+                .expect("run"),
+                RawHistoryLoadLimit::new(
+                    mfm_journal::single_trust::MAX_RUN_FRAMES,
+                    mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+                ),
+            )
+            .await
+            .expect("backend load")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1824,5 +2052,91 @@ mod tests {
             other => panic!("unexpected stale outcome: {other:?}"),
         }
         assert_eq!(empty.head_sequence(), 0);
+    }
+}
+
+#[cfg(all(test, feature = "test-support"))]
+mod fault_tests {
+    use super::*;
+    use mfm_canonical::raw_content_digest;
+    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
+
+    #[tokio::test]
+    async fn memory_unknown_acknowledgements_retain_physical_identity() {
+        let identity = StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("scope"),
+            mfm_ids::StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        );
+        let backend = MemoryStructuredBackend::new(identity.clone());
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run");
+        let bytes = br#"{"kind":"unknown-history"}"#;
+        let frame_digest = raw_content_digest(bytes);
+        let head_digest = ContentDigest::parse(
+            "content:sha256-v1:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        )
+        .expect("head");
+        let request = AppendRequestId::new("memory-unknown-history-0123456789").expect("request");
+        let command = BackendAppendCommand::new(
+            &identity,
+            &run_id,
+            1,
+            &request,
+            bytes,
+            &frame_digest,
+            &head_digest,
+            None,
+            true,
+            None,
+        );
+        backend.fail_next_history_acknowledgement();
+        assert_eq!(
+            backend.compare_and_append(&command).await.expect("append"),
+            BackendAppendOutcome::AcknowledgementUnknown
+        );
+        assert!(matches!(
+            backend.compare_and_append(&command).await.expect("retry"),
+            BackendAppendOutcome::Found(_)
+        ));
+
+        let schema = SchemaId::new(
+            "mfm.test.unknown-configuration",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0; 32]),
+        )
+        .expect("schema");
+        let configuration_bytes = br#"{"unknown":true}"#;
+        let configuration_ref =
+            ContentRef::new(schema, raw_content_digest(configuration_bytes)).expect("ref");
+        let configuration_request =
+            AppendRequestId::new("memory-unknown-configuration-012345").expect("request");
+        let configuration = ConfigurationAppendCommand::new(
+            &identity,
+            0,
+            &configuration_request,
+            configuration_bytes,
+            &configuration_ref,
+        );
+        backend.fail_next_configuration_acknowledgement();
+        assert_eq!(
+            backend
+                .compare_and_append_configuration(&configuration)
+                .await
+                .expect("configuration append"),
+            BackendConfigurationOutcome::AcknowledgementUnknown
+        );
+        assert!(matches!(
+            backend
+                .compare_and_append_configuration(&configuration)
+                .await
+                .expect("configuration retry"),
+            BackendConfigurationOutcome::Found { sequence: 1 }
+        ));
     }
 }
