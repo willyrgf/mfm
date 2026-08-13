@@ -55,9 +55,11 @@ through the exact opening.
 Runtime owns immutable live assembly and affine execution owners. The only provider-entering path
 requires a directly committed `CommittedCall`. `RunSession` retains the latest qualified typed
 context and its reducer result; hot conclusion settlement advances that result over the new suffix,
-while cold resume performs bounded complete-prefix qualification. `SuspendedRun` is the exhaustive
-owner-fate coordinator for admission, preparation, and conclusion acknowledgement boundaries; its
-conclusion variant is the Runtime-owned affine `PendingConclusion`. A State implementation cannot
+while cold resume performs bounded complete-prefix qualification. Each opening also owns bounded
+active-session, deterministic CPU, planning, and provider-ingress permits; these are backpressure,
+not scheduling or per-run ownership. `SuspendedRun` is the exhaustive owner-fate coordinator for
+admission, preparation, and conclusion acknowledgement boundaries; its conclusion variant is the
+Runtime-owned affine `PendingConclusion`. A State implementation cannot
 access Store, journal, replay, or arbitrary prior output through its supported callback. Access
 registration requires the immutable binding descriptor; preparation has no caller-supplied binding
 substitution path.

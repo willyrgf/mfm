@@ -22,6 +22,7 @@ use mfm_program::{canonical_value, ProgramCatalog, QualifiedTypedValue};
 use mfm_store::single_trust::{AppendDisposition, QualifiedRun, ReducedRunState, RunAction};
 use mfm_store::{ConclusionCommitOutcome, OpenedStructuredStore};
 use mfm_values::MfmValue;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
     AccessHandlerResolution, AccessImplementation, CommittedCall, PreparedExecution,
@@ -606,6 +607,9 @@ pub enum AdmissionFailure {
     /// The Store rejected the admission without creating a live owner.
     #[error("admission could not be committed")]
     Store,
+    /// The Runtime could not admit another bounded planning job.
+    #[error("runtime admission capacity is unavailable")]
+    Capacity,
 }
 
 /// Conflict between two semantic genesis candidates for one run identity.
@@ -622,6 +626,9 @@ pub enum ResumeFailure {
     /// The run belongs to another Runtime/store/catalog brand.
     #[error("run identity is invalid")]
     Identity,
+    /// The Runtime could not admit another bounded active session.
+    #[error("runtime resume capacity is unavailable")]
+    Capacity,
 }
 
 /// Callback-free terminal evidence returned only after a durable conclusion is qualified.
@@ -951,6 +958,7 @@ pub struct RunSession {
     run: QualifiedRun,
     reduced: ReducedRunState,
     latest: ErasedValue,
+    _active_permit: OwnedSemaphorePermit,
 }
 
 /// Result of one admission owner transition.
@@ -1032,15 +1040,105 @@ pub struct Runtime {
     inner: Arc<RuntimeInner>,
 }
 
+/// Fixed process-local Runtime work limits.
+///
+/// These limits bound independent owners and deterministic work without introducing a scheduler,
+/// per-run lock, or process-wide writer lease.  Provider futures use the ingress bound; pure,
+/// preparation, qualification, and interpretation work use the corresponding deterministic
+/// bounds.  A session holds one active-session permit for its entire affine lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeLimits {
+    max_active_sessions: usize,
+    max_cpu_jobs: usize,
+    max_planning_jobs: usize,
+    max_ingress_jobs: usize,
+}
+
+impl RuntimeLimits {
+    /// Creates one non-zero bounded Runtime envelope.
+    pub const fn new(
+        max_active_sessions: usize,
+        max_cpu_jobs: usize,
+        max_planning_jobs: usize,
+        max_ingress_jobs: usize,
+    ) -> Self {
+        Self {
+            max_active_sessions,
+            max_cpu_jobs,
+            max_planning_jobs,
+            max_ingress_jobs,
+        }
+    }
+
+    /// Returns the selected default envelope for the current MVP entry points.
+    pub const fn default_envelope() -> Self {
+        Self::new(64, 8, 8, 64)
+    }
+
+    /// Validates that every Runtime work lane has at least one permit.
+    pub const fn validate(self) -> LifecycleResult<()> {
+        if self.max_active_sessions == 0
+            || self.max_cpu_jobs == 0
+            || self.max_planning_jobs == 0
+            || self.max_ingress_jobs == 0
+        {
+            Err(RuntimeError::Capacity)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Returns the active-session bound.
+    pub const fn max_active_sessions(self) -> usize {
+        self.max_active_sessions
+    }
+
+    /// Returns the deterministic CPU-job bound.
+    pub const fn max_cpu_jobs(self) -> usize {
+        self.max_cpu_jobs
+    }
+
+    /// Returns the planning-job bound.
+    pub const fn max_planning_jobs(self) -> usize {
+        self.max_planning_jobs
+    }
+
+    /// Returns the provider-ingress bound.
+    pub const fn max_ingress_jobs(self) -> usize {
+        self.max_ingress_jobs
+    }
+}
+
+impl Default for RuntimeLimits {
+    fn default() -> Self {
+        Self::default_envelope()
+    }
+}
+
 struct RuntimeInner {
     assembly: Arc<RuntimeAssembly>,
     store: Arc<OpenedStructuredStore>,
     witness: Arc<RuntimeWitness>,
+    limits: RuntimeLimits,
+    active_sessions: Arc<Semaphore>,
+    cpu_jobs: Arc<Semaphore>,
+    planning_jobs: Arc<Semaphore>,
+    ingress_jobs: Arc<Semaphore>,
 }
 
 impl Runtime {
     /// Opens one Runtime over an exact immutable assembly and branded Store.
     pub fn new(assembly: RuntimeAssembly, store: OpenedStructuredStore) -> LifecycleResult<Self> {
+        Self::new_with_limits(assembly, store, RuntimeLimits::default())
+    }
+
+    /// Opens one Runtime with one exact immutable assembly, Store, and bounded work envelope.
+    pub fn new_with_limits(
+        assembly: RuntimeAssembly,
+        store: OpenedStructuredStore,
+        limits: RuntimeLimits,
+    ) -> LifecycleResult<Self> {
+        limits.validate()?;
         if !assembly.program().belongs_to_catalog(store.catalog()) {
             return Err(RuntimeError::Identity);
         }
@@ -1049,8 +1147,44 @@ impl Runtime {
                 assembly: Arc::new(assembly),
                 store: Arc::new(store),
                 witness: Arc::new(RuntimeWitness),
+                limits,
+                active_sessions: Arc::new(Semaphore::new(limits.max_active_sessions)),
+                cpu_jobs: Arc::new(Semaphore::new(limits.max_cpu_jobs)),
+                planning_jobs: Arc::new(Semaphore::new(limits.max_planning_jobs)),
+                ingress_jobs: Arc::new(Semaphore::new(limits.max_ingress_jobs)),
             }),
         })
+    }
+
+    /// Returns this Runtime's immutable bounded work envelope.
+    pub fn limits(&self) -> RuntimeLimits {
+        self.inner.limits
+    }
+
+    async fn acquire(
+        semaphore: &Arc<Semaphore>,
+    ) -> std::result::Result<OwnedSemaphorePermit, RuntimeError> {
+        semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| RuntimeError::Capacity)
+    }
+
+    async fn acquire_active_session(&self) -> LifecycleResult<OwnedSemaphorePermit> {
+        Self::acquire(&self.inner.active_sessions).await
+    }
+
+    async fn acquire_cpu_job(&self) -> LifecycleResult<OwnedSemaphorePermit> {
+        Self::acquire(&self.inner.cpu_jobs).await
+    }
+
+    async fn acquire_planning_job(&self) -> LifecycleResult<OwnedSemaphorePermit> {
+        Self::acquire(&self.inner.planning_jobs).await
+    }
+
+    async fn acquire_ingress_job(&self) -> LifecycleResult<OwnedSemaphorePermit> {
+        Self::acquire(&self.inner.ingress_jobs).await
     }
 
     /// Creates one typed admission owner from a planning-owned singular `C0`.
@@ -1083,6 +1217,7 @@ impl Runtime {
         };
         match self.session_from_run(run, Some(input.value)).await {
             Ok(session) => self.classify_resume_session(session).await,
+            Err(RuntimeError::Capacity) => ResumeStep::Failed(ResumeFailure::Capacity),
             Err(_) => ResumeStep::Failed(ResumeFailure::Identity),
         }
     }
@@ -1099,6 +1234,7 @@ impl Runtime {
         };
         match self.session_from_run(run, None).await {
             Ok(session) => self.classify_resume_session(session).await,
+            Err(RuntimeError::Capacity) => ResumeStep::Failed(ResumeFailure::Capacity),
             Err(_) => ResumeStep::Failed(ResumeFailure::Identity),
         }
     }
@@ -1176,20 +1312,41 @@ impl Runtime {
                 }
             }
         };
-        let resolution = match call
-            .execute(Arc::clone(&self.inner.assembly), &self.inner.witness)
-            .await
-        {
-            Ok(resolution) => resolution,
-            Err(_) => {
-                return self
-                    .neutral_access(
-                        run,
-                        reduced.clone(),
-                        UnresolvedClassification::AcknowledgementUnknown,
-                    )
-                    .await;
+        let resolution = {
+            let _ingress_permit = match self.acquire_ingress_job().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return RuntimeStep::Failed {
+                        history: run,
+                        error,
+                    }
+                }
+            };
+            let _cpu_permit = match self.acquire_cpu_job().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    return RuntimeStep::Failed {
+                        history: run,
+                        error,
+                    }
+                }
+            };
+            match call
+                .execute(Arc::clone(&self.inner.assembly), &self.inner.witness)
+                .await
+            {
+                Ok(resolution) => Some(resolution),
+                Err(_) => None,
             }
+        };
+        let Some(resolution) = resolution else {
+            return self
+                .neutral_access(
+                    run,
+                    reduced.clone(),
+                    UnresolvedClassification::AcknowledgementUnknown,
+                )
+                .await;
         };
         let conclusion_sequence = resolution.preparation.run_sequence();
         if let Some(classification) = resolution.classification {
@@ -1368,6 +1525,15 @@ impl Runtime {
     ) -> RuntimeStep {
         match disposition {
             AppendDisposition::NewlyCommitted { .. } | AppendDisposition::Found { .. } => {
+                let _cpu_permit = match self.acquire_cpu_job().await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        return RuntimeStep::Failed {
+                            history: previous,
+                            error,
+                        }
+                    }
+                };
                 let next_run = match self
                     .inner
                     .store
@@ -1395,6 +1561,7 @@ impl Runtime {
                         }
                     }
                 };
+                drop(_cpu_permit);
                 match successor {
                     Some(successor) => match self
                         .session_from_reduced(next_run, next_reduced, Some(successor))
@@ -1461,6 +1628,10 @@ impl Runtime {
         source_refs: Vec<ContentRef>,
         append_request_id: AppendRequestId,
     ) -> SpawnStep {
+        let _planning_permit = match self.acquire_planning_job().await {
+            Ok(permit) => permit,
+            Err(_) => return SpawnStep::Failed(AdmissionFailure::Capacity),
+        };
         let admission = match RunAdmitted::new(
             self.inner.store.identity().scope().clone(),
             self.inner.store.identity().epoch(),
@@ -1609,11 +1780,18 @@ impl Runtime {
         run: QualifiedRun,
         supplied: Option<ErasedValue>,
     ) -> LifecycleResult<RunSession> {
-        let reduced = self
-            .inner
-            .store
-            .reduce_qualified(&run, self.inner.assembly.program().document().clone())
-            .map_err(|_| RuntimeError::Conclusion)?;
+        let cpu_permit = self.acquire_cpu_job().await?;
+        let store = Arc::clone(&self.inner.store);
+        let reduction_run = run.clone();
+        let document = self.inner.assembly.program().document().clone();
+        let reduced = tokio::task::spawn_blocking(move || {
+            let _cpu_permit = cpu_permit;
+            store
+                .reduce_qualified(&reduction_run, document)
+                .map_err(|_| RuntimeError::Conclusion)
+        })
+        .await
+        .map_err(|_| RuntimeError::Conclusion)??;
         self.session_from_reduced(run, reduced, supplied).await
     }
 
@@ -1632,11 +1810,17 @@ impl Runtime {
                 .flat_map(|frame| frame.objects())
                 .find(|object| object.content_ref() == reduced.latest_context().value_ref())
                 .ok_or(RuntimeError::Conclusion)?;
-            self.inner.assembly.reify_value(
-                &self.inner.witness,
-                reduced.latest_context().contract_ref(),
-                object.canonical_json().as_bytes(),
-            )?
+            let assembly = Arc::clone(&self.inner.assembly);
+            let witness = Arc::clone(&self.inner.witness);
+            let contract = reduced.latest_context().contract_ref().clone();
+            let canonical_bytes = object.canonical_json().as_bytes().to_vec();
+            let cpu_permit = self.acquire_cpu_job().await?;
+            tokio::task::spawn_blocking(move || {
+                let _cpu_permit = cpu_permit;
+                assembly.reify_value(&witness, &contract, &canonical_bytes)
+            })
+            .await
+            .map_err(|_| RuntimeError::Value)??
         };
         if latest.value_ref() != reduced.latest_context().value_ref()
             || latest.contract_ref() != reduced.latest_context().contract_ref()
@@ -1656,6 +1840,7 @@ impl Runtime {
             run,
             reduced,
             latest,
+            _active_permit: self.acquire_active_session().await?,
         })
     }
 }
@@ -1680,6 +1865,7 @@ impl RunSession {
             run,
             reduced,
             latest,
+            _active_permit,
         } = self;
         let state = match runtime
             .inner
@@ -1720,14 +1906,39 @@ impl RunSession {
                 }
             }
         };
-        let prepared = match registration.prepare_access(
-            &runtime.inner.assembly,
-            &runtime.inner.witness,
-            run.run_id().clone(),
-            occurrence.clone(),
-            latest,
-            binding_ref,
-        ) {
+        let _planning_permit = match runtime.acquire_planning_job().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                return RuntimeStep::Failed {
+                    history: run,
+                    error,
+                }
+            }
+        };
+        let assembly = Arc::clone(&runtime.inner.assembly);
+        let witness = Arc::clone(&runtime.inner.witness);
+        let run_id = run.run_id().clone();
+        let prepare_occurrence = occurrence.clone();
+        let prepared_result = match tokio::task::spawn_blocking(move || {
+            let _planning_permit = _planning_permit;
+            registration.prepare_access(
+                &assembly,
+                &witness,
+                run_id,
+                prepare_occurrence,
+                latest,
+                binding_ref,
+            )
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(DynamicPreparationFailure {
+                input: None,
+                error: RuntimeError::Preparation,
+            }),
+        };
+        let prepared = match prepared_result {
             Ok(prepared) => prepared,
             Err(failure) => {
                 if let Some(input) = failure.input {
@@ -1737,6 +1948,7 @@ impl RunSession {
                             run,
                             reduced,
                             latest: input,
+                            _active_permit,
                         },
                         error: failure.error,
                     };
@@ -1747,6 +1959,7 @@ impl RunSession {
                 };
             }
         };
+        drop(_active_permit);
         let intent_ref = match prepared.intent_ref() {
             Ok(intent_ref) => intent_ref,
             Err(error) => {
@@ -1821,9 +2034,14 @@ impl RunSession {
         self,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
     ) -> RuntimeStep {
-        let reduced = self.reduced.clone();
-        let state = match self
-            .runtime
+        let RunSession {
+            runtime,
+            run,
+            reduced,
+            latest,
+            _active_permit,
+        } = self;
+        let state = match runtime
             .inner
             .assembly
             .program()
@@ -1833,13 +2051,12 @@ impl RunSession {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
-                    history: self.run,
+                    history: run,
                     error: RuntimeError::Identity,
                 }
             }
         };
-        let registration = match self
-            .runtime
+        let registration = match runtime
             .inner
             .assembly
             .dynamic_registration(state.state_implementation_ref())
@@ -1847,24 +2064,49 @@ impl RunSession {
             Ok(registration) => registration,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: self.run,
+                    history: run,
                     error,
                 };
             }
         };
-        let outcome = match registration.pure_evaluate(
-            &self.runtime.inner.assembly,
-            &self.runtime.inner.witness,
-            self.latest,
-            state.input_contract_ref(),
-            state.output_contract_ref(),
-            state.failure_contract_ref(),
-        ) {
-            Ok(outcome) => outcome,
+        let input_contract = state.input_contract_ref().clone();
+        let output_contract = state.output_contract_ref().clone();
+        let failure_contract = state.failure_contract_ref().cloned();
+        let assembly = Arc::clone(&runtime.inner.assembly);
+        let witness = Arc::clone(&runtime.inner.witness);
+        let cpu_permit = match runtime.acquire_cpu_job().await {
+            Ok(permit) => permit,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: self.run,
+                    history: run,
                     error,
+                }
+            }
+        };
+        let outcome = match tokio::task::spawn_blocking(move || {
+            let _cpu_permit = cpu_permit;
+            registration.pure_evaluate(
+                &assembly,
+                &witness,
+                latest,
+                &input_contract,
+                &output_contract,
+                failure_contract.as_ref(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                return RuntimeStep::Failed {
+                    history: run,
+                    error,
+                };
+            }
+            Err(_) => {
+                return RuntimeStep::Failed {
+                    history: run,
+                    error: RuntimeError::Unresolved,
                 };
             }
         };
@@ -1875,7 +2117,7 @@ impl RunSession {
                     Ok(object) => object,
                     Err(error) => {
                         return RuntimeStep::Failed {
-                            history: self.run,
+                            history: run,
                             error,
                         }
                     }
@@ -1888,7 +2130,7 @@ impl RunSession {
                     Ok(object) => object,
                     Err(error) => {
                         return RuntimeStep::Failed {
-                            history: self.run,
+                            history: run,
                             error,
                         }
                     }
@@ -1896,25 +2138,24 @@ impl RunSession {
                 (StateOutcome::Failure(value_ref), None, object)
             }
         };
-        let append_request_id =
-            match conclusion_append_id(self.run.run_id(), self.run.head_sequence()) {
-                Ok(value) => value,
-                Err(error) => {
-                    return RuntimeStep::Failed {
-                        history: self.run,
-                        error,
-                    }
+        drop(_active_permit);
+        let append_request_id = match conclusion_append_id(run.run_id(), run.head_sequence()) {
+            Ok(value) => value,
+            Err(error) => {
+                return RuntimeStep::Failed {
+                    history: run,
+                    error,
                 }
-            };
-        let owner = match self
-            .runtime
+            }
+        };
+        let owner = match runtime
             .inner
             .store
             .prepare_conclusion_qualified_with_reduced(
-                &self.run,
-                self.runtime.inner.assembly.program().document(),
+                &run,
+                runtime.inner.assembly.program().document(),
                 &reduced,
-                self.run.head_sequence(),
+                run.head_sequence(),
                 append_request_id,
                 StateConcluded::Pure {
                     occurrence,
@@ -1927,27 +2168,27 @@ impl RunSession {
             Ok(owner) => owner,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: self.run,
+                    history: run,
                     error: error.into(),
                 };
             }
         };
         let conclusion_frame = owner.frame().clone();
-        let disposition = match self.runtime.inner.store.commit_conclusion(owner).await {
+        let disposition = match runtime.inner.store.commit_conclusion(owner).await {
             Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
                 return RuntimeStep::Suspended(SuspendedRun::conclusion(
-                    self.runtime.clone(),
+                    runtime.clone(),
                     owner,
-                    self.run.clone(),
+                    run.clone(),
                     reduced.clone(),
                     successor,
                 ));
             }
             Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => {
                 return RuntimeStep::Suspended(SuspendedRun::conclusion(
-                    self.runtime.clone(),
+                    runtime.clone(),
                     owner,
-                    self.run.clone(),
+                    run.clone(),
                     reduced.clone(),
                     successor,
                 ));
@@ -1955,13 +2196,13 @@ impl RunSession {
             Ok(ConclusionCommitOutcome::Disposition(disposition)) => disposition,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: self.run,
+                    history: run,
                     error: error.into(),
                 };
             }
         };
-        self.runtime
-            .finish_conclusion(self.run, reduced, conclusion_frame, disposition, successor)
+        runtime
+            .finish_conclusion(run, reduced, conclusion_frame, disposition, successor)
             .await
     }
 
@@ -2092,6 +2333,16 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use std::num::NonZeroU16;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn runtime_limits_require_one_permit_per_work_lane() {
+        assert!(RuntimeLimits::default().validate().is_ok());
+        assert_eq!(RuntimeLimits::default().max_cpu_jobs(), 8);
+        assert!(RuntimeLimits::new(0, 1, 1, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 0, 1, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 1, 0, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 1, 1, 0).validate().is_err());
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
     #[serde(deny_unknown_fields)]

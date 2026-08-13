@@ -9,10 +9,15 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+use mfm_canonical::raw_content_digest;
+use mfm_facts::{FactCompleteness, FactSelection, FactSelectionFrontier, FactSelectionRequest};
 use mfm_ids::{
     AppendRequestId, ContentDigest, ContentRef, RunId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
+use mfm_journal::single_trust::{RunRecord, ValueRef};
 use mfm_program::ProgramCatalog;
+use mfm_values::MfmValue;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
     advance_reduced, prepare_access_from_current, prepare_conclusion_from_current,
@@ -991,7 +996,15 @@ struct OpenedStoreInner {
     catalog: ProgramCatalog,
     limits: StoreWorkLimits,
     brand: Arc<StoreBrand>,
+    prefix_ingress: Arc<Semaphore>,
 }
+
+/// One shared bound for backend prefix ingress and callback-free qualification.
+///
+/// This is intentionally derived framework capacity rather than a public per-call knob.  A
+/// permit remains held through the blocking decode/reduction job, including when its async join
+/// handle is cancelled.
+const PREFIX_INGRESS_JOBS: usize = 8;
 
 /// Entry point for one composite Store open.
 pub struct StructuredStore;
@@ -1012,6 +1025,7 @@ impl StructuredStore {
                 catalog,
                 limits,
                 brand: Arc::new(StoreBrand),
+                prefix_ingress: Arc::new(Semaphore::new(PREFIX_INGRESS_JOBS)),
             }),
         })
     }
@@ -1038,6 +1052,7 @@ impl StructuredStore {
                 catalog,
                 limits,
                 brand: Arc::new(StoreBrand),
+                prefix_ingress: Arc::new(Semaphore::new(PREFIX_INGRESS_JOBS)),
             }),
         })
     }
@@ -1480,6 +1495,13 @@ pub struct QualifiedHistoryPort {
 impl QualifiedHistoryPort {
     /// Loads and qualifies one complete retained prefix.
     pub async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
+        let permit = self
+            .inner
+            .prefix_ingress
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| StoreError::InvalidHistory)?;
         let raw = self
             .inner
             .backend
@@ -1487,7 +1509,8 @@ impl QualifiedHistoryPort {
             .await
             .map_err(map_backend_error)?
             .ok_or(StoreError::NotFound)?;
-        let mut qualified = qualify_raw_prefix(&self.inner.identity, raw)?;
+        let identity = self.inner.identity.clone();
+        let mut qualified = qualify_prefix_on_blocking_job(identity, raw, permit).await?;
         qualified.bind_store(Arc::clone(&self.inner.brand));
         let store = OpenedStructuredStore {
             inner: Arc::clone(&self.inner),
@@ -1856,6 +1879,34 @@ fn qualify_raw_prefix(
         identity.tenant().clone(),
         decode_raw_frames(identity, &raw)?,
     )
+}
+
+fn fact_stream_ref(tenant: &TenantScopeId) -> Result<ContentRef> {
+    let schema = mfm_ids::SchemaId::new(
+        "mfm.fact-stream",
+        "1",
+        mfm_ids::DigestAlgorithm::Sha256JcsV1,
+        mfm_ids::DigestBytes::from_array([0; 32]),
+    )
+    .map_err(|_| StoreError::InvalidRecord)?;
+    ContentRef::new(
+        schema,
+        mfm_canonical::raw_content_digest(tenant.as_str().as_bytes()),
+    )
+    .map_err(|_| StoreError::InvalidRecord)
+}
+
+async fn qualify_prefix_on_blocking_job(
+    identity: StructuredStoreIdentity,
+    raw: RawRunPrefix,
+    permit: OwnedSemaphorePermit,
+) -> Result<QualifiedRun> {
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        qualify_raw_prefix(&identity, raw)
+    })
+    .await
+    .map_err(|_| StoreError::InvalidHistory)?
 }
 
 fn decode_raw_frames(

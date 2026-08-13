@@ -60,6 +60,9 @@ pub enum RuntimeError {
     /// The provider result is not trustworthy enough to conclude the occurrence.
     #[error("runtime access result is unresolved")]
     Unresolved,
+    /// The Runtime's bounded work envelope is currently exhausted or invalid.
+    #[error("runtime work capacity is unavailable")]
+    Capacity,
 }
 
 impl From<mfm_program::single_trust::ProgramError> for RuntimeError {
