@@ -249,8 +249,17 @@ pub async fn append_primary_restart_probe(
     let configuration_ref = restart_probe_content(34, "restart-configuration")?;
     let physical_target_ref = restart_probe_content(35, "restart-target")?;
     let state_ref = restart_probe_content(36, "restart-state")?;
-    let binding = BindingDescriptor::new(state_ref, None, None, physical_target_ref, None, None)
-        .map_err(|_| BackendError::Storage)?;
+    let capability_ref = restart_probe_content(37, "restart-capability")?;
+    let adapter_ref = restart_probe_content(38, "restart-adapter")?;
+    let binding = BindingDescriptor::new(
+        state_ref,
+        Some(capability_ref),
+        Some(adapter_ref),
+        physical_target_ref,
+        None,
+        None,
+    )
+    .map_err(|_| BackendError::Storage)?;
     let binding_ref = binding.content_ref().map_err(|_| BackendError::Storage)?;
     let admission = RunAdmitted::new(
         identity.scope().clone(),
