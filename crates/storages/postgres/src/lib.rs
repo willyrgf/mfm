@@ -8,6 +8,12 @@
 use mfm_canonical::PlainCanonicalJsonBytes;
 use mfm_ids::{AppendRequestId, ContentDigest, RunId, StoreEpoch, StoreScopeId, TenantScopeId};
 use mfm_journal::single_trust::{RunFrame, RunRecord};
+use mfm_store::backend::{
+    BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
+    BackendFuture, BackendResult, ConfigurationAppendCommand, RawConfigurationRevision,
+    RawFactPublication, RawFactSnapshot, RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix,
+    StructuredStoreBackend, StructuredStoreIdentity,
+};
 use mfm_store::{
     AppendDisposition, ConfigurationAppendDisposition, ConfigurationHistory, ConfigurationRevision,
     PreparedConfigurationAppend, QualifiedRun, RunStore,
@@ -566,8 +572,8 @@ impl PostgresStore {
         sqlx::query(
             "INSERT INTO mfm_run_frames
              (store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence,
-              append_request_id, frame_bytes, frame_digest)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+              append_request_id, frame_bytes, frame_digest, head_digest)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
         .bind(self.scope.as_str())
         .bind(epoch)
@@ -577,6 +583,7 @@ impl PostgresStore {
         .bind(frame.append_request_id().as_str())
         .bind(encoded.as_bytes())
         .bind(digest.as_str())
+        .bind(head_digest.as_str())
         .execute(&mut *transaction)
         .await
         .map_err(|_| PostgresError::Conflict)?;
@@ -677,6 +684,483 @@ impl PostgresStore {
         .await
         .map_err(|_| PostgresError::Storage)?;
         Ok(found.is_some())
+    }
+}
+
+impl StructuredStoreBackend for PostgresStore {
+    fn identity(&self) -> StructuredStoreIdentity {
+        StructuredStoreIdentity::new(self.scope.clone(), self.epoch, self.tenant.clone())
+    }
+
+    fn load_complete_prefix<'a>(
+        &'a self,
+        run_id: &'a RunId,
+        limit: RawHistoryLoadLimit,
+    ) -> BackendFuture<'a, Option<RawRunPrefix>> {
+        Box::pin(async move {
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let rows: Vec<(i64, String, Vec<u8>, String, String)> = sqlx::query_as(
+                "SELECT run_sequence, append_request_id, frame_bytes, frame_digest, head_digest
+                 FROM mfm_run_frames
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3 AND run_id = $4
+                 ORDER BY run_sequence ASC",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(run_id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            if rows.len() > limit.max_frames() {
+                return Err(BackendError::Capacity);
+            }
+            let mut total_bytes = 0usize;
+            let mut frames = Vec::with_capacity(rows.len());
+            for (sequence, append_request_id, bytes, frame_digest, head_digest) in rows {
+                total_bytes = total_bytes
+                    .checked_add(bytes.len())
+                    .ok_or(BackendError::Capacity)?;
+                if total_bytes > limit.max_bytes() {
+                    return Err(BackendError::Capacity);
+                }
+                frames.push(RawFrameBytes::new(
+                    u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                    AppendRequestId::new(append_request_id).map_err(|_| BackendError::Storage)?,
+                    bytes,
+                    ContentDigest::parse(&frame_digest).map_err(|_| BackendError::Storage)?,
+                    ContentDigest::parse(&head_digest).map_err(|_| BackendError::Storage)?,
+                )?);
+            }
+            RawRunPrefix::new(frames).map(Some)
+        })
+    }
+
+    fn compare_and_append<'a>(
+        &'a self,
+        command: &'a BackendAppendCommand<'a>,
+    ) -> BackendFuture<'a, BackendAppendOutcome> {
+        Box::pin(async move {
+            if command.identity()
+                != &StructuredStoreIdentity::new(
+                    self.scope.clone(),
+                    self.epoch,
+                    self.tenant.clone(),
+                )
+            {
+                return Err(BackendError::Identity);
+            }
+            if command.frame_bytes().is_empty()
+                || command.frame_bytes().len() > mfm_journal::single_trust::MAX_FRAME_BYTES
+                || command.expected_sequence() == 0
+            {
+                return Err(BackendError::Capacity);
+            }
+            let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let existing: Option<(i64, Vec<u8>, String, String)> = sqlx::query_as(
+                "SELECT run_sequence, frame_bytes, frame_digest, head_digest
+                 FROM mfm_run_frames
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                   AND run_id = $4 AND append_request_id = $5",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(command.run_id().as_str())
+            .bind(command.append_request_id().as_str())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            if let Some((sequence, bytes, frame_digest, head_digest)) = existing {
+                let same = bytes == command.frame_bytes()
+                    && frame_digest == command.frame_digest().as_str()
+                    && head_digest == command.head_digest().as_str();
+                let commit = transaction.commit().await;
+                if commit.is_err() {
+                    return Err(BackendError::AcknowledgementUnknown);
+                }
+                if same {
+                    return Ok(BackendAppendOutcome::Found(RawFrameBytes::new(
+                        u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                        command.append_request_id().clone(),
+                        bytes,
+                        ContentDigest::parse(&frame_digest).map_err(|_| BackendError::Storage)?,
+                        ContentDigest::parse(&head_digest).map_err(|_| BackendError::Storage)?,
+                    )?));
+                }
+                return Err(BackendError::Conflict);
+            }
+
+            let current: Option<(i64, String)> = sqlx::query_as(
+                "SELECT head_sequence, head_digest
+                 FROM mfm_run_heads
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3 AND run_id = $4
+                 FOR UPDATE",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(command.run_id().as_str())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            let actual = current.as_ref().map_or(0, |value| value.0);
+            let expected = u64::try_from(actual)
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or(BackendError::Capacity)?;
+            if command.expected_sequence() != expected {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| BackendError::AcknowledgementUnknown)?;
+                return Ok(BackendAppendOutcome::StaleHead {
+                    actual_sequence: u64::try_from(actual).map_err(|_| BackendError::Storage)?,
+                });
+            }
+            let actual_head = current
+                .as_ref()
+                .map(|(_, digest)| ContentDigest::parse(digest))
+                .transpose()
+                .map_err(|_| BackendError::Storage)?;
+            if command.previous_head_digest() != actual_head.as_ref() {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| BackendError::AcknowledgementUnknown)?;
+                return Ok(BackendAppendOutcome::StaleHead {
+                    actual_sequence: u64::try_from(actual).map_err(|_| BackendError::Storage)?,
+                });
+            }
+            if command.is_admission() != (actual == 0) {
+                return Err(BackendError::Conflict);
+            }
+            if let Some(publication) = command.fact_publication() {
+                let fact_head: Option<i64> = sqlx::query_scalar(
+                    "SELECT publication_sequence FROM mfm_fact_heads
+                     WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                     FOR UPDATE",
+                )
+                .bind(self.scope.as_str())
+                .bind(epoch)
+                .bind(self.tenant.as_str())
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Storage)?;
+                let expected_fact = fact_head.unwrap_or(0).saturating_add(1);
+                if i64::try_from(publication.publication_sequence())
+                    .map_err(|_| BackendError::Capacity)?
+                    != expected_fact
+                {
+                    return Err(BackendError::Conflict);
+                }
+            }
+
+            sqlx::query(
+                "INSERT INTO mfm_run_frames
+                 (store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence,
+                  append_request_id, frame_bytes, frame_digest, head_digest)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(command.run_id().as_str())
+            .bind(i64::try_from(command.expected_sequence()).map_err(|_| BackendError::Capacity)?)
+            .bind(command.append_request_id().as_str())
+            .bind(command.frame_bytes())
+            .bind(command.frame_digest().as_str())
+            .bind(command.head_digest().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Conflict)?;
+
+            if let Some(publication) = command.fact_publication() {
+                let sequence = i64::try_from(publication.publication_sequence())
+                    .map_err(|_| BackendError::Capacity)?;
+                sqlx::query(
+                    "INSERT INTO mfm_fact_heads
+                     (store_scope_id, store_epoch, tenant_scope_id, publication_sequence)
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (store_scope_id, store_epoch, tenant_scope_id)
+                     DO UPDATE SET publication_sequence = EXCLUDED.publication_sequence",
+                )
+                .bind(self.scope.as_str())
+                .bind(epoch)
+                .bind(self.tenant.as_str())
+                .bind(sequence)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Storage)?;
+                sqlx::query(
+                    "INSERT INTO mfm_fact_publications
+                     (store_scope_id, store_epoch, tenant_scope_id, publication_sequence,
+                      run_id, run_sequence, selection_ref)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                )
+                .bind(self.scope.as_str())
+                .bind(epoch)
+                .bind(self.tenant.as_str())
+                .bind(sequence)
+                .bind(publication.run_id().as_str())
+                .bind(
+                    i64::try_from(publication.run_sequence())
+                        .map_err(|_| BackendError::Capacity)?,
+                )
+                .bind(
+                    serde_json::to_string(publication.selection_ref())
+                        .map_err(|_| BackendError::Storage)?,
+                )
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Conflict)?;
+            }
+            sqlx::query(
+                "INSERT INTO mfm_run_heads
+                 (store_scope_id, store_epoch, tenant_scope_id, run_id, head_sequence, head_digest)
+                 VALUES ($1, $2, $3, $4, $5, $6)
+                 ON CONFLICT (store_scope_id, store_epoch, tenant_scope_id, run_id)
+                 DO UPDATE SET head_sequence = EXCLUDED.head_sequence, head_digest = EXCLUDED.head_digest",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(command.run_id().as_str())
+            .bind(i64::try_from(command.expected_sequence()).map_err(|_| BackendError::Capacity)?)
+            .bind(command.head_digest().as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| BackendError::AcknowledgementUnknown)?;
+            Ok(BackendAppendOutcome::NewlyCommitted)
+        })
+    }
+
+    fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
+        Box::pin(async move {
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let rows: Vec<(i64, String, Vec<u8>, String)> = sqlx::query_as(
+                "SELECT revision_sequence, append_request_id, canonical_bytes, content_ref
+                 FROM mfm_configuration_revisions
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                 ORDER BY revision_sequence ASC",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            if rows.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+                return Err(BackendError::Capacity);
+            }
+            let mut total_bytes = 0usize;
+            rows.into_iter()
+                .map(|(sequence, append_request_id, bytes, content_ref)| {
+                    total_bytes = total_bytes
+                        .checked_add(bytes.len())
+                        .ok_or(BackendError::Capacity)?;
+                    if bytes.len() > 16 * 1024 * 1024
+                        || total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
+                    {
+                        return Err(BackendError::Capacity);
+                    }
+                    Ok(RawConfigurationRevision::new(
+                        u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                        AppendRequestId::new(append_request_id)
+                            .map_err(|_| BackendError::Storage)?,
+                        bytes,
+                        serde_json::from_str(&content_ref).map_err(|_| BackendError::Storage)?,
+                    )?)
+                })
+                .collect()
+        })
+    }
+
+    fn compare_and_append_configuration<'a>(
+        &'a self,
+        command: &'a ConfigurationAppendCommand<'a>,
+    ) -> BackendFuture<'a, BackendConfigurationOutcome> {
+        Box::pin(async move {
+            if command.identity()
+                != &StructuredStoreIdentity::new(
+                    self.scope.clone(),
+                    self.epoch,
+                    self.tenant.clone(),
+                )
+            {
+                return Err(BackendError::Identity);
+            }
+            if command.canonical_bytes().is_empty()
+                || command.canonical_bytes().len() > 16 * 1024 * 1024
+            {
+                return Err(BackendError::Capacity);
+            }
+            let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let existing: Option<(i64, Vec<u8>, String)> = sqlx::query_as(
+                "SELECT revision_sequence, canonical_bytes, content_ref
+                 FROM mfm_configuration_revisions
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                   AND append_request_id = $4",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(command.append_request_id().as_str())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            if let Some((sequence, bytes, content_ref)) = existing {
+                let recorded: mfm_ids::ContentRef =
+                    serde_json::from_str(&content_ref).map_err(|_| BackendError::Storage)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| BackendError::AcknowledgementUnknown)?;
+                if bytes == command.canonical_bytes() && recorded == *command.content_ref() {
+                    return Ok(BackendConfigurationOutcome::Found {
+                        sequence: u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                    });
+                }
+                return Err(BackendError::Conflict);
+            }
+            let current: Option<i64> = sqlx::query_scalar(
+                "SELECT head_sequence FROM mfm_configuration_heads
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                 FOR UPDATE",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            let actual = current.unwrap_or(0);
+            if command.expected_sequence()
+                != u64::try_from(actual).map_err(|_| BackendError::Storage)?
+            {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| BackendError::AcknowledgementUnknown)?;
+                return Ok(BackendConfigurationOutcome::StaleHead {
+                    actual_sequence: u64::try_from(actual).map_err(|_| BackendError::Storage)?,
+                });
+            }
+            let sequence = actual.checked_add(1).ok_or(BackendError::Capacity)?;
+            sqlx::query(
+                "INSERT INTO mfm_configuration_revisions
+                 (store_scope_id, store_epoch, tenant_scope_id, revision_sequence,
+                  append_request_id, canonical_bytes, content_ref)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(sequence)
+            .bind(command.append_request_id().as_str())
+            .bind(command.canonical_bytes())
+            .bind(serde_json::to_string(command.content_ref()).map_err(|_| BackendError::Storage)?)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Conflict)?;
+            sqlx::query(
+                "INSERT INTO mfm_configuration_heads
+                 (store_scope_id, store_epoch, tenant_scope_id, head_sequence)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (store_scope_id, store_epoch, tenant_scope_id)
+                 DO UPDATE SET head_sequence = EXCLUDED.head_sequence",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(sequence)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| BackendError::AcknowledgementUnknown)?;
+            Ok(BackendConfigurationOutcome::NewlyCommitted)
+        })
+    }
+
+    fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
+        Box::pin(async move {
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let head: Option<i64> = sqlx::query_scalar(
+                "SELECT publication_sequence FROM mfm_fact_heads
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            let rows: Vec<(i64, String, i64, String)> = sqlx::query_as(
+                "SELECT publication_sequence, run_id, run_sequence, selection_ref
+                 FROM mfm_fact_publications
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                 ORDER BY publication_sequence ASC",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            let publications = rows
+                .into_iter()
+                .map(
+                    |(publication_sequence, run_id, run_sequence, selection_ref)| {
+                        RawFactPublication::new(
+                            u64::try_from(publication_sequence)
+                                .map_err(|_| BackendError::Storage)?,
+                            RunId::parse(run_id).map_err(|_| BackendError::Storage)?,
+                            u64::try_from(run_sequence).map_err(|_| BackendError::Storage)?,
+                            serde_json::from_str(&selection_ref)
+                                .map_err(|_| BackendError::Storage)?,
+                        )
+                    },
+                )
+                .collect::<BackendResult<Vec<_>>>()?;
+            if head.unwrap_or(0)
+                != i64::try_from(publications.len()).map_err(|_| BackendError::Capacity)?
+            {
+                return Err(BackendError::Storage);
+            }
+            Ok(RawFactSnapshot::new(head.unwrap_or(0) as u64, publications))
+        })
+    }
+
+    fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
+        Box::pin(async move {
+            let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let rows: Vec<String> = sqlx::query_scalar(
+                "SELECT run_id FROM mfm_run_heads
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
+                 ORDER BY run_id ASC",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            rows.into_iter()
+                .map(|run_id| RunId::parse(run_id).map_err(|_| BackendError::Storage))
+                .collect()
+        })
     }
 }
 

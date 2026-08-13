@@ -16,6 +16,7 @@ CREATE TABLE mfm_run_frames (
     append_request_id TEXT NOT NULL,
     frame_bytes BYTEA NOT NULL,
     frame_digest TEXT NOT NULL,
+    head_digest TEXT NOT NULL,
     PRIMARY KEY (store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence),
     UNIQUE (store_scope_id, store_epoch, tenant_scope_id, run_id, append_request_id)
 );
