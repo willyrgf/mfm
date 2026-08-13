@@ -17,6 +17,10 @@ binary-facing = false
 name = "mfm_program"
 path = "src/lib.rs"
 
+[[test]]
+name = "api_contract"
+path = "tests/api_contract.rs"
+
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
@@ -27,3 +31,4 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
+trybuild = "1.0"

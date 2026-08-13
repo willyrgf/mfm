@@ -4,12 +4,12 @@
 //! State declarations and deterministic Match selectors. Runtime never receives a generic
 //! context map or a live callback from this module.
 
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use mfm_canonical::PlainCanonicalJsonBytes;
+use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 pub use mfm_ids::SequentialControlAddress;
 use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, StableId};
 use mfm_values::MfmValue;
@@ -808,7 +808,7 @@ impl ProgramDocument {
 pub struct Program {
     document: ProgramDocument,
     program_ref: ProgramRef,
-    catalog_brand: Arc<CatalogBrand>,
+    catalog: Arc<ProgramCatalogInner>,
 }
 
 /// Opaque content address of one normalized Program document.
@@ -823,12 +823,12 @@ impl ProgramRef {
 }
 
 impl Program {
-    fn new(document: ProgramDocument, catalog_brand: Arc<CatalogBrand>) -> Result<Self> {
+    fn new(document: ProgramDocument, catalog: Arc<ProgramCatalogInner>) -> Result<Self> {
         let program_ref = document.program_ref()?;
         Ok(Self {
             document,
             program_ref: ProgramRef(program_ref),
-            catalog_brand,
+            catalog,
         })
     }
 
@@ -844,36 +844,58 @@ impl Program {
 
     /// Returns whether this Program belongs to the exact in-process catalog instance.
     pub fn belongs_to_catalog(&self, catalog: &ProgramCatalog) -> bool {
-        Arc::ptr_eq(&self.catalog_brand, &catalog.brand)
+        Arc::ptr_eq(&self.catalog, &catalog.inner)
     }
 }
 
-/// Process-local catalog brand used to prevent cross-assembly typed transposition.
+#[derive(Debug, PartialEq, Eq)]
+struct ValueAssociation {
+    type_id: TypeId,
+    schema_id: mfm_ids::SchemaId,
+    descriptor_identity: Vec<u8>,
+}
+
 #[derive(Debug)]
-struct CatalogBrand;
+struct ProgramCatalogInner {
+    associations: BTreeMap<ContentRef, ValueAssociation>,
+}
 
 /// Cloneable callback-free catalog owner.
 #[derive(Debug, Clone)]
 pub struct ProgramCatalog {
-    brand: Arc<CatalogBrand>,
+    inner: Arc<ProgramCatalogInner>,
 }
 
 impl ProgramCatalog {
     /// Starts a callback-free catalog builder.
     pub fn builder() -> ProgramCatalogBuilder {
         ProgramCatalogBuilder {
-            brand: Arc::new(CatalogBrand),
+            associations: BTreeMap::new(),
         }
     }
 
     /// Returns whether two catalog handles share the exact process-local type brand.
     pub fn same_catalog(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.brand, &other.brand)
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 
     /// Qualifies one additional normalized Program under this exact catalog brand.
     pub fn program(&self, document: ProgramDocument) -> Result<Program> {
-        Program::new(document, Arc::clone(&self.brand))
+        validate_program_associations(&self.inner.associations, &document)?;
+        Program::new(document, Arc::clone(&self.inner))
+    }
+
+    /// Returns whether this catalog contains the exact nominal contract, descriptor, and Rust
+    /// type association.
+    pub fn contains_value<T: MfmValue>(&self, contract_ref: &ContentRef) -> bool {
+        value_association::<T>().is_ok_and(|(expected_contract, expected)| {
+            &expected_contract == contract_ref
+                && self
+                    .inner
+                    .associations
+                    .get(contract_ref)
+                    .is_some_and(|registered| registered == &expected)
+        })
     }
 
     /// Creates one typed qualified value under this exact catalog instance.
@@ -882,13 +904,17 @@ impl ProgramCatalog {
         contract_ref: ContentRef,
         value: T,
     ) -> Result<QualifiedTypedValue<T>> {
-        let schema_id = T::schema_id().map_err(|_| ProgramError::InvalidValue)?;
-        if contract_ref.schema_id() != &schema_id {
+        if !self.contains_value::<T>(&contract_ref) {
             return Err(ProgramError::InvalidValue);
         }
         let canonical = canonical_value(&value)?;
+        T::schema_descriptor()
+            .map_err(|_| ProgramError::InvalidCatalog)?
+            .identity()
+            .validate_canonical_value(canonical.as_bytes())
+            .map_err(|_| ProgramError::InvalidValue)?;
         let value_ref = ContentRef::new(
-            schema_id,
+            contract_ref.schema_id().clone(),
             ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
         )
         .map_err(|_| ProgramError::InvalidValue)?;
@@ -897,7 +923,39 @@ impl ProgramCatalog {
             value_ref,
             canonical_json: canonical,
             value,
-            brand: Arc::clone(&self.brand),
+            catalog: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Strictly decodes retained canonical bytes once under one exact registered association.
+    pub fn qualify_retained<T: MfmValue>(
+        &self,
+        contract_ref: ContentRef,
+        bytes: &[u8],
+    ) -> Result<QualifiedTypedValue<T>> {
+        if !self.contains_value::<T>(&contract_ref) {
+            return Err(ProgramError::InvalidValue);
+        }
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|_| ProgramError::Canonical)?;
+        let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidCatalog)?;
+        descriptor
+            .identity()
+            .validate_canonical_value(canonical.as_bytes())
+            .map_err(|_| ProgramError::InvalidValue)?;
+        let value =
+            serde_json::from_slice(canonical.as_bytes()).map_err(|_| ProgramError::InvalidValue)?;
+        let value_ref = ContentRef::new(
+            contract_ref.schema_id().clone(),
+            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
+        )
+        .map_err(|_| ProgramError::InvalidValue)?;
+        Ok(QualifiedTypedValue {
+            contract_ref,
+            value_ref,
+            canonical_json: canonical,
+            value,
+            catalog: Arc::clone(&self.inner),
         })
     }
 
@@ -909,7 +967,7 @@ impl ProgramCatalog {
             value_ref: value.value_ref,
             canonical_json: value.canonical_json,
             value: Box::new(value.value),
-            brand: value.brand,
+            catalog: value.catalog,
         }
     }
 }
@@ -917,16 +975,31 @@ impl ProgramCatalog {
 /// Builder for callback-free Program catalog values.
 #[derive(Debug)]
 pub struct ProgramCatalogBuilder {
-    brand: Arc<CatalogBrand>,
+    associations: BTreeMap<ContentRef, ValueAssociation>,
 }
 
 impl ProgramCatalogBuilder {
+    /// Registers one exact nominal contract, descriptor, and Rust type association.
+    pub fn register_value<T: MfmValue>(&mut self) -> Result<ContentRef> {
+        let (contract_ref, association) = value_association::<T>()?;
+        match self.associations.get(&contract_ref) {
+            Some(existing) if existing == &association => Ok(contract_ref),
+            Some(_) => Err(ProgramError::InvalidCatalog),
+            None => {
+                self.associations.insert(contract_ref.clone(), association);
+                Ok(contract_ref)
+            }
+        }
+    }
+
     /// Finalizes the exact catalog and one normalized Program.
     pub fn finish(self, document: ProgramDocument) -> Result<(ProgramCatalog, Program)> {
         let catalog = ProgramCatalog {
-            brand: Arc::clone(&self.brand),
+            inner: Arc::new(ProgramCatalogInner {
+                associations: self.associations,
+            }),
         };
-        let program = Program::new(document, self.brand)?;
+        let program = catalog.program(document)?;
         Ok((catalog, program))
     }
 }
@@ -955,7 +1028,7 @@ impl<'a> ProgramIngress<'a> {
         if checked.as_bytes() != canonical.as_bytes() {
             return Err(ProgramError::Canonical);
         }
-        Program::new(document, Arc::clone(&self.catalog.brand))
+        self.catalog.program(document)
     }
 }
 
@@ -965,7 +1038,7 @@ pub struct QualifiedTypedValue<T: MfmValue> {
     value_ref: ContentRef,
     canonical_json: PlainCanonicalJsonBytes,
     value: T,
-    brand: Arc<CatalogBrand>,
+    catalog: Arc<ProgramCatalogInner>,
 }
 
 impl<T: MfmValue> QualifiedTypedValue<T> {
@@ -991,7 +1064,7 @@ impl<T: MfmValue> QualifiedTypedValue<T> {
 
     /// Returns whether this typed witness belongs to the exact catalog instance.
     pub fn belongs_to_catalog(&self, catalog: &ProgramCatalog) -> bool {
-        Arc::ptr_eq(&self.brand, &catalog.brand)
+        Arc::ptr_eq(&self.catalog, &catalog.inner)
     }
 
     /// Consumes the witness and returns its typed value.
@@ -1007,7 +1080,7 @@ pub struct QualifiedValue {
     value_ref: ContentRef,
     canonical_json: PlainCanonicalJsonBytes,
     value: Box<dyn Any + Send + Sync>,
-    brand: Arc<CatalogBrand>,
+    catalog: Arc<ProgramCatalogInner>,
 }
 
 #[allow(dead_code)]
@@ -1044,7 +1117,10 @@ impl QualifiedValue {
         catalog: &ProgramCatalog,
         contract_ref: &ContentRef,
     ) -> Result<QualifiedTypedValue<T>> {
-        if !Arc::ptr_eq(&self.brand, &catalog.brand) || &self.contract_ref != contract_ref {
+        if !Arc::ptr_eq(&self.catalog, &catalog.inner)
+            || &self.contract_ref != contract_ref
+            || !catalog.contains_value::<T>(contract_ref)
+        {
             return Err(ProgramError::InvalidCatalog);
         }
         let value = self
@@ -1056,9 +1132,67 @@ impl QualifiedValue {
             value_ref: self.value_ref,
             canonical_json: self.canonical_json,
             value: *value,
-            brand: self.brand,
+            catalog: self.catalog,
         })
     }
+}
+
+/// Returns the one canonical nominal contract identity for an MFM value type.
+pub fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
+    value_association::<T>().map(|(contract_ref, _)| contract_ref)
+}
+
+fn value_association<T: MfmValue>() -> Result<(ContentRef, ValueAssociation)> {
+    let descriptor = T::schema_descriptor().map_err(|_| ProgramError::InvalidCatalog)?;
+    let schema_id = T::schema_id().map_err(|_| ProgramError::InvalidCatalog)?;
+    let descriptor_identity = descriptor
+        .identity_canonical_json()
+        .map_err(|_| ProgramError::InvalidCatalog)?
+        .as_bytes()
+        .to_vec();
+    let contract_ref = ContentRef::new(schema_id.clone(), raw_content_digest(b"mfm.contract.v1"))
+        .map_err(|_| ProgramError::InvalidCatalog)?;
+    Ok((
+        contract_ref,
+        ValueAssociation {
+            type_id: TypeId::of::<T>(),
+            schema_id,
+            descriptor_identity,
+        },
+    ))
+}
+
+fn validate_program_associations(
+    associations: &BTreeMap<ContentRef, ValueAssociation>,
+    document: &ProgramDocument,
+) -> Result<()> {
+    let mut contracts = BTreeSet::from([
+        document.root_contract_ref(),
+        document.admitted_context_contract_ref(),
+    ]);
+    for declaration in document.declarations() {
+        match declaration {
+            Declaration::State(state) => {
+                contracts.insert(state.input_contract_ref());
+                contracts.insert(state.output_contract_ref());
+                if let Some(failure) = state.failure_contract_ref() {
+                    contracts.insert(failure);
+                }
+            }
+            Declaration::Match(selector) => {
+                contracts.insert(selector.selector_contract_ref());
+                for variant in selector.variants() {
+                    contracts.insert(variant.payload_contract_ref());
+                    contracts.insert(variant.continuation_contract_ref());
+                }
+            }
+        }
+    }
+    contracts
+        .into_iter()
+        .all(|contract| associations.contains_key(contract))
+        .then_some(())
+        .ok_or(ProgramError::InvalidCatalog)
 }
 
 /// Canonicalizes one MFM value without a serialize/decode round trip.
@@ -1161,11 +1295,99 @@ mod tests {
     use super::*;
     use mfm_ids::{DigestBytes, SchemaId};
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
     #[serde(deny_unknown_fields)]
     struct NonClone {
         text: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SameSchemaA {
+        text: String,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct SameSchemaB {
+        text: String,
+    }
+
+    macro_rules! same_schema_value {
+        ($type:ty) => {
+            impl MfmValue for $type {
+                fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+                    <NonClone as MfmValue>::schema_descriptor()
+                }
+
+                fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
+                    <NonClone as MfmValue>::semantic_id()
+                }
+            }
+        };
+    }
+
+    same_schema_value!(SameSchemaA);
+    same_schema_value!(SameSchemaB);
+
+    static RETAINED_DECODES: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Serialize)]
+    struct DecodeCounted {
+        text: String,
+    }
+
+    impl<'de> Deserialize<'de> for DecodeCounted {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Wire {
+                text: String,
+            }
+
+            RETAINED_DECODES.fetch_add(1, Ordering::SeqCst);
+            let wire = Wire::deserialize(deserializer)?;
+            Ok(Self { text: wire.text })
+        }
+    }
+
+    same_schema_value!(DecodeCounted);
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct OtherDescriptor {
+        value: u64,
+    }
+
+    static CONFLICTING_DESCRIPTOR: AtomicBool = AtomicBool::new(false);
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct UnstableDescriptor {
+        text: String,
+    }
+
+    impl MfmValue for UnstableDescriptor {
+        fn schema_descriptor() -> mfm_values::Result<mfm_values::SchemaDescriptor> {
+            if CONFLICTING_DESCRIPTOR.load(Ordering::SeqCst) {
+                <OtherDescriptor as MfmValue>::schema_descriptor()
+            } else {
+                <NonClone as MfmValue>::schema_descriptor()
+            }
+        }
+
+        fn semantic_id() -> mfm_values::Result<mfm_ids::SemanticTypeId> {
+            <NonClone as MfmValue>::semantic_id()
+        }
+
+        fn schema_id() -> mfm_values::Result<SchemaId> {
+            <NonClone as MfmValue>::schema_id()
+        }
     }
 
     fn reference(seed: u8) -> ContentRef {
@@ -1185,30 +1407,26 @@ mod tests {
         .expect("reference")
     }
 
+    fn empty_document(contract_ref: ContentRef) -> ProgramDocument {
+        ProgramDocument::new(
+            StableId::new("mfm.test-entry-1").expect("entry"),
+            contract_ref.clone(),
+            contract_ref,
+            Vec::new(),
+        )
+        .expect("document")
+    }
+
     #[test]
     fn catalog_erases_and_downcasts_owned_non_clone_values_once() {
-        let catalog = ProgramCatalog::builder();
-        let (catalog, _) = catalog
-            .finish(
-                ProgramDocument::new(
-                    StableId::new("mfm.test-entry-1").expect("entry"),
-                    reference(1),
-                    reference(1),
-                    Vec::new(),
-                )
-                .expect("document"),
-            )
+        let mut builder = ProgramCatalog::builder();
+        let contract_ref = builder.register_value::<NonClone>().expect("registration");
+        let (catalog, _) = builder
+            .finish(empty_document(contract_ref.clone()))
             .expect("catalog");
         let qualified = catalog
             .qualify(
-                ContentRef::new(
-                    NonClone::schema_id().expect("schema"),
-                    ContentDigest::from_digest(
-                        DigestAlgorithm::Sha256V1,
-                        DigestBytes::from_array([2; 32]),
-                    ),
-                )
-                .expect("value reference"),
+                contract_ref.clone(),
                 NonClone {
                     text: "cumulative".to_owned(),
                 },
@@ -1216,19 +1434,143 @@ mod tests {
             .expect("qualified");
         let erased = catalog.erase(qualified);
         let typed: QualifiedTypedValue<NonClone> = erased
-            .try_downcast(
-                &catalog,
-                &ContentRef::new(
-                    NonClone::schema_id().expect("schema"),
-                    ContentDigest::from_digest(
-                        DigestAlgorithm::Sha256V1,
-                        DigestBytes::from_array([2; 32]),
-                    ),
-                )
-                .expect("value reference"),
-            )
+            .try_downcast(&catalog, &contract_ref)
             .expect("downcast");
         assert_eq!(typed.as_ref().text, "cumulative");
+    }
+
+    #[test]
+    fn catalog_requires_exact_registered_contract_descriptor_and_rust_type() {
+        let mut builder = ProgramCatalog::builder();
+        let contract_ref = builder
+            .register_value::<SameSchemaA>()
+            .expect("registration");
+        assert_eq!(
+            builder.register_value::<SameSchemaA>(),
+            Ok(contract_ref.clone())
+        );
+        assert_eq!(
+            builder.register_value::<SameSchemaB>(),
+            Err(ProgramError::InvalidCatalog)
+        );
+        let (catalog, _) = builder
+            .finish(empty_document(contract_ref.clone()))
+            .expect("catalog");
+        assert!(catalog.contains_value::<SameSchemaA>(&contract_ref));
+        assert!(!catalog.contains_value::<SameSchemaB>(&contract_ref));
+        assert!(catalog
+            .qualify(
+                contract_ref.clone(),
+                SameSchemaA {
+                    text: "accepted".to_owned(),
+                },
+            )
+            .is_ok());
+        let same_schema_unregistered = ContentRef::new(
+            contract_ref.schema_id().clone(),
+            raw_content_digest(b"unregistered nominal contract"),
+        )
+        .expect("foreign contract");
+        assert!(matches!(
+            catalog.qualify(
+                same_schema_unregistered,
+                SameSchemaA {
+                    text: "schema-only".to_owned(),
+                },
+            ),
+            Err(ProgramError::InvalidValue)
+        ));
+        assert!(matches!(
+            catalog.qualify(
+                contract_ref,
+                SameSchemaB {
+                    text: "transposed".to_owned(),
+                },
+            ),
+            Err(ProgramError::InvalidValue)
+        ));
+    }
+
+    #[test]
+    fn catalog_rejects_missing_and_conflicting_descriptor_associations() {
+        let missing = nominal_contract_ref::<NonClone>().expect("contract");
+        assert!(matches!(
+            ProgramCatalog::builder().finish(empty_document(missing)),
+            Err(ProgramError::InvalidCatalog)
+        ));
+
+        CONFLICTING_DESCRIPTOR.store(false, Ordering::SeqCst);
+        let mut builder = ProgramCatalog::builder();
+        let contract_ref = builder
+            .register_value::<UnstableDescriptor>()
+            .expect("first descriptor");
+        CONFLICTING_DESCRIPTOR.store(true, Ordering::SeqCst);
+        assert_eq!(
+            builder.register_value::<UnstableDescriptor>(),
+            Err(ProgramError::InvalidCatalog)
+        );
+        CONFLICTING_DESCRIPTOR.store(false, Ordering::SeqCst);
+        assert!(builder.finish(empty_document(contract_ref)).is_ok());
+
+        let mut builder = ProgramCatalog::builder();
+        let registered = builder.register_value::<NonClone>().expect("registered");
+        let (catalog, _) = builder.finish(empty_document(registered)).expect("catalog");
+        let unregistered = nominal_contract_ref::<OtherDescriptor>().expect("unregistered");
+        assert!(matches!(
+            catalog.program(empty_document(unregistered)),
+            Err(ProgramError::InvalidCatalog)
+        ));
+    }
+
+    #[test]
+    fn content_equal_catalogs_do_not_share_qualification_brand() {
+        let mut left = ProgramCatalog::builder();
+        let left_contract = left
+            .register_value::<NonClone>()
+            .expect("left registration");
+        let (left, _) = left
+            .finish(empty_document(left_contract.clone()))
+            .expect("left catalog");
+        let mut right = ProgramCatalog::builder();
+        let right_contract = right
+            .register_value::<NonClone>()
+            .expect("right registration");
+        let (right, _) = right
+            .finish(empty_document(right_contract))
+            .expect("right catalog");
+        assert!(!left.same_catalog(&right));
+        let qualified = left
+            .qualify(
+                left_contract.clone(),
+                NonClone {
+                    text: "left".to_owned(),
+                },
+            )
+            .expect("left value");
+        assert!(qualified.belongs_to_catalog(&left));
+        assert!(!qualified.belongs_to_catalog(&right));
+        assert!(matches!(
+            left.erase(qualified)
+                .try_downcast::<NonClone>(&right, &left_contract),
+            Err(ProgramError::InvalidCatalog)
+        ));
+    }
+
+    #[test]
+    fn retained_bytes_decode_once_under_the_exact_association() {
+        RETAINED_DECODES.store(0, Ordering::SeqCst);
+        let mut builder = ProgramCatalog::builder();
+        let contract_ref = builder
+            .register_value::<DecodeCounted>()
+            .expect("registration");
+        let (catalog, _) = builder
+            .finish(empty_document(contract_ref.clone()))
+            .expect("catalog");
+        let qualified = catalog
+            .qualify_retained::<DecodeCounted>(contract_ref, br#"{"text":"retained"}"#)
+            .expect("retained value");
+        assert_eq!(qualified.as_ref().text, "retained");
+        assert_eq!(RETAINED_DECODES.load(Ordering::SeqCst), 1);
     }
 
     #[test]

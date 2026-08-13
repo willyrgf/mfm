@@ -12,8 +12,9 @@ use std::sync::Mutex;
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::AccessCapabilityContract;
 use mfm_evm::{
-    BroadcastTransaction, EvmBalanceAsset, EvmBalanceCollectionCompletion, EvmBalanceContext,
-    EvmNativeBalanceInput, EvmSubmissionContext, EvmSubmissionFailure, EvmSubmissionOutput,
+    BroadcastEvidence, BroadcastIntent, BroadcastTransaction, EvmBalanceAsset,
+    EvmBalanceCollectionCompletion, EvmBalanceContext, EvmNativeBalanceInput, EvmReadEvidence,
+    EvmReadIntent, EvmSubmissionContext, EvmSubmissionFailure, EvmSubmissionOutput,
     EvmSubmissionRequest, EvmTokenBalanceInput, ReadBalance, ReadWalletNonceStatus,
     EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
 };
@@ -27,8 +28,8 @@ use mfm_portfolio::{
     PortfolioSnapshotOutput, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::single_trust::{
-    Declaration, ExecutionMode, MatchDeclaration, MatchVariant, ProgramCatalog, ProgramDocument,
-    StateDeclaration,
+    nominal_contract_ref, Declaration, ExecutionMode, MatchDeclaration, MatchVariant,
+    ProgramCatalog, ProgramCatalogBuilder, ProgramDocument, StateDeclaration,
 };
 use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
 use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
@@ -288,7 +289,7 @@ impl Application {
             StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
         let evm_id = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
             .map_err(|_| PublicError::Internal)?;
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = application_catalog_builder()?
             .finish(evm_submission_program()?)
             .map_err(|_| PublicError::Internal)?;
         let store = StructuredStore::open_memory(
@@ -848,20 +849,64 @@ fn canonical_typed_admission(
 
 fn canonical_typed_value<T: MfmValue>(value: &T) -> Result<(PlainCanonicalJsonBytes, ContentRef)> {
     let canonical = mfm_program::canonical_value(value).map_err(|_| PublicError::Internal)?;
-    let contract = ContentRef::new(
-        T::schema_id().map_err(|_| PublicError::Internal)?,
-        raw_content_digest(b"mfm.contract.v1"),
-    )
-    .map_err(|_| PublicError::Internal)?;
+    let contract = nominal_contract_ref::<T>().map_err(|_| PublicError::Internal)?;
     Ok((canonical, contract))
 }
 
-fn contract_ref<T: MfmValue>() -> Result<ContentRef> {
-    ContentRef::new(
-        T::schema_id().map_err(|_| PublicError::Internal)?,
-        raw_content_digest(b"mfm.contract.v1"),
-    )
-    .map_err(|_| PublicError::Internal)
+fn application_catalog_builder() -> Result<ProgramCatalogBuilder> {
+    let mut builder = ProgramCatalog::builder();
+    builder
+        .register_value::<EvmSubmissionRequest>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmSubmissionContext>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmSubmissionOutput>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmSubmissionFailure>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<PortfolioSnapshotInput>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<PortfolioContinuation>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmBalanceContext<PortfolioContinuation>>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmBalanceAsset>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmNativeBalanceInput>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmTokenBalanceInput>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<PortfolioSnapshotOutput>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<PortfolioSnapshotFailure>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmReadIntent>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<EvmReadEvidence>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<BroadcastIntent>()
+        .map_err(|_| PublicError::Internal)?;
+    builder
+        .register_value::<BroadcastEvidence>()
+        .map_err(|_| PublicError::Internal)?;
+    Ok(builder)
 }
 
 fn named_ref(schema_name: &str, identity: &str) -> Result<ContentRef> {
@@ -1014,10 +1059,14 @@ fn effect_state_to(
 fn evm_submission_program() -> Result<ProgramDocument> {
     let entry_point_id =
         StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
-    let request = contract_ref::<EvmSubmissionRequest>()?;
-    let context = contract_ref::<EvmSubmissionContext>()?;
-    let output = contract_ref::<EvmSubmissionOutput>()?;
-    let failure = contract_ref::<EvmSubmissionFailure>()?;
+    let request =
+        nominal_contract_ref::<EvmSubmissionRequest>().map_err(|_| PublicError::Internal)?;
+    let context =
+        nominal_contract_ref::<EvmSubmissionContext>().map_err(|_| PublicError::Internal)?;
+    let output =
+        nominal_contract_ref::<EvmSubmissionOutput>().map_err(|_| PublicError::Internal)?;
+    let failure =
+        nominal_contract_ref::<EvmSubmissionFailure>().map_err(|_| PublicError::Internal)?;
     let failure_address = address(4)?;
     let read = read_state_to(
         1,
@@ -1088,16 +1137,25 @@ struct PortfolioCollectionPlan {
 fn portfolio_program(input: &PortfolioSnapshotInput) -> Result<ProgramDocument> {
     let entry_point_id =
         StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
-    let admitted = contract_ref::<PortfolioSnapshotInput>()?;
-    let continuation = contract_ref::<PortfolioContinuation>()?;
-    let balance_context = contract_ref::<EvmBalanceContext<PortfolioContinuation>>()?;
-    let balance_asset = contract_ref::<EvmBalanceAsset>()?;
-    let native_input = contract_ref::<EvmNativeBalanceInput>()?;
-    let token_input = contract_ref::<EvmTokenBalanceInput>()?;
+    let admitted =
+        nominal_contract_ref::<PortfolioSnapshotInput>().map_err(|_| PublicError::Internal)?;
+    let continuation =
+        nominal_contract_ref::<PortfolioContinuation>().map_err(|_| PublicError::Internal)?;
+    let balance_context = nominal_contract_ref::<EvmBalanceContext<PortfolioContinuation>>()
+        .map_err(|_| PublicError::Internal)?;
+    let balance_asset =
+        nominal_contract_ref::<EvmBalanceAsset>().map_err(|_| PublicError::Internal)?;
+    let native_input =
+        nominal_contract_ref::<EvmNativeBalanceInput>().map_err(|_| PublicError::Internal)?;
+    let token_input =
+        nominal_contract_ref::<EvmTokenBalanceInput>().map_err(|_| PublicError::Internal)?;
     let balance_completion =
-        contract_ref::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()?;
-    let output = contract_ref::<PortfolioSnapshotOutput>()?;
-    let failure = contract_ref::<PortfolioSnapshotFailure>()?;
+        nominal_contract_ref::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()
+            .map_err(|_| PublicError::Internal)?;
+    let output =
+        nominal_contract_ref::<PortfolioSnapshotOutput>().map_err(|_| PublicError::Internal)?;
+    let failure =
+        nominal_contract_ref::<PortfolioSnapshotFailure>().map_err(|_| PublicError::Internal)?;
 
     let mut next_ordinal = 1usize;
     let mut allocate = || -> Result<SequentialControlAddress> {
@@ -1322,22 +1380,15 @@ fn portfolio_program(input: &PortfolioSnapshotInput) -> Result<ProgramDocument> 
     )?)));
     ProgramDocument::new(
         entry_point_id,
-        contract_ref::<PortfolioSnapshotOutput>()?,
-        contract_ref::<PortfolioSnapshotInput>()?,
+        nominal_contract_ref::<PortfolioSnapshotOutput>().map_err(|_| PublicError::Internal)?,
+        nominal_contract_ref::<PortfolioSnapshotInput>().map_err(|_| PublicError::Internal)?,
         declarations,
     )
     .map_err(|_| PublicError::Internal)
 }
 
 fn program_ref(document: &ProgramDocument) -> Result<ContentRef> {
-    let builder = ProgramCatalog::builder();
-    let (catalog, program) = builder
-        .finish(document.clone())
-        .map_err(|_| PublicError::Internal)?;
-    if !program.belongs_to_catalog(&catalog) {
-        return Err(PublicError::Internal);
-    }
-    Ok(program.program_ref().content_ref().clone())
+    document.program_ref().map_err(|_| PublicError::Internal)
 }
 
 fn status_from_action(action: &RunAction) -> RunStatus {
@@ -1649,13 +1700,15 @@ mod tests {
             .as_bytes()
             .len();
 
-        let (evm_catalog, evm_program) = ProgramCatalog::builder()
+        let (evm_catalog, evm_program) = application_catalog_builder()
+            .expect("catalog builder")
             .finish(evm)
             .expect("EVM Program finish");
         ProgramIngress::new(&evm_catalog)
             .decode(evm_bytes.as_bytes())
             .expect("EVM Program ingress");
-        let (portfolio_catalog, _portfolio_program) = ProgramCatalog::builder()
+        let (portfolio_catalog, _portfolio_program) = application_catalog_builder()
+            .expect("catalog builder")
             .finish(portfolio)
             .expect("Portfolio Program finish");
         ProgramIngress::new(&portfolio_catalog)

@@ -38,15 +38,17 @@ or history handle.
 
 The non-`Clone` `Context` fixture in
 `crates/kernel/runtime/src/single_trust.rs` proves catalog qualification, affine session retention,
-and consuming handoff. `catalog_erases_and_downcasts_owned_non_clone_values_once` proves the
-catalog-brand/type witness path. `reducer_materializes_one_selected_match_payload` proves that a
-selected Match payload becomes the exact child input while a distinct terminal output remains the
-only conclusion object. The Runtime panic tests prove that preparation, adapter construction, and
-future polling do not detach an owner.
+and consuming handoff. Program's association regressions prove that the exact nominal contract,
+descriptor identity, Rust type, and catalog instance must all agree, including when two Rust types
+claim one schema. The retained-byte regression proves one strict decode. Runtime assembly tests
+reject missing, surplus, and wrong typed registrations before callbacks can run.
+`reducer_materializes_one_selected_match_payload` proves that a selected Match payload becomes the
+exact child input while a distinct terminal output remains the only conclusion object. The Runtime
+panic tests prove that preparation, adapter construction, and future polling do not detach an owner.
 
 The Runtime coordinator now uses one catalog-issued type witness and a consuming branded erased
-owner internally; raw `TypeId` is only a private registration lookup, and there is no unsafe code,
-public free downcast, or erased context map. `RunSession` retains the reduced typed context and
+owner internally; raw `TypeId` is only private live-implementation correlation, and there is no
+unsafe code, public free downcast, or erased context map. `RunSession` retains the reduced typed context and
 the latest value across hot advancement. The lifecycle regression advances a two-State Pure chain
 from head 1 to head 2 without re-reducing the prefix, drops the hot owner, and cold-resumes the
 same durable context to head 3. The access lifecycle regression counts provider entry, response

@@ -604,3 +604,46 @@ Verification
 Unsolved problems
 
 none for this commit. Required-fixes commits 2 through 4 remain to be implemented in order.
+
+2026-08-13 — required-fixes commit 2: bind typed values to exact catalog registrations
+
+Material uncertainties
+
+none.
+
+Implementation progress
+
+- Replaced Program's brand-only catalog with one private immutable inner that owns the process-
+  local brand and the exact nominal-contract, schema-descriptor identity, and Rust `TypeId`
+  association table. Repeated exact registration is idempotent; missing or conflicting
+  associations fail catalog finalization or subsequent Program qualification.
+- Made Program the sole owner of nominal value-contract derivation. Runtime and App no longer hash
+  nominal contracts locally, and App constructs one explicit catalog containing every EVM,
+  Portfolio, Match, terminal, failure, capability-intent, and capability-evidence value type.
+- Added exact local qualification and retained-byte qualification. Local values canonicalize once
+  and validate against the registered descriptor; retained canonical bytes validate and deserialize
+  once before becoming a catalog-branded typed witness.
+- Runtime assembly now records each registered State input/output/failure and Access intent/evidence
+  association, rejects missing, surplus, or wrong typed registrations at finalization, and keeps
+  `TypeId` only for live implementation lookup. Cold reification now enters through exact catalog
+  retained-byte qualification instead of a schema-only precheck.
+- Updated Store fixtures to finalize catalogs with real typed test associations and added the
+  Program Trybuild suite proving downstream code cannot construct association entries, qualified
+  typed values, or erased qualified values.
+- Updated Program/Runtime READMEs, design, architecture, and the cumulative-context proof to state
+  that schema identity, a `ProgramRef`, or a separately finalized content-equal Program is not
+  catalog authority.
+
+Verification
+
+- `nix develop -c cargo test -p mfm-program -p mfm-runtime -p mfm-store -p mfm-replay -p mfm-app`
+  — passed: Program 9 unit plus 3 Trybuild cases; Runtime 14 unit plus 5 Trybuild cases; Store 19
+  unit plus 5 Trybuild cases; App 6 unit tests; Replay and all selected doc tests passed.
+- `nix develop -c cargo clippy -p mfm-program -p mfm-runtime -p mfm-store -p mfm-replay -p mfm-app
+  --all-targets --all-features -- -D warnings` — passed.
+- `nix develop -c cargo fmt --all -- --check` and `git diff --check` — passed before this log-only
+  append and are rerun below before commit.
+
+Unsolved problems
+
+none for this commit. Required-fixes commits 3 and 4 remain to be implemented in order.

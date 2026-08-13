@@ -2673,6 +2673,21 @@ mod tests {
     use crate::single_trust::ConfigurationAppendDisposition;
     use mfm_canonical::raw_content_digest;
     use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId, StableId};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct BackendValue {
+        value: u64,
+    }
+
+    fn backend_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
+        let mut builder = ProgramCatalog::builder();
+        builder
+            .register_value::<BackendValue>()
+            .expect("backend value");
+        builder
+    }
 
     fn identity() -> StructuredStoreIdentity {
         StructuredStoreIdentity::new(
@@ -2685,17 +2700,13 @@ mod tests {
     }
 
     fn admission_frame(identity: &StructuredStoreIdentity) -> mfm_journal::single_trust::RunFrame {
-        let schema = SchemaId::new(
-            "mfm.test.backend-limit",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([2; 32]),
-        )
-        .expect("schema");
-        let contract =
-            ContentRef::new(schema.clone(), raw_content_digest(b"contract")).expect("contract");
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
         let value_bytes = br#"{"value":1}"#;
-        let value = ContentRef::new(schema, raw_content_digest(value_bytes)).expect("value");
+        let value = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(value_bytes),
+        )
+        .expect("value");
         let run_id = RunId::parse(
             "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -2978,7 +2989,7 @@ mod tests {
             Vec::new(),
         )
         .expect("document");
-        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
         let opened = StructuredStore::open(
             backend.clone(),
@@ -3059,7 +3070,7 @@ mod tests {
             .expect("object")],
         )
         .expect("non-genesis frame");
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(
                 mfm_program::single_trust::ProgramDocument::new(
                     mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
@@ -3107,7 +3118,7 @@ mod tests {
             ),
             _ => panic!("expected admission"),
         };
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(
                 mfm_program::single_trust::ProgramDocument::new(
                     mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
@@ -3194,7 +3205,7 @@ mod tests {
             Vec::new(),
         )
         .expect("document");
-        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened =
             StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
                 .expect("opened store");
@@ -3346,7 +3357,7 @@ mod tests {
         .expect("admission frame");
         let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
         let injecting = Arc::new(InjectingFactBackend::new(Arc::clone(&backend)));
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(document.clone())
             .expect("catalog");
         let opened = StructuredStore::open(
@@ -3508,7 +3519,7 @@ mod tests {
             vec![base.objects()[0].clone()],
         )
         .expect("admission frame");
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(document.clone())
             .expect("catalog");
         let opened =
@@ -3680,7 +3691,7 @@ mod tests {
             vec![base.objects()[0].clone()],
         )
         .expect("admission frame");
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(document.clone())
             .expect("catalog");
         let opened =
@@ -3870,7 +3881,7 @@ mod tests {
             .expect("context object")],
         )
         .expect("admission frame");
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(document.clone())
             .expect("catalog");
         let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
@@ -3972,7 +3983,7 @@ mod tests {
             }
             _ => panic!("expected admission"),
         };
-        let (catalog, _) = ProgramCatalog::builder()
+        let (catalog, _) = backend_catalog_builder()
             .finish(
                 mfm_program::single_trust::ProgramDocument::new(
                     mfm_ids::StableId::new("mfm.test.configuration-brand-entry").expect("entry"),
@@ -4020,17 +4031,7 @@ mod tests {
 
     #[tokio::test]
     async fn configuration_owner_promotes_direct_success_and_retains_stale_owner() {
-        let contract = ContentRef::new(
-            SchemaId::new(
-                "mfm.test.configuration",
-                "1",
-                DigestAlgorithm::Sha256JcsV1,
-                DigestBytes::from_array([0; 32]),
-            )
-            .expect("schema"),
-            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([1; 32])),
-        )
-        .expect("contract");
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
         let document = mfm_program::single_trust::ProgramDocument::new(
             mfm_ids::StableId::new("mfm.test.configuration-entry").expect("entry"),
             contract.clone(),
@@ -4038,7 +4039,7 @@ mod tests {
             Vec::new(),
         )
         .expect("document");
-        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("opened store");
         let (_, _, configuration, _) = opened.split().into_parts();

@@ -17,9 +17,11 @@ sandbox linked Rust code.
 ## Program and typed values
 
 `mfm-program` owns one opaque `Program`, its strict serializable document, a callback-free catalog,
-and catalog-branded typed values. The declaration algebra is exactly `State | Match`. Authoring
-fragments are expanded before a Program is constructed; no runtime collection or ambient value map
-exists.
+and catalog-branded typed values. Before finalization, the catalog registers each exact nominal
+contract, schema-descriptor identity, and Rust value type. A schema ID, `ProgramRef`, or
+content-equal Program is not catalog authority, and retained bytes reenter through the same exact
+association. The declaration algebra is exactly `State | Match`. Authoring fragments are expanded
+before a Program is constructed; no runtime collection or ambient value map exists.
 
 Each operation supplies one domain-owned typed admission value `C0`. Every successful nonterminal
 State consumes the complete current context and returns the complete next context. A Match selects

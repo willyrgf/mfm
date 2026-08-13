@@ -830,9 +830,14 @@ where
                 error: RuntimeError::Preparation,
             };
         }
-        let expected_intent_contract = match nominal_contract_ref::<C::Intent>() {
+        let expected_intent_contract = match mfm_program::nominal_contract_ref::<C::Intent>() {
             Ok(value) => value,
-            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+            Err(_) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: RuntimeError::Value,
+                }
+            }
         };
         let expected_intent_value = match qualified_value_ref(&self.intent) {
             Ok(value) => value,
@@ -1092,6 +1097,12 @@ pub(crate) struct RegisteredState {
     pub(crate) access: bool,
     pub(crate) capability_contract_ref: Option<ContentRef>,
     pub(crate) capability_type: Option<TypeId>,
+    pub(crate) input_contract_ref: ContentRef,
+    pub(crate) output_contract_ref: ContentRef,
+    pub(crate) failure_contract_ref: ContentRef,
+    pub(crate) intent_contract_ref: Option<ContentRef>,
+    pub(crate) evidence_contract_ref: Option<ContentRef>,
+    pub(crate) catalog_values_valid: bool,
     pub(crate) binding_ref: Option<ContentRef>,
     pub(crate) adapter_implementation_ref: Option<ContentRef>,
     pub(crate) implementation: Box<dyn Any + Send + Sync>,
@@ -1144,6 +1155,16 @@ impl RuntimeAssemblyBuilder {
         implementation: PureImplementation<S>,
     ) -> Result<()> {
         self.ensure_unique(&state_implementation_ref)?;
+        let input_contract_ref = mfm_program::nominal_contract_ref::<S::Input>()?;
+        let output_contract_ref = mfm_program::nominal_contract_ref::<S::Output>()?;
+        let failure_contract_ref = mfm_program::nominal_contract_ref::<S::Failure>()?;
+        let catalog_values_valid = self.catalog.contains_value::<S::Input>(&input_contract_ref)
+            && self
+                .catalog
+                .contains_value::<S::Output>(&output_contract_ref)
+            && self
+                .catalog
+                .contains_value::<S::Failure>(&failure_contract_ref);
         let dynamic = crate::lifecycle::pure_registration(implementation.clone());
         self.registrations.push(RegisteredState {
             state_implementation_ref,
@@ -1151,6 +1172,12 @@ impl RuntimeAssemblyBuilder {
             access: false,
             capability_contract_ref: None,
             capability_type: None,
+            input_contract_ref,
+            output_contract_ref,
+            failure_contract_ref,
+            intent_contract_ref: None,
+            evidence_contract_ref: None,
+            catalog_values_valid,
             binding_ref: None,
             adapter_implementation_ref: None,
             implementation: Box::new(implementation),
@@ -1186,6 +1213,24 @@ impl RuntimeAssemblyBuilder {
             return Err(RuntimeError::Identity);
         }
         self.ensure_unique(&state_implementation_ref)?;
+        let input_contract_ref = mfm_program::nominal_contract_ref::<S::Input>()?;
+        let output_contract_ref = mfm_program::nominal_contract_ref::<S::Output>()?;
+        let failure_contract_ref = mfm_program::nominal_contract_ref::<S::Failure>()?;
+        let intent_contract_ref = mfm_program::nominal_contract_ref::<C::Intent>()?;
+        let evidence_contract_ref = mfm_program::nominal_contract_ref::<C::Evidence>()?;
+        let catalog_values_valid = self.catalog.contains_value::<S::Input>(&input_contract_ref)
+            && self
+                .catalog
+                .contains_value::<S::Output>(&output_contract_ref)
+            && self
+                .catalog
+                .contains_value::<S::Failure>(&failure_contract_ref)
+            && self
+                .catalog
+                .contains_value::<C::Intent>(&intent_contract_ref)
+            && self
+                .catalog
+                .contains_value::<C::Evidence>(&evidence_contract_ref);
         let adapter: Arc<AccessExecutor<S, C>> = Arc::new(invoke);
         let dynamic =
             crate::lifecycle::access_registration_with_binding(implementation.clone(), binding);
@@ -1195,6 +1240,12 @@ impl RuntimeAssemblyBuilder {
             access: true,
             capability_contract_ref: Some(capability_contract_ref),
             capability_type: Some(TypeId::of::<C>()),
+            input_contract_ref,
+            output_contract_ref,
+            failure_contract_ref,
+            intent_contract_ref: Some(intent_contract_ref),
+            evidence_contract_ref: Some(evidence_contract_ref),
+            catalog_values_valid,
             binding_ref: Some(execution_binding_ref),
             adapter_implementation_ref: Some(adapter_implementation_ref),
             implementation: Box::new(implementation),
@@ -1229,11 +1280,22 @@ impl RuntimeAssemblyBuilder {
                 })
                 .ok_or(RuntimeError::Identity)?;
             let registered = registrations.swap_remove(index);
+            if !registered.catalog_values_valid
+                || registered.input_contract_ref != *state.input_contract_ref()
+                || registered.output_contract_ref != *state.output_contract_ref()
+                || state
+                    .failure_contract_ref()
+                    .is_some_and(|failure| failure != &registered.failure_contract_ref)
+            {
+                return Err(RuntimeError::Identity);
+            }
             match state.execution() {
                 mfm_program::ExecutionMode::Pure => {
                     if registered.access
                         || registered.binding_ref.is_some()
                         || registered.capability_contract_ref.is_some()
+                        || registered.intent_contract_ref.is_some()
+                        || registered.evidence_contract_ref.is_some()
                         || registered.adapter.is_some()
                     {
                         return Err(RuntimeError::Mode);
@@ -1251,6 +1313,8 @@ impl RuntimeAssemblyBuilder {
                         || registered.binding_ref.as_ref() != state.execution_binding_ref()
                         || registered.capability_contract_ref.as_ref()
                             != Some(capability_contract_ref)
+                        || registered.intent_contract_ref.is_none()
+                        || registered.evidence_contract_ref.is_none()
                         || registered.adapter.is_none()
                     {
                         return Err(RuntimeError::Mode);
@@ -1436,14 +1500,6 @@ fn qualified_value_ref<T: MfmValue>(value: &T) -> Result<ContentRef> {
     .map_err(|_| RuntimeError::Value)
 }
 
-fn nominal_contract_ref<T: MfmValue>() -> Result<ContentRef> {
-    ContentRef::new(
-        T::schema_id().map_err(|_| RuntimeError::Value)?,
-        raw_content_digest(b"mfm.contract.v1"),
-    )
-    .map_err(|_| RuntimeError::Value)
-}
-
 fn mint_call_id(run_id: &RunId, preparation: &PreparationRef) -> Result<StableId> {
     StableId::new(format!(
         "call/{}/{}/{}",
@@ -1472,6 +1528,7 @@ mod tests {
     use super::*;
     use mfm_program_derive::MfmValue as DeriveMfmValue;
     use serde::{Deserialize, Serialize};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
     #[serde(deny_unknown_fields)]
@@ -1479,7 +1536,19 @@ mod tests {
         value: u64,
     }
 
+    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct ForeignContext {
+        value: u64,
+    }
+
     impl FailureValue for Context {
+        fn integrity_blocked() -> Self {
+            Self { value: 0 }
+        }
+    }
+
+    impl FailureValue for ForeignContext {
         fn integrity_blocked() -> Self {
             Self { value: 0 }
         }
@@ -1493,6 +1562,17 @@ mod tests {
 
         fn state_id() -> Result<StableId> {
             StableId::new("mfm.test.pure-state").map_err(|_| RuntimeError::Identity)
+        }
+    }
+
+    struct ForeignState;
+    impl State for ForeignState {
+        type Input = ForeignContext;
+        type Output = ForeignContext;
+        type Failure = ForeignContext;
+
+        fn state_id() -> Result<StableId> {
+            StableId::new("mfm.test.foreign-state").map_err(|_| RuntimeError::Identity)
         }
     }
 
@@ -1521,34 +1601,67 @@ mod tests {
         }
     }
 
+    struct ForeignRead;
+
+    impl AccessCapabilityContract for ForeignRead {
+        type Mode = ReadMode;
+        type Intent = ForeignContext;
+        type Evidence = ForeignContext;
+        type Facts = mfm_capabilities::NoPriorFacts;
+
+        fn contract_id() -> mfm_capabilities::Result<StableId> {
+            StableId::new("mfm.test.foreign-read-capability")
+                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
+        }
+
+        fn total_attempt_bound() -> std::num::NonZeroU16 {
+            std::num::NonZeroU16::new(1).expect("nonzero")
+        }
+
+        fn bind_evidence(
+            _intent: &Self::Intent,
+            _evidence: &Self::Evidence,
+        ) -> mfm_capabilities::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn context_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
+        let mut builder = ProgramCatalog::builder();
+        builder.register_value::<Context>().expect("context type");
+        builder
+    }
+
+    fn all_context_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
+        let mut builder = context_catalog_builder();
+        builder
+            .register_value::<ForeignContext>()
+            .expect("foreign context type");
+        builder
+    }
+
+    fn context_contract() -> ContentRef {
+        mfm_program::nominal_contract_ref::<Context>().expect("context contract")
+    }
+
     #[test]
     fn session_retains_non_clone_context() {
         assert_eq!(
             PureState::state_id().expect("state").as_str(),
             "mfm.test.pure-state"
         );
-        let builder = ProgramCatalog::builder();
-        let reference = || {
-            let schema = Context::schema_id().expect("schema");
-            ContentRef::new(
-                schema,
-                mfm_ids::ContentDigest::from_digest(
-                    mfm_ids::DigestAlgorithm::Sha256V1,
-                    mfm_ids::DigestBytes::from_array([1; 32]),
-                ),
-            )
-            .expect("reference")
-        };
+        let builder = context_catalog_builder();
+        let contract = context_contract();
         let doc = mfm_program::single_trust::ProgramDocument::new(
             StableId::new("mfm.test.entry").expect("entry"),
-            reference(),
-            reference(),
+            contract.clone(),
+            contract.clone(),
             Vec::new(),
         )
         .expect("document");
         let (catalog, _program) = builder.finish(doc).expect("catalog");
         let value = catalog
-            .qualify(reference(), Context { value: 7 })
+            .qualify(contract, Context { value: 7 })
             .expect("value");
         assert_eq!(value.as_ref().value, 7);
         let value = value.into_value();
@@ -1557,17 +1670,7 @@ mod tests {
 
     #[test]
     fn assembly_requires_and_retrieves_typed_pure_registration() {
-        let reference = || {
-            let schema = Context::schema_id().expect("schema");
-            ContentRef::new(
-                schema,
-                mfm_ids::ContentDigest::from_digest(
-                    mfm_ids::DigestAlgorithm::Sha256V1,
-                    mfm_ids::DigestBytes::from_array([3; 32]),
-                ),
-            )
-            .expect("reference")
-        };
+        let contract = context_contract();
         let implementation_ref = ContentRef::new(
             Context::schema_id().expect("schema"),
             mfm_ids::ContentDigest::from_digest(
@@ -1578,14 +1681,14 @@ mod tests {
         .expect("implementation ref");
         let document = mfm_program::single_trust::ProgramDocument::new(
             StableId::new("mfm.test.registered-entry").expect("entry"),
-            reference(),
-            reference(),
+            contract.clone(),
+            contract.clone(),
             vec![mfm_program::Declaration::State(Box::new(
                 mfm_program::single_trust::StateDeclaration::new(
                     SequentialControlAddress::new(0, Vec::new()).expect("address"),
                     implementation_ref.clone(),
-                    reference(),
-                    reference(),
+                    contract.clone(),
+                    contract.clone(),
                     None,
                     mfm_program::single_trust::ExecutionMode::Pure,
                     true,
@@ -1594,20 +1697,20 @@ mod tests {
             ))],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
         let builder = RuntimeAssemblyBuilder::new(catalog.clone(), program).expect("builder");
         assert!(builder.finish().is_err());
 
         let document = mfm_program::single_trust::ProgramDocument::new(
             StableId::new("mfm.test.registered-entry").expect("entry"),
-            reference(),
-            reference(),
+            contract.clone(),
+            contract.clone(),
             vec![mfm_program::Declaration::State(Box::new(
                 mfm_program::single_trust::StateDeclaration::new(
                     SequentialControlAddress::new(0, Vec::new()).expect("address"),
                     implementation_ref.clone(),
-                    reference(),
-                    reference(),
+                    contract.clone(),
+                    contract.clone(),
                     None,
                     mfm_program::single_trust::ExecutionMode::Pure,
                     true,
@@ -1616,7 +1719,7 @@ mod tests {
             ))],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
         let mut builder = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
         builder
             .register_pure::<PureState>(
@@ -1643,6 +1746,194 @@ mod tests {
     }
 
     #[test]
+    fn assembly_rejects_missing_surplus_and_wrong_typed_implementations_without_callbacks() {
+        let contract = context_contract();
+        let implementation_ref = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(b"mfm.test.assembly-validation-state"),
+        )
+        .expect("implementation");
+        let pure_document = || {
+            mfm_program::ProgramDocument::new(
+                StableId::new("mfm.test.assembly-validation-entry").expect("entry"),
+                contract.clone(),
+                contract.clone(),
+                vec![mfm_program::Declaration::State(Box::new(
+                    mfm_program::StateDeclaration::new(
+                        SequentialControlAddress::new(0, Vec::new()).expect("address"),
+                        implementation_ref.clone(),
+                        contract.clone(),
+                        contract.clone(),
+                        None,
+                        mfm_program::ExecutionMode::Pure,
+                        true,
+                    )
+                    .expect("state"),
+                ))],
+            )
+            .expect("document")
+        };
+        let callbacks = Arc::new(AtomicUsize::new(0));
+
+        let (catalog, program) = all_context_catalog_builder()
+            .finish(pure_document())
+            .expect("wrong-State catalog");
+        let mut wrong_state = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
+        let counter = Arc::clone(&callbacks);
+        wrong_state
+            .register_pure::<ForeignState>(
+                implementation_ref.clone(),
+                PureImplementation::<ForeignState>::new(move |input| {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Success {
+                        output: ForeignContext { value: input.value },
+                        facts: mfm_facts::FactProposalSet::empty(),
+                    }
+                }),
+            )
+            .expect("registration remains inert");
+        assert!(wrong_state.finish().is_err());
+
+        let (catalog, program) = context_catalog_builder()
+            .finish(pure_document())
+            .expect("surplus catalog");
+        let mut surplus = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
+        let first_counter = Arc::clone(&callbacks);
+        surplus
+            .register_pure::<PureState>(
+                implementation_ref.clone(),
+                PureImplementation::<PureState>::new(move |input| {
+                    first_counter.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Success {
+                        output: Context { value: input.value },
+                        facts: mfm_facts::FactProposalSet::empty(),
+                    }
+                }),
+            )
+            .expect("declared registration");
+        let extra_ref = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(b"mfm.test.assembly-validation-extra"),
+        )
+        .expect("extra implementation");
+        let extra_counter = Arc::clone(&callbacks);
+        surplus
+            .register_pure::<PureState>(
+                extra_ref,
+                PureImplementation::<PureState>::new(move |input| {
+                    extra_counter.fetch_add(1, Ordering::SeqCst);
+                    ProposedStateOutcome::Success {
+                        output: Context { value: input.value },
+                        facts: mfm_facts::FactProposalSet::empty(),
+                    }
+                }),
+            )
+            .expect("surplus registration");
+        assert!(surplus.finish().is_err());
+
+        let capability_ref = capability_content_ref::<ForeignRead>().expect("capability");
+        let adapter_ref = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(b"mfm.test.assembly-validation-adapter"),
+        )
+        .expect("adapter");
+        let binding = BindingDescriptor::new(
+            implementation_ref.clone(),
+            Some(capability_ref.clone()),
+            Some(adapter_ref.clone()),
+            ContentRef::new(
+                contract.schema_id().clone(),
+                raw_content_digest(b"mfm.test.assembly-validation-target"),
+            )
+            .expect("target"),
+            None,
+            None,
+        )
+        .expect("binding");
+        let binding_ref = binding.content_ref().expect("binding ref");
+        let access_document = mfm_program::ProgramDocument::new(
+            StableId::new("mfm.test.assembly-validation-access").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            vec![mfm_program::Declaration::State(Box::new(
+                mfm_program::StateDeclaration::new(
+                    SequentialControlAddress::new(0, Vec::new()).expect("address"),
+                    implementation_ref.clone(),
+                    contract.clone(),
+                    contract.clone(),
+                    None,
+                    mfm_program::ExecutionMode::Read {
+                        capability_contract_ref: capability_ref.clone(),
+                        total_attempt_bound: 1,
+                        fact_selection_required: false,
+                    },
+                    true,
+                )
+                .expect("state")
+                .with_execution_binding(binding_ref.clone())
+                .expect("binding"),
+            ))],
+        )
+        .expect("access document");
+        let (catalog, program) = context_catalog_builder()
+            .finish(access_document)
+            .expect("catalog without capability values");
+        let mut missing_capability_values =
+            RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
+        let prepare_counter = Arc::clone(&callbacks);
+        let state_counter = Arc::clone(&callbacks);
+        let provider_counter = Arc::clone(&callbacks);
+        missing_capability_values
+            .register_access_with_binding::<PureState, ForeignRead, _>(
+                implementation_ref.clone(),
+                capability_ref,
+                binding_ref,
+                adapter_ref,
+                binding,
+                AccessImplementation::new(
+                    move |_input| {
+                        prepare_counter.fetch_add(1, Ordering::SeqCst);
+                        Ok(ForeignContext { value: 1 })
+                    },
+                    move |_call| {
+                        state_counter.fetch_add(1, Ordering::SeqCst);
+                        Box::pin(async { Err(RuntimeError::Unresolved) })
+                    },
+                ),
+                move |_call| {
+                    provider_counter.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { Err(RuntimeError::Unresolved) })
+                },
+            )
+            .expect("registration remains inert");
+        assert!(missing_capability_values.finish().is_err());
+
+        let (catalog, program) = context_catalog_builder()
+            .finish(pure_document())
+            .expect("conflict catalog");
+        let mut conflicting = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
+        conflicting
+            .register_pure::<PureState>(
+                implementation_ref.clone(),
+                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
+                    output: Context { value: input.value },
+                    facts: mfm_facts::FactProposalSet::empty(),
+                }),
+            )
+            .expect("first registration");
+        assert!(conflicting
+            .register_pure::<PureState>(
+                implementation_ref,
+                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
+                    output: Context { value: input.value },
+                    facts: mfm_facts::FactProposalSet::empty(),
+                }),
+            )
+            .is_err());
+        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn pure_evaluation_panics_are_contained_before_conclusion() {
         let implementation = PureImplementation::<PureState>::new(|_| {
             panic!("test pure panic");
@@ -1666,6 +1957,7 @@ mod tests {
             )
             .expect("reference")
         };
+        let contract = context_contract();
         let implementation_ref = reference();
         let capability_ref = capability_content_ref::<TestRead>().expect("capability");
         let adapter_ref = reference();
@@ -1682,14 +1974,14 @@ mod tests {
         let occurrence = SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
         let document = mfm_program::ProgramDocument::new(
             StableId::new("mfm.test.preparation-panic").expect("entry"),
-            reference(),
-            reference(),
+            contract.clone(),
+            contract.clone(),
             vec![mfm_program::Declaration::State(Box::new(
                 mfm_program::StateDeclaration::new(
                     occurrence.clone(),
                     implementation_ref.clone(),
-                    reference(),
-                    reference(),
+                    contract.clone(),
+                    contract.clone(),
                     None,
                     mfm_program::ExecutionMode::Read {
                         capability_contract_ref: capability_ref.clone(),
@@ -1708,7 +2000,7 @@ mod tests {
             Some(mfm_program::Declaration::State(state)) => state.input_contract_ref().clone(),
             _ => panic!("state declaration missing"),
         };
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
         let mut builder = RuntimeAssemblyBuilder::new(catalog.clone(), program).expect("builder");
         builder
             .register_access_with_binding::<PureState, TestRead, _>(
