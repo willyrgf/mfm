@@ -7,7 +7,7 @@
 
 use mfm_evm::{EvmBalanceCollectionResult, EvmBalanceRequest};
 use mfm_ids::StableId;
-use mfm_program_derive::MfmValue;
+use mfm_program_derive::{MfmConfig, MfmValue};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
@@ -330,8 +330,9 @@ pub struct PortfolioRoutingManifest {
 }
 
 /// Minimal persisted Portfolio configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
 #[serde(deny_unknown_fields)]
+#[mfm(validate = "validate_portfolio_config")]
 pub struct PortfolioConfig {
     /// Portfolio identity.
     pub portfolio_id: PortfolioId,
@@ -339,33 +340,11 @@ pub struct PortfolioConfig {
     pub quotes: Vec<QuoteCode>,
 }
 
-/// Checked Portfolio configuration wrapper.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidatedPortfolioConfig(PortfolioConfig);
-
-impl ValidatedPortfolioConfig {
-    /// Validates one configuration by representation.
-    pub fn new(config: PortfolioConfig) -> Result<Self, PortfolioError> {
-        if config.portfolio_id.value.is_empty() || config.quotes.is_empty() {
-            return Err(PortfolioError::InvalidValue);
-        }
-        Ok(Self(config))
+fn validate_portfolio_config(config: &PortfolioConfig) -> Result<(), PortfolioError> {
+    if config.portfolio_id.value.is_empty() || config.quotes.is_empty() {
+        return Err(PortfolioError::InvalidValue);
     }
-
-    /// Borrows the checked configuration.
-    pub const fn as_config(&self) -> &PortfolioConfig {
-        &self.0
-    }
-}
-
-/// Decodes one strict JSON configuration value.
-pub fn decode_portfolio_config(
-    value: &serde_json::Value,
-) -> Result<PortfolioConfig, PortfolioError> {
-    let config: PortfolioConfig =
-        serde_json::from_value(value.clone()).map_err(|_| PortfolioError::InvalidValue)?;
-    ValidatedPortfolioConfig::new(config.clone())?;
-    Ok(config)
+    Ok(())
 }
 
 /// Redaction-safe Portfolio domain error.
@@ -421,6 +400,18 @@ fn total_sources(collections: &[EvmBalanceRequest]) -> usize {
 mod tests {
     use super::*;
     use mfm_evm::EvmBalanceSource;
+    use mfm_values::ValidatedConfig;
+
+    #[test]
+    fn shared_config_validation_rejects_domain_invalid_values() {
+        assert!(ValidatedConfig::new(PortfolioConfig {
+            portfolio_id: PortfolioId {
+                value: "portfolio-1".to_owned(),
+            },
+            quotes: Vec::new(),
+        })
+        .is_err());
+    }
 
     fn request() -> EvmBalanceRequest {
         EvmBalanceRequest::new(

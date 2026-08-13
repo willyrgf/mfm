@@ -1,6 +1,14 @@
 use clap::{Parser, Subcommand};
-use mfm_app::{parse_admission_json, AdmitRunRequest, Application, MAX_ADMISSION_BYTES};
-use mfm_ids::{RunId, StableId, StoreEpoch, StoreScopeId, TenantScopeId};
+use mfm_app::{
+    application_catalog, parse_admission_json, AdmitRunRequest, Application, MAX_ADMISSION_BYTES,
+};
+use mfm_evm::EvmConfig;
+use mfm_ids::{AppendRequestId, RunId, StableId, StoreEpoch, StoreScopeId, TenantScopeId};
+use mfm_portfolio::{PortfolioConfig, PortfolioId, QuoteCode};
+use mfm_store::{
+    ConfigurationCommitOutcome, StoreWorkLimits, StructuredStore, StructuredStoreIdentity,
+};
+use mfm_values::ValidatedConfig;
 
 #[derive(Parser)]
 #[command(name = "mfm", version, about = "fixed-tenant MFM run facade")]
@@ -40,11 +48,44 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let app = Application::for_tenant(
-        TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")?,
-        StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")?,
-        StoreEpoch::new(1),
+    let tenant = TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")?;
+    let store = StructuredStore::open_memory(
+        StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")?,
+            StoreEpoch::new(1),
+            tenant,
+        ),
+        application_catalog()?,
+        StoreWorkLimits::default(),
     )?;
+    let configuration = store.configuration();
+    let portfolio = configuration
+        .initial_write_session::<PortfolioConfig>()
+        .prepare_local(
+            AppendRequestId::new("cli-portfolio-configuration-0001")?,
+            ValidatedConfig::new(PortfolioConfig {
+                portfolio_id: PortfolioId {
+                    value: "demo-portfolio".to_owned(),
+                },
+                quotes: vec![QuoteCode::Usd],
+            })?,
+        )?;
+    let portfolio = match configuration.commit(portfolio).await? {
+        ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+        _ => return Err("failed to persist Portfolio configuration".into()),
+    };
+    let portfolio_head = portfolio.head().clone();
+    let evm = configuration
+        .write_session::<EvmConfig>(&portfolio_head)?
+        .prepare_local(
+            AppendRequestId::new("cli-evm-configuration-000000001")?,
+            ValidatedConfig::new(EvmConfig {})?,
+        )?;
+    let evm = match configuration.commit(evm).await? {
+        ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+        _ => return Err("failed to persist EVM configuration".into()),
+    };
+    let app = Application::new(store, portfolio_head, evm.into_head(), Vec::new())?;
     let output = match cli.command {
         Command::Admit { entry_point, input } => {
             if input.len() > MAX_ADMISSION_BYTES {

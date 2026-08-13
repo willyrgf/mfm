@@ -10,7 +10,7 @@ use std::num::NonZeroU16;
 
 use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
 use mfm_ids::StableId;
-use mfm_program_derive::MfmValue;
+use mfm_program_derive::{MfmConfig, MfmValue};
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
 use serde::de;
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,11 @@ pub const EVM_BALANCE_COLLECTION_OPERATION_ID: &str = "mfm.evm.balance-collectio
 pub const EVM_BALANCE_SOURCE_LIMIT: usize = 64;
 /// Maximum EVM transaction payload bytes.
 pub const EVM_TRANSACTION_DATA_LIMIT: usize = 128 * 1024;
+
+/// Secret-free EVM configuration selected by trusted composition.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
+#[serde(deny_unknown_fields)]
+pub struct EvmConfig {}
 
 /// A checked public EVM target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]

@@ -14,14 +14,15 @@ pub mod backend_conformance;
 pub use backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
     BackendFuture, BackendResult, ConclusionCommitOutcome, ConfigurationAppendCommand,
-    ConfigurationCommitOutcome, ConfigurationStore, HistoryReader, MemoryStructuredBackend,
-    OpenedStructuredStore, PreparedConfigurationWrite, QualifiedHistoryPort,
-    RawConfigurationRevision, RawFactPublication, RawFactSnapshot, RawFrameBytes,
-    RawHistoryLoadLimit, RawRunPrefix, StoreAuditPort, StoreOpenError, StoreParts, StoreWorkLimits,
-    StructuredStore, StructuredStoreBackend, StructuredStoreIdentity,
+    ConfigurationCommitOutcome, ConfigurationStore, ConfigurationWriteSession, HistoryReader,
+    MemoryStructuredBackend, OpenedStructuredStore, PreparedConfigurationAppend,
+    QualifiedHistoryPort, RawConfigurationRevision, RawFactPublication, RawFactSnapshot,
+    RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix, ResolvedConfiguration,
+    ResolvedConfigurationHead, StoreAuditPort, StoreOpenError, StoreParts, StoreWorkLimits,
+    StructuredStore, StructuredStoreBackend, StructuredStoreIdentity, SuspendedConfigurationAppend,
 };
 pub use single_trust::{
-    validate_prefix, AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
-    ConfigurationSnapshot, FactContinuation, PreparationAppend, PreparedConclusion, QualifiedRun,
-    ReducedRunState, Result, RunAction, RunReducer, StoreError,
+    validate_prefix, AppendDisposition, ConfigurationAppendDisposition, FactContinuation,
+    PreparationAppend, PreparedConclusion, QualifiedRun, ReducedRunState, Result, RunAction,
+    RunReducer, StoreError,
 };

@@ -699,8 +699,40 @@ impl StructuredStoreBackend for PostgresStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(|_| BackendError::Storage)?;
-            let raw_rows: Vec<(i64, String, Vec<u8>, String)> = sqlx::query_as(
-                "SELECT revision_sequence, append_request_id, canonical_bytes, content_ref
+            let expected_head = head.map_or(0, |value| value.0);
+            let expected_bytes = head.map_or(0, |value| value.1);
+            if expected_head < 0
+                || expected_bytes < 0
+                || expected_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES as i64
+            {
+                return Err(BackendError::Capacity);
+            }
+            let expected_head_usize =
+                usize::try_from(expected_head).map_err(|_| BackendError::Capacity)?;
+            if expected_head_usize > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+                return Err(BackendError::Capacity);
+            }
+            let metadata: (i64, i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*), COALESCE(SUM(octet_length(canonical_bytes)), 0),
+                        COALESCE(MAX(octet_length(canonical_bytes)), 0)::BIGINT
+                 FROM mfm_configuration_revisions
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            if metadata.0 != expected_head
+                || metadata.1 != expected_bytes
+                || metadata.2 < 0
+                || metadata.2 > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES as i64
+            {
+                return Err(BackendError::Capacity);
+            }
+            let raw_rows: Vec<(i64, String, Vec<u8>, String, i64)> = sqlx::query_as(
+                "SELECT revision_sequence, append_request_id, canonical_bytes, content_ref, total_bytes
                  FROM mfm_configuration_revisions
                  WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
                  ORDER BY revision_sequence ASC
@@ -724,29 +756,37 @@ impl StructuredStoreBackend for PostgresStore {
             let mut total_bytes = 0usize;
             let rows = raw_rows
                 .into_iter()
-                .map(|(sequence, append_request_id, bytes, content_ref)| {
-                    total_bytes = total_bytes
-                        .checked_add(bytes.len())
-                        .ok_or(BackendError::Capacity)?;
-                    if bytes.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
-                        || total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
-                    {
-                        return Err(BackendError::Capacity);
-                    }
-                    RawConfigurationRevision::new(
-                        u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
-                        AppendRequestId::new(append_request_id)
-                            .map_err(|_| BackendError::Storage)?,
-                        bytes,
-                        serde_json::from_str(&content_ref).map_err(|_| BackendError::Storage)?,
-                    )
-                })
+                .map(
+                    |(sequence, append_request_id, bytes, content_ref, retained_total_bytes)| {
+                        total_bytes = total_bytes
+                            .checked_add(bytes.len())
+                            .ok_or(BackendError::Capacity)?;
+                        if bytes.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+                            || total_bytes
+                                > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
+                        {
+                            return Err(BackendError::Capacity);
+                        }
+                        if usize::try_from(retained_total_bytes)
+                            .map_err(|_| BackendError::Storage)?
+                            != total_bytes
+                        {
+                            return Err(BackendError::Storage);
+                        }
+                        RawConfigurationRevision::new(
+                            u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                            AppendRequestId::new(append_request_id)
+                                .map_err(|_| BackendError::Storage)?,
+                            bytes,
+                            serde_json::from_str(&content_ref)
+                                .map_err(|_| BackendError::Storage)?,
+                            usize::try_from(retained_total_bytes)
+                                .map_err(|_| BackendError::Storage)?,
+                        )
+                    },
+                )
                 .collect::<BackendResult<Vec<_>>>()?;
-            let expected_head = head.map_or(0, |value| value.0);
-            let expected_bytes = head.map_or(0, |value| value.1);
-            if expected_head < 0
-                || expected_bytes < 0
-                || usize::try_from(expected_head).map_err(|_| BackendError::Storage)? != rows.len()
+            if expected_head_usize != rows.len()
                 || expected_bytes
                     != i64::try_from(total_bytes).map_err(|_| BackendError::Capacity)?
             {
@@ -794,8 +834,8 @@ impl StructuredStoreBackend for PostgresStore {
                 .await
                 .map_err(|_| BackendError::Storage)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
-            let existing: Option<(i64, Vec<u8>, String)> = sqlx::query_as(
-                "SELECT revision_sequence, canonical_bytes, content_ref
+            let existing: Option<(i64, String, Vec<u8>, String, i64)> = sqlx::query_as(
+                "SELECT revision_sequence, append_request_id, canonical_bytes, content_ref, total_bytes
                  FROM mfm_configuration_revisions
                  WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
                    AND append_request_id = $4",
@@ -807,7 +847,7 @@ impl StructuredStoreBackend for PostgresStore {
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|_| BackendError::Storage)?;
-            if let Some((sequence, bytes, content_ref)) = existing {
+            if let Some((sequence, append_request_id, bytes, content_ref, total_bytes)) = existing {
                 let recorded: mfm_ids::ContentRef =
                     serde_json::from_str(&content_ref).map_err(|_| BackendError::Storage)?;
                 transaction
@@ -815,9 +855,15 @@ impl StructuredStoreBackend for PostgresStore {
                     .await
                     .map_err(|_| BackendError::AcknowledgementUnknown)?;
                 if bytes == command.canonical_bytes() && recorded == *command.content_ref() {
-                    return Ok(BackendConfigurationOutcome::Found {
-                        sequence: u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
-                    });
+                    return RawConfigurationRevision::new(
+                        u64::try_from(sequence).map_err(|_| BackendError::Storage)?,
+                        AppendRequestId::new(append_request_id)
+                            .map_err(|_| BackendError::Storage)?,
+                        bytes,
+                        recorded,
+                        usize::try_from(total_bytes).map_err(|_| BackendError::Storage)?,
+                    )
+                    .map(|revision| BackendConfigurationOutcome::Found(Box::new(revision)));
                 }
                 return Err(BackendError::Conflict);
             }
@@ -860,8 +906,8 @@ impl StructuredStoreBackend for PostgresStore {
             sqlx::query(
                 "INSERT INTO mfm_configuration_revisions
                  (store_scope_id, store_epoch, tenant_scope_id, revision_sequence,
-                  append_request_id, canonical_bytes, content_ref)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                  append_request_id, canonical_bytes, content_ref, total_bytes)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
             )
             .bind(self.scope.as_str())
             .bind(epoch)
@@ -870,6 +916,7 @@ impl StructuredStoreBackend for PostgresStore {
             .bind(command.append_request_id().as_str())
             .bind(command.canonical_bytes())
             .bind(serde_json::to_string(command.content_ref()).map_err(|_| BackendError::Storage)?)
+            .bind(total_bytes + candidate_bytes)
             .execute(&mut *transaction)
             .await
             .map_err(|_| BackendError::Conflict)?;

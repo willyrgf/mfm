@@ -12,6 +12,10 @@ C0 -> RunAdmitted
 ```
 
 Admission is the only genesis. Store selects at most one actionable occurrence from a valid prefix.
+Trusted composition first publishes domain-owned Portfolio and EVM configuration values and gives
+App their same-opening resolved heads. Admission records the selected head's global sequence and
+typed content identity; absent, foreign-opening, wrong-type, or fabricated heads fail before the
+genesis append.
 Pure never creates a preparation. Read and Effect cannot enter a provider until their exact
 preparation append is newly committed. A found, stale, invalid, terminal, or ambiguous append
 creates no call.

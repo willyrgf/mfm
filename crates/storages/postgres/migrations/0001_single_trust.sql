@@ -70,6 +70,7 @@ CREATE TABLE mfm_configuration_revisions (
     append_request_id TEXT NOT NULL,
     canonical_bytes BYTEA NOT NULL,
     content_ref TEXT NOT NULL,
+    total_bytes BIGINT NOT NULL CHECK (total_bytes > 0),
     PRIMARY KEY (store_scope_id, store_epoch, tenant_scope_id, revision_sequence),
     UNIQUE (store_scope_id, store_epoch, tenant_scope_id, append_request_id)
 );

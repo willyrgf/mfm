@@ -45,7 +45,7 @@ intent and call.
 Journal owns strict canonical frames and the three run record families. Store owns the reducer,
 sequential cursor, cumulative-context continuity, preparation selection, source-manifest-bounded
 prior-fact selection, occurrence conclusion uniqueness, object/fact publication closure,
-configuration bounds, fact-frontier preconditions, publication-coordinate assignment, and
+typed configuration ingress and bounds, fact-frontier preconditions, publication-coordinate assignment, and
 exact-head append. Fact selections carry Store-authored producer provenance and a stream identity
 bound to scope, writer epoch, and tenant; qualification checks the captured historical publication
 and producer head rather than trusting retained source/value bytes alone. An opened
@@ -55,6 +55,11 @@ that opening identity, so equal persisted identities do not permit same-type tra
 independent opens. Its public mutation ingress is admission-specific; conclusions can cross it only
 through Store-owned, already-qualified conclusion owners. Runtime receives that mutation path only
 through the exact opening.
+
+The configuration port keeps PostgreSQL and Memory byte-oriented while exposing only
+`ResolvedConfiguration<C>`, erased `ResolvedConfigurationHead` evidence, affine typed write
+sessions, and prepared/suspended append owners above that boundary. App is non-generic and only
+selects same-opening heads supplied by trusted composition; it neither parses nor writes config.
 
 ### Runtime
 

@@ -12,6 +12,12 @@ configuration stream. The writer materializes a zero `mfm_fact_heads` row with
 conformance race proves that concurrent first publishers linearize to one commit and one
 `FactFrontierChanged`, with no partial run or fact row.
 
+Configuration rows remain mechanical canonical bytes. Each row stores the exact typed content
+reference and cumulative byte count at its global sequence; the head stores the same count for
+bounded preflight before byte allocation. Store alone decodes and validates `MfmConfig` values.
+The baseline intentionally rejects retired generic `mfm.configuration` rows and has no legacy
+reader.
+
 The database also records one persisted `(store_scope_id, store_epoch)` deployment identity.
 Ordinary opens must match it, including simultaneous qualified opens. A trusted restore uses
 `PostgresStore::rotate_identity` with a fresh scope or epoch, then opens the new pair; that

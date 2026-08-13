@@ -20,7 +20,7 @@ use mfm_journal::single_trust::{
 };
 use mfm_program::{canonical_value, nominal_contract_ref, ProgramCatalog, QualifiedTypedValue};
 use mfm_store::single_trust::{AppendDisposition, QualifiedRun, ReducedRunState, RunAction};
-use mfm_store::{ConclusionCommitOutcome, OpenedStructuredStore};
+use mfm_store::{ConclusionCommitOutcome, OpenedStructuredStore, ResolvedConfigurationHead};
 use mfm_values::MfmValue;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -712,6 +712,7 @@ enum SuspendedOwner {
     Admission {
         runtime: Runtime,
         frame: RunFrame,
+        configuration: ResolvedConfigurationHead,
     },
     Conclusion(PendingConclusion),
     Preparation {
@@ -828,9 +829,17 @@ pub struct SuspendedRun {
 }
 
 impl SuspendedRun {
-    fn admission(runtime: Runtime, frame: RunFrame) -> Self {
+    fn admission(
+        runtime: Runtime,
+        frame: RunFrame,
+        configuration: ResolvedConfigurationHead,
+    ) -> Self {
         Self {
-            owner: SuspendedOwner::Admission { runtime, frame },
+            owner: SuspendedOwner::Admission {
+                runtime,
+                frame,
+                configuration,
+            },
         }
     }
 
@@ -895,18 +904,33 @@ impl SuspendedRun {
     /// Resolves the retained owner exactly once.
     pub async fn resolve(self) -> RuntimeStep {
         match self.owner {
-            SuspendedOwner::Admission { runtime, frame } => {
-                match runtime.inner.store.append_admission(frame.clone()).await {
+            SuspendedOwner::Admission {
+                runtime,
+                frame,
+                configuration,
+            } => {
+                match runtime
+                    .inner
+                    .store
+                    .append_admission(frame.clone(), &configuration)
+                    .await
+                {
                     Ok(AppendDisposition::NewlyCommitted { .. })
                     | Ok(AppendDisposition::Found { .. })
                     | Ok(AppendDisposition::StaleHead { .. }) => {
                         let resolution = runtime.inspect_admission(&frame).await;
-                        runtime.resolve_admission(resolution, frame).await
+                        runtime
+                            .resolve_admission(resolution, frame, configuration)
+                            .await
                     }
-                    Ok(AppendDisposition::AcknowledgementUnknown) => {
-                        RuntimeStep::Suspended(SuspendedRun::admission(runtime, frame))
-                    }
-                    Err(_) => RuntimeStep::Suspended(SuspendedRun::admission(runtime, frame)),
+                    Ok(AppendDisposition::AcknowledgementUnknown) => RuntimeStep::Suspended(
+                        SuspendedRun::admission(runtime, frame, configuration),
+                    ),
+                    Err(_) => RuntimeStep::Suspended(SuspendedRun::admission(
+                        runtime,
+                        frame,
+                        configuration,
+                    )),
                 }
             }
             SuspendedOwner::Conclusion(owner) => owner.resolve().await,
@@ -1241,7 +1265,7 @@ impl Runtime {
         &self,
         run_id: RunId,
         value: QualifiedTypedValue<T>,
-        configuration_ref: ContentRef,
+        configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
         append_request_id: AppendRequestId,
     ) -> LifecycleResult<AdmissionInput<T>> {
@@ -1249,7 +1273,7 @@ impl Runtime {
             self,
             run_id,
             value,
-            configuration_ref,
+            configuration,
             source_refs,
             append_request_id,
         )
@@ -1704,7 +1728,7 @@ impl Runtime {
         &self,
         run_id: RunId,
         value: ErasedValue,
-        configuration_ref: ContentRef,
+        configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
         append_request_id: AppendRequestId,
     ) -> SpawnStep {
@@ -1712,6 +1736,11 @@ impl Runtime {
             Ok(permit) => permit,
             Err(_) => return SpawnStep::Failed(AdmissionFailure::Capacity),
         };
+        let configuration_projection =
+            match self.inner.store.configuration_projection(&configuration) {
+                Ok(projection) => projection,
+                Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
+            };
         let admission = match RunAdmitted::new(
             self.inner.store.identity().scope().clone(),
             self.inner.store.identity().epoch(),
@@ -1725,7 +1754,7 @@ impl Runtime {
                 .clone(),
             self.inner.assembly.program_ref().clone(),
             value.as_value_ref(),
-            configuration_ref,
+            configuration_projection,
             source_refs,
         ) {
             Ok(admission) => admission,
@@ -1747,7 +1776,12 @@ impl Runtime {
             Ok(frame) => frame,
             Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
         };
-        match self.inner.store.append_admission(frame.clone()).await {
+        match self
+            .inner
+            .store
+            .append_admission(frame.clone(), &configuration)
+            .await
+        {
             Ok(AppendDisposition::NewlyCommitted { .. }) => {
                 let run = match self.inner.store.qualify_admission(frame) {
                     Ok(run) => run,
@@ -1763,13 +1797,15 @@ impl Runtime {
                 self.spawn_admission_resolution(resolution).await
             }
             Ok(AppendDisposition::AcknowledgementUnknown) => {
-                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame))
+                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
             }
             Ok(AppendDisposition::StaleHead { .. }) => {
                 let resolution = self.inspect_admission(&frame).await;
                 self.spawn_admission_resolution(resolution).await
             }
-            Err(_) => SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame)),
+            Err(_) => {
+                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
+            }
         }
     }
 
@@ -1819,6 +1855,7 @@ impl Runtime {
         &self,
         resolution: AdmissionResolution,
         frame: RunFrame,
+        configuration: ResolvedConfigurationHead,
     ) -> RuntimeStep {
         match resolution {
             AdmissionResolution::Same(run) => {
@@ -1837,7 +1874,7 @@ impl Runtime {
                 error: RuntimeError::Identity,
             },
             AdmissionResolution::Missing => {
-                RuntimeStep::Suspended(SuspendedRun::admission(self.clone(), frame))
+                RuntimeStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
             }
         }
     }
@@ -2339,7 +2376,7 @@ pub struct AdmissionInput<T: MfmValue> {
     runtime: Runtime,
     run_id: RunId,
     value: QualifiedTypedValue<T>,
-    configuration_ref: ContentRef,
+    configuration: ResolvedConfigurationHead,
     source_refs: Vec<ContentRef>,
     append_request_id: AppendRequestId,
 }
@@ -2350,7 +2387,7 @@ impl<T: MfmValue> AdmissionInput<T> {
         runtime: &Runtime,
         run_id: RunId,
         value: QualifiedTypedValue<T>,
-        configuration_ref: ContentRef,
+        configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
         append_request_id: AppendRequestId,
     ) -> LifecycleResult<Self> {
@@ -2369,7 +2406,7 @@ impl<T: MfmValue> AdmissionInput<T> {
             runtime: runtime.clone(),
             run_id,
             value,
-            configuration_ref,
+            configuration,
             source_refs,
             append_request_id,
         })
@@ -2389,7 +2426,7 @@ impl<T: MfmValue> AdmissionInput<T> {
             .spawn_erased(
                 self.run_id,
                 value,
-                self.configuration_ref,
+                self.configuration,
                 self.source_refs,
                 self.append_request_id,
             )
@@ -2430,13 +2467,14 @@ mod tests {
     use super::*;
     use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
     use mfm_program::single_trust::{ExecutionMode, ProgramDocument, StateDeclaration};
-    use mfm_program_derive::MfmValue as DeriveMfmValue;
+    use mfm_program_derive::{MfmConfig as DeriveMfmConfig, MfmValue as DeriveMfmValue};
     use mfm_store::{
         BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendFuture,
-        ConfigurationAppendCommand, MemoryStructuredBackend, RawConfigurationRevision,
-        RawFactSnapshot, RawHistoryLoadLimit, RawRunPrefix, StoreWorkLimits, StructuredStore,
-        StructuredStoreBackend, StructuredStoreIdentity,
+        ConfigurationAppendCommand, ConfigurationCommitOutcome, MemoryStructuredBackend,
+        RawConfigurationRevision, RawFactSnapshot, RawHistoryLoadLimit, RawRunPrefix,
+        StoreWorkLimits, StructuredStore, StructuredStoreBackend, StructuredStoreIdentity,
     };
+    use mfm_values::ValidatedConfig;
     use serde::{Deserialize, Serialize};
     use std::num::NonZeroU16;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2454,6 +2492,12 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
     #[serde(deny_unknown_fields)]
     struct TestContext {
+        value: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, DeriveMfmConfig)]
+    #[serde(deny_unknown_fields)]
+    struct TestConfig {
         value: u64,
     }
 
@@ -2656,6 +2700,26 @@ mod tests {
         )
     }
 
+    async fn test_configuration(runtime: &Runtime) -> ResolvedConfigurationHead {
+        let configuration = runtime.store().configuration();
+        let owner = configuration
+            .initial_write_session::<TestConfig>()
+            .prepare_local(
+                AppendRequestId::new("runtime-test-configuration-000001").expect("request"),
+                ValidatedConfig::new(TestConfig { value: 1 }).expect("config"),
+            )
+            .expect("configuration owner");
+        match configuration
+            .commit(owner)
+            .await
+            .expect("configuration commit")
+        {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved)
+            | ConfigurationCommitOutcome::Found(resolved) => resolved.into_head(),
+            other => panic!("unexpected configuration outcome: {other:?}"),
+        }
+    }
+
     struct UnknownConclusionBackend {
         inner: Arc<MemoryStructuredBackend>,
         injected: AtomicUsize,
@@ -2823,12 +2887,12 @@ mod tests {
             "run:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration_ref = test_ref(b"mfm.test.lifecycle-configuration");
+        let configuration = test_configuration(&runtime).await;
         let admission = runtime
             .admission(
                 run_id,
                 value,
-                configuration_ref,
+                configuration,
                 Vec::new(),
                 AppendRequestId::new("runtime-admission").expect("append id"),
             )
@@ -2920,11 +2984,12 @@ mod tests {
         let value = catalog
             .qualify(contract, TestContext { value: 1 })
             .expect("qualified input");
+        let configuration = test_configuration(&runtime).await;
         let admission = runtime
             .admission(
                 run_id,
                 value,
-                test_ref(b"mfm.test.unknown-conclusion-configuration"),
+                configuration,
                 Vec::new(),
                 AppendRequestId::new("unknown-runtime-admission-0123456789").expect("append id"),
             )
@@ -2962,7 +3027,7 @@ mod tests {
             "run:sha256-jcs-v1:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration_ref = test_ref(b"mfm.test.concurrent-configuration");
+        let configuration = test_configuration(&runtime).await;
         let value = |amount| {
             catalog
                 .qualify(contract.clone(), TestContext { value: amount })
@@ -2972,7 +3037,7 @@ mod tests {
             .admission(
                 run_id.clone(),
                 value(1),
-                configuration_ref.clone(),
+                configuration.clone(),
                 Vec::new(),
                 AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
             )
@@ -2981,7 +3046,7 @@ mod tests {
             .admission(
                 run_id.clone(),
                 value(1),
-                configuration_ref.clone(),
+                configuration.clone(),
                 Vec::new(),
                 AppendRequestId::new("concurrent-spawn-right-0123456789").expect("request"),
             )
@@ -3001,7 +3066,7 @@ mod tests {
             .admission(
                 run_id.clone(),
                 value,
-                configuration_ref,
+                configuration,
                 Vec::new(),
                 AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
             )
@@ -3155,11 +3220,12 @@ mod tests {
             "run:sha256-jcs-v1:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
+        let configuration = test_configuration(&runtime).await;
         let admission = runtime
             .admission(
                 run_id.clone(),
                 value,
-                test_ref(b"mfm.test.lifecycle-access-configuration"),
+                configuration,
                 Vec::new(),
                 AppendRequestId::new("runtime-access-admission").expect("append id"),
             )
@@ -3316,11 +3382,12 @@ mod tests {
             "run:sha256-jcs-v1:5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
+        let configuration = test_configuration(&runtime).await;
         let admission = runtime
             .admission(
                 run_id.clone(),
                 value,
-                test_ref(b"mfm.test.lifecycle-effect-configuration"),
+                configuration,
                 Vec::new(),
                 AppendRequestId::new("runtime-effect-admission").expect("append id"),
             )

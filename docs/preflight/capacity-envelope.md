@@ -15,7 +15,7 @@ Exact-bound and independent bound-plus-one tests are required at the owner named
 | Portfolio total EVM sources | 64 | `EVM_BALANCE_SOURCE_LIMIT`, Portfolio constructor |
 | Configuration revisions | 1,024 | Journal limit, Memory/PostgreSQL writer |
 | Configuration stream bytes | 67,108,864 bytes | Journal limit, Memory/PostgreSQL writer |
-| One configuration revision | 16,777,216 bytes | Configuration revision constructor |
+| One configuration revision | 16,777,216 bytes | typed Store configuration ingress |
 | Read attempts | 3 total | `ExecutionMode::Read`, `PreparationMode::Read` |
 | Effect entries | 1 total | `ExecutionMode::Effect`, `PreparationMode::Effect` |
 
@@ -78,7 +78,7 @@ Exact-bound and independent bound-plus-one evidence is executable at each owner:
 | Read attempts, one-entry Effect, State conclusion reservation | `mfm_program::single_trust::tests::attempt_and_conclusion_capacity_bounds_accept_exact_and_reject_plus_one` and `mfm_capabilities::single_trust::tests::access_modes_enforce_their_exact_attempt_bounds` |
 | EVM transaction data | `mfm_evm::tests::transaction_data_capacity_accepts_exact_and_rejects_plus_one` |
 | 64-source Portfolio ceiling and independent +1 | `mfm_portfolio::tests::portfolio_total_source_bound_is_exact` |
-| configuration revisions, one revision, and cumulative stream | `mfm_store::single_trust::tests::configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one` |
+| configuration revisions, one revision, and cumulative stream | `mfm_store::backend::tests::configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one` |
 | selected-preparation liability transfer and conclusion discharge | `mfm_store::backend::tests::conclusion_head_race_classifies_same_and_conflicting_semantics` and the Store reduction/capacity checks in `single_trust.rs` |
 
 The configuration fixture accepts exactly 1,024 small revisions, exactly one 16 MiB canonical

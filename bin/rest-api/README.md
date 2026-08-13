@@ -5,3 +5,6 @@ entry-point id and one singular input; authentication and tenant policy are outs
 Admission bodies are capped at 512 KiB and use strict duplicate/unknown-field rejection before
 domain validation. The transport exposes callback-free read, drive, replay, trace, audit, and
 portable-export routes; responses expose only redacted public error codes.
+
+Startup explicitly publishes secret-free typed Portfolio and EVM demo configuration before App
+construction. There is no REST configuration or credential endpoint.

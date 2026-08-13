@@ -9,7 +9,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-use mfm_canonical::raw_content_digest;
+use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_facts::{
     FactCompleteness, FactProposalSet, FactProvenance, FactSelection, FactSelectionFrontier,
     FactSelectionRequest,
@@ -18,15 +18,14 @@ use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentDigest, ContentRef, RunId, StoreEpoch,
     StoreScopeId, TenantScopeId,
 };
-use mfm_journal::single_trust::{PreparationRef, RunRecord, ValueRef};
+use mfm_journal::single_trust::{ConfigurationHeadProjection, PreparationRef, RunRecord, ValueRef};
 use mfm_program::ProgramCatalog;
-use mfm_values::MfmValue;
+use mfm_values::{string_contains_secret_marker, MfmConfig, MfmValue, ValidatedConfig};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
     advance_reduced, prepare_access_from_current, prepare_conclusion_from_current,
-    reduce_qualified, AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
-    ConfigurationSnapshot, QualifiedRun, Result, RunAction, StoreBrand, StoreError,
+    reduce_qualified, AppendDisposition, QualifiedRun, Result, RunAction, StoreBrand, StoreError,
 };
 
 /// Bounded asynchronous backend result used by every mechanical Store capability.
@@ -426,15 +425,12 @@ pub enum BackendAppendOutcome {
 }
 
 /// Physical configuration append result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendConfigurationOutcome {
     /// The candidate crossed the backend commit point.
     NewlyCommitted,
     /// The same physical configuration append was retained.
-    Found {
-        /// The one-based retained configuration sequence.
-        sequence: u64,
-    },
+    Found(Box<RawConfigurationRevision>),
     /// The expected configuration head is stale.
     StaleHead {
         /// The current configuration head sequence.
@@ -488,22 +484,23 @@ pub enum ConclusionCommitOutcome {
 
 /// Configuration append outcome that retains the exact owner after an unknown acknowledgement.
 #[derive(Debug)]
-pub enum ConfigurationCommitOutcome {
-    /// The configuration append has a known mechanical disposition.
-    Disposition {
-        /// The exact known physical disposition.
-        disposition: ConfigurationAppendDisposition,
-        /// The already-ingressed revision when the backend found or committed this exact owner.
-        /// Stale heads expose no revision and therefore cannot promote a caller snapshot.
-        revision: Option<ConfigurationRevision>,
+pub enum ConfigurationCommitOutcome<C: MfmConfig> {
+    /// The candidate became the direct durable successor.
+    NewlyCommitted(ResolvedConfiguration<C>),
+    /// The backend found and Store ingressed the exact retained successor.
+    Found(ResolvedConfiguration<C>),
+    /// The candidate was prepared against an older global head and promoted nothing.
+    StaleHead {
+        /// The current one-based global configuration sequence.
+        actual_sequence: u64,
     },
     /// The transaction outcome is unknown; the exact semantic owner remains available.
-    AcknowledgementUnknown(PreparedConfigurationWrite),
+    AcknowledgementUnknown(SuspendedConfigurationAppend<C>),
     /// A known Store failure occurred before an append could be accepted; the exact owner remains
     /// available for explicit retry or supervisor classification.
     Rejected {
         /// The unchanged configuration owner.
-        owner: PreparedConfigurationWrite,
+        owner: PreparedConfigurationAppend<C>,
         /// The redaction-safe Store failure.
         error: StoreError,
     },
@@ -565,6 +562,7 @@ pub struct RawConfigurationRevision {
     append_request_id: AppendRequestId,
     canonical_bytes: Vec<u8>,
     content_ref: ContentRef,
+    total_bytes: usize,
 }
 
 impl RawConfigurationRevision {
@@ -574,11 +572,14 @@ impl RawConfigurationRevision {
         append_request_id: AppendRequestId,
         canonical_bytes: Vec<u8>,
         content_ref: ContentRef,
+        total_bytes: usize,
     ) -> BackendResult<Self> {
         if sequence == 0
             || sequence as usize > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
             || canonical_bytes.is_empty()
             || canonical_bytes.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+            || total_bytes < canonical_bytes.len()
+            || total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
         {
             return Err(BackendError::Capacity);
         }
@@ -587,6 +588,7 @@ impl RawConfigurationRevision {
             append_request_id,
             canonical_bytes,
             content_ref,
+            total_bytes,
         })
     }
 
@@ -605,6 +607,10 @@ impl RawConfigurationRevision {
     /// Returns the revision content identity.
     pub const fn content_ref(&self) -> &ContentRef {
         &self.content_ref
+    }
+    /// Returns the cumulative canonical bytes through this revision.
+    pub const fn total_bytes(&self) -> usize {
+        self.total_bytes
     }
 }
 
@@ -914,17 +920,21 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
             if state.configurations.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
                 return Err(BackendError::Capacity);
             }
-            let total_bytes = state
-                .configurations
-                .iter()
-                .try_fold(0usize, |total, revision| {
-                    total
+            let total_bytes = state.configurations.iter().enumerate().try_fold(
+                0usize,
+                |total, (index, revision)| {
+                    let next = total
                         .checked_add(revision.canonical_bytes().len())
                         .filter(|bytes| {
                             *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
                         })
-                        .ok_or(BackendError::Capacity)
-                })?;
+                        .ok_or(BackendError::Capacity)?;
+                    if revision.sequence() != index as u64 + 1 || revision.total_bytes() != next {
+                        return Err(BackendError::Storage);
+                    }
+                    Ok(next)
+                },
+            )?;
             if total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES {
                 return Err(BackendError::Capacity);
             }
@@ -952,9 +962,9 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                 if existing.canonical_bytes() == command.canonical_bytes()
                     && existing.content_ref() == command.content_ref()
                 {
-                    return Ok(BackendConfigurationOutcome::Found {
-                        sequence: existing.sequence(),
-                    });
+                    return Ok(BackendConfigurationOutcome::Found(Box::new(
+                        existing.clone(),
+                    )));
                 }
                 return Err(BackendError::Conflict);
             }
@@ -967,16 +977,13 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
             if state.configurations.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
                 || state
                     .configurations
-                    .iter()
-                    .try_fold(command.canonical_bytes().len(), |total, revision| {
-                        total
-                            .checked_add(revision.canonical_bytes().len())
-                            .filter(|bytes| {
-                                *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
-                            })
-                            .ok_or(BackendError::Capacity)
+                    .last()
+                    .map_or(0, RawConfigurationRevision::total_bytes)
+                    .checked_add(command.canonical_bytes().len())
+                    .filter(|bytes| {
+                        *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
                     })
-                    .is_err()
+                    .is_none()
             {
                 return Err(BackendError::Capacity);
             }
@@ -985,6 +992,14 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                 command.append_request_id().clone(),
                 command.canonical_bytes().to_vec(),
                 command.content_ref().clone(),
+                state
+                    .configurations
+                    .last()
+                    .map_or(command.canonical_bytes().len(), |revision| {
+                        revision
+                            .total_bytes()
+                            .saturating_add(command.canonical_bytes().len())
+                    }),
             )?;
             state.configurations.push(revision);
             #[cfg(feature = "test-support")]
@@ -1039,6 +1054,15 @@ pub enum StoreOpenError {
 #[derive(Clone)]
 pub struct OpenedStructuredStore {
     inner: Arc<OpenedStoreInner>,
+}
+
+impl std::fmt::Debug for OpenedStructuredStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenedStructuredStore")
+            .field("identity", &self.inner.identity)
+            .finish_non_exhaustive()
+    }
 }
 
 struct OpenedStoreInner {
@@ -1316,8 +1340,61 @@ impl OpenedStructuredStore {
     pub async fn append_admission(
         &self,
         frame: mfm_journal::single_trust::RunFrame,
+        configuration: &ResolvedConfigurationHead,
     ) -> Result<AppendDisposition> {
-        self.history_port().append_admission(frame).await
+        self.history_port()
+            .append_admission(frame, configuration)
+            .await
+    }
+
+    /// Opens the typed configuration capability branded to this exact Store opening.
+    pub fn configuration(&self) -> ConfigurationStore {
+        ConfigurationStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Constructs a persisted projection only after checking opaque process-local head evidence.
+    pub fn configuration_projection(
+        &self,
+        head: &ResolvedConfigurationHead,
+    ) -> Result<ConfigurationHeadProjection> {
+        if !Arc::ptr_eq(&head.brand, &self.inner.brand) || !self.same_open(&head.store) {
+            return Err(StoreError::Identity);
+        }
+        ConfigurationHeadProjection::new(head.sequence, head.content_ref.clone())
+            .map_err(|_| StoreError::InvalidRecord)
+    }
+
+    async fn verify_configuration_head(&self, head: &ResolvedConfigurationHead) -> Result<()> {
+        self.configuration_projection(head)?;
+        let rows = self
+            .inner
+            .backend
+            .load_configuration()
+            .await
+            .map_err(map_backend_error)?;
+        validate_configuration_rows(&rows, None)?;
+        let retained = head
+            .sequence
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| rows.get(index))
+            .ok_or(StoreError::InvalidHistory)?;
+        let captured_global = head
+            .global_sequence
+            .checked_sub(1)
+            .and_then(|index| usize::try_from(index).ok())
+            .and_then(|index| rows.get(index))
+            .ok_or(StoreError::InvalidHistory)?;
+        if retained.sequence() != head.sequence
+            || retained.content_ref() != &head.content_ref
+            || captured_global.sequence() != head.global_sequence
+            || captured_global.total_bytes() != head.total_bytes
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        Ok(())
     }
 
     /// Creates one access preparation after callback-free semantic qualification.
@@ -2113,7 +2190,12 @@ impl QualifiedHistoryPort {
     pub async fn append_admission(
         &self,
         frame: mfm_journal::single_trust::RunFrame,
+        configuration: &ResolvedConfigurationHead,
     ) -> Result<AppendDisposition> {
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        store.verify_configuration_head(configuration).await?;
         let mfm_journal::single_trust::RunRecord::RunAdmitted(admission) = frame.record() else {
             return Err(StoreError::InvalidRecord);
         };
@@ -2122,6 +2204,9 @@ impl QualifiedHistoryPort {
             || admission.run_id() != frame.run_id()
             || admission.store_scope_id() != self.inner.identity.scope()
             || admission.store_epoch() != self.inner.identity.epoch()
+            || !Arc::ptr_eq(&configuration.brand, &self.inner.brand)
+            || admission.configuration().sequence() != configuration.sequence
+            || admission.configuration().content_ref() != &configuration.content_ref
         {
             return Err(StoreError::Identity);
         }
@@ -2359,17 +2444,83 @@ pub struct ConfigurationStore {
     inner: Arc<OpenedStoreInner>,
 }
 
-/// One affine configuration append owner branded to an opened Store.
+/// Cloneable, opaque evidence of one exact resolved global configuration head.
+#[derive(Debug, Clone)]
+pub struct ResolvedConfigurationHead {
+    sequence: u64,
+    global_sequence: u64,
+    total_bytes: usize,
+    content_ref: ContentRef,
+    brand: Arc<StoreBrand>,
+    store: OpenedStructuredStore,
+}
+
+impl ResolvedConfigurationHead {
+    /// Returns the exact one-based stream position of this typed configuration.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the exact typed content identity selected at this head.
+    pub const fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
+    }
+}
+
+/// One typed configuration value resolved from or promoted into the retained stream.
 #[derive(Debug)]
-pub struct PreparedConfigurationWrite {
+pub struct ResolvedConfiguration<C: MfmConfig> {
+    value: C,
+    canonical_json: PlainCanonicalJsonBytes,
+    head: ResolvedConfigurationHead,
+}
+
+impl<C: MfmConfig> ResolvedConfiguration<C> {
+    /// Returns the validated typed configuration.
+    pub const fn value(&self) -> &C {
+        &self.value
+    }
+
+    /// Returns the exact canonical retained bytes.
+    pub fn canonical_json(&self) -> &str {
+        self.canonical_json.as_str()
+    }
+
+    /// Returns the opaque resolved head evidence.
+    pub const fn head(&self) -> &ResolvedConfigurationHead {
+        &self.head
+    }
+
+    /// Consumes this resolved value into its cloneable erased head evidence.
+    pub fn into_head(self) -> ResolvedConfigurationHead {
+        self.head
+    }
+}
+
+/// Affine authority to prepare one exact successor against a resolved global head.
+#[derive(Debug)]
+pub struct ConfigurationWriteSession<C: MfmConfig> {
+    expected_sequence: u64,
+    prior_total_bytes: usize,
+    brand: Arc<StoreBrand>,
+    store: OpenedStructuredStore,
+    _config: std::marker::PhantomData<fn() -> C>,
+}
+
+/// One affine typed configuration successor and its fixed physical append identity.
+#[derive(Debug)]
+pub struct PreparedConfigurationAppend<C: MfmConfig> {
     expected_sequence: u64,
     total_bytes: usize,
     append_request_id: AppendRequestId,
-    revision: ConfigurationRevision,
+    value: C,
+    canonical_json: PlainCanonicalJsonBytes,
+    content_ref: ContentRef,
     brand: Arc<StoreBrand>,
+    store: OpenedStructuredStore,
 }
 
-impl PreparedConfigurationWrite {
+impl<C: MfmConfig> PreparedConfigurationAppend<C> {
     /// Returns the expected configuration head sequence.
     pub const fn expected_sequence(&self) -> u64 {
         self.expected_sequence
@@ -2380,87 +2531,175 @@ impl PreparedConfigurationWrite {
         &self.append_request_id
     }
 
-    /// Returns the validated canonical configuration revision.
-    pub const fn revision(&self) -> &ConfigurationRevision {
-        &self.revision
-    }
-
     /// Returns the cumulative byte count after this direct successor.
     pub const fn total_bytes(&self) -> usize {
         self.total_bytes
     }
 }
 
+/// Unknown-acknowledgement owner retaining the exact typed append for explicit resolution.
+#[derive(Debug)]
+pub struct SuspendedConfigurationAppend<C: MfmConfig> {
+    owner: PreparedConfigurationAppend<C>,
+}
+
+impl<C: MfmConfig> SuspendedConfigurationAppend<C> {
+    /// Returns the fixed physical append identity whose outcome must be resolved.
+    pub const fn append_request_id(&self) -> &AppendRequestId {
+        &self.owner.append_request_id
+    }
+
+    /// Consumes the suspension back into the only retryable append owner.
+    pub fn into_owner(self) -> PreparedConfigurationAppend<C> {
+        self.owner
+    }
+}
+
+impl<C: MfmConfig> ConfigurationWriteSession<C> {
+    /// Consumes this session and a locally validated typed value into one exact append owner.
+    pub fn prepare_local(
+        self,
+        append_request_id: AppendRequestId,
+        value: ValidatedConfig<C>,
+    ) -> Result<PreparedConfigurationAppend<C>> {
+        let canonical = value
+            .canonical_json()
+            .map_err(|_| StoreError::InvalidRecord)?;
+        prepare_configuration_append(self, append_request_id, value.into_inner(), canonical)
+    }
+
+    /// Consumes this session and strict external canonical JSON into one exact append owner.
+    pub fn prepare_external(
+        self,
+        append_request_id: AppendRequestId,
+        source: &[u8],
+    ) -> Result<PreparedConfigurationAppend<C>> {
+        if source.is_empty()
+            || source.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+        {
+            return Err(StoreError::Capacity);
+        }
+        let text = std::str::from_utf8(source).map_err(|_| StoreError::InvalidRecord)?;
+        let canonical =
+            PlainCanonicalJsonBytes::from_json_str(text).map_err(|_| StoreError::InvalidRecord)?;
+        if canonical.as_bytes() != source || string_contains_secret_marker(text) {
+            return Err(StoreError::InvalidRecord);
+        }
+        let value: C = serde_json::from_slice(source).map_err(|_| StoreError::InvalidRecord)?;
+        let value = ValidatedConfig::new(value).map_err(|_| StoreError::InvalidRecord)?;
+        prepare_configuration_append(self, append_request_id, value.into_inner(), canonical)
+    }
+}
+
+fn prepare_configuration_append<C: MfmConfig>(
+    session: ConfigurationWriteSession<C>,
+    append_request_id: AppendRequestId,
+    value: C,
+    canonical_json: PlainCanonicalJsonBytes,
+) -> Result<PreparedConfigurationAppend<C>> {
+    let bytes = canonical_json.as_bytes();
+    if bytes.is_empty()
+        || bytes.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+        || string_contains_secret_marker(canonical_json.as_str())
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    if session.expected_sequence as usize >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
+    {
+        return Err(StoreError::Capacity);
+    }
+    let total_bytes = session
+        .prior_total_bytes
+        .checked_add(bytes.len())
+        .filter(|total| *total <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
+        .ok_or(StoreError::Capacity)?;
+    let schema = C::schema_id().map_err(|_| StoreError::InvalidRecord)?;
+    let content_ref = ContentRef::new(schema, raw_content_digest(bytes))
+        .map_err(|_| StoreError::InvalidRecord)?;
+    Ok(PreparedConfigurationAppend {
+        expected_sequence: session.expected_sequence,
+        total_bytes,
+        append_request_id,
+        value,
+        canonical_json,
+        content_ref,
+        brand: session.brand,
+        store: session.store,
+    })
+}
+
 impl ConfigurationStore {
-    /// Loads and qualifies one complete configuration snapshot.
-    pub async fn load(&self) -> Result<ConfigurationSnapshot> {
+    /// Creates an affine first-write session. Backend CAS rejects it when the stream is nonempty.
+    pub fn initial_write_session<C: MfmConfig>(&self) -> ConfigurationWriteSession<C> {
+        ConfigurationWriteSession {
+            expected_sequence: 0,
+            prior_total_bytes: 0,
+            brand: Arc::clone(&self.inner.brand),
+            store: OpenedStructuredStore {
+                inner: Arc::clone(&self.inner),
+            },
+            _config: std::marker::PhantomData,
+        }
+    }
+
+    /// Creates one affine typed successor session from an exact resolved head.
+    pub fn write_session<C: MfmConfig>(
+        &self,
+        head: &ResolvedConfigurationHead,
+    ) -> Result<ConfigurationWriteSession<C>> {
+        if !Arc::ptr_eq(&head.brand, &self.inner.brand)
+            || !head.store.same_open(&OpenedStructuredStore {
+                inner: Arc::clone(&self.inner),
+            })
+        {
+            return Err(StoreError::Identity);
+        }
+        Ok(ConfigurationWriteSession {
+            expected_sequence: head.global_sequence,
+            prior_total_bytes: head.total_bytes,
+            brand: Arc::clone(&head.brand),
+            store: head.store.clone(),
+            _config: std::marker::PhantomData,
+        })
+    }
+
+    /// Loads the complete bounded stream and resolves its latest revision as exactly `C`.
+    pub async fn load<C: MfmConfig>(&self) -> Result<ResolvedConfiguration<C>> {
         let raw = self
             .inner
             .backend
             .load_configuration()
             .await
             .map_err(map_backend_error)?;
-        let revisions = raw
-            .into_iter()
-            .map(|revision| {
-                let canonical_json = String::from_utf8(revision.canonical_bytes().to_vec())
-                    .map_err(|_| StoreError::InvalidHistory)?;
-                ConfigurationRevision::from_parts(
-                    revision.sequence(),
-                    revision.append_request_id().clone(),
-                    canonical_json,
-                    revision.content_ref().clone(),
-                )
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut snapshot = ConfigurationSnapshot::from_revisions(revisions)?;
-        snapshot.bind_store(Arc::clone(&self.inner.brand));
-        Ok(snapshot)
-    }
-
-    /// Prepares one validated configuration successor from a fixed snapshot without reading the
-    /// retained stream again.
-    pub fn prepare_append(
-        &self,
-        current: &ConfigurationSnapshot,
-        append_request_id: AppendRequestId,
-        canonical_json: String,
-    ) -> Result<PreparedConfigurationWrite> {
-        if !current.belongs_to_store(&self.inner.brand) {
-            return Err(StoreError::Identity);
+        if raw.is_empty() {
+            return Err(StoreError::NotFound);
         }
-        if current.head_sequence() as usize
-            >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
-        {
-            return Err(StoreError::Capacity);
-        }
-        let revision = ConfigurationRevision::new(
-            current.head_sequence().saturating_add(1),
-            append_request_id.clone(),
-            canonical_json,
-        )?;
-        let total_bytes = current
-            .total_bytes()
-            .checked_add(revision.canonical_json().len())
-            .ok_or(StoreError::Capacity)?;
-        if total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES {
-            return Err(StoreError::Capacity);
-        }
-        Ok(PreparedConfigurationWrite {
-            expected_sequence: current.head_sequence(),
-            total_bytes,
-            append_request_id,
-            revision,
-            brand: Arc::clone(&self.inner.brand),
-        })
+        let schema = C::schema_id().map_err(|_| StoreError::InvalidRecord)?;
+        let (selected_index, selected_canonical) =
+            validate_configuration_rows(&raw, Some(&schema))?.ok_or(StoreError::InvalidRecord)?;
+        let selected = raw.get(selected_index).ok_or(StoreError::InvalidHistory)?;
+        let global = raw.last().ok_or(StoreError::NotFound)?;
+        ingress_retained_configuration_canonical::<C>(
+            selected,
+            selected_canonical,
+            global.sequence(),
+            global.total_bytes(),
+            OpenedStructuredStore {
+                inner: Arc::clone(&self.inner),
+            },
+        )
     }
 
     /// Consumes one Store-branded configuration owner through the exact backend command.
-    pub async fn commit(
+    pub async fn commit<C: MfmConfig>(
         &self,
-        owner: PreparedConfigurationWrite,
-    ) -> Result<ConfigurationCommitOutcome> {
-        if !Arc::ptr_eq(&owner.brand, &self.inner.brand) {
+        owner: PreparedConfigurationAppend<C>,
+    ) -> Result<ConfigurationCommitOutcome<C>> {
+        if !Arc::ptr_eq(&owner.brand, &self.inner.brand)
+            || !owner.store.same_open(&OpenedStructuredStore {
+                inner: Arc::clone(&self.inner),
+            })
+        {
             return Ok(ConfigurationCommitOutcome::Rejected {
                 owner,
                 error: StoreError::Identity,
@@ -2470,8 +2709,8 @@ impl ConfigurationStore {
             &self.inner.identity,
             owner.expected_sequence,
             &owner.append_request_id,
-            owner.revision.canonical_json().as_bytes(),
-            owner.revision.content_ref(),
+            owner.canonical_json.as_bytes(),
+            &owner.content_ref,
         );
         let result = match self
             .inner
@@ -2481,7 +2720,9 @@ impl ConfigurationStore {
         {
             Ok(result) => result,
             Err(BackendError::AcknowledgementUnknown) => {
-                return Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(owner));
+                return Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(
+                    SuspendedConfigurationAppend { owner },
+                ));
             }
             Err(error) => {
                 return Ok(ConfigurationCommitOutcome::Rejected {
@@ -2490,30 +2731,142 @@ impl ConfigurationStore {
                 })
             }
         };
-        let (disposition, revision) = match result {
-            BackendConfigurationOutcome::NewlyCommitted => (
-                ConfigurationAppendDisposition::NewlyCommitted {
-                    sequence: owner.expected_sequence.saturating_add(1),
-                },
-                Some(owner.revision.clone()),
+        match result {
+            BackendConfigurationOutcome::NewlyCommitted => Ok(
+                ConfigurationCommitOutcome::NewlyCommitted(promote_owner(owner)),
             ),
-            BackendConfigurationOutcome::Found { sequence } => (
-                ConfigurationAppendDisposition::Found { sequence },
-                Some(owner.revision.clone()),
-            ),
-            BackendConfigurationOutcome::StaleHead { actual_sequence } => (
-                ConfigurationAppendDisposition::StaleHead { actual_sequence },
-                None,
-            ),
-            BackendConfigurationOutcome::AcknowledgementUnknown => {
-                return Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(owner));
+            BackendConfigurationOutcome::Found(raw) => {
+                if raw.sequence() != owner.expected_sequence.saturating_add(1)
+                    || raw.append_request_id() != &owner.append_request_id
+                    || raw.canonical_bytes() != owner.canonical_json.as_bytes()
+                    || raw.content_ref() != &owner.content_ref
+                    || raw.total_bytes() != owner.total_bytes
+                {
+                    return Ok(ConfigurationCommitOutcome::Rejected {
+                        owner,
+                        error: StoreError::Conflict,
+                    });
+                }
+                let resolved = ingress_retained_configuration::<C>(&raw, owner.store.clone());
+                match resolved {
+                    Ok(resolved) => Ok(ConfigurationCommitOutcome::Found(resolved)),
+                    Err(error) => Ok(ConfigurationCommitOutcome::Rejected { owner, error }),
+                }
             }
-        };
-        Ok(ConfigurationCommitOutcome::Disposition {
-            disposition,
-            revision,
-        })
+            BackendConfigurationOutcome::StaleHead { actual_sequence } => {
+                Ok(ConfigurationCommitOutcome::StaleHead { actual_sequence })
+            }
+            BackendConfigurationOutcome::AcknowledgementUnknown => {
+                Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(
+                    SuspendedConfigurationAppend { owner },
+                ))
+            }
+        }
     }
+}
+
+fn promote_owner<C: MfmConfig>(owner: PreparedConfigurationAppend<C>) -> ResolvedConfiguration<C> {
+    ResolvedConfiguration {
+        value: owner.value,
+        canonical_json: owner.canonical_json,
+        head: ResolvedConfigurationHead {
+            sequence: owner.expected_sequence.saturating_add(1),
+            global_sequence: owner.expected_sequence.saturating_add(1),
+            total_bytes: owner.total_bytes,
+            content_ref: owner.content_ref,
+            brand: owner.brand,
+            store: owner.store,
+        },
+    }
+}
+
+fn validate_configuration_rows(
+    rows: &[RawConfigurationRevision],
+    selected_schema: Option<&mfm_ids::SchemaId>,
+) -> Result<Option<(usize, PlainCanonicalJsonBytes)>> {
+    if rows.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+        return Err(StoreError::Capacity);
+    }
+    let mut total_bytes = 0usize;
+    let mut selected = None;
+    for (index, row) in rows.iter().enumerate() {
+        total_bytes = total_bytes
+            .checked_add(row.canonical_bytes().len())
+            .filter(|total| *total <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
+            .ok_or(StoreError::Capacity)?;
+        if row.sequence() != index as u64 + 1 || row.total_bytes() != total_bytes {
+            return Err(StoreError::InvalidHistory);
+        }
+        let canonical = validate_retained_configuration_bytes(row)?;
+        if selected_schema.is_some_and(|schema| row.content_ref().schema_id() == schema) {
+            selected = Some((index, canonical));
+        }
+    }
+    Ok(selected)
+}
+
+fn validate_retained_configuration_bytes(
+    row: &RawConfigurationRevision,
+) -> Result<PlainCanonicalJsonBytes> {
+    let text =
+        std::str::from_utf8(row.canonical_bytes()).map_err(|_| StoreError::InvalidHistory)?;
+    let canonical =
+        PlainCanonicalJsonBytes::from_json_str(text).map_err(|_| StoreError::InvalidHistory)?;
+    if canonical.as_bytes() != row.canonical_bytes()
+        || string_contains_secret_marker(text)
+        || row.content_ref().content_digest() != &raw_content_digest(row.canonical_bytes())
+        || row
+            .content_ref()
+            .schema_id()
+            .as_str()
+            .contains(":mfm.configuration:")
+    {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(canonical)
+}
+
+fn ingress_retained_configuration<C: MfmConfig>(
+    row: &RawConfigurationRevision,
+    store: OpenedStructuredStore,
+) -> Result<ResolvedConfiguration<C>> {
+    let canonical_json = validate_retained_configuration_bytes(row)?;
+    ingress_retained_configuration_canonical::<C>(
+        row,
+        canonical_json,
+        row.sequence(),
+        row.total_bytes(),
+        store,
+    )
+}
+
+fn ingress_retained_configuration_canonical<C: MfmConfig>(
+    row: &RawConfigurationRevision,
+    canonical_json: PlainCanonicalJsonBytes,
+    global_sequence: u64,
+    global_total_bytes: usize,
+    store: OpenedStructuredStore,
+) -> Result<ResolvedConfiguration<C>> {
+    if row.content_ref().schema_id() != &C::schema_id().map_err(|_| StoreError::InvalidRecord)? {
+        return Err(StoreError::InvalidRecord);
+    }
+    let value: C =
+        serde_json::from_slice(row.canonical_bytes()).map_err(|_| StoreError::InvalidHistory)?;
+    let value = ValidatedConfig::new(value)
+        .map_err(|_| StoreError::InvalidHistory)?
+        .into_inner();
+    Ok(ResolvedConfiguration {
+        value,
+        canonical_json,
+        head: ResolvedConfigurationHead {
+            sequence: row.sequence(),
+            global_sequence,
+            total_bytes: global_total_bytes,
+            content_ref: row.content_ref().clone(),
+            brand: Arc::clone(&store.inner.brand),
+            store,
+        },
+    })
 }
 
 /// Non-Clone fixed-snapshot audit port.
@@ -2667,10 +3020,9 @@ fn retained_preparation_ref(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 
     use super::*;
-    use crate::single_trust::ConfigurationAppendDisposition;
     use mfm_canonical::raw_content_digest;
     use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId, StableId};
     use serde::{Deserialize, Serialize};
@@ -2679,6 +3031,50 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct BackendValue {
         value: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmConfig)]
+    #[serde(deny_unknown_fields)]
+    struct BackendConfig {
+        value: u64,
+    }
+
+    static CONFIG_DECODES: AtomicUsize = AtomicUsize::new(0);
+    static CONFIG_VALIDATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Serialize, mfm_program_derive::MfmConfig)]
+    #[serde(deny_unknown_fields)]
+    #[mfm(validate = "validate_counted_config")]
+    struct CountedConfig {
+        value: u64,
+    }
+
+    fn validate_counted_config(_value: &CountedConfig) -> std::result::Result<(), &'static str> {
+        CONFIG_VALIDATIONS.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    impl<'de> Deserialize<'de> for CountedConfig {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Wire {
+                value: u64,
+            }
+
+            let wire = Wire::deserialize(deserializer)?;
+            CONFIG_DECODES.fetch_add(1, Ordering::SeqCst);
+            Ok(Self { value: wire.value })
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmConfig)]
+    #[serde(deny_unknown_fields)]
+    struct StringConfig {
+        value: String,
     }
 
     fn backend_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
@@ -2711,6 +3107,12 @@ mod tests {
             "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run");
+        let configuration_bytes = br#"{"value":1}"#;
+        let configuration_ref = ContentRef::new(
+            BackendConfig::schema_id().expect("configuration schema"),
+            raw_content_digest(configuration_bytes),
+        )
+        .expect("configuration");
         let admitted = mfm_journal::single_trust::RunAdmitted::new(
             identity.scope().clone(),
             identity.epoch(),
@@ -2719,7 +3121,7 @@ mod tests {
             mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
             contract.clone(),
             mfm_journal::single_trust::ValueRef::new(contract.clone(), value.clone()),
-            contract.clone(),
+            ConfigurationHeadProjection::new(1, configuration_ref).expect("configuration head"),
             Vec::new(),
         )
         .expect("admission");
@@ -2767,7 +3169,7 @@ mod tests {
             admitted.entry_point_id().clone(),
             admitted.program_ref().clone(),
             admitted.admitted_context().clone(),
-            admitted.configuration_ref().clone(),
+            admitted.configuration().clone(),
             vec![source],
         )
         .expect("sourced admission");
@@ -2781,6 +3183,26 @@ mod tests {
             base.objects().to_vec(),
         )
         .expect("sourced frame")
+    }
+
+    async fn configuration_head(opened: &OpenedStructuredStore) -> ResolvedConfigurationHead {
+        let configuration = opened.configuration();
+        let owner = configuration
+            .initial_write_session::<BackendConfig>()
+            .prepare_local(
+                AppendRequestId::new("backend-test-configuration-000001").expect("request"),
+                ValidatedConfig::new(BackendConfig { value: 1 }).expect("config"),
+            )
+            .expect("owner");
+        match configuration
+            .commit(owner)
+            .await
+            .expect("configuration commit")
+        {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved)
+            | ConfigurationCommitOutcome::Found(resolved) => resolved.into_head(),
+            other => panic!("unexpected configuration outcome: {other:?}"),
+        }
     }
 
     #[test]
@@ -3004,8 +3426,9 @@ mod tests {
         )
         .await
         .expect("opened store");
+        let configuration = configuration_head(&opened).await;
         assert_eq!(
-            opened.append_admission(frame).await,
+            opened.append_admission(frame, &configuration).await,
             Err(StoreError::Capacity)
         );
         assert!(backend
@@ -3090,8 +3513,9 @@ mod tests {
         )
         .await
         .expect("opened store");
+        let configuration = configuration_head(&opened).await;
         assert_eq!(
-            opened.append_admission(non_genesis).await,
+            opened.append_admission(non_genesis, &configuration).await,
             Err(StoreError::InvalidRecord)
         );
         assert!(backend
@@ -3141,9 +3565,10 @@ mod tests {
         let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
             .await
             .expect("second opening");
+        let first_configuration = configuration_head(&first).await;
         assert!(!first.same_open(&second));
         first
-            .append_admission(frame.clone())
+            .append_admission(frame.clone(), &first_configuration)
             .await
             .expect("admission");
         let first_run = first.load(frame.run_id()).await.expect("first run");
@@ -3209,8 +3634,9 @@ mod tests {
         let opened =
             StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
                 .expect("opened store");
+        let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone())
+            .append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
 
@@ -3306,7 +3732,7 @@ mod tests {
                 admitted.entry_point_id().clone(),
                 admitted.admitted_context().contract_ref().clone(),
                 admitted.admitted_context().clone(),
-                admitted.configuration_ref().clone(),
+                admitted.configuration().clone(),
             ),
             _ => panic!("expected admission"),
         };
@@ -3368,8 +3794,9 @@ mod tests {
         )
         .await
         .expect("opened store");
+        let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone())
+            .append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
         let current = opened.load(admission.run_id()).await.expect("current");
@@ -3469,7 +3896,7 @@ mod tests {
                 admitted.entry_point_id().clone(),
                 admitted.admitted_context().contract_ref().clone(),
                 admitted.admitted_context().clone(),
-                admitted.configuration_ref().clone(),
+                admitted.configuration().clone(),
             ),
             _ => panic!("expected admission"),
         };
@@ -3525,8 +3952,9 @@ mod tests {
         let opened =
             StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
                 .expect("opened store");
+        let configuration_head = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone())
+            .append_admission(admission.clone(), &configuration_head)
             .await
             .expect("admission append");
         let current = opened.load(admission.run_id()).await.expect("current");
@@ -3622,7 +4050,7 @@ mod tests {
                 admitted.entry_point_id().clone(),
                 admitted.admitted_context().contract_ref().clone(),
                 admitted.admitted_context().clone(),
-                admitted.configuration_ref().clone(),
+                admitted.configuration().clone(),
             ),
             _ => panic!("expected admission"),
         };
@@ -3697,8 +4125,9 @@ mod tests {
         let opened =
             StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
                 .expect("opened store");
+        let configuration_head = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone())
+            .append_admission(admission.clone(), &configuration_head)
             .await
             .expect("admission append");
         let current = opened.load(admission.run_id()).await.expect("current");
@@ -3858,17 +4287,21 @@ mod tests {
                     StableId::new("mfm.test.unknown-conclusion-entry").expect("entry"),
                     program_ref,
                     context.clone(),
-                    ContentRef::new(
-                        SchemaId::new(
-                            "mfm.test.unknown-conclusion-config",
-                            "1",
-                            DigestAlgorithm::Sha256JcsV1,
-                            DigestBytes::from_array([8; 32]),
+                    ConfigurationHeadProjection::new(
+                        1,
+                        ContentRef::new(
+                            SchemaId::new(
+                                "mfm.test.unknown-conclusion-config",
+                                "1",
+                                DigestAlgorithm::Sha256JcsV1,
+                                DigestBytes::from_array([8; 32]),
+                            )
+                            .expect("configuration schema"),
+                            raw_content_digest(b"configuration"),
                         )
-                        .expect("configuration schema"),
-                        raw_content_digest(b"configuration"),
+                        .expect("configuration"),
                     )
-                    .expect("configuration"),
+                    .expect("configuration head"),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3893,8 +4326,9 @@ mod tests {
         )
         .await
         .expect("opened store");
+        let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone())
+            .append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
         let current = opened.load(&run_id).await.expect("current");
@@ -3974,7 +4408,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configuration_snapshots_cannot_cross_store_openings() {
+    async fn configuration_heads_cannot_cross_store_openings() {
         let identity = identity();
         let frame = admission_frame(&identity);
         let contract = match frame.record() {
@@ -4006,25 +4440,20 @@ mod tests {
         let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
             .await
             .expect("second opening");
-        let (_, _, first_configuration, _) = first.split().into_parts();
-        let (_, _, second_configuration, _) = second.split().into_parts();
-        let first_snapshot = first_configuration.load().await.expect("first snapshot");
-        let second_snapshot = second_configuration.load().await.expect("second snapshot");
-        assert_eq!(first_snapshot, second_snapshot);
+        let first_configuration = first.configuration();
+        let second_configuration = second.configuration();
+        let first_head = configuration_head(&first).await;
+        let second_head = second_configuration
+            .load::<BackendConfig>()
+            .await
+            .expect("second resolved")
+            .into_head();
         assert!(matches!(
-            first_configuration.prepare_append(
-                &second_snapshot,
-                AppendRequestId::new("configuration-foreign-0123456789").expect("request"),
-                "{\"mode\":\"foreign\"}".to_owned(),
-            ),
+            first_configuration.write_session::<BackendConfig>(&second_head),
             Err(StoreError::Identity)
         ));
         assert!(matches!(
-            second_configuration.prepare_append(
-                &first_snapshot,
-                AppendRequestId::new("configuration-foreign-012345678a").expect("request"),
-                "{\"mode\":\"foreign\"}".to_owned(),
-            ),
+            second_configuration.write_session::<BackendConfig>(&first_head),
             Err(StoreError::Identity)
         ));
     }
@@ -4042,45 +4471,459 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("opened store");
-        let (_, _, configuration, _) = opened.split().into_parts();
-        let empty = configuration.load().await.expect("empty snapshot");
+        let configuration = opened.configuration();
         let owner = configuration
-            .prepare_append(
-                &empty,
+            .initial_write_session::<BackendConfig>()
+            .prepare_local(
                 AppendRequestId::new("configuration-direct-0123456789ab").expect("request"),
-                "{\"mode\":\"direct\"}".to_owned(),
+                ValidatedConfig::new(BackendConfig { value: 1 }).expect("config"),
             )
             .expect("direct owner");
-        let revision = match configuration.commit(owner).await.expect("commit") {
-            ConfigurationCommitOutcome::Disposition {
-                disposition: ConfigurationAppendDisposition::NewlyCommitted { sequence: 1 },
-                revision: Some(revision),
-            } => revision,
-            other => panic!("unexpected direct outcome: {other:?}"),
-        };
-        let promoted = empty.with_successor(revision).expect("local promotion");
-        assert_eq!(promoted.head_sequence(), 1);
-
         let stale_owner = configuration
-            .prepare_append(
-                &empty,
+            .initial_write_session::<BackendConfig>()
+            .prepare_local(
                 AppendRequestId::new("configuration-stale-0123456789ab").expect("request"),
-                "{\"mode\":\"stale\"}".to_owned(),
+                ValidatedConfig::new(BackendConfig { value: 2 }).expect("config"),
             )
             .expect("stale owner");
+        let promoted = match configuration.commit(owner).await.expect("commit") {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+            other => panic!("unexpected direct outcome: {other:?}"),
+        };
+        assert_eq!(promoted.head().sequence(), 1);
+        assert_eq!(promoted.value().value, 1);
         match configuration
             .commit(stale_owner)
             .await
             .expect("stale result")
         {
-            ConfigurationCommitOutcome::Disposition {
-                disposition: ConfigurationAppendDisposition::StaleHead { actual_sequence: 1 },
-                revision: None,
-                ..
-            } => {}
+            ConfigurationCommitOutcome::StaleHead { actual_sequence: 1 } => {}
             other => panic!("unexpected stale outcome: {other:?}"),
         }
-        assert_eq!(empty.head_sequence(), 0);
+        let conflict = configuration
+            .initial_write_session::<BackendConfig>()
+            .prepare_local(
+                AppendRequestId::new("configuration-direct-0123456789ab").expect("request"),
+                ValidatedConfig::new(BackendConfig { value: 9 }).expect("config"),
+            )
+            .expect("conflict owner");
+        assert!(matches!(
+            configuration
+                .commit(conflict)
+                .await
+                .expect("conflict result"),
+            ConfigurationCommitOutcome::Rejected {
+                error: StoreError::Conflict,
+                ..
+            }
+        ));
+        let restarted = configuration
+            .load::<BackendConfig>()
+            .await
+            .expect("restart load");
+        assert_eq!(restarted.value().value, 1);
+    }
+
+    #[tokio::test]
+    async fn typed_configuration_ingress_counts_real_decode_and_validation_boundaries() {
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-counted-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+        let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+            .expect("store");
+        let configuration = opened.configuration();
+
+        CONFIG_DECODES.store(0, Ordering::SeqCst);
+        CONFIG_VALIDATIONS.store(0, Ordering::SeqCst);
+        let local = ValidatedConfig::new(CountedConfig { value: 7 }).expect("valid local");
+        let owner = configuration
+            .initial_write_session::<CountedConfig>()
+            .prepare_local(
+                AppendRequestId::new("configuration-counted-local-00001").expect("request"),
+                local,
+            )
+            .expect("local owner");
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 0);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+        let resolved = match configuration.commit(owner).await.expect("commit") {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+            other => panic!("unexpected local outcome: {other:?}"),
+        };
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 0);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+
+        CONFIG_DECODES.store(0, Ordering::SeqCst);
+        CONFIG_VALIDATIONS.store(0, Ordering::SeqCst);
+        let loaded = configuration
+            .load::<CountedConfig>()
+            .await
+            .expect("retained load");
+        assert_eq!(loaded.value().value, 7);
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 1);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+
+        let retry = configuration
+            .initial_write_session::<CountedConfig>()
+            .prepare_local(
+                AppendRequestId::new("configuration-counted-local-00001").expect("request"),
+                ValidatedConfig::new(CountedConfig { value: 7 }).expect("valid retry"),
+            )
+            .expect("retry owner");
+        CONFIG_DECODES.store(0, Ordering::SeqCst);
+        CONFIG_VALIDATIONS.store(0, Ordering::SeqCst);
+        match configuration.commit(retry).await.expect("retry") {
+            ConfigurationCommitOutcome::Found(found) => assert_eq!(found.value().value, 7),
+            other => panic!("unexpected found outcome: {other:?}"),
+        }
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 1);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+
+        let external = configuration
+            .write_session::<CountedConfig>(resolved.head())
+            .expect("external session");
+        CONFIG_DECODES.store(0, Ordering::SeqCst);
+        CONFIG_VALIDATIONS.store(0, Ordering::SeqCst);
+        let external = external
+            .prepare_external(
+                AppendRequestId::new("configuration-counted-external-01").expect("request"),
+                br#"{"value":8}"#,
+            )
+            .expect("external owner");
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 1);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            configuration
+                .commit(external)
+                .await
+                .expect("external commit"),
+            ConfigurationCommitOutcome::NewlyCommitted(_)
+        ));
+        assert_eq!(CONFIG_DECODES.load(Ordering::SeqCst), 1);
+        assert_eq!(CONFIG_VALIDATIONS.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn typed_load_selects_latest_type_at_the_captured_global_head() {
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-heterogeneous-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+        let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+            .expect("store");
+        let configuration = opened.configuration();
+        let first = configuration
+            .initial_write_session::<BackendConfig>()
+            .prepare_local(
+                AppendRequestId::new("configuration-heterogeneous-first-01").expect("request"),
+                ValidatedConfig::new(BackendConfig { value: 1 }).expect("config"),
+            )
+            .expect("first owner");
+        let first = match configuration.commit(first).await.expect("first commit") {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+            other => panic!("unexpected first outcome: {other:?}"),
+        };
+        let second = configuration
+            .write_session::<StringConfig>(first.head())
+            .expect("second session")
+            .prepare_local(
+                AppendRequestId::new("configuration-heterogeneous-second-1").expect("request"),
+                ValidatedConfig::new(StringConfig {
+                    value: "two".to_owned(),
+                })
+                .expect("config"),
+            )
+            .expect("second owner");
+        assert!(matches!(
+            configuration.commit(second).await.expect("second commit"),
+            ConfigurationCommitOutcome::NewlyCommitted(_)
+        ));
+
+        let loaded = configuration
+            .load::<BackendConfig>()
+            .await
+            .expect("typed load");
+        assert_eq!(loaded.value().value, 1);
+        assert_eq!(loaded.head().sequence, 1);
+        assert_eq!(loaded.head().global_sequence, 2);
+        let session = configuration
+            .write_session::<BackendConfig>(loaded.head())
+            .expect("successor session");
+        assert_eq!(session.expected_sequence, 2);
+    }
+
+    #[tokio::test]
+    async fn external_configuration_ingress_rejects_noncanonical_float_secret_and_oversize() {
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-negative-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+        let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+            .expect("store");
+        let configuration = opened.configuration();
+        assert!(matches!(
+            configuration
+                .initial_write_session::<CountedConfig>()
+                .prepare_external(
+                    AppendRequestId::new("configuration-noncanonical-00001").expect("request"),
+                    br#"{"value": 1}"#,
+                ),
+            Err(StoreError::InvalidRecord)
+        ));
+        assert!(matches!(
+            configuration
+                .initial_write_session::<CountedConfig>()
+                .prepare_external(
+                    AppendRequestId::new("configuration-float-00000000001").expect("request"),
+                    br#"{"value":1.0}"#,
+                ),
+            Err(StoreError::InvalidRecord)
+        ));
+        assert!(matches!(
+            configuration
+                .initial_write_session::<StringConfig>()
+                .prepare_external(
+                    AppendRequestId::new("configuration-secret-0000000001").expect("request"),
+                    br#"{"value":"secret"}"#,
+                ),
+            Err(StoreError::InvalidRecord)
+        ));
+        let oversized = vec![b' '; mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES + 1];
+        assert!(matches!(
+            configuration
+                .initial_write_session::<StringConfig>()
+                .prepare_external(
+                    AppendRequestId::new("configuration-oversized-0000001").expect("request"),
+                    &oversized,
+                ),
+            Err(StoreError::Capacity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one() {
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-count-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+        let count_store =
+            StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+                .expect("count store");
+        let count_configuration = count_store.configuration();
+        let mut count_head = None;
+        for ordinal in 0..mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+            let session = match &count_head {
+                Some(head) => count_configuration
+                    .write_session::<BackendConfig>(head)
+                    .expect("count session"),
+                None => count_configuration.initial_write_session::<BackendConfig>(),
+            };
+            let owner = session
+                .prepare_local(
+                    AppendRequestId::new(format!("configuration-count-{ordinal:04}-0000000000"))
+                        .expect("request"),
+                    ValidatedConfig::new(BackendConfig {
+                        value: ordinal as u64,
+                    })
+                    .expect("config"),
+                )
+                .expect("count owner");
+            let resolved = match count_configuration.commit(owner).await.expect("commit") {
+                ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+                other => panic!("unexpected count outcome: {other:?}"),
+            };
+            count_head = Some(resolved.into_head());
+        }
+        assert_eq!(
+            count_head.as_ref().expect("count head").sequence(),
+            mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS as u64
+        );
+        assert!(matches!(
+            count_configuration
+                .write_session::<BackendConfig>(count_head.as_ref().expect("count head"))
+                .expect("final count session")
+                .prepare_local(
+                    AppendRequestId::new("configuration-plus-one-count-000001").expect("request"),
+                    ValidatedConfig::new(BackendConfig { value: 1024 }).expect("config"),
+                ),
+            Err(StoreError::Capacity)
+        ));
+        exercise_typed_configuration_byte_capacity().await;
+        eprintln!(
+            "capacity-envelope configuration revisions={} revision_bytes={} stream_bytes={}",
+            mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS,
+            mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES,
+            mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES,
+        );
+    }
+
+    async fn exercise_typed_configuration_byte_capacity() {
+        fn exact_json(bytes: usize) -> Vec<u8> {
+            const OVERHEAD: usize = 12;
+            format!(r#"{{"value":"{}"}}"#, "a".repeat(bytes - OVERHEAD)).into_bytes()
+        }
+
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-capacity-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+        let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+            .expect("store");
+        let configuration = opened.configuration();
+        let exact = exact_json(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES);
+        let mut head = None;
+        for ordinal in 0..4 {
+            let session = match &head {
+                Some(head) => configuration
+                    .write_session::<StringConfig>(head)
+                    .expect("successor session"),
+                None => configuration.initial_write_session::<StringConfig>(),
+            };
+            let owner = session
+                .prepare_external(
+                    AppendRequestId::new(format!("configuration-exact-stream-{ordinal}-000000"))
+                        .expect("request"),
+                    &exact,
+                )
+                .expect("exact revision");
+            let resolved = match configuration.commit(owner).await.expect("commit") {
+                ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+                other => panic!("unexpected capacity outcome: {other:?}"),
+            };
+            assert_eq!(resolved.canonical_json().len(), exact.len());
+            head = Some(resolved.into_head());
+        }
+        let head = head.expect("stream head");
+        assert!(matches!(
+            configuration
+                .write_session::<StringConfig>(&head)
+                .expect("session")
+                .prepare_local(
+                    AppendRequestId::new("configuration-plus-one-stream-0001").expect("request"),
+                    ValidatedConfig::new(StringConfig {
+                        value: "a".to_owned(),
+                    })
+                    .expect("config"),
+                ),
+            Err(StoreError::Capacity)
+        ));
+
+        let plus_one = vec![b'a'; mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES + 1];
+        assert!(matches!(
+            configuration
+                .initial_write_session::<StringConfig>()
+                .prepare_external(
+                    AppendRequestId::new("configuration-plus-one-revision-01").expect("request"),
+                    &plus_one,
+                ),
+            Err(StoreError::Capacity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retained_configuration_rejects_wrong_type_digest_and_legacy_schema() {
+        async fn opened_with_raw(
+            content_ref: ContentRef,
+        ) -> (OpenedStructuredStore, Arc<MemoryStructuredBackend>) {
+            let identity = identity();
+            let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+            let request =
+                AppendRequestId::new("configuration-retained-invalid-001").expect("request");
+            let command = ConfigurationAppendCommand::new(
+                &identity,
+                0,
+                &request,
+                br#"{"value":1}"#,
+                &content_ref,
+            );
+            assert_eq!(
+                backend
+                    .compare_and_append_configuration(&command)
+                    .await
+                    .expect("raw append"),
+                BackendConfigurationOutcome::NewlyCommitted
+            );
+            let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+            let document = mfm_program::single_trust::ProgramDocument::new(
+                mfm_ids::StableId::new("mfm.test.configuration-retained-entry").expect("entry"),
+                contract.clone(),
+                contract,
+                Vec::new(),
+            )
+            .expect("document");
+            let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
+            let opened = StructuredStore::open(
+                backend.clone(),
+                identity,
+                catalog,
+                StoreWorkLimits::default(),
+            )
+            .await
+            .expect("store");
+            (opened, backend)
+        }
+
+        let wrong_type = ContentRef::new(
+            BackendValue::schema_id().expect("wrong schema"),
+            raw_content_digest(br#"{"value":1}"#),
+        )
+        .expect("wrong type");
+        let (opened, _) = opened_with_raw(wrong_type).await;
+        assert!(matches!(
+            opened.configuration().load::<CountedConfig>().await,
+            Err(StoreError::InvalidRecord)
+        ));
+
+        let wrong_digest = ContentRef::new(
+            CountedConfig::schema_id().expect("schema"),
+            raw_content_digest(b"different"),
+        )
+        .expect("wrong digest");
+        let (opened, _) = opened_with_raw(wrong_digest).await;
+        assert!(matches!(
+            opened.configuration().load::<CountedConfig>().await,
+            Err(StoreError::InvalidHistory)
+        ));
+
+        let legacy_schema = SchemaId::new(
+            "mfm.configuration",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([0; 32]),
+        )
+        .expect("legacy schema");
+        let legacy = ContentRef::new(legacy_schema, raw_content_digest(br#"{"value":1}"#))
+            .expect("legacy ref");
+        let (opened, _) = opened_with_raw(legacy).await;
+        assert!(matches!(
+            opened.configuration().load::<CountedConfig>().await,
+            Err(StoreError::InvalidHistory)
+        ));
     }
 }
 
@@ -4089,6 +4932,78 @@ mod fault_tests {
     use super::*;
     use mfm_canonical::raw_content_digest;
     use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmValue)]
+    #[serde(deny_unknown_fields)]
+    struct FaultValue {
+        value: u64,
+    }
+
+    #[derive(Debug, Serialize, Deserialize, mfm_program_derive::MfmConfig)]
+    #[serde(deny_unknown_fields)]
+    struct FaultConfig {
+        value: u64,
+    }
+
+    #[tokio::test]
+    async fn configuration_unknown_acknowledgement_retains_owner_until_found() {
+        let identity = StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("scope"),
+            StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        );
+        let contract = mfm_program::nominal_contract_ref::<FaultValue>().expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-unknown-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let mut builder = ProgramCatalog::builder();
+        builder
+            .register_value::<FaultValue>()
+            .expect("registration");
+        let (catalog, _) = builder.finish(document).expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity,
+            catalog,
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("store");
+        let configuration = opened.configuration();
+        let request = AppendRequestId::new("configuration-unknown-owner-000001").expect("request");
+        let owner = configuration
+            .initial_write_session::<FaultConfig>()
+            .prepare_local(
+                request.clone(),
+                ValidatedConfig::new(FaultConfig { value: 1 }).expect("config"),
+            )
+            .expect("owner");
+        backend.fail_next_configuration_acknowledgement();
+        let suspended = match configuration.commit(owner).await.expect("commit") {
+            ConfigurationCommitOutcome::AcknowledgementUnknown(suspended) => suspended,
+            other => panic!("unexpected unknown outcome: {other:?}"),
+        };
+        assert_eq!(suspended.append_request_id(), &request);
+        match configuration
+            .commit(suspended.into_owner())
+            .await
+            .expect("resolution")
+        {
+            ConfigurationCommitOutcome::Found(resolved) => {
+                assert_eq!(resolved.head().sequence(), 1);
+                assert_eq!(resolved.value().value, 1);
+            }
+            other => panic!("unexpected resolution outcome: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn memory_unknown_acknowledgements_retain_physical_identity() {
@@ -4187,7 +5102,7 @@ mod fault_tests {
                 .compare_and_append_configuration(&configuration)
                 .await
                 .expect("configuration retry"),
-            BackendConfigurationOutcome::Found { sequence: 1 }
+            BackendConfigurationOutcome::Found(revision) if revision.sequence() == 1
         ));
     }
 }

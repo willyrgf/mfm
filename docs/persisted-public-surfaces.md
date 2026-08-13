@@ -5,6 +5,12 @@ Persisted run data is a strict canonical frame stream. Each frame contains one `
 content-addressed by nominal contract and exact canonical bytes. Hashed structures contain no
 floating-point values.
 
+`RunAdmitted.configuration` is the exact resolved configuration stream coordinate: its one-based
+global sequence and typed content reference. It is not a caller-supplied generic content reference.
+Configuration revisions are separate from run frames and retain canonical bytes, the exact
+`MfmConfig` schema/content identity, and cumulative stream bytes. The retired generic
+`mfm.configuration` schema has no reader.
+
 Public App, CLI, REST, export, and error surfaces contain no credentials, private keys, raw provider
 bytes, provider diagnostics, or secret-bearing context. A fixed-tenant facade derives partition
 identity from trusted construction rather than caller input.
