@@ -16,6 +16,11 @@ Pure never creates a preparation. Read and Effect cannot enter a provider until 
 preparation append is newly committed. A found, stale, invalid, terminal, or ambiguous append
 creates no call.
 
+For a prior-fact capability, preparation carries only the request projected from the canonical
+intent. Store checks the request against the admitted source manifest, reads one bounded fact
+publication snapshot, and appends the resulting selection object with `StatePrepared`. The direct-
+new continuation carries that Store-fixed selection identity; callers cannot provide or refresh it.
+
 The worker retains the latest catalog-qualified typed context while hot. A conclusion is canonically
 encoded once for the append, then the already-typed successor is handed to the next State. Cold
 resume folds the complete bounded prefix and checks every content/contract link without invoking

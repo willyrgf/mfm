@@ -1178,6 +1178,9 @@ impl OpenedStructuredStore {
         {
             return Err(StoreError::Identity);
         }
+        let (prepared, objects) = self
+            .store_select_fact_selection(current, prepared, objects)
+            .await?;
         let mut candidate = prepare_access_from_current(
             self.identity().scope(),
             self.identity().epoch(),
@@ -1202,6 +1205,146 @@ impl OpenedStructuredStore {
         let mut append = candidate.append;
         append.set_frame(frame);
         Ok(append.with_disposition(physical))
+    }
+
+    async fn store_select_fact_selection(
+        &self,
+        current: &QualifiedRun,
+        prepared: mfm_journal::single_trust::StatePrepared,
+        mut objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+    ) -> Result<(
+        mfm_journal::single_trust::StatePrepared,
+        Vec<mfm_journal::single_trust::ImmutableObject>,
+    )> {
+        let Some(request_ref) = prepared.fact_request().cloned() else {
+            if prepared.fact_selection().is_some() {
+                return Err(StoreError::InvalidRecord);
+            }
+            return Ok((prepared, objects));
+        };
+        if prepared.fact_selection().is_some() {
+            return Err(StoreError::InvalidRecord);
+        }
+        let request_object = objects
+            .iter()
+            .find(|object| object.content_ref() == request_ref.value_ref())
+            .ok_or(StoreError::InvalidRecord)?;
+        let request: FactSelectionRequest = serde_json::from_str(request_object.canonical_json())
+            .map_err(|_| StoreError::InvalidRecord)?;
+        request.validate().map_err(|_| StoreError::InvalidRecord)?;
+        let (selection_ref, selection_object) = self.select_prior_facts(current, &request).await?;
+        let finalized = mfm_journal::single_trust::StatePrepared::new(
+            prepared.occurrence().clone(),
+            prepared.preparation_ordinal(),
+            prepared.input().clone(),
+            prepared.intent().clone(),
+            Some(request_ref),
+            Some(selection_ref),
+            *prepared.mode(),
+            prepared.binding().clone(),
+            prepared.execution_binding_ref().clone(),
+            prepared.replaces().cloned(),
+            prepared.maximum_conclusion_bytes(),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        objects.push(selection_object);
+        Ok((finalized, objects))
+    }
+
+    async fn select_prior_facts(
+        &self,
+        current: &QualifiedRun,
+        request: &FactSelectionRequest,
+    ) -> Result<(
+        mfm_journal::single_trust::ValueRef,
+        mfm_journal::single_trust::ImmutableObject,
+    )> {
+        let RunRecord::RunAdmitted(admission) = current
+            .frames()
+            .first()
+            .map(mfm_journal::single_trust::RunFrame::record)
+            .ok_or(StoreError::InvalidHistory)?
+        else {
+            return Err(StoreError::InvalidHistory);
+        };
+        if request
+            .source_refs
+            .iter()
+            .any(|source| !admission.source_refs().contains(source))
+        {
+            return Err(StoreError::InvalidRecord);
+        }
+        let snapshot = self
+            .inner
+            .backend
+            .load_facts()
+            .await
+            .map_err(map_backend_error)?;
+        let Some(head) = snapshot.publications().last() else {
+            return Err(StoreError::NotActionable);
+        };
+        let mut selected = BTreeMap::new();
+        for publication in snapshot.publications().iter().rev() {
+            let producer = self.load(publication.run_id()).await?;
+            let object = producer
+                .frames()
+                .iter()
+                .flat_map(|frame| frame.objects())
+                .find(|object| object.content_ref() == publication.selection_ref())
+                .ok_or(StoreError::InvalidHistory)?;
+            let selection: FactSelection = serde_json::from_str(object.canonical_json())
+                .map_err(|_| StoreError::InvalidHistory)?;
+            selection
+                .frontier
+                .validate()
+                .map_err(|_| StoreError::InvalidHistory)?;
+            for fact in selection.facts {
+                if request.source_refs.contains(&fact.source_ref)
+                    && fact.subject_ref == request.subject_ref
+                {
+                    selected.entry(fact.source_ref.clone()).or_insert(fact);
+                }
+            }
+            if selected.len() == request.source_refs.len() {
+                break;
+            }
+        }
+        let facts = request
+            .source_refs
+            .iter()
+            .map(|source| selected.remove(source).ok_or(StoreError::NotActionable))
+            .collect::<Result<Vec<_>>>()?;
+        let frontier = FactSelectionFrontier::new(
+            fact_stream_ref(self.identity().tenant())?,
+            snapshot.head_sequence(),
+            head.selection_ref().clone(),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        let selection = FactSelection::new(
+            request,
+            facts,
+            FactCompleteness {
+                through_sequence: snapshot.head_sequence(),
+                complete: true,
+            },
+            frontier,
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        let canonical = mfm_journal::single_trust::canonical_json(&selection)
+            .map_err(|_| StoreError::InvalidRecord)?;
+        let value_ref = ContentRef::new(
+            mfm_facts::FactSelection::schema_id().map_err(|_| StoreError::InvalidRecord)?,
+            raw_content_digest(canonical.as_bytes()),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        let value = ValueRef::new(value_ref.clone(), value_ref.clone());
+        let object = mfm_journal::single_trust::ImmutableObject::new(
+            mfm_ids::StableId::new("mfm.value").map_err(|_| StoreError::InvalidRecord)?,
+            value_ref,
+            canonical.as_str().to_owned(),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        Ok((value, object))
     }
 
     /// Builds one Store-owned conclusion append owner from the selected prefix.
