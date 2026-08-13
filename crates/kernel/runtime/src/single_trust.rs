@@ -681,7 +681,6 @@ pub struct PreparedExecution<S: State, C: AccessCapabilityContract> {
     execution_binding_ref: ContentRef,
     mode: PreparationMode,
     fact_request: Option<(mfm_journal::single_trust::ValueRef, ImmutableObject)>,
-    fact_selection: Option<(mfm_journal::single_trust::ValueRef, ImmutableObject)>,
     _mode: PhantomData<C::Mode>,
 }
 
@@ -798,7 +797,6 @@ where
             execution_binding_ref,
             mode: C::Mode::journal_mode(C::total_attempt_bound()),
             fact_request,
-            fact_selection: None,
             _mode: PhantomData,
         })
     }
@@ -806,26 +804,6 @@ where
     /// Borrows the canonical intent before Store entry.
     pub const fn intent(&self) -> &C::Intent {
         &self.intent
-    }
-
-    /// Attaches one already-qualified prior-fact selection object to this exact preparation.
-    ///
-    /// The object is copied into the append closure; its bytes are still validated once by the
-    /// Journal/Store ingress. A replacement must supply the new fixed selection explicitly.
-    pub fn with_fact_selection(
-        mut self,
-        selection: mfm_journal::single_trust::ValueRef,
-        object: ImmutableObject,
-    ) -> Result<Self> {
-        if !C::requires_prior_facts()
-            || self.fact_request.is_none()
-            || !selection.is_schema_bound()
-            || object.content_ref() != selection.value_ref()
-        {
-            return Err(RuntimeError::Value);
-        }
-        self.fact_selection = Some((selection, object));
-        Ok(self)
     }
 
     /// Consumes this owner through the branded asynchronous Store boundary.
@@ -850,9 +828,7 @@ where
                 error: RuntimeError::Identity,
             };
         }
-        if C::requires_prior_facts() != self.fact_request.is_some()
-            || self.fact_request.is_some() != self.fact_selection.is_some()
-        {
+        if C::requires_prior_facts() != self.fact_request.is_some() {
             return OpenedPreparationCommit::Rejected {
                 owner: self,
                 error: RuntimeError::Preparation,
@@ -885,9 +861,7 @@ where
             self.fact_request
                 .as_ref()
                 .map(|(request, _)| request.clone()),
-            self.fact_selection
-                .as_ref()
-                .map(|(selection, _)| selection.clone()),
+            None,
             self.mode,
             self.binding.clone(),
             self.execution_binding_ref.clone(),
@@ -913,9 +887,6 @@ where
             },
         ];
         if let Some((_, object)) = &self.fact_request {
-            objects.push(object.clone());
-        }
-        if let Some((_, object)) = &self.fact_selection {
             objects.push(object.clone());
         }
         let append = match store

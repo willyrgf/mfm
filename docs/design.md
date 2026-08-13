@@ -36,7 +36,9 @@ The append-only run stream contains only:
 
 Each append contains one semantic record and its object/fact closure atomically. Store compares the
 exact current head, rejects stale or conflicting logical keys, and selects at most one conclusion
-for each State occurrence. A conclusion is durable before its output is public.
+for each State occurrence. A prior-fact request is projected from canonical intent, but Store fixes
+its source-manifest-bounded frontier and response during preparation; State code cannot provide a
+selection. A conclusion is durable before its output is public.
 
 ## Runtime and adapters
 

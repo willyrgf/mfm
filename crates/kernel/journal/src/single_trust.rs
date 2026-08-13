@@ -437,7 +437,7 @@ impl StatePrepared {
             || fact_selection
                 .as_ref()
                 .is_some_and(|selection| !selection.is_schema_bound())
-            || fact_request.is_some() != fact_selection.is_some()
+            || fact_selection.is_some() && fact_request.is_none()
             || binding.validate().is_err()
             || binding.capability_contract_ref().is_none()
             || binding.adapter_implementation_ref().is_none()
@@ -1168,6 +1168,33 @@ mod tests {
             Vec::new(),
         )
         .is_ok());
+
+        let request_only = StatePrepared::new(
+            occurrence.clone(),
+            0,
+            ValueRef::new(ref_for(30), ref_for(31)),
+            ValueRef::new(ref_for(32), ref_for(33)),
+            Some(ValueRef::new(ref_for(34), ref_for(35))),
+            None,
+            PreparationMode::Read {
+                total_attempt_bound: 1,
+            },
+            binding.clone(),
+            binding_ref,
+            None,
+            4096,
+        )
+        .expect("request-only preparation candidate");
+        assert!(RunFrame::new(
+            run.clone(),
+            scope.clone(),
+            epoch,
+            2,
+            AppendRequestId::new("journal-request-only-012345").expect("request"),
+            RunRecord::StatePrepared(request_only),
+            Vec::new(),
+        )
+        .is_err());
 
         let unbound = BindingDescriptor::new(ref_for(19), None, None, ref_for(20), None, None)
             .expect("unbound descriptor");

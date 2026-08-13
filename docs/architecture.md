@@ -41,8 +41,9 @@ intent and call.
 ### Journal and Store
 
 Journal owns strict canonical frames and the three run record families. Store owns the reducer,
-sequential cursor, cumulative-context continuity, preparation selection, occurrence conclusion
-uniqueness, object/fact publication closure, configuration bounds, and exact-head append. An opened
+sequential cursor, cumulative-context continuity, preparation selection, source-manifest-bounded
+prior-fact selection, occurrence conclusion uniqueness, object/fact publication closure,
+configuration bounds, and exact-head append. An opened
 Store has one private brand and exposes separate non-Clone mutation, cloneable read, configuration,
 and fixed-snapshot audit ports. Semantic run, reducer, configuration, fact, and append owners retain
 that opening identity, so equal persisted identities do not permit same-type transposition between
