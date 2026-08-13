@@ -429,7 +429,9 @@ impl EvmAdapterBinding {
                 && response_operation == operation
                 && candidate_id == intent.candidate_id =>
             {
-                BroadcastEvidence::PossibleEntry { candidate_id }
+                return Ok(AccessResolution::Unresolved(
+                    call.unresolved(UnresolvedClassification::AcknowledgementUnknown),
+                ));
             }
             EvmProviderResponse::IntegrityBlocked {
                 call_id,
