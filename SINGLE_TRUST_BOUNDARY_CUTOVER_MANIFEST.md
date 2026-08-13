@@ -152,6 +152,8 @@ PendingState::inputs
 SemanticStatePreimage::live_bindings
 SlotBindings
 ReducedRunState::bindings
+ReducedRunState
+ActiveQualifiedRun
 UnboundSuccessor::bindings
 Engine::bindings
 typed_binding

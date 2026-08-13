@@ -48,8 +48,10 @@ panic tests prove that preparation, adapter construction, and future polling do 
 
 The Runtime coordinator now uses one catalog-issued type witness and a consuming branded erased
 owner internally; raw `TypeId` is only private live-implementation correlation, and there is no
-unsafe code, public free downcast, or erased context map. `RunSession` retains the reduced typed context and
-the latest value across hot advancement. The lifecycle regression advances a two-State Pure chain
+unsafe code, public free downcast, or erased context map. `RunSession` retains the latest typed value
+together with one affine Store-selected `SelectedRun` across hot advancement.
+Cloneable `QualifiedRun` evidence has no reader-to-selection promotion path; releasing it consumes
+the selected owner. The lifecycle regression advances a two-State Pure chain
 from head 1 to head 2 without re-reducing the prefix, drops the hot owner, and cold-resumes the
 same durable context to head 3. The access lifecycle regression counts provider entry, response
 ingress, preparation, and interpretation separately and observes exactly one of each. No remaining

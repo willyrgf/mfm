@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         application_catalog()?,
         StoreWorkLimits::default(),
     )?;
-    let configuration = store.configuration();
+    let (history, reader, configuration, audit_port) = store.split().into_parts();
     let portfolio = configuration
         .initial_write_session::<PortfolioConfig>()
         .prepare_local(
@@ -157,7 +157,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => return Err("failed to persist EVM configuration".into()),
     };
     let app = Arc::new(Application::new(
-        store,
+        history,
+        reader,
+        configuration,
+        audit_port,
         portfolio_head,
         evm.into_head(),
         Vec::new(),

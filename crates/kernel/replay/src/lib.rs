@@ -8,7 +8,7 @@ use mfm_canonical::raw_content_digest;
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::single_trust::{RunFrame, RunRecord};
 use mfm_program::single_trust::ProgramDocument;
-use mfm_store::single_trust::{QualifiedRun, RunAction, RunReducer, StoreError};
+use mfm_store::single_trust::{replay_terminality, QualifiedRun, StoreError};
 use serde::{Deserialize, Serialize};
 
 /// The only portable stream identity accepted by the cutover.
@@ -80,13 +80,7 @@ pub fn qualify_with_program(
     run: &QualifiedRun,
     document: ProgramDocument,
 ) -> Result<ReplayReport, ReplayError> {
-    let reduced = RunReducer::new(document)
-        .reduce(run)
-        .map_err(|_| ReplayError::Store)?;
-    let terminal = matches!(
-        reduced.action(),
-        RunAction::ZeroStateTerminal { .. } | RunAction::Terminal { .. } | RunAction::Failed { .. }
-    );
+    let terminal = replay_terminality(run, document).map_err(|_| ReplayError::Store)?;
     Ok(ReplayReport {
         head_sequence: run.head_sequence(),
         terminal,

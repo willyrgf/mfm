@@ -13,20 +13,16 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use mfm_canonical::raw_content_digest;
-use mfm_capabilities::{
-    AccessCapabilityContract, AccessMode, EffectMode, ProposedStateOutcome, ReadMode,
-};
+use mfm_capabilities::{AccessCapabilityContract, ProposedStateOutcome};
 use mfm_ids::{
-    short_stable_id_fragment, AppendRequestId, ContentRef, DigestAlgorithm, DigestBytes, RunId,
-    SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
+    short_stable_id_fragment, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId,
+    StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::single_trust::{
-    BindingDescriptor, ImmutableObject, PreparationMode, PreparationRef, SequentialControlAddress,
-    StatePrepared,
+    BindingDescriptor, ImmutableObject, PreparationRef, SequentialControlAddress,
 };
 use mfm_program::{canonical_value, Program, ProgramCatalog, QualifiedTypedValue};
-use mfm_store::single_trust::{AppendDisposition, FactContinuation, ReducedRunState};
-use mfm_store::QualifiedRun;
+use mfm_store::single_trust::{AppendDisposition, FactContinuation, SelectedRun};
 use mfm_values::MfmValue;
 
 /// Send-owned future used by one qualified live implementation.
@@ -107,26 +103,6 @@ pub struct Read<C: AccessCapabilityContract>(PhantomData<fn() -> C>);
 
 /// Marker for a mutating capability State.
 pub struct Effect<C: AccessCapabilityContract>(PhantomData<fn() -> C>);
-
-/// Maps a sealed capability mode to its journal preparation mode.
-pub trait RuntimePreparationMode: AccessMode {
-    /// Returns the fixed journal mode for one capability's attempt bound.
-    fn journal_mode(total_attempt_bound: std::num::NonZeroU16) -> PreparationMode;
-}
-
-impl RuntimePreparationMode for ReadMode {
-    fn journal_mode(total_attempt_bound: std::num::NonZeroU16) -> PreparationMode {
-        PreparationMode::Read {
-            total_attempt_bound: total_attempt_bound.get(),
-        }
-    }
-}
-
-impl RuntimePreparationMode for EffectMode {
-    fn journal_mode(_total_attempt_bound: std::num::NonZeroU16) -> PreparationMode {
-        PreparationMode::Effect
-    }
-}
 
 /// Bounded error returned before a provider-entering call exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -675,7 +651,6 @@ pub struct PreparedExecution<S: State, C: AccessCapabilityContract> {
     intent: C::Intent,
     binding: BindingDescriptor,
     execution_binding_ref: ContentRef,
-    mode: PreparationMode,
     fact_request: Option<(mfm_journal::single_trust::ValueRef, ImmutableObject)>,
     _mode: PhantomData<C::Mode>,
 }
@@ -687,16 +662,16 @@ pub enum OpenedPreparationCommit<S: State, C: AccessCapabilityContract> {
     Direct {
         /// The inert committed call.
         call: CommittedCall<S, C>,
-        /// The qualified prefix including the durable preparation.
-        run: QualifiedRun,
-        /// The retained reduction advanced to the selected preparation.
-        reduced: ReducedRunState,
+        /// The selected prefix including the durable preparation.
+        selected: SelectedRun,
     },
     /// Store returned a non-new disposition; the exact inert owner remains available for
     /// acknowledgement resolution or semantic rebind.
     Retained {
         /// The original preparation owner, including its typed input and intent.
         owner: PreparedExecution<S, C>,
+        /// The unchanged selected predecessor.
+        selected: SelectedRun,
         /// The known Store disposition that prevented direct call minting.
         disposition: AppendDisposition,
     },
@@ -704,15 +679,14 @@ pub enum OpenedPreparationCommit<S: State, C: AccessCapabilityContract> {
     Rejected {
         /// The original preparation owner.
         owner: PreparedExecution<S, C>,
+        /// The unchanged selected predecessor.
+        selected: SelectedRun,
         /// Redacted failure classification.
         error: RuntimeError,
     },
 }
 
-impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C>
-where
-    C::Mode: RuntimePreparationMode,
-{
+impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
     /// Creates a preparation by borrowing input while retaining the consuming typed value.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -791,7 +765,6 @@ where
             intent,
             binding,
             execution_binding_ref,
-            mode: C::Mode::journal_mode(C::total_attempt_bound()),
             fact_request,
             _mode: PhantomData,
         })
@@ -803,30 +776,23 @@ where
     }
 
     /// Consumes this owner through the branded asynchronous Store boundary.
-    #[allow(clippy::too_many_arguments)]
     pub async fn commit_opened(
         self,
         assembly: &RuntimeAssembly,
-        store: &mfm_store::OpenedStructuredStore,
-        current: &QualifiedRun,
-        reduced: &ReducedRunState,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: mfm_journal::single_trust::ValueRef,
-        intent_ref: mfm_journal::single_trust::ValueRef,
-        maximum_conclusion_bytes: u64,
-        preparation_ordinal: u16,
-        replaces: Option<PreparationRef>,
+        store: &mfm_store::QualifiedHistoryPort,
+        selected: SelectedRun,
     ) -> OpenedPreparationCommit<S, C> {
         if !Arc::ptr_eq(&self.assembly_brand, &assembly.brand) {
             return OpenedPreparationCommit::Rejected {
                 owner: self,
+                selected,
                 error: RuntimeError::Identity,
             };
         }
         if C::requires_prior_facts() != self.fact_request.is_some() {
             return OpenedPreparationCommit::Rejected {
                 owner: self,
+                selected,
                 error: RuntimeError::Preparation,
             };
         }
@@ -835,108 +801,51 @@ where
             Err(_) => {
                 return OpenedPreparationCommit::Rejected {
                     owner: self,
+                    selected,
                     error: RuntimeError::Value,
                 }
             }
         };
         let expected_intent_value = match qualified_value_ref(&self.intent) {
             Ok(value) => value,
-            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+            Err(error) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    selected,
+                    error,
+                }
+            }
         };
-        if self.input.contract_ref() != input_ref.contract_ref()
-            || self.input.value_ref() != input_ref.value_ref()
-            || intent_ref.contract_ref() != &expected_intent_contract
-            || intent_ref.value_ref() != &expected_intent_value
+        let intent_ref = mfm_journal::single_trust::ValueRef::new(
+            expected_intent_contract,
+            expected_intent_value,
+        );
+        if self.input.contract_ref() != selected.latest_context().contract_ref()
+            || self.input.value_ref() != selected.latest_context().value_ref()
             || !intent_ref.is_schema_bound()
         {
             return OpenedPreparationCommit::Rejected {
                 owner: self,
+                selected,
                 error: RuntimeError::Value,
             };
         }
-        let prepared = match StatePrepared::new(
-            self.occurrence.clone(),
-            preparation_ordinal,
-            input_ref.clone(),
-            intent_ref.clone(),
-            self.fact_request
-                .as_ref()
-                .map(|(request, _)| request.clone()),
-            None,
-            self.mode,
-            self.binding.clone(),
-            self.execution_binding_ref.clone(),
-            replaces,
-            maximum_conclusion_bytes,
-        ) {
-            Ok(prepared) => prepared,
-            Err(_) => {
+        let intent_object = match value_object(&self.intent, intent_ref.value_ref()) {
+            Ok(object) => object,
+            Err(error) => {
                 return OpenedPreparationCommit::Rejected {
                     owner: self,
-                    error: RuntimeError::Preparation,
+                    selected,
+                    error,
                 }
             }
-        };
-        let mut objects = vec![
-            match value_object(self.input.as_ref(), input_ref.value_ref()) {
-                Ok(object) => object,
-                Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
-            },
-            match value_object(&self.intent, intent_ref.value_ref()) {
-                Ok(object) => object,
-                Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
-            },
-        ];
-        if let Some((_, object)) = &self.fact_request {
-            objects.push(object.clone());
-        }
-        let append = match store
-            .prepare_access_qualified_with_reduced(
-                current,
-                assembly.program().document(),
-                reduced,
-                expected_sequence,
-                append_request_id,
-                prepared,
-                objects,
-            )
-            .await
-        {
-            Ok(append) => append,
-            Err(_) => {
-                return OpenedPreparationCommit::Rejected {
-                    owner: self,
-                    error: RuntimeError::Preparation,
-                }
-            }
-        };
-        if !matches!(
-            append.disposition(),
-            AppendDisposition::NewlyCommitted { .. }
-        ) {
-            return OpenedPreparationCommit::Retained {
-                owner: self,
-                disposition: append.disposition(),
-            };
-        }
-        let preparation = match append.preparation().cloned() {
-            Some(preparation) => preparation,
-            None => {
-                return OpenedPreparationCommit::Rejected {
-                    owner: self,
-                    error: RuntimeError::PreparationNotCommitted,
-                }
-            }
-        };
-        let call_id = match mint_call_id(&self.run_id, &preparation) {
-            Ok(call_id) => call_id,
-            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
         };
         let capability_contract_ref = match self.binding.capability_contract_ref() {
             Some(value) => value,
             None => {
                 return OpenedPreparationCommit::Rejected {
                     owner: self,
+                    selected,
                     error: RuntimeError::Identity,
                 }
             }
@@ -947,30 +856,54 @@ where
             &self.execution_binding_ref,
         ) {
             Ok(adapter) => Arc::new(adapter),
-            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
-        };
-        let committed_run = match append.committed_frame() {
-            Some(frame) => match store.qualify_appended(current, frame.clone()) {
-                Ok(run) => run,
-                Err(error) => {
-                    return OpenedPreparationCommit::Rejected {
-                        owner: self,
-                        error: error.into(),
-                    }
-                }
-            },
-            None => current.clone(),
-        };
-        let reduced = match reduced.waiting_preparation(
-            &committed_run,
-            self.occurrence.clone(),
-            preparation.clone(),
-        ) {
-            Ok(reduced) => reduced,
             Err(error) => {
                 return OpenedPreparationCommit::Rejected {
                     owner: self,
-                    error: error.into(),
+                    selected,
+                    error,
+                }
+            }
+        };
+        let outcome = store
+            .prepare_selected_access(
+                selected,
+                intent_ref,
+                intent_object,
+                self.fact_request.clone(),
+                self.binding.clone(),
+            )
+            .await;
+        let (selected, preparation, fact_continuation) = match outcome {
+            mfm_store::AccessPreparationOutcome::Committed {
+                selected,
+                preparation,
+                fact_continuation,
+            } => (selected, preparation, fact_continuation),
+            mfm_store::AccessPreparationOutcome::Retained {
+                selected,
+                disposition,
+            } => {
+                return OpenedPreparationCommit::Retained {
+                    owner: self,
+                    selected,
+                    disposition,
+                }
+            }
+            mfm_store::AccessPreparationOutcome::Rejected { selected, error: _ } => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    selected,
+                    error: RuntimeError::Preparation,
+                }
+            }
+        };
+        let call_id = match mint_call_id(&self.run_id, &preparation) {
+            Ok(call_id) => call_id,
+            Err(error) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    selected,
+                    error,
                 }
             }
         };
@@ -1000,11 +933,10 @@ where
                 intent,
                 binding,
                 execution_binding_ref,
-                fact_continuation: append.into_fact_continuation(),
+                fact_continuation,
                 adapter,
             },
-            run: committed_run,
-            reduced,
+            selected,
         }
     }
 }
@@ -1201,7 +1133,6 @@ impl RuntimeAssemblyBuilder {
     ) -> Result<()>
     where
         F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
-        C::Mode: RuntimePreparationMode,
     {
         C::validate().map_err(|_| RuntimeError::Mode)?;
         if capability_contract_ref != capability_content_ref::<C>()?
@@ -1526,6 +1457,7 @@ pub(crate) fn capability_content_ref<C: AccessCapabilityContract>() -> Result<Co
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_capabilities::ReadMode;
     use mfm_program_derive::MfmValue as DeriveMfmValue;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};

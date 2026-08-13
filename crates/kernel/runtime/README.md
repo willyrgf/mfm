@@ -7,6 +7,12 @@ retains the immutable binding descriptor, and conclusion recovery retains no pro
 authority. Integrity-blocked Access outcomes use the declared static failure contract and do not
 invoke State interpretation.
 
+Runtime receives only one exact non-Clone `QualifiedHistoryPort` and never returns it or an opened
+Store. `RunSession` retains exactly one affine `SelectedRun` plus the latest catalog-qualified typed
+value. Cold resume selects the full prefix once; direct admission, preparation, and conclusion
+consume and advance that owner without a backend reload. Callback-free `QualifiedRun` evidence is
+available only after giving up selected mutation authority.
+
 Assembly finalization checks every State input/output/failure and Access intent/evidence type
 against Program's exact finalized catalog associations before any session or provider authority
 exists. Runtime's private `TypeId` values correlate live implementations only; cold reification

@@ -23,3 +23,8 @@ Ordinary opens must match it, including simultaneous qualified opens. A trusted 
 `PostgresStore::rotate_identity` with a fresh scope or epoch, then opens the new pair; that
 rotation makes already-open handles with the previous identity fail closed and leaves old
 partitions replay-only.
+
+Each simultaneous semantic opening has an independent process-local brand and consumes into one
+non-Clone mutation port plus read/configuration/audit ports. Runtime assemblies targeting this same
+persisted identity therefore load their own configuration evidence and cannot exchange selected
+runs or append owners; PostgreSQL linearizes them only through append-id lookup and exact-head CAS.

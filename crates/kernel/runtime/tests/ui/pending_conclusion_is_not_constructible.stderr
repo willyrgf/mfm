@@ -7,5 +7,5 @@ error: cannot construct `PendingConclusion` with struct literal syntax due to pr
 help: you might have meant to use the `new` associated function
   |
 4 -     let _ = PendingConclusion {};
-4 +     let _ = PendingConclusion::new(_, _, _, _, _);
+4 +     let _ = PendingConclusion::new(_, _, _);
   |

@@ -6,5 +6,6 @@ Admission bodies are capped at 512 KiB and use strict duplicate/unknown-field re
 domain validation. The transport exposes callback-free read, drive, replay, trace, audit, and
 portable-export routes; responses expose only redacted public error codes.
 
-Startup explicitly publishes secret-free typed Portfolio and EVM demo configuration before App
-construction. There is no REST configuration or credential endpoint.
+Startup explicitly opens and splits the demo Store, publishes secret-free typed Portfolio and EVM
+configuration, and passes the explicit mutation/read/configuration/audit ports and resolved heads
+to App. There is no REST configuration or credential endpoint.
