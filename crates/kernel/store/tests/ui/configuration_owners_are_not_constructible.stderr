@@ -1,0 +1,29 @@
+error: cannot construct `ResolvedConfigurationHead` with struct literal syntax due to private fields
+  --> tests/ui/configuration_owners_are_not_constructible.rs:12:13
+   |
+12 |     let _ = ResolvedConfigurationHead {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `ResolvedConfiguration<Config>` with struct literal syntax due to private fields
+  --> tests/ui/configuration_owners_are_not_constructible.rs:13:13
+   |
+13 |     let _ = ResolvedConfiguration::<Config> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `ConfigurationWriteSession<Config>` with struct literal syntax due to private fields
+  --> tests/ui/configuration_owners_are_not_constructible.rs:14:13
+   |
+14 |     let _ = ConfigurationWriteSession::<Config> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `PreparedConfigurationAppend<Config>` with struct literal syntax due to private fields
+  --> tests/ui/configuration_owners_are_not_constructible.rs:15:13
+   |
+15 |     let _ = PreparedConfigurationAppend::<Config> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: cannot construct `SuspendedConfigurationAppend<Config>` with struct literal syntax due to private fields
+  --> tests/ui/configuration_owners_are_not_constructible.rs:16:13
+   |
+16 |     let _ = SuspendedConfigurationAppend::<Config> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

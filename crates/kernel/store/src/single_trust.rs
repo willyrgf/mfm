@@ -10,7 +10,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 
-use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
+use mfm_canonical::raw_content_digest;
 use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RunId,
     SchemaId, StoreEpoch, StoreScopeId, TenantScopeId,
@@ -19,7 +19,7 @@ use mfm_journal::single_trust::{
     PreparationRef, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
 };
 use mfm_program::single_trust::{Declaration, ExecutionMode, ProgramDocument, StateDeclaration};
-use mfm_values::{string_contains_secret_marker, MfmValue};
+use mfm_values::MfmValue;
 
 /// Process-local identity of one opened semantic Store.
 ///
@@ -2554,164 +2554,6 @@ fn validate_candidate_prefix(
         })
 }
 
-/// One canonical configuration revision retained outside the run stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConfigurationRevision {
-    sequence: u64,
-    append_request_id: AppendRequestId,
-    canonical_json: PlainCanonicalJsonBytes,
-    content_ref: ContentRef,
-}
-
-impl ConfigurationRevision {
-    /// Constructs one validated configuration revision from source JSON.
-    pub fn new(
-        sequence: u64,
-        append_request_id: AppendRequestId,
-        canonical_json: String,
-    ) -> Result<Self> {
-        let canonical = PlainCanonicalJsonBytes::from_json_str(&canonical_json)
-            .map_err(|_| StoreError::InvalidRecord)?;
-        let value: serde_json::Value =
-            serde_json::from_slice(canonical.as_bytes()).map_err(|_| StoreError::InvalidRecord)?;
-        if sequence == 0
-            || canonical.as_bytes().len()
-                > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
-            || contains_secret_marker(&value)
-        {
-            return Err(StoreError::InvalidRecord);
-        }
-        let content_ref = configuration_content_ref(canonical.as_bytes())?;
-        Ok(Self {
-            sequence,
-            append_request_id,
-            canonical_json: canonical,
-            content_ref,
-        })
-    }
-
-    /// Constructs one retained revision after checking its stored content identity.
-    pub fn from_parts(
-        sequence: u64,
-        append_request_id: AppendRequestId,
-        canonical_json: String,
-        content_ref: ContentRef,
-    ) -> Result<Self> {
-        let canonical = PlainCanonicalJsonBytes::from_json_str(&canonical_json)
-            .map_err(|_| StoreError::InvalidRecord)?;
-        if canonical.as_str() != canonical_json {
-            return Err(StoreError::InvalidRecord);
-        }
-        let revision = Self::new(sequence, append_request_id, canonical_json)?;
-        if revision.content_ref != content_ref {
-            return Err(StoreError::InvalidRecord);
-        }
-        Ok(revision)
-    }
-
-    /// Returns the one-based revision sequence.
-    pub const fn sequence(&self) -> u64 {
-        self.sequence
-    }
-
-    /// Returns the physical append identity that created this revision.
-    pub const fn append_request_id(&self) -> &AppendRequestId {
-        &self.append_request_id
-    }
-
-    /// Returns the canonical revision bytes.
-    pub fn canonical_json(&self) -> &str {
-        self.canonical_json.as_str()
-    }
-
-    /// Returns the content identity of the canonical revision.
-    pub const fn content_ref(&self) -> &ContentRef {
-        &self.content_ref
-    }
-}
-
-/// One fixed, fully qualified configuration snapshot.
-#[derive(Debug, Clone)]
-pub struct ConfigurationSnapshot {
-    revisions: Vec<ConfigurationRevision>,
-    total_bytes: usize,
-    store_brand: Option<Arc<StoreBrand>>,
-}
-
-impl PartialEq for ConfigurationSnapshot {
-    fn eq(&self, other: &Self) -> bool {
-        self.revisions == other.revisions && self.total_bytes == other.total_bytes
-    }
-}
-
-impl Eq for ConfigurationSnapshot {}
-
-impl ConfigurationSnapshot {
-    pub(crate) fn from_revisions(revisions: Vec<ConfigurationRevision>) -> Result<Self> {
-        if revisions.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
-            || revisions
-                .iter()
-                .enumerate()
-                .any(|(index, revision)| revision.sequence() != index as u64 + 1)
-        {
-            return Err(StoreError::InvalidHistory);
-        }
-        let total_bytes = revisions.iter().try_fold(0usize, |total, revision| {
-            total
-                .checked_add(revision.canonical_json().len())
-                .filter(|bytes| *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
-                .ok_or(StoreError::Capacity)
-        })?;
-        Ok(Self {
-            revisions,
-            total_bytes,
-            store_brand: None,
-        })
-    }
-
-    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
-        self.store_brand = Some(brand);
-    }
-
-    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
-        self.store_brand
-            .as_ref()
-            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
-    }
-
-    /// Returns the current one-based configuration head, or zero for an empty stream.
-    pub const fn head_sequence(&self) -> u64 {
-        self.revisions.len() as u64
-    }
-
-    /// Returns the cumulative canonical bytes in this snapshot.
-    pub const fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-
-    /// Returns the dense validated revisions in order.
-    pub fn revisions(&self) -> &[ConfigurationRevision] {
-        &self.revisions
-    }
-
-    /// Returns the latest revision, when the stream is non-empty.
-    pub fn latest(&self) -> Option<&ConfigurationRevision> {
-        self.revisions.last()
-    }
-
-    /// Promotes one direct successor into a new local snapshot without reading the backend.
-    pub fn with_successor(&self, revision: ConfigurationRevision) -> Result<Self> {
-        if revision.sequence() != self.head_sequence().saturating_add(1) {
-            return Err(StoreError::Conflict);
-        }
-        let mut revisions = self.revisions.clone();
-        revisions.push(revision);
-        let mut snapshot = Self::from_revisions(revisions)?;
-        snapshot.store_brand = self.store_brand.clone();
-        Ok(snapshot)
-    }
-}
-
 /// Mechanical result of one exact-head configuration append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationAppendDisposition {
@@ -2734,169 +2576,14 @@ pub enum ConfigurationAppendDisposition {
     AcknowledgementUnknown,
 }
 
-/// One test-only affine configuration successor for the in-memory semantic history tests.
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct PreparedConfigurationAppend {
-    pub(crate) expected_sequence: u64,
-    pub(crate) append_request_id: AppendRequestId,
-    pub(crate) revision: ConfigurationRevision,
-}
-
-#[cfg(test)]
-impl PreparedConfigurationAppend {
-    /// Consumes this owner through the one configuration append path.
-    pub(crate) fn commit(
-        self,
-        history: &mut ConfigurationHistory,
-    ) -> Result<ConfigurationAppendDisposition> {
-        history.commit(self)
-    }
-}
-
-/// Strict bounded configuration history used by Store's semantic unit tests.
-#[cfg(test)]
-pub(crate) struct ConfigurationHistory {
-    revisions: Vec<ConfigurationRevision>,
-    total_bytes: usize,
-    append_requests: BTreeMap<AppendRequestId, u64>,
-}
-
-#[cfg(test)]
-impl Default for ConfigurationHistory {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[cfg(test)]
-impl ConfigurationHistory {
-    /// Creates an empty bounded configuration stream.
-    pub(crate) const fn new() -> Self {
-        Self {
-            revisions: Vec::new(),
-            total_bytes: 0,
-            append_requests: BTreeMap::new(),
-        }
-    }
-
-    /// Prepares one canonical configuration successor without changing history.
-    pub(crate) fn prepare_append(
-        &self,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        revision: String,
-    ) -> Result<PreparedConfigurationAppend> {
-        let successor = ConfigurationRevision::new(
-            self.revisions.len() as u64 + 1,
-            append_request_id.clone(),
-            revision,
-        )?;
-        let bytes = successor.canonical_json.as_bytes().len();
-        let duplicate_request = self.append_requests.contains_key(&append_request_id);
-        if !duplicate_request
-            && (bytes > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
-                || self.revisions.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
-                || self.total_bytes.saturating_add(bytes)
-                    > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
-        {
-            return Err(StoreError::Capacity);
-        }
-        Ok(PreparedConfigurationAppend {
-            expected_sequence,
-            append_request_id,
-            revision: successor,
-        })
-    }
-
-    fn commit(
-        &mut self,
-        prepared: PreparedConfigurationAppend,
-    ) -> Result<ConfigurationAppendDisposition> {
-        if let Some(sequence) = self.append_requests.get(&prepared.append_request_id) {
-            let existing = self
-                .revisions
-                .get((*sequence).saturating_sub(1) as usize)
-                .ok_or(StoreError::InvalidHistory)?;
-            return if existing.canonical_json == prepared.revision.canonical_json
-                && existing.content_ref == prepared.revision.content_ref
-            {
-                Ok(ConfigurationAppendDisposition::Found {
-                    sequence: *sequence,
-                })
-            } else {
-                Err(StoreError::Conflict)
-            };
-        }
-        let actual_sequence = self.revisions.len() as u64;
-        if prepared.expected_sequence != actual_sequence {
-            return Ok(ConfigurationAppendDisposition::StaleHead { actual_sequence });
-        }
-        let bytes = prepared.revision.canonical_json.as_bytes().len();
-        if bytes > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
-            || self.revisions.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
-            || self.total_bytes.saturating_add(bytes)
-                > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
-        {
-            return Err(StoreError::Capacity);
-        }
-        let sequence = actual_sequence.saturating_add(1);
-        let mut revision = prepared.revision;
-        revision.sequence = sequence;
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(bytes)
-            .ok_or(StoreError::Capacity)?;
-        self.append_requests
-            .insert(prepared.append_request_id, sequence);
-        self.revisions.push(revision);
-        Ok(ConfigurationAppendDisposition::NewlyCommitted { sequence })
-    }
-
-    /// Returns the current configuration head sequence.
-    pub(crate) const fn head_sequence(&self) -> u64 {
-        self.revisions.len() as u64
-    }
-
-    /// Returns the cumulative canonical bytes retained by this stream.
-    pub(crate) const fn total_bytes(&self) -> usize {
-        self.total_bytes
-    }
-}
-
-fn configuration_content_ref(bytes: &[u8]) -> Result<ContentRef> {
-    let schema = SchemaId::new(
-        "mfm.configuration",
-        "1",
-        DigestAlgorithm::Sha256JcsV1,
-        mfm_ids::DigestBytes::from_array([0; 32]),
-    )
-    .map_err(|_| StoreError::InvalidRecord)?;
-    ContentRef::new(schema, raw_content_digest(bytes)).map_err(|_| StoreError::InvalidRecord)
-}
-
-fn contains_secret_marker(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::String(text) => string_contains_secret_marker(text),
-        serde_json::Value::Array(values) => values.iter().any(contains_secret_marker),
-        serde_json::Value::Object(values) => values.iter().any(|(key, value)| {
-            contains_secret_marker(&serde_json::Value::String(key.clone()))
-                || contains_secret_marker(value)
-        }),
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mfm_canonical::raw_content_digest;
     use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
     use mfm_journal::single_trust::{
-        BindingDescriptor, ImmutableObject, PreparationMode, RunAdmitted, SequentialControlAddress,
-        StateOutcome, ValueRef,
+        BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
+        RunAdmitted, SequentialControlAddress, StateOutcome, ValueRef,
     };
 
     fn content(seed: u8) -> ContentRef {
@@ -2914,6 +2601,10 @@ mod tests {
             ),
         )
         .expect("content")
+    }
+
+    fn configuration(seed: u8) -> ConfigurationHeadProjection {
+        ConfigurationHeadProjection::new(1, content(seed)).expect("configuration")
     }
 
     fn ids() -> (StoreScopeId, TenantScopeId, RunId) {
@@ -3001,7 +2692,7 @@ mod tests {
                     StableId::new("mfm.test-entry-1").expect("entry"),
                     content(1),
                     ValueRef::new(content(2), context_ref.clone()),
-                    content(4),
+                    configuration(4),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3084,136 +2775,6 @@ mod tests {
     }
 
     #[test]
-    fn configuration_writer_promotes_only_direct_successors() {
-        let mut history = ConfigurationHistory::new();
-        let request = AppendRequestId::new("config-append-0123456789abcdef").expect("request");
-        let prepared = history
-            .prepare_append(0, request.clone(), "{\"quote\":\"usd\"}".to_owned())
-            .expect("prepare");
-        assert_eq!(
-            prepared.commit(&mut history),
-            Ok(ConfigurationAppendDisposition::NewlyCommitted { sequence: 1 })
-        );
-        assert_eq!(history.head_sequence(), 1);
-        assert_eq!(history.total_bytes(), 15);
-
-        let retry = history
-            .prepare_append(0, request, "{\"quote\":\"usd\"}".to_owned())
-            .expect("retry prepare");
-        assert_eq!(
-            retry.commit(&mut history),
-            Ok(ConfigurationAppendDisposition::Found { sequence: 1 })
-        );
-        let stale = history
-            .prepare_append(
-                0,
-                AppendRequestId::new("config-append-2-0123456789ab").expect("request"),
-                "{\"quote\":\"eur\"}".to_owned(),
-            )
-            .expect("stale prepare");
-        assert_eq!(
-            stale.commit(&mut history),
-            Ok(ConfigurationAppendDisposition::StaleHead { actual_sequence: 1 })
-        );
-        assert_eq!(
-            history
-                .prepare_append(
-                    1,
-                    AppendRequestId::new("config-secret-0123456789ab").expect("request"),
-                    "{\"secret\":\"x\"}".to_owned(),
-                )
-                .unwrap_err(),
-            StoreError::InvalidRecord
-        );
-    }
-
-    #[test]
-    fn configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one() {
-        fn json_with_bytes(bytes: usize) -> String {
-            const OVERHEAD: usize = 12;
-            assert!(bytes >= OVERHEAD);
-            format!(r#"{{"value":"{}"}}"#, "a".repeat(bytes - OVERHEAD))
-        }
-
-        let exact_revision = ConfigurationRevision::new(
-            1,
-            AppendRequestId::new("configuration-exact-revision-012345").expect("request"),
-            json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES),
-        )
-        .expect("exact revision bound");
-        assert_eq!(
-            exact_revision.canonical_json().len(),
-            mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
-        );
-        assert!(ConfigurationRevision::new(
-            1,
-            AppendRequestId::new("configuration-plus-one-revision-0123").expect("request"),
-            json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES + 1),
-        )
-        .is_err());
-
-        let mut revisions = ConfigurationHistory::new();
-        for sequence in 0..mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
-            let request =
-                AppendRequestId::new(format!("configuration-revision-{sequence:04}-0123456789"))
-                    .expect("request");
-            let owner = revisions
-                .prepare_append(sequence as u64, request, r#"{"mode":"bounded"}"#.to_owned())
-                .expect("exact revision-count bound");
-            assert!(matches!(
-                owner.commit(&mut revisions),
-                Ok(ConfigurationAppendDisposition::NewlyCommitted { .. })
-            ));
-        }
-        assert_eq!(
-            revisions.head_sequence(),
-            mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS as u64
-        );
-        assert!(matches!(
-            revisions.prepare_append(
-                revisions.head_sequence(),
-                AppendRequestId::new("configuration-plus-one-count-012345").expect("request"),
-                r#"{"mode":"over-count"}"#.to_owned(),
-            ),
-            Err(StoreError::Capacity)
-        ));
-
-        let mut stream = ConfigurationHistory::new();
-        for sequence in 0..4 {
-            let owner = stream
-                .prepare_append(
-                    sequence,
-                    AppendRequestId::new(format!("configuration-stream-{sequence}-0123456789"))
-                        .expect("request"),
-                    json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES),
-                )
-                .expect("exact stream bound");
-            assert!(matches!(
-                owner.commit(&mut stream),
-                Ok(ConfigurationAppendDisposition::NewlyCommitted { .. })
-            ));
-        }
-        assert_eq!(
-            stream.total_bytes(),
-            mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
-        );
-        assert!(matches!(
-            stream.prepare_append(
-                stream.head_sequence(),
-                AppendRequestId::new("configuration-plus-one-stream-01234").expect("request"),
-                r#"{"mode":"over-stream"}"#.to_owned(),
-            ),
-            Err(StoreError::Capacity)
-        ));
-        eprintln!(
-            "capacity-envelope configuration revisions={} revision_bytes={} stream_bytes={}",
-            revisions.head_sequence(),
-            exact_revision.canonical_json().len(),
-            stream.total_bytes(),
-        );
-    }
-
-    #[test]
     fn pure_conclusion_has_no_preparation_path() {
         let (scope, tenant, run) = ids();
         let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
@@ -3248,7 +2809,7 @@ mod tests {
                     StableId::new("mfm.test-entry-1").expect("entry"),
                     document.program_ref().expect("program"),
                     ValueRef::new(content(2), context_ref.clone()),
-                    content(4),
+                    configuration(4),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3344,7 +2905,7 @@ mod tests {
                     StableId::new("mfm.test-access").expect("entry"),
                     document.program_ref().expect("program"),
                     input.clone(),
-                    content(77),
+                    configuration(77),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3453,7 +3014,7 @@ mod tests {
                     StableId::new("mfm.test-effect").expect("entry"),
                     document.program_ref().expect("program"),
                     input.clone(),
-                    content(87),
+                    configuration(87),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3579,7 +3140,7 @@ mod tests {
                     StableId::new("mfm.test-sequential").expect("entry"),
                     document.program_ref().expect("program"),
                     root_value.clone(),
-                    content(41),
+                    configuration(41),
                     Vec::new(),
                 )
                 .expect("admission"),
@@ -3689,7 +3250,7 @@ mod tests {
                     StableId::new("mfm.test-match").expect("entry"),
                     document.program_ref().expect("program"),
                     selector_value.clone(),
-                    content(53),
+                    configuration(53),
                     Vec::new(),
                 )
                 .expect("admission"),

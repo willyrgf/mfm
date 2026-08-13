@@ -4,3 +4,7 @@ The CLI is a non-interactive transport wrapper over the fixed-tenant App. It acc
 or tenant override and renders one redacted JSON/text surface.
 Admission input is capped at 512 KiB before parsing and uses the same typed domain validation as
 the REST transport.
+
+Startup explicitly opens the demo Store, publishes secret-free typed Portfolio and EVM
+configuration revisions, and constructs App with their resolved heads. The CLI exposes no public
+configuration write surface.

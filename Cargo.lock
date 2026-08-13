@@ -870,7 +870,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "mfm-app",
+ "mfm-evm",
  "mfm-ids",
+ "mfm-portfolio",
+ "mfm-store",
+ "mfm-values",
  "serde_json",
  "tokio",
 ]
@@ -1052,7 +1056,11 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "mfm-app",
+ "mfm-evm",
  "mfm-ids",
+ "mfm-portfolio",
+ "mfm-store",
+ "mfm-values",
  "serde",
  "serde_json",
  "tokio",

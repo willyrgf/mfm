@@ -243,7 +243,7 @@ pub struct RunAdmitted {
     entry_point_id: StableId,
     program_ref: ContentRef,
     admitted_context: ValueRef,
-    configuration_ref: ContentRef,
+    configuration: ConfigurationHeadProjection,
     source_refs: Vec<ContentRef>,
 }
 
@@ -258,7 +258,7 @@ impl RunAdmitted {
         entry_point_id: StableId,
         program_ref: ContentRef,
         admitted_context: ValueRef,
-        configuration_ref: ContentRef,
+        configuration: ConfigurationHeadProjection,
         source_refs: Vec<ContentRef>,
     ) -> Result<Self> {
         if source_refs.len() > 64
@@ -275,7 +275,7 @@ impl RunAdmitted {
             entry_point_id,
             program_ref,
             admitted_context,
-            configuration_ref,
+            configuration,
             source_refs,
         })
     }
@@ -285,6 +285,8 @@ impl RunAdmitted {
         if self.source_refs.len() > 64
             || self.source_refs.windows(2).any(|pair| pair[0] >= pair[1])
             || !self.admitted_context.is_schema_bound()
+            || self.configuration.sequence == 0
+            || self.configuration.sequence as usize > MAX_CONFIGURATION_REVISIONS
         {
             return Err(JournalError::InvalidRecord);
         }
@@ -331,9 +333,40 @@ impl RunAdmitted {
         &self.source_refs
     }
 
-    /// Returns the selected configuration identity.
-    pub const fn configuration_ref(&self) -> &ContentRef {
-        &self.configuration_ref
+    /// Returns the exact selected configuration stream head.
+    pub const fn configuration(&self) -> &ConfigurationHeadProjection {
+        &self.configuration
+    }
+}
+
+/// Persisted identity of one resolved configuration stream position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigurationHeadProjection {
+    sequence: u64,
+    content_ref: ContentRef,
+}
+
+impl ConfigurationHeadProjection {
+    /// Constructs the persisted projection of a Store-verified configuration head.
+    pub fn new(sequence: u64, content_ref: ContentRef) -> Result<Self> {
+        if sequence == 0 || sequence as usize > MAX_CONFIGURATION_REVISIONS {
+            return Err(JournalError::InvalidRecord);
+        }
+        Ok(Self {
+            sequence,
+            content_ref,
+        })
+    }
+
+    /// Returns the one-based global configuration sequence.
+    pub const fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    /// Returns the exact typed configuration content identity.
+    pub const fn content_ref(&self) -> &ContentRef {
+        &self.content_ref
     }
 }
 
@@ -1243,7 +1276,7 @@ mod tests {
                 StableId::new("mfm.test-entry-1").expect("entry"),
                 ref_for(5),
                 ValueRef::new(ref_for(6), ref_for(7)),
-                ref_for(8),
+                ConfigurationHeadProjection::new(1, ref_for(8)).expect("configuration"),
                 Vec::new(),
             )
             .expect("admission"),

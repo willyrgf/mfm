@@ -647,3 +647,69 @@ Verification
 Unsolved problems
 
 none for this commit. Required-fixes commits 3 and 4 remain to be implemented in order.
+
+2026-08-13 — required-fixes commit 3: make configuration ingress and writes typed
+
+Material uncertainties
+
+none.
+
+Implementation progress
+
+- Replaced Store's generic JSON `ConfigurationRevision`/`ConfigurationSnapshot` and raw string
+  preparation surface with `ResolvedConfiguration<C>`, opaque cloneable
+  `ResolvedConfigurationHead`, affine `ConfigurationWriteSession<C>`, typed prepared append, and
+  suspended unknown-acknowledgement owners. Each owner retains the exact Store opening; fields and
+  affine constructors remain private and are covered by Trybuild contracts.
+- Local `ValidatedConfig<C>` publication validates before Store entry, canonicalizes once, and
+  performs zero decodes. External and retained ingress enforce the 16 MiB pre-allocation bound,
+  strict canonical float-free JSON, secret rejection, exact `MfmConfig` schema and digest, one
+  typed decode, and one domain validation. Direct commits promote the existing typed successor;
+  `Found` verifies and ingresses the returned row; stale/conflict promote nothing; unknown
+  acknowledgement retains the fixed physical id and owner.
+- Kept the configuration stream globally ordered and heterogeneous. Typed restart load selects the
+  latest matching schema at a captured global head, while its private CAS metadata carries that
+  global sequence and cumulative bytes so the next successor does not reload or fold the stream.
+  The persisted admission projection carries the selected revision's own sequence and typed
+  content identity. Admission rechecks that both the selected and captured global coordinates are
+  still retained before appending genesis.
+- Added cumulative bytes to raw configuration rows and the PostgreSQL baseline. PostgreSQL now
+  preflights head/count/sum/maximum metadata before allocating row payloads, validates each row's
+  cumulative total, and returns the exact retained row for `Found`; it remains byte-oriented and
+  has no Rust-type or retired generic-schema reader.
+- Made Portfolio configuration use the shared derived `MfmConfig` validation hook, deleted
+  `ValidatedPortfolioConfig` and `decode_portfolio_config`, and added the distinct zero-field EVM
+  configuration type.
+- Replaced all `Application::for_tenant*` construction with trusted `Application::new` composition
+  over an opened Store and exact Portfolio/EVM heads. App stays non-generic and only selects heads;
+  Runtime and callback-free Store admission require the same-opening head. CLI and REST now publish
+  explicit secret-free typed demo configurations before constructing App. The fabricated
+  `fixed-configuration-v1` path is deleted.
+- Changed `RunAdmitted` to persist the exact configuration stream projection rather than a free
+  `ContentRef`, updated current baseline/docs/fixtures, and expanded the cutover scanner with the
+  retired configuration/App identities.
+- Added decode/validation counters at actual ingress functions; wrong-schema/digest, legacy,
+  noncanonical, float, secret, foreign-Store, wrong-type, stale/conflict, direct/found/unknown,
+  heterogeneous restart, exact/plus-one capacity, admission projection, and compile-fail owner
+  tests.
+
+Verification
+
+- The required focused values, proc-macro, Portfolio, EVM, journal, Store, Runtime, Replay, App,
+  CLI, REST, and PostgreSQL package tests/checks passed. Store passed 22 semantic unit tests and 9
+  Trybuild contracts, including the exact 1,024-revision, 16 MiB revision, and 64 MiB cumulative
+  fixtures. One initial Store run exposed wrong-type classification as `NotFound`; it was corrected
+  to `InvalidRecord`, and the complete Store/dependent sequence passed on rerun.
+- `nix develop -c cargo clippy -p mfm-journal -p mfm-store -p mfm-runtime -p mfm-replay -p
+  mfm-portfolio -p mfm-evm -p mfm-app -p mfm -p mfm-rest-api -p mfm-storage-postgres
+  --all-targets -- -D warnings` — passed after boxing the mechanical retained-row `Found` payload.
+- `nix run .#run -- --task negative-scan` — passed as run
+  `run-2673829-1786636330652419591`.
+- `nix develop -c cargo fmt --all -- --check` and `git diff --check` — passed before this log append
+  and are rerun below before commit.
+- The managed PostgreSQL lane is intentionally deferred to the one final `nix run .#ci` after
+  required-fixes commit 4, per the repository verification policy.
+
+Unsolved problems
+
+none for this commit. Required-fixes commit 4 remains to be implemented.

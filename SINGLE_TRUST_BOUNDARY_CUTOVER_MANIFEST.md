@@ -238,6 +238,13 @@ import_run
 ImportRunRequest
 ImportRunResult
 drive_once
+ValidatedPortfolioConfig
+decode_portfolio_config
+PreparedConfigurationWrite
+ConfigurationSnapshot
+fixed-configuration-v1
+Application::for_tenant
+configuration_content_ref
 ```
 
 ## Deleted EVM/Portfolio parallel identities

@@ -13,18 +13,20 @@ use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonB
 use mfm_capabilities::AccessCapabilityContract;
 use mfm_evm::{
     BroadcastEvidence, BroadcastIntent, BroadcastTransaction, EvmBalanceAsset,
-    EvmBalanceCollectionCompletion, EvmBalanceContext, EvmNativeBalanceInput, EvmReadEvidence,
-    EvmReadIntent, EvmSubmissionContext, EvmSubmissionFailure, EvmSubmissionOutput,
-    EvmSubmissionRequest, EvmTokenBalanceInput, ReadBalance, ReadWalletNonceStatus,
-    EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
+    EvmBalanceCollectionCompletion, EvmBalanceContext, EvmConfig, EvmNativeBalanceInput,
+    EvmReadEvidence, EvmReadIntent, EvmSubmissionContext, EvmSubmissionFailure,
+    EvmSubmissionOutput, EvmSubmissionRequest, EvmTokenBalanceInput, ReadBalance,
+    ReadWalletNonceStatus, EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
 };
 use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentRef, DigestAlgorithm, RunId, SchemaId,
-    SequentialControlAddress, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
+    SequentialControlAddress, StableId, TenantScopeId,
 };
+#[cfg(test)]
+use mfm_ids::{StoreEpoch, StoreScopeId};
 use mfm_journal::single_trust::{ImmutableObject, RunAdmitted, RunFrame, RunRecord, ValueRef};
 use mfm_portfolio::{
-    PortfolioContinuation, PortfolioSnapshotFailure, PortfolioSnapshotInput,
+    PortfolioConfig, PortfolioContinuation, PortfolioSnapshotFailure, PortfolioSnapshotInput,
     PortfolioSnapshotOutput, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::single_trust::{
@@ -33,12 +35,11 @@ use mfm_program::single_trust::{
 };
 use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
 use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
-use mfm_store::OpenedStructuredStore;
-use mfm_store::{
-    AppendDisposition, RunAction, StoreError, StoreWorkLimits, StructuredStore,
-    StructuredStoreIdentity,
-};
-use mfm_values::{string_contains_secret_marker, MfmValue};
+use mfm_store::{AppendDisposition, RunAction, StoreError};
+use mfm_store::{OpenedStructuredStore, ResolvedConfigurationHead};
+#[cfg(test)]
+use mfm_store::{StoreWorkLimits, StructuredStore, StructuredStoreIdentity};
+use mfm_values::{string_contains_secret_marker, MfmConfig, MfmValue};
 use serde::{Deserialize, Serialize};
 
 /// Maximum canonical admission body accepted by every transport.
@@ -274,111 +275,68 @@ pub struct Application {
     store: Arc<OpenedStructuredStore>,
     catalog: ProgramCatalog,
     supported_entry_points: BTreeMap<StableId, ()>,
+    configuration_heads: BTreeMap<StableId, ResolvedConfigurationHead>,
     runtimes: BTreeMap<StableId, Runtime>,
     suspended: Mutex<BTreeMap<RunId, SuspendedRun>>,
 }
 
 impl Application {
-    /// Creates one facade with an immutable tenant and Store identity.
-    pub fn for_tenant(
-        tenant_scope_id: TenantScopeId,
-        store_scope_id: StoreScopeId,
-        store_epoch: StoreEpoch,
+    /// Composes one facade from an already-opened Store and explicit per-entry configuration heads.
+    pub fn new(
+        store: OpenedStructuredStore,
+        portfolio_configuration: ResolvedConfigurationHead,
+        evm_configuration: ResolvedConfigurationHead,
+        runtimes: Vec<Runtime>,
     ) -> Result<Self> {
         let portfolio_id =
             StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
         let evm_id = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
             .map_err(|_| PublicError::Internal)?;
-        let (catalog, _) = application_catalog_builder()?
-            .finish(evm_submission_program()?)
-            .map_err(|_| PublicError::Internal)?;
-        let store = StructuredStore::open_memory(
-            StructuredStoreIdentity::new(store_scope_id, store_epoch, tenant_scope_id.clone()),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .map_err(|_| PublicError::Internal)?;
-        Ok(Self {
-            store: Arc::new(store),
-            catalog,
-            tenant_scope_id,
-            supported_entry_points: BTreeMap::from([(portfolio_id, ()), (evm_id, ())]),
-            runtimes: BTreeMap::new(),
-            suspended: Mutex::new(BTreeMap::new()),
-        })
-    }
-
-    /// Creates a fixed-tenant facade over an already-qualified live Runtime.
-    ///
-    /// The Runtime's Store identity and tenant must match the facade.  The Runtime owns the
-    /// exact live State/adapter assembly; this constructor is the only application path that
-    /// enables provider execution.
-    pub fn for_tenant_with_runtime(
-        tenant_scope_id: TenantScopeId,
-        runtime: Runtime,
-    ) -> Result<Self> {
-        Self::for_tenant_with_runtimes(tenant_scope_id, vec![runtime])
-    }
-
-    /// Creates a fixed-tenant facade over the exact live Runtime assemblies for one or more
-    /// supported entry points.
-    pub fn for_tenant_with_runtimes(
-        tenant_scope_id: TenantScopeId,
-        runtimes: Vec<Runtime>,
-    ) -> Result<Self> {
-        if runtimes.is_empty() {
+        if portfolio_configuration.content_ref().schema_id()
+            != &<PortfolioConfig as MfmConfig>::schema_id().map_err(|_| PublicError::Internal)?
+            || evm_configuration.content_ref().schema_id()
+                != &EvmConfig::schema_id().map_err(|_| PublicError::Internal)?
+            || store
+                .configuration_projection(&portfolio_configuration)
+                .is_err()
+            || store.configuration_projection(&evm_configuration).is_err()
+        {
             return Err(PublicError::Internal);
         }
         let mut runtime_map = BTreeMap::new();
-        let mut store = None;
-        let mut catalog = None;
         for runtime in runtimes {
             let runtime_store = runtime.store();
-            if runtime_store.identity().tenant() != &tenant_scope_id
-                || store
-                    .as_ref()
-                    .is_some_and(|existing: &OpenedStructuredStore| {
-                        !existing.same_open(&runtime_store)
-                    })
-            {
+            if !store.same_open(&runtime_store) {
                 return Err(PublicError::Internal);
             }
-            if catalog.as_ref().is_some_and(|existing: &ProgramCatalog| {
-                !runtime_store.catalog().same_catalog(existing)
-            }) {
+            if !store.catalog().same_catalog(runtime_store.catalog()) {
                 return Err(PublicError::Internal);
             }
             let entry_point = runtime.entry_point_id();
             if runtime_map.insert(entry_point, runtime).is_some() {
                 return Err(PublicError::Internal);
             }
-            if store.is_none() {
-                store = Some(runtime_store);
-                catalog = Some(
-                    runtime_map
-                        .values()
-                        .next()
-                        .ok_or(PublicError::Internal)?
-                        .catalog(),
-                );
-            }
         }
-        let store = store.ok_or(PublicError::Internal)?;
-        let portfolio_id =
-            StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
-        let evm_id = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
-            .map_err(|_| PublicError::Internal)?;
         if runtime_map
             .keys()
             .any(|entry| entry != &portfolio_id && entry != &evm_id)
         {
             return Err(PublicError::Internal);
         }
+        let tenant_scope_id = store.identity().tenant().clone();
+        let catalog = store.catalog().clone();
         Ok(Self {
             store: Arc::new(store),
-            catalog: catalog.ok_or(PublicError::Internal)?,
+            catalog,
             tenant_scope_id,
-            supported_entry_points: BTreeMap::from([(portfolio_id, ()), (evm_id, ())]),
+            supported_entry_points: BTreeMap::from([
+                (portfolio_id.clone(), ()),
+                (evm_id.clone(), ()),
+            ]),
+            configuration_heads: BTreeMap::from([
+                (portfolio_id.clone(), portfolio_configuration),
+                (evm_id.clone(), evm_configuration),
+            ]),
             runtimes: runtime_map,
             suspended: Mutex::new(BTreeMap::new()),
         })
@@ -448,7 +406,11 @@ impl Application {
             short_stable_id_fragment(run_id.as_str(), 48)
         ))
         .map_err(|_| PublicError::Internal)?;
-        let configuration_ref = value_ref("mfm.configuration", b"fixed-configuration-v1")?;
+        let configuration = self
+            .configuration_heads
+            .get(&entry_point_id)
+            .ok_or(PublicError::Internal)?
+            .clone();
         if let Some(runtime) = self.runtimes.get(&entry_point_id) {
             let step = if entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
                 let typed: EvmSubmissionRequest =
@@ -461,7 +423,7 @@ impl Application {
                     .admission(
                         run_id.clone(),
                         value,
-                        configuration_ref.clone(),
+                        configuration.clone(),
                         Vec::new(),
                         append_request_id,
                     )
@@ -479,7 +441,7 @@ impl Application {
                     .admission(
                         run_id.clone(),
                         value,
-                        configuration_ref.clone(),
+                        configuration.clone(),
                         Vec::new(),
                         append_request_id,
                     )
@@ -519,7 +481,9 @@ impl Application {
             entry_point_id,
             program,
             ValueRef::new(contract_ref, context_ref.clone()),
-            configuration_ref,
+            self.store
+                .configuration_projection(&configuration)
+                .map_err(map_store_error)?,
             Vec::new(),
         )
         .map_err(|_| PublicError::Internal)?;
@@ -540,7 +504,7 @@ impl Application {
         .map_err(|_| PublicError::Internal)?;
         let disposition = self
             .store
-            .append_admission(frame)
+            .append_admission(frame, &configuration)
             .await
             .map_err(map_store_error)?;
         Ok(AdmitRunResponse {
@@ -851,6 +815,14 @@ fn canonical_typed_value<T: MfmValue>(value: &T) -> Result<(PlainCanonicalJsonBy
     let canonical = mfm_program::canonical_value(value).map_err(|_| PublicError::Internal)?;
     let contract = nominal_contract_ref::<T>().map_err(|_| PublicError::Internal)?;
     Ok((canonical, contract))
+}
+
+/// Builds the exact catalog used by trusted application composition.
+pub fn application_catalog() -> Result<ProgramCatalog> {
+    application_catalog_builder()?
+        .finish(evm_submission_program()?)
+        .map(|(catalog, _)| catalog)
+        .map_err(|_| PublicError::Internal)
 }
 
 fn application_catalog_builder() -> Result<ProgramCatalogBuilder> {
@@ -1471,17 +1443,80 @@ mod tests {
         EVM_TRANSACTION_DATA_LIMIT,
     };
     use mfm_program::single_trust::ProgramIngress;
+    use mfm_store::ConfigurationCommitOutcome;
+    use mfm_values::ValidatedConfig;
 
-    #[tokio::test]
-    async fn admits_typed_input_into_sequential_program() {
-        let app = Application::for_tenant(
-            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
+    async fn test_application() -> Application {
+        let identity = StructuredStoreIdentity::new(
             StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
                 .expect("scope"),
             StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        );
+        let store = StructuredStore::open_memory(
+            identity,
+            application_catalog().expect("catalog"),
+            StoreWorkLimits::default(),
         )
-        .expect("application");
+        .expect("store");
+        let configuration = store.configuration();
+        let portfolio = configuration
+            .initial_write_session::<PortfolioConfig>()
+            .prepare_local(
+                AppendRequestId::new("test-portfolio-configuration-0001").expect("request"),
+                ValidatedConfig::new(PortfolioConfig {
+                    portfolio_id: mfm_portfolio::PortfolioId {
+                        value: "portfolio-1".to_owned(),
+                    },
+                    quotes: vec![mfm_portfolio::QuoteCode::Usd],
+                })
+                .expect("valid portfolio config"),
+            )
+            .expect("portfolio append");
+        let portfolio = match configuration.commit(portfolio).await.expect("commit") {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+            _ => panic!("unexpected portfolio configuration outcome"),
+        };
+        let portfolio_head = portfolio.head().clone();
+        let evm = configuration
+            .write_session::<EvmConfig>(&portfolio_head)
+            .expect("evm session")
+            .prepare_local(
+                AppendRequestId::new("test-evm-configuration-000000001").expect("request"),
+                ValidatedConfig::new(EvmConfig {}).expect("valid evm config"),
+            )
+            .expect("evm append");
+        let evm = match configuration.commit(evm).await.expect("commit") {
+            ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
+            _ => panic!("unexpected evm configuration outcome"),
+        };
+        let evm_head = evm.into_head();
+        let restarted_portfolio = configuration
+            .load::<PortfolioConfig>()
+            .await
+            .expect("restarted Portfolio config");
+        let restarted_evm = configuration
+            .load::<EvmConfig>()
+            .await
+            .expect("restarted EVM config");
+        assert_eq!(
+            restarted_portfolio.head().sequence(),
+            portfolio_head.sequence()
+        );
+        assert_eq!(restarted_evm.head().sequence(), evm_head.sequence());
+        Application::new(
+            store,
+            restarted_portfolio.into_head(),
+            restarted_evm.into_head(),
+            Vec::new(),
+        )
+        .expect("application")
+    }
+
+    #[tokio::test]
+    async fn admits_typed_input_into_sequential_program() {
+        let app = test_application().await;
         let entry = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).expect("entry");
         let input = serde_json::json!({
             "target": {"chain_id": 1, "sender": "0xabc", "nonce_domain": "wallet-main"},
@@ -1491,9 +1526,22 @@ mod tests {
             "max_fee": "100"
         });
         let response = app
-            .admit_run(AdmitRunRequest::new(entry, input).expect("request"))
+            .admit_run(AdmitRunRequest::new(entry.clone(), input).expect("request"))
             .await;
         let response = response.expect("admission");
+        let retained = app.store.load(&response.run_id).await.expect("retained");
+        let RunRecord::RunAdmitted(admitted) = retained.frames()[0].record() else {
+            panic!("expected admission")
+        };
+        let configured = app
+            .configuration_heads
+            .get(&entry)
+            .expect("configured EVM head");
+        assert_eq!(admitted.configuration().sequence(), configured.sequence());
+        assert_eq!(
+            admitted.configuration().content_ref(),
+            configured.content_ref()
+        );
         assert_eq!(
             app.drive(response.run_id.clone()).await,
             Err(PublicError::Internal)
@@ -1502,14 +1550,7 @@ mod tests {
 
     #[tokio::test]
     async fn evm_submission_identity_is_tenant_nonce_domain_and_idempotency_key() {
-        let app = Application::for_tenant(
-            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
-            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("scope"),
-            StoreEpoch::new(1),
-        )
-        .expect("application");
+        let app = test_application().await;
         let entry = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).expect("entry");
         let request = |max_fee: &str| {
             AdmitRunRequest::new(
@@ -1543,14 +1584,7 @@ mod tests {
 
     #[tokio::test]
     async fn plans_portfolio_asset_match_for_each_collection() {
-        let app = Application::for_tenant(
-            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
-            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("scope"),
-            StoreEpoch::new(1),
-        )
-        .expect("application");
+        let app = test_application().await;
         let entry = StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).expect("entry");
         let input = serde_json::json!({
             "portfolio_id": {"value": "portfolio-1"},
@@ -1569,19 +1603,27 @@ mod tests {
             .admit_run(AdmitRunRequest::new(entry, input).expect("request"))
             .await
             .expect("admission");
+        let retained = app.store.load(&response.run_id).await.expect("retained");
+        let RunRecord::RunAdmitted(admitted) = retained.frames()[0].record() else {
+            panic!("expected admission")
+        };
+        let portfolio_entry =
+            StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).expect("portfolio entry");
+        let configured = app
+            .configuration_heads
+            .get(&portfolio_entry)
+            .expect("configured Portfolio head");
+        assert_eq!(admitted.configuration().sequence(), configured.sequence());
+        assert_eq!(
+            admitted.configuration().content_ref(),
+            configured.content_ref()
+        );
         assert_eq!(app.drive(response.run_id).await, Err(PublicError::Internal));
     }
 
     #[tokio::test]
     async fn exports_and_reimports_the_v5_structural_stream() {
-        let app = Application::for_tenant(
-            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
-            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("scope"),
-            StoreEpoch::new(1),
-        )
-        .expect("application");
+        let app = test_application().await;
         let entry = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).expect("entry");
         let input = serde_json::json!({
             "target": {"chain_id": 1, "sender": "0xabc", "nonce_domain": "wallet-main"},
@@ -1602,6 +1644,37 @@ mod tests {
             portable
         );
         assert!(PortableRun::decode(br#"{"format":"mfm.portable-run.v4"}"#).is_err());
+    }
+
+    #[tokio::test]
+    async fn composition_rejects_foreign_and_wrong_type_configuration_heads() {
+        let first = test_application().await;
+        let second = test_application().await;
+        let portfolio = StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).expect("portfolio");
+        let evm = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).expect("evm");
+        let first_portfolio = first.configuration_heads[&portfolio].clone();
+        let first_evm = first.configuration_heads[&evm].clone();
+        let second_portfolio = second.configuration_heads[&portfolio].clone();
+        let second_evm = second.configuration_heads[&evm].clone();
+
+        assert!(matches!(
+            Application::new(
+                first.store.as_ref().clone(),
+                second_portfolio,
+                second_evm,
+                Vec::new(),
+            ),
+            Err(PublicError::Internal)
+        ));
+        assert!(matches!(
+            Application::new(
+                first.store.as_ref().clone(),
+                first_evm,
+                first_portfolio,
+                Vec::new(),
+            ),
+            Err(PublicError::Internal)
+        ));
     }
 
     #[test]

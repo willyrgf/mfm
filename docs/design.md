@@ -61,7 +61,7 @@ owner-bearing Runtime result until an explicit supervisor or process boundary di
 Store owns reduction and semantic evidence. Runtime owns immutable live registration, the affine
 `PreparedExecution`, direct-new-only `CommittedCall`, call correlation, typed input retention, and
 the exhaustive `SuspendedRun` owner-fate coordinator around a Store-owned `PreparedConclusion`.
-`QualifiedRun`, `ReducedRunState`, configuration snapshots, fact continuations, and append owners
+`QualifiedRun`, `ReducedRunState`, resolved typed configurations, fact continuations, and append owners
 carry private process-local identity for the exact Store opening that created them; matching
 persisted scope, epoch, and tenant values alone cannot transpose a semantic owner between opens.
 The Runtime-owned `PendingConclusion` is the affine handoff that retains only conclusion Store I/O
@@ -96,6 +96,16 @@ Store scope and writer epoch. The admitted durability claim is primary crash/res
 or binding replacement rotates scope or epoch through an explicit persisted deployment-identity
 cutover; old handles fail their next readiness/backend check and old nonterminal runs are
 replay-only.
+
+Configuration is a separate append-only stream under the same scope, epoch, and tenant. Store is
+the only semantic ingress: local `ValidatedConfig<C>` values are canonicalized without decoding,
+while external and retained canonical JSON is decoded once into the exact `MfmConfig` type and
+validated before Store mints a resolved value or head. Each revision records that type's schema,
+content digest, sequence, and cumulative bytes. Affine write sessions compare the exact global
+head; direct commits promote their typed successor, found appends re-ingress the returned row, and
+unknown acknowledgements retain the same physical owner. A run admission persists the selected
+configuration sequence, schema, and content identity and is accepted only with a same-opening
+resolved head.
 
 EVM and Portfolio domains own their bounded cumulative contexts. EVM source States are expanded in
 declaration order, and Portfolio passes one opaque continuation through each child collection.

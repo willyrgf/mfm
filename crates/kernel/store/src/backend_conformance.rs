@@ -8,8 +8,9 @@ use mfm_ids::{
     SequentialControlAddress, StableId,
 };
 use mfm_journal::single_trust::{
-    BindingDescriptor, ImmutableObject, PreparationMode, PreparationRef, RunAdmitted, RunFrame,
-    RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
+    BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
+    PreparationRef, RunAdmitted, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared,
+    ValueRef,
 };
 
 use crate::backend::{
@@ -323,7 +324,8 @@ pub async fn append_primary_restart_probe(
         StableId::new("mfm.test.primary-restart@1").map_err(|_| BackendError::Storage)?,
         program_ref,
         input.clone(),
-        configuration_ref,
+        ConfigurationHeadProjection::new(1, configuration_ref)
+            .map_err(|_| BackendError::Storage)?,
         Vec::new(),
     )
     .map_err(|_| BackendError::Storage)?;
@@ -472,7 +474,8 @@ fn process_race_admission_frame(
         StableId::new("mfm.test.process-race@1").map_err(|_| BackendError::Storage)?,
         program_ref,
         input,
-        configuration_ref,
+        ConfigurationHeadProjection::new(1, configuration_ref)
+            .map_err(|_| BackendError::Storage)?,
         Vec::new(),
     )
     .map_err(|_| BackendError::Storage)?;
@@ -962,7 +965,7 @@ pub async fn exercise(
         backend
             .compare_and_append_configuration(&configuration)
             .await?,
-        BackendConfigurationOutcome::Found { sequence: 1 }
+        BackendConfigurationOutcome::Found(revision) if revision.sequence() == 1
     ));
 
     let configuration_schema = SchemaId::new(
@@ -1023,6 +1026,19 @@ pub async fn exercise(
     let configuration_rows = backend.load_configuration().await?;
     assert_eq!(configuration_rows.len(), 2);
     assert_eq!(configuration_rows[0].canonical_bytes(), configuration_bytes);
+    assert_eq!(
+        configuration_rows[0].total_bytes(),
+        configuration_bytes.len()
+    );
+    assert_eq!(
+        configuration_rows[1].total_bytes(),
+        configuration_bytes.len()
+            + if matches!(left, BackendConfigurationOutcome::NewlyCommitted) {
+                left_configuration_bytes.len()
+            } else {
+                right_configuration_bytes.len()
+            }
+    );
 
     let facts = backend.load_facts().await?;
     assert_eq!(facts, RawFactSnapshot::new(0, Vec::new())?);
@@ -1043,6 +1059,7 @@ pub async fn exercise(
         configuration_request,
         configuration_bytes.to_vec(),
         configuration_ref,
+        configuration_bytes.len(),
     )
     .is_err());
 
