@@ -6,20 +6,6 @@
 //! formatting; canonical byte production and digest computation live in later
 //! kernel crates.
 //!
-//! ```
-//! use mfm_ids::{OccurrenceId, SchemaVersion};
-//!
-//! let occurrence_id = OccurrenceId::parse(
-//!     "occurrence:sha256-jcs-v1:\
-//!      0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-//! )?;
-//! let schema_version = SchemaVersion::new("1")?;
-//!
-//! assert!(occurrence_id.as_str().starts_with("occurrence:"));
-//! assert_eq!(schema_version.as_str(), "1");
-//! # Ok::<(), mfm_ids::IdentityError>(())
-//! ```
-//!
 //! ```compile_fail
 //! use mfm_ids::{SchemaId, SemanticTypeId};
 //!
@@ -205,6 +191,55 @@ pub type ArtifactId = Identity<ArtifactIdKind>;
 /// Generic digest of canonical bytes or artifact bytes.
 pub type ContentDigest = Identity<ContentDigestKind>;
 
+/// Minimal sequential State/Match address shared by Program, Journal, and Store.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SequentialControlAddress {
+    declaration_ordinal: u32,
+    match_arm_ordinals: Vec<u32>,
+}
+
+impl<'de> Deserialize<'de> for SequentialControlAddress {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            declaration_ordinal: u32,
+            match_arm_ordinals: Vec<u32>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.declaration_ordinal, wire.match_arm_ordinals)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl SequentialControlAddress {
+    /// Creates one bounded declaration address.
+    pub fn new(declaration_ordinal: u32, match_arm_ordinals: Vec<u32>) -> Result<Self> {
+        if match_arm_ordinals.len() > 64 {
+            return Err(IdentityError::new("sequential address is too deep"));
+        }
+        Ok(Self {
+            declaration_ordinal,
+            match_arm_ordinals,
+        })
+    }
+
+    /// Returns the declaration ordinal.
+    pub const fn declaration_ordinal(&self) -> u32 {
+        self.declaration_ordinal
+    }
+
+    /// Returns enclosing Match arm ordinals.
+    pub fn match_arm_ordinals(&self) -> &[u32] {
+        &self.match_arm_ordinals
+    }
+}
+
 fn validate_scope_id(value: &str, prefix: &str, label: &str) -> Result<()> {
     let suffix = value
         .strip_prefix(prefix)
@@ -277,7 +312,7 @@ impl<'de> Deserialize<'de> for StoreScopeId {
     }
 }
 
-/// Store generation used to fence append writers.
+/// Store writer epoch used to qualify append writers.
 ///
 /// The wire form is a canonical decimal `u64` JSON string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -708,7 +743,7 @@ fn validate_stable_id(grammar: &'static str, value: &str) -> CheckedStringResult
         ));
     }
     for (index, byte) in value.bytes().enumerate().skip(1) {
-        if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'/' | b'-') {
+        if is_lower_or_digit_byte(byte) || matches!(byte, b'.' | b'_' | b'/' | b'-' | b'@') {
             continue;
         }
         return Err(CheckedStringError::new(
@@ -800,6 +835,7 @@ fn validate_entry_point_id(grammar: &'static str, value: &str) -> CheckedStringR
     Ok(())
 }
 
+#[allow(dead_code)]
 fn validate_invocation_identity(grammar: &'static str, value: &str) -> CheckedStringResult<()> {
     if value.len() != 36 {
         return Err(CheckedStringError::new(

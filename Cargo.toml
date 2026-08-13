@@ -5,27 +5,20 @@ resolver = "2"
 members = [
 	"bin/cli",
 	"bin/rest-api",
-	"tests/wallet-authority-provider",
-	"tests/integration",
 	"crates/app",
-	"crates/live/bitcoin",
 	"crates/live/evm",
 	"crates/keystore",
 	"crates/kernel/canonical",
-	"crates/kernel/authority-seal",
 	"crates/kernel/capabilities",
-	"crates/kernel/certify",
-	"crates/kernel/journal",
 	"crates/kernel/facts",
+	"crates/kernel/journal",
 	"crates/kernel/ids",
 	"crates/kernel/program",
 	"crates/kernel/program-derive",
 	"crates/kernel/replay",
 	"crates/kernel/runtime",
-	"crates/kernel/spec",
 	"crates/kernel/store",
 	"crates/kernel/values",
-	"crates/domains/bitcoin",
 	"crates/domains/evm",
 	"crates/domains/portfolio",
 	"crates/signing",
@@ -35,29 +28,14 @@ members = [
 
 # Core dependencies
 [workspace.dependencies]
-# Alloy blockchain library components
-alloy-primitives = "0.8"
-alloy-consensus = "0.8.3"
-alloy-eips = "0.8"
-# Alloy 0.8's EIP-7702 manifest omits the derive feature used by its source.
-derive_more = { version = "1.0.0", features = ["display"] }
-# Bitcoin protocol primitives
-bitcoin = { version = "0.32.102", default-features = false, features = ["std"] }
 # Cryptography dependency
 ring = "0.17.14"
 # Common dependencies
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.108"
-anyhow = "1.0.75"
 tokio = { version = "1.44", features = ["full"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres"] }
 clap = { version = "4.4", features = ["derive"] }
-url = "2.5"
-hex = "0.4"
-http = "1"
-rand = "0.9"
-async-trait = "0.1"
-tracing = "0.1"
-tracing-subscriber = "0.3"
 thiserror = "2.0.18"
 
 # Keep full debugger-quality DWARF without embedding a copy into every linked

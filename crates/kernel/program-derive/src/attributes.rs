@@ -100,6 +100,18 @@ impl ContainerAttrs {
                     } else if meta.path.is_ident("try_from") || meta.path.is_ident("into") {
                         let _ = meta.value()?.parse::<LitStr>()?;
                         Ok(())
+                    } else if meta.path.is_ident("bound") {
+                        if meta.input.peek(syn::token::Paren) {
+                            meta.parse_nested_meta(|nested| {
+                                if nested.input.peek(syn::Token![=]) {
+                                    let _ = nested.value()?.parse::<LitStr>()?;
+                                }
+                                Ok(())
+                            })?;
+                        } else {
+                            let _ = meta.value()?.parse::<LitStr>()?;
+                        }
+                        Ok(())
                     } else if meta.path.is_ident("transparent") {
                         output.serde_transparent = true;
                         Ok(())

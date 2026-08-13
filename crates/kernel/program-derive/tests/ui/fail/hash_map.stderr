@@ -1,5 +1,0 @@
-error: HashMap is not supported; use BTreeMap<String, V>
- --> tests/ui/fail/hash_map.rs:7:14
-  |
-7 |     weights: HashMap<String, u64>,
-  |              ^^^^^^^^^^^^^^^^^^^^

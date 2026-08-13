@@ -1,5 +1,0 @@
-error: skipped fields are not supported by MFM derives
- --> tests/ui/fail/serde_skip.rs:6:13
-  |
-6 |     #[serde(skip)]
-  |             ^^^^

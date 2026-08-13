@@ -1,46 +1,282 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::sync::Arc;
 
-use clap::Parser;
-use mfm_app::observability::{init_observability, observability_from_env};
-use tokio::net::TcpListener;
+use axum::{
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path, State},
+    http::{header, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
+use mfm_app::{parse_admission_json, AdmitRunRequest, Application, MAX_ADMISSION_BYTES};
+use mfm_ids::{RunId, StableId, StoreEpoch, StoreScopeId, TenantScopeId};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 
-const ENV_ADDR: &str = "MFM_REST_API_ADDR";
+#[derive(Clone)]
+struct ApiState(Arc<Application>);
 
-#[derive(Parser)]
-#[command(name = "mfm_rest_api")]
-struct Args {
-    /// Explicit runtime configuration file for live capability-backed runs.
-    #[arg(long, value_name = "PATH")]
-    runtime_config: Option<PathBuf>,
+struct AdmitWire {
+    entry_point_id: String,
+    input: serde_json::Value,
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+impl<'de> Deserialize<'de> for AdmitWire {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        enum Field {
+            EntryPointId,
+            Input,
+        }
+
+        impl<'de> Deserialize<'de> for Field {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                struct FieldVisitor;
+
+                impl<'de> Visitor<'de> for FieldVisitor {
+                    type Value = Field;
+
+                    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                        formatter.write_str("`entry_point_id` or `input`")
+                    }
+
+                    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+                    where
+                        E: de::Error,
+                    {
+                        match value {
+                            "entry_point_id" => Ok(Field::EntryPointId),
+                            "input" => Ok(Field::Input),
+                            _ => Err(de::Error::unknown_field(
+                                value,
+                                &["entry_point_id", "input"],
+                            )),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_identifier(FieldVisitor)
+            }
+        }
+
+        struct AdmitVisitor;
+
+        impl<'de> Visitor<'de> for AdmitVisitor {
+            type Value = AdmitWire;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("an admission object")
+            }
+
+            fn visit_map<M>(self, mut map: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut entry_point_id = None;
+                let mut input = None;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::EntryPointId => {
+                            if entry_point_id.is_some() {
+                                return Err(de::Error::duplicate_field("entry_point_id"));
+                            }
+                            entry_point_id = Some(map.next_value()?);
+                        }
+                        Field::Input => {
+                            if input.is_some() {
+                                return Err(de::Error::duplicate_field("input"));
+                            }
+                            input = Some(map.next_value()?);
+                        }
+                    }
+                }
+                Ok(AdmitWire {
+                    entry_point_id: entry_point_id
+                        .ok_or_else(|| de::Error::missing_field("entry_point_id"))?,
+                    input: input.ok_or_else(|| de::Error::missing_field("input"))?,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(AdmitVisitor)
+    }
 }
 
 #[tokio::main]
-#[allow(clippy::disallowed_methods)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
-    init_observability(observability_from_env("mfm_rest_api"))
-        .map_err(|e| std::io::Error::other(format!("observability init failed: {}", e.message)))?;
-
-    let addr: SocketAddr = std::env::var(ENV_ADDR)
-        .unwrap_or_else(|_| "127.0.0.1:3001".to_string())
-        .parse()
-        .map_err(|_| format!("invalid {ENV_ADDR} socket addr"))?;
-
-    let app =
-        mfm_rest_api::make_app(mfm_rest_api::make_default_app_state(args.runtime_config).await?);
-
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "listening");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
+    let app = Arc::new(Application::for_tenant(
+        TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")?,
+        StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")?,
+        StoreEpoch::new(1),
+    )?);
+    let router = Router::new()
+        .route("/health", get(health))
+        .route("/runs", post(admit))
+        .route("/runs/:run_id", get(read))
+        .route("/runs/:run_id/drive", post(drive))
+        .route("/runs/:run_id/replay", get(replay))
+        .route("/runs/:run_id/trace", get(trace))
+        .route("/runs/:run_id/audit", get(audit))
+        .route("/runs/:run_id/export", get(export_run))
+        .layer(DefaultBodyLimit::max(MAX_ADMISSION_BYTES))
+        .with_state(ApiState(app));
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 3000))).await?;
+    axum::serve(listener, router).await?;
     Ok(())
+}
+
+async fn health() -> impl IntoResponse {
+    axum::Json(serde_json::json!({"status":"ok"}))
+}
+
+async fn admit(State(ApiState(app)): State<ApiState>, body: Bytes) -> impl IntoResponse {
+    let result = if body.len() > MAX_ADMISSION_BYTES {
+        Err(())
+    } else {
+        std::str::from_utf8(&body)
+            .map_err(|_| ())
+            .and_then(|text| parse_admission_json(text).map_err(|_| ()))
+            .and_then(|value| serde_json::from_value::<AdmitWire>(value).map_err(|_| ()))
+            .and_then(|input| {
+                StableId::new(input.entry_point_id)
+                    .map_err(|_| ())
+                    .and_then(|entry| AdmitRunRequest::new(entry, input.input).map_err(|_| ()))
+            })
+    };
+    let result = match result {
+        Ok(request) => app.admit_run(request).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!(response)),
+        )
+            .into_response(),
+        Err(()) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({"code":"AdmissionRequestInvalid"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn read(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.read_public_run(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (StatusCode::OK, axum::Json(serde_json::json!(response))).into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn drive(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.drive(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (StatusCode::OK, axum::Json(serde_json::json!(response))).into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn replay(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.replay_run(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (StatusCode::OK, axum::Json(serde_json::json!(response))).into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn trace(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.trace_run(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (StatusCode::OK, axum::Json(serde_json::json!(response))).into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn audit(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.audit_access(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(response) => (StatusCode::OK, axum::Json(serde_json::json!(response))).into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
+}
+
+async fn export_run(
+    State(ApiState(app)): State<ApiState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let result = match RunId::parse(run_id).map_err(|_| ()) {
+        Ok(run) => app.export_run(run).await.map_err(|_| ()),
+        Err(error) => Err(error),
+    };
+    match result {
+        Ok(export) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            export.bytes().to_vec(),
+        )
+            .into_response(),
+        Err(()) => (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"code":"RunNotFound"})),
+        )
+            .into_response(),
+    }
 }

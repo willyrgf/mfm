@@ -79,7 +79,7 @@
           sqlx-cli = mkSqlxCli system;
           mfm = rustPlatform.buildRustPackage {
             pname = "mfm";
-            version = "0.1.29";
+            version = "0.1.0";
             src = ./.;
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [
@@ -122,58 +122,22 @@
           projectApps = nixfied.lib.${system}.projectApps ./nixfied.nix;
           managedMfm = pkgs.writeShellApplication {
             name = "mfm";
-            runtimeInputs = [
-              self.packages.${system}.mfm
-              pkgs.jq
-            ];
+            runtimeInputs = [ self.packages.${system}.mfm ];
             text = ''
-              slot=9
-              nixfied_run="${projectApps.run.program}"
-              nixfied_down="${projectApps.down.program}"
-
-              # shellcheck disable=SC2329
-              cleanup() {
-                "$nixfied_down" --slot "$slot" >/dev/null || true
-              }
-              trap cleanup EXIT
-
-              store_output="$("$nixfied_run" --task mfm-store --slot "$slot" --json)"
-              endpoint="$(
-                jq -r \
-                  '[.services[] | select(.serviceId == "postgres")][-1].selectedEndpoint | [.host, .port] | @tsv' \
-                  <<<"$store_output"
-              )"
-              IFS=$'\t' read -r host port <<<"$endpoint"
-              if [[ -z "$host" || -z "$port" || "$host" == "null" || "$port" == "null" ]]; then
-                printf '%s\n' "mfm could not resolve the managed Postgres endpoint" >&2
-                printf '%s\n' "$store_output" >&2
-                exit 1
-              fi
-
-              export DATABASE_URL="postgresql://postgres@$host:$port/postgres"
               mfm "$@"
             '';
           };
         in
-        # Keep the generated project apps and add the managed CLI.
+        # Keep the generated project apps and add the CLI.
         projectApps
         // {
-          check = projectApps.check // {
-            meta.description = "Run formatting, Clippy, metadata, and offline SQLx checks";
-          };
-          test = projectApps.test // {
-            meta.description = "Run service-free workspace Nextest and doctests";
-          };
-          test-db = projectApps.test-db // {
-            meta.description = "Run managed PostgreSQL SQLx and parity verification";
-          };
           ci = projectApps.ci // {
             meta.description = "Run the complete MFM verification graph";
           };
           mfm = {
             type = "app";
             program = "${managedMfm}/bin/mfm";
-            meta.description = "Run the MFM CLI with managed PostgreSQL";
+            meta.description = "Run the MFM CLI";
           };
         }
       );

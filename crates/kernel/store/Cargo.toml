@@ -3,7 +3,7 @@ name = "mfm-store"
 version = "0.1.0"
 edition = "2021"
 autotests = false
-description = "Typed kernel store contracts for MFM"
+description = "Callback-free durable semantic Store for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -18,57 +18,15 @@ name = "mfm_store"
 path = "src/lib.rs"
 
 [features]
-test-support = ["dep:mfm-program", "dep:tokio"]
+test-support = []
 backend-conformance = ["test-support"]
 
 [dependencies]
-mfm-authority-seal = { path = "../authority-seal" }
 mfm-canonical = { path = "../canonical" }
-mfm-certify = { path = "../certify" }
-mfm-runtime = { path = "../runtime", features = ["store-authority"] }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
-mfm-program = { path = "../program", optional = true }
-mfm-program-derive = { path = "../program-derive" }
-mfm-spec = { path = "../spec" }
+mfm-program = { path = "../program" }
 mfm-values = { path = "../values" }
-serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, optional = true }
-
-[dev-dependencies]
-mfm-capabilities = { path = "../capabilities" }
-mfm-certify = { path = "../certify" }
-mfm-facts = { path = "../facts" }
-mfm-ids = { path = "../ids" }
-mfm-program = { path = "../program" }
-mfm-program-derive = { path = "../program-derive" }
-mfm-replay = { path = "../replay" }
-mfm-runtime = { path = "../runtime" }
-mfm-spec = { path = "../spec" }
-mfm-values = { path = "../values" }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-trybuild = "1.0"
-
-[[test]]
-name = "api-surface"
-path = "tests/api_surface.rs"
-
-[[test]]
-name = "structured-runtime"
-path = "tests/structured_runtime.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "structured-history-qualification"
-path = "tests/structured_history_qualification.rs"
-required-features = ["test-support"]
-
-[[test]]
-name = "structured-runtime-causal"
-path = "tests/structured_runtime_causal.rs"
-required-features = ["test-support"]

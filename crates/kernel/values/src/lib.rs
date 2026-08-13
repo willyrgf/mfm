@@ -43,9 +43,6 @@ pub use self::persisted::{
     StringGrammar, MAX_MEDIA_TYPE_BYTES,
 };
 
-mod retained;
-pub use self::retained::{ComponentObjectEvidence, RetainedValueContract};
-
 // Keep this list intentionally small and high-signal to avoid false positives on public
 // descriptive fields while still blocking common secret-bearing persisted surfaces.
 const SECRET_MARKERS: &[&str] = &[
@@ -112,9 +109,6 @@ pub enum ValueError {
     /// Config validation failed.
     #[error("config error: {0}")]
     Config(String),
-    /// A retained-value contract failed exact owner validation.
-    #[error("invalid retained-value contract")]
-    RetainedValueContract,
 }
 
 /// Returns `true` when `input` matches MFM's high-signal secret-marker policy.
@@ -1681,8 +1675,8 @@ fn literal_matches(literal: &LiteralValue, value: &serde_json::Value) -> bool {
 /// one implementation.
 fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
     use mfm_ids::{
-        ContentDigest, InvocationIdentity, OccurrenceId, RunId, SchemaId, SemanticDigest,
-        SemanticTypeId, StableId, StoreScopeId, TenantScopeId,
+        ContentDigest, RunId, SchemaId, SemanticDigest, SemanticTypeId, StableId, StoreScopeId,
+        TenantScopeId,
     };
 
     match grammar {
@@ -1690,11 +1684,6 @@ fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
         StringGrammar::ContentDigest => ContentDigest::parse(value).is_ok(),
         StringGrammar::SemanticDigest => SemanticDigest::parse(value).is_ok(),
         StringGrammar::RunId => RunId::parse(value).is_ok(),
-        StringGrammar::OccurrenceId => OccurrenceId::parse(value).is_ok(),
-        StringGrammar::SemanticCallId => mfm_ids::SemanticCallId::parse(value).is_ok(),
-        StringGrammar::FragmentBoundaryId => mfm_ids::FragmentBoundaryId::parse(value).is_ok(),
-        StringGrammar::FailurePlanId => mfm_ids::FailurePlanId::parse(value).is_ok(),
-        StringGrammar::AccessAttemptId => mfm_ids::AccessAttemptId::parse(value).is_ok(),
         StringGrammar::ArtifactId => mfm_ids::ArtifactId::parse(value).is_ok(),
         StringGrammar::SchemaId => SchemaId::parse(value).is_ok(),
         StringGrammar::SemanticTypeId => SemanticTypeId::parse(value).is_ok(),
@@ -1702,7 +1691,6 @@ fn grammar_admits(grammar: StringGrammar, value: &str) -> bool {
         StringGrammar::StableId => StableId::new(value).is_ok(),
         StringGrammar::StoreScopeId => StoreScopeId::new(value).is_ok(),
         StringGrammar::TenantScopeId => TenantScopeId::new(value).is_ok(),
-        StringGrammar::UuidV4 => InvocationIdentity::new(value).is_ok(),
         StringGrammar::CanonicalUnsignedText => {
             value == "0"
                 || (value.len() <= 20
@@ -1773,7 +1761,7 @@ fn validate_canonical_json_terminal(
                 // A key is a structural name, judged as a declared struct
                 // field name is rather than scanned for secret markers. Secret
                 // material is a value, and every value below is still scanned,
-                // so a structural name such as `authorization_ref` is admitted
+                // so a structural protocol name is admitted
                 // while a `"Bearer …"` value is not.
                 if key.is_empty()
                     || key.len() > MAX_CANONICAL_OBJECT_KEY_UTF8_BYTES
@@ -2045,11 +2033,6 @@ fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
         StringGrammar::ContentDigest,
         StringGrammar::SemanticDigest,
         StringGrammar::RunId,
-        StringGrammar::OccurrenceId,
-        StringGrammar::SemanticCallId,
-        StringGrammar::FragmentBoundaryId,
-        StringGrammar::FailurePlanId,
-        StringGrammar::AccessAttemptId,
         StringGrammar::ArtifactId,
         StringGrammar::SchemaId,
         StringGrammar::SemanticTypeId,
@@ -2057,7 +2040,6 @@ fn parse_string_grammar(value: &str) -> Result<StringGrammar> {
         StringGrammar::StableId,
         StringGrammar::StoreScopeId,
         StringGrammar::TenantScopeId,
-        StringGrammar::UuidV4,
         StringGrammar::CanonicalUnsignedText,
         StringGrammar::LowerPathToken,
         StringGrammar::MediaType,

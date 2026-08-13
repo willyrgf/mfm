@@ -1,8 +1,14 @@
 #![warn(missing_docs)]
-//! Store-owned structured-history verification and atomic append contracts.
+//! Durable callback-free semantic evidence for one Store scope and writer epoch.
 //!
-//! Libraries use purpose-typed authority to load one exact run or submit one of four sealed
-//! append variants. Frozen values and codecs live in `mfm-journal`; this crate owns structural
-//! reduction, assigned coordinates, object authority, and backend transaction seams.
+//! Store is intentionally below Runtime in the dependency graph.  It validates strict journal
+//! frames, reduces the sequential prefix, and returns append owners; it cannot invoke a State or
+//! provider because neither authority is present in this crate.
 
-pub mod structured;
+pub mod single_trust;
+
+pub use single_trust::{
+    AppendDisposition, ConfigurationAppendDisposition, ConfigurationHistory, ConfigurationRevision,
+    FactContinuation, PreparationAppend, PreparedConclusion, PreparedConfigurationAppend,
+    QualifiedRun, ReducedRunState, Result, RunAction, RunReducer, RunStore, StoreError,
+};

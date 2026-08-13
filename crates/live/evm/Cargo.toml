@@ -3,39 +3,21 @@ name = "mfm-evm-live"
 version = "0.1.0"
 edition = "2021"
 autotests = false
-description = "Reusable EVM transport and runtime binding for MFM"
+description = "Qualified bounded EVM provider adapters for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
 [package.metadata.mfm]
-layer = "live"
+layer = "adapter"
 domain = "evm"
+domain-role = "live"
 
 [dependencies]
-alloy-primitives = { workspace = true, features = ["serde"] }
-bytes = "1.12.1"
-hex = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots"] }
-serde = { workspace = true }
-serde_json = { workspace = true, features = ["raw_value"] }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
-tracing = { workspace = true }
-zeroize = "1.7"
-
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-authority-seal = { path = "../../kernel/authority-seal" }
 mfm-canonical = { path = "../../kernel/canonical" }
-mfm-certify = { path = "../../kernel/certify" }
+mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-journal = { path = "../../kernel/journal" }
-mfm-program = { path = "../../kernel/program" }
-mfm-signing = { path = "../../signing" }
-mfm-spec = { path = "../../kernel/spec" }
-mfm-values = { path = "../../kernel/values" }
-
-[dev-dependencies]
-k256 = { version = "0.13.0", features = ["ecdsa"] }
-static_assertions = "1"
-tokio = { workspace = true, features = ["test-util"] }
+mfm-runtime = { path = "../../kernel/runtime" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

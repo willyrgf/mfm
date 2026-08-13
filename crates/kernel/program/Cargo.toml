@@ -3,7 +3,7 @@ name = "mfm-program"
 version = "0.1.0"
 edition = "2021"
 autotests = false
-description = "Typed state-program authoring contracts for MFM"
+description = "Opaque sequential Program authority for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -19,27 +19,11 @@ path = "src/lib.rs"
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
-mfm-capabilities = { path = "../capabilities" }
-mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
-mfm-program-derive = { path = "../program-derive" }
-mfm-spec = { path = "../spec" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-trybuild = "1.0"
-
-[[test]]
-name = "structured-authoring"
-path = "tests/structured_authoring.rs"
-
-[[test]]
-name = "structured-entry-mode"
-path = "tests/structured_entry_mode.rs"
-
-[[test]]
-name = "structured-ui"
-path = "tests/structured_ui.rs"
+mfm-program-derive = { path = "../program-derive" }

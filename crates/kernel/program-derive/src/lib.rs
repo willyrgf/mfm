@@ -11,7 +11,7 @@ use syn::parse_macro_input;
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed, FieldsUnnamed,
-    GenericArgument, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
+    GenericArgument, GenericParam, Ident, LitStr, Path, PathArguments, Type, TypePath, Variant,
 };
 
 #[path = "attributes.rs"]
@@ -88,12 +88,27 @@ fn expand_schema_derive_result(
     input: DeriveInput,
     kind: DeriveKind,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    if !input.generics.params.is_empty() {
-        return Err(syn::Error::new_spanned(
-            input.generics,
-            "MFM derives do not support generic structs in v1",
-        ));
+    let generic_params = input
+        .generics
+        .params
+        .iter()
+        .map(|parameter| match parameter {
+            GenericParam::Type(parameter) => Ok(parameter.ident.clone()),
+            other => Err(syn::Error::new_spanned(
+                other,
+                "MFM derives support only type parameters in v1",
+            )),
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+    let mut impl_generics = input.generics.clone();
+    for parameter in &mut impl_generics.params {
+        if let GenericParam::Type(parameter) = parameter {
+            parameter
+                .bounds
+                .push(syn::parse_quote!(::mfm_values::MfmValue));
+        }
     }
+    let (impl_generics, ty_generics, where_clause) = impl_generics.split_for_impl();
 
     let attrs = ContainerAttrs::parse(&input.attrs, &input.ident)?;
     let input_destinations = if kind == DeriveKind::StateInput {
@@ -104,7 +119,13 @@ fn expand_schema_derive_result(
     } else {
         None
     };
-    let shape_output = schema_shape_tokens(&input.data, attrs.rename_all.as_deref(), kind, &attrs)?;
+    let shape_output = schema_shape_tokens(
+        &input.data,
+        attrs.rename_all.as_deref(),
+        kind,
+        &attrs,
+        &generic_params,
+    )?;
     let shape = shape_output.shape;
     let default_bounds = shape_output.default_bounds;
     let ident = &input.ident;
@@ -194,7 +215,7 @@ fn expand_schema_derive_result(
 
     let impl_block = match kind {
         DeriveKind::PersistedContract => quote! {
-            impl #ident {
+            impl #impl_generics #ident #ty_generics #where_clause {
                 fn __mfm_persisted_schema_identity(
                 ) -> ::mfm_values::Result<&'static ::mfm_values::SchemaIdentity> {
                     static IDENTITY: ::std::sync::OnceLock<
@@ -212,7 +233,7 @@ fn expand_schema_derive_result(
                 }
             }
 
-            impl ::mfm_values::PersistedSchema for #ident {
+            impl #impl_generics ::mfm_values::PersistedSchema for #ident #ty_generics #where_clause {
                 fn schema_identity() -> ::mfm_values::Result<::mfm_values::SchemaIdentity> {
                     Self::__mfm_persisted_schema_identity().cloned()
                 }
@@ -256,7 +277,7 @@ fn expand_schema_derive_result(
             }
         },
         DeriveKind::Value => quote! {
-            impl ::mfm_values::MfmValue for #ident {
+            impl #impl_generics ::mfm_values::MfmValue for #ident #ty_generics #where_clause {
                 #semantic_impl
 
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
@@ -265,7 +286,7 @@ fn expand_schema_derive_result(
             }
         },
         DeriveKind::Config => quote! {
-            impl ::mfm_values::MfmConfig for #ident {
+            impl #impl_generics ::mfm_values::MfmConfig for #ident #ty_generics #where_clause {
                 fn schema_descriptor() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
@@ -274,7 +295,7 @@ fn expand_schema_derive_result(
             }
         },
         DeriveKind::StateInput => quote! {
-            impl ::mfm_values::StateInput for #ident {
+            impl #impl_generics ::mfm_values::StateInput for #ident #ty_generics #where_clause {
                 fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
@@ -296,20 +317,20 @@ fn expand_schema_derive_result(
             }
         },
         DeriveKind::OperationOutput => quote! {
-            impl ::mfm_values::OperationOutput for #ident {
+            impl #impl_generics ::mfm_values::OperationOutput for #ident #ty_generics #where_clause {
                 fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
             }
         },
         DeriveKind::PublicOutputs => quote! {
-            impl ::mfm_values::PublicOutputDescriptor for #ident {
+            impl #impl_generics ::mfm_values::PublicOutputDescriptor for #ident #ty_generics #where_clause {
                 fn #schema_method() -> ::mfm_values::Result<::mfm_values::SchemaDescriptor> {
                     #descriptor_body
                 }
             }
 
-            impl ::mfm_values::PublicOutputs for #ident {}
+            impl #impl_generics ::mfm_values::PublicOutputs for #ident #ty_generics #where_clause {}
         },
     };
 

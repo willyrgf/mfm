@@ -2,14 +2,15 @@
 name = "mfm-facts"
 version = "0.1.0"
 edition = "2021"
-description = "Pure fact authoring and selection semantics for the MFM typed kernel"
+autotests = false
+description = "Strict prior-fact request and publication values for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
 [package.metadata.mfm]
 layer = "kernel"
-domain-facing = true
+domain-facing = false
 binary-facing = false
 
 [lib]
@@ -22,8 +23,4 @@ mfm-ids = { path = "../ids" }
 mfm-program-derive = { path = "../program-derive" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }
-serde_json = { workspace = true }
 thiserror = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

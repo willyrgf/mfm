@@ -3,7 +3,7 @@ name = "mfm-evm"
 version = "0.1.0"
 edition = "2021"
 autotests = false
-description = "Pure EVM structured balance, submission, and wallet-authority contracts for MFM"
+description = "Secret-free EVM cumulative contexts and capability contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -14,37 +14,15 @@ domain-role = "source"
 
 [features]
 test-support = []
-# Internal storage bridge for the authority-produced activation permit.  The
-# pure domain crate does not expose the permit derivation by default.
 authority-integration = []
 
 [dependencies]
-mfm-authority-seal = { path = "../../kernel/authority-seal" }
-alloy-consensus = { workspace = true }
-alloy-eips = { workspace = true }
-alloy-primitives = { workspace = true, features = ["k256", "serde"] }
-derive_more = { workspace = true }
-hex = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-zeroize = "1.7"
-
-mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
 mfm-ids = { path = "../../kernel/ids" }
-mfm-journal = { path = "../../kernel/journal" }
-mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
-mfm-signing = { path = "../../signing" }
-mfm-spec = { path = "../../kernel/spec" }
 mfm-values = { path = "../../kernel/values" }
+serde = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
-trybuild = "1.0"
-
-[[test]]
-name = "signing-ui"
-path = "tests/signing_ui.rs"
+serde_json = { workspace = true }

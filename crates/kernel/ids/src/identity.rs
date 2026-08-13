@@ -178,6 +178,7 @@ impl<'de> Deserialize<'de> for SemanticDigest {
     }
 }
 
+#[allow(unused_macros)]
 macro_rules! semantic_identity {
     ($(#[$meta:meta])* $name:ident, $prefix:literal, $label:literal) => {
         $(#[$meta])*
@@ -389,41 +390,6 @@ branded_semantic_digest!(
 branded_semantic_digest!(
     /// Digest of the semantic state reconstructed for a run.
     RunSemanticStateDigest
-);
-
-semantic_identity!(
-    /// Stable semantic identity of one authored structured-program call.
-    SemanticCallId,
-    "semantic-call:",
-    "semantic call id"
-);
-
-semantic_identity!(
-    /// Exact normalized identity of one executable structured-program occurrence.
-    OccurrenceId,
-    "occurrence:",
-    "occurrence id"
-);
-
-semantic_identity!(
-    /// Exact non-executable identity of one structured fragment boundary.
-    FragmentBoundaryId,
-    "fragment-boundary:",
-    "fragment boundary id"
-);
-
-semantic_identity!(
-    /// Exact identity of one certified typed-failure continuation.
-    FailurePlanId,
-    "failure-plan:",
-    "failure plan id"
-);
-
-semantic_identity!(
-    /// Immutable identity of one structured Runtime access attempt.
-    AccessAttemptId,
-    "access-attempt:",
-    "access attempt id"
 );
 
 /// Category-branded identity with private fields and checked construction.

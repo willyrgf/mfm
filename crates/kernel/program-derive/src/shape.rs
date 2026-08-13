@@ -48,6 +48,7 @@ pub(super) fn schema_shape_tokens(
     rename_all: Option<&str>,
     kind: DeriveKind,
     attrs: &ContainerAttrs,
+    generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
     if attrs.unsigned_minimum.is_some()
         && (kind != DeriveKind::PersistedContract || !attrs.serde_transparent)
@@ -66,13 +67,13 @@ pub(super) fn schema_shape_tokens(
         ));
     }
     if attrs.transparent_string {
-        return transparent_string_shape_tokens(data, kind);
+        return transparent_string_shape_tokens(data, kind, generic_params);
     }
     if attrs.transparent_map {
-        return transparent_map_shape_tokens(data, kind);
+        return transparent_map_shape_tokens(data, kind, generic_params);
     }
     if kind == DeriveKind::PersistedContract && attrs.serde_transparent {
-        return transparent_newtype_shape_tokens(data, kind, attrs);
+        return transparent_newtype_shape_tokens(data, kind, attrs, generic_params);
     }
 
     match data {
@@ -80,7 +81,8 @@ pub(super) fn schema_shape_tokens(
             fields: Fields::Named(fields),
             ..
         }) => {
-            let field_output = field_descriptor_tokens(&fields.named, rename_all, kind)?;
+            let field_output =
+                field_descriptor_tokens(&fields.named, rename_all, kind, generic_params)?;
             let descriptors = field_output.descriptors;
             Ok(SchemaShapeOutput {
                 shape: quote!(::mfm_values::SchemaShape::named_struct(
@@ -93,7 +95,7 @@ pub(super) fn schema_shape_tokens(
             other.fields.span(),
             "MFM derives support named structs only in v1",
         )),
-        Data::Enum(data) => enum_shape_tokens(data, rename_all, kind, attrs),
+        Data::Enum(data) => enum_shape_tokens(data, rename_all, kind, attrs, generic_params),
         Data::Union(data) => Err(syn::Error::new(
             data.union_token.span,
             "MFM derives do not support unions",
@@ -109,6 +111,7 @@ fn transparent_newtype_shape_tokens(
     data: &Data,
     kind: DeriveKind,
     attrs: &ContainerAttrs,
+    generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
     let Data::Struct(DataStruct { fields, .. }) = data else {
         return Err(syn::Error::new(
@@ -148,7 +151,7 @@ fn transparent_newtype_shape_tokens(
             maximum: #maximum,
         })
     } else {
-        shape_tokens(&field.ty, kind)?
+        shape_tokens(&field.ty, kind, generic_params)?
     };
     Ok(SchemaShapeOutput {
         shape,
@@ -156,7 +159,11 @@ fn transparent_newtype_shape_tokens(
     })
 }
 
-fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<SchemaShapeOutput> {
+fn transparent_map_shape_tokens(
+    data: &Data,
+    kind: DeriveKind,
+    generic_params: &[Ident],
+) -> syn::Result<SchemaShapeOutput> {
     let Data::Struct(DataStruct {
         fields: Fields::Named(fields),
         ..
@@ -204,7 +211,7 @@ fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<Sc
             "mfm(transparent_map) BTreeMap keys must be String",
         ));
     }
-    let value_shape = shape_tokens(value, kind)?;
+    let value_shape = shape_tokens(value, kind, generic_params)?;
 
     Ok(SchemaShapeOutput {
         shape: if kind == DeriveKind::PersistedContract {
@@ -228,6 +235,7 @@ fn transparent_map_shape_tokens(data: &Data, kind: DeriveKind) -> syn::Result<Sc
 fn transparent_string_shape_tokens(
     data: &Data,
     kind: DeriveKind,
+    _generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
     let Data::Struct(DataStruct {
         fields: Fields::Named(fields),
@@ -273,6 +281,7 @@ fn enum_shape_tokens(
     rename_all: Option<&str>,
     kind: DeriveKind,
     attrs: &ContainerAttrs,
+    generic_params: &[Ident],
 ) -> syn::Result<SchemaShapeOutput> {
     if kind == DeriveKind::StateInput {
         return Err(syn::Error::new(
@@ -303,7 +312,7 @@ fn enum_shape_tokens(
             ));
         }
         variant_names.push(wire_name.clone());
-        let shape_output = variant_shape_tokens(variant, kind)?;
+        let shape_output = variant_shape_tokens(variant, kind, generic_params)?;
         default_bounds.extend(shape_output.default_bounds);
         let shape = shape_output.shape;
         variants.push(quote!(::mfm_values::EnumVariantDescriptor::new(#wire_name, #shape)));
@@ -334,14 +343,18 @@ fn enum_shape_tokens(
     })
 }
 
-fn variant_shape_tokens(variant: &Variant, kind: DeriveKind) -> syn::Result<SchemaShapeOutput> {
+fn variant_shape_tokens(
+    variant: &Variant,
+    kind: DeriveKind,
+    generic_params: &[Ident],
+) -> syn::Result<SchemaShapeOutput> {
     match &variant.fields {
         Fields::Unit => Ok(SchemaShapeOutput {
             shape: quote!(::mfm_values::SchemaShape::Unit),
             default_bounds: Vec::new(),
         }),
         Fields::Named(FieldsNamed { named, .. }) => {
-            let field_output = field_descriptor_tokens(named, None, kind)?;
+            let field_output = field_descriptor_tokens(named, None, kind, generic_params)?;
             let descriptors = field_output.descriptors;
             Ok(SchemaShapeOutput {
                 shape: quote!(::mfm_values::SchemaShape::named_struct(
@@ -353,7 +366,7 @@ fn variant_shape_tokens(variant: &Variant, kind: DeriveKind) -> syn::Result<Sche
         Fields::Unnamed(FieldsUnnamed { unnamed, .. }) => {
             let shapes = unnamed
                 .iter()
-                .map(|field| shape_tokens(&field.ty, kind))
+                .map(|field| shape_tokens(&field.ty, kind, generic_params))
                 .collect::<syn::Result<Vec<_>>>()?;
             Ok(SchemaShapeOutput {
                 shape: quote!(::mfm_values::SchemaShape::Tuple(vec![#(#shapes),*])),
@@ -367,6 +380,7 @@ fn field_descriptor_tokens(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
     rename_all: Option<&str>,
     kind: DeriveKind,
+    generic_params: &[Ident],
 ) -> syn::Result<FieldDescriptorOutput> {
     let mut output = Vec::new();
     let mut default_bounds = Vec::new();
@@ -414,9 +428,13 @@ fn field_descriptor_tokens(
                 .ok_or_else(|| {
                     syn::Error::new_spanned(&field.ty, "Option::is_none requires an Option field")
                 })?;
-            shape_tokens(one_generic_type(segment, "Option")?, shape_kind)?
+            shape_tokens(
+                one_generic_type(segment, "Option")?,
+                shape_kind,
+                generic_params,
+            )?
         } else {
-            shape_tokens(&field.ty, shape_kind)?
+            shape_tokens(&field.ty, shape_kind, generic_params)?
         };
         if let Some(literal) = attrs.literal {
             if kind != DeriveKind::PersistedContract || !is_string_type(&field.ty) {
@@ -481,10 +499,14 @@ fn field_descriptor_tokens(
     })
 }
 
-fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenStream> {
+fn shape_tokens(
+    ty: &Type,
+    kind: DeriveKind,
+    generic_params: &[Ident],
+) -> syn::Result<proc_macro2::TokenStream> {
     reject_known_secret_type(ty)?;
     match ty {
-        Type::Path(type_path) => shape_tokens_for_path(type_path, kind),
+        Type::Path(type_path) => shape_tokens_for_path(type_path, kind, generic_params),
         Type::Tuple(tuple) => {
             if tuple.elems.is_empty() {
                 return Ok(quote!(::mfm_values::SchemaShape::Unit));
@@ -492,7 +514,7 @@ fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenSt
             let elements = tuple
                 .elems
                 .iter()
-                .map(|element| shape_tokens(element, kind))
+                .map(|element| shape_tokens(element, kind, generic_params))
                 .collect::<syn::Result<Vec<_>>>()?;
             Ok(quote!(::mfm_values::SchemaShape::Tuple(
                 vec![#(#elements),*]
@@ -508,6 +530,7 @@ fn shape_tokens(ty: &Type, kind: DeriveKind) -> syn::Result<proc_macro2::TokenSt
 fn shape_tokens_for_path(
     type_path: &TypePath,
     kind: DeriveKind,
+    generic_params: &[Ident],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let Some(segment) = type_path.path.segments.last() else {
         return Err(syn::Error::new_spanned(
@@ -516,6 +539,25 @@ fn shape_tokens_for_path(
         ));
     };
     let ident = segment.ident.to_string();
+
+    if type_path.path.segments.len() == 1
+        && generic_params
+            .iter()
+            .any(|parameter| parameter == &segment.ident)
+    {
+        return Ok(quote!({
+            let descriptor = <#type_path as ::mfm_values::MfmValue>::schema_descriptor()?;
+            ::mfm_values::SchemaShape::Generic {
+                constructor: "mfm/generic-value".to_owned(),
+                arguments: vec![
+                    ::mfm_values::GenericArgumentDescriptor::for_value::<#type_path>()?
+                ],
+                serialized_shape: Box::new(
+                    descriptor.identity().canonical_json_shape()?.clone()
+                ),
+            }
+        }));
+    }
 
     if let Some(shape) = checked_identity_shape(&ident) {
         return Ok(shape);
@@ -565,16 +607,16 @@ fn shape_tokens_for_path(
         }
         "Box" => {
             let element = one_generic_type(segment, "Box")?;
-            shape_tokens(element, kind)
+            shape_tokens(element, kind, generic_params)
         }
         "Option" => {
             let element = one_generic_type(segment, "Option")?;
-            let shape = shape_tokens(element, kind)?;
+            let shape = shape_tokens(element, kind, generic_params)?;
             Ok(quote!(::mfm_values::SchemaShape::Option(Box::new(#shape))))
         }
         "Vec" => {
             let element = one_generic_type(segment, "Vec")?;
-            let shape = shape_tokens(element, kind)?;
+            let shape = shape_tokens(element, kind, generic_params)?;
             if kind == DeriveKind::PersistedContract {
                 Ok(quote!(::mfm_values::SchemaShape::BoundedSequence {
                     element: Box::new(#shape),
@@ -589,7 +631,7 @@ fn shape_tokens_for_path(
         }
         "NonEmpty" => {
             let element = one_generic_type(segment, "NonEmpty")?;
-            let shape = shape_tokens(element, kind)?;
+            let shape = shape_tokens(element, kind, generic_params)?;
             if kind == DeriveKind::PersistedContract {
                 Ok(quote!(::mfm_values::SchemaShape::BoundedSequence {
                     element: Box::new(#shape),
@@ -610,7 +652,7 @@ fn shape_tokens_for_path(
                     "BTreeMap keys must be String for MFM descriptors",
                 ));
             }
-            let value_shape = shape_tokens(value, kind)?;
+            let value_shape = shape_tokens(value, kind, generic_params)?;
             if kind == DeriveKind::PersistedContract {
                 Ok(quote!(::mfm_values::SchemaShape::BoundedStringMap {
                     key_grammar: ::mfm_values::StringGrammar::UnicodeScalarText,
@@ -682,11 +724,6 @@ fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
         "SemanticTypeId" => (quote!(SemanticTypeId), 512),
         "SemanticDigest" => (quote!(SemanticDigest), 128),
         "RunId" => (quote!(RunId), 128),
-        "OccurrenceId" => (quote!(OccurrenceId), 128),
-        "SemanticCallId" => (quote!(SemanticCallId), 128),
-        "FragmentBoundaryId" => (quote!(FragmentBoundaryId), 128),
-        "FailurePlanId" => (quote!(FailurePlanId), 128),
-        "AccessAttemptId" => (quote!(AccessAttemptId), 128),
         "ArtifactId" => (quote!(ArtifactId), 128),
         "JournalRecordHash"
         | "JournalCommitDigest"
@@ -700,7 +737,6 @@ fn checked_identity_shape(ident: &str) -> Option<proc_macro2::TokenStream> {
         "StoreScopeId" => (quote!(StoreScopeId), 64),
         "TenantScopeId" => (quote!(TenantScopeId), 64),
         "EntryPointId" => (quote!(EntryPointId), 256),
-        "InvocationIdentity" => (quote!(UuidV4), 64),
         _ => return None,
     };
     let (grammar, maximum_bytes) = grammar_and_bound;

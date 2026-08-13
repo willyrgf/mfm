@@ -1,5 +1,0 @@
-error[E0609]: no field `admit_run` on type `&PublicRunReader<PostgresStructuredHistoryBackend>`
- --> tests/ui/structured/fail/run_history_reader_cannot_append.rs:7:24
-  |
-7 |         let _ = reader.admit_run;
-  |                        ^^^^^^^^^ unknown field

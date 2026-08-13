@@ -244,13 +244,6 @@ checked_string_type!(
 );
 
 checked_string_type!(
-    InvocationIdentity,
-    "invocation identity",
-    validate_invocation_identity,
-    "Canonical lowercase UUIDv4 identity for one external invocation."
-);
-
-checked_string_type!(
     FieldSegment,
     "field segment",
     validate_field_segment,

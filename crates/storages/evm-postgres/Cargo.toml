@@ -2,8 +2,9 @@
 name = "mfm-storage-evm-postgres"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
-description = "Fenced PostgreSQL activation registry and EVM wallet nonce authority for MFM"
+autotests = false
+autobins = false
+description = "EVM wallet nonce authority for MFM adapters"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 
@@ -11,44 +12,14 @@ license = "MIT"
 layer = "storage"
 domain = "evm"
 
-[dependencies]
-mfm-authority-seal = { path = "../../kernel/authority-seal" }
-alloy-primitives = { workspace = true }
-hex = { workspace = true }
-ring = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "tls-none", "postgres", "macros", "migrate"] }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-zeroize = { version = "1.7", features = ["serde"] }
-
-mfm-canonical = { path = "../../kernel/canonical" }
-mfm-capabilities = { path = "../../kernel/capabilities" }
-mfm-certify = { path = "../../kernel/certify" }
-mfm-evm = { path = "../../domains/evm", features = ["authority-integration"] }
-mfm-ids = { path = "../../kernel/ids" }
-mfm-journal = { path = "../../kernel/journal" }
-mfm-values = { path = "../../kernel/values" }
-mfm-wallet-authority-provider-test-support = { path = "../../../tests/wallet-authority-provider", optional = true }
-
-[dev-dependencies]
-static_assertions = "1"
-tokio = { workspace = true }
+[lib]
+name = "mfm_storage_evm_postgres"
+path = "src/lib.rs"
 
 [features]
-parity-tests = ["dep:mfm-wallet-authority-provider-test-support", "mfm-evm/test-support"]
+parity-tests = []
 
-[[bin]]
-name = "mfm-storage-wallet-authority-provider"
-path = "src/bin/provider_process.rs"
-required-features = ["parity-tests"]
-
-[[test]]
-name = "provider-protocol"
-path = "tests/provider_protocol.rs"
-
-[[test]]
-name = "wallet-authority"
-path = "tests/wallet_authority.rs"
-required-features = ["parity-tests"]
+[dependencies]
+mfm-ids = { path = "../../kernel/ids" }
+sqlx = { workspace = true }
+thiserror = { workspace = true }

@@ -45,3 +45,12 @@ fn short_stable_id_fragment_uses_alphanumeric_suffix() {
         "012345"
     );
 }
+
+#[test]
+fn sequential_address_deserialization_reenters_its_depth_bound() {
+    let value = serde_json::json!({
+        "declaration_ordinal": 1,
+        "match_arm_ordinals": vec![0_u32; 65],
+    });
+    assert!(serde_json::from_value::<SequentialControlAddress>(value).is_err());
+}

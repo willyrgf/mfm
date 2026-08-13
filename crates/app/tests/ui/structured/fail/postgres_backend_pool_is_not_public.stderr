@@ -1,5 +1,0 @@
-error[E0599]: no method named `writer_pool` found for reference `&PostgresStructuredHistoryBackend` in the current scope
- --> tests/ui/structured/fail/postgres_backend_pool_is_not_public.rs:4:21
-  |
-4 |     let _ = backend.writer_pool();
-  |                     ^^^^^^^^^^^ method not found in `&PostgresStructuredHistoryBackend`

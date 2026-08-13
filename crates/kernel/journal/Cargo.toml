@@ -2,7 +2,7 @@
 name = "mfm-journal"
 version = "0.1.0"
 edition = "2021"
-description = "Canonical five-family structured RunHistory contracts for MFM"
+description = "Canonical three-family run journal contracts for MFM"
 repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
@@ -19,8 +19,6 @@ path = "src/lib.rs"
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-ids = { path = "../ids" }
-mfm-program-derive = { path = "../program-derive" }
-mfm-values = { path = "../values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

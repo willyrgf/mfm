@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `QualifiedPhysicalBinding<K>` in the current scope
- --> tests/ui/structured/fail/clone_qualified_physical_binding.rs:4:30
-  |
-4 |     let _duplicate = binding.clone();
-  |                              ^^^^^ method not found in `QualifiedPhysicalBinding<ReadPhysicalBindingKind>`

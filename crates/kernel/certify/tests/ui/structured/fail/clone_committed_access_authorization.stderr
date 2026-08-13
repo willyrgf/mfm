@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `CertifiedAccessAuthorization` in the current scope
- --> tests/ui/structured/fail/clone_committed_access_authorization.rs:4:36
-  |
-4 |     let _duplicate = authorization.clone();
-  |                                    ^^^^^ method not found in `CertifiedAccessAuthorization`

@@ -1,5 +1,0 @@
-error[E0599]: no method named `records` found for reference `&PublicRunEvidence` in the current scope
- --> tests/ui/structured/fail/public_evidence_cannot_enumerate_records.rs:4:22
-  |
-4 |     let _ = evidence.records();
-  |                      ^^^^^^^ method not found in `&PublicRunEvidence`
