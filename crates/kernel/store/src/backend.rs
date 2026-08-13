@@ -2248,7 +2248,7 @@ mod tests {
     use super::*;
     use crate::single_trust::ConfigurationAppendDisposition;
     use mfm_canonical::raw_content_digest;
-    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
+    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId, StableId};
 
     fn identity() -> StructuredStoreIdentity {
         StructuredStoreIdentity::new(
@@ -2948,6 +2948,178 @@ mod tests {
         assert_eq!(facts.publications().len(), 2);
     }
 
+    #[cfg(feature = "test-support")]
+    #[tokio::test]
+    async fn unknown_conclusion_retry_finds_same_frame_without_republishing_facts() {
+        let identity = identity();
+        let schema = SchemaId::new(
+            "mfm.test.unknown-conclusion",
+            "1",
+            DigestAlgorithm::Sha256JcsV1,
+            DigestBytes::from_array([7; 32]),
+        )
+        .expect("schema");
+        let contract =
+            ContentRef::new(schema.clone(), raw_content_digest(b"contract")).expect("contract");
+        let context_content =
+            ContentRef::new(schema, raw_content_digest(br#"{"value":1}"#)).expect("context");
+        let context = ValueRef::new(contract.clone(), context_content.clone());
+        let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+            .expect("occurrence");
+        let state = mfm_program::single_trust::StateDeclaration::new(
+            occurrence.clone(),
+            contract.clone(),
+            contract.clone(),
+            contract.clone(),
+            None,
+            mfm_program::single_trust::ExecutionMode::Pure,
+            true,
+        )
+        .expect("state");
+        let maximum_conclusion_bytes = state.maximum_conclusion_bytes();
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            StableId::new("mfm.test.unknown-conclusion-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            vec![mfm_program::Declaration::State(Box::new(state))],
+        )
+        .expect("document");
+        let program_ref = document.program_ref().expect("program ref");
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:6123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+        let admission = mfm_journal::single_trust::RunFrame::new(
+            run_id.clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            1,
+            AppendRequestId::new("unknown-conclusion-admission-012345").expect("request"),
+            RunRecord::RunAdmitted(
+                mfm_journal::single_trust::RunAdmitted::new(
+                    identity.scope().clone(),
+                    identity.epoch(),
+                    run_id.clone(),
+                    identity.tenant().clone(),
+                    StableId::new("mfm.test.unknown-conclusion-entry").expect("entry"),
+                    program_ref,
+                    context.clone(),
+                    ContentRef::new(
+                        SchemaId::new(
+                            "mfm.test.unknown-conclusion-config",
+                            "1",
+                            DigestAlgorithm::Sha256JcsV1,
+                            DigestBytes::from_array([8; 32]),
+                        )
+                        .expect("configuration schema"),
+                        raw_content_digest(b"configuration"),
+                    )
+                    .expect("configuration"),
+                    Vec::new(),
+                )
+                .expect("admission"),
+            ),
+            vec![mfm_journal::single_trust::ImmutableObject::new(
+                StableId::new("mfm.value").expect("object type"),
+                context_content,
+                r#"{"value":1}"#.to_owned(),
+            )
+            .expect("context object")],
+        )
+        .expect("admission frame");
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(document.clone())
+            .expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity,
+            catalog,
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("opened store");
+        opened
+            .append_admission(admission.clone())
+            .await
+            .expect("admission");
+        let current = opened.load(&run_id).await.expect("current");
+        let reduced = opened
+            .reduce_qualified(&current, document.clone())
+            .expect("reduced");
+        let (proposal_value, proposal_object) = proposal(100);
+        let owner = opened
+            .prepare_conclusion_qualified_with_reduced(
+                &current,
+                &document,
+                &reduced,
+                1,
+                AppendRequestId::new("unknown-conclusion-append-0123456789").expect("request"),
+                mfm_journal::single_trust::StateConcluded::Pure {
+                    occurrence,
+                    outcome: mfm_journal::single_trust::StateOutcome::Success(context),
+                    fact_proposals: Some(proposal_value),
+                    fact_publication: None,
+                },
+                vec![admission.objects()[0].clone(), proposal_object],
+                maximum_conclusion_bytes,
+            )
+            .expect("conclusion owner");
+        backend.fail_next_history_acknowledgement();
+        let owner = match opened
+            .commit_conclusion(owner)
+            .await
+            .expect("unknown commit")
+        {
+            ConclusionCommitOutcome::AcknowledgementUnknown(owner) => {
+                assert_eq!(
+                    owner
+                        .frame()
+                        .record()
+                        .fact_publication()
+                        .map(|publication| publication.publication_sequence()),
+                    Some(1)
+                );
+                owner
+            }
+            other => panic!("unexpected unknown outcome: {other:?}"),
+        };
+        let (disposition, frame) = match opened
+            .commit_conclusion(owner)
+            .await
+            .expect("unknown resolution")
+        {
+            ConclusionCommitOutcome::Disposition { disposition, frame } => (disposition, frame),
+            other => panic!("unexpected resolution outcome: {other:?}"),
+        };
+        assert_eq!(disposition, AppendDisposition::Found { sequence: 2 });
+        assert_eq!(
+            frame
+                .record()
+                .fact_publication()
+                .map(|publication| publication.publication_sequence()),
+            Some(1)
+        );
+        let facts = opened
+            .clone()
+            .split()
+            .into_parts()
+            .3
+            .facts()
+            .await
+            .expect("facts");
+        assert_eq!(facts.head_sequence(), 1);
+        assert_eq!(facts.publications().len(), 1);
+        assert_eq!(
+            opened
+                .load(&run_id)
+                .await
+                .expect("retained")
+                .head_sequence(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn configuration_snapshots_cannot_cross_store_openings() {
         let identity = identity();
@@ -3117,6 +3289,28 @@ mod fault_tests {
             backend.compare_and_append(&command).await.expect("retry"),
             BackendAppendOutcome::Found(_)
         ));
+        let second_bytes = br#"{"kind":"fact-frontier-check"}"#;
+        let second_digest = raw_content_digest(second_bytes);
+        let second_head = raw_content_digest(b"second-head");
+        let second_request =
+            AppendRequestId::new("memory-fact-frontier-0123456789").expect("request");
+        let second = BackendAppendCommand::new(
+            &identity,
+            &run_id,
+            2,
+            &second_request,
+            second_bytes,
+            &second_digest,
+            &second_head,
+            Some(&head_digest),
+            false,
+            None,
+        )
+        .with_fact_frontier(Some(1));
+        assert_eq!(
+            backend.compare_and_append(&second).await,
+            Err(BackendError::FactFrontierChanged)
+        );
 
         let schema = SchemaId::new(
             "mfm.test.unknown-configuration",

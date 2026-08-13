@@ -28,6 +28,11 @@ publication atomically. A fact-frontier race returns the same pending conclusion
 coordinate cleared; retrying rebinds that coordinate without re-running State, adapter, or fact
 selection logic.
 
+If the backend acknowledges a conclusion append ambiguously, Runtime retains the same pending
+owner. Resolution retries the same append identity, accepts `Found` for the exact retained frame,
+and never republishes its fact proposal set or re-enters Pure, Access, adapter, or interpretation
+logic.
+
 The worker retains the latest catalog-qualified typed context while hot. A conclusion is canonically
 encoded once for the append, then the already-typed successor is handed to the next State. Cold
 resume folds the complete bounded prefix and checks every content/contract link without invoking

@@ -2397,7 +2397,12 @@ mod tests {
     use mfm_capabilities::{AccessCapabilityContract, NoPriorFacts, ReadMode};
     use mfm_program::single_trust::{ExecutionMode, ProgramDocument, StateDeclaration};
     use mfm_program_derive::MfmValue as DeriveMfmValue;
-    use mfm_store::{StoreWorkLimits, StructuredStore, StructuredStoreIdentity};
+    use mfm_store::{
+        BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendFuture,
+        ConfigurationAppendCommand, MemoryStructuredBackend, RawConfigurationRevision,
+        RawFactSnapshot, RawHistoryLoadLimit, RawRunPrefix, StoreWorkLimits, StructuredStore,
+        StructuredStoreBackend, StructuredStoreIdentity,
+    };
     use serde::{Deserialize, Serialize};
     use std::num::NonZeroU16;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2490,7 +2495,13 @@ mod tests {
         )
     }
 
-    fn pure_runtime_fixture() -> (Runtime, ProgramCatalog, ContentRef) {
+    fn pure_runtime_assembly(
+        pure_entries: Option<Arc<AtomicUsize>>,
+    ) -> (
+        crate::single_trust::RuntimeAssembly,
+        ProgramCatalog,
+        ContentRef,
+    ) {
         let contract = nominal_contract_ref::<TestContext>().expect("contract");
         let first_implementation_ref = test_ref(b"mfm.test.concurrent-pure-first");
         let second_implementation_ref = test_ref(b"mfm.test.concurrent-pure-second");
@@ -2533,7 +2544,10 @@ mod tests {
         )
         .expect("document");
         let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
-        let implementation = PureImplementation::<TestPure>::new(|input| {
+        let implementation = PureImplementation::<TestPure>::new(move |input| {
+            if let Some(pure_entries) = &pure_entries {
+                pure_entries.fetch_add(1, Ordering::SeqCst);
+            }
             mfm_capabilities::ProposedStateOutcome::Success {
                 output: TestContext {
                     value: input.value + 1,
@@ -2551,6 +2565,15 @@ mod tests {
             .register_pure(second_implementation_ref, implementation)
             .expect("registration");
         let assembly = builder.finish().expect("assembly");
+        (
+            assembly,
+            catalog,
+            nominal_contract_ref::<TestContext>().expect("contract"),
+        )
+    }
+
+    fn pure_runtime_fixture() -> (Runtime, ProgramCatalog, ContentRef) {
+        let (assembly, catalog, contract) = pure_runtime_assembly(None);
         let store = StructuredStore::open_memory(
             test_identity(),
             catalog.clone(),
@@ -2560,8 +2583,73 @@ mod tests {
         (
             Runtime::new(assembly, store).expect("runtime"),
             catalog,
-            nominal_contract_ref::<TestContext>().expect("contract"),
+            contract,
         )
+    }
+
+    struct UnknownConclusionBackend {
+        inner: Arc<MemoryStructuredBackend>,
+        injected: AtomicUsize,
+    }
+
+    impl UnknownConclusionBackend {
+        fn new(inner: Arc<MemoryStructuredBackend>) -> Self {
+            Self {
+                inner,
+                injected: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl StructuredStoreBackend for UnknownConclusionBackend {
+        fn identity(&self) -> StructuredStoreIdentity {
+            self.inner.identity()
+        }
+
+        fn load_complete_prefix<'a>(
+            &'a self,
+            run_id: &'a RunId,
+            limit: RawHistoryLoadLimit,
+        ) -> BackendFuture<'a, Option<RawRunPrefix>> {
+            self.inner.load_complete_prefix(run_id, limit)
+        }
+
+        fn compare_and_append<'a>(
+            &'a self,
+            command: &'a BackendAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendAppendOutcome> {
+            let inner = Arc::clone(&self.inner);
+            let injected = &self.injected;
+            Box::pin(async move {
+                let outcome = inner.compare_and_append(command).await?;
+                if !command.is_admission()
+                    && matches!(outcome, BackendAppendOutcome::NewlyCommitted)
+                    && injected.fetch_add(1, Ordering::SeqCst) == 0
+                {
+                    return Ok(BackendAppendOutcome::AcknowledgementUnknown);
+                }
+                Ok(outcome)
+            })
+        }
+
+        fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
+            self.inner.load_configuration()
+        }
+
+        fn compare_and_append_configuration<'a>(
+            &'a self,
+            command: &'a ConfigurationAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendConfigurationOutcome> {
+            self.inner.compare_and_append_configuration(command)
+        }
+
+        fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
+            self.inner.load_facts()
+        }
+
+        fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
+            self.inner.audit_run_ids()
+        }
     }
 
     #[derive(Default)]
@@ -2714,6 +2802,65 @@ mod tests {
                     .len())
                 .sum::<usize>()
         );
+        assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_pure_conclusion_recovery_does_not_reexecute_state() {
+        let pure_entries = Arc::new(AtomicUsize::new(0));
+        let (assembly, catalog, contract) = pure_runtime_assembly(Some(Arc::clone(&pure_entries)));
+        let identity = test_identity();
+        let backend = Arc::new(UnknownConclusionBackend::new(Arc::new(
+            MemoryStructuredBackend::new(identity.clone()),
+        )));
+        let store = StructuredStore::open(
+            backend,
+            identity,
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("store");
+        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+        let value = catalog
+            .qualify(contract, TestContext { value: 1 })
+            .expect("qualified input");
+        let admission = runtime
+            .admission(
+                run_id,
+                value,
+                test_ref(b"mfm.test.unknown-conclusion-configuration"),
+                Vec::new(),
+                AppendRequestId::new("unknown-runtime-admission-0123456789").expect("append id"),
+            )
+            .expect("admission");
+        let session = match admission.spawn().await {
+            SpawnStep::Active(session) => session,
+            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
+        };
+        let suspended = match session.drive().await {
+            RuntimeStep::Suspended(suspended) => suspended,
+            other => panic!("unexpected first drive outcome: {}", runtime_name(&other)),
+        };
+        assert_eq!(pure_entries.load(Ordering::SeqCst), 1);
+        let advanced = match suspended.resolve().await {
+            RuntimeStep::Advanced(session) => session,
+            other => panic!("unexpected conclusion recovery: {}", runtime_name(&other)),
+        };
+        assert_eq!(advanced.head_sequence(), 2);
+        assert_eq!(pure_entries.load(Ordering::SeqCst), 1);
+        let terminal = match advanced.drive().await {
+            RuntimeStep::Terminal(terminal) => terminal,
+            other => panic!(
+                "unexpected terminal drive outcome: {}",
+                runtime_name(&other)
+            ),
+        };
+        assert_eq!(terminal.head_sequence(), 3);
         assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
     }
 
