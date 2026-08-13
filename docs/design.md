@@ -64,9 +64,11 @@ preparation bridge does not accept a caller-supplied replacement descriptor, and
 has no generic public frame append; admission and qualified conclusion ownership are separate
 ingress paths.
 
-Runtime has no scheduler, history API, per-run execution lock, or process-wide writer lease.
-Workers race through Store exact-head compare-and-append. A dropped hot owner leaves only the
-durable prefix; cold replay qualifies the complete prefix without callbacks.
+Runtime has no scheduler, history API, per-run execution lock, or process-wide writer lease. Each
+opening owns bounded active-session, deterministic CPU, planning, and provider-ingress permits;
+retained-prefix qualification uses a bounded blocking job. Workers race through Store exact-head
+compare-and-append. A dropped hot owner leaves only the durable prefix; cold replay qualifies the
+complete prefix without callbacks.
 
 ## Storage, tenants, and deployment
 

@@ -23,7 +23,7 @@ path = "src/lib.rs"
 
 [features]
 test-support = []
-backend-conformance = ["test-support", "dep:tokio"]
+backend-conformance = ["test-support"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
@@ -34,7 +34,7 @@ mfm-program = { path = "../program" }
 mfm-values = { path = "../values" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, optional = true }
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
