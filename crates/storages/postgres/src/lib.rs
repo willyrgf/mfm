@@ -743,7 +743,11 @@ impl StructuredStoreBackend for PostgresStore {
 mod managed_postgres_tests {
     use super::*;
     use mfm_canonical::raw_content_digest;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     async fn install_abort_trigger(pool: &PgPool, table: &str, operation: &str) {
         let create = match (table, operation) {
@@ -834,6 +838,250 @@ mod managed_postgres_tests {
             .expect("clear failpoint function");
     }
 
+    #[cfg(target_os = "linux")]
+    struct IsolatedPrimary {
+        pool: PgPool,
+        store: Arc<PostgresStore>,
+        data_directory: PathBuf,
+        pg_ctl: PathBuf,
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn start_isolated_primary(
+        managed_pool: &PgPool,
+        identity: &StructuredStoreIdentity,
+    ) -> IsolatedPrimary {
+        let managed_data_directory: String =
+            sqlx::query_scalar("SELECT setting FROM pg_settings WHERE name = 'data_directory'")
+                .fetch_one(managed_pool)
+                .await
+                .expect("managed data directory");
+        let managed_pid =
+            fs::read_to_string(PathBuf::from(&managed_data_directory).join("postmaster.pid"))
+                .expect("managed postmaster pid file")
+                .lines()
+                .next()
+                .and_then(|line| line.parse::<i32>().ok())
+                .expect("managed postmaster pid");
+        let postgres_executable = fs::read_link(format!("/proc/{managed_pid}/exe"))
+            .expect("managed postmaster executable");
+        let binary_directory = postgres_executable
+            .parent()
+            .expect("postgres executable directory")
+            .to_owned();
+        let pg_ctl = binary_directory.join("pg_ctl");
+        let initdb = binary_directory.join("initdb");
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let data_directory = std::env::temp_dir().join(format!(
+            "mfm-primary-restart-{}-{stamp}",
+            std::process::id()
+        ));
+        let setup_pg_ctl = pg_ctl.clone();
+        let (data_directory, port) = tokio::task::spawn_blocking({
+            let data_directory = data_directory.clone();
+            move || {
+                fs::create_dir(&data_directory).expect("isolated primary directory");
+                let init = Command::new(&initdb)
+                    .args([
+                        "-D",
+                        data_directory
+                            .to_str()
+                            .expect("isolated data directory path"),
+                        "-U",
+                        "postgres",
+                        "--auth=trust",
+                    ])
+                    .output()
+                    .expect("initialize isolated primary");
+                assert!(init.status.success(), "initialize isolated primary failed");
+                let listener =
+                    std::net::TcpListener::bind("127.0.0.1:0").expect("isolated primary port");
+                let port = listener
+                    .local_addr()
+                    .expect("isolated primary address")
+                    .port();
+                drop(listener);
+                let options = format!(
+                    "-c fsync=on -c full_page_writes=on -c synchronous_commit=on \
+                     -c unix_socket_directories= -h 127.0.0.1 -p {port}"
+                );
+                let log_path = data_directory.join("restart.log");
+                let start = Command::new(&setup_pg_ctl)
+                    .args([
+                        "-D",
+                        data_directory
+                            .to_str()
+                            .expect("isolated data directory path"),
+                        "-o",
+                        &options,
+                        "-l",
+                        log_path.to_str().expect("isolated restart log path"),
+                        "-w",
+                        "start",
+                    ])
+                    .output()
+                    .expect("start isolated primary");
+                assert!(start.status.success(), "start isolated primary failed");
+                Ok::<_, ()>((data_directory, port))
+            }
+        })
+        .await
+        .expect("isolated primary worker")
+        .expect("isolated primary setup");
+        let database_url = format!("postgresql://postgres@127.0.0.1:{port}/postgres");
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("isolated primary connection");
+        PostgresStore::migrate(&pool)
+            .await
+            .expect("isolated primary schema");
+        let store = Arc::new(
+            PostgresStore::from_pool(
+                pool.clone(),
+                identity.scope().clone(),
+                identity.epoch(),
+                identity.tenant().clone(),
+                DurabilityProfile::PrimaryCrashRestart,
+            )
+            .expect("isolated primary store"),
+        );
+        store
+            .check_ready()
+            .await
+            .expect("isolated primary durability");
+        IsolatedPrimary {
+            pool,
+            store,
+            data_directory,
+            pg_ctl,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn crash_and_restart_primary(primary: &IsolatedPrimary) {
+        let port: String = sqlx::query_scalar("SELECT current_setting('port')")
+            .fetch_one(&primary.pool)
+            .await
+            .expect("isolated primary port");
+        let pid_path = primary.data_directory.join("postmaster.pid");
+        let postmaster_pid = fs::read_to_string(&pid_path)
+            .expect("isolated postmaster pid file")
+            .lines()
+            .next()
+            .and_then(|line| line.parse::<i32>().ok())
+            .expect("isolated postmaster pid");
+        assert!(Command::new("kill")
+            .args(["-KILL", &postmaster_pid.to_string()])
+            .status()
+            .expect("kill isolated primary")
+            .success());
+
+        let restart_data_directory = primary.data_directory.clone();
+        let restart_pg_ctl = primary.pg_ctl.clone();
+        let restart_port = port.clone();
+        tokio::task::spawn_blocking(move || {
+            for _ in 0..100 {
+                let data_directory_text = restart_data_directory.to_string_lossy();
+                let still_running = fs::read_dir("/proc")
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry.ok())
+                    .filter_map(|entry| entry.file_name().into_string().ok())
+                    .filter(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+                    .any(|pid| {
+                        fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                            .map(|command| {
+                                command.contains("postgres")
+                                    && command.contains(data_directory_text.as_ref())
+                            })
+                            .unwrap_or(false)
+                    });
+                if !still_running {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if fs::read_to_string(restart_data_directory.join("postmaster.pid"))
+                .ok()
+                .and_then(|contents| contents.lines().next().map(str::to_owned))
+                .and_then(|pid| pid.parse::<i32>().ok())
+                == Some(postmaster_pid)
+            {
+                fs::remove_file(restart_data_directory.join("postmaster.pid"))
+                    .expect("remove crashed isolated pid file");
+            }
+            let options = format!(
+                "-c fsync=on -c full_page_writes=on -c synchronous_commit=on \
+                 -c unix_socket_directories= -h 127.0.0.1 -p {restart_port}"
+            );
+            let log_path = restart_data_directory.join("restart.log");
+            let output = Command::new(&restart_pg_ctl)
+                .args([
+                    "-D",
+                    restart_data_directory
+                        .to_str()
+                        .expect("isolated data directory path"),
+                    "-o",
+                    &options,
+                    "-l",
+                    log_path.to_str().expect("isolated restart log path"),
+                    "-w",
+                    "start",
+                ])
+                .output()
+                .expect("restart isolated primary");
+            assert!(output.status.success(), "restart isolated primary failed");
+        })
+        .await
+        .expect("isolated primary restart worker");
+
+        let mut ready = false;
+        for _ in 0..100 {
+            if sqlx::query_scalar::<_, i32>("SELECT 1")
+                .fetch_one(&primary.pool)
+                .await
+                .is_ok()
+            {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(ready, "restarted isolated primary did not become ready");
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn stop_isolated_primary(primary: IsolatedPrimary) {
+        primary.pool.close().await;
+        let data_directory = primary.data_directory;
+        let pg_ctl = primary.pg_ctl;
+        tokio::task::spawn_blocking(move || {
+            let stopped = Command::new(&pg_ctl)
+                .args([
+                    "-D",
+                    data_directory
+                        .to_str()
+                        .expect("isolated data directory path"),
+                    "-m",
+                    "immediate",
+                    "-w",
+                    "stop",
+                ])
+                .output()
+                .expect("stop isolated primary");
+            assert!(stopped.status.success(), "stop isolated primary failed");
+            fs::remove_dir_all(data_directory).expect("remove isolated primary directory");
+        })
+        .await
+        .expect("isolated primary shutdown worker");
+    }
+
     #[tokio::test]
     async fn managed_primary_schema_meets_the_admitted_profile() {
         let Ok(database_url) = std::env::var("DATABASE_URL") else {
@@ -869,22 +1117,49 @@ mod managed_postgres_tests {
             TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
                 .expect("tenant"),
         );
-        let store = PostgresStore::from_pool(
-            pool.clone(),
-            identity.scope().clone(),
-            identity.epoch(),
-            identity.tenant().clone(),
-            DurabilityProfile::PrimaryCrashRestart,
-        )
-        .expect("store");
+        let store = Arc::new(
+            PostgresStore::from_pool(
+                pool.clone(),
+                identity.scope().clone(),
+                identity.epoch(),
+                identity.tenant().clone(),
+                DurabilityProfile::PrimaryCrashRestart,
+            )
+            .expect("store"),
+        );
         store
             .check_ready()
             .await
             .expect("admitted PostgreSQL durability");
-        let backend = Arc::new(store);
+        let backend: Arc<dyn StructuredStoreBackend> = store.clone();
         mfm_store::backend_conformance::exercise(backend.clone(), identity.clone())
             .await
             .expect("PostgreSQL backend contract");
+
+        #[cfg(target_os = "linux")]
+        {
+            let primary = start_isolated_primary(&pool, &identity).await;
+            let primary_backend: Arc<dyn StructuredStoreBackend> = primary.store.clone();
+            let restart_run = mfm_store::backend_conformance::append_primary_restart_probe(
+                primary_backend.clone(),
+                identity.clone(),
+            )
+            .await
+            .expect("primary restart probe append");
+            crash_and_restart_primary(&primary).await;
+            primary
+                .store
+                .check_ready()
+                .await
+                .expect("restarted PostgreSQL durability");
+            mfm_store::backend_conformance::verify_primary_restart_probe(
+                primary_backend,
+                restart_run,
+            )
+            .await
+            .expect("primary restart probe recovery");
+            stop_isolated_primary(primary).await;
+        }
 
         for (table, operation) in [
             ("mfm_run_frames", "INSERT"),
