@@ -3135,6 +3135,92 @@ mod tests {
     }
 
     #[test]
+    fn configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one() {
+        fn json_with_bytes(bytes: usize) -> String {
+            const OVERHEAD: usize = 12;
+            assert!(bytes >= OVERHEAD);
+            format!(r#"{{"value":"{}"}}"#, "a".repeat(bytes - OVERHEAD))
+        }
+
+        let exact_revision = ConfigurationRevision::new(
+            1,
+            AppendRequestId::new("configuration-exact-revision-012345").expect("request"),
+            json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES),
+        )
+        .expect("exact revision bound");
+        assert_eq!(
+            exact_revision.canonical_json().len(),
+            mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+        );
+        assert!(ConfigurationRevision::new(
+            1,
+            AppendRequestId::new("configuration-plus-one-revision-0123").expect("request"),
+            json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES + 1),
+        )
+        .is_err());
+
+        let mut revisions = ConfigurationHistory::new();
+        for sequence in 0..mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+            let request =
+                AppendRequestId::new(format!("configuration-revision-{sequence:04}-0123456789"))
+                    .expect("request");
+            let owner = revisions
+                .prepare_append(sequence as u64, request, r#"{"mode":"bounded"}"#.to_owned())
+                .expect("exact revision-count bound");
+            assert!(matches!(
+                owner.commit(&mut revisions),
+                Ok(ConfigurationAppendDisposition::NewlyCommitted { .. })
+            ));
+        }
+        assert_eq!(
+            revisions.head_sequence(),
+            mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS as u64
+        );
+        assert!(matches!(
+            revisions.prepare_append(
+                revisions.head_sequence(),
+                AppendRequestId::new("configuration-plus-one-count-012345").expect("request"),
+                r#"{"mode":"over-count"}"#.to_owned(),
+            ),
+            Err(StoreError::Capacity)
+        ));
+
+        let mut stream = ConfigurationHistory::new();
+        for sequence in 0..4 {
+            let owner = stream
+                .prepare_append(
+                    sequence,
+                    AppendRequestId::new(format!("configuration-stream-{sequence}-0123456789"))
+                        .expect("request"),
+                    json_with_bytes(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES),
+                )
+                .expect("exact stream bound");
+            assert!(matches!(
+                owner.commit(&mut stream),
+                Ok(ConfigurationAppendDisposition::NewlyCommitted { .. })
+            ));
+        }
+        assert_eq!(
+            stream.total_bytes(),
+            mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
+        );
+        assert!(matches!(
+            stream.prepare_append(
+                stream.head_sequence(),
+                AppendRequestId::new("configuration-plus-one-stream-01234").expect("request"),
+                r#"{"mode":"over-stream"}"#.to_owned(),
+            ),
+            Err(StoreError::Capacity)
+        ));
+        eprintln!(
+            "capacity-envelope configuration revisions={} revision_bytes={} stream_bytes={}",
+            revisions.head_sequence(),
+            exact_revision.canonical_json().len(),
+            stream.total_bytes(),
+        );
+    }
+
+    #[test]
     fn pure_conclusion_has_no_preparation_path() {
         let (scope, tenant, run) = ids();
         let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());

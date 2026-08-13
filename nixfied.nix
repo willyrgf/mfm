@@ -119,6 +119,32 @@ in
     doc-tests = cargoLeaf {
       run = [ "cargo" "test" "--workspace" "--doc" ];
     };
+    capacity-app = cargoLeaf {
+      run = [
+        "cargo" "test" "-p" "mfm-app" "maximum_entry_point_programs_record_capacity_envelope" "--"
+        "--nocapture"
+      ];
+    };
+    capacity-runtime = cargoLeaf {
+      run = [
+        "cargo" "test" "-p" "mfm-runtime" "pure_session_advances_through_runtime_and_store" "--"
+        "--nocapture"
+      ];
+    };
+    capacity-store = cargoLeaf {
+      run = [
+        "cargo" "test" "-p" "mfm-store"
+        "configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one" "--" "--nocapture"
+      ];
+    };
+    capacity-envelope = {
+      kind = "composite";
+      steps = nixfiedLib.seq [
+        "capacity-app"
+        "capacity-runtime"
+        "capacity-store"
+      ];
+    };
     negative-scan = cargoLeaf {
       run = [ "bash" "scripts/check-cutover-manifest.sh" ];
     };
@@ -132,6 +158,7 @@ in
         "cargo-test"
         "test-db"
         "doc-tests"
+        "capacity-envelope"
       ];
     };
   };
