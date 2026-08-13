@@ -742,7 +742,97 @@ impl StructuredStoreBackend for PostgresStore {
 #[cfg(all(test, feature = "test-support"))]
 mod managed_postgres_tests {
     use super::*;
+    use mfm_canonical::raw_content_digest;
     use std::sync::Arc;
+
+    async fn install_abort_trigger(pool: &PgPool, table: &str, operation: &str) {
+        let create = match (table, operation) {
+            ("mfm_run_frames", "INSERT") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT ON mfm_run_frames
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            ("mfm_run_heads", "INSERT OR UPDATE") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT OR UPDATE ON mfm_run_heads
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            ("mfm_fact_heads", "INSERT OR UPDATE") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT OR UPDATE ON mfm_fact_heads
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            ("mfm_fact_publications", "INSERT") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT ON mfm_fact_publications
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            ("mfm_configuration_revisions", "INSERT") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT ON mfm_configuration_revisions
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            ("mfm_configuration_heads", "INSERT OR UPDATE") => {
+                "CREATE TRIGGER mfm_test_abort AFTER INSERT OR UPDATE ON mfm_configuration_heads
+                 FOR EACH ROW EXECUTE FUNCTION mfm_test_abort_trigger()"
+            }
+            _ => panic!("unreviewed PostgreSQL failpoint"),
+        };
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION mfm_test_abort_trigger()
+             RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN
+                 RAISE EXCEPTION 'test transaction failpoint';
+             END;
+             $$",
+        )
+        .execute(pool)
+        .await
+        .expect("failpoint function");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_run_frames")
+            .execute(pool)
+            .await
+            .expect("clear frame trigger");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_run_heads")
+            .execute(pool)
+            .await
+            .expect("clear head trigger");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_fact_heads")
+            .execute(pool)
+            .await
+            .expect("clear fact head trigger");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_fact_publications")
+            .execute(pool)
+            .await
+            .expect("clear fact publication trigger");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_configuration_revisions")
+            .execute(pool)
+            .await
+            .expect("clear configuration revision trigger");
+        sqlx::query("DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_configuration_heads")
+            .execute(pool)
+            .await
+            .expect("clear configuration head trigger");
+        sqlx::query(create)
+            .execute(pool)
+            .await
+            .expect("install failpoint trigger");
+    }
+
+    async fn clear_abort_triggers(pool: &PgPool) {
+        for drop in [
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_run_frames",
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_run_heads",
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_fact_heads",
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_fact_publications",
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_configuration_revisions",
+            "DROP TRIGGER IF EXISTS mfm_test_abort ON mfm_configuration_heads",
+        ] {
+            sqlx::query(drop)
+                .execute(pool)
+                .await
+                .expect("clear failpoint trigger");
+        }
+        sqlx::query("DROP FUNCTION IF EXISTS mfm_test_abort_trigger()")
+            .execute(pool)
+            .await
+            .expect("clear failpoint function");
+    }
 
     #[tokio::test]
     async fn managed_primary_schema_meets_the_admitted_profile() {
@@ -780,7 +870,7 @@ mod managed_postgres_tests {
                 .expect("tenant"),
         );
         let store = PostgresStore::from_pool(
-            pool,
+            pool.clone(),
             identity.scope().clone(),
             identity.epoch(),
             identity.tenant().clone(),
@@ -791,8 +881,105 @@ mod managed_postgres_tests {
             .check_ready()
             .await
             .expect("admitted PostgreSQL durability");
-        mfm_store::backend_conformance::exercise(Arc::new(store), identity)
+        let backend = Arc::new(store);
+        mfm_store::backend_conformance::exercise(backend.clone(), identity.clone())
             .await
             .expect("PostgreSQL backend contract");
+
+        for (table, operation) in [
+            ("mfm_run_frames", "INSERT"),
+            ("mfm_run_heads", "INSERT OR UPDATE"),
+        ] {
+            install_abort_trigger(&pool, table, operation).await;
+            mfm_store::backend_conformance::exercise_atomic_rollback(
+                backend.clone(),
+                identity.clone(),
+                mfm_store::backend_conformance::AtomicRollbackProbe::History,
+            )
+            .await
+            .expect("history rollback");
+            clear_abort_triggers(&pool).await;
+        }
+        for (table, operation) in [
+            ("mfm_fact_heads", "INSERT OR UPDATE"),
+            ("mfm_fact_publications", "INSERT"),
+        ] {
+            install_abort_trigger(&pool, table, operation).await;
+            mfm_store::backend_conformance::exercise_atomic_rollback(
+                backend.clone(),
+                identity.clone(),
+                mfm_store::backend_conformance::AtomicRollbackProbe::FactPublication,
+            )
+            .await
+            .expect("fact rollback");
+            clear_abort_triggers(&pool).await;
+        }
+        for (table, operation) in [
+            ("mfm_configuration_revisions", "INSERT"),
+            ("mfm_configuration_heads", "INSERT OR UPDATE"),
+        ] {
+            install_abort_trigger(&pool, table, operation).await;
+            mfm_store::backend_conformance::exercise_atomic_rollback(
+                backend.clone(),
+                identity.clone(),
+                mfm_store::backend_conformance::AtomicRollbackProbe::Configuration,
+            )
+            .await
+            .expect("configuration rollback");
+            clear_abort_triggers(&pool).await;
+        }
+
+        // A killed client connection must leave its uncommitted frame absent after reconnect.
+        let first_bytes = br#"{"kind":"connection-loss"}"#;
+        let first_digest = raw_content_digest(first_bytes);
+        let first_head = ContentDigest::parse(
+            "content:sha256-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        )
+        .expect("connection-loss head");
+        let mut target = pool.acquire().await.expect("target connection");
+        sqlx::query("BEGIN")
+            .execute(&mut *target)
+            .await
+            .expect("begin target transaction");
+        let lost_run_id = RunId::parse(
+            "run:sha256-jcs-v1:6123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("lost run");
+        sqlx::query(
+            "INSERT INTO mfm_run_frames
+             (store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence,
+              append_request_id, frame_bytes, frame_digest, head_digest)
+             VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8)",
+        )
+        .bind(identity.scope().as_str())
+        .bind(i64::try_from(identity.epoch().get()).expect("epoch"))
+        .bind(identity.tenant().as_str())
+        .bind(lost_run_id.as_str())
+        .bind("postgres-connection-loss-0123456789")
+        .bind(first_bytes)
+        .bind(first_digest.as_str())
+        .bind(first_head.as_str())
+        .execute(&mut *target)
+        .await
+        .expect("uncommitted frame");
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *target)
+            .await
+            .expect("target pid");
+        let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&pool)
+            .await
+            .expect("terminate target");
+        assert!(killed);
+        assert!(sqlx::query("COMMIT").execute(&mut *target).await.is_err());
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mfm_run_frames WHERE run_id = $1")
+                .bind(lost_run_id.as_str())
+                .fetch_one(&pool)
+                .await
+                .expect("reconnected count");
+        assert_eq!(remaining, 0);
+        clear_abort_triggers(&pool).await;
     }
 }

@@ -9,9 +9,157 @@ use mfm_ids::{
 
 use crate::backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
-    ConfigurationAppendCommand, RawConfigurationRevision, RawFactSnapshot, RawFrameBytes,
-    RawHistoryLoadLimit, RawRunPrefix, StructuredStoreBackend, StructuredStoreIdentity,
+    ConfigurationAppendCommand, RawConfigurationRevision, RawFactPublication, RawFactSnapshot,
+    RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix, StructuredStoreBackend,
+    StructuredStoreIdentity,
 };
+
+/// One transaction boundary exercised by the PostgreSQL fault probes.
+#[derive(Clone, Copy)]
+pub enum AtomicRollbackProbe {
+    /// A history frame/head transaction.
+    History,
+    /// A history frame plus fact publication transaction.
+    FactPublication,
+    /// A configuration revision/head transaction.
+    Configuration,
+}
+
+/// Exercises one append transaction with an externally installed SQL failpoint.
+pub async fn exercise_atomic_rollback(
+    backend: Arc<dyn StructuredStoreBackend>,
+    identity: StructuredStoreIdentity,
+    probe: AtomicRollbackProbe,
+) -> Result<(), BackendError> {
+    let run_id = RunId::parse(match probe {
+        AtomicRollbackProbe::History => {
+            "run:sha256-jcs-v1:7123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+        AtomicRollbackProbe::FactPublication => {
+            "run:sha256-jcs-v1:8123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+        AtomicRollbackProbe::Configuration => {
+            "run:sha256-jcs-v1:9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+    })
+    .map_err(|_| BackendError::Storage)?;
+    let first_bytes = br#"{"kind":"rollback-first"}"#;
+    let first_digest = raw_content_digest(first_bytes);
+    let first_head = ContentDigest::parse(
+        "content:sha256-v1:1111111111111111111111111111111111111111111111111111111111111111",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let first_request = AppendRequestId::new("rollback-first-0123456789abcdef")
+        .map_err(|_| BackendError::Storage)?;
+    let first = BackendAppendCommand::new(
+        &identity,
+        &run_id,
+        1,
+        &first_request,
+        first_bytes,
+        &first_digest,
+        &first_head,
+        None,
+        true,
+        None,
+    );
+
+    match probe {
+        AtomicRollbackProbe::History => {
+            if backend.compare_and_append(&first).await.is_ok() {
+                return Err(BackendError::Conflict);
+            }
+            let prefix = backend
+                .load_complete_prefix(&run_id, RawHistoryLoadLimit::new(4, 4096))
+                .await?;
+            if prefix.is_some() {
+                return Err(BackendError::Conflict);
+            }
+        }
+        AtomicRollbackProbe::FactPublication => {
+            if !matches!(
+                backend.compare_and_append(&first).await?,
+                BackendAppendOutcome::NewlyCommitted | BackendAppendOutcome::Found(_)
+            ) {
+                return Err(BackendError::Conflict);
+            }
+            let selection_schema = SchemaId::new(
+                "mfm.test.rollback-selection",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([1; 32]),
+            )
+            .map_err(|_| BackendError::Storage)?;
+            let selection_ref = ContentRef::new(selection_schema, raw_content_digest(b"selection"))
+                .map_err(|_| BackendError::Storage)?;
+            let publication = RawFactPublication::new(1, run_id.clone(), 2, selection_ref)?;
+            let second_bytes = br#"{"kind":"rollback-second"}"#;
+            let second_digest = raw_content_digest(second_bytes);
+            let second_head = ContentDigest::parse(
+                "content:sha256-v1:2222222222222222222222222222222222222222222222222222222222222222",
+            )
+            .map_err(|_| BackendError::Storage)?;
+            let second_request = AppendRequestId::new("rollback-second-0123456789abcdef")
+                .map_err(|_| BackendError::Storage)?;
+            let second = BackendAppendCommand::new(
+                &identity,
+                &run_id,
+                2,
+                &second_request,
+                second_bytes,
+                &second_digest,
+                &second_head,
+                Some(&first_head),
+                false,
+                Some(&publication),
+            );
+            if backend.compare_and_append(&second).await.is_ok() {
+                return Err(BackendError::Conflict);
+            }
+            let prefix = backend
+                .load_complete_prefix(&run_id, RawHistoryLoadLimit::new(4, 4096))
+                .await?
+                .ok_or(BackendError::Storage)?;
+            let fact_head = backend.load_facts().await?.head_sequence();
+            if prefix.frames().len() != 1 || fact_head != 0 {
+                return Err(BackendError::Conflict);
+            }
+        }
+        AtomicRollbackProbe::Configuration => {
+            let before = backend.load_configuration().await?;
+            let bytes = br#"{"kind":"rollback-configuration"}"#;
+            let schema = SchemaId::new(
+                "mfm.test.rollback-configuration",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([2; 32]),
+            )
+            .map_err(|_| BackendError::Storage)?;
+            let content_ref = ContentRef::new(schema, raw_content_digest(bytes))
+                .map_err(|_| BackendError::Storage)?;
+            let request = AppendRequestId::new("rollback-configuration-0123456789")
+                .map_err(|_| BackendError::Storage)?;
+            let command = ConfigurationAppendCommand::new(
+                &identity,
+                u64::try_from(before.len()).map_err(|_| BackendError::Capacity)?,
+                &request,
+                bytes,
+                &content_ref,
+            );
+            if backend
+                .compare_and_append_configuration(&command)
+                .await
+                .is_ok()
+            {
+                return Err(BackendError::Conflict);
+            }
+            if backend.load_configuration().await? != before {
+                return Err(BackendError::Conflict);
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Exercises the complete mechanical contract without decoding or reducing any frame.
 pub async fn exercise(
