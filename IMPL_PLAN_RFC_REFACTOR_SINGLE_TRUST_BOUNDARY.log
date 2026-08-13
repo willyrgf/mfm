@@ -131,3 +131,46 @@ The three preflight artifacts are now checked in:
   the current U8/U11 typed-handoff evidence.
 - `docs/preflight/capacity-envelope.md` records the fixed bounds, reservation law, fixtures, and
   the still-pending hot/cold high-water measurement harness.
+
+2026-08-13 — continuation implementation and final audit
+
+The architect ruling is implemented in commit `6400112a` (`complete single-trust runtime and
+storage cutover`). The resulting tree now has one branded composite `StructuredStore::open`
+boundary over the mechanical Memory/PostgreSQL SPI, consuming split history/configuration/audit
+ports, cached qualified-run indexes, direct appended-prefix qualification, and configuration
+owners that expose a revision only on direct success or an exact duplicate. PostgreSQL uses the
+same SPI and the v8 three-family schema; its managed lane checks the admitted primary settings and
+runs the shared frame/configuration CAS contract with two pooled connections.
+
+Runtime now owns the exhaustive admission, resume, session, suspended-owner, and step outcomes.
+`RunSession` retains the Store reduction and catalog-branded typed context. Hot conclusion handoff
+uses the cached reduction and a suffix advance, while cold resume performs one bounded complete
+prefix qualification and typed reification. The lifecycle regression records hot head 2 at 3,241
+canonical frame bytes and cold head 3 at 4,550 bytes; its access regression counts provider entry,
+accepted ingress, preparation, and interpretation separately and requires exactly one of each.
+The finite owner-fate model proves that only one direct-new preparation can mint a call.
+
+The application now uses live Runtime assemblies when supplied and rejects status-only success for
+an actionable structural run. The maximum-entry-point fixture records the four-State EVM program at
+4 declarations/6,840 canonical bytes and the 64-collection/64-source Portfolio plan at 963
+declarations/1,566,954 canonical bytes. Runtime and Store API trybuild tests cover non-Clone
+sessions and private Runtime/QualifiedRun construction; the shared Memory/PostgreSQL conformance
+test covers idempotent found, stale-head, same-head frame races, configuration races, bounded raw
+DTO constructors, facts, and audit rows.
+
+Completed focused verification on this implementation:
+
+- `nix develop -c cargo fmt --all`
+- strict affected-package Clippy with `--all-targets --all-features -D warnings`
+- affected Runtime, Store, App, and PostgreSQL checks/tests, including both trybuild suites
+- `nix run .#run -- --task test-db` — managed PostgreSQL passed (`1 passed, 0 failed`)
+- `nix run .#model-check`
+- `nix run .#run -- --task negative-scan`
+- `bash scripts/check-cutover-manifest.sh` and `git diff --check`
+
+The RFC, implementation plan, and cutover manifest remain byte-for-byte unchanged. The remaining
+documented trust-boundary limits are the primary crash/restart profile rather than host/failover
+durability, trusted in-process Rust State/adapter code, process-local owner loss before durable
+conclusion, and the two fixed entry points. The managed database task does not control the service
+process to inject a primary crash; it proves the admitted settings, reconnectable schema baseline,
+and same-epoch CAS behavior, so no stronger crash-injection claim is recorded.

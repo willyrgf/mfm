@@ -51,4 +51,7 @@ The inventory is implemented by `crates/domains/evm/src/lib.rs`,
 `crates/live/evm/src/lib.rs`, `crates/kernel/journal/src/single_trust.rs`, and
 `crates/kernel/runtime/src/single_trust.rs`. The focused checks are
 `admission_and_result_deserialization_reenter_domain_validation`,
-`adapter_future_panics_are_contained_as_unresolved`, and the Store preparation/conclusion tests.
+`adapter_future_panics_are_contained_as_unresolved`, the Store preparation/conclusion tests, and
+the Runtime access lifecycle counter regression. That regression separately counts provider entry,
+accepted ingress, preparation, and State interpretation and requires one of each before a durable
+conclusion is produced.

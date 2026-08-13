@@ -42,7 +42,13 @@ selected-preparation reservations, direct-new preparation identity, conclusion c
 fact coordinates, and the 64-source Portfolio bound. The Journal and domain constructors enforce
 the exact fixed bounds before allocation of a retained owner.
 
-The final Runtime/Store conformance harness must add the measured hot advancement and complete
-cold-prefix resume high-water for the maximum EVM and Portfolio fixtures. These measurements have
-no pass/fail latency threshold; they only characterize the admitted envelope. Until that harness
-lands, no cold-resume performance claim is made.
+The checked-in capacity harness now records the maximum current entry-point planning envelope:
+`maximum_entry_point_programs_record_capacity_envelope` measures the four-State EVM submission at
+4 declarations and 6,840 canonical Program bytes, and a Portfolio plan at 64 collections, 64 total
+sources, 963 declarations, and 1,566,954 canonical Program bytes. The sequential Runtime fixture
+also records hot advancement at head 2 with 3,241 canonical frame bytes and cold resume at head 3
+with 4,550 canonical frame bytes. These are bounded debug-test measurements, not latency targets;
+the fixture does not claim that every live adapter implementation has been registered for the
+maximum Portfolio graph. The shared Memory/PostgreSQL backend conformance additionally races two
+frame writers and two configuration writers at the same head and requires one direct commit plus
+one stale-head result for each stream.

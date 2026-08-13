@@ -87,7 +87,7 @@ the smallest final gate set that covers it.
 | Local behavior within one crate | Run rustfmt, a package-scoped check or Clippy invocation, and the affected package/test targets. Include dependent packages when a public contract changed. |
 | Cargo manifest, workspace metadata, Cargo-enforced crate taxonomy, or dependency-boundary configuration | Run affected package checks/tests, then `nix run .#ci` for the final cross-crate graph. |
 | Cross-crate public API, proc-macro output, shared kernel/runtime semantics, or multi-crate behavior | Run focused package checks while iterating, then `nix run .#ci`. |
-| PostgreSQL migration, SQLx metadata/query, store behavior, or DB-backed transport behavior | Run focused package checks while iterating, then `nix run .#ci`; the current graph has no managed database service. |
+| PostgreSQL migration, SQLx metadata/query, store behavior, or DB-backed transport behavior | Run focused package checks while iterating, then `nix run .#ci`; the final graph includes the managed `test-db`/`postgres-test` lane. |
 | Nixfied model or verification graph | Run `nix run .#model-check` early, then `nix run .#ci` once on the final revision. |
 | Flake output, package/dev-shell definition, flake dependency pin, or hosted workflow | Run `nix flake check --no-build` for early evaluation, then `nix run .#ci`. |
 | Security-sensitive, persisted-contract, scheduler/recovery, cross-cutting, release, or explicit full local merge-readiness validation | Run targeted checks first, then `nix run .#ci` once on the final revision. |

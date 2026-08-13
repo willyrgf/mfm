@@ -42,13 +42,19 @@ intent and call.
 
 Journal owns strict canonical frames and the three run record families. Store owns the reducer,
 sequential cursor, cumulative-context continuity, preparation selection, occurrence conclusion
-uniqueness, object/fact publication closure, configuration bounds, and exact-head append.
+uniqueness, object/fact publication closure, configuration bounds, and exact-head append. An opened
+Store has one private brand and exposes separate non-Clone mutation, cloneable read, configuration,
+and fixed-snapshot audit ports; Runtime receives the mutation path only through that opening.
 
 ### Runtime
 
 Runtime owns immutable live assembly and affine execution owners. The only provider-entering path
-requires a directly committed `CommittedCall`. A State implementation cannot access Store, journal,
-replay, or arbitrary prior output through its supported callback.
+requires a directly committed `CommittedCall`. `RunSession` retains the latest qualified typed
+context and its reducer result; hot conclusion settlement advances that result over the new suffix,
+while cold resume performs bounded complete-prefix qualification. `SuspendedRun` is the exhaustive
+owner-fate coordinator for admission, preparation, and conclusion acknowledgement boundaries. A
+State implementation cannot access Store, journal, replay, or arbitrary prior output through its
+supported callback.
 
 ### Adapters
 
