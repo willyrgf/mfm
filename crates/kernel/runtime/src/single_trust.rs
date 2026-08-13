@@ -1180,43 +1180,6 @@ impl RuntimeAssemblyBuilder {
         Ok(())
     }
 
-    /// Registers one Access State implementation and its exact adapter callback.
-    #[allow(clippy::too_many_arguments)]
-    pub fn register_access<S: State, C: AccessCapabilityContract, F>(
-        &mut self,
-        state_implementation_ref: ContentRef,
-        capability_contract_ref: ContentRef,
-        execution_binding_ref: ContentRef,
-        adapter_implementation_ref: ContentRef,
-        implementation: AccessImplementation<S, C>,
-        invoke: F,
-    ) -> Result<()>
-    where
-        F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
-        C::Mode: RuntimePreparationMode,
-    {
-        C::validate().map_err(|_| RuntimeError::Mode)?;
-        if capability_contract_ref != capability_content_ref::<C>()? {
-            return Err(RuntimeError::Identity);
-        }
-        self.ensure_unique(&state_implementation_ref)?;
-        let adapter: Arc<AccessExecutor<S, C>> = Arc::new(invoke);
-        let dynamic = crate::lifecycle::access_registration(implementation.clone());
-        self.registrations.push(RegisteredState {
-            state_implementation_ref,
-            state_type: TypeId::of::<S>(),
-            access: true,
-            capability_contract_ref: Some(capability_contract_ref),
-            capability_type: Some(TypeId::of::<C>()),
-            binding_ref: Some(execution_binding_ref),
-            adapter_implementation_ref: Some(adapter_implementation_ref),
-            implementation: Box::new(implementation),
-            adapter: Some(Box::new(adapter)),
-            dynamic: Some(dynamic),
-        });
-        Ok(())
-    }
-
     /// Registers one Access State with its immutable content-addressed binding descriptor.
     #[allow(clippy::too_many_arguments)]
     pub fn register_access_with_binding<S: State, C: AccessCapabilityContract, F>(
@@ -1758,11 +1721,12 @@ mod tests {
         let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
         let mut builder = RuntimeAssemblyBuilder::new(catalog.clone(), program).expect("builder");
         builder
-            .register_access::<PureState, TestRead, _>(
+            .register_access_with_binding::<PureState, TestRead, _>(
                 implementation_ref,
                 capability_ref,
                 binding_ref.clone(),
                 adapter_ref,
+                binding.clone(),
                 AccessImplementation::new(
                     |_| panic!("test preparation panic"),
                     |_call| Box::pin(async { Err(RuntimeError::Unresolved) }),

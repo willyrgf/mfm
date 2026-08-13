@@ -537,7 +537,11 @@ impl Application {
             .map_err(|_| PublicError::Internal)?],
         )
         .map_err(|_| PublicError::Internal)?;
-        let disposition = self.store.append(frame).await.map_err(map_store_error)?;
+        let disposition = self
+            .store
+            .append_admission(frame)
+            .await
+            .map_err(map_store_error)?;
         Ok(AdmitRunResponse {
             run_id,
             disposition: disposition_name(disposition),

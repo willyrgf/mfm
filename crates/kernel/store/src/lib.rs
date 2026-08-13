@@ -14,11 +14,11 @@ pub mod backend_conformance;
 pub use backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
     BackendFuture, BackendResult, ConclusionCommitOutcome, ConfigurationAppendCommand,
-    ConfigurationCommitOutcome, HistoryReader, MemoryStructuredBackend, OpenedStructuredStore,
-    PreparedConfigurationWrite, QualifiedHistoryPort, RawConfigurationRevision, RawFactPublication,
-    RawFactSnapshot, RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix, StoreAuditPort,
-    StoreOpenError, StoreParts, StoreWorkLimits, StructuredStore, StructuredStoreBackend,
-    StructuredStoreIdentity,
+    ConfigurationCommitOutcome, ConfigurationStore, HistoryReader, MemoryStructuredBackend,
+    OpenedStructuredStore, PreparedConfigurationWrite, QualifiedHistoryPort,
+    RawConfigurationRevision, RawFactPublication, RawFactSnapshot, RawFrameBytes,
+    RawHistoryLoadLimit, RawRunPrefix, StoreAuditPort, StoreOpenError, StoreParts, StoreWorkLimits,
+    StructuredStore, StructuredStoreBackend, StructuredStoreIdentity,
 };
 pub use single_trust::{
     AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,

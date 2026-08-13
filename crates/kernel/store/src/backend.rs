@@ -1091,12 +1091,12 @@ impl OpenedStructuredStore {
         self.history_port().load(run_id).await
     }
 
-    /// Appends one already-constructed strict frame through the branded mechanical port.
-    pub async fn append(
+    /// Appends the sole genesis frame through the branded admission port.
+    pub async fn append_admission(
         &self,
         frame: mfm_journal::single_trust::RunFrame,
     ) -> Result<AppendDisposition> {
-        self.history_port().append(frame).await
+        self.history_port().append_admission(frame).await
     }
 
     /// Creates one access preparation after callback-free semantic qualification.
@@ -1289,7 +1289,7 @@ impl OpenedStructuredStore {
             });
         }
         let frame = owner.frame().clone();
-        let disposition = match self.append(frame).await {
+        let disposition = match self.history_port().append_frame(frame).await {
             Ok(disposition) => disposition,
             Err(error) => return Ok(ConclusionCommitOutcome::Rejected { owner, error }),
         };
@@ -1484,8 +1484,26 @@ impl QualifiedHistoryPort {
         Ok(qualified)
     }
 
-    /// Performs one semantic-free mechanical append after strict local frame validation.
-    pub async fn append(
+    /// Appends the sole genesis frame after checking its Store and tenant identity.
+    pub async fn append_admission(
+        &self,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<AppendDisposition> {
+        let mfm_journal::single_trust::RunRecord::RunAdmitted(admission) = frame.record() else {
+            return Err(StoreError::InvalidRecord);
+        };
+        if frame.expected_sequence() != 1
+            || admission.tenant_scope_id() != self.inner.identity.tenant()
+            || admission.run_id() != frame.run_id()
+            || admission.store_scope_id() != self.inner.identity.scope()
+            || admission.store_epoch() != self.inner.identity.epoch()
+        {
+            return Err(StoreError::Identity);
+        }
+        self.append_frame(frame).await
+    }
+
+    async fn append_frame(
         &self,
         frame: mfm_journal::single_trust::RunFrame,
     ) -> Result<AppendDisposition> {
@@ -1973,13 +1991,98 @@ mod tests {
         )
         .await
         .expect("opened store");
-        assert_eq!(opened.append(frame).await, Err(StoreError::Capacity));
+        assert_eq!(
+            opened.append_admission(frame).await,
+            Err(StoreError::Capacity)
+        );
         assert!(backend
             .load_complete_prefix(
                 &RunId::parse(
                     "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
                 )
                 .expect("run"),
+                RawHistoryLoadLimit::new(
+                    mfm_journal::single_trust::MAX_RUN_FRAMES,
+                    mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+                ),
+            )
+            .await
+            .expect("backend load")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn admission_port_rejects_non_genesis_frames_before_backend_ingress() {
+        let identity = identity();
+        let admission = admission_frame(&identity);
+        let (contract_ref, value_ref, value_json) = match admission.record() {
+            mfm_journal::single_trust::RunRecord::RunAdmitted(admitted) => {
+                let value = admitted.admitted_context().value_ref().clone();
+                (
+                    admitted.admitted_context().contract_ref().clone(),
+                    value,
+                    r#"{"value":1}"#,
+                )
+            }
+            _ => panic!("expected admission"),
+        };
+        let non_genesis = mfm_journal::single_trust::RunFrame::new(
+            admission.run_id().clone(),
+            identity.scope().clone(),
+            identity.epoch(),
+            2,
+            AppendRequestId::new("backend-admission-port-0123456789").expect("request"),
+            mfm_journal::single_trust::RunRecord::StateConcluded(
+                mfm_journal::single_trust::StateConcluded::Pure {
+                    occurrence: mfm_journal::single_trust::SequentialControlAddress::new(
+                        0,
+                        Vec::new(),
+                    )
+                    .expect("occurrence"),
+                    outcome: mfm_journal::single_trust::StateOutcome::Success(
+                        mfm_journal::single_trust::ValueRef::new(
+                            contract_ref.clone(),
+                            value_ref.clone(),
+                        ),
+                    ),
+                    fact_publication: None,
+                },
+            ),
+            vec![mfm_journal::single_trust::ImmutableObject::new(
+                mfm_ids::StableId::new("mfm.value").expect("object"),
+                value_ref,
+                value_json.to_owned(),
+            )
+            .expect("object")],
+        )
+        .expect("non-genesis frame");
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(
+                mfm_program::single_trust::ProgramDocument::new(
+                    mfm_ids::StableId::new("mfm.test.backend-limit-entry").expect("entry"),
+                    contract_ref.clone(),
+                    contract_ref,
+                    Vec::new(),
+                )
+                .expect("document"),
+            )
+            .expect("catalog");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity,
+            catalog,
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("opened store");
+        assert_eq!(
+            opened.append_admission(non_genesis).await,
+            Err(StoreError::InvalidRecord)
+        );
+        assert!(backend
+            .load_complete_prefix(
+                admission.run_id(),
                 RawHistoryLoadLimit::new(
                     mfm_journal::single_trust::MAX_RUN_FRAMES,
                     mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,

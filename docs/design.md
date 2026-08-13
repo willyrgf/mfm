@@ -50,6 +50,11 @@ An adapter consumes the committed call, derives provider bytes from intent, auth
 response, and returns one capability-owned evidence value. Indeterminate results remain neutral;
 generic errors never mint retry authority. `EntryOnce` is the default Effect discipline.
 
+Access assembly retains the complete immutable binding descriptor at registration. The Runtime
+preparation bridge does not accept a caller-supplied replacement descriptor, and the opened Store
+has no generic public frame append; admission and qualified conclusion ownership are separate
+ingress paths.
+
 Runtime has no scheduler, history API, per-run execution lock, or process-wide writer lease.
 Workers race through Store exact-head compare-and-append. A dropped hot owner leaves only the
 durable prefix; cold replay qualifies the complete prefix without callbacks.
