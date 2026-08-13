@@ -37,18 +37,58 @@ canonical bytes, bounded by the run ceiling.
 
 The current production fixture families are the two builders in `crates/app/src/lib.rs`: one EVM
 submission with four sequential State declarations and one Portfolio plan that expands each
-declared collection and source into explicit State/Match declarations. The Store tests cover
-selected-preparation reservations, direct-new preparation identity, conclusion capacity, dense
-fact coordinates, and the 64-source Portfolio bound. The Journal and domain constructors enforce
-the exact fixed bounds before allocation of a retained owner.
+declared collection and source into explicit State/Match declarations. The executable task
+`capacity-envelope` runs the maximum App, Runtime, and configuration fixtures with `--nocapture`.
 
-The checked-in capacity harness now records the maximum current entry-point planning envelope:
-`maximum_entry_point_programs_record_capacity_envelope` measures the four-State EVM submission at
-4 declarations and 6,840 canonical Program bytes, and a Portfolio plan at 64 collections, 64 total
-sources, 963 declarations, and 1,566,954 canonical Program bytes. The sequential Runtime fixture
-also records hot advancement at head 2 with 3,241 canonical frame bytes and cold resume at head 3
-with 4,550 canonical frame bytes. These are bounded debug-test measurements, not latency targets;
-the fixture does not claim that every live adapter implementation has been registered for the
-maximum Portfolio graph. The shared Memory/PostgreSQL backend conformance additionally races two
-frame writers and two configuration writers at the same head and requires one direct commit plus
-one stale-head result for each stream.
+| Measurement | EVM submission | Portfolio snapshot |
+| --- | ---: | ---: |
+| Program declarations | 4 | 963 |
+| canonical Program bytes | 6,840 | 1,566,954 |
+| maximum `C0` canonical bytes | 262,296 | 6,284 |
+| maximum recorded `Cn` canonical bytes | 262,382 | 12,736 |
+| entry fixture expansion | four sequential States | 64 collections / 64 total sources |
+
+The EVM fixture uses the exact 128 KiB transaction-data bound, constructs the maximum candidate
+context before broadcast, finishes both Programs, and decodes each finished canonical document
+through `ProgramIngress`. The Portfolio fixture constructs all 64 completed collection results
+before constructing its final continuation, so the `Cn` measurement covers retained cumulative
+results rather than only the empty continuation.
+
+The Runtime fixture `pure_session_advances_through_runtime_and_store` records both the retained
+session and the one-shot cold `resume_run(...).drive()` path:
+
+| Executor path | head | retained canonical frame bytes | latest context bytes |
+| --- | ---: | ---: | ---: |
+| retained hot session | 2 | 4,063 | 11 |
+| one-shot cold resume/drive | 3 | 6,194 | 11 |
+
+The retained canonical-byte total is the portable, allocator-independent high-water proxy used by
+this artifact (`frame bytes + latest context bytes`); it is a structural bound, not an RSS or
+latency claim. The test also counts the pure State entries and proves that cold resume does not
+re-execute the already concluded State. No executor, cache, checkpoint, suffix protocol, or
+structural sharing is retained.
+
+Exact-bound and independent bound-plus-one evidence is executable at each owner:
+
+| Contract | Exact/+1 test |
+| --- | --- |
+| frame, run-frame count, reachable-object count, cumulative run-frame bytes | `mfm_store::backend::tests::outer_capacity_accepts_exact_ceiling_and_rejects_each_plus_one` |
+| Read attempts, absorbing Effect attempts, EntryOnce, State conclusion reservation | `mfm_program::single_trust::tests::attempt_and_conclusion_capacity_bounds_accept_exact_and_reject_plus_one` |
+| EVM transaction data | `mfm_evm::tests::transaction_data_capacity_accepts_exact_and_rejects_plus_one` |
+| 64-source Portfolio ceiling and independent +1 | `mfm_portfolio::tests::portfolio_total_source_bound_is_exact` |
+| configuration revisions, one revision, and cumulative stream | `mfm_store::single_trust::tests::configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one` |
+| selected-preparation liability transfer and conclusion discharge | `mfm_store::backend::tests::conclusion_head_race_classifies_same_and_conflicting_semantics` and the Store reduction/capacity checks in `single_trust.rs` |
+
+The configuration fixture accepts exactly 1,024 small revisions, exactly one 16 MiB canonical
+revision, and exactly four such revisions totaling 64 MiB. It independently rejects the 1,025th
+revision, a 16 MiB-plus-one revision, and any successor after the 64 MiB stream is full. The
+conclusion reservation is carried by the selected preparation, transferred by replacement, and
+removed only by its matching conclusion; a superseded conclusion never releases or duplicates the
+liability.
+
+The shared Memory/PostgreSQL backend conformance covers local exact-head races, and the managed
+PostgreSQL lane starts two independent child processes behind an explicit filesystem rendezvous
+before each admission, preparation, replacement, and conclusion append. It requires exactly one
+`NewlyCommitted` and one `StaleHead` result per stage, then validates the complete seeded prefix and
+winning record. This is a mechanical CAS proof; Runtime provider-entry counts remain in Runtime
+tests, where only a direct-new preparation winner can reach a provider.

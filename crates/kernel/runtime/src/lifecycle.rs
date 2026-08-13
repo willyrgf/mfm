@@ -2815,16 +2815,19 @@ mod tests {
                     .len()
             })
             .sum();
+        let hot_context_bytes = advanced.latest.canonical_bytes.len();
         eprintln!(
-            "capacity-envelope runtime pure hot_head={} hot_frame_bytes={}",
+            "capacity-envelope runtime pure hot_head={} hot_frame_bytes={} hot_context_bytes={} executor=retained-session",
             hot_prefix.head_sequence(),
-            hot_frame_bytes
+            hot_frame_bytes,
+            hot_context_bytes,
         );
         drop(advanced);
         let cold = match runtime.resume_run(run_id).await {
             ResumeStep::Active(session) => session,
             other => panic!("unexpected cold resume outcome: {}", resume_name(&other)),
         };
+        let cold_context_bytes = cold.latest.canonical_bytes.len();
         let terminal = match cold.drive().await {
             RuntimeStep::Terminal(terminal) => terminal,
             RuntimeStep::Failed { error, .. } => panic!("unexpected cold drive failure: {error:?}"),
@@ -2832,7 +2835,7 @@ mod tests {
         };
         assert_eq!(terminal.head_sequence(), 3);
         eprintln!(
-            "capacity-envelope runtime pure cold_resume_head={} cold_frame_bytes={}",
+            "capacity-envelope runtime pure cold_resume_head={} cold_frame_bytes={} cold_context_bytes={} executor=one-shot-resume-drive",
             terminal.head_sequence(),
             terminal
                 .qualified_run()
@@ -2843,7 +2846,8 @@ mod tests {
                     .expect("frame bytes")
                     .as_bytes()
                     .len())
-                .sum::<usize>()
+                .sum::<usize>(),
+            cold_context_bytes,
         );
         assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
     }

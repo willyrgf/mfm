@@ -1301,4 +1301,75 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn attempt_and_conclusion_capacity_bounds_accept_exact_and_reject_plus_one() {
+        let read = ExecutionMode::Read {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 3,
+            fact_selection_required: false,
+        };
+        assert_eq!(read.validate(), Ok(()));
+        assert!(ExecutionMode::Read {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 4,
+            fact_selection_required: false,
+        }
+        .validate()
+        .is_err());
+
+        let absorbing = ExecutionMode::Effect {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 3,
+            absorbing: true,
+            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
+            fact_selection_required: false,
+        };
+        assert_eq!(absorbing.validate(), Ok(()));
+        assert!(ExecutionMode::Effect {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 4,
+            absorbing: true,
+            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
+            fact_selection_required: false,
+        }
+        .validate()
+        .is_err());
+
+        let entry_once = ExecutionMode::Effect {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 1,
+            absorbing: false,
+            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
+            fact_selection_required: false,
+        };
+        assert_eq!(entry_once.validate(), Ok(()));
+        assert!(ExecutionMode::Effect {
+            capability_contract_ref: reference(1),
+            total_attempt_bound: 2,
+            absorbing: false,
+            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
+            fact_selection_required: false,
+        }
+        .validate()
+        .is_err());
+
+        let state = StateDeclaration::new(
+            SequentialControlAddress::new(0, Vec::new()).expect("address"),
+            reference(2),
+            reference(1),
+            reference(1),
+            None,
+            ExecutionMode::Pure,
+            true,
+        )
+        .expect("state");
+        assert!(state
+            .clone()
+            .with_maximum_conclusion_bytes(MAX_STATE_CONCLUSION_BYTES)
+            .is_ok());
+        assert!(state
+            .with_maximum_conclusion_bytes(MAX_STATE_CONCLUSION_BYTES + 1)
+            .is_err());
+    }
 }

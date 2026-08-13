@@ -148,6 +148,7 @@ nix develop -c cargo clean --target-dir target/verification
 | --- | --- |
 | `nix run .#model-check` | Admit the compiled Nixfied model without running project tasks. |
 | `nix run .#run -- --task negative-scan` | Run the immutable cutover-manifest negative scan. |
+| `nix run .#run -- --task capacity-envelope` | Emit the checked-in maximum-fixture, hot/cold, and configuration-bound measurements. |
 | `nix run .#ci` | Run the one final cross-crate gate for the cutover. |
 
 The definitions in `nixfied.nix` are authoritative when individual tests or

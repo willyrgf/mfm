@@ -2772,6 +2772,47 @@ mod tests {
         .expect("sourced frame")
     }
 
+    #[test]
+    fn outer_capacity_accepts_exact_ceiling_and_rejects_each_plus_one() {
+        let exact = StoreWorkLimits::default();
+        assert_eq!(exact.validate(), Ok(()));
+
+        let cases = [
+            StoreWorkLimits::new(
+                mfm_journal::single_trust::MAX_FRAME_BYTES + 1,
+                mfm_journal::single_trust::MAX_RUN_FRAMES,
+                mfm_journal::single_trust::MAX_RUN_OBJECTS,
+                mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+            ),
+            StoreWorkLimits::new(
+                mfm_journal::single_trust::MAX_FRAME_BYTES,
+                mfm_journal::single_trust::MAX_RUN_FRAMES + 1,
+                mfm_journal::single_trust::MAX_RUN_OBJECTS,
+                mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+            ),
+            StoreWorkLimits::new(
+                mfm_journal::single_trust::MAX_FRAME_BYTES,
+                mfm_journal::single_trust::MAX_RUN_FRAMES,
+                mfm_journal::single_trust::MAX_RUN_OBJECTS + 1,
+                mfm_journal::single_trust::MAX_RUN_FRAME_BYTES,
+            ),
+            StoreWorkLimits::new(
+                mfm_journal::single_trust::MAX_FRAME_BYTES,
+                mfm_journal::single_trust::MAX_RUN_FRAMES,
+                mfm_journal::single_trust::MAX_RUN_OBJECTS,
+                mfm_journal::single_trust::MAX_RUN_FRAME_BYTES + 1,
+            ),
+        ];
+        assert!(cases.iter().all(|limits| limits.validate().is_err()));
+        eprintln!(
+            "capacity-envelope store frame_bytes={} frames={} objects={} run_frame_bytes={}",
+            exact.max_frame_bytes(),
+            exact.max_run_frames(),
+            exact.max_run_objects(),
+            exact.max_run_frame_bytes(),
+        );
+    }
+
     fn proposal(seed: u8) -> (ValueRef, mfm_journal::single_trust::ImmutableObject) {
         let source = fact_source(seed);
         let subject = fact_source(seed.saturating_add(1));

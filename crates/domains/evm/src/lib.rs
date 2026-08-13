@@ -1299,4 +1299,26 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn transaction_data_capacity_accepts_exact_and_rejects_plus_one() {
+        let target = EvmTransactionTarget::new(1, "0xabc".to_owned(), "wallet-main".to_owned())
+            .expect("target");
+        assert!(EvmSubmissionRequest::new(
+            target.clone(),
+            "capacity-exact".to_owned(),
+            vec![0; EVM_TRANSACTION_DATA_LIMIT],
+            1,
+            "1".to_owned(),
+        )
+        .is_ok());
+        assert!(EvmSubmissionRequest::new(
+            target,
+            "capacity-plus-one".to_owned(),
+            vec![0; EVM_TRANSACTION_DATA_LIMIT + 1],
+            1,
+            "1".to_owned(),
+        )
+        .is_err());
+    }
 }

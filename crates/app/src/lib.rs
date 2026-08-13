@@ -1417,6 +1417,11 @@ fn contains_secret_marker(value: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_evm::{
+        EvmBalanceCollectionResult, EvmBalanceResult, EvmTransactionTarget,
+        EVM_TRANSACTION_DATA_LIMIT,
+    };
+    use mfm_program::single_trust::ProgramIngress;
 
     #[tokio::test]
     async fn admits_typed_input_into_sequential_program() {
@@ -1562,6 +1567,29 @@ mod tests {
     fn maximum_entry_point_programs_record_capacity_envelope() {
         let evm = evm_submission_program().expect("EVM program");
         let evm_bytes = evm.canonical_bytes().expect("EVM canonical bytes");
+        let evm_input = EvmSubmissionRequest::new(
+            EvmTransactionTarget::new(1, "0xabc".to_owned(), "wallet-main".to_owned())
+                .expect("EVM target"),
+            "capacity-envelope".to_owned(),
+            vec![0; EVM_TRANSACTION_DATA_LIMIT],
+            21_000,
+            "100".to_owned(),
+        )
+        .expect("maximum EVM input");
+        let evm_c0_bytes = mfm_program::canonical_value(&evm_input)
+            .expect("EVM C0 bytes")
+            .as_bytes()
+            .len();
+        let evm_context = EvmSubmissionContext::new(
+            evm_input,
+            u64::MAX,
+            "capacity-envelope-candidate".to_owned(),
+        )
+        .expect("maximum EVM context");
+        let evm_cn_bytes = mfm_program::canonical_value(&evm_context)
+            .expect("EVM Cn bytes")
+            .as_bytes()
+            .len();
 
         let collection_count =
             mfm_portfolio::PORTFOLIO_COLLECTION_LIMIT.min(mfm_evm::EVM_BALANCE_SOURCE_LIMIT);
@@ -1588,19 +1616,66 @@ mod tests {
         let portfolio_bytes = portfolio
             .canonical_bytes()
             .expect("Portfolio canonical bytes");
+        let portfolio_c0_bytes = mfm_program::canonical_value(&input)
+            .expect("Portfolio C0 bytes")
+            .as_bytes()
+            .len();
+        let portfolio_collections = input.collections.len();
+        let portfolio_sources = input
+            .collections
+            .iter()
+            .map(|collection| collection.sources.len())
+            .sum::<usize>();
+        let portfolio_declarations = portfolio.declarations().len();
+        let portfolio_completed = input
+            .collections
+            .iter()
+            .enumerate()
+            .map(|(collection, request)| EvmBalanceCollectionResult {
+                results: request
+                    .sources
+                    .iter()
+                    .map(|source| EvmBalanceResult {
+                        source_id: source.source_id.clone(),
+                        amount_scaled: "0".to_owned(),
+                        anchor: format!("anchor-{collection}"),
+                    })
+                    .collect(),
+                total_scaled: "0".to_owned(),
+            })
+            .collect();
+        let portfolio_context = PortfolioContinuation::new(input, portfolio_completed, 64)
+            .expect("maximum Portfolio context");
+        let portfolio_cn_bytes = mfm_program::canonical_value(&portfolio_context)
+            .expect("Portfolio Cn bytes")
+            .as_bytes()
+            .len();
+
+        let (evm_catalog, evm_program) = ProgramCatalog::builder()
+            .finish(evm)
+            .expect("EVM Program finish");
+        ProgramIngress::new(&evm_catalog)
+            .decode(evm_bytes.as_bytes())
+            .expect("EVM Program ingress");
+        let (portfolio_catalog, _portfolio_program) = ProgramCatalog::builder()
+            .finish(portfolio)
+            .expect("Portfolio Program finish");
+        ProgramIngress::new(&portfolio_catalog)
+            .decode(portfolio_bytes.as_bytes())
+            .expect("Portfolio Program ingress");
 
         eprintln!(
-            "capacity-envelope app evm declarations={} bytes={} portfolio collections={} sources={} declarations={} bytes={}",
-            evm.declarations().len(),
+            "capacity-envelope app evm declarations={} bytes={} c0_bytes={} cn_bytes={} portfolio collections={} sources={} declarations={} bytes={} c0_bytes={} cn_bytes={}",
+            evm_program.document().declarations().len(),
             evm_bytes.as_bytes().len(),
-            input.collections.len(),
-            input
-                .collections
-                .iter()
-                .map(|collection| collection.sources.len())
-                .sum::<usize>(),
-            portfolio.declarations().len(),
+            evm_c0_bytes,
+            evm_cn_bytes,
+            portfolio_collections,
+            portfolio_sources,
+            portfolio_declarations,
             portfolio_bytes.as_bytes().len(),
+            portfolio_c0_bytes,
+            portfolio_cn_bytes,
         );
     }
 }
