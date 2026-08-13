@@ -11,7 +11,11 @@ Access preparation projects only the canonical fact request. Store fixes any pri
 from the admitted source manifest and a bounded publication frontier before minting the direct-new
 typed continuation; Runtime and State code cannot submit or replace that selection. State success
 outcomes carry coordinate-free fact proposals, and pending conclusion recovery can rebind only the
-Store-assigned publication coordinate when the independent fact frontier moves.
+Store-assigned publication coordinate when the independent fact frontier moves; Store rotates the
+physical append identity for that rebind. Same-run conclusion races return qualified history,
+`NoLongerSelected`, conflict, or invalid-history classifications without re-entering State or an
+adapter. Permanent Store rejection remains an owner-bearing `ConclusionRejected` result until an
+explicit owner boundary discards it.
 
 Each Runtime opening also owns bounded active-session, deterministic CPU, planning, and provider
 ingress permits. Pure evaluation, access preparation, retained-prefix qualification, and typed

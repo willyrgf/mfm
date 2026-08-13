@@ -676,7 +676,9 @@ impl Application {
                     status: RunStatus::WaitingPreparation,
                 })
             }
-            RuntimeStep::Conflict { .. } | RuntimeStep::Failed { .. } => Err(PublicError::Internal),
+            RuntimeStep::ConclusionRejected { .. }
+            | RuntimeStep::Conflict { .. }
+            | RuntimeStep::Failed { .. } => Err(PublicError::Internal),
         }
     }
 
