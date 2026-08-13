@@ -1175,16 +1175,10 @@ mod managed_postgres_tests {
         )
     }
 
-    fn process_race_run_id() -> RunId {
-        RunId::parse(
-            "run:sha256-jcs-v1:c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("process race run")
-    }
-
-    async fn run_process_cas_child() {
+    async fn run_process_cas_child(stage: mfm_store::backend_conformance::ProcessRaceStage) {
         let database_url = std::env::var("DATABASE_URL").expect("child database URL");
         let identity = process_race_identity();
+        let candidate = std::env::var("MFM_POSTGRES_CAS_CANDIDATE").expect("child CAS candidate");
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -1201,18 +1195,60 @@ mod managed_postgres_tests {
             .expect("child store"),
         );
         store.check_ready().await.expect("child store readiness");
-        let outcome = mfm_store::backend_conformance::append_admission_probe(
-            store,
+        let backend: Arc<dyn StructuredStoreBackend> = store;
+        let (sequence, previous_head) =
+            mfm_store::backend_conformance::process_race_candidate_head(
+                Arc::clone(&backend),
+                stage,
+            )
+            .await
+            .expect("child process CAS head");
+        await_process_race_barrier(&candidate).await;
+        let outcome = mfm_store::backend_conformance::append_process_race_candidate_at_head(
+            backend,
             identity,
-            process_race_run_id(),
-            "postgres-process-race-0123456789",
+            stage,
+            &candidate,
+            sequence,
+            previous_head,
         )
         .await
-        .expect("child admission append");
+        .expect("child process CAS append");
+        let outcome_name = match &outcome {
+            BackendAppendOutcome::NewlyCommitted => "newly-committed",
+            BackendAppendOutcome::StaleHead { .. } => "stale-head",
+            BackendAppendOutcome::Found(_) => "found",
+            BackendAppendOutcome::AcknowledgementUnknown => "acknowledgement-unknown",
+        };
+        let barrier = std::env::var_os("MFM_POSTGRES_CAS_BARRIER")
+            .map(PathBuf::from)
+            .expect("child CAS barrier");
+        fs::write(barrier.join(format!("{candidate}.outcome")), outcome_name)
+            .expect("record child CAS outcome");
         assert!(matches!(
             outcome,
-            BackendAppendOutcome::NewlyCommitted | BackendAppendOutcome::Found(_)
+            BackendAppendOutcome::NewlyCommitted | BackendAppendOutcome::StaleHead { .. }
         ));
+    }
+
+    async fn await_process_race_barrier(candidate: &str) {
+        assert!(matches!(candidate, "left" | "right"));
+        let barrier = std::env::var_os("MFM_POSTGRES_CAS_BARRIER")
+            .map(PathBuf::from)
+            .expect("child CAS barrier");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(barrier.join(format!("{candidate}.ready")))
+            .expect("create child CAS barrier marker");
+        let other = if candidate == "left" { "right" } else { "left" };
+        for _ in 0..400 {
+            if barrier.join(format!("{other}.ready")).is_file() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("process CAS barrier did not release both children");
     }
 
     #[tokio::test]
@@ -1221,7 +1257,11 @@ mod managed_postgres_tests {
             return;
         };
         if std::env::var_os("MFM_POSTGRES_CAS_CHILD").is_some() {
-            run_process_cas_child().await;
+            let stage = std::env::var("MFM_POSTGRES_CAS_STAGE")
+                .ok()
+                .and_then(|value| mfm_store::backend_conformance::ProcessRaceStage::parse(&value))
+                .expect("child CAS stage");
+            run_process_cas_child(stage).await;
             return;
         }
         let pool = PgPoolOptions::new()
@@ -1268,31 +1308,101 @@ mod managed_postgres_tests {
             .expect("PostgreSQL backend contract");
         let executable = std::env::current_exe().expect("PostgreSQL test executable");
         let child_database_url = database_url.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut children = (0..2)
-                .map(|_| {
-                    Command::new(&executable)
-                        .args([
-                            "--exact",
-                            "managed_postgres_tests::managed_primary_schema_meets_the_admitted_profile",
-                            "--nocapture",
-                        ])
-                        .env("DATABASE_URL", &child_database_url)
-                        .env("MFM_POSTGRES_CAS_CHILD", "1")
-                        .spawn()
-                        .expect("spawn PostgreSQL CAS child")
+        for stage in mfm_store::backend_conformance::ProcessRaceStage::ALL {
+            mfm_store::backend_conformance::seed_process_race(
+                backend.clone(),
+                identity.clone(),
+                stage,
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "seed PostgreSQL process CAS stage {}: {error:?}",
+                    stage.as_str()
+                )
+            });
+            let barrier = std::env::temp_dir().join(format!(
+                "mfm-postgres-cas-{}-{}-{}",
+                std::process::id(),
+                stage.as_str(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("CAS barrier clock")
+                    .as_nanos()
+            ));
+            fs::create_dir(&barrier).expect("create PostgreSQL CAS barrier");
+            let executable = executable.clone();
+            let child_database_url = child_database_url.clone();
+            let child_barrier = barrier.clone();
+            let stage_name = stage.as_str();
+            tokio::task::spawn_blocking(move || {
+                let mut children = ["left", "right"]
+                    .into_iter()
+                    .map(|candidate| {
+                        Command::new(&executable)
+                            .args([
+                                "--exact",
+                                "managed_postgres_tests::managed_primary_schema_meets_the_admitted_profile",
+                                "--nocapture",
+                            ])
+                            .env("DATABASE_URL", &child_database_url)
+                            .env("MFM_POSTGRES_CAS_CHILD", "1")
+                            .env("MFM_POSTGRES_CAS_STAGE", stage_name)
+                            .env("MFM_POSTGRES_CAS_CANDIDATE", candidate)
+                            .env("MFM_POSTGRES_CAS_BARRIER", &child_barrier)
+                            .spawn()
+                            .expect("spawn PostgreSQL CAS child")
+                    })
+                    .collect::<Vec<_>>();
+                for child in &mut children {
+                    assert!(child
+                        .wait()
+                        .expect("wait for PostgreSQL CAS child")
+                        .success());
+                }
+            })
+            .await
+            .expect("PostgreSQL process CAS worker");
+            let outcomes = ["left", "right"]
+                .into_iter()
+                .map(|candidate| {
+                    fs::read_to_string(barrier.join(format!("{candidate}.outcome")))
+                        .expect("read PostgreSQL CAS child outcome")
                 })
                 .collect::<Vec<_>>();
-            for child in &mut children {
-                assert!(child
-                    .wait()
-                    .expect("wait for PostgreSQL CAS child")
-                    .success());
-            }
-        })
-        .await
-        .expect("PostgreSQL process CAS worker");
-        let process_race_run = process_race_run_id();
+            fs::remove_dir_all(&barrier).expect("remove PostgreSQL CAS barrier");
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| outcome.as_str() == "newly-committed")
+                    .count(),
+                1,
+                "process CAS stage {} outcomes: {outcomes:?}",
+                stage.as_str()
+            );
+            assert_eq!(
+                outcomes
+                    .iter()
+                    .filter(|outcome| outcome.as_str() == "stale-head")
+                    .count(),
+                1,
+                "process CAS stage {} outcomes: {outcomes:?}",
+                stage.as_str()
+            );
+            mfm_store::backend_conformance::verify_process_race(backend.clone(), stage)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "verify PostgreSQL process CAS stage {}: {error:?}",
+                        stage.as_str()
+                    )
+                });
+        }
+
+        let process_race_run = RunId::parse(
+            "run:sha256-jcs-v1:c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("process race run");
         let process_prefix = backend
             .load_complete_prefix(
                 &process_race_run,
@@ -1302,10 +1412,6 @@ mod managed_postgres_tests {
             .expect("load process CAS prefix")
             .expect("process CAS prefix");
         assert_eq!(process_prefix.frames().len(), 1);
-        assert_eq!(
-            process_prefix.frames()[0].append_request_id().as_str(),
-            "postgres-process-race-0123456789"
-        );
         let recorded_process_head = process_prefix.frames()[0].head_digest().as_str().to_owned();
         let corrupt_process_head =
             "content:sha256-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
