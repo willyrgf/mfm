@@ -496,3 +496,74 @@ product code outside explicit rejection/deletion manifests and narrow ordinary d
 words. Secrets are not logged, persisted, or returned by the new evidence, race, capacity, or
 verification paths. The completion audit is recorded in this log; the RFC and implementation plan
 remain untouched.
+
+2026-08-13 — strict restore and identity audit continuation
+
+Material uncertainties
+
+none.
+
+This continuation corrects the preceding completion record's remaining persisted-deployment gap.
+The immutable normative inputs are unchanged and retain these SHA-256 identities:
+
+- `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `d5293fe93e356748a364ca2832481548210a5b3b07f1fa5f0a92c4415735f46b`
+- `IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `185d5575fe30ff5041f76c540731259ce683c1069015f707821444ec12e72148`
+- `SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md`: `72694f76e02d7ac43b28b31ba713a1ae4c9eed15849ebcec22d06dbe3497aa6d`
+
+Architectural review
+
+Architect Aquinas reviewed the restore boundary after the audit found that the PostgreSQL
+singleton schema row did not yet persist the active Store pair. The ruling was to keep that
+pair in the existing schema row, expose one trusted rotation operation, check the pair at open,
+and recheck it under a row lock in every append transaction. Multiple opens with one unchanged
+pair remain valid; the pair is not a process lease. No historical partition is rewritten during
+rotation, and a fresh pair starts a new partition lineage.
+
+Implementation
+
+Commit `38267c65` (`persist postgresql store identity and restore rotation`) implements that
+cutover:
+
+- the fresh PostgreSQL baseline persists `store_scope_id` and positive `store_epoch` alongside
+  the v8 schema contract;
+- `PostgresStore::rotate_identity` changes the pair atomically only when the previous pair matches;
+- readiness checks compare the requested pair with the persisted row without enumerating runs;
+- append transactions lock and recheck the persisted row before identity-scoped CAS or
+  configuration work, while all backend reads fail closed when the opened pair is stale; and
+- the restore regression copies a populated database with PostgreSQL template machinery,
+  verifies the old pair, rotates to a new pair, rejects the old handle, proves old partitions are
+  absent under the new pair, appends and reopens under the new pair, accepts a second same-pair
+  open, and rejects reuse of the old pair after reconnect.
+
+The managed database regression passed as Nixfied run
+`run-2578951-1786612423375961825` (one of one leaves, including the physical restore copy). The
+same task also retains the isolated Linux primary crash/restart probe and the four-stage,
+two-process exact-head race proof. The final cross-crate gate is being rerun after this cutover;
+its result is recorded below before handoff.
+
+Strict requirement audit
+
+The capacity artifact and executable owners now have exact and independent bound-plus-one checks
+for the fixed outer envelope, access attempts, EntryOnce, State conclusion reservation,
+transaction data, Portfolio sources, and configuration history. The App and Runtime maximum
+fixtures record both current entry points, hot/cold retained canonical bytes, and Linux process
+high-water characterization without claiming a latency threshold. Portable decoding remains
+consuming evidence validation only; there is no persistence import path. The remaining deliberate
+limits are trusted in-process implementation code, provider-factual trust, response-loss before
+durable conclusion, and the admitted primary-crash/restart profile rather than host or failover
+durability.
+
+Final verification after the restore cutover
+
+- `nix run .#model-check` — passed; computed model hash
+  `6a3ede0c1d985b964a7fefd2c2190609ecd0ebc38a4677dac0e1a4b0a0a3e58d`;
+- `nix run .#ci` — passed as run `run-2581717-1786612894444774521`, 10/10 tasks, 0 failures,
+  including formatting, negative scan, Clippy, workspace check/tests, managed PostgreSQL,
+  documentation tests, and all three capacity leaves;
+- `bash scripts/check-cutover-manifest.sh` — passed;
+- `git diff --check` — passed; and
+- RFC, implementation-plan, and cutover-manifest SHA-256 checks — passed with the values above.
+
+The final audit remains evidence-backed: no host-loss, failover, replica, quorum, latency, or
+independent provider-factual-truth claim is made. The RFC, implementation plan, and cutover
+manifest remain byte-for-byte unchanged.
