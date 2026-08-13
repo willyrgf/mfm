@@ -15,7 +15,7 @@ pub use lifecycle::{
 pub use single_trust::{
     AcceptedIntegrityAccess, AcceptedOutcomeAccess, AccessHandlerResolution, AccessImplementation,
     AccessIngressFuture, AccessResolution, AccessResolutionFuture, BoxFuture, CommittedCall,
-    Effect, OpenedPreparationCommit, PreparationError, PreparedExecution, Pure, PureImplementation,
-    QualifiedAdapter, Read, Result, RuntimeAssembly, RuntimeAssemblyBuilder, RuntimeError, State,
-    UnresolvedAccess, UnresolvedClassification,
+    Effect, FailureValue, OpenedPreparationCommit, PreparationError, PreparedExecution, Pure,
+    PureImplementation, QualifiedAdapter, Read, Result, RuntimeAssembly, RuntimeAssemblyBuilder,
+    RuntimeError, State, UnresolvedAccess, UnresolvedClassification,
 };

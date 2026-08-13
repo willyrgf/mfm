@@ -74,6 +74,16 @@ impl From<mfm_store::single_trust::StoreError> for RuntimeError {
     }
 }
 
+/// A typed failure contract with one static integrity-blocked value.
+///
+/// The value is selected by the domain's closed failure contract and receives no input, evidence,
+/// or Runtime authority. It is therefore safe for the capability-certified integrity path to use
+/// without invoking a State callback or accepting a caller-supplied failure.
+pub trait FailureValue: MfmValue {
+    /// Returns the contract-fixed failure for an accepted integrity block.
+    fn integrity_blocked() -> Self;
+}
+
 /// A callback-free typed State contract.
 pub trait State: Send + Sync + 'static {
     /// Complete cumulative input consumed by this State.
@@ -81,7 +91,7 @@ pub trait State: Send + Sync + 'static {
     /// Complete successor context or terminal public result.
     type Output: MfmValue;
     /// Explicit fail-fast domain value.
-    type Failure: MfmValue;
+    type Failure: FailureValue;
 
     /// Returns the stable State implementation identity.
     fn state_id() -> Result<StableId>;
@@ -207,8 +217,9 @@ impl<S: State, C: AccessCapabilityContract> AcceptedOutcomeAccess<S, C> {
 
 /// Affine evidence for a capability-specific integrity block.
 ///
-/// The caller must supply the State's declared typed failure.  The wrapper has no success
-/// constructor and therefore cannot accidentally grant a successor context or retry authority.
+/// The wrapper has no success constructor and therefore cannot accidentally grant a successor
+/// context or retry authority. Its consuming failure route is static and does not invoke State
+/// interpretation.
 pub struct AcceptedIntegrityAccess<S: State, C: AccessCapabilityContract> {
     assembly_brand: Arc<RuntimeAssemblyBrand>,
     input: QualifiedTypedValue<S::Input>,
@@ -247,17 +258,16 @@ impl<S: State, C: AccessCapabilityContract> AcceptedIntegrityAccess<S, C> {
     }
 
     /// Consumes integrity evidence into the exact declared typed failure route.
-    pub fn conclude_blocked(
-        self,
-        failure: S::Failure,
-    ) -> AccessHandlerResolution<S, S::Output, S::Failure, C> {
+    pub fn conclude_blocked(self) -> AccessHandlerResolution<S, S::Output, S::Failure, C> {
         AccessHandlerResolution {
             assembly_brand: self.assembly_brand,
             input: self.input,
             call_id: self.call_id,
             intent: self.intent,
             evidence: Some(self.evidence),
-            outcome: Some(ProposedStateOutcome::Failure(failure)),
+            outcome: Some(ProposedStateOutcome::Failure(
+                S::Failure::integrity_blocked(),
+            )),
             classification: None,
             preparation: self.preparation,
             fact_continuation: self.fact_continuation,
@@ -1497,6 +1507,12 @@ mod tests {
     #[serde(deny_unknown_fields)]
     struct Context {
         value: u64,
+    }
+
+    impl FailureValue for Context {
+        fn integrity_blocked() -> Self {
+            Self { value: 0 }
+        }
     }
 
     struct PureState;

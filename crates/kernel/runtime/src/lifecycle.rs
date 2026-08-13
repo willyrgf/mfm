@@ -2099,6 +2099,12 @@ mod tests {
         value: u64,
     }
 
+    impl crate::single_trust::FailureValue for TestContext {
+        fn integrity_blocked() -> Self {
+            Self { value: 0 }
+        }
+    }
+
     struct TestPure;
 
     impl State for TestPure {
@@ -2544,7 +2550,7 @@ mod tests {
                                 }
                                 crate::single_trust::AccessResolution::BlockedIntegrity(
                                     accepted,
-                                ) => Ok(accepted.conclude_blocked(TestContext { value: 0 })),
+                                ) => Ok(accepted.conclude_blocked()),
                                 crate::single_trust::AccessResolution::Unresolved(unresolved) => {
                                     Ok(unresolved.finish())
                                 }
