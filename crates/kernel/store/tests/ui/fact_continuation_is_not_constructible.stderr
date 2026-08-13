@@ -1,0 +1,11 @@
+error: cannot construct `FactContinuation` with struct literal syntax due to private fields
+ --> tests/ui/fact_continuation_is_not_constructible.rs:4:13
+  |
+4 |     let _ = FactContinuation {};
+  |             ^^^^^^^^^^^^^^^^
+  |
+help: you might have meant to use the `new` associated function
+  |
+4 -     let _ = FactContinuation {};
+4 +     let _ = FactContinuation::new(_, _, _, _, _, _, _);
+  |

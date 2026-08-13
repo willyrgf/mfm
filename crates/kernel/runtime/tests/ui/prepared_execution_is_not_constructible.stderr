@@ -1,0 +1,5 @@
+error: cannot construct `PreparedExecution<TestState, TestCapability>` with struct literal syntax due to private fields
+  --> tests/ui/prepared_execution_is_not_constructible.rs:52:13
+   |
+52 |     let _ = PreparedExecution::<TestState, TestCapability> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

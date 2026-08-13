@@ -707,7 +707,7 @@ where
 {
     /// Creates a preparation by borrowing input while retaining the consuming typed value.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         assembly: &RuntimeAssembly,
         run_id: RunId,
         occurrence: SequentialControlAddress,

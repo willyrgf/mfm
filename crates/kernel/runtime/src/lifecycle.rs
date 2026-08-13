@@ -2165,6 +2165,77 @@ mod tests {
         )
     }
 
+    fn pure_runtime_fixture() -> (Runtime, ProgramCatalog, ContentRef) {
+        let contract = nominal_contract_ref::<TestContext>().expect("contract");
+        let first_implementation_ref = test_ref(b"mfm.test.concurrent-pure-first");
+        let second_implementation_ref = test_ref(b"mfm.test.concurrent-pure-second");
+        let first_occurrence =
+            mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+                .expect("occurrence");
+        let second_occurrence =
+            mfm_journal::single_trust::SequentialControlAddress::new(1, Vec::new())
+                .expect("occurrence");
+        let document = ProgramDocument::new(
+            StableId::new("mfm.test.concurrent-entry").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            vec![
+                mfm_program::Declaration::State(Box::new(
+                    StateDeclaration::with_next(
+                        first_occurrence,
+                        first_implementation_ref.clone(),
+                        contract.clone(),
+                        contract.clone(),
+                        None,
+                        ExecutionMode::Pure,
+                        second_occurrence.clone(),
+                    )
+                    .expect("state"),
+                )),
+                mfm_program::Declaration::State(Box::new(
+                    StateDeclaration::new(
+                        second_occurrence,
+                        second_implementation_ref.clone(),
+                        contract.clone(),
+                        contract,
+                        None,
+                        ExecutionMode::Pure,
+                        true,
+                    )
+                    .expect("state"),
+                )),
+            ],
+        )
+        .expect("document");
+        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let implementation = PureImplementation::<TestPure>::new(|input| {
+            mfm_capabilities::ProposedStateOutcome::Success(TestContext {
+                value: input.value + 1,
+            })
+        });
+        let mut builder =
+            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
+                .expect("assembly builder");
+        builder
+            .register_pure(first_implementation_ref, implementation.clone())
+            .expect("registration");
+        builder
+            .register_pure(second_implementation_ref, implementation)
+            .expect("registration");
+        let assembly = builder.finish().expect("assembly");
+        let store = StructuredStore::open_memory(
+            test_identity(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .expect("store");
+        (
+            Runtime::new(assembly, store).expect("runtime"),
+            catalog,
+            nominal_contract_ref::<TestContext>().expect("contract"),
+        )
+    }
+
     #[derive(Default)]
     struct AccessCounters {
         provider_entries: AtomicUsize,
@@ -2316,6 +2387,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_spawn_and_resume_share_cas_outcomes_without_duplicate_pure_entries() {
+        let (runtime, catalog, contract) = pure_runtime_fixture();
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+        let configuration_ref = test_ref(b"mfm.test.concurrent-configuration");
+        let value = |amount| {
+            catalog
+                .qualify(contract.clone(), TestContext { value: amount })
+                .expect("qualified value")
+        };
+        let left = runtime
+            .admission(
+                run_id.clone(),
+                value(1),
+                configuration_ref.clone(),
+                Vec::new(),
+                AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
+            )
+            .expect("admission");
+        let right = runtime
+            .admission(
+                run_id.clone(),
+                value(1),
+                configuration_ref.clone(),
+                Vec::new(),
+                AppendRequestId::new("concurrent-spawn-right-0123456789").expect("request"),
+            )
+            .expect("admission");
+        let (left, right) = tokio::join!(left.spawn(), right.spawn());
+        assert!(matches!(
+            left,
+            SpawnStep::Active(_) | SpawnStep::Terminal(_)
+        ));
+        assert!(matches!(
+            right,
+            SpawnStep::Active(_) | SpawnStep::Terminal(_)
+        ));
+
+        let value = value(1);
+        let seed = runtime
+            .admission(
+                run_id.clone(),
+                value,
+                configuration_ref,
+                Vec::new(),
+                AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
+            )
+            .expect("same admission");
+        drop(seed.spawn().await);
+
+        let (left, right) = tokio::join!(
+            runtime.resume_run(run_id.clone()),
+            runtime.resume_run(run_id)
+        );
+        let left = match left {
+            ResumeStep::Active(session) => session,
+            other => panic!("unexpected left resume: {}", resume_name(&other)),
+        };
+        let right = match right {
+            ResumeStep::Active(session) => session,
+            other => panic!("unexpected right resume: {}", resume_name(&other)),
+        };
+        let (left, right) = tokio::join!(left.drive(), right.drive());
+        assert!(matches!(
+            left,
+            RuntimeStep::Advanced(_) | RuntimeStep::Terminal(_)
+        ));
+        assert!(matches!(
+            right,
+            RuntimeStep::Advanced(_) | RuntimeStep::Terminal(_)
+        ));
+    }
+
+    #[tokio::test]
     async fn access_session_enters_only_the_bound_adapter_and_concludes() {
         let contract = nominal_contract_ref::<TestContext>().expect("contract");
         let capability_contract =
@@ -2438,7 +2585,7 @@ mod tests {
         .expect("run id");
         let admission = runtime
             .admission(
-                run_id,
+                run_id.clone(),
                 value,
                 test_ref(b"mfm.test.lifecycle-access-configuration"),
                 Vec::new(),
@@ -2449,15 +2596,42 @@ mod tests {
             SpawnStep::Active(session) => session,
             other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
         };
-        let terminal = match session.drive().await {
-            RuntimeStep::Terminal(terminal) => terminal,
-            RuntimeStep::Failed { error, .. } => panic!("unexpected drive failure: {error:?}"),
-            other => panic!("unexpected drive outcome: {}", runtime_name(&other)),
+        drop(session);
+        let (left, right) = tokio::join!(
+            runtime.resume_run(run_id.clone()),
+            runtime.resume_run(run_id)
+        );
+        let left = match left {
+            ResumeStep::Active(session) => session,
+            other => panic!("unexpected left resume: {}", resume_name(&other)),
         };
-        assert_eq!(terminal.head_sequence(), 3);
+        let right = match right {
+            ResumeStep::Active(session) => session,
+            other => panic!("unexpected right resume: {}", resume_name(&other)),
+        };
+        let (left, right) = tokio::join!(left.drive(), right.drive());
+        let suspended = match (left, right) {
+            (RuntimeStep::Terminal(terminal), RuntimeStep::Suspended(suspended))
+            | (RuntimeStep::Suspended(suspended), RuntimeStep::Terminal(terminal)) => {
+                assert_eq!(terminal.head_sequence(), 3);
+                suspended
+            }
+            (left, right) => panic!(
+                "expected one terminal and one suspended preparation, got {} and {}",
+                runtime_name(&left),
+                runtime_name(&right)
+            ),
+        };
+        match suspended.resolve().await {
+            RuntimeStep::Terminal(terminal) => assert_eq!(terminal.head_sequence(), 3),
+            other => panic!(
+                "unexpected preparation resolution: {}",
+                runtime_name(&other)
+            ),
+        }
         assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
         assert_eq!(counters.ingress.load(Ordering::SeqCst), 1);
-        assert_eq!(counters.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.preparations.load(Ordering::SeqCst), 2);
         assert_eq!(counters.interpretations.load(Ordering::SeqCst), 1);
     }
 
