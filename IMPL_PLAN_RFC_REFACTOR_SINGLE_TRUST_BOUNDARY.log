@@ -172,5 +172,5 @@ The RFC, implementation plan, and cutover manifest remain byte-for-byte unchange
 documented trust-boundary limits are the primary crash/restart profile rather than host/failover
 durability, trusted in-process Rust State/adapter code, process-local owner loss before durable
 conclusion, and the two fixed entry points. The managed database task does not control the service
-process to inject a primary crash; it proves the admitted settings, reconnectable schema baseline,
-and same-epoch CAS behavior, so no stronger crash-injection claim is recorded.
+process to inject a primary crash; it proves the admitted settings, a fresh schema baseline, and
+same-epoch CAS behavior, so no stronger crash-injection claim is recorded.
