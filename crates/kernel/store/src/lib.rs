@@ -5,8 +5,17 @@
 //! frames, reduces the sequential prefix, and returns append owners; it cannot invoke a State or
 //! provider because neither authority is present in this crate.
 
+pub mod backend;
 pub mod single_trust;
 
+pub use backend::{
+    BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
+    BackendFuture, BackendResult, ConfigurationAppendCommand, HistoryReader,
+    MemoryStructuredBackend, OpenedStructuredStore, QualifiedHistoryPort, RawConfigurationRevision,
+    RawFactPublication, RawFactSnapshot, RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix,
+    StoreAuditPort, StoreOpenError, StoreParts, StoreWorkLimits, StructuredStore,
+    StructuredStoreBackend, StructuredStoreIdentity,
+};
 pub use single_trust::{
     AppendDisposition, ConfigurationAppendDisposition, ConfigurationHistory, ConfigurationRevision,
     FactContinuation, PreparationAppend, PreparedConclusion, PreparedConfigurationAppend,

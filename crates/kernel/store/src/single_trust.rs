@@ -261,6 +261,14 @@ impl PreparedConclusion {
         &self.frame
     }
 
+    pub(crate) fn belongs_to(&self, identity: &crate::backend::StructuredStoreIdentity) -> bool {
+        self.scope == *identity.scope() && self.epoch == identity.epoch()
+    }
+
+    pub(crate) fn into_frame(self) -> RunFrame {
+        self.frame
+    }
+
     /// Consumes this owner into one exact-head Store append.
     pub fn commit(self, store: &RunStore) -> Result<AppendDisposition> {
         if self.scope != store.scope || self.epoch != store.epoch {
@@ -356,6 +364,20 @@ impl FactContinuation {
 }
 
 impl PreparationAppend {
+    pub(crate) fn with_disposition(self, disposition: AppendDisposition) -> Self {
+        let direct_new = matches!(disposition, AppendDisposition::NewlyCommitted { .. });
+        Self {
+            disposition,
+            preparation: matches!(
+                disposition,
+                AppendDisposition::NewlyCommitted { .. } | AppendDisposition::Found { .. }
+            )
+            .then_some(self.preparation)
+            .flatten(),
+            fact_continuation: direct_new.then_some(self.fact_continuation).flatten(),
+        }
+    }
+
     /// Returns the mechanical append disposition.
     pub const fn disposition(&self) -> AppendDisposition {
         self.disposition
