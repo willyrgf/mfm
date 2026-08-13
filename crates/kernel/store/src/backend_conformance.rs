@@ -639,6 +639,148 @@ pub async fn exercise(
     Ok(())
 }
 
+/// Races the first fact publication for two independent runs sharing one empty fact head.
+pub async fn exercise_first_fact_publication_race(
+    backend: Arc<dyn StructuredStoreBackend>,
+    identity: StructuredStoreIdentity,
+) -> Result<(), BackendError> {
+    let left_run = RunId::parse(
+        "run:sha256-jcs-v1:b123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let right_run = RunId::parse(
+        "run:sha256-jcs-v1:d123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let left_first_bytes = br#"{"kind":"fact-race-left-admission"}"#;
+    let right_first_bytes = br#"{"kind":"fact-race-right-admission"}"#;
+    let left_first_digest = raw_content_digest(left_first_bytes);
+    let right_first_digest = raw_content_digest(right_first_bytes);
+    let left_first_head = ContentDigest::parse(
+        "content:sha256-v1:1212121212121212121212121212121212121212121212121212121212121212",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let right_first_head = ContentDigest::parse(
+        "content:sha256-v1:1313131313131313131313131313131313131313131313131313131313131313",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let left_first_request = AppendRequestId::new("fact-race-left-admission-0123456789")
+        .map_err(|_| BackendError::Storage)?;
+    let right_first_request = AppendRequestId::new("fact-race-right-admission-0123456789")
+        .map_err(|_| BackendError::Storage)?;
+    let left_first = BackendAppendCommand::new(
+        &identity,
+        &left_run,
+        1,
+        &left_first_request,
+        left_first_bytes,
+        &left_first_digest,
+        &left_first_head,
+        None,
+        true,
+        None,
+    );
+    let right_first = BackendAppendCommand::new(
+        &identity,
+        &right_run,
+        1,
+        &right_first_request,
+        right_first_bytes,
+        &right_first_digest,
+        &right_first_head,
+        None,
+        true,
+        None,
+    );
+    if !matches!(
+        backend.compare_and_append(&left_first).await?,
+        BackendAppendOutcome::NewlyCommitted
+    ) || !matches!(
+        backend.compare_and_append(&right_first).await?,
+        BackendAppendOutcome::NewlyCommitted
+    ) {
+        return Err(BackendError::Conflict);
+    }
+
+    let proposal_schema = SchemaId::new(
+        "mfm.test.fact-race-proposals",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        DigestBytes::from_array([4; 32]),
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let proposal_ref = ContentRef::new(proposal_schema, raw_content_digest(b"fact-race-proposals"))
+        .map_err(|_| BackendError::Storage)?;
+    let left_publication = RawFactPublication::new(1, left_run.clone(), 2, proposal_ref.clone())?;
+    let right_publication = RawFactPublication::new(1, right_run.clone(), 2, proposal_ref)?;
+    let left_second_bytes = br#"{"kind":"fact-race-left-publication"}"#;
+    let right_second_bytes = br#"{"kind":"fact-race-right-publication"}"#;
+    let left_second_digest = raw_content_digest(left_second_bytes);
+    let right_second_digest = raw_content_digest(right_second_bytes);
+    let left_second_head = ContentDigest::parse(
+        "content:sha256-v1:1414141414141414141414141414141414141414141414141414141414141414",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let right_second_head = ContentDigest::parse(
+        "content:sha256-v1:1515151515151515151515151515151515151515151515151515151515151515",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let left_second_request = AppendRequestId::new("fact-race-left-publication-0123456789")
+        .map_err(|_| BackendError::Storage)?;
+    let right_second_request = AppendRequestId::new("fact-race-right-publication-0123456789")
+        .map_err(|_| BackendError::Storage)?;
+    let left_second = BackendAppendCommand::new(
+        &identity,
+        &left_run,
+        2,
+        &left_second_request,
+        left_second_bytes,
+        &left_second_digest,
+        &left_second_head,
+        Some(&left_first_head),
+        false,
+        Some(&left_publication),
+    );
+    let right_second = BackendAppendCommand::new(
+        &identity,
+        &right_run,
+        2,
+        &right_second_request,
+        right_second_bytes,
+        &right_second_digest,
+        &right_second_head,
+        Some(&right_first_head),
+        false,
+        Some(&right_publication),
+    );
+    let (left, right) = tokio::join!(
+        backend.compare_and_append(&left_second),
+        backend.compare_and_append(&right_second)
+    );
+    let committed = usize::from(matches!(&left, Ok(BackendAppendOutcome::NewlyCommitted)))
+        + usize::from(matches!(&right, Ok(BackendAppendOutcome::NewlyCommitted)));
+    let frontier_losers = usize::from(matches!(&left, Err(BackendError::FactFrontierChanged)))
+        + usize::from(matches!(&right, Err(BackendError::FactFrontierChanged)));
+    if committed != 1 || frontier_losers != 1 {
+        return Err(BackendError::Conflict);
+    }
+    if backend.load_facts().await?.head_sequence() != 1 {
+        return Err(BackendError::Conflict);
+    }
+    let left_prefix = backend
+        .load_complete_prefix(&left_run, RawHistoryLoadLimit::new(4, 4096))
+        .await?
+        .ok_or(BackendError::Storage)?;
+    let right_prefix = backend
+        .load_complete_prefix(&right_run, RawHistoryLoadLimit::new(4, 4096))
+        .await?
+        .ok_or(BackendError::Storage)?;
+    if left_prefix.frames().len() + right_prefix.frames().len() != 3 {
+        return Err(BackendError::Conflict);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,5 +798,21 @@ mod tests {
         );
         let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
         exercise(backend, identity).await.expect("backend contract");
+    }
+
+    #[tokio::test]
+    async fn memory_backend_serializes_first_fact_publication() {
+        let identity = StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("scope"),
+            StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        );
+        let backend: Arc<dyn StructuredStoreBackend> =
+            Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        exercise_first_fact_publication_race(backend, identity)
+            .await
+            .expect("first fact publication race");
     }
 }

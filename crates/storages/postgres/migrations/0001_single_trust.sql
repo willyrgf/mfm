@@ -40,6 +40,7 @@ CREATE INDEX mfm_run_frames_tenant_run_order
     ON mfm_run_frames (store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence);
 
 CREATE TABLE mfm_fact_heads (
+    -- The writer creates and locks the zero row before the first publication transaction.
     store_scope_id TEXT NOT NULL,
     store_epoch BIGINT NOT NULL,
     tenant_scope_id TEXT NOT NULL,
