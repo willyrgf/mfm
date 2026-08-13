@@ -42,7 +42,7 @@ for each State occurrence. A conclusion is durable before its output is public.
 
 Store owns reduction and semantic evidence. Runtime owns immutable live registration, the affine
 `PreparedExecution`, direct-new-only `CommittedCall`, call correlation, typed input retention, and
-`PendingConclusion` around a Store-owned `PreparedConclusion`.
+the exhaustive `SuspendedRun` owner-fate coordinator around a Store-owned `PreparedConclusion`.
 
 Pure implementations receive only typed input. Read and Effect implementations borrow input to
 prepare canonical intent, then execute only after the exact preparation append is newly committed.
