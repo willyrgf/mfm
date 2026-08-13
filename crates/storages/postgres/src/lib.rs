@@ -193,6 +193,7 @@ impl StructuredStoreBackend for PostgresStore {
     ) -> BackendFuture<'a, Option<RawRunPrefix>> {
         Box::pin(async move {
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
+            let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
             let rows: Vec<(i64, String, Vec<u8>, String, String)> = sqlx::query_as(
                 "SELECT run_sequence, append_request_id, frame_bytes, frame_digest, head_digest
                  FROM mfm_run_frames
@@ -208,10 +209,29 @@ impl StructuredStoreBackend for PostgresStore {
                 i64::try_from(limit.max_frames().saturating_add(1))
                     .map_err(|_| BackendError::Capacity)?,
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *transaction)
             .await
             .map_err(|_| BackendError::Storage)?;
+            let head: Option<(i64, String)> = sqlx::query_as(
+                "SELECT head_sequence, head_digest
+                 FROM mfm_run_heads
+                 WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3 AND run_id = $4",
+            )
+            .bind(self.scope.as_str())
+            .bind(epoch)
+            .bind(self.tenant.as_str())
+            .bind(run_id.as_str())
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|_| BackendError::Storage)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|_| BackendError::AcknowledgementUnknown)?;
             if rows.is_empty() {
+                if head.is_some() {
+                    return Err(BackendError::Storage);
+                }
                 return Ok(None);
             }
             if rows.len() > limit.max_frames() {
@@ -233,6 +253,18 @@ impl StructuredStoreBackend for PostgresStore {
                     ContentDigest::parse(&frame_digest).map_err(|_| BackendError::Storage)?,
                     ContentDigest::parse(&head_digest).map_err(|_| BackendError::Storage)?,
                 )?);
+            }
+            let Some((head_sequence, head_digest)) = head else {
+                return Err(BackendError::Storage);
+            };
+            let retained_head = frames.last().ok_or(BackendError::Storage)?;
+            if head_sequence < 0
+                || u64::try_from(head_sequence).map_err(|_| BackendError::Storage)?
+                    != retained_head.sequence()
+                || ContentDigest::parse(&head_digest).map_err(|_| BackendError::Storage)?
+                    != *retained_head.head_digest()
+            {
+                return Err(BackendError::Storage);
             }
             RawRunPrefix::new(frames).map(Some)
         })
@@ -1251,6 +1283,44 @@ mod managed_postgres_tests {
             process_prefix.frames()[0].append_request_id().as_str(),
             "postgres-process-race-0123456789"
         );
+        let recorded_process_head = process_prefix.frames()[0].head_digest().as_str().to_owned();
+        let corrupt_process_head =
+            "content:sha256-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        sqlx::query(
+            "UPDATE mfm_run_heads
+             SET head_digest = $1
+             WHERE store_scope_id = $2 AND store_epoch = $3 AND tenant_scope_id = $4 AND run_id = $5",
+        )
+        .bind(corrupt_process_head)
+        .bind(identity.scope().as_str())
+        .bind(i64::try_from(identity.epoch().get()).expect("epoch"))
+        .bind(identity.tenant().as_str())
+        .bind(process_race_run.as_str())
+        .execute(&pool)
+        .await
+        .expect("corrupt process CAS head");
+        assert!(matches!(
+            backend
+                .load_complete_prefix(
+                    &process_race_run,
+                    RawHistoryLoadLimit::new(2, mfm_journal::single_trust::MAX_FRAME_BYTES * 2),
+                )
+                .await,
+            Err(BackendError::Storage)
+        ));
+        sqlx::query(
+            "UPDATE mfm_run_heads
+             SET head_digest = $1
+             WHERE store_scope_id = $2 AND store_epoch = $3 AND tenant_scope_id = $4 AND run_id = $5",
+        )
+        .bind(&recorded_process_head)
+        .bind(identity.scope().as_str())
+        .bind(i64::try_from(identity.epoch().get()).expect("epoch"))
+        .bind(identity.tenant().as_str())
+        .bind(process_race_run.as_str())
+        .execute(&pool)
+        .await
+        .expect("restore process CAS head");
 
         #[cfg(target_os = "linux")]
         {
