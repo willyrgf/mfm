@@ -136,7 +136,6 @@ pub(crate) trait DynamicStateRegistration: Send + Sync {
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        binding: Option<BindingDescriptor>,
         binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure>;
 
@@ -197,7 +196,7 @@ struct DynamicPure<S: State> {
 
 struct DynamicAccess<S: State, C: AccessCapabilityContract> {
     implementation: AccessImplementation<S, C>,
-    binding: Option<BindingDescriptor>,
+    binding: BindingDescriptor,
 }
 
 struct TypedPrepared<S: State, C: AccessCapabilityContract> {
@@ -216,18 +215,6 @@ pub(crate) fn pure_registration<S: State>(
     Arc::new(DynamicPure { implementation })
 }
 
-pub(crate) fn access_registration<S: State, C: AccessCapabilityContract>(
-    implementation: AccessImplementation<S, C>,
-) -> Arc<dyn DynamicStateRegistration>
-where
-    C::Mode: crate::single_trust::RuntimePreparationMode,
-{
-    Arc::new(DynamicAccess {
-        implementation,
-        binding: None,
-    })
-}
-
 pub(crate) fn access_registration_with_binding<S: State, C: AccessCapabilityContract>(
     implementation: AccessImplementation<S, C>,
     binding: BindingDescriptor,
@@ -237,7 +224,7 @@ where
 {
     Arc::new(DynamicAccess {
         implementation,
-        binding: Some(binding),
+        binding,
     })
 }
 
@@ -306,7 +293,6 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
         _run_id: RunId,
         _occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        _binding: Option<BindingDescriptor>,
         _binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure> {
         Err(DynamicPreparationFailure {
@@ -352,7 +338,6 @@ where
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        binding: Option<BindingDescriptor>,
         binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure> {
         let state = match assembly.program().document().declaration(&occurrence) {
@@ -364,12 +349,7 @@ where
                 })
             }
         };
-        let Some(binding) = binding.or_else(|| self.binding.clone()) else {
-            return Err(DynamicPreparationFailure {
-                input: Some(input),
-                error: RuntimeError::Identity,
-            });
-        };
+        let binding = self.binding.clone();
         let input = match input.into_qualified::<S::Input>(
             assembly.catalog(),
             witness,
@@ -813,7 +793,7 @@ impl SuspendedRun {
     pub async fn resolve(self) -> RuntimeStep {
         match self.owner {
             SuspendedOwner::Admission { runtime, frame } => {
-                match runtime.inner.store.append(frame.clone()).await {
+                match runtime.inner.store.append_admission(frame.clone()).await {
                     Ok(AppendDisposition::NewlyCommitted { .. })
                     | Ok(AppendDisposition::Found { .. })
                     | Ok(AppendDisposition::StaleHead { .. }) => {
@@ -1495,7 +1475,7 @@ impl Runtime {
             Ok(frame) => frame,
             Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
         };
-        match self.inner.store.append(frame.clone()).await {
+        match self.inner.store.append_admission(frame.clone()).await {
             Ok(AppendDisposition::NewlyCommitted { .. }) => {
                 let run = match self.inner.store.qualify_admission(frame) {
                     Ok(run) => run,
@@ -1725,7 +1705,6 @@ impl RunSession {
             run.run_id().clone(),
             occurrence.clone(),
             latest,
-            None,
             binding_ref,
         ) {
             Ok(prepared) => prepared,

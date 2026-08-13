@@ -44,7 +44,9 @@ Journal owns strict canonical frames and the three run record families. Store ow
 sequential cursor, cumulative-context continuity, preparation selection, occurrence conclusion
 uniqueness, object/fact publication closure, configuration bounds, and exact-head append. An opened
 Store has one private brand and exposes separate non-Clone mutation, cloneable read, configuration,
-and fixed-snapshot audit ports; Runtime receives the mutation path only through that opening.
+and fixed-snapshot audit ports. Its public mutation ingress is admission-specific; conclusions can
+cross it only through Store-owned, already-qualified conclusion owners. Runtime receives that
+mutation path only through the exact opening.
 
 ### Runtime
 
@@ -54,7 +56,8 @@ context and its reducer result; hot conclusion settlement advances that result o
 while cold resume performs bounded complete-prefix qualification. `SuspendedRun` is the exhaustive
 owner-fate coordinator for admission, preparation, and conclusion acknowledgement boundaries. A
 State implementation cannot access Store, journal, replay, or arbitrary prior output through its
-supported callback.
+supported callback. Access registration requires the immutable binding descriptor; preparation has
+no caller-supplied binding substitution path.
 
 ### Adapters
 
