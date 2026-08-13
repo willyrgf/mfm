@@ -76,6 +76,9 @@ pub enum StoreError {
     /// Retained records do not form one valid sequential prefix.
     #[error("retained run history is invalid")]
     InvalidHistory,
+    /// The independent tenant fact-publication head changed while a conclusion was prepared.
+    #[error("fact publication frontier changed")]
+    FactFrontierChanged,
 }
 
 /// Result type for the strict Store API.
@@ -413,6 +416,60 @@ impl PreparedConclusion {
         }
     }
 
+    pub(crate) fn bind_fact_publication(&mut self, publication_sequence: u64) -> Result<()> {
+        let proposal_set_ref = self
+            .frame
+            .record()
+            .fact_proposals()
+            .cloned()
+            .ok_or(StoreError::InvalidRecord)?;
+        let publication =
+            mfm_journal::single_trust::FactPublication::new(publication_sequence, proposal_set_ref)
+                .map_err(|_| StoreError::InvalidRecord)?;
+        let conclusion = match self.frame.record() {
+            RunRecord::StateConcluded(conclusion) => conclusion.clone(),
+            _ => return Err(StoreError::InvalidRecord),
+        };
+        let conclusion = conclusion
+            .with_fact_publication(Some(publication))
+            .map_err(|_| StoreError::InvalidRecord)?;
+        self.frame = RunFrame::new(
+            self.frame.run_id().clone(),
+            self.frame.store_scope_id().clone(),
+            self.frame.store_epoch(),
+            self.frame.expected_sequence(),
+            self.frame.append_request_id().clone(),
+            RunRecord::StateConcluded(conclusion),
+            self.frame.objects().to_vec(),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_fact_publication(&mut self) -> Result<()> {
+        if self.frame.record().fact_publication().is_none() {
+            return Ok(());
+        }
+        let conclusion = match self.frame.record() {
+            RunRecord::StateConcluded(conclusion) => conclusion.clone(),
+            _ => return Err(StoreError::InvalidRecord),
+        };
+        let conclusion = conclusion
+            .with_fact_publication(None)
+            .map_err(|_| StoreError::InvalidRecord)?;
+        self.frame = RunFrame::new(
+            self.frame.run_id().clone(),
+            self.frame.store_scope_id().clone(),
+            self.frame.store_epoch(),
+            self.frame.expected_sequence(),
+            self.frame.append_request_id().clone(),
+            RunRecord::StateConcluded(conclusion),
+            self.frame.objects().to_vec(),
+        )
+        .map_err(|_| StoreError::InvalidRecord)?;
+        Ok(())
+    }
+
     /// Returns the exact candidate frame without exposing mutable append authority.
     pub const fn frame(&self) -> &RunFrame {
         &self.frame
@@ -466,11 +523,13 @@ pub struct FactContinuation {
     run_id: RunId,
     preparation: PreparationRef,
     request: ValueRef,
-    selection: ValueRef,
+    selection_ref: ValueRef,
+    selection: mfm_facts::FactSelection,
     store_brand: Option<Arc<StoreBrand>>,
 }
 
 impl FactContinuation {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         scope: StoreScopeId,
         epoch: StoreEpoch,
@@ -478,7 +537,8 @@ impl FactContinuation {
         run_id: RunId,
         preparation: PreparationRef,
         request: ValueRef,
-        selection: ValueRef,
+        selection_ref: ValueRef,
+        selection: mfm_facts::FactSelection,
     ) -> Self {
         Self {
             scope,
@@ -487,6 +547,7 @@ impl FactContinuation {
             run_id,
             preparation,
             request,
+            selection_ref,
             selection,
             store_brand: None,
         }
@@ -501,13 +562,18 @@ impl FactContinuation {
         &self.request
     }
 
-    /// Returns the selected fact response identity without exposing its bytes.
-    pub const fn selection(&self) -> &ValueRef {
+    /// Returns the Store-selected, callback-free fact response.
+    pub const fn selection(&self) -> &mfm_facts::FactSelection {
         &self.selection
     }
 
-    /// Consumes the continuation into the callback-free selected response identity.
-    pub fn into_selection(self) -> ValueRef {
+    /// Returns the content identity of the selected response.
+    pub const fn selection_ref(&self) -> &ValueRef {
+        &self.selection_ref
+    }
+
+    /// Consumes the continuation into the callback-free selected response.
+    pub fn into_selection(self) -> mfm_facts::FactSelection {
         self.selection
     }
 
@@ -718,19 +784,28 @@ pub(crate) fn prepare_access_from_current(
     validate_candidate_prefix(scope, epoch, tenant, &candidate_prefix)?;
     let record_ordinal = u32::try_from(expected_sequence).map_err(|_| StoreError::Capacity)?;
     let preparation = PreparationRef::new(run_id.clone(), successor_sequence, record_ordinal);
-    let fact_continuation = fact_request
-        .zip(fact_selection)
-        .map(|(request, selection)| {
-            FactContinuation::new(
+    let fact_continuation = match fact_request.zip(fact_selection) {
+        None => None,
+        Some((request, selection_ref)) => {
+            let object = candidate_frame
+                .objects()
+                .iter()
+                .find(|object| object.content_ref() == selection_ref.value_ref())
+                .ok_or(StoreError::InvalidHistory)?;
+            let selection = serde_json::from_str(object.canonical_json())
+                .map_err(|_| StoreError::InvalidHistory)?;
+            Some(FactContinuation::new(
                 scope.clone(),
                 epoch,
                 tenant.clone(),
                 run_id.clone(),
                 preparation.clone(),
                 request,
+                selection_ref,
                 selection,
-            )
-        });
+            ))
+        }
+    };
     Ok(AccessPreparationCandidate {
         append: PreparationAppend {
             disposition: AppendDisposition::NewlyCommitted {
@@ -759,6 +834,9 @@ pub(crate) fn prepare_conclusion_from_current(
     objects: Vec<mfm_journal::single_trust::ImmutableObject>,
     maximum_conclusion_bytes: u64,
 ) -> Result<PreparedConclusion> {
+    if conclusion.fact_publication().is_some() {
+        return Err(StoreError::InvalidRecord);
+    }
     if current.run_id() != run_id {
         return Err(StoreError::Identity);
     }
@@ -1872,14 +1950,12 @@ fn validate_conclusion_contract(
         }
         StateConcluded::Access {
             outcome,
-            fact_selection,
             fact_publication,
             ..
         } => {
-            if fact_publication
-                .as_ref()
-                .is_some_and(|publication| Some(publication.selection()) != fact_selection.as_ref())
-            {
+            if fact_publication.as_ref().is_some_and(|publication| {
+                Some(publication.proposal_set_ref()) != conclusion.fact_proposals()
+            }) {
                 return Err(StoreError::InvalidRecord);
             }
             match outcome {
@@ -2148,14 +2224,14 @@ fn record_value_refs(record: &RunRecord) -> Vec<&mfm_journal::single_trust::Valu
                     values.push(selection);
                 }
                 if let Some(publication) = fact_publication {
-                    values.push(publication.selection());
+                    values.push(publication.proposal_set_ref());
                 }
             } else if let StateConcluded::Pure {
                 fact_publication: Some(publication),
                 ..
             } = conclusion
             {
-                values.push(publication.selection());
+                values.push(publication.proposal_set_ref());
             }
             values.push(match conclusion.outcome() {
                 StateOutcome::Success(value) | StateOutcome::Failure(value) => value,
@@ -3110,7 +3186,6 @@ mod tests {
         let root_value = value_ref(&input_contract, "{\"step\":0}");
         let middle_value = value_ref(&middle_contract, "{\"step\":1}");
         let final_value = value_ref(&middle_contract, "{\"step\":2}");
-        let fact_selection = value_ref(&content(60), "null");
         let second_address = SequentialControlAddress::new(2, Vec::new()).expect("address");
         let document = ProgramDocument::new(
             StableId::new("mfm.test-sequential").expect("entry"),
@@ -3171,15 +3246,9 @@ mod tests {
                 occurrence: SequentialControlAddress::new(1, Vec::new()).expect("address"),
                 outcome: StateOutcome::Success(middle_value.clone()),
                 fact_proposals: None,
-                fact_publication: Some(
-                    mfm_journal::single_trust::FactPublication::new(1, fact_selection.clone())
-                        .expect("publication"),
-                ),
+                fact_publication: None,
             }),
-            vec![
-                value_object(&middle_value, "{\"step\":1}"),
-                value_object(&fact_selection, "null"),
-            ],
+            vec![value_object(&middle_value, "{\"step\":1}")],
         )
         .expect("first frame");
         assert_eq!(

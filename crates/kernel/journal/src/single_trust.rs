@@ -559,24 +559,24 @@ impl PreparationRef {
 
 /// One append-atomic fact-publication coordinate bound to a conclusion.
 ///
-/// The selection object and selected fact values live in the same frame object closure. Journal
-/// keeps this structural product independent from the higher-level facts crate.
+/// The proposal-set object and proposed fact values live in the same frame object closure.
+/// Journal keeps this structural product independent from the higher-level facts crate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FactPublication {
     publication_sequence: u64,
-    selection: ValueRef,
+    proposal_set_ref: ValueRef,
 }
 
 impl FactPublication {
     /// Constructs one positive tenant-local publication coordinate.
-    pub fn new(publication_sequence: u64, selection: ValueRef) -> Result<Self> {
-        if publication_sequence == 0 || !selection.is_schema_bound() {
+    pub fn new(publication_sequence: u64, proposal_set_ref: ValueRef) -> Result<Self> {
+        if publication_sequence == 0 || !proposal_set_ref.is_schema_bound() {
             return Err(JournalError::InvalidRecord);
         }
         Ok(Self {
             publication_sequence,
-            selection,
+            proposal_set_ref,
         })
     }
 
@@ -585,9 +585,9 @@ impl FactPublication {
         self.publication_sequence
     }
 
-    /// Returns the content identity of the selected fact response.
-    pub const fn selection(&self) -> &ValueRef {
-        &self.selection
+    /// Returns the content identity of the published proposal set.
+    pub const fn proposal_set_ref(&self) -> &ValueRef {
+        &self.proposal_set_ref
     }
 }
 
@@ -642,6 +642,49 @@ pub enum StateConcluded {
 }
 
 impl StateConcluded {
+    /// Binds one Store-assigned fact publication coordinate to this semantic conclusion.
+    ///
+    /// The coordinate must refer to this conclusion's proposal set. Store is the only semantic
+    /// caller in the normal append path; the check prevents a publication from being paired with
+    /// another conclusion closure.
+    pub fn with_fact_publication(self, publication: Option<FactPublication>) -> Result<Self> {
+        if let Some(publication) = &publication {
+            if self.fact_proposals() != Some(publication.proposal_set_ref()) {
+                return Err(JournalError::InvalidRecord);
+            }
+        }
+        Ok(match self {
+            Self::Pure {
+                occurrence,
+                outcome,
+                fact_proposals,
+                ..
+            } => Self::Pure {
+                occurrence,
+                outcome,
+                fact_proposals,
+                fact_publication: publication,
+            },
+            Self::Access {
+                occurrence,
+                preparation,
+                evidence,
+                outcome,
+                fact_proposals,
+                fact_selection,
+                ..
+            } => Self::Access {
+                occurrence,
+                preparation,
+                evidence,
+                outcome,
+                fact_proposals,
+                fact_selection,
+                fact_publication: publication,
+            },
+        })
+    }
+
     /// Returns the exact concluded occurrence.
     pub fn occurrence(&self) -> &SequentialControlAddress {
         match self {
@@ -782,6 +825,14 @@ impl RunRecord {
             Self::RunAdmitted(_) | Self::StatePrepared(_) => None,
         }
     }
+
+    /// Returns the coordinate-free fact proposals emitted by this record, if any.
+    pub const fn fact_proposals(&self) -> Option<&ValueRef> {
+        match self {
+            Self::StateConcluded(conclusion) => conclusion.fact_proposals(),
+            Self::RunAdmitted(_) | Self::StatePrepared(_) => None,
+        }
+    }
 }
 
 /// One append-atomic frame containing exactly one semantic record.
@@ -898,13 +949,16 @@ impl RunFrame {
                         .as_ref()
                         .is_some_and(|proposals| !proposals.is_schema_bound())
                         || matches!(outcome, StateOutcome::Failure(_)) && fact_proposals.is_some()
+                        || fact_publication.as_ref().is_some_and(|publication| {
+                            fact_proposals.as_ref() != Some(publication.proposal_set_ref())
+                        })
                     {
                         return Err(JournalError::InvalidRecord);
                     }
                     if fact_publication.as_ref().is_some_and(|publication| {
                         FactPublication::new(
                             publication.publication_sequence,
-                            publication.selection.clone(),
+                            publication.proposal_set_ref.clone(),
                         )
                         .is_err()
                     }) {
@@ -930,13 +984,16 @@ impl RunFrame {
                             .as_ref()
                             .is_some_and(|proposals| !proposals.is_schema_bound())
                         || matches!(outcome, StateOutcome::Failure(_)) && fact_proposals.is_some()
+                        || fact_publication.as_ref().is_some_and(|publication| {
+                            fact_proposals.as_ref() != Some(publication.proposal_set_ref())
+                        })
                     {
                         return Err(JournalError::InvalidRecord);
                     }
                     if fact_publication.as_ref().is_some_and(|publication| {
                         FactPublication::new(
                             publication.publication_sequence,
-                            publication.selection.clone(),
+                            publication.proposal_set_ref.clone(),
                         )
                         .is_err()
                     }) {
@@ -1097,6 +1154,45 @@ mod tests {
             fact_publication: None,
         };
         assert_eq!(conclusion.occurrence().declaration_ordinal(), 1);
+    }
+
+    #[test]
+    fn store_publication_binding_is_coordinate_checked() {
+        let proposal = ValueRef::new(ref_for(30), ref_for(31));
+        let conclusion = StateConcluded::Pure {
+            occurrence: SequentialControlAddress::new(1, Vec::new()).expect("occurrence"),
+            outcome: StateOutcome::Success(ValueRef::new(ref_for(32), ref_for(33))),
+            fact_proposals: Some(proposal.clone()),
+            fact_publication: None,
+        };
+        let publication = FactPublication::new(1, proposal.clone()).expect("publication");
+        let bound = conclusion
+            .clone()
+            .with_fact_publication(Some(publication))
+            .expect("matching publication");
+        assert_eq!(
+            bound
+                .fact_publication()
+                .map(FactPublication::proposal_set_ref),
+            Some(&proposal)
+        );
+        assert_eq!(
+            bound
+                .fact_publication()
+                .map(FactPublication::publication_sequence),
+            Some(1)
+        );
+        assert!(conclusion
+            .with_fact_publication(Some(
+                FactPublication::new(1, ValueRef::new(ref_for(34), ref_for(35)))
+                    .expect("foreign publication"),
+            ))
+            .is_err());
+        assert!(bound
+            .with_fact_publication(None)
+            .expect("clear publication")
+            .fact_publication()
+            .is_none());
     }
 
     #[test]

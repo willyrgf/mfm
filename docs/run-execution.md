@@ -18,8 +18,15 @@ creates no call.
 
 For a prior-fact capability, preparation carries only the request projected from the canonical
 intent. Store checks the request against the admitted source manifest, reads one bounded fact
-publication snapshot, and appends the resulting selection object with `StatePrepared`. The direct-
-new continuation carries that Store-fixed selection identity; callers cannot provide or refresh it.
+publication snapshot, scans the published proposal sets, and appends the resulting selection object
+with `StatePrepared`. The direct-new continuation carries that Store-fixed typed selection and
+frontier; callers cannot provide or refresh it.
+
+Successful State conclusions carry a coordinate-free proposal set. Store assigns the next tenant
+fact-publication coordinate only when the proposal set is non-empty and appends the conclusion and
+publication atomically. A fact-frontier race returns the same pending conclusion owner with its
+coordinate cleared; retrying rebinds that coordinate without re-running State, adapter, or fact
+selection logic.
 
 The worker retains the latest catalog-qualified typed context while hot. A conclusion is canonically
 encoded once for the append, then the already-typed successor is handed to the next State. Cold

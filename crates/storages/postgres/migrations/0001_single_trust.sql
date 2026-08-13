@@ -54,7 +54,7 @@ CREATE TABLE mfm_fact_publications (
     publication_sequence BIGINT NOT NULL CHECK (publication_sequence > 0),
     run_id TEXT NOT NULL,
     run_sequence BIGINT NOT NULL CHECK (run_sequence > 0),
-    selection_ref TEXT NOT NULL,
+    proposal_set_ref TEXT NOT NULL,
     PRIMARY KEY (store_scope_id, store_epoch, tenant_scope_id, publication_sequence),
     FOREIGN KEY (
         store_scope_id, store_epoch, tenant_scope_id, run_id, run_sequence

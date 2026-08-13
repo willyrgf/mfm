@@ -9,7 +9,9 @@ invoke State interpretation.
 
 Access preparation projects only the canonical fact request. Store fixes any prior-fact selection
 from the admitted source manifest and a bounded publication frontier before minting the direct-new
-continuation; Runtime and State code cannot submit or replace that selection.
+typed continuation; Runtime and State code cannot submit or replace that selection. State success
+outcomes carry coordinate-free fact proposals, and pending conclusion recovery can rebind only the
+Store-assigned publication coordinate when the independent fact frontier moves.
 
 Each Runtime opening also owns bounded active-session, deterministic CPU, planning, and provider
 ingress permits. Pure evaluation, access preparation, retained-prefix qualification, and typed

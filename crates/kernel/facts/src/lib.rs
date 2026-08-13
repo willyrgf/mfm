@@ -184,6 +184,11 @@ impl FactProposalSet {
         Self { facts: Vec::new() }
     }
 
+    /// Returns whether this conclusion emitted no new facts.
+    pub const fn is_empty(&self) -> bool {
+        self.facts.is_empty()
+    }
+
     /// Creates one canonical proposal set without a publication coordinate.
     pub fn new(facts: Vec<FactValue>) -> Result<Self, FactError> {
         if facts.len() > MAX_SELECTED_FACTS

@@ -783,7 +783,6 @@ impl PendingConclusion {
             reduced,
             successor,
         } = self;
-        let conclusion_frame = owner.frame().clone();
         match runtime.inner.store.commit_conclusion(owner).await {
             Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => RuntimeStep::Suspended(
                 SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
@@ -791,9 +790,9 @@ impl PendingConclusion {
             Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => RuntimeStep::Suspended(
                 SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
             ),
-            Ok(ConclusionCommitOutcome::Disposition(disposition)) => {
+            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
                 runtime
-                    .finish_conclusion(run, reduced, conclusion_frame, disposition, successor)
+                    .finish_conclusion(run, reduced, frame, disposition, successor)
                     .await
             }
             Err(error) => RuntimeStep::Failed {
@@ -1362,13 +1361,9 @@ impl Runtime {
                     }
                 }
             };
-            match call
-                .execute(Arc::clone(&self.inner.assembly), &self.inner.witness)
+            call.execute(Arc::clone(&self.inner.assembly), &self.inner.witness)
                 .await
-            {
-                Ok(resolution) => Some(resolution),
-                Err(_) => None,
-            }
+                .ok()
         };
         let Some(resolution) = resolution else {
             return self
@@ -1517,7 +1512,7 @@ impl Runtime {
                 fact_selection: resolution
                     .fact_continuation
                     .as_ref()
-                    .map(mfm_store::FactContinuation::selection)
+                    .map(mfm_store::FactContinuation::selection_ref)
                     .cloned(),
                 fact_publication: None,
             },
@@ -1538,36 +1533,34 @@ impl Runtime {
                 }
             }
         };
-        let conclusion_frame = owner.frame().clone();
-        let disposition = match self.inner.store.commit_conclusion(owner).await {
+        match self.inner.store.commit_conclusion(owner).await {
             Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
-                return RuntimeStep::Suspended(SuspendedRun::conclusion(
+                RuntimeStep::Suspended(SuspendedRun::conclusion(
                     self.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ));
+                ))
             }
             Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => {
-                return RuntimeStep::Suspended(SuspendedRun::conclusion(
+                RuntimeStep::Suspended(SuspendedRun::conclusion(
                     self.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ));
+                ))
             }
-            Ok(ConclusionCommitOutcome::Disposition(disposition)) => disposition,
-            Err(error) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error: error.into(),
-                }
+            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
+                self.finish_conclusion(run, reduced, frame, disposition, successor)
+                    .await
             }
-        };
-        self.finish_conclusion(run, reduced, conclusion_frame, disposition, successor)
-            .await
+            Err(error) => RuntimeStep::Failed {
+                history: run,
+                error: error.into(),
+            },
+        }
     }
 
     async fn finish_conclusion(
@@ -1911,6 +1904,7 @@ impl RunSession {
         self.run.head_sequence()
     }
 
+    #[allow(clippy::result_large_err)]
     async fn drive_access(
         self,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
@@ -2249,37 +2243,35 @@ impl RunSession {
                 };
             }
         };
-        let conclusion_frame = owner.frame().clone();
-        let disposition = match runtime.inner.store.commit_conclusion(owner).await {
+        match runtime.inner.store.commit_conclusion(owner).await {
             Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
-                return RuntimeStep::Suspended(SuspendedRun::conclusion(
+                RuntimeStep::Suspended(SuspendedRun::conclusion(
                     runtime.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ));
+                ))
             }
             Ok(ConclusionCommitOutcome::Rejected { owner, .. }) => {
-                return RuntimeStep::Suspended(SuspendedRun::conclusion(
+                RuntimeStep::Suspended(SuspendedRun::conclusion(
                     runtime.clone(),
                     owner,
                     run.clone(),
                     reduced.clone(),
                     successor,
-                ));
+                ))
             }
-            Ok(ConclusionCommitOutcome::Disposition(disposition)) => disposition,
-            Err(error) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error: error.into(),
-                };
+            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
+                runtime
+                    .finish_conclusion(run, reduced, frame, disposition, successor)
+                    .await
             }
-        };
-        runtime
-            .finish_conclusion(run, reduced, conclusion_frame, disposition, successor)
-            .await
+            Err(error) => RuntimeStep::Failed {
+                history: run,
+                error: error.into(),
+            },
+        }
     }
 
     /// Consumes this session and performs one deterministic Runtime step.
