@@ -12,8 +12,8 @@ use std::sync::Mutex;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_ids::{
-    AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RunId, SchemaId, StoreEpoch,
-    StoreScopeId, TenantScopeId,
+    short_stable_id_fragment, AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RunId,
+    SchemaId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::single_trust::{
     PreparationRef, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
@@ -175,7 +175,7 @@ impl QualifiedRun {
             return Err(StoreError::Capacity);
         }
         validate_prefix_structure(&frames)?;
-        validate_object_reachability(&frames)?;
+        validate_object_reachability(&scope, epoch, &tenant, &frames)?;
         Ok(Self {
             scope,
             epoch,
@@ -253,6 +253,30 @@ impl QualifiedRun {
     /// Returns the recursive head content address for this qualified prefix.
     pub fn head_digest(&self) -> Result<ContentDigest> {
         Ok(self.head_digest.clone())
+    }
+
+    /// Returns the recursive head content identity at one retained record sequence.
+    pub fn head_digest_at(&self, sequence: u64) -> Result<ContentDigest> {
+        if sequence == 0
+            || usize::try_from(sequence)
+                .ok()
+                .is_none_or(|index| index > self.frames.len())
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        let mut head = None;
+        for frame in self
+            .frames
+            .iter()
+            .take(usize::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?)
+        {
+            head = Some(
+                frame
+                    .head_digest(head.as_ref())
+                    .map_err(|_| StoreError::InvalidHistory)?,
+            );
+        }
+        head.ok_or(StoreError::InvalidHistory)
     }
 
     /// Returns the complete conclusion capacity currently reserved by unresolved preparations.
@@ -340,7 +364,14 @@ impl QualifiedRun {
             if let (Some(request), Some(selection)) =
                 (prepared.fact_request(), prepared.fact_selection())
             {
-                validate_fact_pair(&object_map, request, selection)?;
+                validate_fact_pair(
+                    &object_map,
+                    request,
+                    selection,
+                    &self.scope,
+                    self.epoch,
+                    &self.tenant,
+                )?;
             }
         }
         let mut reserved = self.reserved_conclusion_bytes;
@@ -402,16 +433,29 @@ pub struct PreparedConclusion {
     epoch: StoreEpoch,
     tenant: TenantScopeId,
     frame: RunFrame,
+    document: ProgramDocument,
+    expected_action: RunAction,
+    fact_rebind_ordinal: u16,
     store_brand: Option<Arc<StoreBrand>>,
 }
 
 impl PreparedConclusion {
-    fn new(scope: StoreScopeId, epoch: StoreEpoch, tenant: TenantScopeId, frame: RunFrame) -> Self {
+    fn new(
+        scope: StoreScopeId,
+        epoch: StoreEpoch,
+        tenant: TenantScopeId,
+        frame: RunFrame,
+        document: ProgramDocument,
+        expected_action: RunAction,
+    ) -> Self {
         Self {
             scope,
             epoch,
             tenant,
             frame,
+            document,
+            expected_action,
+            fact_rebind_ordinal: 0,
             store_brand: None,
         }
     }
@@ -446,7 +490,7 @@ impl PreparedConclusion {
         Ok(())
     }
 
-    pub(crate) fn clear_fact_publication(&mut self) -> Result<()> {
+    pub(crate) fn rebind_fact_publication(&mut self) -> Result<()> {
         if self.frame.record().fact_publication().is_none() {
             return Ok(());
         }
@@ -457,22 +501,46 @@ impl PreparedConclusion {
         let conclusion = conclusion
             .with_fact_publication(None)
             .map_err(|_| StoreError::InvalidRecord)?;
+        let ordinal = self
+            .fact_rebind_ordinal
+            .checked_add(1)
+            .ok_or(StoreError::Capacity)?;
         self.frame = RunFrame::new(
             self.frame.run_id().clone(),
             self.frame.store_scope_id().clone(),
             self.frame.store_epoch(),
             self.frame.expected_sequence(),
-            self.frame.append_request_id().clone(),
+            AppendRequestId::new(format!(
+                "conclusion-{}-{}-fact-{}",
+                short_stable_id_fragment(self.frame.run_id().as_str(), 96),
+                self.frame.expected_sequence(),
+                ordinal
+            ))
+            .map_err(|_| StoreError::InvalidRecord)?,
             RunRecord::StateConcluded(conclusion),
             self.frame.objects().to_vec(),
         )
         .map_err(|_| StoreError::InvalidRecord)?;
+        self.fact_rebind_ordinal = ordinal;
         Ok(())
     }
 
     /// Returns the exact candidate frame without exposing mutable append authority.
     pub const fn frame(&self) -> &RunFrame {
         &self.frame
+    }
+
+    /// Returns the durable run identity carried by this conclusion owner.
+    pub const fn run_id(&self) -> &RunId {
+        self.frame.run_id()
+    }
+
+    pub(crate) const fn expected_action(&self) -> &RunAction {
+        &self.expected_action
+    }
+
+    pub(crate) const fn document(&self) -> &ProgramDocument {
+        &self.document
     }
 
     pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
@@ -866,6 +934,8 @@ pub(crate) fn prepare_conclusion_from_current(
             epoch,
             tenant.clone(),
             existing.clone(),
+            document.clone(),
+            reduced.action().clone(),
         ));
     }
     if current.head_sequence() != expected_sequence
@@ -946,6 +1016,8 @@ pub(crate) fn prepare_conclusion_from_current(
         epoch,
         tenant.clone(),
         candidate_frame,
+        document.clone(),
+        reduced.action().clone(),
     ))
 }
 
@@ -2076,7 +2148,12 @@ fn validate_prefix_structure(frames: &[RunFrame]) -> Result<()> {
     Ok(())
 }
 
-fn validate_object_reachability(frames: &[RunFrame]) -> Result<()> {
+fn validate_object_reachability(
+    scope: &StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: &TenantScopeId,
+    frames: &[RunFrame],
+) -> Result<()> {
     let mut objects = BTreeMap::new();
     let mut referenced = BTreeSet::new();
     for frame in frames {
@@ -2107,7 +2184,7 @@ fn validate_object_reachability(frames: &[RunFrame]) -> Result<()> {
             if let (Some(request), Some(selection)) =
                 (prepared.fact_request(), prepared.fact_selection())
             {
-                validate_fact_pair(&objects, request, selection)?;
+                validate_fact_pair(&objects, request, selection, scope, epoch, tenant)?;
             }
         }
     }
@@ -2168,6 +2245,9 @@ fn validate_fact_pair(
     objects: &BTreeMap<ContentRef, mfm_journal::single_trust::ImmutableObject>,
     request_ref: &ValueRef,
     selection_ref: &ValueRef,
+    scope: &StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: &TenantScopeId,
 ) -> Result<()> {
     if request_ref.contract_ref().schema_id()
         != &mfm_facts::FactSelectionRequest::schema_id().map_err(|_| StoreError::InvalidRecord)?
@@ -2191,6 +2271,29 @@ fn validate_fact_pair(
     request.validate().map_err(|_| StoreError::InvalidRecord)?;
     selection
         .validate_for(&request)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    if selection.frontier.stream_ref != fact_stream_ref(scope, epoch, tenant)? {
+        return Err(StoreError::InvalidRecord);
+    }
+    Ok(())
+}
+
+pub(crate) fn fact_stream_ref(
+    scope: &StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: &TenantScopeId,
+) -> Result<ContentRef> {
+    let schema = SchemaId::new(
+        "mfm.fact-stream",
+        "1",
+        DigestAlgorithm::Sha256JcsV1,
+        mfm_ids::DigestBytes::from_array([0; 32]),
+    )
+    .map_err(|_| StoreError::InvalidRecord)?;
+    let material =
+        mfm_journal::single_trust::canonical_json(&(scope.as_str(), epoch.get(), tenant.as_str()))
+            .map_err(|_| StoreError::InvalidRecord)?;
+    ContentRef::new(schema, raw_content_digest(material.as_bytes()))
         .map_err(|_| StoreError::InvalidRecord)
 }
 
@@ -2918,6 +3021,36 @@ mod tests {
             .expect("context object")],
         )
         .expect("frame")
+    }
+
+    #[test]
+    fn fact_stream_identity_binds_scope_epoch_and_tenant() {
+        let (scope, tenant, _) = ids();
+        let base = fact_stream_ref(&scope, StoreEpoch::new(1), &tenant).expect("base stream");
+        assert_ne!(
+            base,
+            fact_stream_ref(&scope, StoreEpoch::new(2), &tenant).expect("epoch stream")
+        );
+        assert_ne!(
+            base,
+            fact_stream_ref(
+                &StoreScopeId::new("mfm.store_scope.v1:1123456789abcdef0123456789abcdef")
+                    .expect("scope"),
+                StoreEpoch::new(1),
+                &tenant,
+            )
+            .expect("scope stream")
+        );
+        assert_ne!(
+            base,
+            fact_stream_ref(
+                &scope,
+                StoreEpoch::new(1),
+                &TenantScopeId::new("mfm.tenant_scope.v1:1123456789abcdef0123456789abcdef")
+                    .expect("tenant"),
+            )
+            .expect("tenant stream")
+        );
     }
 
     #[test]

@@ -44,7 +44,9 @@ Journal owns strict canonical frames and the three run record families. Store ow
 sequential cursor, cumulative-context continuity, preparation selection, source-manifest-bounded
 prior-fact selection, occurrence conclusion uniqueness, object/fact publication closure,
 configuration bounds, fact-frontier preconditions, publication-coordinate assignment, and
-exact-head append. An opened
+exact-head append. Fact selections carry Store-authored producer provenance and a stream identity
+bound to scope, writer epoch, and tenant; qualification checks the captured historical publication
+and producer head rather than trusting retained source/value bytes alone. An opened
 Store has one private brand and exposes separate non-Clone mutation, cloneable read, configuration,
 and fixed-snapshot audit ports. Semantic run, reducer, configuration, fact, and append owners retain
 that opening identity, so equal persisted identities do not permit same-type transposition between
@@ -64,7 +66,10 @@ admission, preparation, and conclusion acknowledgement boundaries; its conclusio
 Runtime-owned affine `PendingConclusion`. A State implementation cannot
 access Store, journal, replay, or arbitrary prior output through its supported callback. Access
 registration requires the immutable binding descriptor; preparation has no caller-supplied binding
-substitution path.
+substitution path. Conclusion recovery preserves Store classifications for same-run races,
+including identical semantic conclusions, superseded Access preparations, conflicts, and invalid
+history; permanent Store rejection remains a distinct owner-bearing result rather than becoming a
+retryable suspension.
 
 ### Adapters
 
@@ -87,3 +92,14 @@ an unresolved preparation. A late result for a superseded preparation cannot set
 Pure and Access conclusions use one Store-owned append owner; duplicate conclusions are idempotent,
 conflicting conclusions fail closed, and response loss before durable conclusion leaves neutral
 prepared history.
+
+### Fact and conclusion recovery matrix
+
+| Boundary result | State/provider re-entry | Durable/session result |
+| --- | ---: | --- |
+| Same semantic conclusion under another physical append id | zero | qualified recorded history |
+| Superseded Access preparation | zero | latest qualified history (`NoLongerSelected`) |
+| Different same-occurrence conclusion | zero | qualified conflict |
+| Invalid or permanently rejected owner | zero | invalid-history/permanent owner result |
+| Independent fact publication moved | zero | same owner with a fresh physical fact append id |
+| Ambiguous acknowledgement | zero | exact owner retained until `Found`/classification |

@@ -38,11 +38,21 @@ Each append contains one semantic record and its object/fact closure atomically.
 exact current head, rejects stale or conflicting logical keys, and selects at most one conclusion
 for each State occurrence. A prior-fact request is projected from canonical intent, but Store fixes
 its source-manifest-bounded frontier and response during preparation; State code cannot provide a
-selection. A successful conclusion carries a coordinate-free `FactProposalSet`; Store validates
-and publishes non-empty proposals under the tenant fact head in the same append transaction. If
-that independent fact frontier moves during the append, Store clears only the assigned publication
-coordinate and retries the same semantic conclusion owner. A conclusion is durable before its
+selection. A selection carries aligned Store-authored producer provenance: source identity,
+producer Program, producer run/record, and the producer head at that record. Store binds its
+frontier stream to scope, writer epoch, and tenant, and revalidates the publication row, producer
+history, head, and exact fact content during qualification. A successful conclusion carries a
+coordinate-free `FactProposalSet`; Store validates and publishes non-empty proposals under the
+tenant fact head in the same append transaction. If that independent fact frontier moves during
+the append, Store clears only the assigned publication coordinate, rotates the physical append
+identity, and retries the same semantic conclusion owner. A conclusion is durable before its
 output is public.
+
+Same-run conclusion races are classified after the latest qualified prefix, in precedence order:
+`AlreadyConcludedSame`, `NoLongerSelected` for a superseded Access preparation, `Conflict`, and
+`InvalidHistory`. Runtime resumes only from the returned qualified history and never re-evaluates
+State or re-enters a provider during these branches. Permanent Store rejection retains a distinct
+owner-bearing Runtime result until an explicit supervisor or process boundary discards it.
 
 ## Runtime and adapters
 
