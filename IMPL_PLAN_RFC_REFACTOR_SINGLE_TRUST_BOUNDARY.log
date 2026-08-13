@@ -174,3 +174,121 @@ durability, trusted in-process Rust State/adapter code, process-local owner loss
 conclusion, and the two fixed entry points. The managed database task does not control the service
 process to inject a primary crash; it proves the admitted settings, a fresh schema baseline, and
 same-epoch CAS behavior, so no stronger crash-injection claim is recorded.
+
+2026-08-13 — final completion audit after fact-boundary and recovery cutover
+
+Material uncertainties
+
+none.
+
+The immutable normative inputs still have these exact SHA-256 identities:
+
+- `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `d5293fe93e356748a364ca2832481548210a5b3b07f1fa5f0a92c4415735f46b`
+- `IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `185d5575fe30ff5041f76c540731259ce683c1069015f707821444ec12e72148`
+
+The final continuation commits are ordered as follows:
+
+- `d572a92e` — bound runtime and Store deterministic work;
+- `f22a4317` — move prior-fact selection into Store preparation;
+- `fe42d5c4` — make State fact proposals part of conclusions;
+- `77298f91` — make pending conclusions rebind fact frontiers;
+- `d7b86732` — prove fact selection and conclusion recovery;
+- `a7fdcbb8` — map the new Store error exhaustively at the App boundary; and
+- `a6a63313` — name fact-publication conformance fixtures consistently.
+
+Completion evidence:
+
+- `FactSelectionRequest` is the only preparation input projected from canonical intent. Store
+  checks its source identities against the admitted manifest, scans one bounded publication
+  snapshot of State-owned `FactProposalSet` objects, and mints the typed, frontier-bound direct-
+  new continuation. Runtime and State code cannot provide, replace, or refresh the selection.
+- Conclusions carry coordinate-free proposal objects. Store validates them, assigns the next
+  tenant publication coordinate, and appends the conclusion, object closure, fact row, and fact
+  head atomically. A fact-frontier race clears only that coordinate and retains the same semantic
+  owner for retry.
+- Memory tests prove proposal publications are selectable as prior facts, a stale fact frontier
+  is rejected before append, a frontier race rebinds only the publication coordinate, and an
+  unknown conclusion acknowledgement resolves to the exact retained frame without a second fact
+  publication. Runtime tests prove Pure evaluation count is unchanged during unknown conclusion
+  recovery. Journal tests prove publication coordinates are bound to their own proposal set.
+- The App error mapping and PostgreSQL migration/queries cover the new publication and frontier
+  contract. The source sweep contains no retired publication `selection_ref` surface; remaining
+  selection names refer only to preparation selections.
+
+Verification on the final tree:
+
+- `nix develop -c cargo fmt --all`
+- affected-package checks/tests, Store test-support recovery tests, API trybuild suites, and
+  all-feature affected-package Clippy;
+- `nix run .#model-check` — passed with computed model hash
+  `e0a1835b7017bcfe0ec4aff72bacd78838a9973786b6810d5cd0befbca3f7251`;
+- `bash scripts/check-cutover-manifest.sh` — passed;
+- `nix run .#ci` — final run `run-2507461-1786604874627275798`, all 7 tasks passed: fmt,
+  negative-scan, Clippy, workspace check, workspace tests, managed PostgreSQL, and doc tests;
+- `git diff --check` — passed; and
+- final worktree — clean.
+
+The deliberate limits remain the documented primary crash/restart durability profile, trusted
+in-process Rust State and adapter code, process-local owner loss before durable conclusion, and
+the two fixed entry points. The managed PostgreSQL lane still does not inject a service-process
+crash, so this audit makes no stronger crash-injection claim. RFC, implementation plan, and
+cutover manifest bytes remain unchanged.
+
+2026-08-13 — corrective completion audit after independent gap review
+
+Material uncertainties
+
+none.
+
+The preceding completion entry was written before the independent audit and is superseded for
+acceptance purposes. That audit correctly identified six gaps: same-run conclusion classification,
+fresh physical ids for repeated fact rebinding, preservation of permanent rejection owners,
+producer provenance and Store-bound frontier validation, the PostgreSQL first-publication race,
+and missing recovery-matrix evidence. The corrective implementation closes those gaps without
+changing the normative inputs. Their SHA-256 identities remain:
+
+- `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `d5293fe93e356748a364ca2832481548210a5b3b07f1fa5f0a92c4415735f46b`
+- `IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`: `185d5575fe30ff5041f76c540731259ce683c1069015f707821444ec12e72148`
+
+The ordered corrective commits are:
+
+- `b8eeefca` — enforce Store-owned fact and conclusion recovery boundaries;
+- `c96c1f7f` — preserve conclusion classifications through Runtime recovery; and
+- `a827449c` — serialize first fact publication across PostgreSQL backends.
+
+Corrective evidence:
+
+- Fact selections now carry aligned Store-authored source, producer Program, producer run/record,
+  and producer-head provenance. Their frontier identity is bound to Store scope, writer epoch,
+  and tenant. Cold qualification and preparation revalidate historical/future coordinates,
+  publication heads, producer prefixes, exact producer heads, and exact fact values.
+- Same-run conclusion races compare occurrence, mode/preparation, fact selection, evidence,
+  outcome, and object closure while excluding sequence, recursive head, physical append id, and
+  publication coordinate. Store returns `AlreadyConcludedSame`, `NoLongerSelected`, `Conflict`,
+  or `InvalidHistory` in the required precedence and retains the owner on classifier/rebind
+  failure. Access supersession, Pure same/conflict, repeated fresh fact-rebind ids, and unknown
+  acknowledgement recovery have regression coverage; Runtime never re-enters State or adapters
+  on these branches and exposes permanent rejection as an owner-bearing result.
+- PostgreSQL materializes and locks a zero fact-head row before checking the first publication.
+  Shared Memory/PostgreSQL conformance proves two independent first publishers produce exactly one
+  commit and one `FactFrontierChanged`, with no partial loser run.
+- Documentation records the Store/Runtime ownership, recovery matrix, frontier/provenance rules,
+  fresh physical rebind identity, and PostgreSQL transaction invariant.
+
+Verification after the corrective commits:
+
+- focused Nix-shell tests: facts (3), Store all-features (19 plus API trybuild), Runtime (12 plus
+  API trybuild), App (6), and the PostgreSQL crate check — all passed;
+- `nix run .#model-check` — passed with model hash
+  `e0a1835b7017bcfe0ec4aff72bacd78838a9973786b6810d5cd0befbca3f7251`;
+- `nix run .#run -- --task negative-scan` — passed;
+- `bash scripts/check-cutover-manifest.sh` — passed;
+- `nix run .#ci` — `run-2543027-1786608382475382897`, all 7 tasks passed, including the managed
+  PostgreSQL lane; and
+- `git diff --check` and final immutable-input hash checks — passed.
+
+The final correction commit records this audit entry. The deliberate durability and trust limits
+remain unchanged: primary crash/restart profile, trusted in-process Rust State/adapter code,
+process-local owner loss before durable conclusion, and the two fixed entry points. No service
+process crash-injection claim is made. RFC, implementation plan, and cutover-manifest bytes were
+not modified.
