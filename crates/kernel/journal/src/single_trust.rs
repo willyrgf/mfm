@@ -450,6 +450,9 @@ impl StatePrepared {
                 .is_some_and(|selection| !selection.is_schema_bound())
             || fact_request.is_some() != fact_selection.is_some()
             || binding.validate().is_err()
+            || binding.capability_contract_ref().is_none()
+            || binding.adapter_implementation_ref().is_none()
+            || binding.content_ref()? != execution_binding_ref
         {
             return Err(JournalError::InvalidRecord);
         }
@@ -868,6 +871,16 @@ impl RunFrame {
                     || prepared.maximum_conclusion_bytes() as usize > MAX_FRAME_BYTES
                     || prepared.mode.validate().is_err()
                     || prepared.binding().validate().is_err()
+                    || prepared.binding().capability_contract_ref().is_none()
+                    || prepared.binding().adapter_implementation_ref().is_none()
+                    || prepared
+                        .binding()
+                        .content_ref()
+                        .map_err(|_| JournalError::InvalidRecord)?
+                        != *prepared.execution_binding_ref()
+                    || prepared
+                        .replaces()
+                        .is_some_and(|replacement| replacement.run_id() != &self.run_id)
                 {
                     return Err(JournalError::InvalidRecord);
                 }
@@ -890,13 +903,15 @@ impl RunFrame {
                     validate_outcome(outcome)
                 }
                 StateConcluded::Access {
+                    preparation,
                     evidence,
                     outcome,
                     fact_selection,
                     fact_publication,
                     ..
                 } => {
-                    if !evidence.is_schema_bound()
+                    if preparation.run_id() != &self.run_id
+                        || !evidence.is_schema_bound()
                         || fact_selection
                             .as_ref()
                             .is_some_and(|selection| !selection.is_schema_bound())
@@ -1116,5 +1131,95 @@ mod tests {
             Vec::new()
         )
         .is_err());
+    }
+
+    #[test]
+    fn access_frames_bind_preparations_and_execution_descriptors() {
+        let scope = StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+            .expect("scope");
+        let epoch = StoreEpoch::new(1);
+        let run = RunId::parse(
+            "run:sha256-jcs-v1:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run");
+        let occurrence = SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
+        let state = ref_for(11);
+        let capability = ref_for(12);
+        let adapter = ref_for(13);
+        let target = ref_for(14);
+        let binding =
+            BindingDescriptor::new(state, Some(capability), Some(adapter), target, None, None)
+                .expect("binding");
+        let binding_ref = binding.content_ref().expect("binding ref");
+        let input = ValueRef::new(ref_for(15), ref_for(16));
+        let intent = ValueRef::new(ref_for(17), ref_for(18));
+        let prepared = StatePrepared::new(
+            occurrence.clone(),
+            0,
+            input,
+            intent,
+            None,
+            None,
+            PreparationMode::Read {
+                total_attempt_bound: 1,
+            },
+            binding.clone(),
+            binding_ref.clone(),
+            None,
+            4096,
+        )
+        .expect("prepared");
+        assert!(RunFrame::new(
+            run.clone(),
+            scope.clone(),
+            epoch,
+            2,
+            AppendRequestId::new("journal-prepared-0123456789").expect("request"),
+            RunRecord::StatePrepared(prepared),
+            Vec::new(),
+        )
+        .is_ok());
+
+        let unbound = BindingDescriptor::new(ref_for(19), None, None, ref_for(20), None, None)
+            .expect("unbound descriptor");
+        assert!(StatePrepared::new(
+            occurrence.clone(),
+            0,
+            ValueRef::new(ref_for(21), ref_for(22)),
+            ValueRef::new(ref_for(23), ref_for(24)),
+            None,
+            None,
+            PreparationMode::Read {
+                total_attempt_bound: 1,
+            },
+            unbound,
+            ref_for(25),
+            None,
+            4096,
+        )
+        .is_err());
+
+        let foreign_run = RunId::parse(
+            "run:sha256-jcs-v1:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("foreign run");
+        let foreign_preparation = PreparationRef::new(foreign_run, 2, 0);
+        let foreign_conclusion = RunFrame::new(
+            run,
+            scope,
+            epoch,
+            3,
+            AppendRequestId::new("journal-conclusion-0123456789").expect("request"),
+            RunRecord::StateConcluded(StateConcluded::Access {
+                occurrence,
+                preparation: foreign_preparation,
+                evidence: ValueRef::new(ref_for(26), ref_for(27)),
+                outcome: StateOutcome::Failure(ValueRef::new(ref_for(28), ref_for(29))),
+                fact_selection: None,
+                fact_publication: None,
+            }),
+            Vec::new(),
+        );
+        assert!(foreign_conclusion.is_err());
     }
 }
