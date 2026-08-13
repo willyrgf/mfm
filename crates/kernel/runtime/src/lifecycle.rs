@@ -2703,6 +2703,21 @@ mod tests {
         interpretations: AtomicUsize,
     }
 
+    #[cfg(target_os = "linux")]
+    fn process_vm_hwm_bytes() -> Option<usize> {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("VmHWM:")?.split_whitespace().next())
+            .and_then(|kilobytes| kilobytes.parse::<usize>().ok())
+            .and_then(|kilobytes| kilobytes.checked_mul(1024))
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    const fn process_vm_hwm_bytes() -> Option<usize> {
+        None
+    }
+
     #[tokio::test]
     async fn pure_session_advances_through_runtime_and_store() {
         let contract = nominal_contract_ref::<TestContext>().expect("contract");
@@ -2816,11 +2831,13 @@ mod tests {
             })
             .sum();
         let hot_context_bytes = advanced.latest.canonical_bytes.len();
+        let hot_process_vm_hwm_bytes = process_vm_hwm_bytes();
         eprintln!(
-            "capacity-envelope runtime pure hot_head={} hot_frame_bytes={} hot_context_bytes={} executor=retained-session",
+            "capacity-envelope runtime pure hot_head={} hot_frame_bytes={} hot_context_bytes={} process_vm_hwm_bytes={:?} executor=retained-session",
             hot_prefix.head_sequence(),
             hot_frame_bytes,
             hot_context_bytes,
+            hot_process_vm_hwm_bytes,
         );
         drop(advanced);
         let cold = match runtime.resume_run(run_id).await {
@@ -2835,7 +2852,7 @@ mod tests {
         };
         assert_eq!(terminal.head_sequence(), 3);
         eprintln!(
-            "capacity-envelope runtime pure cold_resume_head={} cold_frame_bytes={} cold_context_bytes={} executor=one-shot-resume-drive",
+            "capacity-envelope runtime pure cold_resume_head={} cold_frame_bytes={} cold_context_bytes={} process_vm_hwm_bytes={:?} executor=one-shot-resume-drive",
             terminal.head_sequence(),
             terminal
                 .qualified_run()
@@ -2846,8 +2863,9 @@ mod tests {
                     .expect("frame bytes")
                     .as_bytes()
                     .len())
-                .sum::<usize>(),
+            .sum::<usize>(),
             cold_context_bytes,
+            process_vm_hwm_bytes(),
         );
         assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
     }

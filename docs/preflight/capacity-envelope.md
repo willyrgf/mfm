@@ -63,10 +63,13 @@ session and the one-shot cold `resume_run(...).drive()` path:
 | one-shot cold resume/drive | 3 | 6,194 | 11 |
 
 The retained canonical-byte total is the portable, allocator-independent high-water proxy used by
-this artifact (`frame bytes + latest context bytes`); it is a structural bound, not an RSS or
-latency claim. The test also counts the pure State entries and proves that cold resume does not
-re-execute the already concluded State. No executor, cache, checkpoint, suffix protocol, or
-structural sharing is retained.
+this artifact (`frame bytes + latest context bytes`). On Linux the same fixture also records
+`/proc/self/status` `VmHWM` samples after hot advancement and cold resume; those samples are
+diagnostic process measurements and include the test harness, while the canonical-byte total is
+the portable contract bound. Neither is an RSS or latency acceptance threshold. The test also
+counts the pure State entries and proves that cold resume does not re-execute the already
+concluded State. No executor, cache, checkpoint, suffix protocol, or structural sharing is
+retained.
 
 Exact-bound and independent bound-plus-one evidence is executable at each owner:
 
