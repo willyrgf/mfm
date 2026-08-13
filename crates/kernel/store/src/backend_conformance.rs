@@ -88,16 +88,17 @@ pub async fn exercise_atomic_rollback(
             ) {
                 return Err(BackendError::Conflict);
             }
-            let selection_schema = SchemaId::new(
-                "mfm.test.rollback-selection",
+            let proposal_schema = SchemaId::new(
+                "mfm.test.rollback-proposals",
                 "1",
                 DigestAlgorithm::Sha256JcsV1,
                 DigestBytes::from_array([1; 32]),
             )
             .map_err(|_| BackendError::Storage)?;
-            let selection_ref = ContentRef::new(selection_schema, raw_content_digest(b"selection"))
-                .map_err(|_| BackendError::Storage)?;
-            let publication = RawFactPublication::new(1, run_id.clone(), 2, selection_ref)?;
+            let proposal_set_ref =
+                ContentRef::new(proposal_schema, raw_content_digest(b"proposals"))
+                    .map_err(|_| BackendError::Storage)?;
+            let publication = RawFactPublication::new(1, run_id.clone(), 2, proposal_set_ref)?;
             let second_bytes = br#"{"kind":"rollback-second"}"#;
             let second_digest = raw_content_digest(second_bytes);
             let second_head = ContentDigest::parse(
