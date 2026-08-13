@@ -1,7 +1,7 @@
 use std::num::NonZeroU16;
 
 use mfm_capabilities::{AccessCapabilityContract, NoPriorFacts, ReadMode};
-use mfm_runtime::{PreparedExecution, RuntimeError, State};
+use mfm_runtime::{FailureValue, PreparedExecution, RuntimeError, State};
 use mfm_ids::StableId;
 use mfm_program_derive::MfmValue as DeriveMfmValue;
 use serde::{Deserialize, Serialize};
@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveMfmValue)]
 struct TestValue {
     value: u64,
+}
+
+impl FailureValue for TestValue {
+    fn integrity_blocked() -> Self {
+        Self { value: 0 }
+    }
 }
 
 struct TestState;

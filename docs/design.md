@@ -55,6 +55,10 @@ An adapter consumes the committed call, derives provider bytes from intent, auth
 response, and returns one capability-owned evidence value. Indeterminate results remain neutral;
 generic errors never mint retry authority. `EntryOnce` is the default Effect discipline.
 
+An integrity-blocked Access result is a capability-certified, callback-free terminal route. The
+declared failure contract supplies one static typed failure value; callers cannot choose a failure,
+successor context, retry authority, or new fact publication on that route.
+
 Access assembly retains the complete immutable binding descriptor at registration. The Runtime
 preparation bridge does not accept a caller-supplied replacement descriptor, and the opened Store
 has no generic public frame append; admission and qualified conclusion ownership are separate

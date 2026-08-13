@@ -66,6 +66,9 @@ substitution path.
 
 Adapters own clients, protocol authentication, stable-key transmission, nonce/signing mechanics,
 and raw response disposal. They return only bounded capability evidence or an unresolved result.
+An integrity-blocked Access result consumes a capability-certified route whose typed failure is
+contract-fixed and callback-free; it cannot mint a successor context, retry authority, or fact
+publication.
 
 ### App and storage
 
