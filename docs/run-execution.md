@@ -20,13 +20,23 @@ For a prior-fact capability, preparation carries only the request projected from
 intent. Store checks the request against the admitted source manifest, reads one bounded fact
 publication snapshot, scans the published proposal sets, and appends the resulting selection object
 with `StatePrepared`. The direct-new continuation carries that Store-fixed typed selection and
-frontier; callers cannot provide or refresh it.
+frontier; callers cannot provide or refresh it. Each selected fact is paired with Store-authored
+producer Program/run/record/head provenance, and load/append qualification verifies the producer
+history and exact fact content. The frontier stream is bound to the Store scope, writer epoch,
+and tenant, so a copied selection cannot cross partitions or epochs.
 
 Successful State conclusions carry a coordinate-free proposal set. Store assigns the next tenant
 fact-publication coordinate only when the proposal set is non-empty and appends the conclusion and
 publication atomically. A fact-frontier race returns the same pending conclusion owner with its
-coordinate cleared; retrying rebinds that coordinate without re-running State, adapter, or fact
-selection logic.
+coordinate cleared and a fresh Store-owned physical append id; retrying rebinds that coordinate
+without re-running State, adapter, or fact-selection logic. PostgreSQL materializes and locks an
+empty fact-head row before checking the first publication, so two independent first publishers
+produce one winner and one frontier-change result rather than a unique-key ambiguity.
+
+Conclusion recovery classifies a stale same-run head before Runtime settles it: identical semantic
+records resume from qualified history, a superseded Access preparation returns `NoLongerSelected`,
+a different conclusion returns `Conflict`, and a malformed or impossible prefix returns
+`InvalidHistory`. None of these branches re-enters State, adapters, interpretation, or fact scans.
 
 If the backend acknowledges a conclusion append ambiguously, Runtime retains the same pending
 owner. Resolution retries the same append identity, accepts `Found` for the exact retained frame,
@@ -46,6 +56,16 @@ drop or status-only success path creates execution authority.
 Effect may replace a selected preparation only within their fixed total budget, preserving exact
 input, intent, binding, domain, and absorption identity. A late result cannot settle a superseded
 occurrence.
+
+The recovery matrix is intentionally owner-based:
+
+| Outcome | Re-execution | Owner/result |
+| --- | ---: | --- |
+| Same conclusion, different physical id | zero | recorded qualified history |
+| Access preparation superseded | zero | latest history and `NoLongerSelected` |
+| Different same-occurrence conclusion | zero | qualified conflict |
+| Permanent Store rejection | zero | distinct owner-bearing rejection |
+| Unknown acknowledgement | zero | exact pending owner, resolved by physical id |
 
 Every successful nonterminal State returns the complete next domain context. Failure is fail-fast;
 recovery context exists only when the domain failure value explicitly contains it. Match consumes

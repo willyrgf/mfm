@@ -2,7 +2,7 @@
 //! Strict prior-fact values used by capability preparation and conclusion closures.
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
-use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
+use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId};
 use mfm_program_derive::MfmValue;
 use mfm_values::string_contains_secret_marker;
 use serde::{Deserialize, Serialize};
@@ -170,6 +170,65 @@ impl FactValue {
     }
 }
 
+/// Qualified producer evidence for one selected fact.
+///
+/// The evidence is Store-authored after reading the retained producer run. It prevents a replay
+/// from treating a source identity and value as sufficient proof when the producer Program,
+/// record, or producer head differs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+pub struct FactProvenance {
+    /// Source identity whose fact is proven by this evidence.
+    pub source_ref: ContentRef,
+    /// Program identity that produced the selected fact.
+    pub producer_program_ref: ContentRef,
+    /// Durable producer run identity.
+    pub producer_run_id: RunId,
+    /// One-based producer record sequence containing the publication.
+    pub producer_record_sequence: u64,
+    /// Content identity of the producer fact proposal record.
+    pub producer_record_ref: ContentRef,
+    /// Recursive producer run head at the selected record.
+    pub producer_head_ref: ContentDigest,
+}
+
+impl FactProvenance {
+    /// Creates one bounded producer proof.
+    pub fn new(
+        source_ref: ContentRef,
+        producer_program_ref: ContentRef,
+        producer_run_id: RunId,
+        producer_record_sequence: u64,
+        producer_record_ref: ContentRef,
+        producer_head_ref: ContentDigest,
+    ) -> Result<Self, FactError> {
+        if producer_record_sequence == 0 {
+            return Err(FactError::Invalid);
+        }
+        Ok(Self {
+            source_ref,
+            producer_program_ref,
+            producer_run_id,
+            producer_record_sequence,
+            producer_record_ref,
+            producer_head_ref,
+        })
+    }
+
+    /// Validates producer evidence decoded from retained canonical bytes.
+    pub fn validate(&self) -> std::result::Result<(), FactError> {
+        Self::new(
+            self.source_ref.clone(),
+            self.producer_program_ref.clone(),
+            self.producer_run_id.clone(),
+            self.producer_record_sequence,
+            self.producer_record_ref.clone(),
+            self.producer_head_ref.clone(),
+        )
+        .map(|_| ())
+    }
+}
+
 /// One bounded set of new fact values emitted by a State conclusion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -234,6 +293,8 @@ pub struct FactSelection {
     pub request_id: StableId,
     /// Selected facts in request order.
     pub facts: Vec<FactValue>,
+    /// Store-qualified producer evidence aligned one-for-one with [`Self::facts`].
+    pub provenance: Vec<FactProvenance>,
     /// Dense completeness proof.
     pub completeness: FactCompleteness,
     /// The Store-captured producer frontier.
@@ -245,6 +306,7 @@ impl FactSelection {
     pub fn new(
         request: &FactSelectionRequest,
         facts: Vec<FactValue>,
+        provenance: Vec<FactProvenance>,
         completeness: FactCompleteness,
         frontier: FactSelectionFrontier,
     ) -> Result<Self, FactError> {
@@ -255,7 +317,11 @@ impl FactSelection {
             || completeness.through_sequence == 0
             || frontier.through_sequence != completeness.through_sequence
             || facts.len() != request.source_refs.len()
+            || provenance.len() != facts.len()
             || facts.iter().any(|fact| fact.validate().is_err())
+            || provenance
+                .iter()
+                .any(|evidence| evidence.validate().is_err())
             || facts
                 .iter()
                 .zip(&request.source_refs)
@@ -263,6 +329,10 @@ impl FactSelection {
             || facts
                 .iter()
                 .any(|fact| fact.subject_ref != request.subject_ref)
+            || facts
+                .iter()
+                .zip(&provenance)
+                .any(|(fact, evidence)| fact.source_ref != evidence.source_ref)
             || facts
                 .windows(2)
                 .any(|pair| pair[0].fact_id >= pair[1].fact_id)
@@ -272,6 +342,7 @@ impl FactSelection {
         Ok(Self {
             request_id: request.request_id.clone(),
             facts,
+            provenance,
             completeness,
             frontier,
         })
@@ -290,7 +361,12 @@ impl FactSelection {
             || self.frontier.validate().is_err()
             || self.frontier.through_sequence != self.completeness.through_sequence
             || self.facts.len() != request.source_refs.len()
+            || self.provenance.len() != self.facts.len()
             || self.facts.iter().any(|fact| fact.validate().is_err())
+            || self
+                .provenance
+                .iter()
+                .any(|evidence| evidence.validate().is_err())
             || self
                 .facts
                 .iter()
@@ -300,6 +376,11 @@ impl FactSelection {
                 .facts
                 .iter()
                 .any(|fact| fact.subject_ref != request.subject_ref)
+            || self
+                .facts
+                .iter()
+                .zip(&self.provenance)
+                .any(|(fact, evidence)| fact.source_ref != evidence.source_ref)
             || self
                 .facts
                 .windows(2)
@@ -367,7 +448,7 @@ mod tests {
         .expect("request");
         let value_ref = content_ref_for_value(br#"{"value":1}"#).expect("value ref");
         let fact = FactValue::new(
-            source,
+            source.clone(),
             request.subject_ref.clone(),
             StableId::new("mfm.fact-test-fact").expect("fact"),
             value_ref,
@@ -377,6 +458,21 @@ mod tests {
         let selection = FactSelection::new(
             &request,
             vec![fact],
+            vec![FactProvenance::new(
+                source,
+                reference(8),
+                RunId::parse(
+                    "run:sha256-jcs-v1:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                )
+                .expect("run"),
+                2,
+                reference(9),
+                mfm_ids::ContentDigest::parse(
+                    "content:sha256-v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                )
+                .expect("head"),
+            )
+            .expect("provenance")],
             FactCompleteness {
                 through_sequence: 7,
                 complete: true,
@@ -388,6 +484,7 @@ mod tests {
         assert!(FactSelection::new(
             &request,
             selection.facts.clone(),
+            selection.provenance.clone(),
             FactCompleteness {
                 through_sequence: 8,
                 complete: true,
@@ -395,6 +492,9 @@ mod tests {
             FactSelectionFrontier::new(reference(4), 7, reference(5)).expect("frontier"),
         )
         .is_err());
+        let mut mismatched = selection.clone();
+        mismatched.provenance[0].source_ref = reference(2);
+        assert!(mismatched.validate_for(&request).is_err());
     }
 
     #[test]
