@@ -5,23 +5,20 @@
 //! assembly/store association, keeps the latest qualified context in an affine session, and
 //! returns every live owner through an explicit outcome.
 
-use std::any::Any;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use mfm_canonical::raw_content_digest;
 use mfm_capabilities::AccessCapabilityContract;
 #[cfg(test)]
 use mfm_ids::AppendRequestId;
 use mfm_ids::{ContentRef, RunId, StableId};
-use mfm_journal::single_trust::{BindingDescriptor, ImmutableObject, StateOutcome, ValueRef};
-use mfm_program::{canonical_value, nominal_contract_ref, ProgramCatalog, QualifiedTypedValue};
+use mfm_program::{nominal_contract_ref, ProgramCatalog, QualifiedTypedValue, QualifiedValue};
 use mfm_store::single_trust::{AppendDisposition, QualifiedRun, RunAction, SelectedRun};
 use mfm_store::{
-    AccessConclusionProposal, QualifiedHistoryPort, ResolvedConfigurationHead, SelectedConclusion,
-    SelectedConclusionOutcome, SelectedConclusionPreparationOutcome,
+    QualifiedHistoryPort, ResolvedConfigurationHead, SelectedConclusion, SelectedConclusionOutcome,
+    SelectedConclusionPreparationOutcome,
 };
 use mfm_values::MfmValue;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -34,80 +31,7 @@ use crate::single_trust::{
 type LifecycleResult<T> = std::result::Result<T, RuntimeError>;
 type LifecycleFuture<T> = Pin<Box<dyn Future<Output = LifecycleResult<T>> + Send + 'static>>;
 
-/// Private process witness carried by every dynamically erased typed value.
-#[derive(Debug)]
-pub(crate) struct RuntimeWitness;
-
-/// One owned typed value erased only inside Runtime.
-pub(crate) struct ErasedValue {
-    contract_ref: ContentRef,
-    value_ref: ContentRef,
-    canonical_bytes: Vec<u8>,
-    value: Box<dyn Any + Send + Sync>,
-    witness: Arc<RuntimeWitness>,
-}
-
-impl ErasedValue {
-    fn from_qualified<T: MfmValue>(
-        catalog: &ProgramCatalog,
-        witness: &Arc<RuntimeWitness>,
-        value: QualifiedTypedValue<T>,
-    ) -> LifecycleResult<Self> {
-        if !value.belongs_to_catalog(catalog) {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
-            contract_ref: value.contract_ref().clone(),
-            value_ref: value.value_ref().clone(),
-            canonical_bytes: value.canonical_bytes().to_vec(),
-            value: Box::new(value),
-            witness: Arc::clone(witness),
-        })
-    }
-
-    fn into_qualified<T: MfmValue>(
-        self,
-        catalog: &ProgramCatalog,
-        witness: &Arc<RuntimeWitness>,
-        expected_contract: &ContentRef,
-    ) -> LifecycleResult<QualifiedTypedValue<T>> {
-        if !Arc::ptr_eq(&self.witness, witness) || &self.contract_ref != expected_contract {
-            return Err(RuntimeError::Identity);
-        }
-        let value = self
-            .value
-            .downcast::<QualifiedTypedValue<T>>()
-            .map_err(|_| RuntimeError::Value)?;
-        if !value.belongs_to_catalog(catalog)
-            || value.contract_ref() != expected_contract
-            || value.value_ref() != &self.value_ref
-        {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(*value)
-    }
-
-    fn contract_ref(&self) -> &ContentRef {
-        &self.contract_ref
-    }
-
-    fn value_ref(&self) -> &ContentRef {
-        &self.value_ref
-    }
-
-    fn as_value_ref(&self) -> ValueRef {
-        ValueRef::new(self.contract_ref.clone(), self.value_ref.clone())
-    }
-
-    fn object(&self) -> LifecycleResult<ImmutableObject> {
-        ImmutableObject::new(
-            StableId::new("mfm.value").map_err(|_| RuntimeError::Value)?,
-            self.value_ref.clone(),
-            String::from_utf8(self.canonical_bytes.clone()).map_err(|_| RuntimeError::Value)?,
-        )
-        .map_err(|_| RuntimeError::Value)
-    }
-}
+pub(crate) type ErasedValue = QualifiedValue;
 
 pub(crate) enum DynamicOutcome {
     Success {
@@ -127,7 +51,6 @@ pub(crate) trait DynamicStateRegistration: Send + Sync {
     fn pure_evaluate(
         &self,
         assembly: &RuntimeAssembly,
-        witness: &Arc<RuntimeWitness>,
         input: ErasedValue,
         input_contract: &ContentRef,
         output_contract: &ContentRef,
@@ -138,20 +61,10 @@ pub(crate) trait DynamicStateRegistration: Send + Sync {
     fn prepare_access(
         &self,
         assembly: &RuntimeAssembly,
-        witness: &Arc<RuntimeWitness>,
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure>;
-
-    fn reify(
-        &self,
-        catalog: &ProgramCatalog,
-        witness: &Arc<RuntimeWitness>,
-        contract: &ContentRef,
-        canonical_bytes: &[u8],
-    ) -> LifecycleResult<Option<ErasedValue>>;
 }
 
 pub(crate) trait DynamicPrepared: Send {
@@ -180,7 +93,6 @@ pub(crate) trait DynamicCall: Send {
     fn execute(
         self: Box<Self>,
         assembly: Arc<RuntimeAssembly>,
-        witness: &Arc<RuntimeWitness>,
     ) -> LifecycleFuture<DynamicResolution>;
 }
 
@@ -190,7 +102,6 @@ struct DynamicPure<S: State> {
 
 struct DynamicAccess<S: State, C: AccessCapabilityContract> {
     implementation: AccessImplementation<S, C>,
-    binding: BindingDescriptor,
 }
 
 struct TypedPrepared<S: State, C: AccessCapabilityContract> {
@@ -209,19 +120,14 @@ pub(crate) fn pure_registration<S: State>(
     Arc::new(DynamicPure { implementation })
 }
 
-pub(crate) fn access_registration_with_binding<S: State, C: AccessCapabilityContract>(
+pub(crate) fn access_registration<S: State, C: AccessCapabilityContract>(
     implementation: AccessImplementation<S, C>,
-    binding: BindingDescriptor,
 ) -> Arc<dyn DynamicStateRegistration> {
-    Arc::new(DynamicAccess {
-        implementation,
-        binding,
-    })
+    Arc::new(DynamicAccess { implementation })
 }
 
 fn qualify_erased<T: MfmValue>(
     assembly: &RuntimeAssembly,
-    witness: &Arc<RuntimeWitness>,
     contract: ContentRef,
     value: T,
 ) -> LifecycleResult<ErasedValue> {
@@ -229,62 +135,27 @@ fn qualify_erased<T: MfmValue>(
         .catalog()
         .qualify(contract, value)
         .map_err(|_| RuntimeError::Value)?;
-    ErasedValue::from_qualified(assembly.catalog(), witness, qualified)
-}
-
-fn fact_proposals_object(
-    facts: &mfm_facts::FactProposalSet,
-) -> LifecycleResult<(ValueRef, ImmutableObject)> {
-    facts.validate().map_err(|_| RuntimeError::Value)?;
-    let canonical = canonical_value(facts).map_err(|_| RuntimeError::Value)?;
-    let value_ref = ContentRef::new(
-        mfm_facts::FactProposalSet::schema_id().map_err(|_| RuntimeError::Value)?,
-        raw_content_digest(canonical.as_bytes()),
-    )
-    .map_err(|_| RuntimeError::Value)?;
-    let value = ValueRef::new(value_ref.clone(), value_ref.clone());
-    let object = ImmutableObject::new(
-        StableId::new("mfm.value").map_err(|_| RuntimeError::Value)?,
-        value_ref,
-        canonical.as_str().to_owned(),
-    )
-    .map_err(|_| RuntimeError::Value)?;
-    Ok((value, object))
-}
-
-fn try_reify<T: MfmValue>(
-    catalog: &ProgramCatalog,
-    witness: &Arc<RuntimeWitness>,
-    contract: &ContentRef,
-    canonical_bytes: &[u8],
-) -> LifecycleResult<Option<ErasedValue>> {
-    if !catalog.contains_value::<T>(contract) {
-        return Ok(None);
-    }
-    let qualified = catalog
-        .qualify_retained::<T>(contract.clone(), canonical_bytes)
-        .map_err(|_| RuntimeError::Value)?;
-    ErasedValue::from_qualified(catalog, witness, qualified).map(Some)
+    Ok(qualified.erase())
 }
 
 impl<S: State> DynamicStateRegistration for DynamicPure<S> {
     fn pure_evaluate(
         &self,
         assembly: &RuntimeAssembly,
-        witness: &Arc<RuntimeWitness>,
         input: ErasedValue,
         input_contract: &ContentRef,
         output_contract: &ContentRef,
         failure_contract: Option<&ContentRef>,
     ) -> LifecycleResult<DynamicOutcome> {
-        let input =
-            input.into_qualified::<S::Input>(assembly.catalog(), witness, input_contract)?;
+        let input = input
+            .try_downcast::<S::Input>(assembly.catalog(), input_contract)
+            .map_err(|_| RuntimeError::Value)?;
         let outcome = self.implementation.evaluate_contained(input.as_ref())?;
         match outcome {
             mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
                 facts.validate().map_err(|_| RuntimeError::Value)?;
                 Ok(DynamicOutcome::Success {
-                    value: qualify_erased(assembly, witness, output_contract.clone(), output)?,
+                    value: qualify_erased(assembly, output_contract.clone(), output)?,
                     facts,
                 })
             }
@@ -292,7 +163,6 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
                 let failure_contract = failure_contract.ok_or(RuntimeError::Value)?;
                 Ok(DynamicOutcome::Failure(qualify_erased(
                     assembly,
-                    witness,
                     failure_contract.clone(),
                     failure,
                 )?))
@@ -303,29 +173,14 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
     fn prepare_access(
         &self,
         _assembly: &RuntimeAssembly,
-        _witness: &Arc<RuntimeWitness>,
         _run_id: RunId,
         _occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        _binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure> {
         Err(DynamicPreparationFailure {
             input: Some(input),
             error: RuntimeError::Mode,
         })
-    }
-
-    fn reify(
-        &self,
-        catalog: &ProgramCatalog,
-        witness: &Arc<RuntimeWitness>,
-        contract: &ContentRef,
-        canonical_bytes: &[u8],
-    ) -> LifecycleResult<Option<ErasedValue>> {
-        if let Some(value) = try_reify::<S::Input>(catalog, witness, contract, canonical_bytes)? {
-            return Ok(Some(value));
-        }
-        try_reify::<S::Output>(catalog, witness, contract, canonical_bytes)
     }
 }
 
@@ -333,7 +188,6 @@ impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for Dynamic
     fn pure_evaluate(
         &self,
         _assembly: &RuntimeAssembly,
-        _witness: &Arc<RuntimeWitness>,
         _input: ErasedValue,
         _input_contract: &ContentRef,
         _output_contract: &ContentRef,
@@ -345,11 +199,9 @@ impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for Dynamic
     fn prepare_access(
         &self,
         assembly: &RuntimeAssembly,
-        witness: &Arc<RuntimeWitness>,
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
-        binding_ref: ContentRef,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure> {
         let state = match assembly.program().document().declaration(&occurrence) {
             Some(mfm_program::Declaration::State(state)) => state,
@@ -360,40 +212,24 @@ impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for Dynamic
                 })
             }
         };
-        let binding = self.binding.clone();
-        let input = match input.into_qualified::<S::Input>(
-            assembly.catalog(),
-            witness,
-            state.input_contract_ref(),
-        ) {
-            Ok(input) => input,
-            Err(error) => {
-                return Err(DynamicPreparationFailure { input: None, error });
-            }
-        };
-        let prepared =
-            match PreparedExecution::new(assembly, run_id, occurrence, input, binding, binding_ref)
-            {
-                Ok(prepared) => prepared,
-                Err(error) => return Err(DynamicPreparationFailure { input: None, error }),
+        let input =
+            match input.try_downcast::<S::Input>(assembly.catalog(), state.input_contract_ref()) {
+                Ok(input) => input,
+                Err(_) => {
+                    return Err(DynamicPreparationFailure {
+                        input: None,
+                        error: RuntimeError::Value,
+                    });
+                }
             };
+        let prepared = match PreparedExecution::new(assembly, run_id, occurrence, input) {
+            Ok(prepared) => prepared,
+            Err(error) => return Err(DynamicPreparationFailure { input: None, error }),
+        };
         Ok(Box::new(TypedPrepared {
             prepared,
             implementation: self.implementation.clone(),
         }))
-    }
-
-    fn reify(
-        &self,
-        catalog: &ProgramCatalog,
-        witness: &Arc<RuntimeWitness>,
-        contract: &ContentRef,
-        canonical_bytes: &[u8],
-    ) -> LifecycleResult<Option<ErasedValue>> {
-        if let Some(value) = try_reify::<S::Input>(catalog, witness, contract, canonical_bytes)? {
-            return Ok(Some(value));
-        }
-        try_reify::<S::Output>(catalog, witness, contract, canonical_bytes)
     }
 }
 
@@ -454,9 +290,7 @@ impl<S: State, C: AccessCapabilityContract> DynamicCall for TypedCall<S, C> {
     fn execute(
         self: Box<Self>,
         assembly: Arc<RuntimeAssembly>,
-        witness: &Arc<RuntimeWitness>,
     ) -> LifecycleFuture<DynamicResolution> {
-        let witness = Arc::clone(witness);
         let TypedCall {
             call,
             implementation,
@@ -464,7 +298,7 @@ impl<S: State, C: AccessCapabilityContract> DynamicCall for TypedCall<S, C> {
         let expected_call_id = call.call_id().clone();
         Box::pin(async move {
             let resolution = implementation.execute(call).await?;
-            DynamicResolution::from_handler(&assembly, &witness, &expected_call_id, resolution)
+            DynamicResolution::from_handler(&assembly, &expected_call_id, resolution)
         })
     }
 }
@@ -481,7 +315,6 @@ pub(crate) struct DynamicResolution {
 impl DynamicResolution {
     fn from_handler<S: State, C: AccessCapabilityContract>(
         assembly: &RuntimeAssembly,
-        witness: &Arc<RuntimeWitness>,
         expected_call_id: &StableId,
         resolution: AccessHandlerResolution<S, S::Output, S::Failure, C>,
     ) -> LifecycleResult<Self> {
@@ -504,21 +337,11 @@ impl DynamicResolution {
         {
             return Err(RuntimeError::Value);
         }
-        let input = ErasedValue::from_qualified(assembly.catalog(), witness, input)?;
-        let _intent = qualify_erased(
-            assembly,
-            witness,
-            nominal_contract_ref::<C::Intent>()?,
-            intent,
-        )?;
+        let input = input.erase();
+        let _intent = qualify_erased(assembly, nominal_contract_ref::<C::Intent>()?, intent)?;
         let evidence = evidence
             .map(|evidence| {
-                qualify_erased(
-                    assembly,
-                    witness,
-                    nominal_contract_ref::<C::Evidence>()?,
-                    evidence,
-                )
+                qualify_erased(assembly, nominal_contract_ref::<C::Evidence>()?, evidence)
             })
             .transpose()?;
         let outcome = outcome
@@ -528,7 +351,6 @@ impl DynamicResolution {
                     Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Success {
                         value: qualify_erased(
                             assembly,
-                            witness,
                             nominal_contract_ref::<S::Output>()?,
                             output,
                         )?,
@@ -538,7 +360,6 @@ impl DynamicResolution {
                 mfm_capabilities::ProposedStateOutcome::Failure { failure } => {
                     Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Failure(qualify_erased(
                         assembly,
-                        witness,
                         nominal_contract_ref::<S::Failure>()?,
                         failure,
                     )?))
@@ -1051,7 +872,6 @@ impl Default for RuntimeLimits {
 struct RuntimeInner {
     assembly: Arc<RuntimeAssembly>,
     store: Arc<QualifiedHistoryPort>,
-    witness: Arc<RuntimeWitness>,
     limits: RuntimeLimits,
     active_sessions: Arc<Semaphore>,
     cpu_jobs: Arc<Semaphore>,
@@ -1079,7 +899,6 @@ impl Runtime {
             inner: Arc::new(RuntimeInner {
                 assembly: Arc::new(assembly),
                 store: Arc::new(store),
-                witness: Arc::new(RuntimeWitness),
                 limits,
                 active_sessions: Arc::new(Semaphore::new(limits.max_active_sessions)),
                 cpu_jobs: Arc::new(Semaphore::new(limits.max_cpu_jobs)),
@@ -1263,9 +1082,7 @@ impl Runtime {
                     }
                 }
             };
-            call.execute(Arc::clone(&self.inner.assembly), &self.inner.witness)
-                .await
-                .ok()
+            call.execute(Arc::clone(&self.inner.assembly)).await.ok()
         };
         let Some(resolution) = resolution else {
             return self
@@ -1303,63 +1120,20 @@ impl Runtime {
                     .await;
             }
         };
-        let evidence_ref = evidence.as_value_ref();
-        let evidence_object = match evidence.object() {
-            Ok(object) => object,
-            Err(_) => {
-                return self
-                    .neutral_access(selected, UnresolvedClassification::InvalidResponse)
-                    .await;
-            }
-        };
-        let (recorded_outcome, successor, outcome_object, fact_proposals) = match outcome {
+        let evidence = evidence;
+        let proposal = match outcome {
             DynamicOutcome::Success { value, facts } => {
-                let value_ref = value.as_value_ref();
-                let object = match value.object() {
-                    Ok(object) => object,
-                    Err(_) => {
-                        return self
-                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
-                            .await;
-                    }
-                };
-                let fact_proposals = match fact_proposals_object(&facts) {
-                    Ok(value) => Some(value),
-                    Err(_) => {
-                        return self
-                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
-                            .await;
-                    }
-                };
-                (
-                    StateOutcome::Success(value_ref),
-                    Some(value),
-                    object,
-                    fact_proposals,
-                )
+                let output = value;
+                mfm_capabilities::ProposedStateOutcome::Success { output, facts }
             }
             DynamicOutcome::Failure(value) => {
-                let value_ref = value.as_value_ref();
-                let object = match value.object() {
-                    Ok(object) => object,
-                    Err(_) => {
-                        return self
-                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
-                            .await;
-                    }
-                };
-                (StateOutcome::Failure(value_ref), None, object, None)
+                let failure = value;
+                mfm_capabilities::ProposedStateOutcome::Failure { failure }
             }
         };
-        let proposal = AccessConclusionProposal::new(
-            evidence_ref,
-            evidence_object,
-            recorded_outcome,
-            outcome_object,
-            fact_proposals,
-        );
         let owner = match self.inner.store.prepare_selected_access_conclusion(
             selected,
+            evidence,
             proposal,
             resolution.fact_continuation,
         ) {
@@ -1373,10 +1147,10 @@ impl Runtime {
         };
         match self.inner.store.commit_selected_conclusion(owner).await {
             SelectedConclusionOutcome::AcknowledgementUnknown(owner) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(self.clone(), owner, successor))
+                RuntimeStep::Suspended(SuspendedRun::conclusion(self.clone(), owner, None))
             }
             SelectedConclusionOutcome::Rejected { owner, error } => {
-                let suspended = SuspendedRun::conclusion(self.clone(), owner, successor);
+                let suspended = SuspendedRun::conclusion(self.clone(), owner, None);
                 match error {
                     mfm_store::StoreError::FactFrontierChanged
                     | mfm_store::StoreError::Conflict
@@ -1390,7 +1164,7 @@ impl Runtime {
             SelectedConclusionOutcome::AlreadyConcludedSame(next)
             | SelectedConclusionOutcome::NoLongerSelected(next)
             | SelectedConclusionOutcome::Committed(next) => {
-                self.step_from_selected(next, successor).await
+                self.step_from_selected(next, None).await
             }
             SelectedConclusionOutcome::Conflict(history) => RuntimeStep::Conflict {
                 history,
@@ -1463,14 +1237,7 @@ impl Runtime {
                 source_refs,
             )
             .await;
-        let value = match ErasedValue::from_qualified(
-            self.inner.assembly.catalog(),
-            &self.inner.witness,
-            value,
-        ) {
-            Ok(value) => value,
-            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-        };
+        let value = value.erase();
         match outcome {
             mfm_store::AdmissionOutcome::Selected(selected, _) => {
                 match self.session_from_selected(selected, Some(value)).await {
@@ -1508,13 +1275,12 @@ impl Runtime {
         } else {
             let object = selected.latest_context_object();
             let assembly = Arc::clone(&self.inner.assembly);
-            let witness = Arc::clone(&self.inner.witness);
             let contract = selected.latest_context().contract_ref().clone();
             let canonical_bytes = object.canonical_json().as_bytes().to_vec();
             match self.acquire_cpu_job().await {
                 Ok(cpu_permit) => tokio::task::spawn_blocking(move || {
                     let _cpu_permit = cpu_permit;
-                    assembly.reify_value(&witness, &contract, &canonical_bytes)
+                    assembly.reify_value(&contract, &canonical_bytes)
                 })
                 .await
                 .map_err(|_| RuntimeError::Value)
@@ -1599,15 +1365,6 @@ impl RunSession {
                 }
             }
         };
-        let binding_ref = match state.execution_binding_ref() {
-            Some(binding_ref) => binding_ref.clone(),
-            None => {
-                return RuntimeStep::Failed {
-                    history: selected.into_qualified_run(),
-                    error: RuntimeError::Mode,
-                }
-            }
-        };
         let registration = match runtime
             .inner
             .assembly
@@ -1631,19 +1388,11 @@ impl RunSession {
             }
         };
         let assembly = Arc::clone(&runtime.inner.assembly);
-        let witness = Arc::clone(&runtime.inner.witness);
         let run_id = selected.run_id().clone();
         let prepare_occurrence = occurrence.clone();
         let prepared_result = match tokio::task::spawn_blocking(move || {
             let _planning_permit = _planning_permit;
-            registration.prepare_access(
-                &assembly,
-                &witness,
-                run_id,
-                prepare_occurrence,
-                latest,
-                binding_ref,
-            )
+            registration.prepare_access(&assembly, run_id, prepare_occurrence, latest)
         })
         .await
         {
@@ -1743,7 +1492,6 @@ impl RunSession {
         let output_contract = state.output_contract_ref().clone();
         let failure_contract = state.failure_contract_ref().cloned();
         let assembly = Arc::clone(&runtime.inner.assembly);
-        let witness = Arc::clone(&runtime.inner.witness);
         let cpu_permit = match runtime.acquire_cpu_job().await {
             Ok(permit) => permit,
             Err(error) => {
@@ -1757,7 +1505,6 @@ impl RunSession {
             let _cpu_permit = cpu_permit;
             registration.pure_evaluate(
                 &assembly,
-                &witness,
                 latest,
                 &input_contract,
                 &output_contract,
@@ -1780,55 +1527,22 @@ impl RunSession {
                 };
             }
         };
-        let (recorded, successor, object, fact_proposals) = match outcome {
+        let proposal = match outcome {
             DynamicOutcome::Success { value, facts } => {
-                let value_ref = value.as_value_ref();
-                let object = match value.object() {
-                    Ok(object) => object,
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: selected.into_qualified_run(),
-                            error,
-                        }
-                    }
-                };
-                let fact_proposals = match fact_proposals_object(&facts) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: selected.into_qualified_run(),
-                            error,
-                        }
-                    }
-                };
-                (
-                    StateOutcome::Success(value_ref),
-                    Some(value),
-                    object,
-                    fact_proposals,
-                )
+                let output = value;
+                mfm_capabilities::ProposedStateOutcome::Success { output, facts }
             }
             DynamicOutcome::Failure(value) => {
-                let value_ref = value.as_value_ref();
-                let object = match value.object() {
-                    Ok(object) => object,
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: selected.into_qualified_run(),
-                            error,
-                        }
-                    }
-                };
-                (StateOutcome::Failure(value_ref), None, object, None)
+                let failure = value;
+                mfm_capabilities::ProposedStateOutcome::Failure { failure }
             }
         };
         drop(_active_permit);
-        let owner = match runtime.inner.store.prepare_selected_pure_conclusion(
-            selected,
-            recorded,
-            object,
-            fact_proposals,
-        ) {
+        let owner = match runtime
+            .inner
+            .store
+            .prepare_selected_pure_conclusion(selected, proposal)
+        {
             SelectedConclusionPreparationOutcome::Prepared(owner) => owner,
             SelectedConclusionPreparationOutcome::Rejected { selected, error } => {
                 return RuntimeStep::Failed {
@@ -1839,10 +1553,10 @@ impl RunSession {
         };
         match runtime.inner.store.commit_selected_conclusion(owner).await {
             SelectedConclusionOutcome::AcknowledgementUnknown(owner) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(runtime.clone(), owner, successor))
+                RuntimeStep::Suspended(SuspendedRun::conclusion(runtime.clone(), owner, None))
             }
             SelectedConclusionOutcome::Rejected { owner, error } => {
-                let suspended = SuspendedRun::conclusion(runtime.clone(), owner, successor);
+                let suspended = SuspendedRun::conclusion(runtime.clone(), owner, None);
                 match error {
                     mfm_store::StoreError::FactFrontierChanged
                     | mfm_store::StoreError::Conflict
@@ -1856,7 +1570,7 @@ impl RunSession {
             SelectedConclusionOutcome::AlreadyConcludedSame(next)
             | SelectedConclusionOutcome::NoLongerSelected(next)
             | SelectedConclusionOutcome::Committed(next) => {
-                runtime.step_from_selected(next, successor).await
+                runtime.step_from_selected(next, None).await
             }
             SelectedConclusionOutcome::Conflict(history) => RuntimeStep::Conflict {
                 history,
@@ -1954,12 +1668,11 @@ impl<T: MfmValue> ResumeInput<T> {
         run_id: RunId,
         value: QualifiedTypedValue<T>,
     ) -> LifecycleResult<Self> {
+        if !value.belongs_to_catalog(runtime.inner.assembly.catalog()) {
+            return Err(RuntimeError::Identity);
+        }
         Ok(Self {
-            value: ErasedValue::from_qualified(
-                runtime.inner.assembly.catalog(),
-                &runtime.inner.witness,
-                value,
-            )?,
+            value: value.erase(),
             runtime: runtime.clone(),
             run_id,
             _marker: PhantomData,
@@ -1970,8 +1683,11 @@ impl<T: MfmValue> ResumeInput<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mfm_canonical::raw_content_digest;
     use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
-    use mfm_program::single_trust::{ExecutionMode, ProgramDocument, StateDeclaration};
+    use mfm_program::single_trust::{
+        BindingDescriptor, ExecutionMode, ProgramDocument, StateDeclaration,
+    };
     use mfm_program_derive::{MfmConfig as DeriveMfmConfig, MfmValue as DeriveMfmValue};
     use mfm_store::{
         BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendFuture,
@@ -2100,6 +1816,12 @@ mod tests {
         builder
             .register_value::<TestContext>()
             .expect("test context");
+        builder
+            .register_capability::<TestRead>()
+            .expect("test read capability");
+        builder
+            .register_capability::<TestEffect>()
+            .expect("test effect capability");
         builder
     }
 
@@ -2439,7 +2161,7 @@ mod tests {
                     .len()
             })
             .sum();
-        let hot_context_bytes = advanced.latest.canonical_bytes.len();
+        let hot_context_bytes = advanced.latest.canonical_bytes().len();
         let hot_process_vm_hwm_bytes = process_vm_hwm_bytes();
         eprintln!(
             "capacity-envelope runtime pure hot_head={} hot_frame_bytes={} hot_context_bytes={} process_vm_hwm_bytes={:?} executor=retained-session",
@@ -2453,7 +2175,7 @@ mod tests {
             ResumeStep::Active(session) => session,
             other => panic!("unexpected cold resume outcome: {}", resume_name(&other)),
         };
-        let cold_context_bytes = cold.latest.canonical_bytes.len();
+        let cold_context_bytes = cold.latest.canonical_bytes().len();
         let terminal = match cold.drive().await {
             RuntimeStep::Terminal(terminal) => terminal,
             RuntimeStep::Failed { error, .. } => panic!("unexpected cold drive failure: {error:?}"),
@@ -2595,7 +2317,7 @@ mod tests {
     async fn access_session_enters_only_the_bound_adapter_and_concludes() {
         let contract = nominal_contract_ref::<TestContext>().expect("contract");
         let capability_contract =
-            crate::single_trust::capability_content_ref::<TestRead>().expect("capability");
+            mfm_program::capability_contract_ref::<TestRead>().expect("capability");
         let implementation_ref = test_ref(b"mfm.test.lifecycle-access-implementation");
         let adapter_ref = test_ref(b"mfm.test.lifecycle-access-adapter");
         let physical_target_ref = test_ref(b"mfm.test.lifecycle-access-target");
@@ -2610,7 +2332,6 @@ mod tests {
             None,
         )
         .expect("binding");
-        let binding_ref = binding.content_ref().expect("binding ref");
         let document = ProgramDocument::new(
             StableId::new("mfm.test.lifecycle-access-entry").expect("entry"),
             contract.clone(),
@@ -2630,7 +2351,7 @@ mod tests {
                     true,
                 )
                 .expect("state")
-                .with_execution_binding(binding_ref.clone())
+                .with_execution_binding(binding)
                 .expect("execution binding"),
             ))],
         )
@@ -2643,14 +2364,9 @@ mod tests {
         let counters_for_registration = Arc::clone(&counters);
         let counters_for_state = Arc::clone(&counters);
         let counters_for_preparation = Arc::clone(&counters);
-        let binding_for_registration = binding.clone();
         builder
-            .register_access_with_binding::<TestAccess, TestRead, _>(
+            .register_access::<TestAccess, TestRead, _>(
                 implementation_ref,
-                capability_contract,
-                binding_ref,
-                adapter_ref,
-                binding_for_registration,
                 AccessImplementation::new(
                     move |input: &TestContext| {
                         counters_for_preparation
@@ -2766,7 +2482,7 @@ mod tests {
     async fn unresolved_effect_parks_without_another_preparation_or_provider_entry() {
         let contract = nominal_contract_ref::<TestContext>().expect("contract");
         let capability_contract =
-            crate::single_trust::capability_content_ref::<TestEffect>().expect("capability");
+            mfm_program::capability_contract_ref::<TestEffect>().expect("capability");
         let implementation_ref = test_ref(b"mfm.test.lifecycle-effect-implementation");
         let adapter_ref = test_ref(b"mfm.test.lifecycle-effect-adapter");
         let physical_target_ref = test_ref(b"mfm.test.lifecycle-effect-target");
@@ -2782,7 +2498,6 @@ mod tests {
             None,
         )
         .expect("binding");
-        let binding_ref = binding.content_ref().expect("binding ref");
         let document = ProgramDocument::new(
             StableId::new("mfm.test.lifecycle-effect-entry").expect("entry"),
             contract.clone(),
@@ -2802,7 +2517,7 @@ mod tests {
                     true,
                 )
                 .expect("state")
-                .with_execution_binding(binding_ref.clone())
+                .with_execution_binding(binding)
                 .expect("execution binding"),
             ))],
         )
@@ -2815,12 +2530,8 @@ mod tests {
         let preparation_counters = Arc::clone(&counters);
         let provider_counters = Arc::clone(&counters);
         builder
-            .register_access_with_binding::<TestAccess, TestEffect, _>(
+            .register_access::<TestAccess, TestEffect, _>(
                 implementation_ref,
-                capability_contract,
-                binding_ref,
-                adapter_ref,
-                binding.clone(),
                 AccessImplementation::new(
                     move |input: &TestContext| {
                         preparation_counters

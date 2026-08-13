@@ -11,9 +11,8 @@ use std::sync::Mutex;
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::AccessCapabilityContract;
 use mfm_evm::{
-    BroadcastEvidence, BroadcastIntent, BroadcastTransaction, EvmBalanceAsset,
-    EvmBalanceCollectionCompletion, EvmBalanceContext, EvmConfig, EvmNativeBalanceInput,
-    EvmReadEvidence, EvmReadIntent, EvmSubmissionContext, EvmSubmissionFailure,
+    BroadcastTransaction, EvmBalanceAsset, EvmBalanceCollectionCompletion, EvmBalanceContext,
+    EvmConfig, EvmNativeBalanceInput, EvmSubmissionContext, EvmSubmissionFailure,
     EvmSubmissionOutput, EvmSubmissionRequest, EvmTokenBalanceInput, ReadBalance,
     ReadWalletNonceStatus, EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
 };
@@ -28,8 +27,9 @@ use mfm_portfolio::{
     PortfolioSnapshotOutput, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::single_trust::{
-    nominal_contract_ref, Declaration, ExecutionMode, MatchDeclaration, MatchVariant,
-    ProgramCatalog, ProgramCatalogBuilder, ProgramDocument, StateDeclaration,
+    capability_contract_ref, nominal_contract_ref, BindingDescriptor, Declaration, ExecutionMode,
+    MatchDeclaration, MatchVariant, ProgramCatalog, ProgramCatalogBuilder, ProgramDocument,
+    StateDeclaration,
 };
 use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
 use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
@@ -924,16 +924,13 @@ fn application_catalog_builder() -> Result<ProgramCatalogBuilder> {
         .register_value::<PortfolioSnapshotFailure>()
         .map_err(|_| PublicError::Internal)?;
     builder
-        .register_value::<EvmReadIntent>()
+        .register_capability::<ReadBalance>()
         .map_err(|_| PublicError::Internal)?;
     builder
-        .register_value::<EvmReadEvidence>()
+        .register_capability::<ReadWalletNonceStatus>()
         .map_err(|_| PublicError::Internal)?;
     builder
-        .register_value::<BroadcastIntent>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
-        .register_value::<BroadcastEvidence>()
+        .register_capability::<BroadcastTransaction>()
         .map_err(|_| PublicError::Internal)?;
     Ok(builder)
 }
@@ -946,13 +943,8 @@ fn implementation_ref(identity: &str) -> Result<ContentRef> {
     named_ref("mfm.state-implementation", identity)
 }
 
-fn binding_ref(identity: &str) -> Result<ContentRef> {
-    named_ref("mfm.execution-binding", identity)
-}
-
 fn capability_ref<C: AccessCapabilityContract>() -> Result<ContentRef> {
-    let identity = C::contract_id().map_err(|_| PublicError::Internal)?;
-    named_ref("mfm.capability-contract", identity.as_str())
+    capability_contract_ref::<C>().map_err(|_| PublicError::Internal)
 }
 
 fn address(ordinal: usize) -> Result<SequentialControlAddress> {
@@ -1016,7 +1008,18 @@ fn read_state_to(
 ) -> Result<StateDeclaration> {
     let state_address = address(ordinal)?;
     let implementation = implementation_ref(implementation_name)?;
-    let binding = binding_ref(implementation_name)?;
+    let binding = BindingDescriptor::new(
+        implementation.clone(),
+        Some(capability_contract_ref.clone()),
+        Some(named_ref(
+            "mfm.adapter-implementation",
+            implementation_name,
+        )?),
+        named_ref("mfm.physical-target", implementation_name)?,
+        None,
+        None,
+    )
+    .map_err(|_| PublicError::Internal)?;
     let execution = ExecutionMode::Read {
         capability_contract_ref,
         total_attempt_bound: 3,
@@ -1062,8 +1065,19 @@ fn effect_state_to(
 ) -> Result<StateDeclaration> {
     let state_address = address(ordinal)?;
     let implementation = implementation_ref(implementation_name)?;
-    let binding = binding_ref(implementation_name)?;
     let effect_domain = StableId::new(implementation_name).map_err(|_| PublicError::Internal)?;
+    let binding = BindingDescriptor::new(
+        implementation.clone(),
+        Some(capability_contract_ref.clone()),
+        Some(named_ref(
+            "mfm.adapter-implementation",
+            implementation_name,
+        )?),
+        named_ref("mfm.physical-target", implementation_name)?,
+        Some(effect_domain.clone()),
+        None,
+    )
+    .map_err(|_| PublicError::Internal)?;
     let state = StateDeclaration::new(
         state_address,
         implementation,

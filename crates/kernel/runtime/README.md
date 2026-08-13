@@ -3,7 +3,7 @@
 Runtime owns immutable live assembly, affine sessions, direct-new `CommittedCall`, typed handoff,
 the Runtime-owned affine `PendingConclusion`, and the exhaustive `SuspendedRun` owner-fate
 coordinator around Store. Provider entry requires a consuming call token. Access registration
-retains the immutable binding descriptor, and conclusion recovery retains no provider or callback
+derives the immutable binding descriptor and capability contract from Program, and conclusion recovery retains no provider or callback
 authority. Integrity-blocked Access outcomes use the declared static failure contract and do not
 invoke State interpretation.
 
@@ -13,9 +13,9 @@ value. Cold resume selects the full prefix once; direct admission, preparation, 
 consume and advance that owner without a backend reload. Callback-free `QualifiedRun` evidence is
 available only after giving up selected mutation authority.
 
-Assembly finalization checks every State input/output/failure and Access intent/evidence type
-against Program's exact finalized catalog associations before any session or provider authority
-exists. Runtime's private `TypeId` values correlate live implementations only; cold reification
+Program finalization checks every State input/output/failure and Access intent/evidence type,
+mode, fact discipline, and binding against its exact catalog associations before any Runtime
+assembly or provider authority exists. Runtime's private `TypeId` values correlate live implementations only; cold reification
 uses catalog qualification and cannot accept a schema-only match.
 
 Access preparation projects only the canonical fact request. Store fixes any prior-fact selection

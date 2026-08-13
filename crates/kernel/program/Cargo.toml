@@ -23,6 +23,8 @@ path = "tests/api_contract.rs"
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
+mfm-capabilities = { path = "../capabilities" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-values = { path = "../values" }
 serde = { workspace = true }

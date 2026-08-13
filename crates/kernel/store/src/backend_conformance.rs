@@ -8,10 +8,10 @@ use mfm_ids::{
     SequentialControlAddress, StableId,
 };
 use mfm_journal::single_trust::{
-    BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
-    PreparationRef, RunAdmitted, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared,
-    ValueRef,
+    ConfigurationHeadProjection, ImmutableObject, PreparationMode, PreparationRef, RunAdmitted,
+    RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
 };
+use mfm_program::BindingDescriptor;
 
 use crate::backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
@@ -352,7 +352,6 @@ pub async fn append_primary_restart_probe(
         PreparationMode::Read {
             total_attempt_bound: 1,
         },
-        binding,
         binding_ref,
         None,
         4096,
@@ -570,7 +569,6 @@ fn process_race_prepared_frame(
         PreparationMode::Read {
             total_attempt_bound: 2,
         },
-        binding,
         binding_ref,
         replaces,
         4096,

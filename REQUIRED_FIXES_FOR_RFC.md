@@ -562,12 +562,12 @@ Keep `mfm-journal` independent and authority-free:
 Move normal semantic construction into Store:
 
 - admission accepts catalog-qualified typed input and a Store-issued resolved configuration head;
-- preparation consumes the selected Access owner plus canonical typed intent/fact request/object
-  material;
+- preparation consumes the selected Access owner plus a catalog-qualified intent; Store validates
+  the exact registered capability association, projects any fact request, and derives refs/objects;
 - Store derives occurrence, predecessor/head, sequence, preparation ordinal, replacement ref,
   execution mode/binding, reserved capacity, and physical append identity;
-- conclusion consumes the matching selected/Pending owner plus coordinate-free typed
-  outcome/evidence/fact proposals;
+- conclusion consumes the matching selected/Pending owner plus catalog-qualified outcome/evidence
+  and concrete fact proposals; Store validates exact contracts and evidence-to-intent binding;
 - Store derives the selected preparation ref, occurrence, append identity, publication coordinate,
   and complete frame; and
 - State implementations continue to return only typed intent, outcome, evidence interpretation,

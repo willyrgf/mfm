@@ -3,8 +3,9 @@
 Store validates complete frames, reduces one sequential prefix, selects one action, enforces
 occurrence-level conclusion uniqueness, and returns exact-head append owners. Cloneable
 `QualifiedRun` is callback-free evidence; affine `SelectedRun` is the sole Store-selected run
-mutation owner. Public mutation consumes catalog-qualified typed admission or coordinate-free
-preparation/conclusion material; Store derives every journal coordinate and there is no generic
+mutation owner. Public mutation consumes catalog-qualified admission, intent, evidence, and
+outcome values plus concrete fact values; Store validates exact capability/evidence association,
+derives every journal ref, object closure, binding identity, and coordinate, and there is no generic
 frame append or evidence-promotion API. It scans published fact proposal sets into a typed
 preparation-bound continuation,
 and assigns conclusion publication coordinates atomically with the fact head. Selections carry

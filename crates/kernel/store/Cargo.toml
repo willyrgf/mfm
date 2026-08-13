@@ -27,6 +27,7 @@ backend-conformance = ["test-support"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
+mfm-capabilities = { path = "../capabilities" }
 mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }

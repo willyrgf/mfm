@@ -58,9 +58,7 @@ help: there is a method `prepare_selected_access` with a similar name
   | /     pub fn prepare_selected_access<'a>(
   | |         &'a self,
   | |         selected: SelectedRun,
-  | |         intent: ValueRef,
-... |
-  | |         binding: BindingDescriptor,
+  | |         intent: &'a QualifiedValue,
   | |     ) -> Pin<Box<dyn Future<Output = AccessPreparationOutcome> + Send + 'a>> {
   | |____________________________________________________________________________^
 
@@ -76,8 +74,6 @@ help: there is a method `prepare_selected_pure_conclusion` with a similar name
    | /     pub fn prepare_selected_pure_conclusion(
    | |         &self,
    | |         selected: SelectedRun,
-   | |         outcome: mfm_journal::single_trust::StateOutcome,
-   | |         outcome_object: ImmutableObject,
-   | |         fact_proposals: Option<(ValueRef, ImmutableObject)>,
+   | |         proposal: ProposedStateOutcome<QualifiedValue, QualifiedValue>,
    | |     ) -> SelectedConclusionPreparationOutcome {
    | |_____________________________________________^

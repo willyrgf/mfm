@@ -811,3 +811,31 @@ Unsolved problems
 none for this commit. The single composite run remains red historical evidence, but every failed or
 unstarted component subsequently passed on the corrected final tree without duplicating the
 repository's one-final-composite invocation.
+
+2026-08-13 — typed Store ingress follow-up
+
+- Program now owns the complete Access binding and the exact capability intent/evidence/mode/fact
+  association. Its qualified erased values preserve the catalog brand through hot and retained
+  paths.
+- Store mutation ingress accepts catalog-qualified intent, evidence, and typed outcomes, derives
+  journal references and object closure itself, and rejects exact-contract, evidence-binding, and
+  retained typed-byte mismatches.
+- Runtime's duplicate erased-value witness and caller-supplied binding registration were deleted;
+  Runtime now forwards Program-qualified material through the sole Store boundary.
+- Regression coverage rejects unassociated intent/evidence, mismatched evidence binding,
+  wrong-contract qualified output, correct-schema invalid retained output bytes, and the retired raw
+  conclusion call shape. Focused Program/Store/Runtime tests and affected-crate Clippy passed before
+  the final composite gate.
+- Production Rust LOC across the changed Rust files is 14,905 before and 14,878 after the cutover.
+- The one final `nix run .#ci` was run as `run-2808547-1786660129695858183`. Format and the
+  cutover-manifest scan passed; all-feature Clippy exposed two test-support calls that still passed
+  the deleted full binding instead of its retained content ref, so later leaves were not started.
+  The composite was not invoked a second time.
+- After deleting those arguments, all-feature workspace Clippy, workspace check, and workspace
+  all-target tests passed. The managed PostgreSQL leaf passed as
+  `run-2812994-1786660228604383583`, doc tests as `run-2813318-1786660252630006105`, and all three
+  capacity leaves as `run-2813649-1786660260172367144`.
+
+Material uncertainties
+
+none.
