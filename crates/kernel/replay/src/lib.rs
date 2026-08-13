@@ -217,7 +217,7 @@ fn decode_inner(bytes: &[u8]) -> Result<PortableRun, ReplayError> {
     {
         return Err(ReplayError::InvalidPrefix);
     }
-    QualifiedRun::qualify_prefix(scope, epoch, tenant, frames.clone())
+    mfm_store::single_trust::validate_prefix(scope, epoch, tenant, frames.clone())
         .map_err(|_| ReplayError::InvalidPrefix)?;
     Ok(PortableRun { frames })
 }
