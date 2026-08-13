@@ -292,3 +292,207 @@ remain unchanged: primary crash/restart profile, trusted in-process Rust State/a
 process-local owner loss before durable conclusion, and the two fixed entry points. No service
 process crash-injection claim is made. RFC, implementation plan, and cutover-manifest bytes were
 not modified.
+
+2026-08-13 — final completion audit after process CAS and capacity evidence
+
+Material uncertainties
+
+none.
+
+Normative inputs and immutable scan identity
+
+- `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md` SHA-256:
+  `d5293fe93e356748a364ca2832481548210a5b3b07f1fa5f0a92c4415735f46b`.
+- `IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md` SHA-256:
+  `185d5575fe30ff5041f76c540731259ce683c1069015f707821444ec12e72148`.
+- `SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md` SHA-256:
+  `72694f76e02d7ac43b28b31ba713a1ae4c9eed15849ebcec22d06dbe3497aa6d`.
+
+All three files are byte-for-byte unchanged by this implementation continuation. The final
+source scan excludes only the RFC, this plan, and the scanner's own manifest as specified by the
+manifest contract.
+
+Architectural decision and ordered commits
+
+The dedicated architect review concluded that exact-head CAS, rather than a process lease,
+coordinator, or production lock, owns same-epoch worker linearization. Raw backend conformance
+proves mechanical outcomes; Runtime retains the separate provider-entry invariant. It also
+required an executable capacity artifact with maximum fixtures, exact/+1 checks, and reservation
+evidence. The resulting final continuation commits are:
+
+- `1c025795` — `prove postgresql same-epoch process cas races`;
+- `b8565fa4` — `record executable capacity envelope`; and
+- `d8954209` — `measure runtime process memory high water`.
+
+The earlier ordered cutover and corrective commits remain in history, including `6400112a`
+(`complete single-trust runtime and storage cutover`), `b8eeefca`, `c96c1f7f`, and `a827449c`.
+`c924a92e` deletes the obsolete EVM `authority-integration` feature bridge. Every new commit
+leaves one coherent current design; no compatibility path or parallel production implementation
+was added.
+
+Preflight artifacts
+
+- [`docs/preflight/capability-binding-inventory.md`](docs/preflight/capability-binding-inventory.md)
+  is the U3/U5 provider, evidence, absorption, and immutable-binding inventory for the two
+  supported entry points.
+- [`docs/preflight/cumulative-context-abi.md`](docs/preflight/cumulative-context-abi.md) is the
+  U8/U11 C0-to-result table and consuming non-Clone typed-handoff proof.
+- [`docs/preflight/capacity-envelope.md`](docs/preflight/capacity-envelope.md) is the U1/U7/U9
+  derived-bound, maximum-fixture, exact/+1, hot/cold, configuration-chain, and conclusion-
+  reservation artifact. `capacity-envelope` is an executable Nixfied task and is included in
+  `ci`.
+
+Final crate graph and deletion boundary
+
+The workspace contains 21 packages: the fixed-tenant `mfm-app`, two binaries, EVM/Portfolio
+domains, EVM live adapter, keystore/signing primitives, canonical/ids/values/facts/journal/
+program/replay/runtime/store kernel crates, and the two PostgreSQL storage crates. The cutover
+deletes the former Bitcoin packages, the authority-seal/certification/specification packages,
+`mfm-integration-tests`, and `mfm-wallet-authority-provider-test-support` package surfaces. It
+also deletes the authority/runtime/store guard family (`authority-integration`, the runtime-
+authority and store authority feature guards) and the old structured five-family operation, certification,
+specification, provider-authority, policy, and generic append surfaces. Remaining test-support
+features are narrow test-only wiring, not production authority bridges.
+
+Public API before and after
+
+The pre-cutover surface exposed structured operation/runtime/history/specification/certification
+types, generic semantic append paths, policy/credential/principal transport inputs, provider
+authority and currentness lineage, multiple observation families, and Bitcoin workflows. The
+current surface exposes one `Application::for_tenant` facade, singular `AdmitRunRequest`, the
+`Runtime::{admission,resume_run}` lifecycle and exhaustive `RuntimeStep`/`ResumeStep` outcomes,
+`StructuredStore::open` over one mechanical backend, split non-Clone history/configuration/audit
+ports, `ProgramDocument`/`Program`/`ProgramCatalog`/`ProgramIngress`, `RunFrame` with exactly
+`RunAdmitted`, `StatePrepared`, and `StateConcluded`, callback-free `PortableRun`, and the
+redaction-safe `PostgresStore` adapter.
+
+The following values are intentionally opaque or affine: `Program`, `ProgramRef`, the
+catalog-branded `QualifiedTypedValue<T>` and its private erased `QualifiedValue`, `QualifiedRun`,
+`OpenedStructuredStore` and its split ports, `RunSession`, `PreparedExecution`, `CommittedCall`,
+pending-conclusion owners, configuration append owners, and prior-fact continuations. Their
+constructors, brands, and consuming transitions prevent foreign-catalog/store transposition,
+duplicate conclusion ownership, and retry authority minting. No public unchecked downcast or free
+erasure constructor exists.
+
+Persisted and protocol identities
+
+- Run records are the three append-only families `RunAdmitted`, `StatePrepared`, and
+  `StateConcluded::{Pure,Access}`; each frame is canonical, content-addressed, and exact-head
+  chained. A run is tenant/scope/epoch bound.
+- PostgreSQL activation is the fresh three-family schema contract
+  `mfm.structured-run-history-postgres.v8`, admitted only under `PrimaryCrashRestart`, after
+  migration, schema/identity checks, `fsync=on`, `full_page_writes=on`, non-off
+  `synchronous_commit`, and a fresh logical scope/writer epoch.
+- Portable export is `mfm.portable-run.v5`, content-addressed under the `mfm.portable-run` v1
+  schema, and accepts only the three-family canonical stream with object/fact closure.
+- Binding descriptors use `mfm.execution-binding` v1; configuration revisions use
+  `mfm.configuration` v1; fact streams use `mfm.fact-stream` v1.
+- Supported entry identities are `mfm.evm/submit-transaction@1` with operation
+  `mfm.evm.submit-transaction@1` and `mfm.portfolio/snapshot@1` with operation
+  `mfm.portfolio.snapshot@1`. The EVM broadcast capability is
+  `mfm.evm.capability.broadcast-transaction@1` and is `EntryOnce`.
+- Activation is fixed-tenant App construction plus one catalog/store identity; live embedding
+  registers the exact State, adapter, and binding assembly; admission persists one domain-owned
+  C0; direct-new preparation persists the deterministic call identity before provider entry;
+  resume accepts only the same catalog/store scope, epoch, and tenant. Binding replacement
+  rotates scope/epoch and makes old runs replay/read-only.
+
+Capacity and race evidence
+
+The final `capacity-envelope` task passed all three leaves. Its recorded values are:
+
+- EVM: 4 declarations, 6,840 Program bytes, C0 262,296 bytes, Cn 262,382 bytes;
+- Portfolio: 64 collections, 64 total sources, 963 declarations, 1,566,954 Program bytes, C0
+  6,284 bytes, Cn 12,736 bytes;
+- Runtime: retained hot head 2 / 4,063 frame bytes / 11 context bytes; one-shot cold resume head
+  3 / 6,194 frame bytes / 11 context bytes. Linux `VmHWM` samples in the focused run were
+  7,507,968 bytes after hot advancement and 7,544,832 bytes after cold resume. These are
+  characterization values, not latency thresholds; canonical retained bytes are the portable
+  bound and `VmHWM` includes the test harness;
+- configuration: exactly 1,024 revisions, exactly 16 MiB one-revision bytes, exactly 64 MiB stream
+  bytes, with independent bound-plus-one rejection;
+- outer and domain bounds: 32 MiB frame, 65,536 frames, 1,048,576 objects, 512 MiB run bytes,
+  64 EVM sources, 3 Read/absorbing attempts, and 1 EntryOnce attempt, each with exact/+1 owner
+  tests; and
+- conclusion reservation: selected preparation owns the complete declared maximum, replacement
+  transfers it, conclusion discharges it, and a superseded conclusion does not release or mint a
+  second liability.
+
+The PostgreSQL managed lane now uses an explicit filesystem rendezvous so two independent child
+processes observe the same seeded head before each admission, preparation, replacement, and
+conclusion append. Each stage records exactly one `NewlyCommitted` and one `StaleHead` result and
+then qualifies the winning prefix. The isolated Linux primary probe commits admission,
+preparation, and conclusion, kills the primary, restarts it, and qualifies the recovered prefix.
+Runtime's provider-entry/preparation/interpretation counters remain separately exact-one for the
+direct-new winner; a stale process never receives a call owner.
+
+Product reduction and concept ownership
+
+Counting Rust files below `bin/` and `crates/` (including inline tests), the pre-cutover parent
+contained 158,560 lines and 1,470 public declaration lines; the final tree contains 32,644 lines
+and 401 public declaration lines (the declaration count is a stable grep-based comparison, not a
+semantic API inventory). The product-only cutover delta is 25,169 insertions and 154,349
+deletions across 466 paths. The old workspace had 28 members; the final graph has 21.
+
+Net-new concepts have one owner:
+
+- Runtime lifecycle/coordinator and affine session own admission, resume, drive, suspension, and
+  owner fate because State semantics must not schedule or perform ambient IO;
+- composite StructuredStore and mechanical backend SPI own identity, CAS, append atomicity,
+  qualification, configuration, facts, and audit because adapters must not duplicate semantic
+  storage rules;
+- `PreparationRef`, selected-preparation liability, and conclusion classifications belong to
+  Store because only Store can observe the exact durable prefix and reserve/discharge capacity;
+- binding/evidence descriptors belong to Journal/domain capability contracts because they are the
+  immutable, secret-free propositions needed for callback-free recovery;
+- domain cumulative contexts and typed caller continuations belong to EVM/Portfolio because the
+  kernel cannot interpret domain fields; and
+- `ProcessRaceStage` and `capacity-envelope` are test/artifact concepts only, because production
+  CAS and capacity ownership already exist and must not gain a coordinator or a new public knob.
+
+Verification on the final implementation tree
+
+- `nix develop -c cargo fmt --all` — passed;
+- `nix develop -c cargo clippy -p mfm-app -p mfm-evm -p mfm-program -p mfm-runtime -p mfm-store
+  --all-targets --all-features -- -D warnings` — passed;
+- `nix run .#run -- --task capacity-envelope` — passed, 3/3 leaves;
+- `nix run .#run -- --task test-db` — passed, managed PostgreSQL 1/1, including four
+  rendezvoused process races and isolated primary restart;
+- `nix run .#model-check` — passed;
+- `nix run .#ci` — final run `run-2569676-1786611074443058278`, 10/10 tasks passed:
+  fmt, negative-scan, Clippy, workspace check, workspace tests, managed PostgreSQL, doc tests,
+  and the three capacity leaves;
+- `bash scripts/check-cutover-manifest.sh` and `git diff --check` — passed; and
+- final RFC/plan/manifest SHA-256 checks — passed.
+
+Unrun or intentionally non-claims
+
+No required implementation or verification task in the final Nixfied graph is unrun. The RFC/
+plan explicitly admits no latency SLO, so no latency benchmark or threshold is claimed. Linux
+`VmHWM` is diagnostic rather than a portable allocator contract. No failover, replica, quorum,
+host-loss, or multi-primary test is claimed because `PrimaryCrashRestart` is the sole admitted
+durability profile. The cross-process provider assertion is intentionally not simulated with a
+fake external provider: backend CAS races plus Runtime's direct-new provider counter are the two
+owner-specific proofs, and no provider credentials or raw responses enter tests or persistence.
+
+Known limitations retained by the design
+
+- trusted in-process Rust State, adapter, signer, and provider implementation code;
+- provider factual trust remains an authenticated provider assertion, not independent chain truth;
+- response-loss window before conclusion durability is neutral and may require owner parking;
+- unproven mutating capabilities remain `EntryOnce`, so parked calls are not retried;
+- cold resume and cumulative-context retention are bounded by the fixed run/frame envelope and may
+  retain O(n²) canonical context bytes;
+- binding replacement requires a new scope/writer epoch and old nonterminal runs are replay/read-
+  only;
+- there is no external rollback witness beyond the append-atomic Store/backend result; and
+- only the two current EVM submission and Portfolio snapshot entry points are admitted.
+
+Final deletion confirmation
+
+No five-family branching, lane, join, collection, policy/credential/principal override, provider
+authority, or old Program/spec/certification workflow definition, use, or identity survives in
+product code outside explicit rejection/deletion manifests and narrow ordinary domain/tooling
+words. Secrets are not logged, persisted, or returned by the new evidence, race, capacity, or
+verification paths. The completion audit is recorded in this log; the RFC and implementation plan
+remain untouched.
