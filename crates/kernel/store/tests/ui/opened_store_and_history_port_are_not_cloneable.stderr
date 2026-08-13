@@ -1,0 +1,11 @@
+error[E0599]: no method named `clone` found for struct `OpenedStructuredStore` in the current scope
+ --> tests/ui/opened_store_and_history_port_are_not_cloneable.rs:4:19
+  |
+4 |     let _ = store.clone();
+  |                   ^^^^^ method not found in `OpenedStructuredStore`
+
+error[E0599]: no method named `clone` found for struct `QualifiedHistoryPort` in the current scope
+ --> tests/ui/opened_store_and_history_port_are_not_cloneable.rs:8:18
+  |
+8 |     let _ = port.clone();
+  |                  ^^^^^ method not found in `QualifiedHistoryPort`

@@ -30,12 +30,16 @@ Program may return the exact admitted `C0`; every nonempty successful path ends 
 
 ## Three-family journal
 
-The append-only run stream contains only:
+Journal owns the strict canonical wire syntax and validation for the append-only run stream, not
+semantic mutation authority. Its public checked DTOs contain only:
 
 1. `RunAdmitted`, the separate singular genesis;
 2. `StatePrepared`, an access-only preparation; and
 3. `StateConcluded`, a Pure or Access conclusion.
 
+Store alone converts coordinate-free typed admission, intent, outcome, evidence, and fact-proposal
+material into those DTOs for normal execution. It supplies occurrence, predecessor/head,
+sequence, preparation ordinal/replacement/reference, append identity, and publication coordinates.
 Each append contains one semantic record and its object/fact closure atomically. Store compares the
 exact current head, rejects stale or conflicting logical keys, and selects at most one conclusion
 for each State occurrence. A prior-fact request is projected from canonical intent, but Store fixes
@@ -58,11 +62,17 @@ owner-bearing Runtime result until an explicit supervisor or process boundary di
 
 ## Runtime and adapters
 
-Store owns reduction and semantic evidence. Runtime owns immutable live registration, the affine
+Store owns reduction and semantic evidence. Cloneable `QualifiedRun` is callback-free history
+evidence and cannot be promoted through a reader. Non-Clone/non-Serde `SelectedRun` is the sole
+affine Store-selected run mutation owner: it owns the exact qualified prefix, Program/catalog
+association, latest typed-context evidence, selected action, and private Store-opening brand.
+Giving up a selection into `QualifiedRun` destroys its mutation authority.
+
+Runtime owns immutable live registration, the affine
 `PreparedExecution`, direct-new-only `CommittedCall`, call correlation, typed input retention, and
-the exhaustive `SuspendedRun` owner-fate coordinator around a Store-owned `PreparedConclusion`.
-`QualifiedRun`, `ReducedRunState`, resolved typed configurations, fact continuations, and append owners
-carry private process-local identity for the exact Store opening that created them; matching
+the exhaustive `SuspendedRun` owner-fate coordinator around a Store-owned selected conclusion.
+`SelectedRun`, resolved typed configurations, fact continuations, and append owners carry private
+process-local identity for the exact Store opening that created them; matching
 persisted scope, epoch, and tenant values alone cannot transpose a semantic owner between opens.
 The Runtime-owned `PendingConclusion` is the affine handoff that retains only conclusion Store I/O
 and the inert session continuation.
@@ -80,7 +90,9 @@ successor context, retry authority, or new fact publication on that route.
 Access assembly retains the complete immutable binding descriptor at registration. The Runtime
 preparation bridge does not accept a caller-supplied replacement descriptor, and the opened Store
 has no generic public frame append; admission and qualified conclusion ownership are separate
-ingress paths.
+ingress paths. Runtime receives only its exact non-Clone mutation port and never returns that port
+or an opened Store. Multiple Runtime assemblies over one persisted identity use independent
+branded openings and linearize only through backend append-id lookup and exact-head CAS.
 
 Runtime has no scheduler, history API, per-run execution lock, or process-wide writer lease. Each
 opening owns bounded active-session, deterministic CPU, planning, and provider-ingress permits;

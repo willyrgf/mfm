@@ -713,3 +713,101 @@ Verification
 Unsolved problems
 
 none for this commit. Required-fixes commit 4 remains to be implemented.
+
+2026-08-13 — required-fixes commit 4: make selected runs own semantic append authority
+
+Material uncertainties
+
+none.
+
+Implementation progress
+
+- Replaced the cloneable standalone reduction product with non-Clone/non-Serde `SelectedRun`, the
+  sole Store-selected mutation owner for one exact qualified head, Program/catalog association,
+  latest context, selected `RunAction`, and private opening brand. Consuming it into cloneable
+  `QualifiedRun` evidence gives up authority; the evidence cannot be re-promoted through a reader
+  or public mutation-port API.
+- Removed `Clone` from `OpenedStructuredStore`, made its split consuming, kept
+  `QualifiedHistoryPort` non-Clone, and deleted Runtime's opened-Store getter. Runtime now retains
+  only the exact mutation port and exposes immutable identity/catalog/entry-point metadata needed
+  by trusted App composition.
+- Centralized admission, preparation, and conclusion journal construction in Store. Callers provide
+  catalog-qualified admission values or coordinate-free intent, evidence, outcome, and fact
+  material; Store derives occurrence, head/sequence, preparation ordinal/replacement/reference,
+  append identity, capacity, and fact-publication coordinates. The public journal DTO constructors
+  remain strict authority-free wire/test/replay/storage surfaces.
+- Migrated `RunSession`, preparation, pending conclusion, suspension, hot advancement, cold resume,
+  and race recovery to consume and return `SelectedRun`. Direct-new append outcomes advance without
+  a backend reload; `Found` and same-run races load/select the latest complete prefix before
+  execution can continue, with no State/provider re-entry.
+- Changed App and both binaries to compose explicit mutation/read/configuration/audit ports. App no
+  longer constructs admission records or frames, retains Store-built admission owners across
+  unknown acknowledgement, classifies same-run admission conflicts publicly, and validates each
+  Runtime-backed configuration head against that Runtime's independent Store opening.
+- Kept Replay dependent only on cloneable callback-free `QualifiedRun` evidence and a narrow
+  terminality query. Added Store/Runtime Trybuild coverage for affine selection, private
+  construction/deserialization, no evidence splitting or reader promotion, non-Clone openings and
+  mutation ports, and the absence of Runtime Store recovery.
+- Updated architecture/design/execution/public-surface/ABI documentation, core/App/storage/binary
+  READMEs, the implementation-plan exclusion wording, and the cutover manifest. The manifest keeps
+  `ReducedRunState` deleted and also excludes the superseded `ActiveQualifiedRun` name.
+
+Issues found and resolved
+
+- The first compiling cutover exposed borrowed `QualifiedRun` from a live selection and publicly
+  accepted same-opening evidence for re-selection. Both paths were removed so evidence release is
+  consuming and reader evidence cannot mint authority.
+- Initial App validation required Runtime-owned heads to belong to App's independent configuration
+  port and treated runtime composition as all-or-none. Ownership validation and drive dispatch are
+  now per entry point.
+- Initial conclusion recovery advanced a `Found` frame against the retained predecessor even when a
+  later durable head could exist. Only `NewlyCommitted` now takes the hot path; `Found` cold-selects
+  the latest prefix.
+- The initial access-conclusion call remained wider than the reviewed API bound. A coordinate-free,
+  authority-free `AccessConclusionProposal` now groups evidence/outcome/fact material while the
+  Store-issued fact continuation remains a separate affine argument.
+- The sole final `nix run .#ci` reached all-feature Clippy after its format and cutover-scan leaves
+  passed, then exposed a test-support regression that cloned the now-affine
+  `OpenedStructuredStore`. The fixture now retains its read handle before consuming the opening,
+  and its catalog/configuration values use the exact typed contracts introduced by commits 2 and
+  3.
+- The explicitly resumed PostgreSQL leaf exposed an SQLx metadata type mismatch:
+  `MAX(octet_length(bytea))` is PostgreSQL `INT4`, while the bounded aggregate contract decodes all
+  three values as `i64`. The query now casts that maximum to `BIGINT`; the complete managed schema,
+  backend-conformance, and process-race test then passed.
+
+Verification
+
+- `nix develop -c cargo fmt --all -- --check` — passed.
+- `nix develop -c cargo test -p mfm-journal` — passed (6 unit tests and doc tests).
+- `nix develop -c cargo test -p mfm-store` — passed (23 semantic/backend tests, 13 Trybuild cases,
+  and doc tests), including Store-built admission unknown-acknowledgement recovery and rejection of
+  selected/conclusion owners transferred between equal-identity independent openings.
+- `nix develop -c cargo test -p mfm-runtime` — passed (14 lifecycle/assembly tests, 6 Trybuild cases,
+  and doc tests).
+- `nix develop -c cargo test -p mfm-replay` and `nix develop -c cargo test -p mfm-app` — passed.
+- `nix develop -c cargo check -p mfm-storage-postgres --features test-support --all-targets` and
+  `nix develop -c cargo check -p mfm -p mfm-rest-api` — passed.
+- Focused Clippy for Store, Runtime, Replay, and App with all targets and warnings denied passed.
+- The one final `nix run .#ci` was run as
+  `run-2723075-1786640152241986949`. Its format and negative-scan leaves passed; its Clippy leaf
+  failed on the test-support clone regression described above, so later leaves were not started.
+  The composite was not invoked a second time.
+- After correcting that regression, the failed and unstarted task graph was executed explicitly:
+  `nix develop -c cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `nix develop -c cargo check --workspace --all-targets`, and
+  `nix develop -c cargo test --workspace --all-targets` all passed. The workspace test includes the
+  Store and Runtime semantic and Trybuild suites.
+- `nix run .#run -- --task postgres-test` passed after the SQLx cast correction as
+  `run-2733372-1786640539877913405`; `nix run .#run -- --task doc-tests` passed as
+  `run-2733931-1786640583002432674`; and `nix run .#run -- --task capacity-envelope` passed all
+  three leaves as `run-2734335-1786640588935318394`.
+- Final-tree `nix develop -c cargo fmt --all -- --check` and all-feature workspace Clippy passed.
+  `nix run .#run -- --task negative-scan` passed after this log update as
+  `run-2735408-1786640687888471887`.
+
+Unsolved problems
+
+none for this commit. The single composite run remains red historical evidence, but every failed or
+unstarted component subsequently passed on the corrected final tree without duplicating the
+repository's one-final-composite invocation.

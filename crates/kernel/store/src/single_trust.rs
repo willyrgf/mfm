@@ -426,9 +426,18 @@ pub fn validate_prefix(
     QualifiedRun::new(scope, epoch, tenant, frames).map(|_| ())
 }
 
+/// Computes callback-free terminality for replay without minting mutation authority.
+pub fn replay_terminality(run: &QualifiedRun, document: ProgramDocument) -> Result<bool> {
+    let selection = RunReducer::new(document).reduce(run)?;
+    Ok(matches!(
+        selection.action(),
+        RunAction::ZeroStateTerminal { .. } | RunAction::Terminal { .. } | RunAction::Failed { .. }
+    ))
+}
+
 /// A secret-free Store-owned owner for one conclusion append.
 #[derive(Debug)]
-pub struct PreparedConclusion {
+pub(crate) struct PreparedConclusion {
     scope: StoreScopeId,
     epoch: StoreEpoch,
     tenant: TenantScopeId,
@@ -572,11 +581,10 @@ impl PreparedConclusion {
 
 /// Result of a preparation append.  Runtime may create a call only for `NewlyCommitted`.
 #[derive(Debug)]
-pub struct PreparationAppend {
+pub(crate) struct PreparationAppend {
     disposition: AppendDisposition,
     preparation: Option<PreparationRef>,
     fact_continuation: Option<FactContinuation>,
-    frame: Option<RunFrame>,
 }
 
 /// One-use preparation-bound prior-fact continuation.
@@ -623,6 +631,12 @@ impl FactContinuation {
 
     pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
         self.store_brand = Some(brand);
+    }
+
+    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
+        self.store_brand
+            .as_ref()
+            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
     /// Returns the fixed prior-fact request identity without exposing its bytes.
@@ -678,6 +692,7 @@ impl PreparationAppend {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_disposition(self, disposition: AppendDisposition) -> Self {
         let direct_new = matches!(disposition, AppendDisposition::NewlyCommitted { .. });
         Self {
@@ -689,7 +704,6 @@ impl PreparationAppend {
             .then_some(self.preparation)
             .flatten(),
             fact_continuation: direct_new.then_some(self.fact_continuation).flatten(),
-            frame: self.frame,
         }
     }
 
@@ -703,23 +717,9 @@ impl PreparationAppend {
         self.preparation.as_ref()
     }
 
-    /// Returns the one-use prior-fact continuation for a direct-new append.
-    pub const fn fact_continuation(&self) -> Option<&FactContinuation> {
-        self.fact_continuation.as_ref()
-    }
-
     /// Consumes the append result's one-use prior-fact continuation.
     pub fn into_fact_continuation(self) -> Option<FactContinuation> {
         self.fact_continuation
-    }
-
-    pub(crate) fn set_frame(&mut self, frame: RunFrame) {
-        self.frame = Some(frame);
-    }
-
-    /// Returns the exact candidate frame when Store constructed a new physical append.
-    pub fn committed_frame(&self) -> Option<&RunFrame> {
-        self.frame.as_ref()
     }
 }
 
@@ -736,7 +736,7 @@ pub(crate) fn prepare_access_from_current(
     current: &QualifiedRun,
     run_id: &RunId,
     document: &ProgramDocument,
-    reduced: &ReducedRunState,
+    selected: &RunSelection,
     expected_sequence: u64,
     append_request_id: AppendRequestId,
     prepared: StatePrepared,
@@ -748,20 +748,17 @@ pub(crate) fn prepare_access_from_current(
     let successor_sequence = expected_sequence
         .checked_add(1)
         .ok_or(StoreError::Capacity)?;
-    if !reduced.belongs_to(current) {
-        return Err(StoreError::Identity);
-    }
     let mut objects = objects;
     if !current
         .frames()
         .iter()
         .flat_map(|frame| frame.objects())
-        .any(|object| object == &reduced.latest_context_object)
+        .any(|object| object == &selected.latest_context_object)
         && !objects
             .iter()
-            .any(|object| object == &reduced.latest_context_object)
+            .any(|object| object == &selected.latest_context_object)
     {
-        objects.push(reduced.latest_context_object.clone());
+        objects.push(selected.latest_context_object.clone());
     }
     let candidate_frame = RunFrame::new(
         run_id.clone(),
@@ -793,7 +790,6 @@ pub(crate) fn prepare_access_from_current(
                     index as u32,
                 )),
                 fact_continuation: None,
-                frame: None,
             },
             frame: None,
         });
@@ -806,12 +802,11 @@ pub(crate) fn prepare_access_from_current(
                 },
                 preparation: None,
                 fact_continuation: None,
-                frame: None,
             },
             frame: None,
         });
     }
-    let expected_input = match &reduced.action {
+    let expected_input = match &selected.action {
         RunAction::ReadyAccess {
             occurrence, input, ..
         } if occurrence == prepared.occurrence() => Some(input),
@@ -881,7 +876,6 @@ pub(crate) fn prepare_access_from_current(
             },
             preparation: Some(preparation),
             fact_continuation,
-            frame: None,
         },
         frame: Some(candidate_frame),
     })
@@ -895,7 +889,7 @@ pub(crate) fn prepare_conclusion_from_current(
     current: &QualifiedRun,
     run_id: &RunId,
     document: &ProgramDocument,
-    reduced: &ReducedRunState,
+    selected: &RunSelection,
     expected_sequence: u64,
     append_request_id: AppendRequestId,
     conclusion: StateConcluded,
@@ -935,7 +929,7 @@ pub(crate) fn prepare_conclusion_from_current(
             tenant.clone(),
             existing.clone(),
             document.clone(),
-            reduced.action().clone(),
+            selected.action().clone(),
         ));
     }
     if current.head_sequence() != expected_sequence
@@ -943,10 +937,7 @@ pub(crate) fn prepare_conclusion_from_current(
     {
         return Err(StoreError::NotActionable);
     }
-    if !reduced.belongs_to(current) {
-        return Err(StoreError::Identity);
-    }
-    let actionable = match (&conclusion, &reduced.action) {
+    let actionable = match (&conclusion, &selected.action) {
         (
             StateConcluded::Pure { occurrence, .. },
             RunAction::ReadyPure {
@@ -1017,14 +1008,14 @@ pub(crate) fn prepare_conclusion_from_current(
         tenant.clone(),
         candidate_frame,
         document.clone(),
-        reduced.action().clone(),
+        selected.action().clone(),
     ))
 }
 
 pub(crate) fn reduce_qualified(
     current: &QualifiedRun,
     document: ProgramDocument,
-) -> Result<ReducedRunState> {
+) -> Result<RunSelection> {
     RunReducer::new(document).reduce(current)
 }
 
@@ -1092,7 +1083,7 @@ impl SemanticStore {
 
     /// Appends the sole admission frame, or returns found-same for an identical retry.
     #[cfg(test)]
-    pub fn admit(&self, frame: RunFrame) -> Result<AppendDisposition> {
+    fn append_admission_fixture(&self, frame: RunFrame) -> Result<AppendDisposition> {
         if frame.expected_sequence() != 1 || !frame.record().is_admission() {
             return Err(StoreError::InvalidRecord);
         }
@@ -1172,7 +1163,7 @@ impl SemanticStore {
 
     /// Creates one Access preparation candidate without invoking any implementation.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_access(
+    fn prepare_access_fixture(
         &self,
         run_id: &RunId,
         document: &ProgramDocument,
@@ -1182,7 +1173,7 @@ impl SemanticStore {
         objects: Vec<mfm_journal::single_trust::ImmutableObject>,
     ) -> Result<PreparationAppend> {
         let current = self.load(run_id)?;
-        let reduced = reduce_qualified(&current, document.clone())?;
+        let selected = reduce_qualified(&current, document.clone())?;
         let candidate = prepare_access_from_current(
             &self.scope,
             self.epoch,
@@ -1190,7 +1181,7 @@ impl SemanticStore {
             &current,
             run_id,
             document,
-            &reduced,
+            &selected,
             expected_sequence,
             append_request_id,
             prepared,
@@ -1207,7 +1198,7 @@ impl SemanticStore {
 
     /// Reserves and returns one conclusion owner while the current exact head remains known.
     #[allow(clippy::too_many_arguments)]
-    pub fn prepare_conclusion(
+    fn prepare_conclusion_fixture(
         &self,
         run_id: &RunId,
         document: &ProgramDocument,
@@ -1218,7 +1209,7 @@ impl SemanticStore {
         maximum_conclusion_bytes: u64,
     ) -> Result<PreparedConclusion> {
         let current = self.load(run_id)?;
-        let reduced = reduce_qualified(&current, document.clone())?;
+        let selected = reduce_qualified(&current, document.clone())?;
         prepare_conclusion_from_current(
             &self.scope,
             self.epoch,
@@ -1226,7 +1217,7 @@ impl SemanticStore {
             &current,
             run_id,
             document,
-            &reduced,
+            &selected,
             expected_sequence,
             append_request_id,
             conclusion,
@@ -1236,7 +1227,7 @@ impl SemanticStore {
     }
 
     /// Reduces one qualified prefix against the exact callback-free Program document.
-    pub fn reduce(&self, run_id: &RunId, document: ProgramDocument) -> Result<ReducedRunState> {
+    fn reduce_fixture(&self, run_id: &RunId, document: ProgramDocument) -> Result<RunSelection> {
         let run = self.load(run_id)?;
         reduce_qualified(&run, document)
     }
@@ -1298,9 +1289,9 @@ pub enum AccessActionMode {
     Effect,
 }
 
-/// Callback-free result of one complete-prefix reduction.
-#[derive(Debug, Clone)]
-pub struct ReducedRunState {
+/// Internal callback-free result of one complete-prefix reduction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RunSelection {
     /// Exact latest complete cumulative context.
     latest_context: mfm_journal::single_trust::ValueRef,
     /// Immutable object carrying the latest context bytes.  Match selection may materialize this
@@ -1308,26 +1299,11 @@ pub struct ReducedRunState {
     latest_context_object: mfm_journal::single_trust::ImmutableObject,
     /// Sole next action or durable terminal result.
     action: RunAction,
-    run_id: RunId,
-    head_sequence: u64,
-    store_brand: Option<Arc<StoreBrand>>,
 }
 
-impl PartialEq for ReducedRunState {
-    fn eq(&self, other: &Self) -> bool {
-        self.latest_context == other.latest_context
-            && self.latest_context_object == other.latest_context_object
-            && self.action == other.action
-            && self.run_id == other.run_id
-            && self.head_sequence == other.head_sequence
-    }
-}
-
-impl Eq for ReducedRunState {}
-
-impl ReducedRunState {
+impl RunSelection {
     fn new(
-        run: &QualifiedRun,
+        _run: &QualifiedRun,
         latest_context: mfm_journal::single_trust::ValueRef,
         latest_context_object: mfm_journal::single_trust::ImmutableObject,
         action: RunAction,
@@ -1336,30 +1312,7 @@ impl ReducedRunState {
             latest_context,
             latest_context_object,
             action,
-            run_id: run.run_id().clone(),
-            head_sequence: run.head_sequence(),
-            store_brand: None,
         }
-    }
-
-    pub(crate) fn belongs_to(&self, run: &QualifiedRun) -> bool {
-        self.run_id == *run.run_id()
-            && self.head_sequence == run.head_sequence()
-            && match (&self.store_brand, &run.store_brand) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
-    }
-
-    pub(crate) fn bind_store(&mut self, brand: Arc<StoreBrand>) {
-        self.store_brand = Some(brand);
-    }
-
-    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
-        self.store_brand
-            .as_ref()
-            .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
     /// Returns the latest complete cumulative context identity.
@@ -1377,46 +1330,113 @@ impl ReducedRunState {
         &self.action
     }
 
-    /// Carries the retained latest context across a direct-new preparation append.
-    pub fn waiting_preparation(
-        &self,
-        run: &QualifiedRun,
+    pub(crate) fn waiting_preparation(
+        self,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         preparation: PreparationRef,
-    ) -> Result<Self> {
-        if self.run_id != *run.run_id()
-            || self.head_sequence.saturating_add(1) != run.head_sequence()
-            || preparation.run_sequence() != run.head_sequence()
-        {
-            return Err(StoreError::Identity);
-        }
-        let mut next = Self::new(
-            run,
-            self.latest_context.clone(),
-            self.latest_context_object.clone(),
-            RunAction::WaitingPreparation {
+    ) -> Self {
+        Self {
+            latest_context: self.latest_context,
+            latest_context_object: self.latest_context_object,
+            action: RunAction::WaitingPreparation {
                 occurrence,
                 preparation,
             },
-        );
-        next.store_brand = self.store_brand.clone();
-        Ok(next)
+        }
+    }
+}
+
+/// The sole affine Store-selected authority for one exact run head and Program.
+///
+/// A selected run cannot be cloned, serialized, or constructed by callers. Consuming it into
+/// [`QualifiedRun`] gives up all mutation authority while preserving callback-free evidence.
+#[derive(Debug)]
+pub struct SelectedRun {
+    run: QualifiedRun,
+    document: ProgramDocument,
+    selection: RunSelection,
+    store_brand: Arc<StoreBrand>,
+}
+
+impl SelectedRun {
+    pub(crate) fn new(
+        run: QualifiedRun,
+        document: ProgramDocument,
+        selection: RunSelection,
+        store_brand: Arc<StoreBrand>,
+    ) -> Self {
+        Self {
+            run,
+            document,
+            selection,
+            store_brand,
+        }
+    }
+
+    pub(crate) fn belongs_to_store(&self, brand: &Arc<StoreBrand>) -> bool {
+        Arc::ptr_eq(&self.store_brand, brand) && self.run.belongs_to_store(brand)
+    }
+
+    pub(crate) const fn document(&self) -> &ProgramDocument {
+        &self.document
+    }
+
+    pub(crate) const fn selection(&self) -> &RunSelection {
+        &self.selection
+    }
+
+    pub(crate) fn into_parts(self) -> (QualifiedRun, ProgramDocument, RunSelection) {
+        (self.run, self.document, self.selection)
+    }
+
+    pub(crate) const fn qualified_run(&self) -> &QualifiedRun {
+        &self.run
+    }
+
+    /// Returns the durable run identity.
+    pub fn run_id(&self) -> &RunId {
+        self.run.run_id()
+    }
+
+    /// Returns the exact selected head sequence.
+    pub fn head_sequence(&self) -> u64 {
+        self.run.head_sequence()
+    }
+
+    /// Returns the latest complete cumulative context identity.
+    pub const fn latest_context(&self) -> &mfm_journal::single_trust::ValueRef {
+        self.selection.latest_context()
+    }
+
+    /// Returns the retained object carrying the latest context bytes.
+    pub const fn latest_context_object(&self) -> &mfm_journal::single_trust::ImmutableObject {
+        self.selection.latest_context_object()
+    }
+
+    /// Returns the sole selected action or durable terminal result.
+    pub const fn action(&self) -> &RunAction {
+        self.selection.action()
+    }
+
+    /// Consumes this mutation owner into cloneable callback-free evidence.
+    pub fn into_qualified_run(self) -> QualifiedRun {
+        self.run
     }
 }
 
 /// Store-owned sequential reducer and binder.
-pub struct RunReducer {
+pub(crate) struct RunReducer {
     document: ProgramDocument,
 }
 
 impl RunReducer {
     /// Creates one reducer for an already normalized State/Match Program document.
-    pub fn new(document: ProgramDocument) -> Self {
+    pub(crate) fn new(document: ProgramDocument) -> Self {
         Self { document }
     }
 
     /// Folds one complete retained prefix without invoking any callback.
-    pub fn reduce(&self, run: &QualifiedRun) -> Result<ReducedRunState> {
+    pub(crate) fn reduce(&self, run: &QualifiedRun) -> Result<RunSelection> {
         let admission = match run.frames().first().map(RunFrame::record) {
             Some(RunRecord::RunAdmitted(value)) => value,
             _ => return Err(StoreError::InvalidHistory),
@@ -1442,7 +1462,7 @@ impl RunReducer {
             if run.frames().len() != 1 {
                 return Err(StoreError::InvalidHistory);
             }
-            return Ok(ReducedRunState::new(
+            return Ok(RunSelection::new(
                 run,
                 latest.clone(),
                 object_for_value(run, &latest)?,
@@ -1576,7 +1596,7 @@ impl RunReducer {
                                 return Err(StoreError::InvalidHistory);
                             }
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState::new(
+                            return Ok(RunSelection::new(
                                 run,
                                 latest,
                                 latest_object,
@@ -1588,7 +1608,7 @@ impl RunReducer {
                         }
                         (None, None, ExecutionMode::Pure) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState::new(
+                            return Ok(RunSelection::new(
                                 run,
                                 latest.clone(),
                                 latest_object,
@@ -1600,7 +1620,7 @@ impl RunReducer {
                         }
                         (None, None, ExecutionMode::Read { .. }) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState::new(
+                            return Ok(RunSelection::new(
                                 run,
                                 latest.clone(),
                                 latest_object,
@@ -1613,7 +1633,7 @@ impl RunReducer {
                         }
                         (None, None, ExecutionMode::Effect { .. }) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState::new(
+                            return Ok(RunSelection::new(
                                 run,
                                 latest.clone(),
                                 latest_object,
@@ -1634,14 +1654,13 @@ impl RunReducer {
 /// Advances one retained reducer result across the one conclusion frame just appended by a hot
 /// Runtime session. This follows only the suffix after the already-selected occurrence; it never
 /// folds the retained prefix again.
-pub(crate) fn advance_reduced(
-    reduced: &ReducedRunState,
+pub(crate) fn advance_selected(
+    selected: &RunSelection,
     previous: &QualifiedRun,
     next: &QualifiedRun,
     document: &ProgramDocument,
-) -> Result<ReducedRunState> {
-    if !reduced.belongs_to(previous)
-        || next.run_id() != previous.run_id()
+) -> Result<RunSelection> {
+    if next.run_id() != previous.run_id()
         || next.head_sequence() != previous.head_sequence().saturating_add(1)
     {
         return Err(StoreError::Identity);
@@ -1651,7 +1670,7 @@ pub(crate) fn advance_reduced(
         _ => return Err(StoreError::InvalidRecord),
     };
     let occurrence = conclusion.occurrence().clone();
-    match &reduced.action {
+    match &selected.action {
         RunAction::ReadyPure {
             occurrence: ready, ..
         }
@@ -1664,7 +1683,7 @@ pub(crate) fn advance_reduced(
         return Err(StoreError::InvalidHistory);
     };
     let mut latest =
-        apply_success_or_failure(state, &reduced.latest_context, conclusion.outcome())?;
+        apply_success_or_failure(state, &selected.latest_context, conclusion.outcome())?;
     let mut latest_object = object_for_value(next, &latest)?;
     let mut cursor = match conclusion_transition(state, document, conclusion.outcome())? {
         ConclusionTransition::Terminal => {
@@ -1708,7 +1727,7 @@ pub(crate) fn advance_reduced(
                         mode: AccessActionMode::Effect,
                     },
                 };
-                return Ok(ReducedRunState::new(next, latest, latest_object, action));
+                return Ok(RunSelection::new(next, latest, latest_object, action));
             }
         }
     }
@@ -1720,9 +1739,9 @@ fn terminal_state(
     outcome: &StateOutcome,
     latest: mfm_journal::single_trust::ValueRef,
     latest_object: mfm_journal::single_trust::ImmutableObject,
-) -> Result<ReducedRunState> {
+) -> Result<RunSelection> {
     match outcome {
-        StateOutcome::Success(result) => Ok(ReducedRunState::new(
+        StateOutcome::Success(result) => Ok(RunSelection::new(
             run,
             latest,
             latest_object,
@@ -1731,7 +1750,7 @@ fn terminal_state(
                 result: result.clone(),
             },
         )),
-        StateOutcome::Failure(failure) => Ok(ReducedRunState::new(
+        StateOutcome::Failure(failure) => Ok(RunSelection::new(
             run,
             latest,
             latest_object,
@@ -2743,11 +2762,11 @@ mod tests {
         let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let first = admission(scope.clone(), tenant.clone(), run.clone());
         assert_eq!(
-            store.admit(first.clone()),
+            store.append_admission_fixture(first.clone()),
             Ok(AppendDisposition::NewlyCommitted { sequence: 1 })
         );
         assert_eq!(
-            store.admit(first),
+            store.append_admission_fixture(first),
             Ok(AppendDisposition::Found { sequence: 1 })
         );
         let stale = {
@@ -2820,7 +2839,7 @@ mod tests {
             )],
         )
         .expect("frame");
-        store.admit(admitted).expect("admit");
+        store.append_admission_fixture(admitted).expect("admit");
         let conclusion = StateConcluded::Pure {
             occurrence,
             outcome: StateOutcome::Success(ValueRef::new(contract, context_value_ref())),
@@ -2828,7 +2847,7 @@ mod tests {
             fact_publication: None,
         };
         let owner = store
-            .prepare_conclusion(
+            .prepare_conclusion_fixture(
                 &run,
                 &document,
                 1,
@@ -2913,7 +2932,7 @@ mod tests {
             vec![value_object(&input, "null")],
         )
         .expect("admission frame");
-        store.admit(admission).expect("admit");
+        store.append_admission_fixture(admission).expect("admit");
 
         let prepared = StatePrepared::new(
             SequentialControlAddress::new(0, Vec::new()).expect("address"),
@@ -2932,7 +2951,7 @@ mod tests {
         )
         .expect("prepared");
         let append = store
-            .prepare_access(
+            .prepare_access_fixture(
                 &run,
                 &document,
                 1,
@@ -3022,7 +3041,7 @@ mod tests {
             vec![value_object(&input, "null")],
         )
         .expect("admission frame");
-        store.admit(admission).expect("admit");
+        store.append_admission_fixture(admission).expect("admit");
 
         let maximum_conclusion_bytes = 4096;
         let first = StatePrepared::new(
@@ -3040,7 +3059,7 @@ mod tests {
         )
         .expect("first preparation");
         let first = store
-            .prepare_access(
+            .prepare_access_fixture(
                 &run,
                 &document,
                 1,
@@ -3073,7 +3092,7 @@ mod tests {
         )
         .expect("wire-valid second preparation");
         assert!(matches!(
-            store.prepare_access(
+            store.prepare_access_fixture(
                 &run,
                 &document,
                 2,
@@ -3148,8 +3167,8 @@ mod tests {
             vec![value_object(&root_value, "{\"step\":0}")],
         )
         .expect("admission frame");
-        store.admit(admission).expect("admit");
-        let ready = store.reduce(&run, document.clone()).expect("ready");
+        store.append_admission_fixture(admission).expect("admit");
+        let ready = store.reduce_fixture(&run, document.clone()).expect("ready");
         assert!(matches!(ready.action, RunAction::ReadyPure { .. }));
 
         let first = RunFrame::new(
@@ -3175,7 +3194,7 @@ mod tests {
             store.append(first),
             Ok(AppendDisposition::Found { sequence: 2 })
         );
-        let next = store.reduce(&run, document.clone()).expect("next");
+        let next = store.reduce_fixture(&run, document.clone()).expect("next");
         assert_eq!(next.latest_context, middle_value);
         assert!(matches!(next.action, RunAction::ReadyPure { .. }));
 
@@ -3195,7 +3214,7 @@ mod tests {
         )
         .expect("second frame");
         store.append(second).expect("second conclusion");
-        let terminal = store.reduce(&run, document).expect("terminal");
+        let terminal = store.reduce_fixture(&run, document).expect("terminal");
         assert_eq!(terminal.latest_context, final_value);
         assert!(matches!(terminal.action, RunAction::Terminal { .. }));
     }
@@ -3263,13 +3282,15 @@ mod tests {
             .expect("selector object")],
         )
         .expect("admission frame");
-        store.admit(admission).expect("admit");
-        let selected = store.reduce(&run, document.clone()).expect("selected arm");
+        store.append_admission_fixture(admission).expect("admit");
+        let selected = store
+            .reduce_fixture(&run, document.clone())
+            .expect("selected arm");
         assert_eq!(selected.latest_context, payload_value);
         assert_eq!(selected.latest_context_object.canonical_json(), "{\"n\":1}");
         assert!(matches!(selected.action, RunAction::ReadyPure { .. }));
         let owner = store
-            .prepare_conclusion(
+            .prepare_conclusion_fixture(
                 &run,
                 &document,
                 1,
@@ -3290,7 +3311,7 @@ mod tests {
             "{\"result\":2}"
         );
         owner.commit(&store).expect("commit match conclusion");
-        let terminal = store.reduce(&run, document).expect("terminal arm");
+        let terminal = store.reduce_fixture(&run, document).expect("terminal arm");
         assert!(matches!(terminal.action, RunAction::Terminal { .. }));
     }
 }

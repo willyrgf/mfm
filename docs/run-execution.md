@@ -13,9 +13,10 @@ C0 -> RunAdmitted
 
 Admission is the only genesis. Store selects at most one actionable occurrence from a valid prefix.
 Trusted composition first publishes domain-owned Portfolio and EVM configuration values and gives
-App their same-opening resolved heads. Admission records the selected head's global sequence and
-typed content identity; absent, foreign-opening, wrong-type, or fabricated heads fail before the
-genesis append.
+each execution mutation port its own same-opening resolved head. Admission accepts a
+catalog-qualified typed value and that Store-issued head; Store derives the genesis frame, sequence,
+and physical append identity. It records the selected head's global sequence and typed content
+identity; absent, foreign-opening, wrong-type, or fabricated heads fail before the genesis append.
 Pure never creates a preparation. Read and Effect cannot enter a provider until their exact
 preparation append is newly committed. A found, stale, invalid, terminal, or ambiguous append
 creates no call.
@@ -53,8 +54,11 @@ logic.
 
 The worker retains the latest catalog-qualified typed context while hot. A conclusion is canonically
 encoded once for the append, then the already-typed successor is handed to the next State. Cold
-resume folds the complete bounded prefix and checks every content/contract link without invoking
-State or adapter callbacks.
+resume asks the non-Clone mutation port for one affine `SelectedRun`, folds the complete bounded
+prefix once, and checks every content/contract link without invoking State or adapter callbacks.
+Hot preparation and conclusion consume that owner; a direct append returns the next selected owner
+without reloading or refolding history. Converting it to cloneable `QualifiedRun` evidence ends
+mutation authority.
 
 Admission, preparation, conclusion, and acknowledgement uncertainty return exhaustive Runtime
 outcomes. `SuspendedRun` retains the exact owner across a retryable physical boundary; no generic

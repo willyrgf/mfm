@@ -804,15 +804,9 @@ recursive head algorithms/domain separators; old record tags and fields reject.
 Store owns:
 
 ```rust
-pub struct QualifiedRun(Arc<QualifiedRunInner>);       // callback-free, cloneable evidence
-pub struct ActiveQualifiedRun { /* Store owner + run; affine */ }
-
-pub enum SelectedRunAction {
-    Pure(SelectedPureAction),
-    Access(SelectedAccessAction),
-    UnresolvedRead(SelectedReadPreparation),
-    UnresolvedEffect(SelectedEffectPreparation),
-    Terminal(SelectedTerminalRun),
+pub struct QualifiedRun { /* callback-free, cloneable evidence */ }
+pub struct SelectedRun {
+    /* exact QualifiedRun + Program/catalog + latest context + one RunAction + Store brand; affine */
 }
 ```
 
@@ -974,7 +968,8 @@ open. Callers cannot construct ports, mix branded parts from different opens, or
 trait object into semantic authority. Multiple qualified opens, Runtime assemblies, workers, and
 processes may target the same admitted Memory/PostgreSQL writer identity. They retain independent
 process-local brands and all mutations share the backend's append-id lookup and exact-head CAS;
-none receives process-global execution authority. Runtime `resume` returns `ActiveQualifiedRun`;
+none receives process-global execution authority. Runtime cold resume asks its exact non-Clone
+mutation port to return `SelectedRun`;
 readers return only callback-free evidence or purpose DTOs.
 
 Store open checks schema, identity/epoch, channel, writer role, durability, catalog, and bounded
@@ -1134,7 +1129,7 @@ pub struct Runtime(Arc<RuntimeInner>);
 pub struct AdmissionInput { /* Runtime-minted owner-bound typed Store admission */ }
 pub struct ResumeInput { /* owner-bound run selection under exact Store/Runtime */ }
 pub struct RunSession {
-    /* Runtime brand + ActiveQualifiedRun + latest qualified typed context */
+    /* Runtime + SelectedRun + latest catalog-qualified typed context */
 }
 pub struct SuspendedRun { /* exact affine retry/unknown owner; !Sync */ }
 
@@ -1307,10 +1302,10 @@ one closed semantic disposition:
 
 ```text
 DirectlyCommitted(CommittedPreparation)
-ExistingSame(ActiveQualifiedRun)
-Terminal(ActiveQualifiedRun)
-SelectedOtherPreparation(ActiveQualifiedRun)
-Conflict(ActiveQualifiedRun, PreparationConflict)
+ExistingSame(SelectedRun)
+Terminal(SelectedRun)
+SelectedOtherPreparation(SelectedRun)
+Conflict(QualifiedRun, PreparationConflict)
 AcknowledgementUnknown(UnresolvedPreparationAppend)
 Retryable(PreparedStatePreparation)
 FactPreconditionChanged(RebindableStatePreparation)
@@ -1319,8 +1314,8 @@ FactPreconditionChanged(RebindableStatePreparation)
 or one typed terminal operational error:
 
 ```text
-InvalidCorrelation(ActiveQualifiedRun, terminal error)
-CapacityRejected(ActiveQualifiedRun, terminal error)
+InvalidCorrelation(QualifiedRun, terminal error)
+CapacityRejected(QualifiedRun, terminal error)
 StoreEpochChanged(QualifiedRun, terminal error; reopen required)
 DurabilityProfileLost(QualifiedRun, terminal error; reopen required)
 ProjectionMismatch(QualifiedRun, terminal integrity error)
@@ -1504,11 +1499,11 @@ never exposes it directly; it retains the inert continuation while moving only t
 
 ```rust
 enum InnerConclusionCommitStep {
-    Committed(ActiveQualifiedRun),
-    AlreadyConcludedSame(ActiveQualifiedRun),
-    NoLongerSelected(ActiveQualifiedRun), // Access only
+    Committed(SelectedRun),
+    AlreadyConcludedSame(SelectedRun),
+    NoLongerSelected(SelectedRun), // Access only
     Conflict {
-        history: ActiveQualifiedRun,
+        history: QualifiedRun,
         error: ConclusionConflict,
     },
     AcknowledgementUnknown(UnresolvedConclusionAppend),
@@ -2595,7 +2590,7 @@ Land prerequisites that remain coherent under the already-sequential current exe
 
 1. invert Store/Runtime dependency and move callback-free semantics to Store;
 2. move the already-current sequential cursor under Store ownership and introduce
-   `QualifiedRun`/`ActiveQualifiedRun`, one reducer/binder, singular reservation, and owner-bound
+   `QualifiedRun`/`SelectedRun`, one reducer/binder, singular reservation, and owner-bound
    appends;
 3. delete dual reducers, semantic comparison, local requalification, and positive echo;
 4. retain the unchanged pre-cutover mechanical backend/schema behind that one semantic owner;
@@ -2712,7 +2707,7 @@ Trybuild/API tests prove downstream code cannot:
 - register Pure/Read/Effect callbacks or adapters under the wrong mode/capability/binding;
 - use one nominal capability type as both Read and Effect, manually implement the evidence marker,
   or bypass exact catalog evidence registration;
-- construct/mutate/deserialize `QualifiedRun`, or construct/clone `ActiveQualifiedRun`,
+- construct/mutate/deserialize `QualifiedRun`, or construct/clone/deserialize `SelectedRun`,
   `RunSession`, `PreparedExecution`, `CommittedCall`, accepted call wrappers,
   `PendingConclusion`, fact continuation, or Runtime brand; callback-free `QualifiedRun` alone may
   be cloned;
@@ -2722,9 +2717,12 @@ Trybuild/API tests prove downstream code cannot:
 - construct `CommittedCall` from a Store token, raw backend outcome, found-same history, cold
   preparation, head, ref, or another call;
 - construct a free accepted evidence/conclusion pair or transpose correlation;
-- construct `StatePrepared`, `StateConcluded`, record envelopes, occurrence/preparation refs,
-  append ids, or publication coordinates from State implementation code; implementations return
-  only typed intent, outcome, and fact proposals;
+- submit publicly constructible journal DTOs (`RunFrame`, `StatePrepared`, or `StateConcluded`) to
+  Store mutation, or supply occurrence/preparation refs, append ids, predecessor/head sequence,
+  preparation ordinal/replacement, or publication coordinates through State, Runtime, App,
+  reader, or Replay paths; journal DTO construction remains available for wire, replay, export,
+  storage, and backend-conformance code, while implementations return only typed intent, outcome,
+  evidence interpretation, and fact proposals;
 - obtain `RunHistory`, `QualifiedRun`, Store/reducer/cursor/journal readers, an ambient output map,
   or arbitrary prior values through supported State constructors/callbacks; ordinary domain crate
   dependencies expose none of those owners (captured ambient handles remain a trusted-code

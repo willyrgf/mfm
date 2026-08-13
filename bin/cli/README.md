@@ -6,5 +6,6 @@ Admission input is capped at 512 KiB before parsing and uses the same typed doma
 the REST transport.
 
 Startup explicitly opens the demo Store, publishes secret-free typed Portfolio and EVM
-configuration revisions, and constructs App with their resolved heads. The CLI exposes no public
+configuration revisions, consumes the opening into explicit mutation/read/configuration/audit
+ports, and constructs App with those ports and resolved heads. The CLI exposes no public
 configuration write surface.

@@ -13,14 +13,16 @@ use std::sync::Arc;
 
 use mfm_canonical::raw_content_digest;
 use mfm_capabilities::AccessCapabilityContract;
-use mfm_ids::{short_stable_id_fragment, AppendRequestId, ContentRef, RunId, StableId};
-use mfm_journal::single_trust::{
-    BindingDescriptor, ImmutableObject, RunAdmitted, RunFrame, RunRecord, StateConcluded,
-    StateOutcome, ValueRef,
-};
+#[cfg(test)]
+use mfm_ids::AppendRequestId;
+use mfm_ids::{ContentRef, RunId, StableId};
+use mfm_journal::single_trust::{BindingDescriptor, ImmutableObject, StateOutcome, ValueRef};
 use mfm_program::{canonical_value, nominal_contract_ref, ProgramCatalog, QualifiedTypedValue};
-use mfm_store::single_trust::{AppendDisposition, QualifiedRun, ReducedRunState, RunAction};
-use mfm_store::{ConclusionCommitOutcome, OpenedStructuredStore, ResolvedConfigurationHead};
+use mfm_store::single_trust::{AppendDisposition, QualifiedRun, RunAction, SelectedRun};
+use mfm_store::{
+    AccessConclusionProposal, QualifiedHistoryPort, ResolvedConfigurationHead, SelectedConclusion,
+    SelectedConclusionOutcome, SelectedConclusionPreparationOutcome,
+};
 use mfm_values::MfmValue;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -153,22 +155,11 @@ pub(crate) trait DynamicStateRegistration: Send + Sync {
 }
 
 pub(crate) trait DynamicPrepared: Send {
-    fn intent_ref(&self) -> LifecycleResult<ValueRef>;
-
-    #[allow(clippy::too_many_arguments)]
     fn commit(
         self: Box<Self>,
         assembly: Arc<RuntimeAssembly>,
-        store: Arc<OpenedStructuredStore>,
-        current: QualifiedRun,
-        reduced: ReducedRunState,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: ValueRef,
-        intent_ref: ValueRef,
-        maximum_conclusion_bytes: u64,
-        preparation_ordinal: u16,
-        replaces: Option<mfm_journal::single_trust::PreparationRef>,
+        store: Arc<mfm_store::QualifiedHistoryPort>,
+        selected: SelectedRun,
     ) -> Pin<Box<dyn Future<Output = DynamicCommit> + Send + 'static>>;
 }
 
@@ -176,13 +167,12 @@ pub(crate) trait DynamicPrepared: Send {
 pub(crate) enum DynamicCommit {
     Direct {
         call: Box<dyn DynamicCall>,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
     },
     Retained {
         prepared: Box<dyn DynamicPrepared>,
         disposition: Option<AppendDisposition>,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
     },
 }
 
@@ -222,10 +212,7 @@ pub(crate) fn pure_registration<S: State>(
 pub(crate) fn access_registration_with_binding<S: State, C: AccessCapabilityContract>(
     implementation: AccessImplementation<S, C>,
     binding: BindingDescriptor,
-) -> Arc<dyn DynamicStateRegistration>
-where
-    C::Mode: crate::single_trust::RuntimePreparationMode,
-{
+) -> Arc<dyn DynamicStateRegistration> {
     Arc::new(DynamicAccess {
         implementation,
         binding,
@@ -342,10 +329,7 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
     }
 }
 
-impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for DynamicAccess<S, C>
-where
-    C::Mode: crate::single_trust::RuntimePreparationMode,
-{
+impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for DynamicAccess<S, C> {
     fn pure_evaluate(
         &self,
         _assembly: &RuntimeAssembly,
@@ -413,90 +397,54 @@ where
     }
 }
 
-impl<S: State, C: AccessCapabilityContract> DynamicPrepared for TypedPrepared<S, C>
-where
-    C::Mode: crate::single_trust::RuntimePreparationMode,
-{
-    fn intent_ref(&self) -> LifecycleResult<ValueRef> {
-        let intent = self.prepared.intent();
-        let canonical = canonical_value(intent).map_err(|_| RuntimeError::Value)?;
-        let value_ref = ContentRef::new(
-            C::Intent::schema_id().map_err(|_| RuntimeError::Value)?,
-            raw_content_digest(canonical.as_bytes()),
-        )
-        .map_err(|_| RuntimeError::Value)?;
-        Ok(ValueRef::new(
-            nominal_contract_ref::<C::Intent>()?,
-            value_ref,
-        ))
-    }
-
+impl<S: State, C: AccessCapabilityContract> DynamicPrepared for TypedPrepared<S, C> {
     fn commit(
         self: Box<Self>,
         assembly: Arc<RuntimeAssembly>,
-        store: Arc<OpenedStructuredStore>,
-        current: QualifiedRun,
-        reduced: ReducedRunState,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: ValueRef,
-        intent_ref: ValueRef,
-        maximum_conclusion_bytes: u64,
-        preparation_ordinal: u16,
-        replaces: Option<mfm_journal::single_trust::PreparationRef>,
+        store: Arc<mfm_store::QualifiedHistoryPort>,
+        selected: SelectedRun,
     ) -> Pin<Box<dyn Future<Output = DynamicCommit> + Send + 'static>> {
         Box::pin(async move {
             let TypedPrepared {
                 prepared,
                 implementation,
             } = *self;
-            let committed = prepared
-                .commit_opened(
-                    &assembly,
-                    &store,
-                    &current,
-                    &reduced,
-                    expected_sequence,
-                    append_request_id,
-                    input_ref,
-                    intent_ref,
-                    maximum_conclusion_bytes,
-                    preparation_ordinal,
-                    replaces,
-                )
-                .await;
+            let committed = prepared.commit_opened(&assembly, &store, selected).await;
 
             match committed {
-                crate::single_trust::OpenedPreparationCommit::Direct { call, run, reduced } => {
+                crate::single_trust::OpenedPreparationCommit::Direct { call, selected } => {
                     DynamicCommit::Direct {
                         call: Box::new(TypedCall {
                             call,
                             implementation,
                         }) as Box<dyn DynamicCall>,
-                        run,
-                        reduced,
+                        selected,
                     }
                 }
-                crate::single_trust::OpenedPreparationCommit::Retained { owner, disposition } => {
-                    DynamicCommit::Retained {
-                        prepared: Box::new(TypedPrepared {
-                            prepared: owner,
-                            implementation,
-                        }),
-                        disposition: Some(disposition),
-                        reduced,
-                    }
-                }
-                crate::single_trust::OpenedPreparationCommit::Rejected { owner, error: _ } => {
-                    DynamicCommit::Retained {
-                        prepared: Box::new(TypedPrepared {
-                            prepared: owner,
-                            implementation,
-                        }),
-                        disposition: None,
-                        reduced,
-                    }
-                }
+                crate::single_trust::OpenedPreparationCommit::Retained {
+                    owner,
+                    selected,
+                    disposition,
+                } => DynamicCommit::Retained {
+                    prepared: Box::new(TypedPrepared {
+                        prepared: owner,
+                        implementation,
+                    }),
+                    disposition: Some(disposition),
+                    selected,
+                },
+                crate::single_trust::OpenedPreparationCommit::Rejected {
+                    owner,
+                    selected,
+                    error: _,
+                } => DynamicCommit::Retained {
+                    prepared: Box::new(TypedPrepared {
+                        prepared: owner,
+                        implementation,
+                    }),
+                    disposition: None,
+                    selected,
+                },
             }
         })
     }
@@ -524,11 +472,9 @@ impl<S: State, C: AccessCapabilityContract> DynamicCall for TypedCall<S, C> {
 /// Result of an access implementation before Store conclusion qualification.
 pub(crate) struct DynamicResolution {
     input: ErasedValue,
-    intent: ErasedValue,
     evidence: Option<ErasedValue>,
     outcome: Option<DynamicOutcome>,
     classification: Option<UnresolvedClassification>,
-    preparation: mfm_journal::single_trust::PreparationRef,
     fact_continuation: Option<mfm_store::FactContinuation>,
 }
 
@@ -547,7 +493,7 @@ impl DynamicResolution {
             evidence,
             outcome,
             classification,
-            preparation,
+            _preparation,
             fact_continuation,
         ) = resolution.into_parts();
         if !assembly.has_brand(&brand) || &call_id != expected_call_id {
@@ -559,7 +505,7 @@ impl DynamicResolution {
             return Err(RuntimeError::Value);
         }
         let input = ErasedValue::from_qualified(assembly.catalog(), witness, input)?;
-        let intent = qualify_erased(
+        let _intent = qualify_erased(
             assembly,
             witness,
             nominal_contract_ref::<C::Intent>()?,
@@ -601,11 +547,9 @@ impl DynamicResolution {
             .transpose()?;
         Ok(Self {
             input,
-            intent,
             evidence,
             outcome,
             classification,
-            preparation,
             fact_continuation,
         })
     }
@@ -711,23 +655,15 @@ impl ParkedRun {
 enum SuspendedOwner {
     Admission {
         runtime: Runtime,
-        frame: RunFrame,
-        configuration: ResolvedConfigurationHead,
+        owner: mfm_store::PreparedAdmission,
+        value: ErasedValue,
     },
     Conclusion(PendingConclusion),
     Preparation {
         runtime: Runtime,
         prepared: Box<dyn DynamicPrepared>,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: ValueRef,
-        intent_ref: ValueRef,
-        maximum_conclusion_bytes: u64,
-        preparation_ordinal: u16,
-        replaces: Option<mfm_journal::single_trust::PreparationRef>,
         disposition: Option<AppendDisposition>,
     },
 }
@@ -739,48 +675,36 @@ enum SuspendedOwner {
 /// the owning Runtime and cannot be cloned, serialized, or field-constructed by callers.
 pub struct PendingConclusion {
     runtime: Runtime,
-    owner: mfm_store::single_trust::PreparedConclusion,
-    run: QualifiedRun,
-    reduced: ReducedRunState,
+    owner: SelectedConclusion,
     successor: Option<ErasedValue>,
 }
 
 impl PendingConclusion {
-    fn new(
-        runtime: Runtime,
-        owner: mfm_store::single_trust::PreparedConclusion,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
-        successor: Option<ErasedValue>,
-    ) -> Self {
+    fn new(runtime: Runtime, owner: SelectedConclusion, successor: Option<ErasedValue>) -> Self {
         Self {
             runtime,
             owner,
-            run,
-            reduced,
             successor,
         }
     }
 
     /// Returns the run identity retained by this conclusion owner.
     pub fn run_id(&self) -> &RunId {
-        self.run.run_id()
+        self.owner.run_id()
     }
 
     async fn resolve(self) -> RuntimeStep {
         let Self {
             runtime,
             owner,
-            run,
-            reduced,
             successor,
         } = self;
-        match runtime.inner.store.commit_conclusion(owner).await {
-            Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => RuntimeStep::Suspended(
-                SuspendedRun::conclusion(runtime, owner, run, reduced, successor),
-            ),
-            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
-                let suspended = SuspendedRun::conclusion(runtime, owner, run, reduced, successor);
+        match runtime.inner.store.commit_selected_conclusion(owner).await {
+            SelectedConclusionOutcome::AcknowledgementUnknown(owner) => {
+                RuntimeStep::Suspended(SuspendedRun::conclusion(runtime, owner, successor))
+            }
+            SelectedConclusionOutcome::Rejected { owner, error } => {
+                let suspended = SuspendedRun::conclusion(runtime, owner, successor);
                 match error {
                     mfm_store::StoreError::FactFrontierChanged
                     | mfm_store::StoreError::Conflict
@@ -791,36 +715,21 @@ impl PendingConclusion {
                     },
                 }
             }
-            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
-            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
-                runtime.reloaded_step(history).await
+            SelectedConclusionOutcome::AlreadyConcludedSame(selected)
+            | SelectedConclusionOutcome::NoLongerSelected(selected)
+            | SelectedConclusionOutcome::Committed(selected) => {
+                runtime.step_from_selected(selected, successor).await
             }
-            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+            SelectedConclusionOutcome::Conflict(history) => RuntimeStep::Conflict {
                 history,
                 error: RuntimeError::Conclusion,
             },
-            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+            SelectedConclusionOutcome::InvalidHistory(history) => RuntimeStep::Failed {
                 history,
                 error: RuntimeError::Conclusion,
-            },
-            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
-                runtime
-                    .finish_conclusion(run, reduced, frame, disposition, successor)
-                    .await
-            }
-            Err(error) => RuntimeStep::Failed {
-                history: run,
-                error: error.into(),
             },
         }
     }
-}
-
-enum AdmissionResolution {
-    Same(QualifiedRun),
-    Conflict(QualifiedRun),
-    Invalid(QualifiedRun),
-    Missing,
 }
 
 /// Explicit owner retained across an acknowledgement-unknown or unresolved boundary.
@@ -831,62 +740,41 @@ pub struct SuspendedRun {
 impl SuspendedRun {
     fn admission(
         runtime: Runtime,
-        frame: RunFrame,
-        configuration: ResolvedConfigurationHead,
+        owner: mfm_store::PreparedAdmission,
+        value: ErasedValue,
     ) -> Self {
         Self {
             owner: SuspendedOwner::Admission {
                 runtime,
-                frame,
-                configuration,
+                owner,
+                value,
             },
         }
     }
 
     fn conclusion(
         runtime: Runtime,
-        owner: mfm_store::single_trust::PreparedConclusion,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
+        owner: SelectedConclusion,
         successor: Option<ErasedValue>,
     ) -> Self {
         Self {
-            owner: SuspendedOwner::Conclusion(PendingConclusion::new(
-                runtime, owner, run, reduced, successor,
-            )),
+            owner: SuspendedOwner::Conclusion(PendingConclusion::new(runtime, owner, successor)),
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn preparation(
         runtime: Runtime,
         prepared: Box<dyn DynamicPrepared>,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: ValueRef,
-        intent_ref: ValueRef,
-        maximum_conclusion_bytes: u64,
-        preparation_ordinal: u16,
-        replaces: Option<mfm_journal::single_trust::PreparationRef>,
         disposition: Option<AppendDisposition>,
     ) -> Self {
         Self {
             owner: SuspendedOwner::Preparation {
                 runtime,
                 prepared,
-                run,
-                reduced,
+                selected,
                 occurrence,
-                expected_sequence,
-                append_request_id,
-                input_ref,
-                intent_ref,
-                maximum_conclusion_bytes,
-                preparation_ordinal,
-                replaces,
                 disposition,
             },
         }
@@ -895,9 +783,9 @@ impl SuspendedRun {
     /// Returns the run identity retained by this owner-fate boundary.
     pub fn run_id(&self) -> &RunId {
         match &self.owner {
-            SuspendedOwner::Admission { frame, .. } => frame.run_id(),
+            SuspendedOwner::Admission { owner, .. } => owner.run_id(),
             SuspendedOwner::Conclusion(owner) => owner.run_id(),
-            SuspendedOwner::Preparation { run, .. } => run.run_id(),
+            SuspendedOwner::Preparation { selected, .. } => selected.run_id(),
         }
     }
 
@@ -906,68 +794,50 @@ impl SuspendedRun {
         match self.owner {
             SuspendedOwner::Admission {
                 runtime,
-                frame,
-                configuration,
-            } => {
-                match runtime
-                    .inner
-                    .store
-                    .append_admission(frame.clone(), &configuration)
-                    .await
-                {
-                    Ok(AppendDisposition::NewlyCommitted { .. })
-                    | Ok(AppendDisposition::Found { .. })
-                    | Ok(AppendDisposition::StaleHead { .. }) => {
-                        let resolution = runtime.inspect_admission(&frame).await;
-                        runtime
-                            .resolve_admission(resolution, frame, configuration)
-                            .await
-                    }
-                    Ok(AppendDisposition::AcknowledgementUnknown) => RuntimeStep::Suspended(
-                        SuspendedRun::admission(runtime, frame, configuration),
-                    ),
-                    Err(_) => RuntimeStep::Suspended(SuspendedRun::admission(
-                        runtime,
-                        frame,
-                        configuration,
-                    )),
+                owner,
+                value,
+            } => match runtime.inner.store.resolve_admission(owner).await {
+                mfm_store::AdmissionOutcome::Selected(selected, _) => {
+                    runtime.step_from_selected(selected, Some(value)).await
                 }
-            }
+                mfm_store::AdmissionOutcome::AcknowledgementUnknown(owner) => {
+                    RuntimeStep::Suspended(SuspendedRun::admission(runtime, owner, value))
+                }
+                mfm_store::AdmissionOutcome::Conflict(history) => RuntimeStep::Conflict {
+                    history,
+                    error: RuntimeError::Conclusion,
+                },
+                mfm_store::AdmissionOutcome::Rejected(_) => {
+                    RuntimeStep::AdmissionRejected(RuntimeError::Conclusion)
+                }
+                mfm_store::AdmissionOutcome::RetainedRejected { owner, .. } => {
+                    RuntimeStep::Suspended(SuspendedRun::admission(runtime, owner, value))
+                }
+            },
             SuspendedOwner::Conclusion(owner) => owner.resolve().await,
             SuspendedOwner::Preparation {
                 runtime,
                 prepared,
-                run,
-                reduced,
+                selected,
                 occurrence,
-                expected_sequence,
-                append_request_id,
-                input_ref,
-                intent_ref,
-                maximum_conclusion_bytes,
-                preparation_ordinal,
-                replaces,
                 disposition,
             } => {
                 if matches!(
                     disposition,
                     Some(disposition) if !matches!(disposition, AppendDisposition::AcknowledgementUnknown)
                 ) {
-                    return match runtime.inner.store.load(run.run_id()).await {
-                        Ok(latest) => runtime.reloaded_step(latest).await,
+                    return match runtime
+                        .inner
+                        .store
+                        .select(selected.run_id(), runtime.inner.assembly.program())
+                        .await
+                    {
+                        Ok(latest) => runtime.step_from_selected(latest, None).await,
                         Err(_) => RuntimeStep::Suspended(SuspendedRun::preparation(
                             runtime,
                             prepared,
-                            run,
-                            reduced,
+                            selected,
                             occurrence,
-                            expected_sequence,
-                            append_request_id,
-                            input_ref,
-                            intent_ref,
-                            maximum_conclusion_bytes,
-                            preparation_ordinal,
-                            replaces,
                             disposition,
                         )),
                     };
@@ -976,40 +846,24 @@ impl SuspendedRun {
                     .commit(
                         Arc::clone(&runtime.inner.assembly),
                         Arc::clone(&runtime.inner.store),
-                        run.clone(),
-                        reduced.clone(),
-                        expected_sequence,
-                        append_request_id.clone(),
-                        input_ref.clone(),
-                        intent_ref.clone(),
-                        maximum_conclusion_bytes,
-                        preparation_ordinal,
-                        replaces.clone(),
+                        selected,
                     )
                     .await
                 {
-                    DynamicCommit::Direct { call, run, reduced } => {
+                    DynamicCommit::Direct { call, selected } => {
                         runtime
-                            .execute_committed_access(run, occurrence, call, reduced)
+                            .execute_committed_access(occurrence, call, selected)
                             .await
                     }
                     DynamicCommit::Retained {
                         prepared,
                         disposition,
-                        reduced,
+                        selected,
                     } => RuntimeStep::Suspended(SuspendedRun::preparation(
                         runtime,
                         prepared,
-                        run,
-                        reduced,
+                        selected,
                         occurrence,
-                        expected_sequence,
-                        append_request_id,
-                        input_ref,
-                        intent_ref,
-                        maximum_conclusion_bytes,
-                        preparation_ordinal,
-                        replaces,
                         disposition,
                     )),
                 }
@@ -1021,10 +875,14 @@ impl SuspendedRun {
 /// A non-Clone affine Runtime session retaining one latest cumulative context.
 pub struct RunSession {
     runtime: Runtime,
-    run: QualifiedRun,
-    reduced: ReducedRunState,
+    selected: SelectedRun,
     latest: ErasedValue,
     _active_permit: OwnedSemaphorePermit,
+}
+
+struct SessionBuildFailure {
+    selected: SelectedRun,
+    error: RuntimeError,
 }
 
 /// Result of one admission owner transition.
@@ -1091,6 +949,8 @@ pub enum RuntimeStep {
         /// The permanent rejection classification.
         error: RuntimeError,
     },
+    /// Admission resolution failed before callback-free history was available.
+    AdmissionRejected(RuntimeError),
     /// The consumed session raced with a different semantic head.
     Conflict {
         /// Qualified callback-free history at the competing head.
@@ -1190,7 +1050,7 @@ impl Default for RuntimeLimits {
 
 struct RuntimeInner {
     assembly: Arc<RuntimeAssembly>,
-    store: Arc<OpenedStructuredStore>,
+    store: Arc<QualifiedHistoryPort>,
     witness: Arc<RuntimeWitness>,
     limits: RuntimeLimits,
     active_sessions: Arc<Semaphore>,
@@ -1201,14 +1061,14 @@ struct RuntimeInner {
 
 impl Runtime {
     /// Opens one Runtime over an exact immutable assembly and branded Store.
-    pub fn new(assembly: RuntimeAssembly, store: OpenedStructuredStore) -> LifecycleResult<Self> {
+    pub fn new(assembly: RuntimeAssembly, store: QualifiedHistoryPort) -> LifecycleResult<Self> {
         Self::new_with_limits(assembly, store, RuntimeLimits::default())
     }
 
     /// Opens one Runtime with one exact immutable assembly, Store, and bounded work envelope.
     pub fn new_with_limits(
         assembly: RuntimeAssembly,
-        store: OpenedStructuredStore,
+        store: QualifiedHistoryPort,
         limits: RuntimeLimits,
     ) -> LifecycleResult<Self> {
         limits.validate()?;
@@ -1267,16 +1127,8 @@ impl Runtime {
         value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
-        append_request_id: AppendRequestId,
     ) -> LifecycleResult<AdmissionInput<T>> {
-        AdmissionInput::new(
-            self,
-            run_id,
-            value,
-            configuration,
-            source_refs,
-            append_request_id,
-        )
+        AdmissionInput::new(self, run_id, value, configuration, source_refs)
     }
 
     /// Resumes one exact run after cold callback-free prefix qualification.
@@ -1284,13 +1136,24 @@ impl Runtime {
         if !Arc::ptr_eq(&self.inner, &input.runtime.inner) {
             return ResumeStep::Failed(ResumeFailure::Identity);
         }
-        let run = match self.inner.store.load(&input.run_id).await {
-            Ok(run) => run,
+        let selected = match self
+            .inner
+            .store
+            .select(&input.run_id, self.inner.assembly.program())
+            .await
+        {
+            Ok(selected) => selected,
             Err(_) => return ResumeStep::Failed(ResumeFailure::History),
         };
-        match self.session_from_run(run, Some(input.value)).await {
+        match self
+            .session_from_selected(selected, Some(input.value))
+            .await
+        {
             Ok(session) => self.classify_resume_session(session).await,
-            Err(RuntimeError::Capacity) => ResumeStep::Failed(ResumeFailure::Capacity),
+            Err(SessionBuildFailure {
+                error: RuntimeError::Capacity,
+                ..
+            }) => ResumeStep::Failed(ResumeFailure::Capacity),
             Err(_) => ResumeStep::Failed(ResumeFailure::Identity),
         }
     }
@@ -1301,20 +1164,28 @@ impl Runtime {
     /// performs the same bounded prefix qualification as typed [`Runtime::resume`] and never
     /// exposes the retained history to State code.
     pub async fn resume_run(&self, run_id: RunId) -> ResumeStep {
-        let run = match self.inner.store.load(&run_id).await {
-            Ok(run) => run,
+        let selected = match self
+            .inner
+            .store
+            .select(&run_id, self.inner.assembly.program())
+            .await
+        {
+            Ok(selected) => selected,
             Err(_) => return ResumeStep::Failed(ResumeFailure::History),
         };
-        match self.session_from_run(run, None).await {
+        match self.session_from_selected(selected, None).await {
             Ok(session) => self.classify_resume_session(session).await,
-            Err(RuntimeError::Capacity) => ResumeStep::Failed(ResumeFailure::Capacity),
+            Err(SessionBuildFailure {
+                error: RuntimeError::Capacity,
+                ..
+            }) => ResumeStep::Failed(ResumeFailure::Capacity),
             Err(_) => ResumeStep::Failed(ResumeFailure::Identity),
         }
     }
 
-    /// Returns a clone of the exact Store opening owned by this Runtime.
-    pub fn store(&self) -> OpenedStructuredStore {
-        (*self.inner.store).clone()
+    /// Returns immutable Store identity metadata for trusted composition.
+    pub fn store_identity(&self) -> &mfm_store::StructuredStoreIdentity {
+        self.inner.store.identity()
     }
 
     /// Returns the exact callback-free Program catalog associated with this Runtime.
@@ -1332,11 +1203,18 @@ impl Runtime {
             .clone()
     }
 
+    /// Returns whether a configuration head was issued by this Runtime's exact Store opening.
+    pub fn accepts_configuration_head(&self, head: &ResolvedConfigurationHead) -> bool {
+        self.inner.store.accepts_configuration_head(head)
+    }
+
     async fn classify_resume_session(&self, session: RunSession) -> ResumeStep {
-        match session.reduced.action().clone() {
+        match session.selected.action().clone() {
             RunAction::ZeroStateTerminal { .. }
             | RunAction::Terminal { .. }
-            | RunAction::Failed { .. } => ResumeStep::Terminal(TerminalRun::new(session.run)),
+            | RunAction::Failed { .. } => {
+                ResumeStep::Terminal(TerminalRun::new(session.selected.into_qualified_run()))
+            }
             RunAction::WaitingPreparation { .. } => ResumeStep::Parked(ParkedRun {
                 session,
                 reason: ParkReason::WaitingPreparation,
@@ -1345,32 +1223,13 @@ impl Runtime {
         }
     }
 
-    async fn reloaded_step(&self, run: QualifiedRun) -> RuntimeStep {
-        let history = run.clone();
-        let session = match self.session_from_run(run, None).await {
-            Ok(session) => session,
-            Err(error) => return RuntimeStep::Failed { history, error },
-        };
-        match session.reduced.action().clone() {
-            RunAction::ZeroStateTerminal { .. }
-            | RunAction::Terminal { .. }
-            | RunAction::Failed { .. } => RuntimeStep::Terminal(TerminalRun::new(session.run)),
-            RunAction::WaitingPreparation { .. } => RuntimeStep::Parked {
-                session,
-                reason: ParkReason::WaitingPreparation,
-            },
-            _ => RuntimeStep::Advanced(session),
-        }
-    }
-
     async fn execute_committed_access(
         &self,
-        run: QualifiedRun,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         call: Box<dyn DynamicCall>,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
     ) -> RuntimeStep {
-        let state = match self
+        let _state = match self
             .inner
             .assembly
             .program()
@@ -1380,7 +1239,7 @@ impl Runtime {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: RuntimeError::Identity,
                 }
             }
@@ -1390,7 +1249,7 @@ impl Runtime {
                 Ok(permit) => permit,
                 Err(error) => {
                     return RuntimeStep::Failed {
-                        history: run,
+                        history: selected.into_qualified_run(),
                         error,
                     }
                 }
@@ -1399,7 +1258,7 @@ impl Runtime {
                 Ok(permit) => permit,
                 Err(error) => {
                     return RuntimeStep::Failed {
-                        history: run,
+                        history: selected.into_qualified_run(),
                         error,
                     }
                 }
@@ -1410,36 +1269,29 @@ impl Runtime {
         };
         let Some(resolution) = resolution else {
             return self
-                .neutral_access(
-                    run,
-                    reduced.clone(),
-                    UnresolvedClassification::AcknowledgementUnknown,
-                )
+                .neutral_access(selected, UnresolvedClassification::AcknowledgementUnknown)
                 .await;
         };
-        let conclusion_sequence = resolution.preparation.run_sequence();
         if let Some(classification) = resolution.classification {
-            let history = run.clone();
             return match self
-                .session_from_reduced(run, reduced, Some(resolution.input))
+                .session_from_selected(selected, Some(resolution.input))
                 .await
             {
                 Ok(session) => RuntimeStep::Unresolved {
                     session,
                     classification,
                 },
-                Err(error) => RuntimeStep::Failed { history, error },
+                Err(failure) => RuntimeStep::Failed {
+                    history: failure.selected.into_qualified_run(),
+                    error: failure.error,
+                },
             };
         }
         let evidence = match resolution.evidence {
             Some(evidence) => evidence,
             None => {
                 return self
-                    .neutral_access(
-                        run,
-                        reduced.clone(),
-                        UnresolvedClassification::InvalidResponse,
-                    )
+                    .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                     .await;
             }
         };
@@ -1447,36 +1299,16 @@ impl Runtime {
             Some(outcome) => outcome,
             None => {
                 return self
-                    .neutral_access(
-                        run,
-                        reduced.clone(),
-                        UnresolvedClassification::InvalidResponse,
-                    )
+                    .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                     .await;
             }
         };
         let evidence_ref = evidence.as_value_ref();
-        let intent_object = match resolution.intent.object() {
-            Ok(object) => object,
-            Err(_) => {
-                return self
-                    .neutral_access(
-                        run,
-                        reduced.clone(),
-                        UnresolvedClassification::InvalidResponse,
-                    )
-                    .await;
-            }
-        };
         let evidence_object = match evidence.object() {
             Ok(object) => object,
             Err(_) => {
                 return self
-                    .neutral_access(
-                        run,
-                        reduced.clone(),
-                        UnresolvedClassification::InvalidResponse,
-                    )
+                    .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                     .await;
             }
         };
@@ -1487,11 +1319,7 @@ impl Runtime {
                     Ok(object) => object,
                     Err(_) => {
                         return self
-                            .neutral_access(
-                                run,
-                                reduced.clone(),
-                                UnresolvedClassification::InvalidResponse,
-                            )
+                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                             .await;
                     }
                 };
@@ -1499,11 +1327,7 @@ impl Runtime {
                     Ok(value) => Some(value),
                     Err(_) => {
                         return self
-                            .neutral_access(
-                                run,
-                                reduced.clone(),
-                                UnresolvedClassification::InvalidResponse,
-                            )
+                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                             .await;
                     }
                 };
@@ -1520,70 +1344,39 @@ impl Runtime {
                     Ok(object) => object,
                     Err(_) => {
                         return self
-                            .neutral_access(
-                                run,
-                                reduced.clone(),
-                                UnresolvedClassification::InvalidResponse,
-                            )
+                            .neutral_access(selected, UnresolvedClassification::InvalidResponse)
                             .await;
                     }
                 };
                 (StateOutcome::Failure(value_ref), None, object, None)
             }
         };
-        let owner = match self.inner.store.prepare_conclusion_qualified_with_reduced(
-            &run,
-            self.inner.assembly.program().document(),
-            &reduced,
-            conclusion_sequence,
-            StateConcluded::Access {
-                occurrence,
-                preparation: resolution.preparation,
-                evidence: evidence_ref,
-                outcome: recorded_outcome,
-                fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
-                fact_selection: resolution
-                    .fact_continuation
-                    .as_ref()
-                    .map(mfm_store::FactContinuation::selection_ref)
-                    .cloned(),
-                fact_publication: None,
-            },
-            {
-                let mut objects = vec![intent_object, evidence_object, outcome_object];
-                if let Some((_, object)) = fact_proposals {
-                    objects.push(object);
-                }
-                objects
-            },
-            state.maximum_conclusion_bytes(),
+        let proposal = AccessConclusionProposal::new(
+            evidence_ref,
+            evidence_object,
+            recorded_outcome,
+            outcome_object,
+            fact_proposals,
+        );
+        let owner = match self.inner.store.prepare_selected_access_conclusion(
+            selected,
+            proposal,
+            resolution.fact_continuation,
         ) {
-            Ok(owner) => owner,
-            Err(error) => {
+            SelectedConclusionPreparationOutcome::Prepared(owner) => owner,
+            SelectedConclusionPreparationOutcome::Rejected { selected, error } => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: error.into(),
                 }
             }
         };
-        match self.inner.store.commit_conclusion(owner).await {
-            Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(
-                    self.clone(),
-                    owner,
-                    run.clone(),
-                    reduced.clone(),
-                    successor,
-                ))
+        match self.inner.store.commit_selected_conclusion(owner).await {
+            SelectedConclusionOutcome::AcknowledgementUnknown(owner) => {
+                RuntimeStep::Suspended(SuspendedRun::conclusion(self.clone(), owner, successor))
             }
-            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
-                let suspended = SuspendedRun::conclusion(
-                    self.clone(),
-                    owner,
-                    run.clone(),
-                    reduced.clone(),
-                    successor,
-                );
+            SelectedConclusionOutcome::Rejected { owner, error } => {
+                let suspended = SuspendedRun::conclusion(self.clone(), owner, successor);
                 match error {
                     mfm_store::StoreError::FactFrontierChanged
                     | mfm_store::StoreError::Conflict
@@ -1594,370 +1387,170 @@ impl Runtime {
                     },
                 }
             }
-            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
-            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
-                self.reloaded_step(history).await
+            SelectedConclusionOutcome::AlreadyConcludedSame(next)
+            | SelectedConclusionOutcome::NoLongerSelected(next)
+            | SelectedConclusionOutcome::Committed(next) => {
+                self.step_from_selected(next, successor).await
             }
-            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+            SelectedConclusionOutcome::Conflict(history) => RuntimeStep::Conflict {
                 history,
                 error: RuntimeError::Conclusion,
             },
-            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+            SelectedConclusionOutcome::InvalidHistory(history) => RuntimeStep::Failed {
                 history,
                 error: RuntimeError::Conclusion,
-            },
-            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
-                self.finish_conclusion(run, reduced, frame, disposition, successor)
-                    .await
-            }
-            Err(error) => RuntimeStep::Failed {
-                history: run,
-                error: error.into(),
             },
         }
     }
 
-    async fn finish_conclusion(
+    async fn step_from_selected(
         &self,
-        previous: QualifiedRun,
-        reduced: ReducedRunState,
-        conclusion_frame: RunFrame,
-        disposition: AppendDisposition,
+        selected: SelectedRun,
         successor: Option<ErasedValue>,
     ) -> RuntimeStep {
-        match disposition {
-            AppendDisposition::NewlyCommitted { .. } | AppendDisposition::Found { .. } => {
-                let _cpu_permit = match self.acquire_cpu_job().await {
-                    Ok(permit) => permit,
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: previous,
-                            error,
-                        }
-                    }
-                };
-                let next_run = match self
-                    .inner
-                    .store
-                    .qualify_appended(&previous, conclusion_frame)
-                {
-                    Ok(next_run) => next_run,
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: previous,
-                            error: error.into(),
-                        }
-                    }
-                };
-                let next_reduced = match self.inner.store.advance_reduced(
-                    &reduced,
-                    &previous,
-                    &next_run,
-                    self.inner.assembly.program().document(),
-                ) {
-                    Ok(reduced) => reduced,
-                    Err(error) => {
-                        return RuntimeStep::Failed {
-                            history: previous,
-                            error: error.into(),
-                        }
-                    }
-                };
-                drop(_cpu_permit);
-                match successor {
-                    Some(successor) => match self
-                        .session_from_reduced(next_run, next_reduced, Some(successor))
-                        .await
-                    {
-                        Ok(session) => match session.reduced.action().clone() {
-                            RunAction::ZeroStateTerminal { .. }
-                            | RunAction::Terminal { .. }
-                            | RunAction::Failed { .. } => {
-                                RuntimeStep::Terminal(TerminalRun::new(session.run))
-                            }
-                            _ => RuntimeStep::Advanced(session),
-                        },
-                        Err(error) => RuntimeStep::Failed {
-                            history: previous,
-                            error,
-                        },
-                    },
-                    None => match next_reduced.action() {
-                        RunAction::ZeroStateTerminal { .. }
-                        | RunAction::Terminal { .. }
-                        | RunAction::Failed { .. } => {
-                            RuntimeStep::Terminal(TerminalRun::new(next_run))
-                        }
-                        _ => RuntimeStep::Failed {
-                            history: next_run,
-                            error: RuntimeError::Conclusion,
-                        },
-                    },
+        match self.session_from_selected(selected, successor).await {
+            Ok(session) => match session.selected.action() {
+                RunAction::ZeroStateTerminal { .. }
+                | RunAction::Terminal { .. }
+                | RunAction::Failed { .. } => {
+                    RuntimeStep::Terminal(TerminalRun::new(session.selected.into_qualified_run()))
                 }
-            }
-            AppendDisposition::AcknowledgementUnknown => RuntimeStep::Failed {
-                history: previous,
-                error: RuntimeError::Unresolved,
+                _ => RuntimeStep::Advanced(session),
             },
-            // Store classifies a stale conclusion before returning a disposition. Reaching this
-            // branch means the Store boundary violated that contract.
-            AppendDisposition::StaleHead { .. } => RuntimeStep::Failed {
-                history: previous,
-                error: RuntimeError::Conclusion,
+            Err(failure) => RuntimeStep::Failed {
+                history: failure.selected.into_qualified_run(),
+                error: failure.error,
             },
         }
     }
 
     async fn neutral_access(
         &self,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
+        selected: SelectedRun,
         classification: UnresolvedClassification,
     ) -> RuntimeStep {
-        let history = run.clone();
-        match self.session_from_reduced(run, reduced, None).await {
+        match self.session_from_selected(selected, None).await {
             Ok(session) => RuntimeStep::Unresolved {
                 session,
                 classification,
             },
-            Err(error) => RuntimeStep::Failed { history, error },
+            Err(failure) => RuntimeStep::Failed {
+                history: failure.selected.into_qualified_run(),
+                error: failure.error,
+            },
         }
     }
 
-    async fn spawn_erased(
+    async fn spawn_typed<T: MfmValue>(
         &self,
         run_id: RunId,
-        value: ErasedValue,
+        value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
-        append_request_id: AppendRequestId,
     ) -> SpawnStep {
         let _planning_permit = match self.acquire_planning_job().await {
             Ok(permit) => permit,
             Err(_) => return SpawnStep::Failed(AdmissionFailure::Capacity),
         };
-        let configuration_projection =
-            match self.inner.store.configuration_projection(&configuration) {
-                Ok(projection) => projection,
-                Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-            };
-        let admission = match RunAdmitted::new(
-            self.inner.store.identity().scope().clone(),
-            self.inner.store.identity().epoch(),
-            run_id.clone(),
-            self.inner.store.identity().tenant().clone(),
-            self.inner
-                .assembly
-                .program()
-                .document()
-                .entry_point_id()
-                .clone(),
-            self.inner.assembly.program_ref().clone(),
-            value.as_value_ref(),
-            configuration_projection,
-            source_refs,
-        ) {
-            Ok(admission) => admission,
-            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-        };
-        let object = match value.object() {
-            Ok(object) => object,
-            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-        };
-        let frame = match RunFrame::new(
-            run_id.clone(),
-            self.inner.store.identity().scope().clone(),
-            self.inner.store.identity().epoch(),
-            1,
-            append_request_id,
-            RunRecord::RunAdmitted(admission),
-            vec![object],
-        ) {
-            Ok(frame) => frame,
-            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-        };
-        match self
+        let outcome = self
             .inner
             .store
-            .append_admission(frame.clone(), &configuration)
-            .await
-        {
-            Ok(AppendDisposition::NewlyCommitted { .. }) => {
-                let run = match self.inner.store.qualify_admission(frame) {
-                    Ok(run) => run,
-                    Err(_) => return SpawnStep::Failed(AdmissionFailure::Store),
-                };
-                match self.session_from_run(run, Some(value)).await {
+            .admit(
+                run_id,
+                self.inner.assembly.program(),
+                &value,
+                configuration,
+                source_refs,
+            )
+            .await;
+        let value = match ErasedValue::from_qualified(
+            self.inner.assembly.catalog(),
+            &self.inner.witness,
+            value,
+        ) {
+            Ok(value) => value,
+            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
+        };
+        match outcome {
+            mfm_store::AdmissionOutcome::Selected(selected, _) => {
+                match self.session_from_selected(selected, Some(value)).await {
                     Ok(session) => self.spawn_classify(session).await,
                     Err(_) => SpawnStep::Failed(AdmissionFailure::Store),
                 }
             }
-            Ok(AppendDisposition::Found { .. }) => {
-                let resolution = self.inspect_admission(&frame).await;
-                self.spawn_admission_resolution(resolution).await
+            mfm_store::AdmissionOutcome::AcknowledgementUnknown(owner)
+            | mfm_store::AdmissionOutcome::RetainedRejected { owner, .. } => {
+                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), owner, value))
             }
-            Ok(AppendDisposition::AcknowledgementUnknown) => {
-                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
-            }
-            Ok(AppendDisposition::StaleHead { .. }) => {
-                let resolution = self.inspect_admission(&frame).await;
-                self.spawn_admission_resolution(resolution).await
-            }
-            Err(_) => {
-                SpawnStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
-            }
+            mfm_store::AdmissionOutcome::Conflict(_) => SpawnStep::Conflict(AdmissionConflict),
+            mfm_store::AdmissionOutcome::Rejected(_) => SpawnStep::Failed(AdmissionFailure::Store),
         }
     }
 
     async fn spawn_classify(&self, session: RunSession) -> SpawnStep {
-        match session.reduced.action().clone() {
+        match session.selected.action().clone() {
             RunAction::ZeroStateTerminal { .. }
             | RunAction::Terminal { .. }
-            | RunAction::Failed { .. } => SpawnStep::Terminal(TerminalRun::new(session.run)),
+            | RunAction::Failed { .. } => {
+                SpawnStep::Terminal(TerminalRun::new(session.selected.into_qualified_run()))
+            }
             _ => SpawnStep::Active(session),
         }
     }
 
-    async fn inspect_admission(&self, frame: &RunFrame) -> AdmissionResolution {
-        let run = match self.inner.store.load(frame.run_id()).await {
-            Ok(run) => run,
-            Err(_) => return AdmissionResolution::Missing,
-        };
-        let RunRecord::RunAdmitted(candidate) = frame.record() else {
-            return AdmissionResolution::Invalid(run);
-        };
-        let Some(RunRecord::RunAdmitted(existing)) =
-            run.frames().first().map(|retained| retained.record())
-        else {
-            return AdmissionResolution::Invalid(run);
-        };
-        if candidate == existing {
-            AdmissionResolution::Same(run)
-        } else {
-            AdmissionResolution::Conflict(run)
-        }
-    }
-
-    async fn spawn_admission_resolution(&self, resolution: AdmissionResolution) -> SpawnStep {
-        match resolution {
-            AdmissionResolution::Same(run) => match self.session_from_run(run, None).await {
-                Ok(session) => self.spawn_classify(session).await,
-                Err(_) => SpawnStep::Failed(AdmissionFailure::Store),
-            },
-            AdmissionResolution::Conflict(_) => SpawnStep::Conflict(AdmissionConflict),
-            AdmissionResolution::Invalid(_) | AdmissionResolution::Missing => {
-                SpawnStep::Failed(AdmissionFailure::Store)
-            }
-        }
-    }
-
-    async fn resolve_admission(
+    async fn session_from_selected(
         &self,
-        resolution: AdmissionResolution,
-        frame: RunFrame,
-        configuration: ResolvedConfigurationHead,
-    ) -> RuntimeStep {
-        match resolution {
-            AdmissionResolution::Same(run) => {
-                let history = run.clone();
-                match self.session_from_run(run, None).await {
-                    Ok(session) => self.classify_runtime_session(session).await,
-                    Err(error) => RuntimeStep::Failed { history, error },
-                }
-            }
-            AdmissionResolution::Conflict(history) => RuntimeStep::Conflict {
-                history,
-                error: RuntimeError::Identity,
-            },
-            AdmissionResolution::Invalid(history) => RuntimeStep::Failed {
-                history,
-                error: RuntimeError::Identity,
-            },
-            AdmissionResolution::Missing => {
-                RuntimeStep::Suspended(SuspendedRun::admission(self.clone(), frame, configuration))
-            }
-        }
-    }
-
-    async fn classify_runtime_session(&self, session: RunSession) -> RuntimeStep {
-        match session.reduced.action().clone() {
-            RunAction::ZeroStateTerminal { .. }
-            | RunAction::Terminal { .. }
-            | RunAction::Failed { .. } => RuntimeStep::Terminal(TerminalRun::new(session.run)),
-            RunAction::WaitingPreparation { .. } => RuntimeStep::Parked {
-                session,
-                reason: ParkReason::WaitingPreparation,
-            },
-            _ => RuntimeStep::Advanced(session),
-        }
-    }
-
-    async fn session_from_run(
-        &self,
-        run: QualifiedRun,
+        selected: SelectedRun,
         supplied: Option<ErasedValue>,
-    ) -> LifecycleResult<RunSession> {
-        let cpu_permit = self.acquire_cpu_job().await?;
-        let store = Arc::clone(&self.inner.store);
-        let reduction_run = run.clone();
-        let document = self.inner.assembly.program().document().clone();
-        let reduced = tokio::task::spawn_blocking(move || {
-            let _cpu_permit = cpu_permit;
-            store
-                .reduce_qualified(&reduction_run, document)
-                .map_err(|_| RuntimeError::Conclusion)
-        })
-        .await
-        .map_err(|_| RuntimeError::Conclusion)??;
-        self.session_from_reduced(run, reduced, supplied).await
-    }
-
-    async fn session_from_reduced(
-        &self,
-        run: QualifiedRun,
-        reduced: ReducedRunState,
-        supplied: Option<ErasedValue>,
-    ) -> LifecycleResult<RunSession> {
-        let latest = if let Some(value) = supplied {
-            value
+    ) -> std::result::Result<RunSession, SessionBuildFailure> {
+        let latest_result = if let Some(value) = supplied {
+            Ok(value)
         } else {
-            let object = run
-                .frames()
-                .iter()
-                .flat_map(|frame| frame.objects())
-                .find(|object| object.content_ref() == reduced.latest_context().value_ref())
-                .ok_or(RuntimeError::Conclusion)?;
+            let object = selected.latest_context_object();
             let assembly = Arc::clone(&self.inner.assembly);
             let witness = Arc::clone(&self.inner.witness);
-            let contract = reduced.latest_context().contract_ref().clone();
+            let contract = selected.latest_context().contract_ref().clone();
             let canonical_bytes = object.canonical_json().as_bytes().to_vec();
-            let cpu_permit = self.acquire_cpu_job().await?;
-            tokio::task::spawn_blocking(move || {
-                let _cpu_permit = cpu_permit;
-                assembly.reify_value(&witness, &contract, &canonical_bytes)
-            })
-            .await
-            .map_err(|_| RuntimeError::Value)??
+            match self.acquire_cpu_job().await {
+                Ok(cpu_permit) => tokio::task::spawn_blocking(move || {
+                    let _cpu_permit = cpu_permit;
+                    assembly.reify_value(&witness, &contract, &canonical_bytes)
+                })
+                .await
+                .map_err(|_| RuntimeError::Value)
+                .and_then(std::convert::identity),
+                Err(error) => Err(error),
+            }
         };
-        if latest.value_ref() != reduced.latest_context().value_ref()
-            || latest.contract_ref() != reduced.latest_context().contract_ref()
+        let latest = match latest_result {
+            Ok(value) => value,
+            Err(error) => return Err(SessionBuildFailure { selected, error }),
+        };
+        if latest.value_ref() != selected.latest_context().value_ref()
+            || latest.contract_ref() != selected.latest_context().contract_ref()
         {
             #[cfg(test)]
             eprintln!(
-                "latest mismatch supplied={:?} reduced={:?} supplied_contract={:?} reduced_contract={:?}",
+                "latest mismatch supplied={:?} selected={:?} supplied_contract={:?} reduced_contract={:?}",
                 latest.value_ref(),
-                reduced.latest_context().value_ref(),
+                selected.latest_context().value_ref(),
                 latest.contract_ref(),
-                reduced.latest_context().contract_ref(),
+                selected.latest_context().contract_ref(),
             );
-            return Err(RuntimeError::Identity);
+            return Err(SessionBuildFailure {
+                selected,
+                error: RuntimeError::Identity,
+            });
         }
+        let active_permit = match self.acquire_active_session().await {
+            Ok(permit) => permit,
+            Err(error) => return Err(SessionBuildFailure { selected, error }),
+        };
         Ok(RunSession {
             runtime: self.clone(),
-            run,
-            reduced,
+            selected,
             latest,
-            _active_permit: self.acquire_active_session().await?,
+            _active_permit: active_permit,
         })
     }
 }
@@ -1965,23 +1558,29 @@ impl Runtime {
 impl RunSession {
     /// Returns the durable run identity retained by this affine session.
     pub fn run_id(&self) -> &RunId {
-        self.run.run_id()
+        self.selected.run_id()
     }
 
     /// Returns the qualified durable head retained by this affine session.
     pub fn head_sequence(&self) -> u64 {
-        self.run.head_sequence()
+        self.selected.head_sequence()
+    }
+
+    fn drive_access(
+        self,
+        occurrence: mfm_journal::single_trust::SequentialControlAddress,
+    ) -> Pin<Box<dyn Future<Output = RuntimeStep> + Send + 'static>> {
+        Box::pin(self.drive_access_inner(occurrence))
     }
 
     #[allow(clippy::result_large_err)]
-    async fn drive_access(
+    async fn drive_access_inner(
         self,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
     ) -> RuntimeStep {
         let RunSession {
             runtime,
-            run,
-            reduced,
+            selected,
             latest,
             _active_permit,
         } = self;
@@ -1995,7 +1594,7 @@ impl RunSession {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: RuntimeError::Identity,
                 }
             }
@@ -2004,13 +1603,11 @@ impl RunSession {
             Some(binding_ref) => binding_ref.clone(),
             None => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: RuntimeError::Mode,
                 }
             }
         };
-        let maximum_conclusion_bytes = state.maximum_conclusion_bytes();
-        let input_ref = latest.as_value_ref();
         let registration = match runtime
             .inner
             .assembly
@@ -2019,7 +1616,7 @@ impl RunSession {
             Ok(registration) => registration,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error,
                 }
             }
@@ -2028,14 +1625,14 @@ impl RunSession {
             Ok(permit) => permit,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error,
                 }
             }
         };
         let assembly = Arc::clone(&runtime.inner.assembly);
         let witness = Arc::clone(&runtime.inner.witness);
-        let run_id = run.run_id().clone();
+        let run_id = selected.run_id().clone();
         let prepare_occurrence = occurrence.clone();
         let prepared_result = match tokio::task::spawn_blocking(move || {
             let _planning_permit = _planning_permit;
@@ -2063,8 +1660,7 @@ impl RunSession {
                     return RuntimeStep::PreparationRejected {
                         session: RunSession {
                             runtime,
-                            run,
-                            reduced,
+                            selected,
                             latest: input,
                             _active_permit,
                         },
@@ -2072,77 +1668,34 @@ impl RunSession {
                     };
                 }
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: failure.error,
                 };
             }
         };
         drop(_active_permit);
-        let intent_ref = match prepared.intent_ref() {
-            Ok(intent_ref) => intent_ref,
-            Err(error) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error,
-                }
-            }
-        };
-        let preparation_id = match AppendRequestId::new(format!(
-            "runtime-preparation-{}-{}",
-            short_stable_id_fragment(run.run_id().as_str(), 96),
-            run.head_sequence() + 1
-        )) {
-            Ok(id) => id,
-            Err(_) => {
-                return RuntimeStep::Failed {
-                    history: run,
-                    error: RuntimeError::Identity,
-                }
-            }
-        };
-        let expected_sequence = run.head_sequence();
         let committed = prepared
             .commit(
                 Arc::clone(&runtime.inner.assembly),
                 Arc::clone(&runtime.inner.store),
-                run.clone(),
-                reduced,
-                expected_sequence,
-                preparation_id.clone(),
-                input_ref.clone(),
-                intent_ref.clone(),
-                maximum_conclusion_bytes,
-                0,
-                None,
+                selected,
             )
             .await;
         match committed {
-            DynamicCommit::Direct {
-                call,
-                run: committed_run,
-                reduced,
-            } => {
+            DynamicCommit::Direct { call, selected } => {
                 return runtime
-                    .execute_committed_access(committed_run, occurrence, call, reduced)
+                    .execute_committed_access(occurrence, call, selected)
                     .await;
             }
             DynamicCommit::Retained {
                 prepared,
                 disposition,
-                reduced,
+                selected,
             } => RuntimeStep::Suspended(SuspendedRun::preparation(
                 runtime,
                 prepared,
-                run,
-                reduced,
+                selected,
                 occurrence,
-                expected_sequence,
-                preparation_id,
-                input_ref,
-                intent_ref,
-                maximum_conclusion_bytes,
-                0,
-                None,
                 disposition,
             )),
         }
@@ -2154,8 +1707,7 @@ impl RunSession {
     ) -> RuntimeStep {
         let RunSession {
             runtime,
-            run,
-            reduced,
+            selected,
             latest,
             _active_permit,
         } = self;
@@ -2169,7 +1721,7 @@ impl RunSession {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: RuntimeError::Identity,
                 }
             }
@@ -2182,7 +1734,7 @@ impl RunSession {
             Ok(registration) => registration,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error,
                 };
             }
@@ -2196,7 +1748,7 @@ impl RunSession {
             Ok(permit) => permit,
             Err(error) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error,
                 }
             }
@@ -2217,13 +1769,13 @@ impl RunSession {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(error)) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error,
                 };
             }
             Err(_) => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: RuntimeError::Unresolved,
                 };
             }
@@ -2235,7 +1787,7 @@ impl RunSession {
                     Ok(object) => object,
                     Err(error) => {
                         return RuntimeStep::Failed {
-                            history: run,
+                            history: selected.into_qualified_run(),
                             error,
                         }
                     }
@@ -2244,7 +1796,7 @@ impl RunSession {
                     Ok(value) => Some(value),
                     Err(error) => {
                         return RuntimeStep::Failed {
-                            history: run,
+                            history: selected.into_qualified_run(),
                             error,
                         }
                     }
@@ -2262,7 +1814,7 @@ impl RunSession {
                     Ok(object) => object,
                     Err(error) => {
                         return RuntimeStep::Failed {
-                            history: run,
+                            history: selected.into_qualified_run(),
                             error,
                         }
                     }
@@ -2271,55 +1823,26 @@ impl RunSession {
             }
         };
         drop(_active_permit);
-        let owner = match runtime
-            .inner
-            .store
-            .prepare_conclusion_qualified_with_reduced(
-                &run,
-                runtime.inner.assembly.program().document(),
-                &reduced,
-                run.head_sequence(),
-                StateConcluded::Pure {
-                    occurrence,
-                    outcome: recorded,
-                    fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
-                    fact_publication: None,
-                },
-                {
-                    let mut objects = vec![object];
-                    if let Some((_, object)) = fact_proposals {
-                        objects.push(object);
-                    }
-                    objects
-                },
-                state.maximum_conclusion_bytes(),
-            ) {
-            Ok(owner) => owner,
-            Err(error) => {
+        let owner = match runtime.inner.store.prepare_selected_pure_conclusion(
+            selected,
+            recorded,
+            object,
+            fact_proposals,
+        ) {
+            SelectedConclusionPreparationOutcome::Prepared(owner) => owner,
+            SelectedConclusionPreparationOutcome::Rejected { selected, error } => {
                 return RuntimeStep::Failed {
-                    history: run,
+                    history: selected.into_qualified_run(),
                     error: error.into(),
                 };
             }
         };
-        match runtime.inner.store.commit_conclusion(owner).await {
-            Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner)) => {
-                RuntimeStep::Suspended(SuspendedRun::conclusion(
-                    runtime.clone(),
-                    owner,
-                    run.clone(),
-                    reduced.clone(),
-                    successor,
-                ))
+        match runtime.inner.store.commit_selected_conclusion(owner).await {
+            SelectedConclusionOutcome::AcknowledgementUnknown(owner) => {
+                RuntimeStep::Suspended(SuspendedRun::conclusion(runtime.clone(), owner, successor))
             }
-            Ok(ConclusionCommitOutcome::Rejected { owner, error }) => {
-                let suspended = SuspendedRun::conclusion(
-                    runtime.clone(),
-                    owner,
-                    run.clone(),
-                    reduced.clone(),
-                    successor,
-                );
+            SelectedConclusionOutcome::Rejected { owner, error } => {
+                let suspended = SuspendedRun::conclusion(runtime.clone(), owner, successor);
                 match error {
                     mfm_store::StoreError::FactFrontierChanged
                     | mfm_store::StoreError::Conflict
@@ -2330,33 +1853,25 @@ impl RunSession {
                     },
                 }
             }
-            Ok(ConclusionCommitOutcome::AlreadyConcludedSame { history })
-            | Ok(ConclusionCommitOutcome::NoLongerSelected { history }) => {
-                runtime.reloaded_step(history).await
+            SelectedConclusionOutcome::AlreadyConcludedSame(next)
+            | SelectedConclusionOutcome::NoLongerSelected(next)
+            | SelectedConclusionOutcome::Committed(next) => {
+                runtime.step_from_selected(next, successor).await
             }
-            Ok(ConclusionCommitOutcome::Conflict { history }) => RuntimeStep::Conflict {
+            SelectedConclusionOutcome::Conflict(history) => RuntimeStep::Conflict {
                 history,
                 error: RuntimeError::Conclusion,
             },
-            Ok(ConclusionCommitOutcome::InvalidHistory { history }) => RuntimeStep::Failed {
+            SelectedConclusionOutcome::InvalidHistory(history) => RuntimeStep::Failed {
                 history,
                 error: RuntimeError::Conclusion,
-            },
-            Ok(ConclusionCommitOutcome::Disposition { disposition, frame }) => {
-                runtime
-                    .finish_conclusion(run, reduced, frame, disposition, successor)
-                    .await
-            }
-            Err(error) => RuntimeStep::Failed {
-                history: run,
-                error: error.into(),
             },
         }
     }
 
     /// Consumes this session and performs one deterministic Runtime step.
     pub async fn drive(self) -> RuntimeStep {
-        let action = self.reduced.action().clone();
+        let action = self.selected.action().clone();
         match action {
             RunAction::ReadyPure { occurrence, .. } => self.drive_pure(occurrence).await,
             RunAction::WaitingPreparation { .. } => RuntimeStep::Parked {
@@ -2366,7 +1881,9 @@ impl RunSession {
             RunAction::ReadyAccess { occurrence, .. } => self.drive_access(occurrence).await,
             RunAction::ZeroStateTerminal { .. }
             | RunAction::Terminal { .. }
-            | RunAction::Failed { .. } => RuntimeStep::Terminal(TerminalRun::new(self.run)),
+            | RunAction::Failed { .. } => {
+                RuntimeStep::Terminal(TerminalRun::new(self.selected.into_qualified_run()))
+            }
         }
     }
 }
@@ -2378,7 +1895,6 @@ pub struct AdmissionInput<T: MfmValue> {
     value: QualifiedTypedValue<T>,
     configuration: ResolvedConfigurationHead,
     source_refs: Vec<ContentRef>,
-    append_request_id: AppendRequestId,
 }
 
 impl<T: MfmValue> AdmissionInput<T> {
@@ -2389,7 +1905,6 @@ impl<T: MfmValue> AdmissionInput<T> {
         value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
-        append_request_id: AppendRequestId,
     ) -> LifecycleResult<Self> {
         if !value.belongs_to_catalog(runtime.inner.assembly.catalog())
             || value.contract_ref()
@@ -2408,27 +1923,17 @@ impl<T: MfmValue> AdmissionInput<T> {
             value,
             configuration,
             source_refs,
-            append_request_id,
         })
     }
 
     /// Consumes this owner into an exhaustive admission outcome.
     pub async fn spawn(self) -> SpawnStep {
-        let value = match ErasedValue::from_qualified(
-            self.runtime.inner.assembly.catalog(),
-            &self.runtime.inner.witness,
-            self.value,
-        ) {
-            Ok(value) => value,
-            Err(_) => return SpawnStep::Failed(AdmissionFailure::Identity),
-        };
         self.runtime
-            .spawn_erased(
+            .spawn_typed(
                 self.run_id,
-                value,
+                self.value,
                 self.configuration,
                 self.source_refs,
-                self.append_request_id,
             )
             .await
     }
@@ -2685,7 +2190,29 @@ mod tests {
         )
     }
 
-    fn pure_runtime_fixture() -> (Runtime, ProgramCatalog, ContentRef) {
+    fn runtime_with_ports(
+        assembly: RuntimeAssembly,
+        store: mfm_store::OpenedStructuredStore,
+    ) -> (
+        Runtime,
+        mfm_store::ConfigurationStore,
+        mfm_store::HistoryReader,
+    ) {
+        let (history, reader, configuration, _audit) = store.split().into_parts();
+        (
+            Runtime::new(assembly, history).expect("runtime"),
+            configuration,
+            reader,
+        )
+    }
+
+    fn pure_runtime_fixture() -> (
+        Runtime,
+        mfm_store::ConfigurationStore,
+        mfm_store::HistoryReader,
+        ProgramCatalog,
+        ContentRef,
+    ) {
         let (assembly, catalog, contract) = pure_runtime_assembly(None);
         let store = StructuredStore::open_memory(
             test_identity(),
@@ -2693,15 +2220,13 @@ mod tests {
             StoreWorkLimits::default(),
         )
         .expect("store");
-        (
-            Runtime::new(assembly, store).expect("runtime"),
-            catalog,
-            contract,
-        )
+        let (runtime, configuration, reader) = runtime_with_ports(assembly, store);
+        (runtime, configuration, reader, catalog, contract)
     }
 
-    async fn test_configuration(runtime: &Runtime) -> ResolvedConfigurationHead {
-        let configuration = runtime.store().configuration();
+    async fn test_configuration(
+        configuration: &mfm_store::ConfigurationStore,
+    ) -> ResolvedConfigurationHead {
         let owner = configuration
             .initial_write_session::<TestConfig>()
             .prepare_local(
@@ -2879,7 +2404,7 @@ mod tests {
             StoreWorkLimits::default(),
         )
         .expect("store");
-        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let (runtime, configuration_store, reader) = runtime_with_ports(assembly, store);
         let value = catalog
             .qualify(contract, TestContext { value: 1 })
             .expect("qualified input");
@@ -2887,15 +2412,9 @@ mod tests {
             "run:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration = test_configuration(&runtime).await;
+        let configuration = test_configuration(&configuration_store).await;
         let admission = runtime
-            .admission(
-                run_id,
-                value,
-                configuration,
-                Vec::new(),
-                AppendRequestId::new("runtime-admission").expect("append id"),
-            )
+            .admission(run_id, value, configuration, Vec::new())
             .expect("admission");
         let session = match admission.spawn().await {
             SpawnStep::Active(session) => session,
@@ -2908,7 +2427,7 @@ mod tests {
         };
         assert_eq!(advanced.head_sequence(), 2);
         let run_id = advanced.run_id().clone();
-        let hot_prefix = runtime.store().load(&run_id).await.expect("hot prefix");
+        let hot_prefix = reader.load(&run_id).await.expect("hot prefix");
         let hot_frame_bytes: usize = hot_prefix
             .frames()
             .iter()
@@ -2976,7 +2495,7 @@ mod tests {
         )
         .await
         .expect("store");
-        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
         let run_id = RunId::parse(
             "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -2984,15 +2503,9 @@ mod tests {
         let value = catalog
             .qualify(contract, TestContext { value: 1 })
             .expect("qualified input");
-        let configuration = test_configuration(&runtime).await;
+        let configuration = test_configuration(&configuration_store).await;
         let admission = runtime
-            .admission(
-                run_id,
-                value,
-                configuration,
-                Vec::new(),
-                AppendRequestId::new("unknown-runtime-admission-0123456789").expect("append id"),
-            )
+            .admission(run_id, value, configuration, Vec::new())
             .expect("admission");
         let session = match admission.spawn().await {
             SpawnStep::Active(session) => session,
@@ -3022,34 +2535,22 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_spawn_and_resume_share_cas_outcomes_without_duplicate_pure_entries() {
-        let (runtime, catalog, contract) = pure_runtime_fixture();
+        let (runtime, configuration_store, _reader, catalog, contract) = pure_runtime_fixture();
         let run_id = RunId::parse(
             "run:sha256-jcs-v1:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration = test_configuration(&runtime).await;
+        let configuration = test_configuration(&configuration_store).await;
         let value = |amount| {
             catalog
                 .qualify(contract.clone(), TestContext { value: amount })
                 .expect("qualified value")
         };
         let left = runtime
-            .admission(
-                run_id.clone(),
-                value(1),
-                configuration.clone(),
-                Vec::new(),
-                AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
-            )
+            .admission(run_id.clone(), value(1), configuration.clone(), Vec::new())
             .expect("admission");
         let right = runtime
-            .admission(
-                run_id.clone(),
-                value(1),
-                configuration.clone(),
-                Vec::new(),
-                AppendRequestId::new("concurrent-spawn-right-0123456789").expect("request"),
-            )
+            .admission(run_id.clone(), value(1), configuration.clone(), Vec::new())
             .expect("admission");
         let (left, right) = tokio::join!(left.spawn(), right.spawn());
         assert!(matches!(
@@ -3063,13 +2564,7 @@ mod tests {
 
         let value = value(1);
         let seed = runtime
-            .admission(
-                run_id.clone(),
-                value,
-                configuration,
-                Vec::new(),
-                AppendRequestId::new("concurrent-spawn-left-0123456789").expect("request"),
-            )
+            .admission(run_id.clone(), value, configuration, Vec::new())
             .expect("same admission");
         drop(seed.spawn().await);
 
@@ -3212,7 +2707,7 @@ mod tests {
             StoreWorkLimits::default(),
         )
         .expect("store");
-        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
         let value = catalog
             .qualify(contract, TestContext { value: 4 })
             .expect("qualified input");
@@ -3220,15 +2715,9 @@ mod tests {
             "run:sha256-jcs-v1:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration = test_configuration(&runtime).await;
+        let configuration = test_configuration(&configuration_store).await;
         let admission = runtime
-            .admission(
-                run_id.clone(),
-                value,
-                configuration,
-                Vec::new(),
-                AppendRequestId::new("runtime-access-admission").expect("append id"),
-            )
+            .admission(run_id.clone(), value, configuration, Vec::new())
             .expect("admission");
         let session = match admission.spawn().await {
             SpawnStep::Active(session) => session,
@@ -3374,7 +2863,7 @@ mod tests {
             StoreWorkLimits::default(),
         )
         .expect("store");
-        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
         let value = catalog
             .qualify(contract, TestContext { value: 4 })
             .expect("qualified input");
@@ -3382,15 +2871,9 @@ mod tests {
             "run:sha256-jcs-v1:5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
         .expect("run id");
-        let configuration = test_configuration(&runtime).await;
+        let configuration = test_configuration(&configuration_store).await;
         let admission = runtime
-            .admission(
-                run_id.clone(),
-                value,
-                configuration,
-                Vec::new(),
-                AppendRequestId::new("runtime-effect-admission").expect("append id"),
-            )
+            .admission(run_id.clone(), value, configuration, Vec::new())
             .expect("admission");
         let session = match admission.spawn().await {
             SpawnStep::Active(session) => session,
@@ -3513,6 +2996,7 @@ mod tests {
             RuntimeStep::Parked { .. } => "parked",
             RuntimeStep::Suspended(_) => "suspended",
             RuntimeStep::ConclusionRejected { .. } => "conclusion-rejected",
+            RuntimeStep::AdmissionRejected(_) => "admission-rejected",
             RuntimeStep::Conflict { .. } => "conflict",
             RuntimeStep::Failed { .. } => "failed",
         }

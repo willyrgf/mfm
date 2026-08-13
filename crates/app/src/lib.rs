@@ -6,7 +6,6 @@
 //! redacted `RunNotFound` result as an absent run.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::Mutex;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
@@ -18,13 +17,12 @@ use mfm_evm::{
     EvmSubmissionOutput, EvmSubmissionRequest, EvmTokenBalanceInput, ReadBalance,
     ReadWalletNonceStatus, EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID,
 };
-use mfm_ids::{
-    short_stable_id_fragment, AppendRequestId, ContentRef, DigestAlgorithm, RunId, SchemaId,
-    SequentialControlAddress, StableId, TenantScopeId,
-};
 #[cfg(test)]
-use mfm_ids::{StoreEpoch, StoreScopeId};
-use mfm_journal::single_trust::{ImmutableObject, RunAdmitted, RunFrame, RunRecord, ValueRef};
+use mfm_ids::{AppendRequestId, StoreEpoch, StoreScopeId};
+use mfm_ids::{
+    ContentRef, DigestAlgorithm, RunId, SchemaId, SequentialControlAddress, StableId, TenantScopeId,
+};
+use mfm_journal::single_trust::{RunFrame, RunRecord};
 use mfm_portfolio::{
     PortfolioConfig, PortfolioContinuation, PortfolioSnapshotFailure, PortfolioSnapshotInput,
     PortfolioSnapshotOutput, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
@@ -35,8 +33,11 @@ use mfm_program::single_trust::{
 };
 use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
 use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
-use mfm_store::{AppendDisposition, RunAction, StoreError};
-use mfm_store::{OpenedStructuredStore, ResolvedConfigurationHead};
+use mfm_store::{
+    ConfigurationStore, HistoryReader, PreparedAdmission, QualifiedHistoryPort,
+    ResolvedConfigurationHead, StoreAuditPort,
+};
+use mfm_store::{RunAction, StoreError};
 #[cfg(test)]
 use mfm_store::{StoreWorkLimits, StructuredStore, StructuredStoreIdentity};
 use mfm_values::{string_contains_secret_marker, MfmConfig, MfmValue};
@@ -272,18 +273,29 @@ impl ExportedRun {
 /// Fixed-tenant application facade.
 pub struct Application {
     tenant_scope_id: TenantScopeId,
-    store: Arc<OpenedStructuredStore>,
+    history: QualifiedHistoryPort,
+    reader: HistoryReader,
+    _configuration: ConfigurationStore,
+    _audit: StoreAuditPort,
     catalog: ProgramCatalog,
     supported_entry_points: BTreeMap<StableId, ()>,
     configuration_heads: BTreeMap<StableId, ResolvedConfigurationHead>,
     runtimes: BTreeMap<StableId, Runtime>,
-    suspended: Mutex<BTreeMap<RunId, SuspendedRun>>,
+    suspended: Mutex<BTreeMap<RunId, ApplicationSuspended>>,
+}
+
+enum ApplicationSuspended {
+    Runtime(Box<SuspendedRun>),
+    Admission(Box<PreparedAdmission>),
 }
 
 impl Application {
-    /// Composes one facade from an already-opened Store and explicit per-entry configuration heads.
+    /// Composes one facade from explicit Store ports and per-entry configuration heads.
     pub fn new(
-        store: OpenedStructuredStore,
+        history: QualifiedHistoryPort,
+        reader: HistoryReader,
+        configuration: ConfigurationStore,
+        audit: StoreAuditPort,
         portfolio_configuration: ResolvedConfigurationHead,
         evm_configuration: ResolvedConfigurationHead,
         runtimes: Vec<Runtime>,
@@ -296,20 +308,20 @@ impl Application {
             != &<PortfolioConfig as MfmConfig>::schema_id().map_err(|_| PublicError::Internal)?
             || evm_configuration.content_ref().schema_id()
                 != &EvmConfig::schema_id().map_err(|_| PublicError::Internal)?
-            || store
-                .configuration_projection(&portfolio_configuration)
-                .is_err()
-            || store.configuration_projection(&evm_configuration).is_err()
         {
             return Err(PublicError::Internal);
         }
         let mut runtime_map = BTreeMap::new();
         for runtime in runtimes {
-            let runtime_store = runtime.store();
-            if !store.same_open(&runtime_store) {
-                return Err(PublicError::Internal);
-            }
-            if !store.catalog().same_catalog(runtime_store.catalog()) {
+            let configuration_head = if runtime.entry_point_id() == portfolio_id {
+                &portfolio_configuration
+            } else {
+                &evm_configuration
+            };
+            if history.identity() != runtime.store_identity()
+                || !history.catalog().same_catalog(&runtime.catalog())
+                || !runtime.accepts_configuration_head(configuration_head)
+            {
                 return Err(PublicError::Internal);
             }
             let entry_point = runtime.entry_point_id();
@@ -323,10 +335,20 @@ impl Application {
         {
             return Err(PublicError::Internal);
         }
-        let tenant_scope_id = store.identity().tenant().clone();
-        let catalog = store.catalog().clone();
+        if (!runtime_map.contains_key(&portfolio_id)
+            && !configuration.owns_head(&portfolio_configuration))
+            || (!runtime_map.contains_key(&evm_id) && !configuration.owns_head(&evm_configuration))
+        {
+            return Err(PublicError::Internal);
+        }
+        let identity = history.identity().clone();
+        let tenant_scope_id = identity.tenant().clone();
+        let catalog = history.catalog().clone();
         Ok(Self {
-            store: Arc::new(store),
+            history,
+            reader,
+            _configuration: configuration,
+            _audit: audit,
             catalog,
             tenant_scope_id,
             supported_entry_points: BTreeMap::from([
@@ -375,7 +397,10 @@ impl Application {
         let identity_input = request.input.clone();
         let (canonical, contract_ref, document) =
             canonical_typed_admission(&entry_point_id, request.input)?;
-        let program = program_ref(&document)?;
+        let program = self
+            .catalog
+            .program(document.clone())
+            .map_err(|_| PublicError::Internal)?;
         let identity = if entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
             let typed: EvmSubmissionRequest = serde_json::from_value(identity_input.clone())
                 .map_err(|_| PublicError::Internal)?;
@@ -396,16 +421,6 @@ impl Application {
             DigestAlgorithm::Sha256JcsV1,
             sha256_digest_bytes(identity.as_bytes()),
         );
-        let context_ref = ContentRef::new(
-            contract_ref.schema_id().clone(),
-            raw_content_digest(canonical.as_bytes()),
-        )
-        .map_err(|_| PublicError::Internal)?;
-        let append_request_id = AppendRequestId::new(format!(
-            "admit-{}",
-            short_stable_id_fragment(run_id.as_str(), 48)
-        ))
-        .map_err(|_| PublicError::Internal)?;
         let configuration = self
             .configuration_heads
             .get(&entry_point_id)
@@ -420,13 +435,7 @@ impl Application {
                     .qualify(contract_ref.clone(), typed)
                     .map_err(|_| PublicError::Internal)?;
                 runtime
-                    .admission(
-                        run_id.clone(),
-                        value,
-                        configuration.clone(),
-                        Vec::new(),
-                        append_request_id,
-                    )
+                    .admission(run_id.clone(), value, configuration.clone(), Vec::new())
                     .map_err(|_| PublicError::Internal)?
                     .spawn()
                     .await
@@ -438,13 +447,7 @@ impl Application {
                     .qualify(contract_ref.clone(), typed)
                     .map_err(|_| PublicError::Internal)?;
                 runtime
-                    .admission(
-                        run_id.clone(),
-                        value,
-                        configuration.clone(),
-                        Vec::new(),
-                        append_request_id,
-                    )
+                    .admission(run_id.clone(), value, configuration.clone(), Vec::new())
                     .map_err(|_| PublicError::Internal)?
                     .spawn()
                     .await
@@ -457,7 +460,10 @@ impl Application {
                     if owners.contains_key(&run_id) {
                         return Err(PublicError::Internal);
                     }
-                    owners.insert(run_id.clone(), suspended);
+                    owners.insert(
+                        run_id.clone(),
+                        ApplicationSuspended::Runtime(Box::new(suspended)),
+                    );
                     "acknowledgement_unknown"
                 }
                 SpawnStep::Conflict(_) => {
@@ -473,69 +479,81 @@ impl Application {
                 disposition,
             });
         }
-        let admission = RunAdmitted::new(
-            self.store.identity().scope().clone(),
-            self.store.identity().epoch(),
-            run_id.clone(),
-            self.tenant_scope_id.clone(),
-            entry_point_id,
-            program,
-            ValueRef::new(contract_ref, context_ref.clone()),
-            self.store
-                .configuration_projection(&configuration)
-                .map_err(map_store_error)?,
-            Vec::new(),
-        )
-        .map_err(|_| PublicError::Internal)?;
-        let frame = RunFrame::new(
-            run_id.clone(),
-            self.store.identity().scope().clone(),
-            self.store.identity().epoch(),
-            1,
-            append_request_id,
-            RunRecord::RunAdmitted(admission),
-            vec![ImmutableObject::new(
-                StableId::new("mfm.value").map_err(|_| PublicError::Internal)?,
-                context_ref,
-                canonical.as_str().to_owned(),
-            )
-            .map_err(|_| PublicError::Internal)?],
-        )
-        .map_err(|_| PublicError::Internal)?;
-        let disposition = self
-            .store
-            .append_admission(frame, &configuration)
-            .await
-            .map_err(map_store_error)?;
+        let outcome = if entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
+            let typed: EvmSubmissionRequest =
+                serde_json::from_value(identity_input).map_err(|_| PublicError::Internal)?;
+            let value = self
+                .catalog
+                .qualify(contract_ref, typed)
+                .map_err(|_| PublicError::Internal)?;
+            self.history
+                .admit(run_id.clone(), &program, &value, configuration, Vec::new())
+                .await
+        } else {
+            let typed: PortfolioSnapshotInput =
+                serde_json::from_value(identity_input).map_err(|_| PublicError::Internal)?;
+            let value = self
+                .catalog
+                .qualify(contract_ref, typed)
+                .map_err(|_| PublicError::Internal)?;
+            self.history
+                .admit(run_id.clone(), &program, &value, configuration, Vec::new())
+                .await
+        };
+        let disposition = match outcome {
+            mfm_store::AdmissionOutcome::Selected(_, disposition) => match disposition {
+                mfm_store::AppendDisposition::NewlyCommitted { .. } => "newly_committed",
+                mfm_store::AppendDisposition::Found { .. } => "found",
+                mfm_store::AppendDisposition::StaleHead { .. } => "stale_head",
+                mfm_store::AppendDisposition::AcknowledgementUnknown => "acknowledgement_unknown",
+            },
+            mfm_store::AdmissionOutcome::AcknowledgementUnknown(owner)
+            | mfm_store::AdmissionOutcome::RetainedRejected { owner, .. } => {
+                self.suspended
+                    .lock()
+                    .map_err(|_| PublicError::Internal)?
+                    .insert(
+                        run_id.clone(),
+                        ApplicationSuspended::Admission(Box::new(owner)),
+                    );
+                "acknowledgement_unknown"
+            }
+            mfm_store::AdmissionOutcome::Conflict(_) => {
+                return Err(PublicError::BadRequest {
+                    code: "AdmissionConflict",
+                    message: "The run identity already has a different admission",
+                })
+            }
+            mfm_store::AdmissionOutcome::Rejected(error) => return Err(map_store_error(error)),
+        };
         Ok(AdmitRunResponse {
             run_id,
-            disposition: disposition_name(disposition),
+            disposition,
         })
     }
 
     /// Advances only callback-free retained state in this fixed facade.
     pub async fn drive(&self, run_id: RunId) -> Result<DriveResponse> {
-        if !self.runtimes.is_empty() {
-            let run = self.store.load(&run_id).await.map_err(map_store_error)?;
-            let entry_point = match run.frames().first().map(RunFrame::record) {
-                Some(RunRecord::RunAdmitted(admission)) => admission.entry_point_id().clone(),
-                _ => return Err(PublicError::Internal),
-            };
-            let runtime = self
-                .runtimes
-                .get(&entry_point)
-                .ok_or(PublicError::Internal)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
+        let entry_point = match run.frames().first().map(RunFrame::record) {
+            Some(RunRecord::RunAdmitted(admission)) => admission.entry_point_id().clone(),
+            _ => return Err(PublicError::Internal),
+        };
+        if let Some(runtime) = self.runtimes.get(&entry_point) {
             return self.drive_with_runtime(runtime, run_id).await;
         }
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
-        let reduced = self
-            .store
-            .reduce(&run_id, document)
+        let program = self
+            .catalog
+            .program(document)
+            .map_err(|_| PublicError::Internal)?;
+        let selected = self
+            .history
+            .select(&run_id, &program)
             .await
             .map_err(map_store_error)?;
         if matches!(
-            reduced.action(),
+            selected.action(),
             RunAction::ReadyPure { .. }
                 | RunAction::ReadyAccess { .. }
                 | RunAction::WaitingPreparation { .. }
@@ -544,8 +562,8 @@ impl Application {
         }
         Ok(DriveResponse {
             run_id,
-            head_sequence: run.head_sequence(),
-            status: status_from_action(reduced.action()),
+            head_sequence: selected.head_sequence(),
+            status: status_from_action(selected.action()),
         })
     }
 
@@ -559,7 +577,7 @@ impl Application {
             owners.pop_first().map(|(_, suspended)| suspended)
         }
         .ok_or(PublicError::Internal)?;
-        self.finish_runtime_step(suspended.resolve().await).await
+        self.resolve_application_suspended(suspended).await
     }
 
     /// Resolves one application-retained suspended Runtime owner by run identity.
@@ -570,7 +588,38 @@ impl Application {
             .map_err(|_| PublicError::Internal)?
             .remove(&run_id)
             .ok_or(PublicError::Internal)?;
-        self.finish_runtime_step(suspended.resolve().await).await
+        self.resolve_application_suspended(suspended).await
+    }
+
+    async fn resolve_application_suspended(
+        &self,
+        suspended: ApplicationSuspended,
+    ) -> Result<DriveResponse> {
+        match suspended {
+            ApplicationSuspended::Runtime(owner) => {
+                self.finish_runtime_step((*owner).resolve().await).await
+            }
+            ApplicationSuspended::Admission(owner) => {
+                let run_id = owner.run_id().clone();
+                match self.history.resolve_admission(*owner).await {
+                    mfm_store::AdmissionOutcome::Selected(selected, _) => Ok(DriveResponse {
+                        run_id,
+                        head_sequence: selected.head_sequence(),
+                        status: status_from_action(selected.action()),
+                    }),
+                    mfm_store::AdmissionOutcome::AcknowledgementUnknown(owner)
+                    | mfm_store::AdmissionOutcome::RetainedRejected { owner, .. } => {
+                        self.suspended
+                            .lock()
+                            .map_err(|_| PublicError::Internal)?
+                            .insert(run_id, ApplicationSuspended::Admission(Box::new(owner)));
+                        Err(PublicError::Internal)
+                    }
+                    mfm_store::AdmissionOutcome::Conflict(_)
+                    | mfm_store::AdmissionOutcome::Rejected(_) => Err(PublicError::Internal),
+                }
+            }
+        }
     }
 
     async fn drive_with_runtime(&self, runtime: &Runtime, run_id: RunId) -> Result<DriveResponse> {
@@ -627,10 +676,13 @@ impl Application {
                     if owners.contains_key(&run_id) {
                         return Err(PublicError::Internal);
                     }
-                    owners.insert(run_id.clone(), suspended);
+                    owners.insert(
+                        run_id.clone(),
+                        ApplicationSuspended::Runtime(Box::new(suspended)),
+                    );
                 }
                 let head_sequence = self
-                    .store
+                    .reader
                     .load(&run_id)
                     .await
                     .map_err(map_store_error)?
@@ -641,7 +693,8 @@ impl Application {
                     status: RunStatus::WaitingPreparation,
                 })
             }
-            RuntimeStep::ConclusionRejected { .. }
+            RuntimeStep::AdmissionRejected(_)
+            | RuntimeStep::ConclusionRejected { .. }
             | RuntimeStep::Conflict { .. }
             | RuntimeStep::Failed { .. } => Err(PublicError::Internal),
         }
@@ -649,24 +702,28 @@ impl Application {
 
     /// Reads one run inside this fixed tenant partition.
     pub async fn read_public_run(&self, run_id: RunId) -> Result<PublicRunView> {
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
-        let reduced = self
-            .store
-            .reduce(&run_id, document)
+        let program = self
+            .catalog
+            .program(document)
+            .map_err(|_| PublicError::Internal)?;
+        let selected = self
+            .history
+            .select(&run_id, &program)
             .await
             .map_err(map_store_error)?;
         Ok(PublicRunView {
             run_id,
             tenant_scope_id: self.tenant_scope_id.clone(),
-            head_sequence: run.head_sequence(),
-            status: status_from_action(reduced.action()),
+            head_sequence: selected.head_sequence(),
+            status: status_from_action(selected.action()),
         })
     }
 
     /// Replays a retained prefix with zero live callbacks.
     pub async fn replay_run(&self, run_id: RunId) -> Result<ReplayResponse> {
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
         qualify_with_program(&run, document)
             .map(Into::into)
@@ -675,7 +732,7 @@ impl Application {
 
     /// Returns a redacted structural trace without exposing retained values or objects.
     pub async fn trace_run(&self, run_id: RunId) -> Result<TraceResponse> {
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
         let records = run
             .frames()
             .iter()
@@ -703,7 +760,7 @@ impl Application {
 
     /// Returns preparation/supersession/conclusion status without live callbacks.
     pub async fn audit_access(&self, run_id: RunId) -> Result<AccessAuditResponse> {
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
         let mut entries: BTreeMap<SequentialControlAddress, AccessAuditEntry> = BTreeMap::new();
         for frame in run.frames() {
             match frame.record() {
@@ -736,7 +793,7 @@ impl Application {
 
     /// Exports the strict three-family frame stream.
     pub async fn export_run(&self, run_id: RunId) -> Result<ExportedRun> {
-        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
         let portable = PortableRun::from_run(&run);
         let bytes = portable.encode().map_err(map_replay_error)?;
         Ok(ExportedRun { bytes })
@@ -1388,15 +1445,6 @@ fn value_ref(schema_name: &str, bytes: &[u8]) -> Result<ContentRef> {
     ContentRef::new(schema, raw_content_digest(bytes)).map_err(|_| PublicError::Internal)
 }
 
-fn disposition_name(disposition: AppendDisposition) -> &'static str {
-    match disposition {
-        AppendDisposition::NewlyCommitted { .. } => "newly_committed",
-        AppendDisposition::Found { .. } => "found",
-        AppendDisposition::StaleHead { .. } => "stale_head",
-        AppendDisposition::AcknowledgementUnknown => "acknowledgement_unknown",
-    }
-}
-
 fn map_store_error(error: StoreError) -> PublicError {
     match error {
         StoreError::NotFound => PublicError::RunNotFound,
@@ -1446,7 +1494,14 @@ mod tests {
     use mfm_store::ConfigurationCommitOutcome;
     use mfm_values::ValidatedConfig;
 
-    async fn test_application() -> Application {
+    async fn test_components() -> (
+        QualifiedHistoryPort,
+        HistoryReader,
+        ConfigurationStore,
+        StoreAuditPort,
+        ResolvedConfigurationHead,
+        ResolvedConfigurationHead,
+    ) {
         let identity = StructuredStoreIdentity::new(
             StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
                 .expect("scope"),
@@ -1460,7 +1515,7 @@ mod tests {
             StoreWorkLimits::default(),
         )
         .expect("store");
-        let configuration = store.configuration();
+        let (history, reader, configuration, audit) = store.split().into_parts();
         let portfolio = configuration
             .initial_write_session::<PortfolioConfig>()
             .prepare_local(
@@ -1505,10 +1560,25 @@ mod tests {
             portfolio_head.sequence()
         );
         assert_eq!(restarted_evm.head().sequence(), evm_head.sequence());
-        Application::new(
-            store,
+        (
+            history,
+            reader,
+            configuration,
+            audit,
             restarted_portfolio.into_head(),
             restarted_evm.into_head(),
+        )
+    }
+
+    async fn test_application() -> Application {
+        let (history, reader, configuration, audit, portfolio, evm) = test_components().await;
+        Application::new(
+            history,
+            reader,
+            configuration,
+            audit,
+            portfolio,
+            evm,
             Vec::new(),
         )
         .expect("application")
@@ -1529,7 +1599,7 @@ mod tests {
             .admit_run(AdmitRunRequest::new(entry.clone(), input).expect("request"))
             .await;
         let response = response.expect("admission");
-        let retained = app.store.load(&response.run_id).await.expect("retained");
+        let retained = app.reader.load(&response.run_id).await.expect("retained");
         let RunRecord::RunAdmitted(admitted) = retained.frames()[0].record() else {
             panic!("expected admission")
         };
@@ -1578,7 +1648,10 @@ mod tests {
         assert_eq!(retry.disposition, "found");
         assert_eq!(
             app.admit_run(request("101")).await,
-            Err(PublicError::Internal)
+            Err(PublicError::BadRequest {
+                code: "AdmissionConflict",
+                message: "The run identity already has a different admission",
+            })
         );
     }
 
@@ -1603,7 +1676,7 @@ mod tests {
             .admit_run(AdmitRunRequest::new(entry, input).expect("request"))
             .await
             .expect("admission");
-        let retained = app.store.load(&response.run_id).await.expect("retained");
+        let retained = app.reader.load(&response.run_id).await.expect("retained");
         let RunRecord::RunAdmitted(admitted) = retained.frames()[0].record() else {
             panic!("expected admission")
         };
@@ -1648,27 +1721,29 @@ mod tests {
 
     #[tokio::test]
     async fn composition_rejects_foreign_and_wrong_type_configuration_heads() {
-        let first = test_application().await;
-        let second = test_application().await;
-        let portfolio = StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).expect("portfolio");
-        let evm = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID).expect("evm");
-        let first_portfolio = first.configuration_heads[&portfolio].clone();
-        let first_evm = first.configuration_heads[&evm].clone();
-        let second_portfolio = second.configuration_heads[&portfolio].clone();
-        let second_evm = second.configuration_heads[&evm].clone();
+        let (history, reader, configuration, audit, _, _) = test_components().await;
+        let (_, _, _, _, second_portfolio, second_evm) = test_components().await;
 
         assert!(matches!(
             Application::new(
-                first.store.as_ref().clone(),
+                history,
+                reader,
+                configuration,
+                audit,
                 second_portfolio,
                 second_evm,
                 Vec::new(),
             ),
             Err(PublicError::Internal)
         ));
+        let (history, reader, configuration, audit, first_portfolio, first_evm) =
+            test_components().await;
         assert!(matches!(
             Application::new(
-                first.store.as_ref().clone(),
+                history,
+                reader,
+                configuration,
+                audit,
                 first_evm,
                 first_portfolio,
                 Vec::new(),

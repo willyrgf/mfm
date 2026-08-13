@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         application_catalog()?,
         StoreWorkLimits::default(),
     )?;
-    let configuration = store.configuration();
+    let (history, reader, configuration, audit) = store.split().into_parts();
     let portfolio = configuration
         .initial_write_session::<PortfolioConfig>()
         .prepare_local(
@@ -85,7 +85,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ConfigurationCommitOutcome::NewlyCommitted(resolved) => resolved,
         _ => return Err("failed to persist EVM configuration".into()),
     };
-    let app = Application::new(store, portfolio_head, evm.into_head(), Vec::new())?;
+    let app = Application::new(
+        history,
+        reader,
+        configuration,
+        audit,
+        portfolio_head,
+        evm.into_head(),
+        Vec::new(),
+    )?;
     let output = match cli.command {
         Command::Admit { entry_point, input } => {
             if input.len() > MAX_ADMISSION_BYTES {

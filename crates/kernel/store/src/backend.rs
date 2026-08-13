@@ -18,14 +18,18 @@ use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentDigest, ContentRef, RunId, StoreEpoch,
     StoreScopeId, TenantScopeId,
 };
-use mfm_journal::single_trust::{ConfigurationHeadProjection, PreparationRef, RunRecord, ValueRef};
+use mfm_journal::single_trust::{
+    BindingDescriptor, ConfigurationHeadProjection, ImmutableObject, PreparationMode,
+    PreparationRef, RunRecord, StatePrepared, ValueRef,
+};
 use mfm_program::ProgramCatalog;
 use mfm_values::{string_contains_secret_marker, MfmConfig, MfmValue, ValidatedConfig};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
-    advance_reduced, prepare_access_from_current, prepare_conclusion_from_current,
-    reduce_qualified, AppendDisposition, QualifiedRun, Result, RunAction, StoreBrand, StoreError,
+    advance_selected, prepare_access_from_current, prepare_conclusion_from_current,
+    reduce_qualified, AppendDisposition, QualifiedRun, Result, RunAction, SelectedRun, StoreBrand,
+    StoreError,
 };
 
 /// Bounded asynchronous backend result used by every mechanical Store capability.
@@ -347,7 +351,7 @@ impl<'a> BackendAppendCommand<'a> {
     }
 
     /// Returns the Store identity.
-    pub const fn identity(&self) -> &StructuredStoreIdentity {
+    pub fn identity(&self) -> &StructuredStoreIdentity {
         self.identity
     }
 
@@ -442,7 +446,7 @@ pub enum BackendConfigurationOutcome {
 
 /// Store conclusion outcome that retains the exact append owner across an unknown acknowledgement.
 #[derive(Debug)]
-pub enum ConclusionCommitOutcome {
+pub(crate) enum ConclusionCommitOutcome {
     /// The conclusion append has a known mechanical disposition.
     Disposition {
         /// The physical append disposition.
@@ -534,7 +538,7 @@ impl<'a> ConfigurationAppendCommand<'a> {
     }
 
     /// Returns the Store identity.
-    pub const fn identity(&self) -> &StructuredStoreIdentity {
+    pub fn identity(&self) -> &StructuredStoreIdentity {
         self.identity
     }
     /// Returns the expected revision sequence.
@@ -1051,7 +1055,6 @@ pub enum StoreOpenError {
 }
 
 /// One opaque semantic Store opening.
-#[derive(Clone)]
 pub struct OpenedStructuredStore {
     inner: Arc<OpenedStoreInner>,
 }
@@ -1072,6 +1075,15 @@ struct OpenedStoreInner {
     limits: StoreWorkLimits,
     brand: Arc<StoreBrand>,
     prefix_ingress: Arc<Semaphore>,
+}
+
+impl std::fmt::Debug for OpenedStoreInner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Store")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One shared bound for backend prefix ingress and callback-free qualification.
@@ -1135,18 +1147,8 @@ impl StructuredStore {
 
 impl OpenedStructuredStore {
     /// Returns the exact Store identity.
-    pub fn identity(&self) -> &StructuredStoreIdentity {
+    pub(crate) fn identity(&self) -> &StructuredStoreIdentity {
         &self.inner.identity
-    }
-
-    /// Returns the exact Program catalog brand.
-    pub fn catalog(&self) -> &ProgramCatalog {
-        &self.inner.catalog
-    }
-
-    /// Returns whether two handles share the exact private Store opening.
-    pub fn same_open(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner.brand, &other.inner.brand)
     }
 
     /// Consumes this open into its branded Store ports.
@@ -1166,7 +1168,7 @@ impl OpenedStructuredStore {
     }
 
     /// Returns the configured complete-prefix limit.
-    pub fn history_limit(&self) -> RawHistoryLoadLimit {
+    pub(crate) fn history_limit(&self) -> RawHistoryLoadLimit {
         RawHistoryLoadLimit::new(
             self.inner.limits.max_run_frames(),
             self.inner.limits.max_run_frame_bytes(),
@@ -1174,7 +1176,7 @@ impl OpenedStructuredStore {
     }
 
     /// Loads one complete run prefix through the branded semantic port.
-    pub async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
+    pub(crate) async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
         self.history_port().load(run_id).await
     }
 
@@ -1336,30 +1338,12 @@ impl OpenedStructuredStore {
         Ok(())
     }
 
-    /// Appends the sole genesis frame through the branded admission port.
-    pub async fn append_admission(
-        &self,
-        frame: mfm_journal::single_trust::RunFrame,
-        configuration: &ResolvedConfigurationHead,
-    ) -> Result<AppendDisposition> {
-        self.history_port()
-            .append_admission(frame, configuration)
-            .await
-    }
-
-    /// Opens the typed configuration capability branded to this exact Store opening.
-    pub fn configuration(&self) -> ConfigurationStore {
-        ConfigurationStore {
-            inner: Arc::clone(&self.inner),
-        }
-    }
-
     /// Constructs a persisted projection only after checking opaque process-local head evidence.
-    pub fn configuration_projection(
+    pub(crate) fn configuration_projection(
         &self,
         head: &ResolvedConfigurationHead,
     ) -> Result<ConfigurationHeadProjection> {
-        if !Arc::ptr_eq(&head.brand, &self.inner.brand) || !self.same_open(&head.store) {
+        if !Arc::ptr_eq(&head.brand, &self.inner.brand) || !Arc::ptr_eq(&head.store, &self.inner) {
             return Err(StoreError::Identity);
         }
         ConfigurationHeadProjection::new(head.sequence, head.content_ref.clone())
@@ -1395,102 +1379,6 @@ impl OpenedStructuredStore {
             return Err(StoreError::InvalidHistory);
         }
         Ok(())
-    }
-
-    /// Creates one access preparation after callback-free semantic qualification.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn prepare_access(
-        &self,
-        run_id: &RunId,
-        document: &mfm_program::single_trust::ProgramDocument,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        prepared: mfm_journal::single_trust::StatePrepared,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-    ) -> Result<crate::single_trust::PreparationAppend> {
-        let current = self.load(run_id).await?;
-        self.prepare_access_qualified(
-            &current,
-            document,
-            expected_sequence,
-            append_request_id,
-            prepared,
-            objects,
-        )
-        .await
-    }
-
-    /// Prepares an access append against a prefix already qualified by Runtime.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn prepare_access_qualified(
-        &self,
-        current: &QualifiedRun,
-        document: &mfm_program::single_trust::ProgramDocument,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        prepared: mfm_journal::single_trust::StatePrepared,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-    ) -> Result<crate::single_trust::PreparationAppend> {
-        let reduced = self.reduce_qualified(current, document.clone())?;
-        self.prepare_access_qualified_with_reduced(
-            current,
-            document,
-            &reduced,
-            expected_sequence,
-            append_request_id,
-            prepared,
-            objects,
-        )
-        .await
-    }
-
-    /// Prepares an access append using the exact reduction already retained by Runtime.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn prepare_access_qualified_with_reduced(
-        &self,
-        current: &QualifiedRun,
-        document: &mfm_program::single_trust::ProgramDocument,
-        reduced: &crate::single_trust::ReducedRunState,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        prepared: mfm_journal::single_trust::StatePrepared,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-    ) -> Result<crate::single_trust::PreparationAppend> {
-        if current.scope() != self.identity().scope()
-            || current.epoch() != self.identity().epoch()
-            || current.tenant() != self.identity().tenant()
-            || !current.belongs_to_store(&self.inner.brand)
-            || !reduced.belongs_to_store(&self.inner.brand)
-        {
-            return Err(StoreError::Identity);
-        }
-        let (prepared, objects) = self
-            .store_select_fact_selection(current, prepared, objects)
-            .await?;
-        let mut candidate = prepare_access_from_current(
-            self.identity().scope(),
-            self.identity().epoch(),
-            self.identity().tenant(),
-            current,
-            current.run_id(),
-            document,
-            reduced,
-            expected_sequence,
-            append_request_id,
-            prepared,
-            objects,
-        )?;
-        candidate.append.bind_store(Arc::clone(&self.inner.brand));
-        let Some(frame) = candidate.frame else {
-            return Ok(candidate.append);
-        };
-        let physical = self
-            .history_port()
-            .append_against_qualified_prefix(current, frame.clone())
-            .await?;
-        let mut append = candidate.append;
-        append.set_frame(frame);
-        Ok(append.with_disposition(physical))
     }
 
     async fn store_select_fact_selection(
@@ -1677,93 +1565,8 @@ impl OpenedStructuredStore {
         Ok((value, object))
     }
 
-    /// Builds one Store-owned conclusion append owner from the selected prefix.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn prepare_conclusion(
-        &self,
-        run_id: &RunId,
-        document: &mfm_program::single_trust::ProgramDocument,
-        expected_sequence: u64,
-        conclusion: mfm_journal::single_trust::StateConcluded,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-        maximum_conclusion_bytes: u64,
-    ) -> Result<crate::single_trust::PreparedConclusion> {
-        let current = self.load(run_id).await?;
-        self.prepare_conclusion_qualified(
-            &current,
-            document,
-            expected_sequence,
-            conclusion,
-            objects,
-            maximum_conclusion_bytes,
-        )
-    }
-
-    /// Builds a conclusion owner against a prefix already qualified by Runtime.
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_conclusion_qualified(
-        &self,
-        current: &QualifiedRun,
-        document: &mfm_program::single_trust::ProgramDocument,
-        expected_sequence: u64,
-        conclusion: mfm_journal::single_trust::StateConcluded,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-        maximum_conclusion_bytes: u64,
-    ) -> Result<crate::single_trust::PreparedConclusion> {
-        let reduced = self.reduce_qualified(current, document.clone())?;
-        self.prepare_conclusion_qualified_with_reduced(
-            current,
-            document,
-            &reduced,
-            expected_sequence,
-            conclusion,
-            objects,
-            maximum_conclusion_bytes,
-        )
-    }
-
-    /// Builds a conclusion owner using the exact reduction already retained by Runtime.
-    #[allow(clippy::too_many_arguments)]
-    pub fn prepare_conclusion_qualified_with_reduced(
-        &self,
-        current: &QualifiedRun,
-        document: &mfm_program::single_trust::ProgramDocument,
-        reduced: &crate::single_trust::ReducedRunState,
-        expected_sequence: u64,
-        conclusion: mfm_journal::single_trust::StateConcluded,
-        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-        maximum_conclusion_bytes: u64,
-    ) -> Result<crate::single_trust::PreparedConclusion> {
-        if current.scope() != self.identity().scope()
-            || current.epoch() != self.identity().epoch()
-            || current.tenant() != self.identity().tenant()
-            || !current.belongs_to_store(&self.inner.brand)
-        {
-            return Err(StoreError::Identity);
-        }
-        let append_request_id = conclusion_append_request_id(current.run_id(), expected_sequence)?;
-        prepare_conclusion_from_current(
-            self.identity().scope(),
-            self.identity().epoch(),
-            self.identity().tenant(),
-            current,
-            current.run_id(),
-            document,
-            reduced,
-            expected_sequence,
-            append_request_id,
-            conclusion,
-            objects,
-            maximum_conclusion_bytes,
-        )
-        .map(|mut owner| {
-            owner.bind_store(Arc::clone(&self.inner.brand));
-            owner
-        })
-    }
-
     /// Commits one conclusion owner through this exact opened Store.
-    pub async fn commit_conclusion(
+    pub(crate) async fn commit_conclusion(
         &self,
         mut owner: crate::single_trust::PreparedConclusion,
     ) -> Result<ConclusionCommitOutcome> {
@@ -1911,8 +1714,8 @@ impl OpenedStructuredStore {
             };
         }
 
-        let reduced = match self.reduce_qualified(&history, owner.document().clone()) {
-            Ok(reduced) => reduced,
+        let selected = match reduce_qualified(&history, owner.document().clone()) {
+            Ok(selected) => selected,
             Err(error) => return Ok(ConclusionCommitOutcome::Rejected { owner, error }),
         };
         match owner.frame().record() {
@@ -1930,10 +1733,11 @@ impl OpenedStructuredStore {
                 ) {
                     return Ok(ConclusionCommitOutcome::InvalidHistory { history });
                 }
-                let Some((_, selected)) = history.selected_preparation(occurrence) else {
+                let Some((_, selected_preparation)) = history.selected_preparation(occurrence)
+                else {
                     return Ok(ConclusionCommitOutcome::InvalidHistory { history });
                 };
-                if &selected != preparation {
+                if &selected_preparation != preparation {
                     return if retained_preparation_ref(&history, occurrence, preparation) {
                         Ok(ConclusionCommitOutcome::NoLongerSelected { history })
                     } else {
@@ -1941,7 +1745,7 @@ impl OpenedStructuredStore {
                     };
                 }
                 if matches!(
-                    reduced.action(),
+                    selected.action(),
                     RunAction::WaitingPreparation {
                         occurrence: reduced_occurrence,
                         preparation: reduced_preparation,
@@ -1966,7 +1770,7 @@ impl OpenedStructuredStore {
                     return Ok(ConclusionCommitOutcome::InvalidHistory { history });
                 }
                 if matches!(
-                    reduced.action(),
+                    selected.action(),
                     RunAction::ReadyPure {
                         occurrence: reduced_occurrence,
                         ..
@@ -1979,99 +1783,6 @@ impl OpenedStructuredStore {
             }
             _ => Ok(ConclusionCommitOutcome::InvalidHistory { history }),
         }
-    }
-
-    /// Reduces one qualified prefix without exposing a history handle to State callbacks.
-    pub async fn reduce(
-        &self,
-        run_id: &RunId,
-        document: mfm_program::single_trust::ProgramDocument,
-    ) -> Result<crate::single_trust::ReducedRunState> {
-        let current = self.load(run_id).await?;
-        self.reduce_qualified(&current, document)
-    }
-
-    /// Reduces one already-qualified prefix without reading or reloading the backend.
-    pub fn reduce_qualified(
-        &self,
-        run: &QualifiedRun,
-        document: mfm_program::single_trust::ProgramDocument,
-    ) -> Result<crate::single_trust::ReducedRunState> {
-        if run.scope() != self.identity().scope()
-            || run.epoch() != self.identity().epoch()
-            || run.tenant() != self.identity().tenant()
-            || !run.belongs_to_store(&self.inner.brand)
-        {
-            return Err(StoreError::Identity);
-        }
-        let mut reduced = reduce_qualified(run, document)?;
-        reduced.bind_store(Arc::clone(&self.inner.brand));
-        Ok(reduced)
-    }
-
-    /// Advances a retained reducer result over one hot conclusion without re-folding its prefix.
-    pub fn advance_reduced(
-        &self,
-        reduced: &crate::single_trust::ReducedRunState,
-        previous: &QualifiedRun,
-        next: &QualifiedRun,
-        document: &mfm_program::single_trust::ProgramDocument,
-    ) -> Result<crate::single_trust::ReducedRunState> {
-        if previous.scope() != self.identity().scope()
-            || previous.epoch() != self.identity().epoch()
-            || previous.tenant() != self.identity().tenant()
-            || next.scope() != self.identity().scope()
-            || next.epoch() != self.identity().epoch()
-            || next.tenant() != self.identity().tenant()
-            || !previous.belongs_to_store(&self.inner.brand)
-            || !next.belongs_to_store(&self.inner.brand)
-            || !reduced.belongs_to_store(&self.inner.brand)
-        {
-            return Err(StoreError::Identity);
-        }
-        let mut advanced = advance_reduced(reduced, previous, next, document)?;
-        advanced.bind_store(Arc::clone(&self.inner.brand));
-        Ok(advanced)
-    }
-
-    /// Qualifies a candidate prefix whose predecessor was already held by Runtime.
-    pub fn qualify_appended(
-        &self,
-        predecessor: &QualifiedRun,
-        frame: mfm_journal::single_trust::RunFrame,
-    ) -> Result<QualifiedRun> {
-        if predecessor.scope() != self.identity().scope()
-            || predecessor.epoch() != self.identity().epoch()
-            || predecessor.tenant() != self.identity().tenant()
-            || frame.run_id() != predecessor.run_id()
-            || frame.expected_sequence() != predecessor.head_sequence().saturating_add(1)
-            || !predecessor.belongs_to_store(&self.inner.brand)
-        {
-            return Err(StoreError::Identity);
-        }
-        self.validate_frame_against_limits(&frame, predecessor.total_frame_bytes())?;
-        let qualified = predecessor.clone().append_validated(frame)?;
-        self.validate_qualified_limits(&qualified)?;
-        Ok(qualified)
-    }
-
-    /// Qualifies one direct-new admission frame without a post-commit backend read.
-    pub fn qualify_admission(
-        &self,
-        frame: mfm_journal::single_trust::RunFrame,
-    ) -> Result<QualifiedRun> {
-        if !frame.record().is_admission() {
-            return Err(StoreError::InvalidRecord);
-        }
-        let mut qualified = QualifiedRun::qualify_prefix(
-            self.identity().scope().clone(),
-            self.identity().epoch(),
-            self.identity().tenant().clone(),
-            vec![frame],
-        )?;
-        qualified.bind_store(Arc::clone(&self.inner.brand));
-        self.validate_qualified_limits(&qualified)?;
-        Ok(qualified)
     }
 
     fn validate_frame_against_limits(
@@ -2128,6 +1839,128 @@ impl OpenedStructuredStore {
             inner: Arc::clone(&self.inner),
         }
     }
+
+    #[cfg(test)]
+    fn test_configuration(&self) -> ConfigurationStore {
+        ConfigurationStore {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    #[cfg(test)]
+    fn test_same_open(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.brand, &other.inner.brand)
+    }
+
+    #[cfg(test)]
+    async fn test_append_admission(
+        &self,
+        frame: mfm_journal::single_trust::RunFrame,
+        configuration: &ResolvedConfigurationHead,
+    ) -> Result<AppendDisposition> {
+        self.history_port()
+            .append_admission(frame, configuration)
+            .await
+    }
+
+    #[cfg(test)]
+    fn test_select_qualified(
+        &self,
+        run: &QualifiedRun,
+        document: mfm_program::single_trust::ProgramDocument,
+    ) -> Result<SelectedRun> {
+        let selection = reduce_qualified(run, document.clone())?;
+        Ok(SelectedRun::new(
+            run.clone(),
+            document,
+            selection,
+            Arc::clone(&self.inner.brand),
+        ))
+    }
+
+    #[cfg(test)]
+    fn test_qualify_appended(
+        &self,
+        predecessor: &QualifiedRun,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<QualifiedRun> {
+        if !predecessor.belongs_to_store(&self.inner.brand) {
+            return Err(StoreError::Identity);
+        }
+        predecessor.clone().append_validated(frame)
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    async fn test_prepare_access_fixture(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        selected: &SelectedRun,
+        expected_sequence: u64,
+        append_request_id: AppendRequestId,
+        prepared: mfm_journal::single_trust::StatePrepared,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+    ) -> Result<crate::single_trust::PreparationAppend> {
+        let (prepared, objects) = self
+            .store_select_fact_selection(current, prepared, objects)
+            .await?;
+        let mut candidate = prepare_access_from_current(
+            self.identity().scope(),
+            self.identity().epoch(),
+            self.identity().tenant(),
+            current,
+            current.run_id(),
+            document,
+            selected.selection(),
+            expected_sequence,
+            append_request_id,
+            prepared,
+            objects,
+        )?;
+        candidate.append.bind_store(Arc::clone(&self.inner.brand));
+        let Some(frame) = candidate.frame else {
+            return Ok(candidate.append);
+        };
+        let disposition = self
+            .history_port()
+            .append_against_qualified_prefix(current, frame)
+            .await?;
+        Ok(candidate.append.with_disposition(disposition))
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    fn test_prepare_conclusion_fixture(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        selected: &SelectedRun,
+        expected_sequence: u64,
+        conclusion: mfm_journal::single_trust::StateConcluded,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+        maximum_conclusion_bytes: u64,
+    ) -> Result<crate::single_trust::PreparedConclusion> {
+        let append_request_id = conclusion_append_request_id(current.run_id(), expected_sequence)?;
+        prepare_conclusion_from_current(
+            self.identity().scope(),
+            self.identity().epoch(),
+            self.identity().tenant(),
+            current,
+            current.run_id(),
+            document,
+            selected.selection(),
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        )
+        .map(|mut owner| {
+            owner.bind_store(Arc::clone(&self.inner.brand));
+            owner
+        })
+    }
 }
 
 /// The consuming branded Store port split.
@@ -2139,7 +1972,6 @@ pub struct StoreParts {
 }
 
 impl StoreParts {
-    /// Returns the non-Clone Runtime history port.
     /// Consumes the split into its four branded ports.
     pub fn into_parts(
         self,
@@ -2158,9 +1990,853 @@ pub struct QualifiedHistoryPort {
     inner: Arc<OpenedStoreInner>,
 }
 
+/// Exhaustive result of consuming one selected Access owner into Store-owned preparation.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum AccessPreparationOutcome {
+    /// The preparation was appended directly and the returned owner selects that durable head.
+    Committed {
+        /// The sole selected authority at the preparation head.
+        selected: SelectedRun,
+        /// The Store-assigned preparation identity.
+        preparation: PreparationRef,
+        /// Optional one-use prior-fact continuation selected by Store.
+        fact_continuation: Option<crate::single_trust::FactContinuation>,
+    },
+    /// No direct-new append crossed the durability point; the predecessor selection is retained.
+    Retained {
+        /// The unchanged selected predecessor.
+        selected: SelectedRun,
+        /// The mechanical disposition that prevented provider entry.
+        disposition: AppendDisposition,
+    },
+    /// Store rejected the coordinate-free proposal before a direct-new append was established.
+    Rejected {
+        /// The unchanged selected predecessor.
+        selected: SelectedRun,
+        /// Redaction-safe rejection.
+        error: StoreError,
+    },
+}
+
+/// Coordinate-free typed material proposed for one Access conclusion.
+#[derive(Debug)]
+pub struct AccessConclusionProposal {
+    evidence: ValueRef,
+    evidence_object: ImmutableObject,
+    outcome: mfm_journal::single_trust::StateOutcome,
+    outcome_object: ImmutableObject,
+    fact_proposals: Option<(ValueRef, ImmutableObject)>,
+}
+
+impl AccessConclusionProposal {
+    /// Groups typed evidence, outcome, and optional fact proposals without journal coordinates.
+    pub fn new(
+        evidence: ValueRef,
+        evidence_object: ImmutableObject,
+        outcome: mfm_journal::single_trust::StateOutcome,
+        outcome_object: ImmutableObject,
+        fact_proposals: Option<(ValueRef, ImmutableObject)>,
+    ) -> Self {
+        Self {
+            evidence,
+            evidence_object,
+            outcome,
+            outcome_object,
+            fact_proposals,
+        }
+    }
+}
+
+/// Affine Store-owned conclusion append paired with its exact selected predecessor.
+#[derive(Debug)]
+pub struct SelectedConclusion {
+    owner: crate::single_trust::PreparedConclusion,
+    selected: SelectedRun,
+}
+
+impl SelectedConclusion {
+    /// Returns the durable run identity retained by this append owner.
+    pub fn run_id(&self) -> &RunId {
+        self.selected.run_id()
+    }
+}
+
+/// Result of validating coordinate-free conclusion material against one selected owner.
+#[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
+pub enum SelectedConclusionPreparationOutcome {
+    /// Store accepted the proposal and built the complete append owner.
+    Prepared(SelectedConclusion),
+    /// Store rejected the proposal before append ownership was established.
+    Rejected {
+        /// The unchanged selected owner.
+        selected: SelectedRun,
+        /// Redaction-safe rejection.
+        error: StoreError,
+    },
+}
+
+/// Result of resolving one selected conclusion append.
+#[derive(Debug)]
+pub enum SelectedConclusionOutcome {
+    /// The conclusion is durable and the returned owner selects its exact successor head.
+    Committed(SelectedRun),
+    /// The exact append outcome remains unknown and must be resolved with this same owner.
+    AcknowledgementUnknown(SelectedConclusion),
+    /// The same semantic conclusion is durable and execution may continue from this fresh owner.
+    AlreadyConcludedSame(SelectedRun),
+    /// A later Read preparation is selected and execution may continue from this fresh owner.
+    NoLongerSelected(SelectedRun),
+    /// A different semantic conclusion won; only callback-free evidence remains.
+    Conflict(QualifiedRun),
+    /// Retained history is invalid; only callback-free evidence remains.
+    InvalidHistory(QualifiedRun),
+    /// The unchanged append owner remains available after a known rejection.
+    Rejected {
+        /// Exact selected conclusion owner.
+        owner: SelectedConclusion,
+        /// Redaction-safe rejection.
+        error: StoreError,
+    },
+}
+
+/// Opaque Store-built admission append retained across acknowledgement uncertainty.
+#[derive(Debug)]
+pub struct PreparedAdmission {
+    frame: mfm_journal::single_trust::RunFrame,
+    document: mfm_program::ProgramDocument,
+    configuration: ResolvedConfigurationHead,
+}
+
+impl PreparedAdmission {
+    /// Returns the deterministic run identity carried by this Store-built admission.
+    pub fn run_id(&self) -> &RunId {
+        self.frame.run_id()
+    }
+}
+
+/// Exhaustive semantic outcome of a Store-built admission.
+#[derive(Debug)]
+pub enum AdmissionOutcome {
+    /// The exact admission is durable and selected at its genesis head.
+    Selected(SelectedRun, AppendDisposition),
+    /// The physical result is unknown; the same Store-built owner must be resolved.
+    AcknowledgementUnknown(PreparedAdmission),
+    /// A different semantic genesis already owns the run id.
+    Conflict(QualifiedRun),
+    /// Admission failed before a semantic owner was established.
+    Rejected(StoreError),
+    /// A retryable Store-built owner remains after a known resolution failure.
+    RetainedRejected {
+        /// The unchanged admission owner.
+        owner: PreparedAdmission,
+        /// Redaction-safe failure.
+        error: StoreError,
+    },
+}
+
 impl QualifiedHistoryPort {
-    /// Loads and qualifies one complete retained prefix.
-    pub async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
+    /// Returns immutable metadata for trusted composition without exposing another mutation port.
+    pub fn identity(&self) -> &StructuredStoreIdentity {
+        &self.inner.identity
+    }
+
+    /// Returns the exact callback-free catalog associated with this mutation port.
+    pub fn catalog(&self) -> &ProgramCatalog {
+        &self.inner.catalog
+    }
+
+    /// Returns whether opaque configuration evidence belongs to this exact Store opening.
+    pub fn accepts_configuration_head(&self, head: &ResolvedConfigurationHead) -> bool {
+        Arc::ptr_eq(&head.brand, &self.inner.brand) && Arc::ptr_eq(&head.store, &self.inner)
+    }
+
+    /// Builds and appends one genesis frame from an exact catalog-qualified typed value.
+    pub async fn admit<T: MfmValue>(
+        &self,
+        run_id: RunId,
+        program: &mfm_program::Program,
+        value: &mfm_program::QualifiedTypedValue<T>,
+        configuration: ResolvedConfigurationHead,
+        source_refs: Vec<ContentRef>,
+    ) -> AdmissionOutcome {
+        if !program.belongs_to_catalog(&self.inner.catalog)
+            || !value.belongs_to_catalog(&self.inner.catalog)
+            || value.contract_ref() != program.document().admitted_context_contract_ref()
+        {
+            return AdmissionOutcome::Rejected(StoreError::Identity);
+        }
+        let projection = match (OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        })
+        .configuration_projection(&configuration)
+        {
+            Ok(value) => value,
+            Err(error) => return AdmissionOutcome::Rejected(error),
+        };
+        let admitted = match mfm_journal::single_trust::RunAdmitted::new(
+            self.inner.identity.scope().clone(),
+            self.inner.identity.epoch(),
+            run_id.clone(),
+            self.inner.identity.tenant().clone(),
+            program.document().entry_point_id().clone(),
+            program.program_ref().content_ref().clone(),
+            ValueRef::new(value.contract_ref().clone(), value.value_ref().clone()),
+            projection,
+            source_refs,
+        ) {
+            Ok(value) => value,
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        let append_request_id = match AppendRequestId::new(format!(
+            "admission-{}-1",
+            short_stable_id_fragment(run_id.as_str(), 96)
+        )) {
+            Ok(value) => value,
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        let canonical = match std::str::from_utf8(value.canonical_bytes()) {
+            Ok(value) => value.to_owned(),
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        let object_kind = match mfm_ids::StableId::new("mfm.value") {
+            Ok(value) => value,
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        let object = match ImmutableObject::new(object_kind, value.value_ref().clone(), canonical) {
+            Ok(value) => value,
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        let frame = match mfm_journal::single_trust::RunFrame::new(
+            run_id,
+            self.inner.identity.scope().clone(),
+            self.inner.identity.epoch(),
+            1,
+            append_request_id,
+            RunRecord::RunAdmitted(admitted),
+            vec![object],
+        ) {
+            Ok(value) => value,
+            Err(_) => return AdmissionOutcome::Rejected(StoreError::InvalidRecord),
+        };
+        self.resolve_prepared_admission(PreparedAdmission {
+            frame,
+            document: program.document().clone(),
+            configuration,
+        })
+        .await
+    }
+
+    /// Resolves one exact Store-built admission owner without rebuilding journal coordinates.
+    pub async fn resolve_admission(&self, owner: PreparedAdmission) -> AdmissionOutcome {
+        self.resolve_prepared_admission(owner).await
+    }
+
+    async fn resolve_prepared_admission(&self, owner: PreparedAdmission) -> AdmissionOutcome {
+        let disposition = match self
+            .append_admission(owner.frame.clone(), &owner.configuration)
+            .await
+        {
+            Ok(value) => value,
+            Err(StoreError::Conflict | StoreError::NotActionable) => {
+                let history = match self.load(owner.frame.run_id()).await {
+                    Ok(history) => history,
+                    Err(error) => return AdmissionOutcome::RetainedRejected { owner, error },
+                };
+                if history.frames().first() == Some(&owner.frame) {
+                    return match self.select_history_with_document(history, owner.document) {
+                        Ok(selected) => AdmissionOutcome::Selected(
+                            selected,
+                            AppendDisposition::Found { sequence: 1 },
+                        ),
+                        Err(error) => AdmissionOutcome::Rejected(error),
+                    };
+                }
+                return AdmissionOutcome::Conflict(history);
+            }
+            Err(error) => return AdmissionOutcome::RetainedRejected { owner, error },
+        };
+        match disposition {
+            AppendDisposition::NewlyCommitted { .. } => {
+                let mut run = match QualifiedRun::qualify_prefix(
+                    self.inner.identity.scope().clone(),
+                    self.inner.identity.epoch(),
+                    self.inner.identity.tenant().clone(),
+                    vec![owner.frame.clone()],
+                ) {
+                    Ok(value) => value,
+                    Err(error) => return AdmissionOutcome::RetainedRejected { owner, error },
+                };
+                run.bind_store(Arc::clone(&self.inner.brand));
+                match self.select_history_with_document(run, owner.document) {
+                    Ok(selected) => AdmissionOutcome::Selected(selected, disposition),
+                    Err(error) => AdmissionOutcome::Rejected(error),
+                }
+            }
+            AppendDisposition::Found { .. } | AppendDisposition::StaleHead { .. } => {
+                let history = match self.load(owner.frame.run_id()).await {
+                    Ok(value) => value,
+                    Err(error) => return AdmissionOutcome::RetainedRejected { owner, error },
+                };
+                if history.frames().first() == Some(&owner.frame) {
+                    match self.select_history_with_document(history, owner.document) {
+                        Ok(selected) => AdmissionOutcome::Selected(selected, disposition),
+                        Err(error) => AdmissionOutcome::Rejected(error),
+                    }
+                } else {
+                    AdmissionOutcome::Conflict(history)
+                }
+            }
+            AppendDisposition::AcknowledgementUnknown => {
+                AdmissionOutcome::AcknowledgementUnknown(owner)
+            }
+        }
+    }
+
+    /// Loads, qualifies, and selects one complete prefix under an exact catalog-qualified Program.
+    pub async fn select(
+        &self,
+        run_id: &RunId,
+        program: &mfm_program::Program,
+    ) -> Result<SelectedRun> {
+        if !program.belongs_to_catalog(&self.inner.catalog) {
+            return Err(StoreError::Identity);
+        }
+        let run = self.load(run_id).await?;
+        self.select_qualified(run, program)
+    }
+
+    /// Selects callback-free evidence that was loaded through this exact mutation port.
+    fn select_qualified(
+        &self,
+        run: QualifiedRun,
+        program: &mfm_program::Program,
+    ) -> Result<SelectedRun> {
+        if !program.belongs_to_catalog(&self.inner.catalog)
+            || !run.belongs_to_store(&self.inner.brand)
+        {
+            return Err(StoreError::Identity);
+        }
+        let document = program.document().clone();
+        let selection = reduce_qualified(&run, document.clone())?;
+        Ok(SelectedRun::new(
+            run,
+            document,
+            selection,
+            Arc::clone(&self.inner.brand),
+        ))
+    }
+
+    /// Consumes the selected Access owner and coordinate-free intent material.
+    ///
+    /// Store derives the occurrence, predecessor, sequence, ordinal, replacement, mode, reserved
+    /// conclusion capacity, and append identity from the selected owner and Program.
+    pub fn prepare_selected_access<'a>(
+        &'a self,
+        selected: SelectedRun,
+        intent: ValueRef,
+        intent_object: ImmutableObject,
+        fact_request: Option<(ValueRef, ImmutableObject)>,
+        binding: BindingDescriptor,
+    ) -> Pin<Box<dyn Future<Output = AccessPreparationOutcome> + Send + 'a>> {
+        Box::pin(self.prepare_selected_access_inner(
+            selected,
+            intent,
+            intent_object,
+            fact_request,
+            binding,
+        ))
+    }
+
+    async fn prepare_selected_access_inner(
+        &self,
+        selected: SelectedRun,
+        intent: ValueRef,
+        intent_object: ImmutableObject,
+        fact_request: Option<(ValueRef, ImmutableObject)>,
+        binding: BindingDescriptor,
+    ) -> AccessPreparationOutcome {
+        if !selected.belongs_to_store(&self.inner.brand) {
+            return AccessPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::Identity,
+            };
+        }
+        let (run, document, selection) = selected.into_parts();
+        let (occurrence, input) = match selection.action() {
+            RunAction::ReadyAccess {
+                occurrence, input, ..
+            } => (occurrence.clone(), input.clone()),
+            RunAction::WaitingPreparation { occurrence, .. } => {
+                let Some((prepared, _)) = run.selected_preparation(occurrence) else {
+                    return AccessPreparationOutcome::Rejected {
+                        selected: SelectedRun::new(
+                            run,
+                            document,
+                            selection,
+                            Arc::clone(&self.inner.brand),
+                        ),
+                        error: StoreError::InvalidHistory,
+                    };
+                };
+                (occurrence.clone(), prepared.input().clone())
+            }
+            _ => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error: StoreError::NotActionable,
+                }
+            }
+        };
+        let Some(mfm_program::Declaration::State(state)) = document.declaration(&occurrence) else {
+            return AccessPreparationOutcome::Rejected {
+                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let mode = match state.execution() {
+            mfm_program::ExecutionMode::Read {
+                total_attempt_bound,
+                ..
+            } => PreparationMode::Read {
+                total_attempt_bound: *total_attempt_bound,
+            },
+            mfm_program::ExecutionMode::Effect { .. } => PreparationMode::Effect,
+            mfm_program::ExecutionMode::Pure => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error: StoreError::NotActionable,
+                }
+            }
+        };
+        let Some(execution_binding_ref) = state.execution_binding_ref().cloned() else {
+            return AccessPreparationOutcome::Rejected {
+                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let (ordinal, replaces) = match run.selected_preparation(&occurrence) {
+            Some((previous, previous_ref)) => (
+                previous.preparation_ordinal().saturating_add(1),
+                Some(previous_ref),
+            ),
+            None => (0, None),
+        };
+        let prepared = match StatePrepared::new(
+            occurrence.clone(),
+            ordinal,
+            input,
+            intent,
+            fact_request.as_ref().map(|(request, _)| request.clone()),
+            None,
+            mode,
+            binding,
+            execution_binding_ref,
+            replaces,
+            state.maximum_conclusion_bytes(),
+        ) {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error: StoreError::InvalidRecord,
+                }
+            }
+        };
+        let mut objects = vec![intent_object];
+        if let Some((_, object)) = fact_request {
+            objects.push(object);
+        }
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        let (prepared, objects) = match store
+            .store_select_fact_selection(&run, prepared, objects)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error,
+                }
+            }
+        };
+        let append_request_id = match AppendRequestId::new(format!(
+            "preparation-{}-{}",
+            short_stable_id_fragment(run.run_id().as_str(), 96),
+            run.head_sequence().saturating_add(1)
+        )) {
+            Ok(value) => value,
+            Err(_) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error: StoreError::InvalidRecord,
+                }
+            }
+        };
+        let mut candidate = match prepare_access_from_current(
+            self.inner.identity.scope(),
+            self.inner.identity.epoch(),
+            self.inner.identity.tenant(),
+            &run,
+            run.run_id(),
+            &document,
+            &selection,
+            run.head_sequence(),
+            append_request_id,
+            prepared,
+            objects,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error,
+                }
+            }
+        };
+        candidate.append.bind_store(Arc::clone(&self.inner.brand));
+        let Some(frame) = candidate.frame else {
+            return AccessPreparationOutcome::Retained {
+                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                disposition: candidate.append.disposition(),
+            };
+        };
+        let disposition = match self
+            .append_against_qualified_prefix(&run, frame.clone())
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error,
+                }
+            }
+        };
+        if !matches!(disposition, AppendDisposition::NewlyCommitted { .. }) {
+            return AccessPreparationOutcome::Retained {
+                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                disposition,
+            };
+        }
+        let Some(preparation) = candidate.append.preparation().cloned() else {
+            return AccessPreparationOutcome::Rejected {
+                selected: SelectedRun::new(run, document, selection, Arc::clone(&self.inner.brand)),
+                error: StoreError::InvalidHistory,
+            };
+        };
+        let fact_continuation = candidate.append.into_fact_continuation();
+        let next_run = match run.clone().append_validated(frame) {
+            Ok(value) => value,
+            Err(error) => {
+                return AccessPreparationOutcome::Rejected {
+                    selected: SelectedRun::new(
+                        run,
+                        document,
+                        selection,
+                        Arc::clone(&self.inner.brand),
+                    ),
+                    error,
+                }
+            }
+        };
+        let next_selection = selection.waiting_preparation(occurrence, preparation.clone());
+        AccessPreparationOutcome::Committed {
+            selected: SelectedRun::new(
+                next_run,
+                document,
+                next_selection,
+                Arc::clone(&self.inner.brand),
+            ),
+            preparation,
+            fact_continuation,
+        }
+    }
+
+    /// Consumes a selected Pure action and coordinate-free typed outcome material.
+    pub fn prepare_selected_pure_conclusion(
+        &self,
+        selected: SelectedRun,
+        outcome: mfm_journal::single_trust::StateOutcome,
+        outcome_object: ImmutableObject,
+        fact_proposals: Option<(ValueRef, ImmutableObject)>,
+    ) -> SelectedConclusionPreparationOutcome {
+        let occurrence = match selected.action() {
+            RunAction::ReadyPure { occurrence, .. } => occurrence.clone(),
+            _ => {
+                return SelectedConclusionPreparationOutcome::Rejected {
+                    selected,
+                    error: StoreError::NotActionable,
+                }
+            }
+        };
+        let conclusion = mfm_journal::single_trust::StateConcluded::Pure {
+            occurrence,
+            outcome,
+            fact_proposals: fact_proposals.as_ref().map(|(value, _)| value.clone()),
+            fact_publication: None,
+        };
+        let mut objects = vec![outcome_object];
+        if let Some((_, object)) = fact_proposals {
+            objects.push(object);
+        }
+        match self.prepare_selected_conclusion(selected, conclusion, objects) {
+            Ok(owner) => SelectedConclusionPreparationOutcome::Prepared(owner),
+            Err((selected, error)) => {
+                SelectedConclusionPreparationOutcome::Rejected { selected, error }
+            }
+        }
+    }
+
+    /// Consumes a selected Access conclusion and its coordinate-free typed result material.
+    pub fn prepare_selected_access_conclusion(
+        &self,
+        selected: SelectedRun,
+        proposal: AccessConclusionProposal,
+        fact_continuation: Option<crate::single_trust::FactContinuation>,
+    ) -> SelectedConclusionPreparationOutcome {
+        let (occurrence, preparation) = match selected.action() {
+            RunAction::WaitingPreparation {
+                occurrence,
+                preparation,
+            } => (occurrence.clone(), preparation.clone()),
+            _ => {
+                return SelectedConclusionPreparationOutcome::Rejected {
+                    selected,
+                    error: StoreError::NotActionable,
+                }
+            }
+        };
+        let fact_selection = match fact_continuation {
+            Some(continuation) => {
+                if !continuation.belongs_to_store(&self.inner.brand)
+                    || continuation.scope() != self.inner.identity.scope()
+                    || continuation.epoch() != self.inner.identity.epoch()
+                    || continuation.tenant() != self.inner.identity.tenant()
+                    || continuation.run_id() != selected.run_id()
+                    || continuation.preparation() != &preparation
+                {
+                    return SelectedConclusionPreparationOutcome::Rejected {
+                        selected,
+                        error: StoreError::Identity,
+                    };
+                }
+                Some(continuation.selection_ref().clone())
+            }
+            None => None,
+        };
+        let conclusion = mfm_journal::single_trust::StateConcluded::Access {
+            occurrence,
+            preparation,
+            evidence: proposal.evidence,
+            outcome: proposal.outcome,
+            fact_proposals: proposal
+                .fact_proposals
+                .as_ref()
+                .map(|(value, _)| value.clone()),
+            fact_selection,
+            fact_publication: None,
+        };
+        let mut objects = vec![proposal.evidence_object, proposal.outcome_object];
+        if let Some((_, object)) = proposal.fact_proposals {
+            objects.push(object);
+        }
+        match self.prepare_selected_conclusion(selected, conclusion, objects) {
+            Ok(owner) => SelectedConclusionPreparationOutcome::Prepared(owner),
+            Err((selected, error)) => {
+                SelectedConclusionPreparationOutcome::Rejected { selected, error }
+            }
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn prepare_selected_conclusion(
+        &self,
+        selected: SelectedRun,
+        conclusion: mfm_journal::single_trust::StateConcluded,
+        objects: Vec<ImmutableObject>,
+    ) -> std::result::Result<SelectedConclusion, (SelectedRun, StoreError)> {
+        if !selected.belongs_to_store(&self.inner.brand) {
+            return Err((selected, StoreError::Identity));
+        }
+        let expected_sequence = selected.head_sequence();
+        let append_request_id =
+            match conclusion_append_request_id(selected.run_id(), expected_sequence) {
+                Ok(append_request_id) => append_request_id,
+                Err(error) => return Err((selected, error)),
+            };
+        let maximum_conclusion_bytes =
+            match selected.document().declaration(conclusion.occurrence()) {
+                Some(mfm_program::Declaration::State(state)) => state.maximum_conclusion_bytes(),
+                _ => return Err((selected, StoreError::InvalidHistory)),
+            };
+        let owner = prepare_conclusion_from_current(
+            self.inner.identity.scope(),
+            self.inner.identity.epoch(),
+            self.inner.identity.tenant(),
+            selected.qualified_run(),
+            selected.run_id(),
+            selected.document(),
+            selected.selection(),
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        );
+        let mut owner = match owner {
+            Ok(owner) => owner,
+            Err(error) => return Err((selected, error)),
+        };
+        owner.bind_store(Arc::clone(&self.inner.brand));
+        Ok(SelectedConclusion { owner, selected })
+    }
+
+    /// Resolves one exact selected conclusion owner through this mutation port.
+    pub async fn commit_selected_conclusion(
+        &self,
+        pending: SelectedConclusion,
+    ) -> SelectedConclusionOutcome {
+        let SelectedConclusion { owner, selected } = pending;
+        let store = OpenedStructuredStore {
+            inner: Arc::clone(&self.inner),
+        };
+        let outcome = match store.commit_conclusion(owner).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return SelectedConclusionOutcome::InvalidHistory(selected.into_qualified_run())
+            }
+        };
+        match outcome {
+            ConclusionCommitOutcome::Disposition {
+                disposition: AppendDisposition::NewlyCommitted { .. },
+                frame,
+            } => {
+                let (previous, document, selection) = selected.into_parts();
+                let next = match previous.clone().append_validated(frame) {
+                    Ok(next) => next,
+                    Err(_) => return SelectedConclusionOutcome::InvalidHistory(previous),
+                };
+                let next_selection = match advance_selected(&selection, &previous, &next, &document)
+                {
+                    Ok(selection) => selection,
+                    Err(_) => return SelectedConclusionOutcome::InvalidHistory(next),
+                };
+                SelectedConclusionOutcome::Committed(SelectedRun::new(
+                    next,
+                    document,
+                    next_selection,
+                    Arc::clone(&self.inner.brand),
+                ))
+            }
+            ConclusionCommitOutcome::Disposition {
+                disposition: AppendDisposition::Found { .. },
+                ..
+            } => {
+                let document = selected.document().clone();
+                match self.load(selected.run_id()).await {
+                    Ok(history) => {
+                        match self.select_history_with_document(history.clone(), document) {
+                            Ok(selected) => SelectedConclusionOutcome::Committed(selected),
+                            Err(_) => SelectedConclusionOutcome::InvalidHistory(history),
+                        }
+                    }
+                    Err(_) => {
+                        SelectedConclusionOutcome::InvalidHistory(selected.into_qualified_run())
+                    }
+                }
+            }
+            ConclusionCommitOutcome::Disposition { .. } => {
+                SelectedConclusionOutcome::InvalidHistory(selected.into_qualified_run())
+            }
+            ConclusionCommitOutcome::AcknowledgementUnknown(owner) => {
+                SelectedConclusionOutcome::AcknowledgementUnknown(SelectedConclusion {
+                    owner,
+                    selected,
+                })
+            }
+            ConclusionCommitOutcome::AlreadyConcludedSame { history } => {
+                let document = selected.document().clone();
+                match self.select_history_with_document(history.clone(), document) {
+                    Ok(selected) => SelectedConclusionOutcome::AlreadyConcludedSame(selected),
+                    Err(_) => SelectedConclusionOutcome::InvalidHistory(history),
+                }
+            }
+            ConclusionCommitOutcome::NoLongerSelected { history } => {
+                let document = selected.document().clone();
+                match self.select_history_with_document(history.clone(), document) {
+                    Ok(selected) => SelectedConclusionOutcome::NoLongerSelected(selected),
+                    Err(_) => SelectedConclusionOutcome::InvalidHistory(history),
+                }
+            }
+            ConclusionCommitOutcome::Conflict { history } => {
+                SelectedConclusionOutcome::Conflict(history)
+            }
+            ConclusionCommitOutcome::InvalidHistory { history } => {
+                SelectedConclusionOutcome::InvalidHistory(history)
+            }
+            ConclusionCommitOutcome::Rejected { owner, error } => {
+                SelectedConclusionOutcome::Rejected {
+                    owner: SelectedConclusion { owner, selected },
+                    error,
+                }
+            }
+        }
+    }
+
+    fn select_history_with_document(
+        &self,
+        history: QualifiedRun,
+        document: mfm_program::ProgramDocument,
+    ) -> Result<SelectedRun> {
+        let selection = reduce_qualified(&history, document.clone())?;
+        Ok(SelectedRun::new(
+            history,
+            document,
+            selection,
+            Arc::clone(&self.inner.brand),
+        ))
+    }
+
+    async fn load(&self, run_id: &RunId) -> Result<QualifiedRun> {
         let permit = self
             .inner
             .prefix_ingress
@@ -2187,7 +2863,7 @@ impl QualifiedHistoryPort {
     }
 
     /// Appends the sole genesis frame after checking its Store and tenant identity.
-    pub async fn append_admission(
+    async fn append_admission(
         &self,
         frame: mfm_journal::single_trust::RunFrame,
         configuration: &ResolvedConfigurationHead,
@@ -2452,7 +3128,7 @@ pub struct ResolvedConfigurationHead {
     total_bytes: usize,
     content_ref: ContentRef,
     brand: Arc<StoreBrand>,
-    store: OpenedStructuredStore,
+    store: Arc<OpenedStoreInner>,
 }
 
 impl ResolvedConfigurationHead {
@@ -2503,7 +3179,7 @@ pub struct ConfigurationWriteSession<C: MfmConfig> {
     expected_sequence: u64,
     prior_total_bytes: usize,
     brand: Arc<StoreBrand>,
-    store: OpenedStructuredStore,
+    store: Arc<OpenedStoreInner>,
     _config: std::marker::PhantomData<fn() -> C>,
 }
 
@@ -2517,7 +3193,7 @@ pub struct PreparedConfigurationAppend<C: MfmConfig> {
     canonical_json: PlainCanonicalJsonBytes,
     content_ref: ContentRef,
     brand: Arc<StoreBrand>,
-    store: OpenedStructuredStore,
+    store: Arc<OpenedStoreInner>,
 }
 
 impl<C: MfmConfig> PreparedConfigurationAppend<C> {
@@ -2629,15 +3305,17 @@ fn prepare_configuration_append<C: MfmConfig>(
 }
 
 impl ConfigurationStore {
+    /// Returns whether opaque head evidence belongs to this exact Store opening.
+    pub fn owns_head(&self, head: &ResolvedConfigurationHead) -> bool {
+        Arc::ptr_eq(&head.brand, &self.inner.brand) && Arc::ptr_eq(&head.store, &self.inner)
+    }
     /// Creates an affine first-write session. Backend CAS rejects it when the stream is nonempty.
     pub fn initial_write_session<C: MfmConfig>(&self) -> ConfigurationWriteSession<C> {
         ConfigurationWriteSession {
             expected_sequence: 0,
             prior_total_bytes: 0,
             brand: Arc::clone(&self.inner.brand),
-            store: OpenedStructuredStore {
-                inner: Arc::clone(&self.inner),
-            },
+            store: Arc::clone(&self.inner),
             _config: std::marker::PhantomData,
         }
     }
@@ -2647,18 +3325,14 @@ impl ConfigurationStore {
         &self,
         head: &ResolvedConfigurationHead,
     ) -> Result<ConfigurationWriteSession<C>> {
-        if !Arc::ptr_eq(&head.brand, &self.inner.brand)
-            || !head.store.same_open(&OpenedStructuredStore {
-                inner: Arc::clone(&self.inner),
-            })
-        {
+        if !Arc::ptr_eq(&head.brand, &self.inner.brand) || !Arc::ptr_eq(&head.store, &self.inner) {
             return Err(StoreError::Identity);
         }
         Ok(ConfigurationWriteSession {
             expected_sequence: head.global_sequence,
             prior_total_bytes: head.total_bytes,
             brand: Arc::clone(&head.brand),
-            store: head.store.clone(),
+            store: Arc::clone(&head.store),
             _config: std::marker::PhantomData,
         })
     }
@@ -2684,9 +3358,7 @@ impl ConfigurationStore {
             selected_canonical,
             global.sequence(),
             global.total_bytes(),
-            OpenedStructuredStore {
-                inner: Arc::clone(&self.inner),
-            },
+            Arc::clone(&self.inner),
         )
     }
 
@@ -2695,10 +3367,7 @@ impl ConfigurationStore {
         &self,
         owner: PreparedConfigurationAppend<C>,
     ) -> Result<ConfigurationCommitOutcome<C>> {
-        if !Arc::ptr_eq(&owner.brand, &self.inner.brand)
-            || !owner.store.same_open(&OpenedStructuredStore {
-                inner: Arc::clone(&self.inner),
-            })
+        if !Arc::ptr_eq(&owner.brand, &self.inner.brand) || !Arc::ptr_eq(&owner.store, &self.inner)
         {
             return Ok(ConfigurationCommitOutcome::Rejected {
                 owner,
@@ -2828,7 +3497,7 @@ fn validate_retained_configuration_bytes(
 
 fn ingress_retained_configuration<C: MfmConfig>(
     row: &RawConfigurationRevision,
-    store: OpenedStructuredStore,
+    store: Arc<OpenedStoreInner>,
 ) -> Result<ResolvedConfiguration<C>> {
     let canonical_json = validate_retained_configuration_bytes(row)?;
     ingress_retained_configuration_canonical::<C>(
@@ -2845,7 +3514,7 @@ fn ingress_retained_configuration_canonical<C: MfmConfig>(
     canonical_json: PlainCanonicalJsonBytes,
     global_sequence: u64,
     global_total_bytes: usize,
-    store: OpenedStructuredStore,
+    store: Arc<OpenedStoreInner>,
 ) -> Result<ResolvedConfiguration<C>> {
     if row.content_ref().schema_id() != &C::schema_id().map_err(|_| StoreError::InvalidRecord)? {
         return Err(StoreError::InvalidRecord);
@@ -2863,7 +3532,7 @@ fn ingress_retained_configuration_canonical<C: MfmConfig>(
             global_sequence,
             total_bytes: global_total_bytes,
             content_ref: row.content_ref().clone(),
-            brand: Arc::clone(&store.inner.brand),
+            brand: Arc::clone(&store.brand),
             store,
         },
     })
@@ -3186,7 +3855,7 @@ mod tests {
     }
 
     async fn configuration_head(opened: &OpenedStructuredStore) -> ResolvedConfigurationHead {
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         let owner = configuration
             .initial_write_session::<BackendConfig>()
             .prepare_local(
@@ -3389,6 +4058,68 @@ mod tests {
         }
     }
 
+    struct UnknownHistoryOnceBackend {
+        inner: Arc<MemoryStructuredBackend>,
+        unknown: AtomicU8,
+    }
+
+    impl UnknownHistoryOnceBackend {
+        fn new(inner: Arc<MemoryStructuredBackend>) -> Self {
+            Self {
+                inner,
+                unknown: AtomicU8::new(1),
+            }
+        }
+    }
+
+    impl StructuredStoreBackend for UnknownHistoryOnceBackend {
+        fn identity(&self) -> StructuredStoreIdentity {
+            self.inner.identity()
+        }
+
+        fn load_complete_prefix<'a>(
+            &'a self,
+            run_id: &'a RunId,
+            limit: RawHistoryLoadLimit,
+        ) -> BackendFuture<'a, Option<RawRunPrefix>> {
+            self.inner.load_complete_prefix(run_id, limit)
+        }
+
+        fn compare_and_append<'a>(
+            &'a self,
+            command: &'a BackendAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendAppendOutcome> {
+            Box::pin(async move {
+                let outcome = self.inner.compare_and_append(command).await?;
+                if matches!(outcome, BackendAppendOutcome::NewlyCommitted)
+                    && self.unknown.swap(0, Ordering::SeqCst) == 1
+                {
+                    return Ok(BackendAppendOutcome::AcknowledgementUnknown);
+                }
+                Ok(outcome)
+            })
+        }
+
+        fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
+            self.inner.load_configuration()
+        }
+
+        fn compare_and_append_configuration<'a>(
+            &'a self,
+            command: &'a ConfigurationAppendCommand<'a>,
+        ) -> BackendFuture<'a, BackendConfigurationOutcome> {
+            self.inner.compare_and_append_configuration(command)
+        }
+
+        fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
+            self.inner.load_facts()
+        }
+
+        fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
+            self.inner.audit_run_ids()
+        }
+    }
+
     #[tokio::test]
     async fn opened_limits_reject_frame_before_backend_ingress() {
         let identity = identity();
@@ -3428,7 +4159,7 @@ mod tests {
         .expect("opened store");
         let configuration = configuration_head(&opened).await;
         assert_eq!(
-            opened.append_admission(frame, &configuration).await,
+            opened.test_append_admission(frame, &configuration).await,
             Err(StoreError::Capacity)
         );
         assert!(backend
@@ -3515,7 +4246,9 @@ mod tests {
         .expect("opened store");
         let configuration = configuration_head(&opened).await;
         assert_eq!(
-            opened.append_admission(non_genesis, &configuration).await,
+            opened
+                .test_append_admission(non_genesis, &configuration)
+                .await,
             Err(StoreError::InvalidRecord)
         );
         assert!(backend
@@ -3529,6 +4262,61 @@ mod tests {
             .await
             .expect("backend load")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn store_built_admission_retains_owner_across_unknown_acknowledgement() {
+        let identity = identity();
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let document = mfm_program::ProgramDocument::new(
+            StableId::new("mfm.test.store-built-admission-entry").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, program) = backend_catalog_builder().finish(document).expect("catalog");
+        let value = catalog
+            .qualify(contract, BackendValue { value: 7 })
+            .expect("qualified value");
+        let backend = Arc::new(UnknownHistoryOnceBackend::new(Arc::new(
+            MemoryStructuredBackend::new(identity.clone()),
+        )));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity,
+            catalog,
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("opened store");
+        let configuration = configuration_head(&opened).await;
+        let (history, reader, _, _) = opened.split().into_parts();
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:7123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+
+        let owner = match history
+            .admit(run_id.clone(), &program, &value, configuration, Vec::new())
+            .await
+        {
+            AdmissionOutcome::AcknowledgementUnknown(owner) => owner,
+            other => panic!("unexpected admission outcome: {other:?}"),
+        };
+        let selected = match history.resolve_admission(owner).await {
+            AdmissionOutcome::Selected(selected, AppendDisposition::Found { sequence: 1 }) => {
+                selected
+            }
+            other => panic!("unexpected admission resolution: {other:?}"),
+        };
+        assert_eq!(selected.head_sequence(), 1);
+        let retained = reader.load(&run_id).await.expect("retained admission");
+        assert_eq!(retained.frames()[0].expected_sequence(), 1);
+        assert!(retained.frames()[0]
+            .append_request_id()
+            .as_str()
+            .starts_with("admission-"));
     }
 
     #[tokio::test]
@@ -3566,9 +4354,9 @@ mod tests {
             .await
             .expect("second opening");
         let first_configuration = configuration_head(&first).await;
-        assert!(!first.same_open(&second));
+        assert!(!first.test_same_open(&second));
         first
-            .append_admission(frame.clone(), &first_configuration)
+            .test_append_admission(frame.clone(), &first_configuration)
             .await
             .expect("admission");
         let first_run = first.load(frame.run_id()).await.expect("first run");
@@ -3606,7 +4394,7 @@ mod tests {
         )
         .expect("candidate");
         assert!(matches!(
-            second.qualify_appended(&first_run, foreign_candidate),
+            second.test_qualify_appended(&first_run, foreign_candidate),
             Err(StoreError::Identity)
         ));
     }
@@ -3636,7 +4424,7 @@ mod tests {
                 .expect("opened store");
         let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone(), &configuration)
+            .test_append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
 
@@ -3796,13 +4584,13 @@ mod tests {
         .expect("opened store");
         let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone(), &configuration)
+            .test_append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
         let current = opened.load(admission.run_id()).await.expect("current");
-        let reduced = opened
-            .reduce_qualified(&current, document.clone())
-            .expect("reduced");
+        let selected = opened
+            .test_select_qualified(&current, document.clone())
+            .expect("selected");
         let (proposal_value, proposal_object) = proposal(90);
         let conclusion = mfm_journal::single_trust::StateConcluded::Pure {
             occurrence: mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
@@ -3812,10 +4600,10 @@ mod tests {
             fact_publication: None,
         };
         let owner = opened
-            .prepare_conclusion_qualified_with_reduced(
+            .test_prepare_conclusion_fixture(
                 &current,
                 &document,
-                &reduced,
+                &selected,
                 1,
                 conclusion,
                 vec![base.objects()[0].clone(), proposal_object],
@@ -3949,23 +4737,44 @@ mod tests {
         let (catalog, _) = backend_catalog_builder()
             .finish(document.clone())
             .expect("catalog");
-        let opened =
-            StructuredStore::open_memory(identity.clone(), catalog, StoreWorkLimits::default())
-                .expect("opened store");
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let opened = StructuredStore::open(
+            backend.clone(),
+            identity.clone(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("opened store");
+        let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
+            .await
+            .expect("second opening");
         let configuration_head = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone(), &configuration_head)
+            .test_append_admission(admission.clone(), &configuration_head)
             .await
             .expect("admission append");
         let current = opened.load(admission.run_id()).await.expect("current");
-        let reduced = opened
-            .reduce_qualified(&current, document.clone())
-            .expect("reduced");
+        let selected = opened
+            .test_select_qualified(&current, document.clone())
+            .expect("selected");
+        let selected = match second.history_port().prepare_selected_pure_conclusion(
+            selected,
+            mfm_journal::single_trust::StateOutcome::Success(context.clone()),
+            base.objects()[0].clone(),
+            None,
+        ) {
+            SelectedConclusionPreparationOutcome::Rejected {
+                selected,
+                error: StoreError::Identity,
+            } => selected,
+            other => panic!("unexpected foreign selection outcome: {other:?}"),
+        };
         let owner = opened
-            .prepare_conclusion_qualified_with_reduced(
+            .test_prepare_conclusion_fixture(
                 &current,
                 &document,
-                &reduced,
+                &selected,
                 1,
                 mfm_journal::single_trust::StateConcluded::Pure {
                     occurrence: occurrence.clone(),
@@ -3977,6 +4786,17 @@ mod tests {
                 mfm_journal::single_trust::MAX_FRAME_BYTES as u64,
             )
             .expect("conclusion owner");
+        let owner = match second
+            .commit_conclusion(owner)
+            .await
+            .expect("foreign conclusion rejection")
+        {
+            ConclusionCommitOutcome::Rejected {
+                owner,
+                error: StoreError::Identity,
+            } => owner,
+            other => panic!("unexpected foreign conclusion outcome: {other:?}"),
+        };
         let alternate = mfm_journal::single_trust::RunFrame::new(
             owner.frame().run_id().clone(),
             owner.frame().store_scope_id().clone(),
@@ -4016,10 +4836,10 @@ mod tests {
         )
         .expect("alternate object");
         let conflicting_owner = opened
-            .prepare_conclusion_qualified_with_reduced(
+            .test_prepare_conclusion_fixture(
                 &current,
                 &document,
-                &reduced,
+                &selected,
                 1,
                 mfm_journal::single_trust::StateConcluded::Pure {
                     occurrence,
@@ -4127,13 +4947,13 @@ mod tests {
                 .expect("opened store");
         let configuration_head = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone(), &configuration_head)
+            .test_append_admission(admission.clone(), &configuration_head)
             .await
             .expect("admission append");
         let current = opened.load(admission.run_id()).await.expect("current");
-        let reduced = opened
-            .reduce_qualified(&current, document.clone())
-            .expect("reduced ready");
+        let selected = opened
+            .test_select_qualified(&current, document.clone())
+            .expect("selected ready");
         let prepared = mfm_journal::single_trust::StatePrepared::new(
             occurrence.clone(),
             0,
@@ -4151,10 +4971,10 @@ mod tests {
         )
         .expect("initial preparation");
         let initial = opened
-            .prepare_access_qualified_with_reduced(
+            .test_prepare_access_fixture(
                 &current,
                 &document,
-                &reduced,
+                &selected,
                 1,
                 AppendRequestId::new("access-classification-preparation-0-0123456789")
                     .expect("request"),
@@ -4169,10 +4989,10 @@ mod tests {
             .await
             .expect("prepared history");
         let prepared_reduced = opened
-            .reduce_qualified(&prepared_history, document.clone())
+            .test_select_qualified(&prepared_history, document.clone())
             .expect("prepared reduction");
         let owner = opened
-            .prepare_conclusion_qualified_with_reduced(
+            .test_prepare_conclusion_fixture(
                 &prepared_history,
                 &document,
                 &prepared_reduced,
@@ -4207,7 +5027,7 @@ mod tests {
         )
         .expect("replacement preparation");
         opened
-            .prepare_access_qualified_with_reduced(
+            .test_prepare_access_fixture(
                 &prepared_history,
                 &document,
                 &prepared_reduced,
@@ -4235,17 +5055,12 @@ mod tests {
     #[tokio::test]
     async fn unknown_conclusion_retry_finds_same_frame_without_republishing_facts() {
         let identity = identity();
-        let schema = SchemaId::new(
-            "mfm.test.unknown-conclusion",
-            "1",
-            DigestAlgorithm::Sha256JcsV1,
-            DigestBytes::from_array([7; 32]),
+        let contract = mfm_program::nominal_contract_ref::<BackendValue>().expect("contract");
+        let context_content = ContentRef::new(
+            contract.schema_id().clone(),
+            raw_content_digest(br#"{"value":1}"#),
         )
-        .expect("schema");
-        let contract =
-            ContentRef::new(schema.clone(), raw_content_digest(b"contract")).expect("contract");
-        let context_content =
-            ContentRef::new(schema, raw_content_digest(br#"{"value":1}"#)).expect("context");
+        .expect("context");
         let context = ValueRef::new(contract.clone(), context_content.clone());
         let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
             .expect("occurrence");
@@ -4290,14 +5105,8 @@ mod tests {
                     ConfigurationHeadProjection::new(
                         1,
                         ContentRef::new(
-                            SchemaId::new(
-                                "mfm.test.unknown-conclusion-config",
-                                "1",
-                                DigestAlgorithm::Sha256JcsV1,
-                                DigestBytes::from_array([8; 32]),
-                            )
-                            .expect("configuration schema"),
-                            raw_content_digest(b"configuration"),
+                            BackendConfig::schema_id().expect("configuration schema"),
+                            raw_content_digest(br#"{"value":1}"#),
                         )
                         .expect("configuration"),
                     )
@@ -4328,19 +5137,19 @@ mod tests {
         .expect("opened store");
         let configuration = configuration_head(&opened).await;
         opened
-            .append_admission(admission.clone(), &configuration)
+            .test_append_admission(admission.clone(), &configuration)
             .await
             .expect("admission");
         let current = opened.load(&run_id).await.expect("current");
-        let reduced = opened
-            .reduce_qualified(&current, document.clone())
-            .expect("reduced");
+        let selected = opened
+            .test_select_qualified(&current, document.clone())
+            .expect("selected");
         let (proposal_value, proposal_object) = proposal(100);
         let owner = opened
-            .prepare_conclusion_qualified_with_reduced(
+            .test_prepare_conclusion_fixture(
                 &current,
                 &document,
-                &reduced,
+                &selected,
                 1,
                 mfm_journal::single_trust::StateConcluded::Pure {
                     occurrence,
@@ -4387,24 +5196,11 @@ mod tests {
                 .map(|publication| publication.publication_sequence()),
             Some(1)
         );
-        let facts = opened
-            .clone()
-            .split()
-            .into_parts()
-            .3
-            .facts()
-            .await
-            .expect("facts");
+        let retained = opened.load(&run_id).await.expect("retained");
+        let facts = opened.split().into_parts().3.facts().await.expect("facts");
         assert_eq!(facts.head_sequence(), 1);
         assert_eq!(facts.publications().len(), 1);
-        assert_eq!(
-            opened
-                .load(&run_id)
-                .await
-                .expect("retained")
-                .head_sequence(),
-            2
-        );
+        assert_eq!(retained.head_sequence(), 2);
     }
 
     #[tokio::test]
@@ -4440,8 +5236,8 @@ mod tests {
         let second = StructuredStore::open(backend, identity, catalog, StoreWorkLimits::default())
             .await
             .expect("second opening");
-        let first_configuration = first.configuration();
-        let second_configuration = second.configuration();
+        let first_configuration = first.test_configuration();
+        let second_configuration = second.test_configuration();
         let first_head = configuration_head(&first).await;
         let second_head = second_configuration
             .load::<BackendConfig>()
@@ -4471,7 +5267,7 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("opened store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         let owner = configuration
             .initial_write_session::<BackendConfig>()
             .prepare_local(
@@ -4537,7 +5333,7 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
 
         CONFIG_DECODES.store(0, Ordering::SeqCst);
         CONFIG_VALIDATIONS.store(0, Ordering::SeqCst);
@@ -4621,7 +5417,7 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         let first = configuration
             .initial_write_session::<BackendConfig>()
             .prepare_local(
@@ -4675,7 +5471,7 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         assert!(matches!(
             configuration
                 .initial_write_session::<CountedConfig>()
@@ -4729,7 +5525,7 @@ mod tests {
         let count_store =
             StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
                 .expect("count store");
-        let count_configuration = count_store.configuration();
+        let count_configuration = count_store.test_configuration();
         let mut count_head = None;
         for ordinal in 0..mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
             let session = match &count_head {
@@ -4794,7 +5590,7 @@ mod tests {
         let (catalog, _) = backend_catalog_builder().finish(document).expect("catalog");
         let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
             .expect("store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         let exact = exact_json(mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES);
         let mut head = None;
         for ordinal in 0..4 {
@@ -4895,7 +5691,7 @@ mod tests {
         .expect("wrong type");
         let (opened, _) = opened_with_raw(wrong_type).await;
         assert!(matches!(
-            opened.configuration().load::<CountedConfig>().await,
+            opened.test_configuration().load::<CountedConfig>().await,
             Err(StoreError::InvalidRecord)
         ));
 
@@ -4906,7 +5702,7 @@ mod tests {
         .expect("wrong digest");
         let (opened, _) = opened_with_raw(wrong_digest).await;
         assert!(matches!(
-            opened.configuration().load::<CountedConfig>().await,
+            opened.test_configuration().load::<CountedConfig>().await,
             Err(StoreError::InvalidHistory)
         ));
 
@@ -4921,7 +5717,7 @@ mod tests {
             .expect("legacy ref");
         let (opened, _) = opened_with_raw(legacy).await;
         assert!(matches!(
-            opened.configuration().load::<CountedConfig>().await,
+            opened.test_configuration().load::<CountedConfig>().await,
             Err(StoreError::InvalidHistory)
         ));
     }
@@ -4977,7 +5773,7 @@ mod fault_tests {
         )
         .await
         .expect("store");
-        let configuration = opened.configuration();
+        let configuration = opened.test_configuration();
         let request = AppendRequestId::new("configuration-unknown-owner-000001").expect("request");
         let owner = configuration
             .initial_write_session::<FaultConfig>()
