@@ -998,8 +998,6 @@ fn effect_state_to(
         Some(failure),
         ExecutionMode::Effect {
             capability_contract_ref,
-            total_attempt_bound: 1,
-            absorbing: false,
             effect_domain,
             fact_selection_required: false,
         },

@@ -338,7 +338,7 @@ impl RunAdmitted {
 }
 
 /// One sealed Access execution mode retained with a preparation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PreparationMode {
     /// A non-mutating provider read with a bounded replacement budget.
@@ -346,13 +346,31 @@ pub enum PreparationMode {
         /// Total attempts including the first preparation.
         total_attempt_bound: u16,
     },
-    /// A provider mutation with either one entry or a proved absorbing bound.
-    Effect {
-        /// Total entries including the first preparation.
-        total_attempt_bound: u16,
-        /// Whether the capability has a durable absorption proof.
-        absorbing: bool,
-    },
+    /// A provider mutation with exactly one possible entry.
+    Effect,
+}
+
+impl<'de> Deserialize<'de> for PreparationMode {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+        enum WireMode {
+            Read { total_attempt_bound: u16 },
+            Effect {},
+        }
+
+        match WireMode::deserialize(deserializer)? {
+            WireMode::Read {
+                total_attempt_bound,
+            } => Ok(Self::Read {
+                total_attempt_bound,
+            }),
+            WireMode::Effect {} => Ok(Self::Effect),
+        }
+    }
 }
 
 impl PreparationMode {
@@ -361,24 +379,14 @@ impl PreparationMode {
             Self::Read {
                 total_attempt_bound,
             } if (1..=3).contains(total_attempt_bound) => Ok(()),
-            Self::Effect {
-                total_attempt_bound,
-                absorbing,
-            } if (*absorbing && (2..=3).contains(total_attempt_bound))
-                || (!*absorbing && *total_attempt_bound == 1) =>
-            {
-                Ok(())
-            }
+            Self::Effect => Ok(()),
             _ => Err(JournalError::InvalidRecord),
         }
     }
 
     /// Returns whether this mode permits another provider entry.
     pub const fn permits_replacement(&self) -> bool {
-        match self {
-            Self::Read { .. } => true,
-            Self::Effect { absorbing, .. } => *absorbing,
-        }
+        matches!(self, Self::Read { .. })
     }
 
     /// Returns the total entry bound.
@@ -386,11 +394,8 @@ impl PreparationMode {
         match self {
             Self::Read {
                 total_attempt_bound,
-            }
-            | Self::Effect {
-                total_attempt_bound,
-                ..
             } => *total_attempt_bound,
+            Self::Effect => 1,
         }
     }
 }
@@ -1154,6 +1159,29 @@ mod tests {
             fact_publication: None,
         };
         assert_eq!(conclusion.occurrence().declaration_ordinal(), 1);
+    }
+
+    #[test]
+    fn effect_preparation_has_one_nonreplaceable_wire_shape() {
+        let mode = PreparationMode::Effect;
+        assert_eq!(mode.total_attempt_bound(), 1);
+        assert!(!mode.permits_replacement());
+        let current = serde_json::to_value(mode).expect("current Effect mode");
+        assert_eq!(current, serde_json::json!({"kind": "effect"}));
+        assert_eq!(
+            serde_json::from_value::<PreparationMode>(current.clone()).expect("current Effect"),
+            PreparationMode::Effect
+        );
+        for (field, value) in [
+            ("absorbing", serde_json::json!(false)),
+            ("total_attempt_bound", serde_json::json!(1)),
+        ] {
+            let mut old = current.clone();
+            old.as_object_mut()
+                .expect("Effect object")
+                .insert(field.to_owned(), value);
+            assert!(serde_json::from_value::<PreparationMode>(old).is_err());
+        }
     }
 
     #[test]

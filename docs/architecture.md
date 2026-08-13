@@ -89,8 +89,9 @@ preserving same-identity multiple opens.
 
 ## Recovery
 
-Read and proven absorbing Effects may use their declared bounded replacement budget. EntryOnce parks
-an unresolved preparation. A late result for a superseded preparation cannot settle an occurrence.
+Read may use its declared bounded replacement budget. An unresolved Effect preparation parks
+permanently until its retained owner resolves or a supervisor discards it. A late result for a
+superseded Read preparation cannot settle an occurrence.
 Pure and Access conclusions use one Store-owned append owner; duplicate conclusions are idempotent,
 conflicting conclusions fail closed, and response loss before durable conclusion leaves neutral
 prepared history.

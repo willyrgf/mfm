@@ -14,8 +14,7 @@ use std::task::{Context, Poll};
 
 use mfm_canonical::raw_content_digest;
 use mfm_capabilities::{
-    AccessCapabilityContract, AccessMode, EffectEntryMode, EffectMode, ProposedStateOutcome,
-    ReadMode,
+    AccessCapabilityContract, AccessMode, EffectMode, ProposedStateOutcome, ReadMode,
 };
 use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentRef, DigestAlgorithm, DigestBytes, RunId,
@@ -123,12 +122,9 @@ impl RuntimePreparationMode for ReadMode {
     }
 }
 
-impl<E: EffectEntryMode> RuntimePreparationMode for EffectMode<E> {
-    fn journal_mode(total_attempt_bound: std::num::NonZeroU16) -> PreparationMode {
-        PreparationMode::Effect {
-            total_attempt_bound: total_attempt_bound.get(),
-            absorbing: E::ABSORBING,
-        }
+impl RuntimePreparationMode for EffectMode {
+    fn journal_mode(_total_attempt_bound: std::num::NonZeroU16) -> PreparationMode {
+        PreparationMode::Effect
     }
 }
 

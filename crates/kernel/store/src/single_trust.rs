@@ -1974,18 +1974,11 @@ fn validate_preparation_contract(
         (
             ExecutionMode::Effect {
                 capability_contract_ref,
-                total_attempt_bound,
-                absorbing,
                 effect_domain,
                 ..
             },
-            mfm_journal::single_trust::PreparationMode::Effect {
-                total_attempt_bound: prepared_bound,
-                absorbing: prepared_absorbing,
-            },
+            mfm_journal::single_trust::PreparationMode::Effect,
         ) if capability_contract_ref == capability_ref
-            && total_attempt_bound == prepared_bound
-            && absorbing == prepared_absorbing
             && prepared.binding().effect_domain() == Some(effect_domain) =>
         {
             Ok(())
@@ -3394,6 +3387,149 @@ mod tests {
             .expect("selected preparation");
         assert_eq!(assigned, selected);
         assert_eq!(assigned.record_ordinal(), 1);
+    }
+
+    #[test]
+    fn unresolved_effect_rejects_a_second_preparation_without_changing_reservation() {
+        let (scope, tenant, run) = ids();
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let input_contract = content(80);
+        let output_contract = content(81);
+        let capability_contract = content(82);
+        let state_implementation = content(83);
+        let adapter_implementation = content(84);
+        let physical_target = content(85);
+        let effect_domain = StableId::new("mfm.test.effect").expect("effect domain");
+        let binding = BindingDescriptor::new(
+            state_implementation.clone(),
+            Some(capability_contract.clone()),
+            Some(adapter_implementation),
+            physical_target,
+            Some(effect_domain.clone()),
+            None,
+        )
+        .expect("binding");
+        let execution_binding_ref = binding.content_ref().expect("binding ref");
+        let state = StateDeclaration::new(
+            SequentialControlAddress::new(0, Vec::new()).expect("address"),
+            state_implementation,
+            input_contract.clone(),
+            output_contract,
+            None,
+            ExecutionMode::Effect {
+                capability_contract_ref: capability_contract,
+                effect_domain,
+                fact_selection_required: false,
+            },
+            true,
+        )
+        .expect("state")
+        .with_execution_binding(execution_binding_ref.clone())
+        .expect("execution binding")
+        .with_maximum_conclusion_bytes(4096)
+        .expect("conclusion bound");
+        let document = ProgramDocument::new(
+            StableId::new("mfm.test-effect").expect("entry"),
+            state.output_contract_ref().clone(),
+            input_contract.clone(),
+            vec![Declaration::State(Box::new(state))],
+        )
+        .expect("document");
+        let input = value_ref(&input_contract, "null");
+        let intent_contract = content(86);
+        let intent = value_ref(&intent_contract, "null");
+        let admission = RunFrame::new(
+            run.clone(),
+            scope.clone(),
+            StoreEpoch::new(1),
+            1,
+            AppendRequestId::new("append-effect-admission").expect("append"),
+            RunRecord::RunAdmitted(
+                RunAdmitted::new(
+                    scope,
+                    StoreEpoch::new(1),
+                    run.clone(),
+                    tenant,
+                    StableId::new("mfm.test-effect").expect("entry"),
+                    document.program_ref().expect("program"),
+                    input.clone(),
+                    content(87),
+                    Vec::new(),
+                )
+                .expect("admission"),
+            ),
+            vec![value_object(&input, "null")],
+        )
+        .expect("admission frame");
+        store.admit(admission).expect("admit");
+
+        let maximum_conclusion_bytes = 4096;
+        let first = StatePrepared::new(
+            SequentialControlAddress::new(0, Vec::new()).expect("address"),
+            0,
+            input.clone(),
+            intent.clone(),
+            None,
+            None,
+            PreparationMode::Effect,
+            binding.clone(),
+            execution_binding_ref.clone(),
+            None,
+            maximum_conclusion_bytes,
+        )
+        .expect("first preparation");
+        let first = store
+            .prepare_access(
+                &run,
+                &document,
+                1,
+                AppendRequestId::new("append-effect-preparation-1").expect("append"),
+                first,
+                vec![value_object(&intent, "null")],
+            )
+            .expect("first append");
+        let first_ref = first.preparation().cloned().expect("preparation ref");
+        let prepared_run = store.load(&run).expect("prepared run");
+        assert_eq!(
+            prepared_run
+                .reserved_conclusion_bytes()
+                .expect("reserved conclusion"),
+            maximum_conclusion_bytes
+        );
+
+        let second = StatePrepared::new(
+            SequentialControlAddress::new(0, Vec::new()).expect("address"),
+            1,
+            input,
+            intent.clone(),
+            None,
+            None,
+            PreparationMode::Effect,
+            binding,
+            execution_binding_ref,
+            Some(first_ref),
+            maximum_conclusion_bytes,
+        )
+        .expect("wire-valid second preparation");
+        assert!(matches!(
+            store.prepare_access(
+                &run,
+                &document,
+                2,
+                AppendRequestId::new("append-effect-preparation-2").expect("append"),
+                second,
+                vec![value_object(&intent, "null")],
+            ),
+            Err(StoreError::NotActionable)
+        ));
+        let unchanged = store.load(&run).expect("unchanged run");
+        assert_eq!(unchanged.head_sequence(), 2);
+        assert_eq!(
+            unchanged
+                .reserved_conclusion_bytes()
+                .expect("reserved conclusion"),
+            maximum_conclusion_bytes
+        );
     }
 
     #[test]

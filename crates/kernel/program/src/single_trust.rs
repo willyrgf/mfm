@@ -63,14 +63,10 @@ pub enum ExecutionMode {
         /// Whether preparation must carry an interpretation-only prior-fact request.
         fact_selection_required: bool,
     },
-    /// Provider operation with a fixed entry discipline.
+    /// Provider operation with exactly one possible entry.
     Effect {
         /// Exact capability contract.
         capability_contract_ref: ContentRef,
-        /// Total attempts including the initial attempt.
-        total_attempt_bound: u16,
-        /// Whether durable absorption has been proven for this contract.
-        absorbing: bool,
         /// Public Effect domain identity fixed by the binding.
         effect_domain: StableId,
         /// Whether preparation must carry an interpretation-only prior-fact request.
@@ -79,7 +75,7 @@ pub enum ExecutionMode {
 }
 
 impl ExecutionMode {
-    /// Validates the mode's attempt and absorption contract.
+    /// Validates the mode's attempt and entry contract.
     pub fn validate(&self) -> Result<()> {
         match self {
             Self::Pure => Ok(()),
@@ -93,16 +89,8 @@ impl ExecutionMode {
                     Err(ProgramError::InvalidContract)
                 }
             }
-            Self::Effect {
-                total_attempt_bound,
-                absorbing,
-                effect_domain,
-                ..
-            } => {
-                if ((*absorbing && *total_attempt_bound > 1 && *total_attempt_bound <= 3)
-                    || (!absorbing && *total_attempt_bound == 1))
-                    && !effect_domain.as_str().is_empty()
-                {
+            Self::Effect { effect_domain, .. } => {
+                if !effect_domain.as_str().is_empty() {
                     Ok(())
                 } else {
                     Err(ProgramError::InvalidContract)
@@ -138,23 +126,9 @@ impl ExecutionMode {
             Self::Read {
                 total_attempt_bound,
                 ..
-            }
-            | Self::Effect {
-                total_attempt_bound,
-                ..
             } => Some(*total_attempt_bound),
+            Self::Effect { .. } => Some(1),
         }
-    }
-
-    /// Returns whether this Effect has a durable absorption contract.
-    pub const fn is_absorbing_effect(&self) -> bool {
-        matches!(
-            self,
-            Self::Effect {
-                absorbing: true,
-                ..
-            }
-        )
     }
 }
 
@@ -1318,41 +1292,29 @@ mod tests {
         .validate()
         .is_err());
 
-        let absorbing = ExecutionMode::Effect {
+        let effect = ExecutionMode::Effect {
             capability_contract_ref: reference(1),
-            total_attempt_bound: 3,
-            absorbing: true,
             effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
             fact_selection_required: false,
         };
-        assert_eq!(absorbing.validate(), Ok(()));
-        assert!(ExecutionMode::Effect {
-            capability_contract_ref: reference(1),
-            total_attempt_bound: 4,
-            absorbing: true,
-            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
-            fact_selection_required: false,
-        }
-        .validate()
-        .is_err());
+        assert_eq!(effect.validate(), Ok(()));
+        assert_eq!(effect.total_attempt_bound(), Some(1));
 
-        let entry_once = ExecutionMode::Effect {
-            capability_contract_ref: reference(1),
-            total_attempt_bound: 1,
-            absorbing: false,
-            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
-            fact_selection_required: false,
-        };
-        assert_eq!(entry_once.validate(), Ok(()));
-        assert!(ExecutionMode::Effect {
-            capability_contract_ref: reference(1),
-            total_attempt_bound: 2,
-            absorbing: false,
-            effect_domain: StableId::new("mfm.test.effect").expect("effect domain"),
-            fact_selection_required: false,
+        let current = serde_json::to_value(&effect).expect("current Effect shape");
+        assert_eq!(
+            serde_json::from_value::<ExecutionMode>(current.clone()).expect("current Effect"),
+            effect
+        );
+        for (field, value) in [
+            ("absorbing", serde_json::json!(false)),
+            ("total_attempt_bound", serde_json::json!(1)),
+        ] {
+            let mut old = current.clone();
+            old.as_object_mut()
+                .expect("Effect object")
+                .insert(field.to_owned(), value);
+            assert!(serde_json::from_value::<ExecutionMode>(old).is_err());
         }
-        .validate()
-        .is_err());
 
         let state = StateDeclaration::new(
             SequentialControlAddress::new(0, Vec::new()).expect("address"),

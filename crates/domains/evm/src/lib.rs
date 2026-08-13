@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::num::NonZeroU16;
 
-use mfm_capabilities::{AccessCapabilityContract, EffectMode, EntryOnce, NoPriorFacts, ReadMode};
+use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
 use mfm_ids::StableId;
 use mfm_program_derive::MfmValue;
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
@@ -1096,7 +1096,7 @@ impl BroadcastIntent {
     }
 }
 
-/// Closed broadcast evidence; an EntryOnce effect has no generic retry authority.
+/// Closed broadcast evidence; a one-entry Effect has no generic retry authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(
     tag = "kind",
@@ -1150,11 +1150,11 @@ impl BroadcastEvidence {
     }
 }
 
-/// One EntryOnce broadcast capability.
+/// One-entry broadcast capability.
 pub enum BroadcastTransaction {}
 
 impl AccessCapabilityContract for BroadcastTransaction {
-    type Mode = EffectMode<EntryOnce>;
+    type Mode = EffectMode;
     type Intent = BroadcastIntent;
     type Evidence = BroadcastEvidence;
     type Facts = NoPriorFacts;

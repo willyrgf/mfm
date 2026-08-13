@@ -118,7 +118,7 @@ pub enum EvmProviderResponse {
         /// Stable redacted failure code.
         code: String,
     },
-    /// The provider reported that an EntryOnce operation may already have entered.
+    /// The provider reported that a one-entry operation may already have entered.
     PossibleEntry {
         /// Call correlation echoed by the provider transport.
         call_id: StableId,
@@ -346,7 +346,7 @@ impl EvmAdapterBinding {
         }
     }
 
-    /// Performs the single EntryOnce broadcast ingress.
+    /// Performs the single one-entry broadcast ingress.
     pub async fn broadcast_call<
         S: State,
         C: AccessCapabilityContract<Intent = BroadcastIntent, Evidence = BroadcastEvidence>,

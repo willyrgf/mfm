@@ -3,7 +3,6 @@
 //! A capability owns one strict intent, one closed evidence value, and one sealed entry mode.
 //! Provider bytes never become a public generic response or a retry authority.
 
-use std::marker::PhantomData;
 use std::num::NonZeroU16;
 
 use mfm_facts::FactSelectionRequest;
@@ -26,14 +25,11 @@ pub type Result<T> = std::result::Result<T, CapabilityError>;
 
 mod private {
     pub trait AccessModeSealed {}
-    pub trait EffectEntryModeSealed {}
     pub trait FactSelectionModeSealed {}
     pub trait EvidenceSealed {}
 
     impl AccessModeSealed for super::ReadMode {}
-    impl<E: super::EffectEntryMode> AccessModeSealed for super::EffectMode<E> {}
-    impl EffectEntryModeSealed for super::EntryOnce {}
-    impl<const MAX: u16> EffectEntryModeSealed for super::EntryAbsorbing<MAX> {}
+    impl AccessModeSealed for super::EffectMode {}
     impl FactSelectionModeSealed for super::NoPriorFacts {}
     impl FactSelectionModeSealed for super::PriorRunFacts {}
     impl<T: super::MfmValue> EvidenceSealed for T {}
@@ -51,11 +47,9 @@ impl AccessMode for ReadMode {
             .ok_or(CapabilityError::InvalidContract)
     }
 }
-impl<E: EffectEntryMode> AccessMode for EffectMode<E> {
+impl AccessMode for EffectMode {
     fn validate_total_attempts(total: NonZeroU16) -> Result<()> {
-        (total.get() == E::MAX_TOTAL_ENTRIES
-            && total.get() <= 3
-            && ((E::ABSORBING && total.get() > 1) || (!E::ABSORBING && total.get() == 1)))
+        (total.get() == 1)
             .then_some(())
             .ok_or(CapabilityError::InvalidContract)
     }
@@ -64,30 +58,8 @@ impl<E: EffectEntryMode> AccessMode for EffectMode<E> {
 /// Non-mutating capability mode.
 pub struct ReadMode;
 
-/// Mutating capability mode parameterized by its entry discipline.
-pub struct EffectMode<E: EffectEntryMode>(PhantomData<fn() -> E>);
-
-/// Sealed Effect entry discipline.
-pub trait EffectEntryMode: private::EffectEntryModeSealed + Send + Sync + 'static {
-    /// Whether repeated attempts are allowed.
-    const ABSORBING: bool;
-    /// Maximum total entries including the initial attempt.
-    const MAX_TOTAL_ENTRIES: u16;
-}
-
-/// An Effect that may enter at most once.
-pub struct EntryOnce;
-impl EffectEntryMode for EntryOnce {
-    const ABSORBING: bool = false;
-    const MAX_TOTAL_ENTRIES: u16 = 1;
-}
-
-/// An Effect with a proved stable key and post-state convergence bound.
-pub struct EntryAbsorbing<const MAX_TOTAL_ENTRIES: u16>;
-impl<const MAX_TOTAL_ENTRIES: u16> EffectEntryMode for EntryAbsorbing<MAX_TOTAL_ENTRIES> {
-    const ABSORBING: bool = true;
-    const MAX_TOTAL_ENTRIES: u16 = MAX_TOTAL_ENTRIES;
-}
+/// Mutating capability mode with exactly one possible provider entry.
+pub struct EffectMode;
 
 /// No prior-run fact selection is attached.
 pub struct NoPriorFacts;
@@ -195,5 +167,32 @@ impl<C: AccessCapabilityContract> QualifiedRecordedEvidence<C> {
     /// Returns retained evidence.
     pub const fn evidence(&self) -> &C::Evidence {
         &self.evidence
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn access_modes_enforce_their_exact_attempt_bounds() {
+        for attempts in 1..=3 {
+            assert_eq!(
+                ReadMode::validate_total_attempts(NonZeroU16::new(attempts).expect("nonzero")),
+                Ok(())
+            );
+        }
+        assert_eq!(
+            ReadMode::validate_total_attempts(NonZeroU16::new(4).expect("nonzero")),
+            Err(CapabilityError::InvalidContract)
+        );
+        assert_eq!(
+            EffectMode::validate_total_attempts(NonZeroU16::new(1).expect("nonzero")),
+            Ok(())
+        );
+        assert_eq!(
+            EffectMode::validate_total_attempts(NonZeroU16::new(2).expect("nonzero")),
+            Err(CapabilityError::InvalidContract)
+        );
     }
 }

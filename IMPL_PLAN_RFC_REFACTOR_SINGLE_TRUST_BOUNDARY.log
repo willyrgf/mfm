@@ -567,3 +567,40 @@ Final verification after the restore cutover
 The final audit remains evidence-backed: no host-loss, failover, replica, quorum, latency, or
 independent provider-factual-truth claim is made. The RFC, implementation plan, and cutover
 manifest remain byte-for-byte unchanged.
+
+2026-08-13 — required-fixes commit 1: remove unused absorbing Effect support
+
+Material uncertainties
+
+none.
+
+Implementation progress
+
+- Replaced the generic Effect entry-discipline hierarchy with one sealed, non-generic Effect mode
+  that accepts exactly one total attempt; Read remains bounded to one through three attempts.
+- Removed the retry/absorption fields from Program and journal Effect shapes. The current retained
+  Effect preparation encodes only its mode tag, rejects the retired fields during strict decode,
+  reports an implicit bound of one, and never permits replacement.
+- Cut Runtime, EVM, App, and Store over to the one-entry shape. Store's preparation validation no
+  longer contains an Effect replacement branch, while the generic replacement path remains Read-
+  only through the mode contract.
+- Added regressions proving the capability bounds, hostile old Program/journal field rejection,
+  unchanged conclusion reservation after a rejected second Effect preparation, and zero new
+  preparation/provider entry after an unresolved Effect is parked and resumed.
+- Updated the design, recovery, EVM, capability inventory, cumulative-context, capacity, and
+  cutover-scan documentation. The smaller EVM Program fixture now measures 6,798 canonical bytes.
+
+Verification
+
+- `nix develop -c cargo check -p mfm-capabilities -p mfm-program -p mfm-journal -p mfm-store -p
+  mfm-runtime -p mfm-evm -p mfm-app --all-targets` — passed.
+- `nix develop -c cargo test -p mfm-capabilities -p mfm-program -p mfm-journal -p mfm-store -p
+  mfm-runtime -p mfm-evm` — passed after correcting the new Store fixture's conclusion reservation;
+  the final full Store rerun passed 19 unit tests plus its Trybuild API suite.
+- `nix develop -c cargo test -p mfm-app maximum_entry_point_programs_record_capacity_envelope --
+  --nocapture` — passed and supplied the updated canonical Program measurement.
+- `bash scripts/check-cutover-manifest.sh` and `git diff --check` — passed.
+
+Unsolved problems
+
+none for this commit. Required-fixes commits 2 through 4 remain to be implemented in order.
