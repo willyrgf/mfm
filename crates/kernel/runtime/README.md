@@ -7,6 +7,11 @@ retains the immutable binding descriptor, and conclusion recovery retains no pro
 authority. Integrity-blocked Access outcomes use the declared static failure contract and do not
 invoke State interpretation.
 
+Assembly finalization checks every State input/output/failure and Access intent/evidence type
+against Program's exact finalized catalog associations before any session or provider authority
+exists. Runtime's private `TypeId` values correlate live implementations only; cold reification
+uses catalog qualification and cannot accept a schema-only match.
+
 Access preparation projects only the canonical fact request. Store fixes any prior-fact selection
 from the admitted source manifest and a bounded publication frontier before minting the direct-new
 typed continuation; Runtime and State code cannot submit or replace that selection. State success

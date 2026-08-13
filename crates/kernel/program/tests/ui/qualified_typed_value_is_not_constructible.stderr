@@ -1,0 +1,5 @@
+error: cannot construct `QualifiedTypedValue<TestValue>` with struct literal syntax due to private fields
+  --> tests/ui/qualified_typed_value_is_not_constructible.rs:11:13
+   |
+11 |     let _ = QualifiedTypedValue::<TestValue> {};
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

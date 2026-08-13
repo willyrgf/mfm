@@ -29,8 +29,10 @@ consume App.
 ### Program
 
 Program owns strict document ingress, pure expansion, State/Match declarations, contracts,
-catalog-branded typed values, and binding descriptors. Program data is callback-free and cannot
-invoke I/O.
+the sole exact nominal-contract/schema-descriptor/Rust-type association table, catalog-branded
+typed values, and binding descriptors. Program data is callback-free and cannot invoke I/O. Runtime
+State and capability registrations must match the finalized table before an assembly exists; their
+private `TypeId` correlation is not a second value registry.
 
 ### Capabilities
 

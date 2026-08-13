@@ -18,7 +18,7 @@ use mfm_journal::single_trust::{
     BindingDescriptor, ImmutableObject, RunAdmitted, RunFrame, RunRecord, StateConcluded,
     StateOutcome, ValueRef,
 };
-use mfm_program::{canonical_value, ProgramCatalog, QualifiedTypedValue};
+use mfm_program::{canonical_value, nominal_contract_ref, ProgramCatalog, QualifiedTypedValue};
 use mfm_store::single_trust::{AppendDisposition, QualifiedRun, ReducedRunState, RunAction};
 use mfm_store::{ConclusionCommitOutcome, OpenedStructuredStore};
 use mfm_values::MfmValue;
@@ -271,12 +271,11 @@ fn try_reify<T: MfmValue>(
     contract: &ContentRef,
     canonical_bytes: &[u8],
 ) -> LifecycleResult<Option<ErasedValue>> {
-    if T::schema_id().map_err(|_| RuntimeError::Value)? != *contract.schema_id() {
+    if !catalog.contains_value::<T>(contract) {
         return Ok(None);
     }
-    let value = serde_json::from_slice::<T>(canonical_bytes).map_err(|_| RuntimeError::Value)?;
     let qualified = catalog
-        .qualify(contract.clone(), value)
+        .qualify_retained::<T>(contract.clone(), canonical_bytes)
         .map_err(|_| RuntimeError::Value)?;
     ErasedValue::from_qualified(catalog, witness, qualified).map(Some)
 }
@@ -610,14 +609,6 @@ impl DynamicResolution {
             fact_continuation,
         })
     }
-}
-
-fn nominal_contract_ref<T: MfmValue>() -> LifecycleResult<ContentRef> {
-    ContentRef::new(
-        T::schema_id().map_err(|_| RuntimeError::Value)?,
-        raw_content_digest(b"mfm.contract.v1"),
-    )
-    .map_err(|_| RuntimeError::Value)
 }
 
 /// Stable reason for retaining a live session without attempting another State callback.
@@ -2555,6 +2546,14 @@ mod tests {
         ContentRef::new(schema, raw_content_digest(label)).expect("content ref")
     }
 
+    fn test_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
+        let mut builder = ProgramCatalog::builder();
+        builder
+            .register_value::<TestContext>()
+            .expect("test context");
+        builder
+    }
+
     fn test_identity() -> StructuredStoreIdentity {
         StructuredStoreIdentity::new(
             mfm_ids::StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
@@ -2613,7 +2612,7 @@ mod tests {
             ],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
         let implementation = PureImplementation::<TestPure>::new(move |input| {
             if let Some(pure_entries) = &pure_entries {
                 pure_entries.fetch_add(1, Ordering::SeqCst);
@@ -2788,7 +2787,7 @@ mod tests {
             ],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
         let mut builder =
             crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
                 .expect("assembly builder");
@@ -3076,7 +3075,7 @@ mod tests {
             ))],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
         let counters = Arc::new(AccessCounters::default());
         let mut builder =
             crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
@@ -3253,7 +3252,7 @@ mod tests {
             ))],
         )
         .expect("document");
-        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
         let counters = Arc::new(AccessCounters::default());
         let mut builder =
             crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
