@@ -26,10 +26,8 @@ use mfm_journal::single_trust::{
     StatePrepared,
 };
 use mfm_program::{canonical_value, Program, ProgramCatalog, QualifiedTypedValue};
-use mfm_store::single_trust::{
-    AppendDisposition, FactContinuation, PreparationAppend, PreparedConclusion,
-    Result as StoreResult, RunStore,
-};
+use mfm_store::single_trust::{AppendDisposition, FactContinuation, ReducedRunState};
+use mfm_store::QualifiedRun;
 use mfm_values::MfmValue;
 
 /// Send-owned future used by one qualified live implementation.
@@ -386,12 +384,24 @@ type AccessPreparer<S, C> = dyn Fn(
 #[doc(hidden)]
 pub type AccessResolutionFuture<S, C> =
     BoxFuture<Result<AccessHandlerResolution<S, <S as State>::Output, <S as State>::Failure, C>>>;
-type AccessExecutor<S, C> =
+type AccessStateExecutor<S, C> =
     dyn Fn(CommittedCall<S, C>) -> AccessResolutionFuture<S, C> + Send + Sync;
+/// Opaque Send future returned by one consuming qualified adapter ingress.
+#[doc(hidden)]
+pub type AccessIngressFuture<S, C> = BoxFuture<Result<AccessResolution<S, C>>>;
+type AccessExecutor<S, C> = dyn Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync;
 
 /// Pure State implementation whose callback receives only the exact typed input.
 pub struct PureImplementation<S: State> {
     evaluate: Arc<PureEvaluator<S>>,
+}
+
+impl<S: State> Clone for PureImplementation<S> {
+    fn clone(&self) -> Self {
+        Self {
+            evaluate: Arc::clone(&self.evaluate),
+        }
+    }
 }
 
 impl<S: State> PureImplementation<S> {
@@ -423,7 +433,16 @@ impl<S: State> PureImplementation<S> {
 /// Access State implementation with separate borrowed preparation and consuming execution.
 pub struct AccessImplementation<S: State, C: AccessCapabilityContract> {
     prepare: Arc<AccessPreparer<S, C>>,
-    execute: Arc<AccessExecutor<S, C>>,
+    execute: Arc<AccessStateExecutor<S, C>>,
+}
+
+impl<S: State, C: AccessCapabilityContract> Clone for AccessImplementation<S, C> {
+    fn clone(&self) -> Self {
+        Self {
+            prepare: Arc::clone(&self.prepare),
+            execute: Arc::clone(&self.execute),
+        }
+    }
 }
 
 impl<S: State, C: AccessCapabilityContract> AccessImplementation<S, C> {
@@ -470,6 +489,7 @@ pub struct CommittedCall<S: State, C: AccessCapabilityContract> {
     binding: BindingDescriptor,
     execution_binding_ref: ContentRef,
     fact_continuation: Option<FactContinuation>,
+    adapter: Arc<QualifiedAdapter<S, C>>,
 }
 
 impl<S: State, C: AccessCapabilityContract> CommittedCall<S, C> {
@@ -624,6 +644,16 @@ impl<S: State, C: AccessCapabilityContract> CommittedCall<S, C> {
             classification,
         )
     }
+
+    /// Consumes this call through the exact adapter sealed into the Runtime assembly.
+    ///
+    /// The caller supplies no target, binding, request, signer, or provider handle.  The
+    /// adapter derives its request from this call's canonical intent and can only be entered
+    /// once because the call itself is consumed.
+    pub fn invoke_bound_adapter(self) -> AccessIngressFuture<S, C> {
+        let adapter = Arc::clone(&self.adapter);
+        adapter.enter(self)
+    }
 }
 
 /// Preparation owner retaining the typed input until Store direct-new succeeds.
@@ -640,6 +670,35 @@ pub struct PreparedExecution<S: State, C: AccessCapabilityContract> {
     fact_request: Option<(mfm_journal::single_trust::ValueRef, ImmutableObject)>,
     fact_selection: Option<(mfm_journal::single_trust::ValueRef, ImmutableObject)>,
     _mode: PhantomData<C::Mode>,
+}
+
+/// Result of consuming a preparation owner through an opened semantic Store.
+#[allow(clippy::large_enum_variant)]
+pub enum OpenedPreparationCommit<S: State, C: AccessCapabilityContract> {
+    /// The preparation crossed Store direct-new and the call is now eligible for adapter entry.
+    Direct {
+        /// The inert committed call.
+        call: CommittedCall<S, C>,
+        /// The qualified prefix including the durable preparation.
+        run: QualifiedRun,
+        /// The retained reduction advanced to the selected preparation.
+        reduced: ReducedRunState,
+    },
+    /// Store returned a non-new disposition; the exact inert owner remains available for
+    /// acknowledgement resolution or semantic rebind.
+    Retained {
+        /// The original preparation owner, including its typed input and intent.
+        owner: PreparedExecution<S, C>,
+        /// The known Store disposition that prevented direct call minting.
+        disposition: AppendDisposition,
+    },
+    /// The append owner could not cross a known boundary; the exact inert owner remains retained.
+    Rejected {
+        /// The original preparation owner.
+        owner: PreparedExecution<S, C>,
+        /// Redacted failure classification.
+        error: RuntimeError,
+    },
 }
 
 impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C>
@@ -756,37 +815,14 @@ where
         Ok(self)
     }
 
-    /// Consumes this owner and creates a `CommittedCall` only for a direct-new append.
+    /// Consumes this owner through the branded asynchronous Store boundary.
     #[allow(clippy::too_many_arguments)]
-    pub fn commit(
+    pub async fn commit_opened(
         self,
         assembly: &RuntimeAssembly,
-        store: &RunStore,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        input_ref: mfm_journal::single_trust::ValueRef,
-        intent_ref: mfm_journal::single_trust::ValueRef,
-        maximum_conclusion_bytes: u64,
-    ) -> Result<CommittedCall<S, C>> {
-        self.commit_with_replacement(
-            assembly,
-            store,
-            expected_sequence,
-            append_request_id,
-            input_ref,
-            intent_ref,
-            maximum_conclusion_bytes,
-            0,
-            None,
-        )
-    }
-
-    /// Consumes this owner for a replacement preparation under the exact selected parent.
-    #[allow(clippy::too_many_arguments)]
-    pub fn commit_with_replacement(
-        self,
-        assembly: &RuntimeAssembly,
-        store: &RunStore,
+        store: &mfm_store::OpenedStructuredStore,
+        current: &QualifiedRun,
+        reduced: &ReducedRunState,
         expected_sequence: u64,
         append_request_id: AppendRequestId,
         input_ref: mfm_journal::single_trust::ValueRef,
@@ -794,431 +830,197 @@ where
         maximum_conclusion_bytes: u64,
         preparation_ordinal: u16,
         replaces: Option<PreparationRef>,
-    ) -> Result<CommittedCall<S, C>> {
+    ) -> OpenedPreparationCommit<S, C> {
         if !Arc::ptr_eq(&self.assembly_brand, &assembly.brand) {
-            return Err(RuntimeError::Identity);
+            return OpenedPreparationCommit::Rejected {
+                owner: self,
+                error: RuntimeError::Identity,
+            };
         }
-        let Self {
-            assembly_brand,
-            program_ref,
-            run_id,
-            occurrence,
-            input,
-            intent,
-            binding,
-            execution_binding_ref,
-            mode,
-            fact_request,
-            fact_selection,
-            ..
-        } = self;
-        if C::requires_prior_facts() != fact_request.is_some()
-            || fact_request.is_some() != fact_selection.is_some()
+        if C::requires_prior_facts() != self.fact_request.is_some()
+            || self.fact_request.is_some() != self.fact_selection.is_some()
         {
-            return Err(RuntimeError::Preparation);
+            return OpenedPreparationCommit::Rejected {
+                owner: self,
+                error: RuntimeError::Preparation,
+            };
         }
-        let intent_object_ref = intent_ref.value_ref().clone();
-        let input_object_ref = input_ref.value_ref().clone();
-        if input.contract_ref() != input_ref.contract_ref()
-            || input.value_ref() != &input_object_ref
-            || intent_ref.contract_ref() != &nominal_contract_ref::<C::Intent>()?
-            || intent_ref.value_ref() != &qualified_value_ref(&intent)?
+        let expected_intent_contract = match nominal_contract_ref::<C::Intent>() {
+            Ok(value) => value,
+            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+        };
+        let expected_intent_value = match qualified_value_ref(&self.intent) {
+            Ok(value) => value,
+            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+        };
+        if self.input.contract_ref() != input_ref.contract_ref()
+            || self.input.value_ref() != input_ref.value_ref()
+            || intent_ref.contract_ref() != &expected_intent_contract
+            || intent_ref.value_ref() != &expected_intent_value
             || !intent_ref.is_schema_bound()
         {
-            return Err(RuntimeError::Value);
+            return OpenedPreparationCommit::Rejected {
+                owner: self,
+                error: RuntimeError::Value,
+            };
         }
-        let prepared = StatePrepared::new(
-            occurrence.clone(),
+        let prepared = match StatePrepared::new(
+            self.occurrence.clone(),
             preparation_ordinal,
-            input_ref,
-            intent_ref,
-            fact_request.as_ref().map(|(request, _)| request.clone()),
-            fact_selection
+            input_ref.clone(),
+            intent_ref.clone(),
+            self.fact_request
+                .as_ref()
+                .map(|(request, _)| request.clone()),
+            self.fact_selection
                 .as_ref()
                 .map(|(selection, _)| selection.clone()),
-            mode,
-            binding.clone(),
-            execution_binding_ref.clone(),
+            self.mode,
+            self.binding.clone(),
+            self.execution_binding_ref.clone(),
             replaces,
             maximum_conclusion_bytes,
-        )
-        .map_err(|_| RuntimeError::Preparation)?;
+        ) {
+            Ok(prepared) => prepared,
+            Err(_) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: RuntimeError::Preparation,
+                }
+            }
+        };
         let mut objects = vec![
-            value_object(input.as_ref(), &input_object_ref)?,
-            value_object(&intent, &intent_object_ref)?,
+            match value_object(self.input.as_ref(), input_ref.value_ref()) {
+                Ok(object) => object,
+                Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+            },
+            match value_object(&self.intent, intent_ref.value_ref()) {
+                Ok(object) => object,
+                Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+            },
         ];
-        if let Some((_, object)) = fact_request {
-            objects.push(object);
+        if let Some((_, object)) = &self.fact_request {
+            objects.push(object.clone());
         }
-        if let Some((_, object)) = fact_selection {
-            objects.push(object);
+        if let Some((_, object)) = &self.fact_selection {
+            objects.push(object.clone());
         }
-        let append = store
-            .prepare_access(
-                &run_id,
+        let append = match store
+            .prepare_access_qualified_with_reduced(
+                current,
                 assembly.program().document(),
+                reduced,
                 expected_sequence,
                 append_request_id,
                 prepared,
                 objects,
             )
-            .map_err(|_| RuntimeError::Preparation)?;
+            .await
+        {
+            Ok(append) => append,
+            Err(_) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: RuntimeError::Preparation,
+                }
+            }
+        };
         if !matches!(
             append.disposition(),
             AppendDisposition::NewlyCommitted { .. }
         ) {
-            return Err(RuntimeError::PreparationNotCommitted);
+            return OpenedPreparationCommit::Retained {
+                owner: self,
+                disposition: append.disposition(),
+            };
         }
-        let preparation = append
-            .preparation()
-            .cloned()
-            .ok_or(RuntimeError::PreparationNotCommitted)?;
-        let call_id = mint_call_id(&run_id, &preparation)?;
-        let fact_continuation = append.into_fact_continuation();
-        Ok(CommittedCall {
+        let preparation = match append.preparation().cloned() {
+            Some(preparation) => preparation,
+            None => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: RuntimeError::PreparationNotCommitted,
+                }
+            }
+        };
+        let call_id = match mint_call_id(&self.run_id, &preparation) {
+            Ok(call_id) => call_id,
+            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+        };
+        let capability_contract_ref = match self.binding.capability_contract_ref() {
+            Some(value) => value,
+            None => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: RuntimeError::Identity,
+                }
+            }
+        };
+        let adapter = match assembly.qualified_adapter::<S, C>(
+            self.binding.state_implementation_ref(),
+            capability_contract_ref,
+            &self.execution_binding_ref,
+        ) {
+            Ok(adapter) => Arc::new(adapter),
+            Err(error) => return OpenedPreparationCommit::Rejected { owner: self, error },
+        };
+        let committed_run = match append.committed_frame() {
+            Some(frame) => match store.qualify_appended(current, frame.clone()) {
+                Ok(run) => run,
+                Err(error) => {
+                    return OpenedPreparationCommit::Rejected {
+                        owner: self,
+                        error: error.into(),
+                    }
+                }
+            },
+            None => current.clone(),
+        };
+        let reduced = match reduced.waiting_preparation(
+            &committed_run,
+            self.occurrence.clone(),
+            preparation.clone(),
+        ) {
+            Ok(reduced) => reduced,
+            Err(error) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    error: error.into(),
+                }
+            }
+        };
+        let Self {
             assembly_brand,
             program_ref,
-            store_scope_id: store.scope().clone(),
-            store_epoch: store.epoch(),
-            tenant_scope_id: store.tenant().clone(),
             run_id,
             occurrence,
-            preparation,
-            call_id,
             input,
             intent,
             binding,
             execution_binding_ref,
-            fact_continuation,
-        })
-    }
-}
-
-/// Runtime-owned outer owner for a Store conclusion append and its already-typed successor.
-pub struct PendingConclusion<T: MfmValue> {
-    assembly_brand: Arc<RuntimeAssemblyBrand>,
-    owner: PreparedConclusion,
-    successor: QualifiedTypedValue<T>,
-}
-
-impl<T: MfmValue> PendingConclusion<T> {
-    /// Constructs an owner around a Store-prepared conclusion.
-    fn new(
-        assembly: &RuntimeAssembly,
-        owner: PreparedConclusion,
-        successor: QualifiedTypedValue<T>,
-    ) -> Result<Self> {
-        if !successor.belongs_to_catalog(assembly.catalog())
-            || !matches!(
-                owner.frame().record(),
-                mfm_journal::single_trust::RunRecord::StateConcluded(conclusion)
-                    if matches!(
-                        conclusion.outcome(),
-                        mfm_journal::single_trust::StateOutcome::Success(value)
-                            if value.contract_ref() == successor.contract_ref()
-                                && value.value_ref() == successor.value_ref()
-                    )
-            )
-        {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
-            assembly_brand: Arc::clone(&assembly.brand),
-            owner,
-            successor,
-        })
-    }
-
-    /// Returns whether this pending owner belongs to the exact assembly.
-    pub fn belongs_to_assembly(&self, assembly: &RuntimeAssembly) -> bool {
-        Arc::ptr_eq(&self.assembly_brand, &assembly.brand)
-    }
-
-    /// Consumes the pending owner, commits once, and releases the retained typed successor only
-    /// after Store reports a durable or found-identical conclusion.
-    pub fn commit(
-        self,
-        assembly: &RuntimeAssembly,
-        store: &RunStore,
-    ) -> Result<(AppendDisposition, QualifiedTypedValue<T>)> {
-        if !self.belongs_to_assembly(assembly) {
-            return Err(RuntimeError::Identity);
-        }
-        let Self {
-            owner, successor, ..
+            ..
         } = self;
-        let disposition = owner.commit(store).map_err(|_| RuntimeError::Conclusion)?;
-        Ok((disposition, successor))
-    }
-}
-
-/// Runtime owner for a durable typed failure conclusion.
-pub struct PendingFailure {
-    assembly_brand: Arc<RuntimeAssemblyBrand>,
-    owner: PreparedConclusion,
-}
-
-impl PendingFailure {
-    /// Constructs one failure owner around a Store-prepared conclusion.
-    fn new(assembly: &RuntimeAssembly, owner: PreparedConclusion) -> Result<Self> {
-        if !matches!(
-            owner.frame().record(),
-            mfm_journal::single_trust::RunRecord::StateConcluded(conclusion)
-                if matches!(
-                    conclusion.outcome(),
-                    mfm_journal::single_trust::StateOutcome::Failure(_)
-                )
-        ) {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
-            assembly_brand: Arc::clone(&assembly.brand),
-            owner,
-        })
-    }
-
-    /// Returns whether this pending owner belongs to the exact assembly.
-    pub fn belongs_to_assembly(&self, assembly: &RuntimeAssembly) -> bool {
-        Arc::ptr_eq(&self.assembly_brand, &assembly.brand)
-    }
-
-    /// Commits the failure once and returns its mechanical disposition.
-    pub fn commit(self, assembly: &RuntimeAssembly, store: &RunStore) -> Result<AppendDisposition> {
-        if !self.belongs_to_assembly(assembly) {
-            return Err(RuntimeError::Identity);
-        }
-        self.owner
-            .commit(store)
-            .map_err(|_| RuntimeError::Conclusion)
-    }
-}
-
-/// Access conclusion owner returned after one exact accepted evidence interpretation.
-#[allow(clippy::large_enum_variant)]
-pub enum AccessConclusion<S: State> {
-    /// A durable success retains the already-qualified successor context.
-    Success(PendingConclusion<S::Output>),
-    /// A durable failure retains no successor context or retry authority.
-    Failure(PendingFailure),
-}
-
-/// Prepares one Pure success conclusion without invoking Store callbacks or re-decoding output.
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_pure_success<S: State>(
-    assembly: &RuntimeAssembly,
-    store: &RunStore,
-    run_id: &RunId,
-    expected_sequence: u64,
-    append_request_id: AppendRequestId,
-    occurrence: SequentialControlAddress,
-    successor: QualifiedTypedValue<S::Output>,
-    output: mfm_journal::single_trust::ValueRef,
-    objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-) -> Result<PendingConclusion<S::Output>> {
-    if successor.contract_ref() != output.contract_ref()
-        || successor.value_ref() != output.value_ref()
-        || !successor.belongs_to_catalog(assembly.catalog())
-    {
-        return Err(RuntimeError::Value);
-    }
-    let mut objects = objects;
-    objects.push(value_object(successor.as_ref(), output.value_ref())?);
-    let owner = store
-        .prepare_conclusion(
-            run_id,
-            assembly.program().document(),
-            expected_sequence,
-            append_request_id,
-            mfm_journal::single_trust::StateConcluded::Pure {
-                occurrence,
-                outcome: mfm_journal::single_trust::StateOutcome::Success(output),
-                fact_publication: None,
-            },
-            objects,
-            mfm_journal::single_trust::MAX_FRAME_BYTES as u64,
-        )
-        .map_err(|_| RuntimeError::Conclusion)?;
-    PendingConclusion::new(assembly, owner, successor)
-}
-
-/// Prepares one Access success or failure conclusion from a call-bound opaque resolution.
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_access_resolution<S: State, C: AccessCapabilityContract>(
-    assembly: &RuntimeAssembly,
-    catalog: &ProgramCatalog,
-    store: &RunStore,
-    run_id: &RunId,
-    expected_sequence: u64,
-    append_request_id: AppendRequestId,
-    occurrence: SequentialControlAddress,
-    preparation: PreparationRef,
-    call_id: StableId,
-    evidence_contract_ref: ContentRef,
-    output_contract_ref: ContentRef,
-    failure_contract_ref: Option<ContentRef>,
-    resolution: AccessHandlerResolution<S, S::Output, S::Failure, C>,
-    objects: Vec<mfm_journal::single_trust::ImmutableObject>,
-) -> Result<AccessConclusion<S>> {
-    if !assembly.program().belongs_to_catalog(catalog) {
-        return Err(RuntimeError::Identity);
-    }
-    let Some(mfm_program::Declaration::State(state)) =
-        assembly.program().document().declaration(&occurrence)
-    else {
-        return Err(RuntimeError::Identity);
-    };
-    if state.execution().is_pure()
-        || state.output_contract_ref() != &output_contract_ref
-        || state.failure_contract_ref() != failure_contract_ref.as_ref()
-    {
-        return Err(RuntimeError::Identity);
-    }
-    if evidence_contract_ref != nominal_contract_ref::<C::Evidence>()? {
-        return Err(RuntimeError::Value);
-    }
-    let (
-        resolution_assembly_brand,
-        input,
-        recorded_call_id,
-        intent,
-        evidence,
-        outcome,
-        classification,
-        recorded_preparation,
-        fact_continuation,
-    ) = resolution.into_parts();
-    if !Arc::ptr_eq(&resolution_assembly_brand, &assembly.brand)
-        || input.contract_ref() != state.input_contract_ref()
-        || recorded_call_id != call_id
-        || recorded_preparation != preparation
-        || classification.is_some()
-    {
-        return Err(if classification.is_some() {
-            RuntimeError::Unresolved
-        } else {
-            RuntimeError::Identity
-        });
-    }
-    let Some(evidence) = evidence else {
-        return Err(RuntimeError::Unresolved);
-    };
-    let Some(outcome) = outcome else {
-        return Err(RuntimeError::Unresolved);
-    };
-    if !input.belongs_to_catalog(catalog) {
-        return Err(RuntimeError::Identity);
-    }
-    if preparation.run_id() != run_id {
-        return Err(RuntimeError::Identity);
-    }
-    let retained = store.load(run_id).map_err(|_| RuntimeError::Conclusion)?;
-    let Some((selected, selected_ref)) = retained.selected_preparation(&occurrence) else {
-        return Err(RuntimeError::Identity);
-    };
-    if selected.binding().capability_contract_ref() != state.execution().capability_contract_ref()
-        || selected.execution_binding_ref()
-            != state
-                .execution_binding_ref()
-                .ok_or(RuntimeError::Identity)?
-    {
-        return Err(RuntimeError::Identity);
-    }
-    let intent_ref = qualified_value_ref(&intent)?;
-    if selected_ref != preparation
-        || selected.input().value_ref() != input.value_ref()
-        || selected.input().contract_ref() != input.contract_ref()
-        || selected.intent().value_ref() != &intent_ref
-        || selected.fact_request() != fact_continuation.as_ref().map(FactContinuation::request)
-        || selected.fact_selection() != fact_continuation.as_ref().map(FactContinuation::selection)
-    {
-        return Err(RuntimeError::Identity);
-    }
-    if fact_continuation.as_ref().is_some_and(|continuation| {
-        continuation.scope() != store.scope()
-            || continuation.epoch() != store.epoch()
-            || continuation.tenant() != store.tenant()
-            || continuation.run_id() != run_id
-            || continuation.preparation() != &preparation
-    }) {
-        return Err(RuntimeError::Identity);
-    }
-    let qualified_evidence = catalog
-        .qualify(evidence_contract_ref.clone(), evidence)
-        .map_err(|_| RuntimeError::Value)?;
-    let evidence_ref = mfm_journal::single_trust::ValueRef::new(
-        qualified_evidence.contract_ref().clone(),
-        qualified_evidence.value_ref().clone(),
-    );
-    let mut objects = objects;
-    let input_ref = mfm_journal::single_trust::ValueRef::new(
-        input.contract_ref().clone(),
-        input.value_ref().clone(),
-    );
-    objects.push(value_object(input.as_ref(), input_ref.value_ref())?);
-    objects.push(value_object(&intent, &intent_ref)?);
-    objects.push(value_object(
-        qualified_evidence.as_ref(),
-        evidence_ref.value_ref(),
-    )?);
-    let (outcome, success) = match outcome {
-        ProposedStateOutcome::Success(output) => {
-            let qualified = catalog
-                .qualify(output_contract_ref.clone(), output)
-                .map_err(|_| RuntimeError::Value)?;
-            let value_ref = mfm_journal::single_trust::ValueRef::new(
-                qualified.contract_ref().clone(),
-                qualified.value_ref().clone(),
-            );
-            objects.push(value_object(qualified.as_ref(), value_ref.value_ref())?);
-            (
-                mfm_journal::single_trust::StateOutcome::Success(value_ref),
-                Some(qualified),
-            )
-        }
-        ProposedStateOutcome::Failure(failure) => {
-            let failure_ref = failure_contract_ref.ok_or(RuntimeError::Value)?;
-            let qualified = catalog
-                .qualify(failure_ref, failure)
-                .map_err(|_| RuntimeError::Value)?;
-            let value_ref = mfm_journal::single_trust::ValueRef::new(
-                qualified.contract_ref().clone(),
-                qualified.value_ref().clone(),
-            );
-            objects.push(value_object(qualified.as_ref(), value_ref.value_ref())?);
-            (
-                mfm_journal::single_trust::StateOutcome::Failure(value_ref),
-                None,
-            )
-        }
-    };
-    let owner = store
-        .prepare_conclusion(
-            run_id,
-            assembly.program().document(),
-            expected_sequence,
-            append_request_id,
-            mfm_journal::single_trust::StateConcluded::Access {
+        OpenedPreparationCommit::Direct {
+            call: CommittedCall {
+                assembly_brand,
+                program_ref,
+                store_scope_id: store.identity().scope().clone(),
+                store_epoch: store.identity().epoch(),
+                tenant_scope_id: store.identity().tenant().clone(),
+                run_id,
                 occurrence,
                 preparation,
-                evidence: evidence_ref,
-                outcome,
-                fact_selection: fact_continuation
-                    .as_ref()
-                    .map(FactContinuation::selection)
-                    .cloned(),
-                fact_publication: None,
+                call_id,
+                input,
+                intent,
+                binding,
+                execution_binding_ref,
+                fact_continuation: append.into_fact_continuation(),
+                adapter,
             },
-            objects,
-            mfm_journal::single_trust::MAX_FRAME_BYTES as u64,
-        )
-        .map_err(|_| RuntimeError::Conclusion)?;
-    match success {
-        Some(successor) => Ok(AccessConclusion::Success(PendingConclusion::new(
-            assembly, owner, successor,
-        )?)),
-        None => Ok(AccessConclusion::Failure(PendingFailure::new(
-            assembly, owner,
-        )?)),
+            run: committed_run,
+            reduced,
+        }
     }
 }
 
@@ -1257,7 +1059,7 @@ impl<S: State, C: AccessCapabilityContract> QualifiedAdapter<S, C> {
     }
 
     /// Enters the provider-owned path with the one consuming committed call.
-    pub fn enter(&self, call: CommittedCall<S, C>) -> AccessResolutionFuture<S, C> {
+    pub fn enter(&self, call: CommittedCall<S, C>) -> AccessIngressFuture<S, C> {
         if !Arc::ptr_eq(&self.assembly_brand, &call.assembly_brand)
             || call.execution_binding_ref() != &self.binding_ref
             || self
@@ -1284,13 +1086,13 @@ impl<S: State, C: AccessCapabilityContract> QualifiedAdapter<S, C> {
 }
 
 struct PanicContainedFuture<S: State, C: AccessCapabilityContract> {
-    inner: AccessResolutionFuture<S, C>,
+    inner: AccessIngressFuture<S, C>,
 }
 
 impl<S: State, C: AccessCapabilityContract> Unpin for PanicContainedFuture<S, C> {}
 
 impl<S: State, C: AccessCapabilityContract> Future for PanicContainedFuture<S, C> {
-    type Output = Result<AccessHandlerResolution<S, S::Output, S::Failure, C>>;
+    type Output = Result<AccessResolution<S, C>>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         match catch_unwind(AssertUnwindSafe(|| self.inner.as_mut().poll(context))) {
@@ -1304,16 +1106,17 @@ impl<S: State, C: AccessCapabilityContract> Future for PanicContainedFuture<S, C
 #[derive(Debug)]
 pub(crate) struct RuntimeAssemblyBrand;
 
-struct RegisteredState {
-    state_implementation_ref: ContentRef,
-    state_type: TypeId,
-    access: bool,
-    capability_contract_ref: Option<ContentRef>,
-    capability_type: Option<TypeId>,
-    binding_ref: Option<ContentRef>,
-    adapter_implementation_ref: Option<ContentRef>,
-    implementation: Box<dyn Any + Send + Sync>,
-    adapter: Option<Box<dyn Any + Send + Sync>>,
+pub(crate) struct RegisteredState {
+    pub(crate) state_implementation_ref: ContentRef,
+    pub(crate) state_type: TypeId,
+    pub(crate) access: bool,
+    pub(crate) capability_contract_ref: Option<ContentRef>,
+    pub(crate) capability_type: Option<TypeId>,
+    pub(crate) binding_ref: Option<ContentRef>,
+    pub(crate) adapter_implementation_ref: Option<ContentRef>,
+    pub(crate) implementation: Box<dyn Any + Send + Sync>,
+    pub(crate) adapter: Option<Box<dyn Any + Send + Sync>>,
+    pub(crate) dynamic: Option<Arc<dyn crate::lifecycle::DynamicStateRegistration>>,
 }
 
 struct ProcessRegistry {
@@ -1361,6 +1164,7 @@ impl RuntimeAssemblyBuilder {
         implementation: PureImplementation<S>,
     ) -> Result<()> {
         self.ensure_unique(&state_implementation_ref)?;
+        let dynamic = crate::lifecycle::pure_registration(implementation.clone());
         self.registrations.push(RegisteredState {
             state_implementation_ref,
             state_type: TypeId::of::<S>(),
@@ -1371,6 +1175,7 @@ impl RuntimeAssemblyBuilder {
             adapter_implementation_ref: None,
             implementation: Box::new(implementation),
             adapter: None,
+            dynamic: Some(dynamic),
         });
         Ok(())
     }
@@ -1387,7 +1192,8 @@ impl RuntimeAssemblyBuilder {
         invoke: F,
     ) -> Result<()>
     where
-        F: Fn(CommittedCall<S, C>) -> AccessResolutionFuture<S, C> + Send + Sync + 'static,
+        F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
+        C::Mode: RuntimePreparationMode,
     {
         C::validate().map_err(|_| RuntimeError::Mode)?;
         if capability_contract_ref != capability_content_ref::<C>()? {
@@ -1395,6 +1201,7 @@ impl RuntimeAssemblyBuilder {
         }
         self.ensure_unique(&state_implementation_ref)?;
         let adapter: Arc<AccessExecutor<S, C>> = Arc::new(invoke);
+        let dynamic = crate::lifecycle::access_registration(implementation.clone());
         self.registrations.push(RegisteredState {
             state_implementation_ref,
             state_type: TypeId::of::<S>(),
@@ -1405,6 +1212,51 @@ impl RuntimeAssemblyBuilder {
             adapter_implementation_ref: Some(adapter_implementation_ref),
             implementation: Box::new(implementation),
             adapter: Some(Box::new(adapter)),
+            dynamic: Some(dynamic),
+        });
+        Ok(())
+    }
+
+    /// Registers one Access State with its immutable content-addressed binding descriptor.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_access_with_binding<S: State, C: AccessCapabilityContract, F>(
+        &mut self,
+        state_implementation_ref: ContentRef,
+        capability_contract_ref: ContentRef,
+        execution_binding_ref: ContentRef,
+        adapter_implementation_ref: ContentRef,
+        binding: BindingDescriptor,
+        implementation: AccessImplementation<S, C>,
+        invoke: F,
+    ) -> Result<()>
+    where
+        F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
+        C::Mode: RuntimePreparationMode,
+    {
+        C::validate().map_err(|_| RuntimeError::Mode)?;
+        if capability_contract_ref != capability_content_ref::<C>()?
+            || binding.state_implementation_ref() != &state_implementation_ref
+            || binding.capability_contract_ref() != Some(&capability_contract_ref)
+            || binding.adapter_implementation_ref() != Some(&adapter_implementation_ref)
+            || binding.content_ref().map_err(|_| RuntimeError::Identity)? != execution_binding_ref
+        {
+            return Err(RuntimeError::Identity);
+        }
+        self.ensure_unique(&state_implementation_ref)?;
+        let adapter: Arc<AccessExecutor<S, C>> = Arc::new(invoke);
+        let dynamic =
+            crate::lifecycle::access_registration_with_binding(implementation.clone(), binding);
+        self.registrations.push(RegisteredState {
+            state_implementation_ref,
+            state_type: TypeId::of::<S>(),
+            access: true,
+            capability_contract_ref: Some(capability_contract_ref),
+            capability_type: Some(TypeId::of::<C>()),
+            binding_ref: Some(execution_binding_ref),
+            adapter_implementation_ref: Some(adapter_implementation_ref),
+            implementation: Box::new(implementation),
+            adapter: Some(Box::new(adapter)),
+            dynamic: Some(dynamic),
         });
         Ok(())
     }
@@ -1510,6 +1362,41 @@ impl RuntimeAssembly {
         Arc::ptr_eq(&self.brand, &other.brand)
     }
 
+    pub(crate) fn has_brand(&self, brand: &Arc<RuntimeAssemblyBrand>) -> bool {
+        Arc::ptr_eq(&self.brand, brand)
+    }
+
+    pub(crate) fn dynamic_registration(
+        &self,
+        state_implementation_ref: &ContentRef,
+    ) -> Result<Arc<dyn crate::lifecycle::DynamicStateRegistration>> {
+        self.registry
+            .states
+            .iter()
+            .find(|registered| &registered.state_implementation_ref == state_implementation_ref)
+            .and_then(|registered| registered.dynamic.as_ref())
+            .cloned()
+            .ok_or(RuntimeError::Identity)
+    }
+
+    pub(crate) fn reify_value(
+        &self,
+        witness: &Arc<crate::lifecycle::RuntimeWitness>,
+        contract: &ContentRef,
+        canonical_bytes: &[u8],
+    ) -> Result<crate::lifecycle::ErasedValue> {
+        for registered in &self.registry.states {
+            if let Some(dynamic) = registered.dynamic.as_ref() {
+                if let Some(value) =
+                    dynamic.reify(&self.catalog, witness, contract, canonical_bytes)?
+                {
+                    return Ok(value);
+                }
+            }
+        }
+        Err(RuntimeError::Identity)
+    }
+
     /// Returns one registered Pure implementation under its exact implementation identity.
     pub fn pure_implementation<S: State>(
         &self,
@@ -1583,56 +1470,6 @@ impl RuntimeAssembly {
     }
 }
 
-/// One reusable typed session retaining the latest cumulative value without cloning it.
-pub struct RunSession<T: MfmValue> {
-    assembly_brand: Arc<RuntimeAssemblyBrand>,
-    value: QualifiedTypedValue<T>,
-}
-
-impl<T: MfmValue> RunSession<T> {
-    /// Starts a session with one catalog-qualified typed value.
-    pub fn new(assembly: &RuntimeAssembly, value: QualifiedTypedValue<T>) -> Result<Self> {
-        if !value.belongs_to_catalog(assembly.catalog()) {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
-            assembly_brand: Arc::clone(&assembly.brand),
-            value,
-        })
-    }
-
-    /// Borrows the exact latest context.
-    pub const fn value(&self) -> &QualifiedTypedValue<T> {
-        &self.value
-    }
-
-    /// Returns whether this session belongs to the exact immutable assembly.
-    pub fn belongs_to_assembly(&self, assembly: &RuntimeAssembly) -> bool {
-        Arc::ptr_eq(&self.assembly_brand, &assembly.brand)
-    }
-
-    /// Consumes the session and returns its sole typed owner.
-    pub fn into_value(self) -> QualifiedTypedValue<T> {
-        self.value
-    }
-}
-
-/// Builds one typed successor without a serialize/decode handoff.
-pub fn qualify_success<T: MfmValue>(
-    assembly: &RuntimeAssembly,
-    contract_ref: ContentRef,
-    outcome: ProposedStateOutcome<T, impl MfmValue>,
-) -> Result<RunSession<T>> {
-    match outcome {
-        ProposedStateOutcome::Success(value) => assembly
-            .catalog()
-            .qualify(contract_ref, value)
-            .map_err(|_| RuntimeError::Value)
-            .and_then(|value| RunSession::new(assembly, value)),
-        ProposedStateOutcome::Failure(_) => Err(RuntimeError::Value),
-    }
-}
-
 fn value_object<T: MfmValue>(value: &T, value_ref: &ContentRef) -> Result<ImmutableObject> {
     let canonical = canonical_value(value).map_err(|_| RuntimeError::Value)?;
     ImmutableObject::new(
@@ -1674,7 +1511,7 @@ fn mint_call_id(run_id: &RunId, preparation: &PreparationRef) -> Result<StableId
     .map_err(|_| RuntimeError::Identity)
 }
 
-fn capability_content_ref<C: AccessCapabilityContract>() -> Result<ContentRef> {
+pub(crate) fn capability_content_ref<C: AccessCapabilityContract>() -> Result<ContentRef> {
     let contract_id = C::contract_id().map_err(|_| RuntimeError::Mode)?;
     let schema = SchemaId::new(
         "mfm.capability-contract",
@@ -1686,17 +1523,6 @@ fn capability_content_ref<C: AccessCapabilityContract>() -> Result<ContentRef> {
     ContentRef::new(schema, raw_content_digest(contract_id.as_str().as_bytes()))
         .map_err(|_| RuntimeError::Identity)
 }
-
-/// Returns whether one preparation result is the exact direct-new branch.
-pub const fn is_direct_new(append: &PreparationAppend) -> bool {
-    matches!(
-        append.disposition(),
-        AppendDisposition::NewlyCommitted { .. }
-    )
-}
-
-/// Keeps Store's result type name available to adapter integration without exposing a callback.
-pub type StoreAppendResult = StoreResult<AppendDisposition>;
 
 #[cfg(test)]
 mod tests {
@@ -1771,14 +1597,12 @@ mod tests {
             Vec::new(),
         )
         .expect("document");
-        let (catalog, program) = builder.finish(doc).expect("catalog");
-        let assembly = RuntimeAssembly::new(catalog.clone(), program).expect("assembly");
+        let (catalog, _program) = builder.finish(doc).expect("catalog");
         let value = catalog
             .qualify(reference(), Context { value: 7 })
             .expect("value");
-        let session = RunSession::new(&assembly, value).expect("session");
-        assert_eq!(session.value().as_ref().value, 7);
-        let value = session.into_value().into_value();
+        assert_eq!(value.as_ref().value, 7);
+        let value = value.into_value();
         assert_eq!(value.value, 7);
     }
 
@@ -1969,7 +1793,7 @@ mod tests {
 
     #[test]
     fn adapter_future_panics_are_contained_as_unresolved() {
-        let inner: AccessResolutionFuture<PureState, TestRead> = Box::pin(async {
+        let inner: AccessIngressFuture<PureState, TestRead> = Box::pin(async {
             panic!("test adapter panic");
         });
         let mut future = PanicContainedFuture { inner };

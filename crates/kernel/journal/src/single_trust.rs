@@ -22,6 +22,8 @@ pub const MAX_RUN_OBJECTS: usize = 1_048_576;
 pub const MAX_RUN_FRAME_BYTES: usize = 512 * 1024 * 1024;
 /// Maximum retained configuration revisions.
 pub const MAX_CONFIGURATION_REVISIONS: usize = 1_024;
+/// Maximum canonical bytes in one configuration revision.
+pub const MAX_CONFIGURATION_REVISION_BYTES: usize = 16 * 1024 * 1024;
 /// Maximum cumulative canonical configuration bytes.
 pub const MAX_CONFIGURATION_STREAM_BYTES: usize = 64 * 1024 * 1024;
 

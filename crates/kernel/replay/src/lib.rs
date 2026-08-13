@@ -8,7 +8,7 @@ use mfm_canonical::raw_content_digest;
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::single_trust::{RunFrame, RunRecord};
 use mfm_program::single_trust::ProgramDocument;
-use mfm_store::single_trust::{QualifiedRun, RunAction, RunReducer, RunStore, StoreError};
+use mfm_store::single_trust::{QualifiedRun, RunAction, RunReducer, StoreError};
 use serde::{Deserialize, Serialize};
 
 /// The only portable stream identity accepted by the cutover.
@@ -84,7 +84,7 @@ pub fn qualify_with_program(
         .reduce(run)
         .map_err(|_| ReplayError::Store)?;
     let terminal = matches!(
-        reduced.action,
+        reduced.action(),
         RunAction::ZeroStateTerminal { .. } | RunAction::Terminal { .. } | RunAction::Failed { .. }
     );
     Ok(ReplayReport {
@@ -217,7 +217,7 @@ fn decode_inner(bytes: &[u8]) -> Result<PortableRun, ReplayError> {
     {
         return Err(ReplayError::InvalidPrefix);
     }
-    RunStore::qualify_prefix(scope, epoch, tenant, frames.clone())
+    QualifiedRun::qualify_prefix(scope, epoch, tenant, frames.clone())
         .map_err(|_| ReplayError::InvalidPrefix)?;
     Ok(PortableRun { frames })
 }

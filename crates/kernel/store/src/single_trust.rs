@@ -6,7 +6,9 @@
 //! one direct-new execution owner.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_ids::{
@@ -79,6 +81,11 @@ pub struct QualifiedRun {
     tenant: TenantScopeId,
     run_id: RunId,
     frames: Vec<RunFrame>,
+    head_digest: ContentDigest,
+    total_frame_bytes: usize,
+    object_map: BTreeMap<ContentRef, mfm_journal::single_trust::ImmutableObject>,
+    logical_keys: BTreeSet<mfm_journal::single_trust::RecordLogicalKey>,
+    reserved_conclusion_bytes: u64,
 }
 
 impl QualifiedRun {
@@ -104,6 +111,8 @@ impl QualifiedRun {
         let mut total_frame_bytes = 0usize;
         let mut object_refs = BTreeSet::new();
         let mut logical_keys = BTreeSet::new();
+        let mut object_map = BTreeMap::new();
+        let mut head_digest = None;
         for (index, frame) in frames.iter().enumerate() {
             frame.validate().map_err(|_| StoreError::InvalidRecord)?;
             if frame.expected_sequence() != index as u64 + 1
@@ -124,8 +133,19 @@ impl QualifiedRun {
                 )
                 .ok_or(StoreError::Capacity)?;
             for object in frame.objects() {
+                if let Some(previous) = object_map.get(object.content_ref()) {
+                    if previous != object {
+                        return Err(StoreError::InvalidHistory);
+                    }
+                }
+                object_map.insert(object.content_ref().clone(), object.clone());
                 object_refs.insert(object.content_ref().clone());
             }
+            head_digest = Some(
+                frame
+                    .head_digest(head_digest.as_ref())
+                    .map_err(|_| StoreError::InvalidHistory)?,
+            );
             if total_frame_bytes > mfm_journal::single_trust::MAX_RUN_FRAME_BYTES
                 || object_refs.len() > mfm_journal::single_trust::MAX_RUN_OBJECTS
                 || !logical_keys.insert(frame.record().logical_key())
@@ -150,7 +170,22 @@ impl QualifiedRun {
             tenant,
             run_id: admission.run_id().clone(),
             frames,
+            head_digest: head_digest.ok_or(StoreError::InvalidHistory)?,
+            total_frame_bytes,
+            object_map,
+            logical_keys,
+            reserved_conclusion_bytes: reserved,
         })
+    }
+
+    /// Qualifies one complete retained prefix under one Store identity.
+    pub fn qualify_prefix(
+        scope: StoreScopeId,
+        epoch: StoreEpoch,
+        tenant: TenantScopeId,
+        frames: Vec<RunFrame>,
+    ) -> Result<Self> {
+        Self::new(scope, epoch, tenant, frames)
     }
 
     /// Returns the qualified Store scope.
@@ -180,20 +215,12 @@ impl QualifiedRun {
 
     /// Returns the recursive head content address for this qualified prefix.
     pub fn head_digest(&self) -> Result<ContentDigest> {
-        self.frames
-            .iter()
-            .try_fold(None, |previous, frame| {
-                frame
-                    .head_digest(previous.as_ref())
-                    .map(Some)
-                    .map_err(|_| StoreError::InvalidHistory)
-            })
-            .and_then(|digest| digest.ok_or(StoreError::InvalidHistory))
+        Ok(self.head_digest.clone())
     }
 
     /// Returns the complete conclusion capacity currently reserved by unresolved preparations.
     pub fn reserved_conclusion_bytes(&self) -> Result<u64> {
-        reserved_conclusion_bytes(&self.frames)
+        Ok(self.reserved_conclusion_bytes)
     }
 
     /// Returns the run identity carried by the admitted record.
@@ -238,21 +265,107 @@ impl QualifiedRun {
                 ))
             })
     }
+
+    /// Extends this already-qualified prefix with one Store-validated append without re-folding
+    /// or re-encoding the retained prefix. Cold ingress uses [`Self::qualify_prefix`]; this path
+    /// is reserved for a Runtime owner that already holds the predecessor qualification.
+    pub(crate) fn append_validated(mut self, frame: RunFrame) -> Result<Self> {
+        frame.validate().map_err(|_| StoreError::InvalidRecord)?;
+        if frame.run_id() != self.run_id()
+            || frame.store_scope_id() != &self.scope
+            || frame.store_epoch() != self.epoch
+            || frame.expected_sequence() != self.head_sequence().saturating_add(1)
+            || frame.record().is_admission()
+        {
+            return Err(StoreError::Identity);
+        }
+        validate_append(&self.frames, &frame)?;
+        let frame_bytes = frame
+            .canonical_bytes()
+            .map_err(|_| StoreError::InvalidRecord)?
+            .as_bytes()
+            .len();
+        let total_frame_bytes = self
+            .total_frame_bytes
+            .checked_add(frame_bytes)
+            .ok_or(StoreError::Capacity)?;
+        let mut object_map = self.object_map.clone();
+        for object in frame.objects() {
+            if let Some(previous) = object_map.get(object.content_ref()) {
+                if previous != object {
+                    return Err(StoreError::InvalidHistory);
+                }
+            }
+            object_map.insert(object.content_ref().clone(), object.clone());
+        }
+        validate_record_objects(&object_map, frame.record())?;
+        if let RunRecord::StatePrepared(prepared) = frame.record() {
+            if let (Some(request), Some(selection)) =
+                (prepared.fact_request(), prepared.fact_selection())
+            {
+                validate_fact_pair(&object_map, request, selection)?;
+            }
+        }
+        let mut reserved = self.reserved_conclusion_bytes;
+        match frame.record() {
+            RunRecord::StatePrepared(prepared) => {
+                if let Some((previous, _)) = self.selected_preparation(prepared.occurrence()) {
+                    reserved = reserved
+                        .checked_sub(previous.maximum_conclusion_bytes())
+                        .ok_or(StoreError::InvalidHistory)?;
+                }
+                reserved = reserved
+                    .checked_add(prepared.maximum_conclusion_bytes())
+                    .ok_or(StoreError::Capacity)?;
+            }
+            RunRecord::StateConcluded(StateConcluded::Access { occurrence, .. }) => {
+                let (prepared, _) = self
+                    .selected_preparation(occurrence)
+                    .ok_or(StoreError::InvalidHistory)?;
+                reserved = reserved
+                    .checked_sub(prepared.maximum_conclusion_bytes())
+                    .ok_or(StoreError::InvalidHistory)?;
+            }
+            RunRecord::StateConcluded(StateConcluded::Pure { .. }) | RunRecord::RunAdmitted(_) => {}
+        }
+        if total_frame_bytes
+            .checked_add(usize::try_from(reserved).map_err(|_| StoreError::Capacity)?)
+            .is_none_or(|bytes| bytes > mfm_journal::single_trust::MAX_RUN_FRAME_BYTES)
+            || object_map.len() > mfm_journal::single_trust::MAX_RUN_OBJECTS
+        {
+            return Err(StoreError::Capacity);
+        }
+        let head_digest = frame
+            .head_digest(Some(&self.head_digest))
+            .map_err(|_| StoreError::InvalidRecord)?;
+        self.frames.push(frame.clone());
+        self.logical_keys.insert(frame.record().logical_key());
+        self.head_digest = head_digest;
+        self.total_frame_bytes = total_frame_bytes;
+        self.object_map = object_map;
+        self.reserved_conclusion_bytes = reserved;
+        Ok(self)
+    }
 }
 
 /// A secret-free Store-owned owner for one conclusion append.
+#[derive(Debug)]
 pub struct PreparedConclusion {
     scope: StoreScopeId,
     epoch: StoreEpoch,
+    tenant: TenantScopeId,
     frame: RunFrame,
+    store_brand: Option<Arc<crate::backend::StoreBrand>>,
 }
 
 impl PreparedConclusion {
-    fn new(scope: StoreScopeId, epoch: StoreEpoch, frame: RunFrame) -> Self {
+    fn new(scope: StoreScopeId, epoch: StoreEpoch, tenant: TenantScopeId, frame: RunFrame) -> Self {
         Self {
             scope,
             epoch,
+            tenant,
             frame,
+            store_brand: None,
         }
     }
 
@@ -261,17 +374,27 @@ impl PreparedConclusion {
         &self.frame
     }
 
-    pub(crate) fn belongs_to(&self, identity: &crate::backend::StructuredStoreIdentity) -> bool {
-        self.scope == *identity.scope() && self.epoch == identity.epoch()
+    pub(crate) fn bind_store(&mut self, brand: Arc<crate::backend::StoreBrand>) {
+        self.store_brand = Some(brand);
     }
 
-    pub(crate) fn into_frame(self) -> RunFrame {
-        self.frame
+    pub(crate) fn belongs_to(
+        &self,
+        identity: &crate::backend::StructuredStoreIdentity,
+        brand: &Arc<crate::backend::StoreBrand>,
+    ) -> bool {
+        self.scope == *identity.scope()
+            && self.epoch == identity.epoch()
+            && self.tenant == *identity.tenant()
+            && self
+                .store_brand
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(owner, brand))
     }
 
-    /// Consumes this owner into one exact-head Store append.
-    pub fn commit(self, store: &RunStore) -> Result<AppendDisposition> {
-        if self.scope != store.scope || self.epoch != store.epoch {
+    #[cfg(test)]
+    pub(crate) fn commit(self, store: &SemanticStore) -> Result<AppendDisposition> {
+        if self.scope != store.scope || self.epoch != store.epoch || self.tenant != store.tenant {
             return Err(StoreError::Identity);
         }
         store.append(self.frame)
@@ -284,6 +407,7 @@ pub struct PreparationAppend {
     disposition: AppendDisposition,
     preparation: Option<PreparationRef>,
     fact_continuation: Option<FactContinuation>,
+    frame: Option<RunFrame>,
 }
 
 /// One-use preparation-bound prior-fact continuation.
@@ -375,6 +499,7 @@ impl PreparationAppend {
             .then_some(self.preparation)
             .flatten(),
             fact_continuation: direct_new.then_some(self.fact_continuation).flatten(),
+            frame: self.frame,
         }
     }
 
@@ -397,22 +522,323 @@ impl PreparationAppend {
     pub fn into_fact_continuation(self) -> Option<FactContinuation> {
         self.fact_continuation
     }
+
+    pub(crate) fn set_frame(&mut self, frame: RunFrame) {
+        self.frame = Some(frame);
+    }
+
+    /// Returns the exact candidate frame when Store constructed a new physical append.
+    pub fn committed_frame(&self) -> Option<&RunFrame> {
+        self.frame.as_ref()
+    }
 }
 
+pub(crate) struct AccessPreparationCandidate {
+    pub(crate) append: PreparationAppend,
+    pub(crate) frame: Option<RunFrame>,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_access_from_current(
+    scope: &StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: &TenantScopeId,
+    current: &QualifiedRun,
+    run_id: &RunId,
+    document: &ProgramDocument,
+    reduced: &ReducedRunState,
+    expected_sequence: u64,
+    append_request_id: AppendRequestId,
+    prepared: StatePrepared,
+    objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+) -> Result<AccessPreparationCandidate> {
+    if current.run_id() != run_id {
+        return Err(StoreError::Identity);
+    }
+    let successor_sequence = expected_sequence
+        .checked_add(1)
+        .ok_or(StoreError::Capacity)?;
+    if !reduced.belongs_to(current) {
+        return Err(StoreError::Identity);
+    }
+    let mut objects = objects;
+    if !current
+        .frames()
+        .iter()
+        .flat_map(|frame| frame.objects())
+        .any(|object| object == &reduced.latest_context_object)
+        && !objects
+            .iter()
+            .any(|object| object == &reduced.latest_context_object)
+    {
+        objects.push(reduced.latest_context_object.clone());
+    }
+    let candidate_frame = RunFrame::new(
+        run_id.clone(),
+        scope.clone(),
+        epoch,
+        successor_sequence,
+        append_request_id,
+        RunRecord::StatePrepared(prepared.clone()),
+        objects,
+    )
+    .map_err(|_| StoreError::Capacity)?;
+    if let Some((index, existing)) = current
+        .frames()
+        .iter()
+        .enumerate()
+        .find(|(_, frame)| frame.append_request_id() == candidate_frame.append_request_id())
+    {
+        if existing != &candidate_frame {
+            return Err(StoreError::Conflict);
+        }
+        return Ok(AccessPreparationCandidate {
+            append: PreparationAppend {
+                disposition: AppendDisposition::Found {
+                    sequence: existing.expected_sequence(),
+                },
+                preparation: Some(PreparationRef::new(
+                    run_id.clone(),
+                    existing.expected_sequence(),
+                    index as u32,
+                )),
+                fact_continuation: None,
+                frame: None,
+            },
+            frame: None,
+        });
+    }
+    if current.head_sequence() != expected_sequence {
+        return Ok(AccessPreparationCandidate {
+            append: PreparationAppend {
+                disposition: AppendDisposition::StaleHead {
+                    actual_sequence: current.head_sequence(),
+                },
+                preparation: None,
+                fact_continuation: None,
+                frame: None,
+            },
+            frame: None,
+        });
+    }
+    let expected_input = match &reduced.action {
+        RunAction::ReadyAccess {
+            occurrence, input, ..
+        } if occurrence == prepared.occurrence() => Some(input),
+        RunAction::WaitingPreparation { occurrence, .. } if occurrence == prepared.occurrence() => {
+            current
+                .selected_preparation(prepared.occurrence())
+                .map(|(previous, _)| previous.input())
+        }
+        _ => None,
+    };
+    if expected_input != Some(prepared.input()) {
+        return Err(StoreError::NotActionable);
+    }
+    let Some(Declaration::State(state)) = document.declaration(prepared.occurrence()) else {
+        return Err(StoreError::InvalidRecord);
+    };
+    validate_preparation_contract(&prepared, state)?;
+    if current.has_conclusion(prepared.occurrence()) {
+        return Err(StoreError::NotActionable);
+    }
+    if let Some((previous, previous_ref)) = current.selected_preparation(prepared.occurrence()) {
+        if !previous.mode().permits_replacement()
+            || prepared.mode() != previous.mode()
+            || prepared.replaces() != Some(&previous_ref)
+            || prepared.preparation_ordinal() != previous.preparation_ordinal().saturating_add(1)
+            || prepared.preparation_ordinal() >= prepared.mode().total_attempt_bound()
+        {
+            return Err(StoreError::NotActionable);
+        }
+    } else if prepared.preparation_ordinal() != 0 || prepared.replaces().is_some() {
+        return Err(StoreError::InvalidRecord);
+    }
+    let fact_request = prepared.fact_request().cloned();
+    let fact_selection = prepared.fact_selection().cloned();
+    ensure_run_capacity(current.frames(), &candidate_frame)?;
+    let mut candidate_prefix = current.frames().to_vec();
+    candidate_prefix.push(candidate_frame.clone());
+    validate_candidate_prefix(scope, epoch, tenant, &candidate_prefix)?;
+    let record_ordinal = u32::try_from(expected_sequence).map_err(|_| StoreError::Capacity)?;
+    let preparation = PreparationRef::new(run_id.clone(), successor_sequence, record_ordinal);
+    let fact_continuation = fact_request
+        .zip(fact_selection)
+        .map(|(request, selection)| {
+            FactContinuation::new(
+                scope.clone(),
+                epoch,
+                tenant.clone(),
+                run_id.clone(),
+                preparation.clone(),
+                request,
+                selection,
+            )
+        });
+    Ok(AccessPreparationCandidate {
+        append: PreparationAppend {
+            disposition: AppendDisposition::NewlyCommitted {
+                sequence: successor_sequence,
+            },
+            preparation: Some(preparation),
+            fact_continuation,
+            frame: None,
+        },
+        frame: Some(candidate_frame),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_conclusion_from_current(
+    scope: &StoreScopeId,
+    epoch: StoreEpoch,
+    tenant: &TenantScopeId,
+    current: &QualifiedRun,
+    run_id: &RunId,
+    document: &ProgramDocument,
+    reduced: &ReducedRunState,
+    expected_sequence: u64,
+    append_request_id: AppendRequestId,
+    conclusion: StateConcluded,
+    objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+    maximum_conclusion_bytes: u64,
+) -> Result<PreparedConclusion> {
+    if current.run_id() != run_id {
+        return Err(StoreError::Identity);
+    }
+    let successor_sequence = expected_sequence
+        .checked_add(1)
+        .ok_or(StoreError::Capacity)?;
+    let candidate_frame = RunFrame::new(
+        run_id.clone(),
+        scope.clone(),
+        epoch,
+        successor_sequence,
+        append_request_id,
+        RunRecord::StateConcluded(conclusion.clone()),
+        objects,
+    )
+    .map_err(|_| StoreError::Capacity)?;
+    if let Some(existing) = current
+        .frames()
+        .iter()
+        .find(|frame| frame.append_request_id() == candidate_frame.append_request_id())
+    {
+        if existing != &candidate_frame {
+            return Err(StoreError::Conflict);
+        }
+        return Ok(PreparedConclusion::new(
+            scope.clone(),
+            epoch,
+            tenant.clone(),
+            existing.clone(),
+        ));
+    }
+    if current.head_sequence() != expected_sequence
+        || current.has_conclusion(conclusion.occurrence())
+    {
+        return Err(StoreError::NotActionable);
+    }
+    if !reduced.belongs_to(current) {
+        return Err(StoreError::Identity);
+    }
+    let actionable = match (&conclusion, &reduced.action) {
+        (
+            StateConcluded::Pure { occurrence, .. },
+            RunAction::ReadyPure {
+                occurrence: ready, ..
+            },
+        ) => occurrence == ready,
+        (
+            StateConcluded::Access {
+                occurrence,
+                preparation,
+                ..
+            },
+            RunAction::WaitingPreparation {
+                occurrence: ready,
+                preparation: selected,
+            },
+        ) => occurrence == ready && preparation == selected,
+        _ => false,
+    };
+    if !actionable {
+        return Err(StoreError::NotActionable);
+    }
+    let occurrence = conclusion.occurrence().clone();
+    if let StateConcluded::Access {
+        preparation,
+        fact_selection,
+        ..
+    } = &conclusion
+    {
+        let selected = current
+            .selected_preparation(conclusion.occurrence())
+            .ok_or(StoreError::NotActionable)?;
+        if &selected.1 != preparation || selected.0.fact_selection() != fact_selection.as_ref() {
+            return Err(StoreError::NotActionable);
+        }
+    }
+    validate_conclusion_contract(document, &conclusion)?;
+    let candidate_bytes = candidate_frame
+        .canonical_bytes()
+        .map_err(|_| StoreError::Capacity)?
+        .as_bytes()
+        .len();
+    let state_maximum = match document.declaration(conclusion.occurrence()) {
+        Some(Declaration::State(state)) => state.maximum_conclusion_bytes(),
+        _ => return Err(StoreError::InvalidRecord),
+    };
+    if candidate_bytes
+        > usize::try_from(maximum_conclusion_bytes).map_err(|_| StoreError::Capacity)?
+        || candidate_bytes > usize::try_from(state_maximum).map_err(|_| StoreError::Capacity)?
+    {
+        return Err(StoreError::Capacity);
+    }
+    ensure_run_capacity(current.frames(), &candidate_frame)?;
+    if let Some((prepared, _)) = current.selected_preparation(&occurrence) {
+        if candidate_bytes
+            > usize::try_from(prepared.maximum_conclusion_bytes())
+                .map_err(|_| StoreError::Capacity)?
+        {
+            return Err(StoreError::Capacity);
+        }
+    }
+    let mut candidate_prefix = current.frames().to_vec();
+    candidate_prefix.push(candidate_frame.clone());
+    validate_candidate_prefix(scope, epoch, tenant, &candidate_prefix)?;
+    Ok(PreparedConclusion::new(
+        scope.clone(),
+        epoch,
+        tenant.clone(),
+        candidate_frame,
+    ))
+}
+
+pub(crate) fn reduce_qualified(
+    current: &QualifiedRun,
+    document: ProgramDocument,
+) -> Result<ReducedRunState> {
+    RunReducer::new(document).reduce(current)
+}
+
+#[cfg(test)]
 struct MemoryState {
     runs: BTreeMap<RunId, Vec<RunFrame>>,
     fact_heads: BTreeMap<TenantScopeId, u64>,
 }
 
-/// In-memory exact-head Store backend used by the semantic core and conformance tests.
-pub struct RunStore {
+/// In-memory exact-head Store test double used by semantic unit tests.
+#[cfg(test)]
+pub(crate) struct SemanticStore {
     scope: StoreScopeId,
     epoch: StoreEpoch,
     tenant: TenantScopeId,
     state: Arc<Mutex<MemoryState>>,
 }
 
-impl RunStore {
+#[cfg(test)]
+impl SemanticStore {
     /// Creates one immutable Store identity.  The mutex protects backend atomicity, not execution
     /// ownership; multiple qualified workers may call this Store concurrently and race by head.
     pub fn memory(scope: StoreScopeId, epoch: StoreEpoch, tenant: TenantScopeId) -> Self {
@@ -427,27 +853,22 @@ impl RunStore {
         }
     }
 
-    /// Qualifies a complete prefix returned by a mechanical backend.
-    pub fn qualify_prefix(
-        scope: StoreScopeId,
-        epoch: StoreEpoch,
-        tenant: TenantScopeId,
-        frames: Vec<RunFrame>,
-    ) -> Result<QualifiedRun> {
-        QualifiedRun::new(scope, epoch, tenant, frames)
-    }
-
     /// Returns the fixed Store scope.
+    #[cfg(test)]
     pub const fn scope(&self) -> &StoreScopeId {
         &self.scope
     }
 
     /// Returns the immutable writer epoch.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub const fn epoch(&self) -> StoreEpoch {
         self.epoch
     }
 
     /// Returns the fixed tenant partition.
+    #[cfg(test)]
+    #[allow(dead_code)]
     pub const fn tenant(&self) -> &TenantScopeId {
         &self.tenant
     }
@@ -464,6 +885,7 @@ impl RunStore {
     }
 
     /// Appends the sole admission frame, or returns found-same for an identical retry.
+    #[cfg(test)]
     pub fn admit(&self, frame: RunFrame) -> Result<AppendDisposition> {
         if frame.expected_sequence() != 1 || !frame.record().is_admission() {
             return Err(StoreError::InvalidRecord);
@@ -543,6 +965,7 @@ impl RunStore {
     }
 
     /// Creates one Access preparation candidate without invoking any implementation.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_access(
         &self,
         run_id: &RunId,
@@ -552,131 +975,28 @@ impl RunStore {
         prepared: StatePrepared,
         objects: Vec<mfm_journal::single_trust::ImmutableObject>,
     ) -> Result<PreparationAppend> {
-        let successor_sequence = expected_sequence
-            .checked_add(1)
-            .ok_or(StoreError::Capacity)?;
         let current = self.load(run_id)?;
-        let reduced = RunReducer::new(document.clone()).reduce(&current)?;
-        let mut objects = objects;
-        if !current
-            .frames()
-            .iter()
-            .flat_map(|frame| frame.objects())
-            .any(|object| object == &reduced.latest_context_object)
-            && !objects
-                .iter()
-                .any(|object| object == &reduced.latest_context_object)
-        {
-            objects.push(reduced.latest_context_object.clone());
-        }
-        let candidate_frame = RunFrame::new(
-            run_id.clone(),
-            self.scope.clone(),
+        let reduced = reduce_qualified(&current, document.clone())?;
+        let candidate = prepare_access_from_current(
+            &self.scope,
             self.epoch,
-            successor_sequence,
+            &self.tenant,
+            &current,
+            run_id,
+            document,
+            &reduced,
+            expected_sequence,
             append_request_id,
-            RunRecord::StatePrepared(prepared.clone()),
+            prepared,
             objects,
-        )
-        .map_err(|_| StoreError::Capacity)?;
-        if let Some((index, existing)) = current
-            .frames()
-            .iter()
-            .enumerate()
-            .find(|(_, frame)| frame.append_request_id() == candidate_frame.append_request_id())
-        {
-            if existing != &candidate_frame {
-                return Err(StoreError::Conflict);
+        )?;
+        match candidate.frame {
+            Some(frame) => {
+                let disposition = self.append(frame)?;
+                Ok(candidate.append.with_disposition(disposition))
             }
-            return Ok(PreparationAppend {
-                disposition: AppendDisposition::Found {
-                    sequence: existing.expected_sequence(),
-                },
-                preparation: Some(PreparationRef::new(
-                    run_id.clone(),
-                    existing.expected_sequence(),
-                    index as u32,
-                )),
-                fact_continuation: None,
-            });
+            None => Ok(candidate.append),
         }
-        if current.head_sequence() != expected_sequence {
-            return Ok(PreparationAppend {
-                disposition: AppendDisposition::StaleHead {
-                    actual_sequence: current.head_sequence(),
-                },
-                preparation: None,
-                fact_continuation: None,
-            });
-        }
-        let expected_input = match &reduced.action {
-            RunAction::ReadyAccess {
-                occurrence, input, ..
-            } if occurrence == prepared.occurrence() => Some(input),
-            RunAction::WaitingPreparation { occurrence, .. }
-                if occurrence == prepared.occurrence() =>
-            {
-                current
-                    .selected_preparation(prepared.occurrence())
-                    .map(|(previous, _)| previous.input())
-            }
-            _ => None,
-        };
-        let actionable = expected_input.is_some();
-        if expected_input != Some(prepared.input()) {
-            return Err(StoreError::NotActionable);
-        }
-        let Some(Declaration::State(state)) = document.declaration(prepared.occurrence()) else {
-            return Err(StoreError::InvalidRecord);
-        };
-        validate_preparation_contract(&prepared, state)?;
-        if !actionable {
-            return Err(StoreError::NotActionable);
-        }
-        if current.has_conclusion(prepared.occurrence()) {
-            return Err(StoreError::NotActionable);
-        }
-        if let Some((previous, previous_ref)) = current.selected_preparation(prepared.occurrence())
-        {
-            if !previous.mode().permits_replacement()
-                || prepared.mode() != previous.mode()
-                || prepared.replaces() != Some(&previous_ref)
-                || prepared.preparation_ordinal()
-                    != previous.preparation_ordinal().saturating_add(1)
-                || prepared.preparation_ordinal() >= prepared.mode().total_attempt_bound()
-            {
-                return Err(StoreError::NotActionable);
-            }
-        } else if prepared.preparation_ordinal() != 0 || prepared.replaces().is_some() {
-            return Err(StoreError::InvalidRecord);
-        }
-        let fact_request = prepared.fact_request().cloned();
-        let fact_selection = prepared.fact_selection().cloned();
-        ensure_run_capacity(current.frames(), &candidate_frame)?;
-        let record_ordinal = u32::try_from(expected_sequence).map_err(|_| StoreError::Capacity)?;
-        let preparation = PreparationRef::new(run_id.clone(), successor_sequence, record_ordinal);
-        let disposition = self.append(candidate_frame)?;
-        let direct_new = matches!(disposition, AppendDisposition::NewlyCommitted { .. });
-        let fact_continuation = direct_new.then(|| {
-            fact_request
-                .zip(fact_selection)
-                .map(|(request, selection)| {
-                    FactContinuation::new(
-                        self.scope.clone(),
-                        self.epoch,
-                        self.tenant.clone(),
-                        run_id.clone(),
-                        preparation.clone(),
-                        request,
-                        selection,
-                    )
-                })
-        });
-        Ok(PreparationAppend {
-            disposition,
-            preparation: direct_new.then_some(preparation),
-            fact_continuation: fact_continuation.flatten(),
-        })
     }
 
     /// Reserves and returns one conclusion owner while the current exact head remains known.
@@ -691,121 +1011,28 @@ impl RunStore {
         objects: Vec<mfm_journal::single_trust::ImmutableObject>,
         maximum_conclusion_bytes: u64,
     ) -> Result<PreparedConclusion> {
-        let successor_sequence = expected_sequence
-            .checked_add(1)
-            .ok_or(StoreError::Capacity)?;
-        let candidate_frame = RunFrame::new(
-            run_id.clone(),
-            self.scope.clone(),
-            self.epoch,
-            successor_sequence,
-            append_request_id,
-            RunRecord::StateConcluded(conclusion.clone()),
-            objects.clone(),
-        )
-        .map_err(|_| StoreError::Capacity)?;
         let current = self.load(run_id)?;
-        if let Some(existing) = current
-            .frames()
-            .iter()
-            .find(|frame| frame.append_request_id() == candidate_frame.append_request_id())
-        {
-            if existing != &candidate_frame {
-                return Err(StoreError::Conflict);
-            }
-            return Ok(PreparedConclusion::new(
-                self.scope.clone(),
-                self.epoch,
-                existing.clone(),
-            ));
-        }
-        if current.head_sequence() != expected_sequence
-            || current.has_conclusion(conclusion.occurrence())
-        {
-            return Err(StoreError::NotActionable);
-        }
-        let reduced = RunReducer::new(document.clone()).reduce(&current)?;
-        let actionable = match (&conclusion, &reduced.action) {
-            (
-                StateConcluded::Pure { occurrence, .. },
-                RunAction::ReadyPure {
-                    occurrence: ready, ..
-                },
-            ) => occurrence == ready,
-            (
-                StateConcluded::Access {
-                    occurrence,
-                    preparation,
-                    ..
-                },
-                RunAction::WaitingPreparation {
-                    occurrence: ready,
-                    preparation: selected,
-                },
-            ) => occurrence == ready && preparation == selected,
-            _ => false,
-        };
-        if !actionable {
-            return Err(StoreError::NotActionable);
-        }
-        let occurrence = conclusion.occurrence().clone();
-        if let StateConcluded::Access {
-            preparation,
-            fact_selection,
-            ..
-        } = &conclusion
-        {
-            let selected = current
-                .selected_preparation(conclusion.occurrence())
-                .ok_or(StoreError::NotActionable)?;
-            if &selected.1 != preparation || selected.0.fact_selection() != fact_selection.as_ref()
-            {
-                return Err(StoreError::NotActionable);
-            }
-        }
-        validate_conclusion_contract(document, &conclusion)?;
-        let candidate_bytes = candidate_frame
-            .canonical_bytes()
-            .map_err(|_| StoreError::Capacity)?
-            .as_bytes()
-            .len();
-        let state_maximum = match document.declaration(conclusion.occurrence()) {
-            Some(Declaration::State(state)) => state.maximum_conclusion_bytes(),
-            _ => return Err(StoreError::InvalidRecord),
-        };
-        if candidate_bytes
-            > usize::try_from(maximum_conclusion_bytes).map_err(|_| StoreError::Capacity)?
-            || candidate_bytes > usize::try_from(state_maximum).map_err(|_| StoreError::Capacity)?
-        {
-            return Err(StoreError::Capacity);
-        }
-        ensure_run_capacity(current.frames(), &candidate_frame)?;
-        if let Some((prepared, _)) = current.selected_preparation(&occurrence) {
-            if candidate_frame
-                .canonical_bytes()
-                .map_err(|_| StoreError::Capacity)?
-                .as_bytes()
-                .len()
-                > usize::try_from(prepared.maximum_conclusion_bytes())
-                    .map_err(|_| StoreError::Capacity)?
-            {
-                return Err(StoreError::Capacity);
-            }
-        }
-        let mut candidate_prefix = current.frames().to_vec();
-        candidate_prefix.push(candidate_frame.clone());
-        validate_candidate_prefix(&self.scope, self.epoch, &self.tenant, &candidate_prefix)?;
-        Ok(PreparedConclusion::new(
-            self.scope.clone(),
+        let reduced = reduce_qualified(&current, document.clone())?;
+        prepare_conclusion_from_current(
+            &self.scope,
             self.epoch,
-            candidate_frame,
-        ))
+            &self.tenant,
+            &current,
+            run_id,
+            document,
+            &reduced,
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        )
     }
 
     /// Reduces one qualified prefix against the exact callback-free Program document.
     pub fn reduce(&self, run_id: &RunId, document: ProgramDocument) -> Result<ReducedRunState> {
         let run = self.load(run_id)?;
-        RunReducer::new(document).reduce(&run)
+        reduce_qualified(&run, document)
     }
 }
 
@@ -869,12 +1096,74 @@ pub enum AccessActionMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReducedRunState {
     /// Exact latest complete cumulative context.
-    pub latest_context: mfm_journal::single_trust::ValueRef,
+    latest_context: mfm_journal::single_trust::ValueRef,
     /// Immutable object carrying the latest context bytes.  Match selection may materialize this
     /// object for the next append's closure.
-    pub latest_context_object: mfm_journal::single_trust::ImmutableObject,
+    latest_context_object: mfm_journal::single_trust::ImmutableObject,
     /// Sole next action or durable terminal result.
-    pub action: RunAction,
+    action: RunAction,
+    run_id: RunId,
+    head_sequence: u64,
+}
+
+impl ReducedRunState {
+    fn new(
+        run: &QualifiedRun,
+        latest_context: mfm_journal::single_trust::ValueRef,
+        latest_context_object: mfm_journal::single_trust::ImmutableObject,
+        action: RunAction,
+    ) -> Self {
+        Self {
+            latest_context,
+            latest_context_object,
+            action,
+            run_id: run.run_id().clone(),
+            head_sequence: run.head_sequence(),
+        }
+    }
+
+    pub(crate) fn belongs_to(&self, run: &QualifiedRun) -> bool {
+        self.run_id == *run.run_id() && self.head_sequence == run.head_sequence()
+    }
+
+    /// Returns the latest complete cumulative context identity.
+    pub const fn latest_context(&self) -> &mfm_journal::single_trust::ValueRef {
+        &self.latest_context
+    }
+
+    /// Returns the retained object carrying the latest context bytes.
+    pub const fn latest_context_object(&self) -> &mfm_journal::single_trust::ImmutableObject {
+        &self.latest_context_object
+    }
+
+    /// Returns the sole selected action or durable terminal result.
+    pub const fn action(&self) -> &RunAction {
+        &self.action
+    }
+
+    /// Carries the retained latest context across a direct-new preparation append.
+    pub fn waiting_preparation(
+        &self,
+        run: &QualifiedRun,
+        occurrence: mfm_journal::single_trust::SequentialControlAddress,
+        preparation: PreparationRef,
+    ) -> Result<Self> {
+        if self.run_id != *run.run_id()
+            || self.head_sequence.saturating_add(1) != run.head_sequence()
+            || preparation.run_sequence() != run.head_sequence()
+        {
+            return Err(StoreError::Identity);
+        }
+        Ok(Self::new(
+            run,
+            self.latest_context.clone(),
+            self.latest_context_object.clone(),
+            RunAction::WaitingPreparation {
+                occurrence,
+                preparation,
+            },
+        ))
+    }
 }
 
 /// Store-owned sequential reducer and binder.
@@ -915,11 +1204,12 @@ impl RunReducer {
             if run.frames().len() != 1 {
                 return Err(StoreError::InvalidHistory);
             }
-            return Ok(ReducedRunState {
-                latest_context: latest.clone(),
-                latest_context_object: object_for_value(run, &latest)?,
-                action: RunAction::ZeroStateTerminal { result: latest },
-            });
+            return Ok(ReducedRunState::new(
+                run,
+                latest.clone(),
+                object_for_value(run, &latest)?,
+                RunAction::ZeroStateTerminal { result: latest },
+            ));
         }
 
         validate_record_addresses(run, self.document.declarations())?;
@@ -974,7 +1264,13 @@ impl RunReducer {
                             match conclusion_transition(state, &self.document, outcome)? {
                                 ConclusionTransition::Terminal => {
                                     ensure_all_consumed(run, &consumed)?;
-                                    return terminal_state(state, outcome, latest, latest_object);
+                                    return terminal_state(
+                                        run,
+                                        state,
+                                        outcome,
+                                        latest,
+                                        latest_object,
+                                    );
                                 }
                                 ConclusionTransition::Continue(next) => {
                                     cursor = next;
@@ -1011,7 +1307,13 @@ impl RunReducer {
                             match conclusion_transition(state, &self.document, outcome)? {
                                 ConclusionTransition::Terminal => {
                                     ensure_all_consumed(run, &consumed)?;
-                                    return terminal_state(state, outcome, latest, latest_object);
+                                    return terminal_state(
+                                        run,
+                                        state,
+                                        outcome,
+                                        latest,
+                                        latest_object,
+                                    );
                                 }
                                 ConclusionTransition::Continue(next) => {
                                     cursor = next;
@@ -1036,49 +1338,53 @@ impl RunReducer {
                                 return Err(StoreError::InvalidHistory);
                             }
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState {
-                                latest_context: latest,
-                                latest_context_object: latest_object,
-                                action: RunAction::WaitingPreparation {
+                            return Ok(ReducedRunState::new(
+                                run,
+                                latest,
+                                latest_object,
+                                RunAction::WaitingPreparation {
                                     occurrence,
                                     preparation: preparation_ref,
                                 },
-                            });
+                            ));
                         }
                         (None, None, ExecutionMode::Pure) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState {
-                                latest_context: latest.clone(),
-                                latest_context_object: latest_object,
-                                action: RunAction::ReadyPure {
+                            return Ok(ReducedRunState::new(
+                                run,
+                                latest.clone(),
+                                latest_object,
+                                RunAction::ReadyPure {
                                     occurrence,
                                     input: latest,
                                 },
-                            });
+                            ));
                         }
                         (None, None, ExecutionMode::Read { .. }) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState {
-                                latest_context: latest.clone(),
-                                latest_context_object: latest_object,
-                                action: RunAction::ReadyAccess {
+                            return Ok(ReducedRunState::new(
+                                run,
+                                latest.clone(),
+                                latest_object,
+                                RunAction::ReadyAccess {
                                     occurrence,
                                     input: latest,
                                     mode: AccessActionMode::Read,
                                 },
-                            });
+                            ));
                         }
                         (None, None, ExecutionMode::Effect { .. }) => {
                             ensure_all_consumed(run, &consumed)?;
-                            return Ok(ReducedRunState {
-                                latest_context: latest.clone(),
-                                latest_context_object: latest_object,
-                                action: RunAction::ReadyAccess {
+                            return Ok(ReducedRunState::new(
+                                run,
+                                latest.clone(),
+                                latest_object,
+                                RunAction::ReadyAccess {
                                     occurrence,
                                     input: latest,
                                     mode: AccessActionMode::Effect,
                                 },
-                            });
+                            ));
                         }
                     }
                 }
@@ -1087,29 +1393,115 @@ impl RunReducer {
     }
 }
 
+/// Advances one retained reducer result across the one conclusion frame just appended by a hot
+/// Runtime session. This follows only the suffix after the already-selected occurrence; it never
+/// folds the retained prefix again.
+pub(crate) fn advance_reduced(
+    reduced: &ReducedRunState,
+    previous: &QualifiedRun,
+    next: &QualifiedRun,
+    document: &ProgramDocument,
+) -> Result<ReducedRunState> {
+    if !reduced.belongs_to(previous)
+        || next.run_id() != previous.run_id()
+        || next.head_sequence() != previous.head_sequence().saturating_add(1)
+    {
+        return Err(StoreError::Identity);
+    }
+    let conclusion = match next.frames().last().map(RunFrame::record) {
+        Some(RunRecord::StateConcluded(value)) => value,
+        _ => return Err(StoreError::InvalidRecord),
+    };
+    let occurrence = conclusion.occurrence().clone();
+    match &reduced.action {
+        RunAction::ReadyPure {
+            occurrence: ready, ..
+        }
+        | RunAction::WaitingPreparation {
+            occurrence: ready, ..
+        } if ready == &occurrence => {}
+        _ => return Err(StoreError::NotActionable),
+    }
+    let Some(Declaration::State(state)) = document.declaration(&occurrence) else {
+        return Err(StoreError::InvalidHistory);
+    };
+    let mut latest =
+        apply_success_or_failure(state, &reduced.latest_context, conclusion.outcome())?;
+    let mut latest_object = object_for_value(next, &latest)?;
+    let mut cursor = match conclusion_transition(state, document, conclusion.outcome())? {
+        ConclusionTransition::Terminal => {
+            return terminal_state(next, state, conclusion.outcome(), latest, latest_object)
+        }
+        ConclusionTransition::Continue(next) => next,
+    };
+    loop {
+        let declaration = document
+            .declaration(&cursor)
+            .ok_or(StoreError::InvalidHistory)?;
+        match declaration {
+            Declaration::Match(match_declaration) => {
+                if match_declaration.selector_contract_ref() != latest.contract_ref() {
+                    return Err(StoreError::InvalidHistory);
+                }
+                let (payload, next_address, payload_object) =
+                    select_match_payload(next, &latest, match_declaration)?;
+                cursor = next_address;
+                latest = payload;
+                latest_object = payload_object;
+            }
+            Declaration::State(state) => {
+                if state.input_contract_ref() != latest.contract_ref() {
+                    return Err(StoreError::InvalidHistory);
+                }
+                let occurrence = state.address().clone();
+                let action = match state.execution() {
+                    ExecutionMode::Pure => RunAction::ReadyPure {
+                        occurrence,
+                        input: latest.clone(),
+                    },
+                    ExecutionMode::Read { .. } => RunAction::ReadyAccess {
+                        occurrence,
+                        input: latest.clone(),
+                        mode: AccessActionMode::Read,
+                    },
+                    ExecutionMode::Effect { .. } => RunAction::ReadyAccess {
+                        occurrence,
+                        input: latest.clone(),
+                        mode: AccessActionMode::Effect,
+                    },
+                };
+                return Ok(ReducedRunState::new(next, latest, latest_object, action));
+            }
+        }
+    }
+}
+
 fn terminal_state(
+    run: &QualifiedRun,
     state: &StateDeclaration,
     outcome: &StateOutcome,
     latest: mfm_journal::single_trust::ValueRef,
     latest_object: mfm_journal::single_trust::ImmutableObject,
 ) -> Result<ReducedRunState> {
     match outcome {
-        StateOutcome::Success(result) => Ok(ReducedRunState {
-            latest_context: latest,
-            latest_context_object: latest_object,
-            action: RunAction::Terminal {
+        StateOutcome::Success(result) => Ok(ReducedRunState::new(
+            run,
+            latest,
+            latest_object,
+            RunAction::Terminal {
                 occurrence: state.address().clone(),
                 result: result.clone(),
             },
-        }),
-        StateOutcome::Failure(failure) => Ok(ReducedRunState {
-            latest_context: latest,
-            latest_context_object: latest_object,
-            action: RunAction::Failed {
+        )),
+        StateOutcome::Failure(failure) => Ok(ReducedRunState::new(
+            run,
+            latest,
+            latest_object,
+            RunAction::Failed {
                 occurrence: state.address().clone(),
                 failure: failure.clone(),
             },
-        }),
+        )),
     }
 }
 
@@ -1533,17 +1925,12 @@ fn validate_object_reachability(frames: &[RunFrame]) -> Result<()> {
                 objects.insert(object.content_ref().clone(), object.clone());
             }
         }
-        for value in record_value_refs(frame.record()) {
-            let Some(object) = objects.get(value.value_ref()) else {
-                return Err(StoreError::InvalidHistory);
-            };
-            if !value.is_schema_bound()
-                || object.content_ref().schema_id() != value.value_ref().schema_id()
-            {
-                return Err(StoreError::InvalidHistory);
-            }
-            referenced.insert(value.value_ref().clone());
-        }
+        validate_record_objects(&objects, frame.record())?;
+        referenced.extend(
+            record_value_refs(frame.record())
+                .into_iter()
+                .map(|value| value.value_ref().clone()),
+        );
     }
     if objects
         .keys()
@@ -1558,6 +1945,23 @@ fn validate_object_reachability(frames: &[RunFrame]) -> Result<()> {
             {
                 validate_fact_pair(&objects, request, selection)?;
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_record_objects(
+    objects: &BTreeMap<ContentRef, mfm_journal::single_trust::ImmutableObject>,
+    record: &RunRecord,
+) -> Result<()> {
+    for value in record_value_refs(record) {
+        let Some(object) = objects.get(value.value_ref()) else {
+            return Err(StoreError::InvalidHistory);
+        };
+        if !value.is_schema_bound()
+            || object.content_ref().schema_id() != value.value_ref().schema_id()
+        {
+            return Err(StoreError::InvalidHistory);
         }
     }
     Ok(())
@@ -1821,6 +2225,7 @@ fn reserved_conclusion_bytes(frames: &[RunFrame]) -> Result<u64> {
         })
 }
 
+#[cfg(test)]
 fn validate_fact_publication(current: u64, publication: Option<u64>) -> Result<()> {
     let Some(publication) = publication else {
         return Ok(());
@@ -1831,6 +2236,7 @@ fn validate_fact_publication(current: u64, publication: Option<u64>) -> Result<(
         .ok_or(StoreError::Conflict)
 }
 
+#[cfg(test)]
 fn advance_fact_head(state: &mut MemoryState, tenant: &TenantScopeId, publication: Option<u64>) {
     if let Some(publication) = publication {
         state.fact_heads.insert(tenant.clone(), publication);
@@ -1873,7 +2279,8 @@ impl ConfigurationRevision {
         let value: serde_json::Value =
             serde_json::from_slice(canonical.as_bytes()).map_err(|_| StoreError::InvalidRecord)?;
         if sequence == 0
-            || canonical.as_bytes().len() > 16 * 1024 * 1024
+            || canonical.as_bytes().len()
+                > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
             || contains_secret_marker(&value)
         {
             return Err(StoreError::InvalidRecord);
@@ -1927,6 +2334,66 @@ impl ConfigurationRevision {
     }
 }
 
+/// One fixed, fully qualified configuration snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigurationSnapshot {
+    revisions: Vec<ConfigurationRevision>,
+    total_bytes: usize,
+}
+
+impl ConfigurationSnapshot {
+    pub(crate) fn from_revisions(revisions: Vec<ConfigurationRevision>) -> Result<Self> {
+        if revisions.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
+            || revisions
+                .iter()
+                .enumerate()
+                .any(|(index, revision)| revision.sequence() != index as u64 + 1)
+        {
+            return Err(StoreError::InvalidHistory);
+        }
+        let total_bytes = revisions.iter().try_fold(0usize, |total, revision| {
+            total
+                .checked_add(revision.canonical_json().len())
+                .filter(|bytes| *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
+                .ok_or(StoreError::Capacity)
+        })?;
+        Ok(Self {
+            revisions,
+            total_bytes,
+        })
+    }
+
+    /// Returns the current one-based configuration head, or zero for an empty stream.
+    pub const fn head_sequence(&self) -> u64 {
+        self.revisions.len() as u64
+    }
+
+    /// Returns the cumulative canonical bytes in this snapshot.
+    pub const fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Returns the dense validated revisions in order.
+    pub fn revisions(&self) -> &[ConfigurationRevision] {
+        &self.revisions
+    }
+
+    /// Returns the latest revision, when the stream is non-empty.
+    pub fn latest(&self) -> Option<&ConfigurationRevision> {
+        self.revisions.last()
+    }
+
+    /// Promotes one direct successor into a new local snapshot without reading the backend.
+    pub fn with_successor(&self, revision: ConfigurationRevision) -> Result<Self> {
+        if revision.sequence() != self.head_sequence().saturating_add(1) {
+            return Err(StoreError::Conflict);
+        }
+        let mut revisions = self.revisions.clone();
+        revisions.push(revision);
+        Self::from_revisions(revisions)
+    }
+}
+
 /// Mechanical result of one exact-head configuration append.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigurationAppendDisposition {
@@ -1949,32 +2416,19 @@ pub enum ConfigurationAppendDisposition {
     AcknowledgementUnknown,
 }
 
-/// One affine, validated configuration successor awaiting exact-head commit.
+/// One test-only affine configuration successor for the in-memory semantic history tests.
+#[cfg(test)]
 #[derive(Debug)]
-pub struct PreparedConfigurationAppend {
-    expected_sequence: u64,
-    append_request_id: AppendRequestId,
-    revision: ConfigurationRevision,
+pub(crate) struct PreparedConfigurationAppend {
+    pub(crate) expected_sequence: u64,
+    pub(crate) append_request_id: AppendRequestId,
+    pub(crate) revision: ConfigurationRevision,
 }
 
+#[cfg(test)]
 impl PreparedConfigurationAppend {
-    /// Returns the predecessor sequence fixed by this owner.
-    pub const fn expected_sequence(&self) -> u64 {
-        self.expected_sequence
-    }
-
-    /// Returns the physical append identity fixed by this owner.
-    pub const fn append_request_id(&self) -> &AppendRequestId {
-        &self.append_request_id
-    }
-
-    /// Returns the canonical successor without exposing mutation authority.
-    pub const fn revision(&self) -> &ConfigurationRevision {
-        &self.revision
-    }
-
     /// Consumes this owner through the one configuration append path.
-    pub fn commit(
+    pub(crate) fn commit(
         self,
         history: &mut ConfigurationHistory,
     ) -> Result<ConfigurationAppendDisposition> {
@@ -1982,22 +2436,25 @@ impl PreparedConfigurationAppend {
     }
 }
 
-/// Strict bounded configuration history owned by Store rather than by an application policy.
-pub struct ConfigurationHistory {
+/// Strict bounded configuration history used by Store's semantic unit tests.
+#[cfg(test)]
+pub(crate) struct ConfigurationHistory {
     revisions: Vec<ConfigurationRevision>,
     total_bytes: usize,
     append_requests: BTreeMap<AppendRequestId, u64>,
 }
 
+#[cfg(test)]
 impl Default for ConfigurationHistory {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl ConfigurationHistory {
     /// Creates an empty bounded configuration stream.
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             revisions: Vec::new(),
             total_bytes: 0,
@@ -2005,37 +2462,8 @@ impl ConfigurationHistory {
         }
     }
 
-    /// Rebuilds one bounded configuration history from a complete retained prefix.
-    pub fn from_revisions(revisions: Vec<ConfigurationRevision>) -> Result<Self> {
-        if revisions.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
-            return Err(StoreError::Capacity);
-        }
-        let mut history = Self::new();
-        for (index, revision) in revisions.into_iter().enumerate() {
-            let expected = u64::try_from(index + 1).map_err(|_| StoreError::Capacity)?;
-            if revision.sequence != expected
-                || history
-                    .append_requests
-                    .insert(revision.append_request_id.clone(), expected)
-                    .is_some()
-            {
-                return Err(StoreError::InvalidHistory);
-            }
-            let bytes = revision.canonical_json.as_bytes().len();
-            history.total_bytes = history
-                .total_bytes
-                .checked_add(bytes)
-                .ok_or(StoreError::Capacity)?;
-            if history.total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES {
-                return Err(StoreError::Capacity);
-            }
-            history.revisions.push(revision);
-        }
-        Ok(history)
-    }
-
     /// Prepares one canonical configuration successor without changing history.
-    pub fn prepare_append(
+    pub(crate) fn prepare_append(
         &self,
         expected_sequence: u64,
         append_request_id: AppendRequestId,
@@ -2049,7 +2477,7 @@ impl ConfigurationHistory {
         let bytes = successor.canonical_json.as_bytes().len();
         let duplicate_request = self.append_requests.contains_key(&append_request_id);
         if !duplicate_request
-            && (bytes > 16 * 1024 * 1024
+            && (bytes > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
                 || self.revisions.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
                 || self.total_bytes.saturating_add(bytes)
                     > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES)
@@ -2087,7 +2515,7 @@ impl ConfigurationHistory {
             return Ok(ConfigurationAppendDisposition::StaleHead { actual_sequence });
         }
         let bytes = prepared.revision.canonical_json.as_bytes().len();
-        if bytes > 16 * 1024 * 1024
+        if bytes > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
             || self.revisions.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
             || self.total_bytes.saturating_add(bytes)
                 > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
@@ -2108,34 +2536,13 @@ impl ConfigurationHistory {
     }
 
     /// Returns the current configuration head sequence.
-    pub const fn head_sequence(&self) -> u64 {
+    pub(crate) const fn head_sequence(&self) -> u64 {
         self.revisions.len() as u64
     }
 
     /// Returns the cumulative canonical bytes retained by this stream.
-    pub const fn total_bytes(&self) -> usize {
+    pub(crate) const fn total_bytes(&self) -> usize {
         self.total_bytes
-    }
-
-    /// Returns the current revision without loading the stream again.
-    pub fn head(&self) -> Option<&ConfigurationRevision> {
-        self.revisions.last()
-    }
-
-    /// Appends one revision through a fresh exact-head owner.
-    pub fn append(
-        &mut self,
-        expected_sequence: u64,
-        append_request_id: AppendRequestId,
-        revision: String,
-    ) -> Result<ConfigurationAppendDisposition> {
-        let prepared = self.prepare_append(expected_sequence, append_request_id, revision)?;
-        prepared.commit(self)
-    }
-
-    /// Returns revisions in append order.
-    pub fn revisions(&self) -> &[ConfigurationRevision] {
-        &self.revisions
     }
 }
 
@@ -2308,7 +2715,7 @@ mod tests {
     #[test]
     fn duplicate_admission_is_found_and_distinct_head_is_stale() {
         let (scope, tenant, run) = ids();
-        let store = RunStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let first = admission(scope.clone(), tenant.clone(), run.clone());
         assert_eq!(
             store.admit(first.clone()),
@@ -2388,7 +2795,7 @@ mod tests {
     #[test]
     fn pure_conclusion_has_no_preparation_path() {
         let (scope, tenant, run) = ids();
-        let store = RunStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let occurrence = SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
         let contract = content(2);
         let document = ProgramDocument::new(
@@ -2457,7 +2864,7 @@ mod tests {
     #[test]
     fn direct_new_preparation_matches_qualified_record_ordinal() {
         let (scope, tenant, run) = ids();
-        let store = RunStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let input_contract = content(70);
         let output_contract = content(71);
         let capability_contract = content(72);
@@ -2563,7 +2970,7 @@ mod tests {
     #[test]
     fn reducer_advances_the_exact_direct_successor_context() {
         let (scope, tenant, run) = ids();
-        let store = RunStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let input_contract = content(30);
         let middle_contract = content(31);
         let root_value = value_ref(&input_contract, "{\"step\":0}");
@@ -2675,7 +3082,7 @@ mod tests {
     #[test]
     fn reducer_materializes_one_selected_match_payload() {
         let (scope, tenant, run) = ids();
-        let store = RunStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
+        let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
         let selector_contract = content(50);
         let payload_contract = content(51);
         let result_contract = content(52);

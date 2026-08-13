@@ -1,0 +1,16 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/backend_command_is_not_constructible.rs:4:41
+  |
+4 |       let _ = ConfigurationAppendCommand::new;
+  |                                           ^^^ private associated function
+  |
+ ::: src/backend.rs
+  |
+  | /     pub(crate) const fn new(
+  | |         identity: &'a StructuredStoreIdentity,
+  | |         expected_sequence: u64,
+  | |         append_request_id: &'a AppendRequestId,
+  | |         canonical_bytes: &'a [u8],
+  | |         content_ref: &'a ContentRef,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here

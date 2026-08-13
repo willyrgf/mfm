@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use mfm_canonical::{raw_content_digest, sha256_digest_bytes, PlainCanonicalJsonBytes};
 use mfm_capabilities::AccessCapabilityContract;
@@ -30,7 +31,12 @@ use mfm_program::single_trust::{
     StateDeclaration,
 };
 use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
-use mfm_store::{AppendDisposition, RunAction, RunStore, StoreError};
+use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
+use mfm_store::OpenedStructuredStore;
+use mfm_store::{
+    AppendDisposition, RunAction, StoreError, StoreWorkLimits, StructuredStore,
+    StructuredStoreIdentity,
+};
 use mfm_values::MfmValue;
 use serde::{Deserialize, Serialize};
 
@@ -264,8 +270,11 @@ impl ExportedRun {
 /// Fixed-tenant application facade.
 pub struct Application {
     tenant_scope_id: TenantScopeId,
-    store: Arc<RunStore>,
+    store: Arc<OpenedStructuredStore>,
+    catalog: ProgramCatalog,
     supported_entry_points: BTreeMap<StableId, ()>,
+    runtimes: BTreeMap<StableId, Runtime>,
+    suspended: Mutex<BTreeMap<RunId, SuspendedRun>>,
 }
 
 impl Application {
@@ -279,14 +288,98 @@ impl Application {
             StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
         let evm_id = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
             .map_err(|_| PublicError::Internal)?;
+        let (catalog, _) = ProgramCatalog::builder()
+            .finish(evm_submission_program()?)
+            .map_err(|_| PublicError::Internal)?;
+        let store = StructuredStore::open_memory(
+            StructuredStoreIdentity::new(store_scope_id, store_epoch, tenant_scope_id.clone()),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .map_err(|_| PublicError::Internal)?;
         Ok(Self {
-            store: Arc::new(RunStore::memory(
-                store_scope_id,
-                store_epoch,
-                tenant_scope_id.clone(),
-            )),
+            store: Arc::new(store),
+            catalog,
             tenant_scope_id,
             supported_entry_points: BTreeMap::from([(portfolio_id, ()), (evm_id, ())]),
+            runtimes: BTreeMap::new(),
+            suspended: Mutex::new(BTreeMap::new()),
+        })
+    }
+
+    /// Creates a fixed-tenant facade over an already-qualified live Runtime.
+    ///
+    /// The Runtime's Store identity and tenant must match the facade.  The Runtime owns the
+    /// exact live State/adapter assembly; this constructor is the only application path that
+    /// enables provider execution.
+    pub fn for_tenant_with_runtime(
+        tenant_scope_id: TenantScopeId,
+        runtime: Runtime,
+    ) -> Result<Self> {
+        Self::for_tenant_with_runtimes(tenant_scope_id, vec![runtime])
+    }
+
+    /// Creates a fixed-tenant facade over the exact live Runtime assemblies for one or more
+    /// supported entry points.
+    pub fn for_tenant_with_runtimes(
+        tenant_scope_id: TenantScopeId,
+        runtimes: Vec<Runtime>,
+    ) -> Result<Self> {
+        if runtimes.is_empty() {
+            return Err(PublicError::Internal);
+        }
+        let mut runtime_map = BTreeMap::new();
+        let mut store = None;
+        let mut catalog = None;
+        for runtime in runtimes {
+            let runtime_store = runtime.store();
+            if runtime_store.identity().tenant() != &tenant_scope_id
+                || store
+                    .as_ref()
+                    .is_some_and(|existing: &OpenedStructuredStore| {
+                        !existing.same_open(&runtime_store)
+                    })
+            {
+                return Err(PublicError::Internal);
+            }
+            if catalog.as_ref().is_some_and(|existing: &ProgramCatalog| {
+                !runtime_store.catalog().same_catalog(existing)
+            }) {
+                return Err(PublicError::Internal);
+            }
+            let entry_point = runtime.entry_point_id();
+            if runtime_map.insert(entry_point, runtime).is_some() {
+                return Err(PublicError::Internal);
+            }
+            if store.is_none() {
+                store = Some(runtime_store);
+                catalog = Some(
+                    runtime_map
+                        .values()
+                        .next()
+                        .ok_or(PublicError::Internal)?
+                        .catalog(),
+                );
+            }
+        }
+        let store = store.ok_or(PublicError::Internal)?;
+        let portfolio_id =
+            StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PublicError::Internal)?;
+        let evm_id = StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
+            .map_err(|_| PublicError::Internal)?;
+        if runtime_map
+            .keys()
+            .any(|entry| entry != &portfolio_id && entry != &evm_id)
+        {
+            return Err(PublicError::Internal);
+        }
+        Ok(Self {
+            store: Arc::new(store),
+            catalog: catalog.ok_or(PublicError::Internal)?,
+            tenant_scope_id,
+            supported_entry_points: BTreeMap::from([(portfolio_id, ()), (evm_id, ())]),
+            runtimes: runtime_map,
+            suspended: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -325,8 +418,8 @@ impl Application {
             canonical_typed_admission(&entry_point_id, request.input)?;
         let program = program_ref(&document)?;
         let identity = if entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
-            let typed: EvmSubmissionRequest =
-                serde_json::from_value(identity_input).map_err(|_| PublicError::Internal)?;
+            let typed: EvmSubmissionRequest = serde_json::from_value(identity_input.clone())
+                .map_err(|_| PublicError::Internal)?;
             canonical_json(&serde_json::json!({
                 "entry_point_id": entry_point_id.as_str(),
                 "idempotency_key": typed.idempotency_key,
@@ -354,22 +447,85 @@ impl Application {
             short_stable_id_fragment(run_id.as_str(), 48)
         ))
         .map_err(|_| PublicError::Internal)?;
+        let configuration_ref = value_ref("mfm.configuration", b"fixed-configuration-v1")?;
+        if let Some(runtime) = self.runtimes.get(&entry_point_id) {
+            let step = if entry_point_id.as_str() == EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID {
+                let typed: EvmSubmissionRequest =
+                    serde_json::from_value(identity_input).map_err(|_| PublicError::Internal)?;
+                let value = runtime
+                    .catalog()
+                    .qualify(contract_ref.clone(), typed)
+                    .map_err(|_| PublicError::Internal)?;
+                runtime
+                    .admission(
+                        run_id.clone(),
+                        value,
+                        configuration_ref.clone(),
+                        Vec::new(),
+                        append_request_id,
+                    )
+                    .map_err(|_| PublicError::Internal)?
+                    .spawn()
+                    .await
+            } else {
+                let typed: PortfolioSnapshotInput =
+                    serde_json::from_value(identity_input).map_err(|_| PublicError::Internal)?;
+                let value = runtime
+                    .catalog()
+                    .qualify(contract_ref.clone(), typed)
+                    .map_err(|_| PublicError::Internal)?;
+                runtime
+                    .admission(
+                        run_id.clone(),
+                        value,
+                        configuration_ref.clone(),
+                        Vec::new(),
+                        append_request_id,
+                    )
+                    .map_err(|_| PublicError::Internal)?
+                    .spawn()
+                    .await
+            };
+            let disposition = match step {
+                SpawnStep::Active(_) => "accepted",
+                SpawnStep::Terminal(_) => "terminal",
+                SpawnStep::Suspended(suspended) => {
+                    let mut owners = self.suspended.lock().map_err(|_| PublicError::Internal)?;
+                    if owners.contains_key(&run_id) {
+                        return Err(PublicError::Internal);
+                    }
+                    owners.insert(run_id.clone(), suspended);
+                    "acknowledgement_unknown"
+                }
+                SpawnStep::Conflict(_) => {
+                    return Err(PublicError::BadRequest {
+                        code: "AdmissionConflict",
+                        message: "The run identity already has a different admission",
+                    })
+                }
+                SpawnStep::Failed(_) => return Err(PublicError::Internal),
+            };
+            return Ok(AdmitRunResponse {
+                run_id,
+                disposition,
+            });
+        }
         let admission = RunAdmitted::new(
-            self.store.scope().clone(),
-            self.store.epoch(),
+            self.store.identity().scope().clone(),
+            self.store.identity().epoch(),
             run_id.clone(),
             self.tenant_scope_id.clone(),
             entry_point_id,
             program,
             ValueRef::new(contract_ref, context_ref.clone()),
-            value_ref("mfm.configuration", b"fixed-configuration-v1")?,
+            configuration_ref,
             Vec::new(),
         )
         .map_err(|_| PublicError::Internal)?;
         let frame = RunFrame::new(
             run_id.clone(),
-            self.store.scope().clone(),
-            self.store.epoch(),
+            self.store.identity().scope().clone(),
+            self.store.identity().epoch(),
             1,
             append_request_id,
             RunRecord::RunAdmitted(admission),
@@ -381,7 +537,7 @@ impl Application {
             .map_err(|_| PublicError::Internal)?],
         )
         .map_err(|_| PublicError::Internal)?;
-        let disposition = self.store.admit(frame).map_err(map_store_error)?;
+        let disposition = self.store.append(frame).await.map_err(map_store_error)?;
         Ok(AdmitRunResponse {
             run_id,
             disposition: disposition_name(disposition),
@@ -390,38 +546,156 @@ impl Application {
 
     /// Advances only callback-free retained state in this fixed facade.
     pub async fn drive(&self, run_id: RunId) -> Result<DriveResponse> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        if !self.runtimes.is_empty() {
+            let run = self.store.load(&run_id).await.map_err(map_store_error)?;
+            let entry_point = match run.frames().first().map(RunFrame::record) {
+                Some(RunRecord::RunAdmitted(admission)) => admission.entry_point_id().clone(),
+                _ => return Err(PublicError::Internal),
+            };
+            let runtime = self
+                .runtimes
+                .get(&entry_point)
+                .ok_or(PublicError::Internal)?;
+            return self.drive_with_runtime(runtime, run_id).await;
+        }
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
         let reduced = self
             .store
             .reduce(&run_id, document)
+            .await
             .map_err(map_store_error)?;
+        if matches!(
+            reduced.action(),
+            RunAction::ReadyPure { .. }
+                | RunAction::ReadyAccess { .. }
+                | RunAction::WaitingPreparation { .. }
+        ) {
+            return Err(PublicError::Internal);
+        }
         Ok(DriveResponse {
             run_id,
             head_sequence: run.head_sequence(),
-            status: status_from_action(&reduced.action),
+            status: status_from_action(reduced.action()),
         })
+    }
+
+    /// Resolves one application-retained suspended Runtime owner.
+    pub async fn resolve_suspended(&self) -> Result<DriveResponse> {
+        let suspended = {
+            let mut owners = self.suspended.lock().map_err(|_| PublicError::Internal)?;
+            if owners.len() != 1 {
+                return Err(PublicError::Internal);
+            }
+            owners.pop_first().map(|(_, suspended)| suspended)
+        }
+        .ok_or(PublicError::Internal)?;
+        self.finish_runtime_step(suspended.resolve().await).await
+    }
+
+    /// Resolves one application-retained suspended Runtime owner by run identity.
+    pub async fn resolve_suspended_run(&self, run_id: RunId) -> Result<DriveResponse> {
+        let suspended = self
+            .suspended
+            .lock()
+            .map_err(|_| PublicError::Internal)?
+            .remove(&run_id)
+            .ok_or(PublicError::Internal)?;
+        self.finish_runtime_step(suspended.resolve().await).await
+    }
+
+    async fn drive_with_runtime(&self, runtime: &Runtime, run_id: RunId) -> Result<DriveResponse> {
+        match runtime.resume_run(run_id).await {
+            ResumeStep::Active(session) => self.finish_runtime_step(session.drive().await).await,
+            ResumeStep::Terminal(terminal) => Ok(DriveResponse {
+                run_id: terminal.run_id().clone(),
+                head_sequence: terminal.head_sequence(),
+                status: RunStatus::Terminal,
+            }),
+            ResumeStep::Parked(parked) => Ok(DriveResponse {
+                run_id: parked.run_id().clone(),
+                head_sequence: parked.head_sequence(),
+                status: RunStatus::WaitingPreparation,
+            }),
+            ResumeStep::Failed(_) => Err(PublicError::Internal),
+        }
+    }
+
+    async fn finish_runtime_step(&self, step: RuntimeStep) -> Result<DriveResponse> {
+        match step {
+            RuntimeStep::Advanced(session) => {
+                let run_id = session.run_id().clone();
+                Ok(DriveResponse {
+                    run_id,
+                    head_sequence: session.head_sequence(),
+                    status: RunStatus::Ready,
+                })
+            }
+            RuntimeStep::Terminal(terminal) => Ok(DriveResponse {
+                run_id: terminal.run_id().clone(),
+                head_sequence: terminal.head_sequence(),
+                status: RunStatus::Terminal,
+            }),
+            RuntimeStep::PreparationRejected { session, .. } => Ok(DriveResponse {
+                run_id: session.run_id().clone(),
+                head_sequence: session.head_sequence(),
+                status: RunStatus::Ready,
+            }),
+            RuntimeStep::Unresolved { session, .. } => Ok(DriveResponse {
+                run_id: session.run_id().clone(),
+                head_sequence: session.head_sequence(),
+                status: RunStatus::WaitingPreparation,
+            }),
+            RuntimeStep::Parked { session, .. } => Ok(DriveResponse {
+                run_id: session.run_id().clone(),
+                head_sequence: session.head_sequence(),
+                status: RunStatus::WaitingPreparation,
+            }),
+            RuntimeStep::Suspended(suspended) => {
+                let run_id = suspended.run_id().clone();
+                {
+                    let mut owners = self.suspended.lock().map_err(|_| PublicError::Internal)?;
+                    if owners.contains_key(&run_id) {
+                        return Err(PublicError::Internal);
+                    }
+                    owners.insert(run_id.clone(), suspended);
+                }
+                let head_sequence = self
+                    .store
+                    .load(&run_id)
+                    .await
+                    .map_err(map_store_error)?
+                    .head_sequence();
+                Ok(DriveResponse {
+                    run_id,
+                    head_sequence,
+                    status: RunStatus::WaitingPreparation,
+                })
+            }
+            RuntimeStep::Conflict { .. } | RuntimeStep::Failed { .. } => Err(PublicError::Internal),
+        }
     }
 
     /// Reads one run inside this fixed tenant partition.
     pub async fn read_public_run(&self, run_id: RunId) -> Result<PublicRunView> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
         let reduced = self
             .store
             .reduce(&run_id, document)
+            .await
             .map_err(map_store_error)?;
         Ok(PublicRunView {
             run_id,
             tenant_scope_id: self.tenant_scope_id.clone(),
             head_sequence: run.head_sequence(),
-            status: status_from_action(&reduced.action),
+            status: status_from_action(reduced.action()),
         })
     }
 
     /// Replays a retained prefix with zero live callbacks.
     pub async fn replay_run(&self, run_id: RunId) -> Result<ReplayResponse> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let document = self.document_for_run(&run)?;
         qualify_with_program(&run, document)
             .map(Into::into)
@@ -430,7 +704,7 @@ impl Application {
 
     /// Returns a redacted structural trace without exposing retained values or objects.
     pub async fn trace_run(&self, run_id: RunId) -> Result<TraceResponse> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let records = run
             .frames()
             .iter()
@@ -458,7 +732,7 @@ impl Application {
 
     /// Returns preparation/supersession/conclusion status without live callbacks.
     pub async fn audit_access(&self, run_id: RunId) -> Result<AccessAuditResponse> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let mut entries: BTreeMap<SequentialControlAddress, AccessAuditEntry> = BTreeMap::new();
         for frame in run.frames() {
             match frame.record() {
@@ -491,7 +765,7 @@ impl Application {
 
     /// Exports the strict three-family frame stream.
     pub async fn export_run(&self, run_id: RunId) -> Result<ExportedRun> {
-        let run = self.store.load(&run_id).map_err(map_store_error)?;
+        let run = self.store.load(&run_id).await.map_err(map_store_error)?;
         let portable = PortableRun::from_run(&run);
         let bytes = portable.encode().map_err(map_replay_error)?;
         Ok(ExportedRun { bytes })
@@ -523,6 +797,9 @@ impl Application {
         if program_ref(&document)? != *admission.program_ref() {
             return Err(PublicError::Internal);
         }
+        self.catalog
+            .program(document.clone())
+            .map_err(|_| PublicError::Internal)?;
         Ok(document)
     }
 }
@@ -1168,9 +1445,10 @@ mod tests {
             .admit_run(AdmitRunRequest::new(entry, input).expect("request"))
             .await;
         let response = response.expect("admission");
-        let driven = app.drive(response.run_id.clone()).await.expect("drive");
-        assert_eq!(driven.status, RunStatus::Ready);
-        assert_eq!(driven.head_sequence, 1);
+        assert_eq!(
+            app.drive(response.run_id.clone()).await,
+            Err(PublicError::Internal)
+        );
     }
 
     #[tokio::test]
@@ -1242,8 +1520,7 @@ mod tests {
             .admit_run(AdmitRunRequest::new(entry, input).expect("request"))
             .await
             .expect("admission");
-        let driven = app.drive(response.run_id).await.expect("drive");
-        assert_eq!(driven.status, RunStatus::Ready);
+        assert_eq!(app.drive(response.run_id).await, Err(PublicError::Internal));
     }
 
     #[tokio::test]
@@ -1284,5 +1561,51 @@ mod tests {
             r#"{"entry_point_id":"mfm.test@1","input":{"value":1,"value":2}}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn maximum_entry_point_programs_record_capacity_envelope() {
+        let evm = evm_submission_program().expect("EVM program");
+        let evm_bytes = evm.canonical_bytes().expect("EVM canonical bytes");
+
+        let collection_count =
+            mfm_portfolio::PORTFOLIO_COLLECTION_LIMIT.min(mfm_evm::EVM_BALANCE_SOURCE_LIMIT);
+        let collections = (0..collection_count)
+            .map(|collection| {
+                serde_json::json!({
+                    "sources": [{
+                        "source_id": format!("source-{collection}"),
+                        "chain_id": 1,
+                        "address": format!("0x{collection:02x}"),
+                        "token": null
+                    }],
+                    "decimals": 18
+                })
+            })
+            .collect::<Vec<_>>();
+        let input: PortfolioSnapshotInput = serde_json::from_value(serde_json::json!({
+            "portfolio_id": {"value": "portfolio-capacity-envelope"},
+            "collections": collections,
+            "quote": "usd"
+        }))
+        .expect("maximum Portfolio input");
+        let portfolio = portfolio_program(&input).expect("Portfolio program");
+        let portfolio_bytes = portfolio
+            .canonical_bytes()
+            .expect("Portfolio canonical bytes");
+
+        eprintln!(
+            "capacity-envelope app evm declarations={} bytes={} portfolio collections={} sources={} declarations={} bytes={}",
+            evm.declarations().len(),
+            evm_bytes.as_bytes().len(),
+            input.collections.len(),
+            input
+                .collections
+                .iter()
+                .map(|collection| collection.sources.len())
+                .sum::<usize>(),
+            portfolio.declarations().len(),
+            portfolio_bytes.as_bytes().len(),
+        );
     }
 }
