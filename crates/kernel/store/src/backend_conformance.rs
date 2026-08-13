@@ -341,6 +341,36 @@ pub async fn verify_primary_restart_probe(
     Ok(())
 }
 
+/// Appends one bounded sole-genesis probe for process-level CAS tests.
+pub async fn append_admission_probe(
+    backend: Arc<dyn StructuredStoreBackend>,
+    identity: StructuredStoreIdentity,
+    run_id: RunId,
+    append_request_id: &str,
+) -> Result<BackendAppendOutcome, BackendError> {
+    let frame_bytes = br#"{"kind":"process-admission-race"}"#;
+    let frame_digest = raw_content_digest(frame_bytes);
+    let head_digest = ContentDigest::parse(
+        "content:sha256-v1:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let append_request_id =
+        AppendRequestId::new(append_request_id).map_err(|_| BackendError::Storage)?;
+    let command = BackendAppendCommand::new(
+        &identity,
+        &run_id,
+        1,
+        &append_request_id,
+        frame_bytes,
+        &frame_digest,
+        &head_digest,
+        None,
+        true,
+        None,
+    );
+    backend.compare_and_append(&command).await
+}
+
 /// Exercises the complete mechanical contract without decoding or reducing any frame.
 pub async fn exercise(
     backend: Arc<dyn StructuredStoreBackend>,

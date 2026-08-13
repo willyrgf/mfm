@@ -259,6 +259,21 @@ impl StructuredStoreBackend for PostgresStore {
                 return Err(BackendError::Capacity);
             }
             let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            // A missing head row cannot be locked with `FOR UPDATE`.  Serialize only this
+            // identity's short transaction so concurrent genesis commands resolve through the
+            // same Found/stale-head path as an already materialized head row; this is not a
+            // process lease or a retained writer lock.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "history:{}:{}:{}:{}",
+                    self.scope.as_str(),
+                    self.epoch.get(),
+                    self.tenant.as_str(),
+                    command.run_id().as_str()
+                ))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Storage)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let existing: Option<(i64, Vec<u8>, String, String)> = sqlx::query_as(
                 "SELECT run_sequence, frame_bytes, frame_digest, head_digest
@@ -559,6 +574,18 @@ impl StructuredStoreBackend for PostgresStore {
                 return Err(BackendError::Capacity);
             }
             let mut transaction = self.pool.begin().await.map_err(|_| BackendError::Storage)?;
+            // Configuration has the same absent-head race as a new run.  The advisory lock is
+            // transaction-scoped and only closes that gap before the ordinary head row lock.
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(format!(
+                    "configuration:{}:{}:{}",
+                    self.scope.as_str(),
+                    self.epoch.get(),
+                    self.tenant.as_str()
+                ))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Storage)?;
             let epoch = i64::try_from(self.epoch.get()).map_err(|_| BackendError::Capacity)?;
             let existing: Option<(i64, Vec<u8>, String)> = sqlx::query_as(
                 "SELECT revision_sequence, canonical_bytes, content_ref
@@ -1082,11 +1109,65 @@ mod managed_postgres_tests {
         .expect("isolated primary shutdown worker");
     }
 
+    fn process_race_identity() -> StructuredStoreIdentity {
+        StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("scope"),
+            StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        )
+    }
+
+    fn process_race_run_id() -> RunId {
+        RunId::parse(
+            "run:sha256-jcs-v1:c123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("process race run")
+    }
+
+    async fn run_process_cas_child() {
+        let database_url = std::env::var("DATABASE_URL").expect("child database URL");
+        let identity = process_race_identity();
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&database_url)
+            .await
+            .expect("child PostgreSQL service");
+        let store = Arc::new(
+            PostgresStore::from_pool(
+                pool,
+                identity.scope().clone(),
+                identity.epoch(),
+                identity.tenant().clone(),
+                DurabilityProfile::PrimaryCrashRestart,
+            )
+            .expect("child store"),
+        );
+        store.check_ready().await.expect("child store readiness");
+        let outcome = mfm_store::backend_conformance::append_admission_probe(
+            store,
+            identity,
+            process_race_run_id(),
+            "postgres-process-race-0123456789",
+        )
+        .await
+        .expect("child admission append");
+        assert!(matches!(
+            outcome,
+            BackendAppendOutcome::NewlyCommitted | BackendAppendOutcome::Found(_)
+        ));
+    }
+
     #[tokio::test]
     async fn managed_primary_schema_meets_the_admitted_profile() {
         let Ok(database_url) = std::env::var("DATABASE_URL") else {
             return;
         };
+        if std::env::var_os("MFM_POSTGRES_CAS_CHILD").is_some() {
+            run_process_cas_child().await;
+            return;
+        }
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .connect(&database_url)
@@ -1110,13 +1191,7 @@ mod managed_postgres_tests {
         .execute(&pool)
         .await
         .expect("isolated conformance schema");
-        let identity = StructuredStoreIdentity::new(
-            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("scope"),
-            StoreEpoch::new(1),
-            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
-        );
+        let identity = process_race_identity();
         let store = Arc::new(
             PostgresStore::from_pool(
                 pool.clone(),
@@ -1135,6 +1210,47 @@ mod managed_postgres_tests {
         mfm_store::backend_conformance::exercise(backend.clone(), identity.clone())
             .await
             .expect("PostgreSQL backend contract");
+
+        let executable = std::env::current_exe().expect("PostgreSQL test executable");
+        let child_database_url = database_url.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut children = (0..2)
+                .map(|_| {
+                    Command::new(&executable)
+                        .args([
+                            "--exact",
+                            "managed_postgres_tests::managed_primary_schema_meets_the_admitted_profile",
+                            "--nocapture",
+                        ])
+                        .env("DATABASE_URL", &child_database_url)
+                        .env("MFM_POSTGRES_CAS_CHILD", "1")
+                        .spawn()
+                        .expect("spawn PostgreSQL CAS child")
+                })
+                .collect::<Vec<_>>();
+            for child in &mut children {
+                assert!(child
+                    .wait()
+                    .expect("wait for PostgreSQL CAS child")
+                    .success());
+            }
+        })
+        .await
+        .expect("PostgreSQL process CAS worker");
+        let process_race_run = process_race_run_id();
+        let process_prefix = backend
+            .load_complete_prefix(
+                &process_race_run,
+                RawHistoryLoadLimit::new(2, mfm_journal::single_trust::MAX_FRAME_BYTES * 2),
+            )
+            .await
+            .expect("load process CAS prefix")
+            .expect("process CAS prefix");
+        assert_eq!(process_prefix.frames().len(), 1);
+        assert_eq!(
+            process_prefix.frames()[0].append_request_id().as_str(),
+            "postgres-process-race-0123456789"
+        );
 
         #[cfg(target_os = "linux")]
         {
