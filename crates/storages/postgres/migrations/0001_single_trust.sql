@@ -1,11 +1,9 @@
 CREATE TABLE mfm_store_schema (
     schema_contract TEXT PRIMARY KEY,
+    store_scope_id TEXT NOT NULL,
+    store_epoch BIGINT NOT NULL CHECK (store_epoch > 0),
     installed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
-
-INSERT INTO mfm_store_schema (schema_contract)
-VALUES ('mfm.structured-run-history-postgres.v8')
-ON CONFLICT (schema_contract) DO NOTHING;
 
 CREATE TABLE mfm_run_frames (
     store_scope_id TEXT NOT NULL,

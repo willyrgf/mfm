@@ -11,3 +11,9 @@ configuration stream. The writer materializes a zero `mfm_fact_heads` row with
 `ON CONFLICT DO NOTHING` and locks it before checking a first publication. The shared backend
 conformance race proves that concurrent first publishers linearize to one commit and one
 `FactFrontierChanged`, with no partial run or fact row.
+
+The database also records one persisted `(store_scope_id, store_epoch)` deployment identity.
+Ordinary opens must match it, including simultaneous qualified opens. A trusted restore uses
+`PostgresStore::rotate_identity` with a fresh scope or epoch, then opens the new pair; that
+rotation makes already-open handles with the previous identity fail closed and leaves old
+partitions replay-only.

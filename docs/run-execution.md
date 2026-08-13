@@ -25,6 +25,10 @@ producer Program/run/record/head provenance, and load/append qualification verif
 history and exact fact content. The frontier stream is bound to the Store scope, writer epoch,
 and tenant, so a copied selection cannot cross partitions or epochs.
 
+Restore is an explicit deployment cutover: PostgreSQL persists the active scope/epoch identity,
+rotates it to the fresh restore identity, and rejects old-identity handles before they can resume
+or append a run.
+
 Successful State conclusions carry a coordinate-free proposal set. Store assigns the next tenant
 fact-publication coordinate only when the proposal set is non-empty and appends the conclusion and
 publication atomically. A fact-frontier race returns the same pending conclusion owner with its
