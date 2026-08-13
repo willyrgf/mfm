@@ -411,7 +411,22 @@ impl StructuredStoreBackend for PostgresStore {
                 return Err(BackendError::Conflict);
             }
             if command.fact_publication().is_some() || command.fact_frontier().is_some() {
-                let fact_head: Option<i64> = sqlx::query_scalar(
+                // Materialize the zero head before locking it. PostgreSQL cannot lock a row that
+                // does not exist, so selecting an optional head alone would let concurrent first
+                // publications both observe zero and race into a generic unique-key conflict.
+                sqlx::query(
+                    "INSERT INTO mfm_fact_heads
+                     (store_scope_id, store_epoch, tenant_scope_id, publication_sequence)
+                     VALUES ($1, $2, $3, 0)
+                     ON CONFLICT (store_scope_id, store_epoch, tenant_scope_id) DO NOTHING",
+                )
+                .bind(self.scope.as_str())
+                .bind(epoch)
+                .bind(self.tenant.as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| BackendError::Storage)?;
+                let fact_head: i64 = sqlx::query_scalar(
                     "SELECT publication_sequence FROM mfm_fact_heads
                      WHERE store_scope_id = $1 AND store_epoch = $2 AND tenant_scope_id = $3
                      FOR UPDATE",
@@ -419,10 +434,10 @@ impl StructuredStoreBackend for PostgresStore {
                 .bind(self.scope.as_str())
                 .bind(epoch)
                 .bind(self.tenant.as_str())
-                .fetch_optional(&mut *transaction)
+                .fetch_one(&mut *transaction)
                 .await
                 .map_err(|_| BackendError::Storage)?;
-                let actual_fact = fact_head.unwrap_or(0);
+                let actual_fact = fact_head;
                 if let Some(publication) = command.fact_publication() {
                     let expected_fact = actual_fact.saturating_add(1);
                     if i64::try_from(publication.publication_sequence())
@@ -1251,7 +1266,6 @@ mod managed_postgres_tests {
         mfm_store::backend_conformance::exercise(backend.clone(), identity.clone())
             .await
             .expect("PostgreSQL backend contract");
-
         let executable = std::env::current_exe().expect("PostgreSQL test executable");
         let child_database_url = database_url.clone();
         tokio::task::spawn_blocking(move || {
@@ -1384,6 +1398,12 @@ mod managed_postgres_tests {
             .expect("fact rollback");
             clear_abort_triggers(&pool).await;
         }
+        mfm_store::backend_conformance::exercise_first_fact_publication_race(
+            backend.clone(),
+            identity.clone(),
+        )
+        .await
+        .expect("PostgreSQL first fact publication race");
         for (table, operation) in [
             ("mfm_configuration_revisions", "INSERT"),
             ("mfm_configuration_heads", "INSERT OR UPDATE"),
