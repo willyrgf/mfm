@@ -24,6 +24,7 @@ path = "src/lib.rs"
 [dependencies]
 mfm-canonical = { path = "../canonical" }
 mfm-capabilities = { path = "../capabilities" }
+mfm-facts = { path = "../facts" }
 mfm-ids = { path = "../ids" }
 mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }

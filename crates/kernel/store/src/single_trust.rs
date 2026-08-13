@@ -2052,6 +2052,39 @@ fn validate_record_objects(
             return Err(StoreError::InvalidHistory);
         }
     }
+    if let RunRecord::StateConcluded(conclusion) = record {
+        if let Some(proposals) = conclusion.fact_proposals() {
+            validate_fact_proposals(objects, proposals)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_fact_proposals(
+    objects: &BTreeMap<ContentRef, mfm_journal::single_trust::ImmutableObject>,
+    proposals_ref: &ValueRef,
+) -> Result<()> {
+    if proposals_ref.contract_ref().schema_id()
+        != &mfm_facts::FactProposalSet::schema_id().map_err(|_| StoreError::InvalidRecord)?
+    {
+        return Err(StoreError::InvalidRecord);
+    }
+    let object = objects
+        .get(proposals_ref.value_ref())
+        .ok_or(StoreError::InvalidHistory)?;
+    let proposals: mfm_facts::FactProposalSet =
+        serde_json::from_str(object.canonical_json()).map_err(|_| StoreError::InvalidRecord)?;
+    proposals
+        .validate()
+        .map_err(|_| StoreError::InvalidRecord)?;
+    let canonical = mfm_journal::single_trust::canonical_json(&proposals)
+        .map_err(|_| StoreError::InvalidRecord)?;
+    if object.content_ref() != proposals_ref.value_ref()
+        || object.content_ref().content_digest() != &raw_content_digest(canonical.as_bytes())
+        || object.canonical_json() != canonical.as_str()
+    {
+        return Err(StoreError::InvalidRecord);
+    }
     Ok(())
 }
 
@@ -2100,6 +2133,9 @@ fn record_value_refs(record: &RunRecord) -> Vec<&mfm_journal::single_trust::Valu
         }
         RunRecord::StateConcluded(conclusion) => {
             let mut values = Vec::new();
+            if let Some(proposals) = conclusion.fact_proposals() {
+                values.push(proposals);
+            }
             if let StateConcluded::Access {
                 evidence,
                 fact_selection,
@@ -2832,6 +2868,7 @@ mod tests {
                 RunRecord::StateConcluded(StateConcluded::Pure {
                     occurrence: SequentialControlAddress::new(0, Vec::new()).expect("occurrence"),
                     outcome: StateOutcome::Success(ValueRef::new(content(5), content(6))),
+                    fact_proposals: None,
                     fact_publication: None,
                 }),
                 Vec::new(),
@@ -2938,6 +2975,7 @@ mod tests {
         let conclusion = StateConcluded::Pure {
             occurrence,
             outcome: StateOutcome::Success(ValueRef::new(contract, context_value_ref())),
+            fact_proposals: None,
             fact_publication: None,
         };
         let owner = store
@@ -3132,6 +3170,7 @@ mod tests {
             RunRecord::StateConcluded(StateConcluded::Pure {
                 occurrence: SequentialControlAddress::new(1, Vec::new()).expect("address"),
                 outcome: StateOutcome::Success(middle_value.clone()),
+                fact_proposals: None,
                 fact_publication: Some(
                     mfm_journal::single_trust::FactPublication::new(1, fact_selection.clone())
                         .expect("publication"),
@@ -3164,6 +3203,7 @@ mod tests {
             RunRecord::StateConcluded(StateConcluded::Pure {
                 occurrence: second_address,
                 outcome: StateOutcome::Success(final_value.clone()),
+                fact_proposals: None,
                 fact_publication: None,
             }),
             vec![value_object(&final_value, "{\"step\":2}")],
@@ -3252,6 +3292,7 @@ mod tests {
                 StateConcluded::Pure {
                     occurrence: state_address,
                     outcome: StateOutcome::Success(result_value.clone()),
+                    fact_proposals: None,
                     fact_publication: None,
                 },
                 vec![value_object(&result_value, "{\"result\":2}")],

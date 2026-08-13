@@ -617,6 +617,8 @@ pub enum StateConcluded {
         occurrence: SequentialControlAddress,
         /// Complete state result or typed failure.
         outcome: StateOutcome,
+        /// Coordinate-free fact proposals emitted by a successful State.
+        fact_proposals: Option<ValueRef>,
         /// Optional append-atomic fact publication.
         fact_publication: Option<FactPublication>,
     },
@@ -630,6 +632,8 @@ pub enum StateConcluded {
         evidence: ValueRef,
         /// Complete state result or typed failure.
         outcome: StateOutcome,
+        /// Coordinate-free fact proposals emitted by a successful State.
+        fact_proposals: Option<ValueRef>,
         /// Optional callback-free fact selection evidence.
         fact_selection: Option<ValueRef>,
         /// Optional append-atomic fact publication.
@@ -673,6 +677,15 @@ impl StateConcluded {
         match self {
             Self::Pure { .. } => None,
             Self::Access { fact_selection, .. } => fact_selection.as_ref(),
+        }
+    }
+
+    /// Returns the coordinate-free fact proposals emitted by this conclusion, if any.
+    pub const fn fact_proposals(&self) -> Option<&ValueRef> {
+        match self {
+            Self::Pure { fact_proposals, .. } | Self::Access { fact_proposals, .. } => {
+                fact_proposals.as_ref()
+            }
         }
     }
 
@@ -877,9 +890,17 @@ impl RunFrame {
             RunRecord::StateConcluded(conclusion) => match conclusion {
                 StateConcluded::Pure {
                     outcome,
+                    fact_proposals,
                     fact_publication,
                     ..
                 } => {
+                    if fact_proposals
+                        .as_ref()
+                        .is_some_and(|proposals| !proposals.is_schema_bound())
+                        || matches!(outcome, StateOutcome::Failure(_)) && fact_proposals.is_some()
+                    {
+                        return Err(JournalError::InvalidRecord);
+                    }
                     if fact_publication.as_ref().is_some_and(|publication| {
                         FactPublication::new(
                             publication.publication_sequence,
@@ -895,6 +916,7 @@ impl RunFrame {
                     preparation,
                     evidence,
                     outcome,
+                    fact_proposals,
                     fact_selection,
                     fact_publication,
                     ..
@@ -904,6 +926,10 @@ impl RunFrame {
                         || fact_selection
                             .as_ref()
                             .is_some_and(|selection| !selection.is_schema_bound())
+                        || fact_proposals
+                            .as_ref()
+                            .is_some_and(|proposals| !proposals.is_schema_bound())
+                        || matches!(outcome, StateOutcome::Failure(_)) && fact_proposals.is_some()
                     {
                         return Err(JournalError::InvalidRecord);
                     }
@@ -1049,6 +1075,7 @@ mod tests {
         let record = RunRecord::StateConcluded(StateConcluded::Pure {
             occurrence: occurrence.clone(),
             outcome: StateOutcome::Success(ValueRef::new(ref_for(1), ref_for(2))),
+            fact_proposals: None,
             fact_publication: None,
         });
         assert!(record.is_conclusion());
@@ -1066,6 +1093,7 @@ mod tests {
         let conclusion = StateConcluded::Pure {
             occurrence,
             outcome: StateOutcome::Failure(ValueRef::new(ref_for(3), ref_for(4))),
+            fact_proposals: None,
             fact_publication: None,
         };
         assert_eq!(conclusion.occurrence().declaration_ordinal(), 1);
@@ -1115,6 +1143,7 @@ mod tests {
             RunRecord::StateConcluded(StateConcluded::Pure {
                 occurrence: SequentialControlAddress::new(1, Vec::new()).expect("address"),
                 outcome: StateOutcome::Failure(ValueRef::new(ref_for(9), ref_for(10))),
+                fact_proposals: None,
                 fact_publication: None,
             },),
             Vec::new()
@@ -1231,6 +1260,7 @@ mod tests {
                 preparation: foreign_preparation,
                 evidence: ValueRef::new(ref_for(26), ref_for(27)),
                 outcome: StateOutcome::Failure(ValueRef::new(ref_for(28), ref_for(29))),
+                fact_proposals: None,
                 fact_selection: None,
                 fact_publication: None,
             }),

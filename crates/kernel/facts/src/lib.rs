@@ -179,6 +179,11 @@ pub struct FactProposalSet {
 }
 
 impl FactProposalSet {
+    /// Returns an empty proposal set for a State with no new facts.
+    pub const fn empty() -> Self {
+        Self { facts: Vec::new() }
+    }
+
     /// Creates one canonical proposal set without a publication coordinate.
     pub fn new(facts: Vec<FactValue>) -> Result<Self, FactError> {
         if facts.len() > MAX_SELECTED_FACTS
