@@ -14,7 +14,11 @@ use mfm_ids::{
 };
 use mfm_program::ProgramCatalog;
 
-use crate::single_trust::{AppendDisposition, QualifiedRun, Result, RunStore, StoreError};
+use crate::single_trust::{
+    advance_reduced, prepare_access_from_current, prepare_conclusion_from_current,
+    reduce_qualified, AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
+    ConfigurationSnapshot, QualifiedRun, Result, StoreError,
+};
 
 /// Bounded asynchronous backend result used by every mechanical Store capability.
 pub type BackendFuture<'a, T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send + 'a>>;
@@ -206,7 +210,12 @@ impl RawFrameBytes {
         frame_digest: ContentDigest,
         head_digest: ContentDigest,
     ) -> BackendResult<Self> {
-        if sequence == 0 || frame_bytes.is_empty() {
+        if sequence == 0
+            || sequence as usize > mfm_journal::single_trust::MAX_RUN_FRAMES
+            || frame_bytes.is_empty()
+            || frame_bytes.len() > mfm_journal::single_trust::MAX_FRAME_BYTES
+            || frame_digest != mfm_canonical::raw_content_digest(&frame_bytes)
+        {
             return Err(BackendError::Capacity);
         }
         Ok(Self {
@@ -254,12 +263,22 @@ impl RawRunPrefix {
     /// Constructs one ordered raw prefix and records its physical head digest.
     pub fn new(frames: Vec<RawFrameBytes>) -> BackendResult<Self> {
         if frames.is_empty()
+            || frames.len() > mfm_journal::single_trust::MAX_RUN_FRAMES
             || frames
                 .iter()
                 .enumerate()
                 .any(|(index, frame)| frame.sequence() != index as u64 + 1)
+            || frames
+                .iter()
+                .try_fold(0usize, |total, frame| {
+                    total
+                        .checked_add(frame.frame_bytes().len())
+                        .filter(|bytes| *bytes <= mfm_journal::single_trust::MAX_RUN_FRAME_BYTES)
+                        .ok_or(BackendError::Capacity)
+                })
+                .is_err()
         {
-            return Err(BackendError::Storage);
+            return Err(BackendError::Capacity);
         }
         Ok(Self { frames })
     }
@@ -287,7 +306,7 @@ pub struct BackendAppendCommand<'a> {
 impl<'a> BackendAppendCommand<'a> {
     /// Creates one borrowed command from already-qualified frame material.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         identity: &'a StructuredStoreIdentity,
         run_id: &'a RunId,
         expected_sequence: u64,
@@ -370,7 +389,7 @@ pub enum BackendAppendOutcome {
     /// The candidate crossed the backend commit point.
     NewlyCommitted,
     /// The same physical append was retained; the stored bytes are returned only for resolution.
-    Found(RawFrameBytes),
+    Found(Box<RawFrameBytes>),
     /// The predecessor head no longer matches.
     StaleHead {
         /// The current one-based route head sequence.
@@ -386,11 +405,57 @@ pub enum BackendConfigurationOutcome {
     /// The candidate crossed the backend commit point.
     NewlyCommitted,
     /// The same physical configuration append was retained.
-    Found { sequence: u64 },
+    Found {
+        /// The one-based retained configuration sequence.
+        sequence: u64,
+    },
     /// The expected configuration head is stale.
-    StaleHead { actual_sequence: u64 },
+    StaleHead {
+        /// The current configuration head sequence.
+        actual_sequence: u64,
+    },
     /// The transaction outcome is unknown.
     AcknowledgementUnknown,
+}
+
+/// Store conclusion outcome that retains the exact append owner across an unknown acknowledgement.
+#[derive(Debug)]
+pub enum ConclusionCommitOutcome {
+    /// The conclusion append has a known mechanical disposition.
+    Disposition(AppendDisposition),
+    /// The transaction outcome is unknown; the same semantic owner must be resolved explicitly.
+    AcknowledgementUnknown(crate::single_trust::PreparedConclusion),
+    /// A known Store failure occurred before an append could be accepted; the exact owner remains
+    /// available for explicit retry or supervisor classification.
+    Rejected {
+        /// The unchanged conclusion owner.
+        owner: crate::single_trust::PreparedConclusion,
+        /// The redaction-safe Store failure.
+        error: StoreError,
+    },
+}
+
+/// Configuration append outcome that retains the exact owner after an unknown acknowledgement.
+#[derive(Debug)]
+pub enum ConfigurationCommitOutcome {
+    /// The configuration append has a known mechanical disposition.
+    Disposition {
+        /// The exact known physical disposition.
+        disposition: ConfigurationAppendDisposition,
+        /// The already-ingressed revision when the backend found or committed this exact owner.
+        /// Stale heads expose no revision and therefore cannot promote a caller snapshot.
+        revision: Option<ConfigurationRevision>,
+    },
+    /// The transaction outcome is unknown; the exact semantic owner remains available.
+    AcknowledgementUnknown(PreparedConfigurationWrite),
+    /// A known Store failure occurred before an append could be accepted; the exact owner remains
+    /// available for explicit retry or supervisor classification.
+    Rejected {
+        /// The unchanged configuration owner.
+        owner: PreparedConfigurationWrite,
+        /// The redaction-safe Store failure.
+        error: StoreError,
+    },
 }
 
 /// One borrowed mechanical configuration append command.
@@ -404,7 +469,7 @@ pub struct ConfigurationAppendCommand<'a> {
 
 impl<'a> ConfigurationAppendCommand<'a> {
     /// Creates one bounded configuration command.
-    pub const fn new(
+    pub(crate) const fn new(
         identity: &'a StructuredStoreIdentity,
         expected_sequence: u64,
         append_request_id: &'a AppendRequestId,
@@ -459,7 +524,11 @@ impl RawConfigurationRevision {
         canonical_bytes: Vec<u8>,
         content_ref: ContentRef,
     ) -> BackendResult<Self> {
-        if sequence == 0 || canonical_bytes.is_empty() {
+        if sequence == 0
+            || sequence as usize > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
+            || canonical_bytes.is_empty()
+            || canonical_bytes.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISION_BYTES
+        {
             return Err(BackendError::Capacity);
         }
         Ok(Self {
@@ -505,7 +574,11 @@ impl RawFactPublication {
         run_sequence: u64,
         selection_ref: ContentRef,
     ) -> BackendResult<Self> {
-        if publication_sequence == 0 || run_sequence == 0 {
+        if publication_sequence == 0
+            || publication_sequence as usize > mfm_journal::single_trust::MAX_RUN_FRAMES
+            || run_sequence == 0
+            || run_sequence as usize > mfm_journal::single_trust::MAX_RUN_FRAMES
+        {
             return Err(BackendError::Capacity);
         }
         Ok(Self {
@@ -543,11 +616,20 @@ pub struct RawFactSnapshot {
 
 impl RawFactSnapshot {
     /// Constructs one raw fact snapshot.
-    pub fn new(head_sequence: u64, publications: Vec<RawFactPublication>) -> Self {
-        Self {
+    pub fn new(head_sequence: u64, publications: Vec<RawFactPublication>) -> BackendResult<Self> {
+        if head_sequence != publications.len() as u64
+            || publications
+                .iter()
+                .enumerate()
+                .any(|(index, publication)| publication.publication_sequence() != index as u64 + 1)
+            || publications.len() > mfm_journal::single_trust::MAX_RUN_FRAMES
+        {
+            return Err(BackendError::Capacity);
+        }
+        Ok(Self {
             head_sequence,
             publications,
-        }
+        })
     }
     /// Returns the dense head sequence.
     pub const fn head_sequence(&self) -> u64 {
@@ -563,6 +645,11 @@ impl RawFactSnapshot {
 pub trait StructuredStoreBackend: Send + Sync + 'static {
     /// Returns the immutable identity owned by this backend.
     fn identity(&self) -> StructuredStoreIdentity;
+
+    /// Checks schema/channel/durability readiness without enumerating run history.
+    fn check_ready<'a>(&'a self) -> BackendFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 
     /// Loads one bounded complete run prefix without decoding it.
     fn load_complete_prefix<'a>(
@@ -672,7 +759,7 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                     && existing.frame_digest() == command.frame_digest()
                     && existing.head_digest() == command.head_digest()
                 {
-                    return Ok(BackendAppendOutcome::Found(existing.clone()));
+                    return Ok(BackendAppendOutcome::Found(Box::new(existing.clone())));
                 }
                 return Err(BackendError::Conflict);
             }
@@ -681,6 +768,21 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                 return Ok(BackendAppendOutcome::StaleHead {
                     actual_sequence: actual,
                 });
+            }
+            if frames.len() >= mfm_journal::single_trust::MAX_RUN_FRAMES
+                || frames
+                    .iter()
+                    .try_fold(command.frame_bytes().len(), |total, frame| {
+                        total
+                            .checked_add(frame.frame_bytes().len())
+                            .filter(|bytes| {
+                                *bytes <= mfm_journal::single_trust::MAX_RUN_FRAME_BYTES
+                            })
+                            .ok_or(BackendError::Capacity)
+                    })
+                    .is_err()
+            {
+                return Err(BackendError::Capacity);
             }
             if command.is_admission() != (actual == 0) {
                 return Err(BackendError::Storage);
@@ -706,7 +808,6 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                 command.head_digest().clone(),
             )?;
             frames.push(raw);
-            drop(frames);
             if let Some(publication) = publication {
                 state.facts.push(publication);
             }
@@ -716,12 +817,25 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
 
     fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
         Box::pin(async move {
-            Ok(self
-                .state
-                .lock()
-                .map_err(|_| BackendError::Storage)?
+            let state = self.state.lock().map_err(|_| BackendError::Storage)?;
+            if state.configurations.len() > mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS {
+                return Err(BackendError::Capacity);
+            }
+            let total_bytes = state
                 .configurations
-                .clone())
+                .iter()
+                .try_fold(0usize, |total, revision| {
+                    total
+                        .checked_add(revision.canonical_bytes().len())
+                        .filter(|bytes| {
+                            *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
+                        })
+                        .ok_or(BackendError::Capacity)
+                })?;
+            if total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES {
+                return Err(BackendError::Capacity);
+            }
+            Ok(state.configurations.clone())
         })
     }
 
@@ -757,6 +871,22 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
                     actual_sequence: actual,
                 });
             }
+            if state.configurations.len() >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
+                || state
+                    .configurations
+                    .iter()
+                    .try_fold(command.canonical_bytes().len(), |total, revision| {
+                        total
+                            .checked_add(revision.canonical_bytes().len())
+                            .filter(|bytes| {
+                                *bytes <= mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES
+                            })
+                            .ok_or(BackendError::Capacity)
+                    })
+                    .is_err()
+            {
+                return Err(BackendError::Capacity);
+            }
             let revision = RawConfigurationRevision::new(
                 actual + 1,
                 command.append_request_id().clone(),
@@ -771,10 +901,7 @@ impl StructuredStoreBackend for MemoryStructuredBackend {
     fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
         Box::pin(async move {
             let state = self.state.lock().map_err(|_| BackendError::Storage)?;
-            Ok(RawFactSnapshot::new(
-                state.facts.len() as u64,
-                state.facts.clone(),
-            ))
+            RawFactSnapshot::new(state.facts.len() as u64, state.facts.clone())
         })
     }
 
@@ -801,9 +928,13 @@ pub enum StoreOpenError {
     /// The requested work envelope is invalid.
     #[error("Store work limits are invalid")]
     Capacity,
+    /// The backend did not meet its admitted schema or durability contract.
+    #[error("Store backend readiness is invalid")]
+    Backend,
 }
 
 /// One opaque semantic Store opening.
+#[derive(Clone)]
 pub struct OpenedStructuredStore {
     inner: Arc<OpenedStoreInner>,
 }
@@ -817,12 +948,31 @@ struct OpenedStoreInner {
 }
 
 #[derive(Debug)]
-struct StoreBrand;
+pub(crate) struct StoreBrand;
 
 /// Entry point for one composite Store open.
 pub struct StructuredStore;
 
 impl StructuredStore {
+    /// Opens the bounded in-memory mechanical backend synchronously for trusted composition.
+    pub fn open_memory(
+        expected_identity: StructuredStoreIdentity,
+        catalog: ProgramCatalog,
+        limits: StoreWorkLimits,
+    ) -> std::result::Result<OpenedStructuredStore, StoreOpenError> {
+        limits.validate().map_err(|_| StoreOpenError::Capacity)?;
+        let backend = Arc::new(MemoryStructuredBackend::new(expected_identity.clone()));
+        Ok(OpenedStructuredStore {
+            inner: Arc::new(OpenedStoreInner {
+                backend,
+                identity: expected_identity,
+                catalog,
+                limits,
+                brand: Arc::new(StoreBrand),
+            }),
+        })
+    }
+
     /// Opens one exact backend, identity, catalog, and bounded work envelope.
     pub async fn open(
         backend: Arc<dyn StructuredStoreBackend>,
@@ -834,6 +984,10 @@ impl StructuredStore {
         if backend.identity() != expected_identity {
             return Err(StoreOpenError::Identity);
         }
+        backend
+            .check_ready()
+            .await
+            .map_err(|_| StoreOpenError::Backend)?;
         Ok(OpenedStructuredStore {
             inner: Arc::new(OpenedStoreInner {
                 backend,
@@ -855,6 +1009,11 @@ impl OpenedStructuredStore {
     /// Returns the exact Program catalog brand.
     pub fn catalog(&self) -> &ProgramCatalog {
         &self.inner.catalog
+    }
+
+    /// Returns whether two handles share the exact private Store opening.
+    pub fn same_open(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.brand, &other.inner.brand)
     }
 
     /// Consumes this open into its branded Store ports.
@@ -906,27 +1065,82 @@ impl OpenedStructuredStore {
         objects: Vec<mfm_journal::single_trust::ImmutableObject>,
     ) -> Result<crate::single_trust::PreparationAppend> {
         let current = self.load(run_id).await?;
-        let shadow = semantic_shadow(&current)?;
-        let result = shadow.prepare_access(
-            run_id,
+        self.prepare_access_qualified(
+            &current,
             document,
             expected_sequence,
             append_request_id,
             prepared,
             objects,
+        )
+        .await
+    }
+
+    /// Prepares an access append against a prefix already qualified by Runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_access_qualified(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        expected_sequence: u64,
+        append_request_id: AppendRequestId,
+        prepared: mfm_journal::single_trust::StatePrepared,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+    ) -> Result<crate::single_trust::PreparationAppend> {
+        let reduced = self.reduce_qualified(current, document.clone())?;
+        self.prepare_access_qualified_with_reduced(
+            current,
+            document,
+            &reduced,
+            expected_sequence,
+            append_request_id,
+            prepared,
+            objects,
+        )
+        .await
+    }
+
+    /// Prepares an access append using the exact reduction already retained by Runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_access_qualified_with_reduced(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        reduced: &crate::single_trust::ReducedRunState,
+        expected_sequence: u64,
+        append_request_id: AppendRequestId,
+        prepared: mfm_journal::single_trust::StatePrepared,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+    ) -> Result<crate::single_trust::PreparationAppend> {
+        if current.scope() != self.identity().scope()
+            || current.epoch() != self.identity().epoch()
+            || current.tenant() != self.identity().tenant()
+        {
+            return Err(StoreError::Identity);
+        }
+        let candidate = prepare_access_from_current(
+            self.identity().scope(),
+            self.identity().epoch(),
+            self.identity().tenant(),
+            current,
+            current.run_id(),
+            document,
+            reduced,
+            expected_sequence,
+            append_request_id,
+            prepared,
+            objects,
         )?;
-        let Some(preparation) = result.preparation().cloned() else {
-            return Ok(result);
+        let Some(frame) = candidate.frame else {
+            return Ok(candidate.append);
         };
-        let frame = shadow
-            .load(run_id)?
-            .frames()
-            .iter()
-            .find(|frame| frame.expected_sequence() == preparation.run_sequence())
-            .cloned()
-            .ok_or(StoreError::InvalidHistory)?;
-        let physical = self.append(frame).await?;
-        Ok(result.with_disposition(physical))
+        let physical = self
+            .history_port()
+            .append_against_qualified_prefix(current, frame.clone())
+            .await?;
+        let mut append = candidate.append;
+        append.set_frame(frame);
+        Ok(append.with_disposition(physical))
     }
 
     /// Builds one Store-owned conclusion append owner from the selected prefix.
@@ -942,29 +1156,101 @@ impl OpenedStructuredStore {
         maximum_conclusion_bytes: u64,
     ) -> Result<crate::single_trust::PreparedConclusion> {
         let current = self.load(run_id).await?;
-        let shadow = semantic_shadow(&current)?;
-        shadow
-            .prepare_conclusion(
-                run_id,
-                document,
-                expected_sequence,
-                append_request_id,
-                conclusion,
-                objects,
-                maximum_conclusion_bytes,
-            )
-            .map_err(Into::into)
+        self.prepare_conclusion_qualified(
+            &current,
+            document,
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        )
+    }
+
+    /// Builds a conclusion owner against a prefix already qualified by Runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_conclusion_qualified(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        expected_sequence: u64,
+        append_request_id: AppendRequestId,
+        conclusion: mfm_journal::single_trust::StateConcluded,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+        maximum_conclusion_bytes: u64,
+    ) -> Result<crate::single_trust::PreparedConclusion> {
+        let reduced = self.reduce_qualified(current, document.clone())?;
+        self.prepare_conclusion_qualified_with_reduced(
+            current,
+            document,
+            &reduced,
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        )
+    }
+
+    /// Builds a conclusion owner using the exact reduction already retained by Runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_conclusion_qualified_with_reduced(
+        &self,
+        current: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+        reduced: &crate::single_trust::ReducedRunState,
+        expected_sequence: u64,
+        append_request_id: AppendRequestId,
+        conclusion: mfm_journal::single_trust::StateConcluded,
+        objects: Vec<mfm_journal::single_trust::ImmutableObject>,
+        maximum_conclusion_bytes: u64,
+    ) -> Result<crate::single_trust::PreparedConclusion> {
+        if current.scope() != self.identity().scope()
+            || current.epoch() != self.identity().epoch()
+            || current.tenant() != self.identity().tenant()
+        {
+            return Err(StoreError::Identity);
+        }
+        prepare_conclusion_from_current(
+            self.identity().scope(),
+            self.identity().epoch(),
+            self.identity().tenant(),
+            current,
+            current.run_id(),
+            document,
+            reduced,
+            expected_sequence,
+            append_request_id,
+            conclusion,
+            objects,
+            maximum_conclusion_bytes,
+        )
+        .map(|mut owner| {
+            owner.bind_store(Arc::clone(&self.inner.brand));
+            owner
+        })
     }
 
     /// Commits one conclusion owner through this exact opened Store.
     pub async fn commit_conclusion(
         &self,
         owner: crate::single_trust::PreparedConclusion,
-    ) -> Result<AppendDisposition> {
-        if !owner.belongs_to(self.identity()) {
-            return Err(StoreError::Identity);
+    ) -> Result<ConclusionCommitOutcome> {
+        if !owner.belongs_to(self.identity(), &self.inner.brand) {
+            return Ok(ConclusionCommitOutcome::Rejected {
+                owner,
+                error: StoreError::Identity,
+            });
         }
-        self.append(owner.into_frame()).await
+        let frame = owner.frame().clone();
+        let disposition = match self.append(frame).await {
+            Ok(disposition) => disposition,
+            Err(error) => return Ok(ConclusionCommitOutcome::Rejected { owner, error }),
+        };
+        if matches!(disposition, AppendDisposition::AcknowledgementUnknown) {
+            return Ok(ConclusionCommitOutcome::AcknowledgementUnknown(owner));
+        }
+        Ok(ConclusionCommitOutcome::Disposition(disposition))
     }
 
     /// Reduces one qualified prefix without exposing a history handle to State callbacks.
@@ -974,8 +1260,75 @@ impl OpenedStructuredStore {
         document: mfm_program::single_trust::ProgramDocument,
     ) -> Result<crate::single_trust::ReducedRunState> {
         let current = self.load(run_id).await?;
-        let shadow = semantic_shadow(&current)?;
-        shadow.reduce(run_id, document)
+        self.reduce_qualified(&current, document)
+    }
+
+    /// Reduces one already-qualified prefix without reading or reloading the backend.
+    pub fn reduce_qualified(
+        &self,
+        run: &QualifiedRun,
+        document: mfm_program::single_trust::ProgramDocument,
+    ) -> Result<crate::single_trust::ReducedRunState> {
+        if run.scope() != self.identity().scope()
+            || run.epoch() != self.identity().epoch()
+            || run.tenant() != self.identity().tenant()
+        {
+            return Err(StoreError::Identity);
+        }
+        reduce_qualified(run, document)
+    }
+
+    /// Advances a retained reducer result over one hot conclusion without re-folding its prefix.
+    pub fn advance_reduced(
+        &self,
+        reduced: &crate::single_trust::ReducedRunState,
+        previous: &QualifiedRun,
+        next: &QualifiedRun,
+        document: &mfm_program::single_trust::ProgramDocument,
+    ) -> Result<crate::single_trust::ReducedRunState> {
+        if previous.scope() != self.identity().scope()
+            || previous.epoch() != self.identity().epoch()
+            || previous.tenant() != self.identity().tenant()
+            || next.scope() != self.identity().scope()
+            || next.epoch() != self.identity().epoch()
+            || next.tenant() != self.identity().tenant()
+        {
+            return Err(StoreError::Identity);
+        }
+        advance_reduced(reduced, previous, next, document)
+    }
+
+    /// Qualifies a candidate prefix whose predecessor was already held by Runtime.
+    pub fn qualify_appended(
+        &self,
+        predecessor: &QualifiedRun,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<QualifiedRun> {
+        if predecessor.scope() != self.identity().scope()
+            || predecessor.epoch() != self.identity().epoch()
+            || predecessor.tenant() != self.identity().tenant()
+            || frame.run_id() != predecessor.run_id()
+            || frame.expected_sequence() != predecessor.head_sequence().saturating_add(1)
+        {
+            return Err(StoreError::Identity);
+        }
+        predecessor.clone().append_validated(frame)
+    }
+
+    /// Qualifies one direct-new admission frame without a post-commit backend read.
+    pub fn qualify_admission(
+        &self,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<QualifiedRun> {
+        if !frame.record().is_admission() {
+            return Err(StoreError::InvalidRecord);
+        }
+        QualifiedRun::qualify_prefix(
+            self.identity().scope().clone(),
+            self.identity().epoch(),
+            self.identity().tenant().clone(),
+            vec![frame],
+        )
     }
 
     fn history_port(&self) -> QualifiedHistoryPort {
@@ -983,16 +1336,6 @@ impl OpenedStructuredStore {
             inner: Arc::clone(&self.inner),
         }
     }
-}
-
-fn semantic_shadow(run: &QualifiedRun) -> Result<RunStore> {
-    let shadow = RunStore::memory(run.scope().clone(), run.epoch(), run.tenant().clone());
-    for frame in run.frames() {
-        shadow
-            .append(frame.clone())
-            .map_err(|_| StoreError::InvalidHistory)?;
-    }
-    Ok(shadow)
 }
 
 /// The consuming branded Store port split.
@@ -1055,8 +1398,37 @@ impl QualifiedHistoryPort {
             .map_err(map_backend_error)?;
         let previous_digest = current
             .as_ref()
-            .and_then(|prefix| prefix.frames().last())
+            .and_then(|prefix| {
+                frame
+                    .expected_sequence()
+                    .checked_sub(2)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .and_then(|index| prefix.frames().get(index))
+            })
             .map(RawFrameBytes::head_digest);
+        self.append_against_previous_digest(previous_digest, frame)
+            .await
+    }
+
+    async fn append_against_qualified_prefix(
+        &self,
+        current: &QualifiedRun,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<AppendDisposition> {
+        let previous_digest = if frame.expected_sequence() == 1 {
+            None
+        } else {
+            Some(current.head_digest()?)
+        };
+        self.append_against_previous_digest(previous_digest.as_ref(), frame)
+            .await
+    }
+
+    async fn append_against_previous_digest(
+        &self,
+        previous_digest: Option<&ContentDigest>,
+        frame: mfm_journal::single_trust::RunFrame,
+    ) -> Result<AppendDisposition> {
         let candidate_head = frame
             .head_digest(previous_digest)
             .map_err(|_| StoreError::InvalidRecord)?;
@@ -1089,12 +1461,13 @@ impl QualifiedHistoryPort {
             frame.record().is_admission(),
             fact_publication.as_ref(),
         );
-        let result = self
-            .inner
-            .backend
-            .compare_and_append(&command)
-            .await
-            .map_err(map_backend_error)?;
+        let result = match self.inner.backend.compare_and_append(&command).await {
+            Ok(result) => result,
+            Err(BackendError::AcknowledgementUnknown) => {
+                return Ok(AppendDisposition::AcknowledgementUnknown);
+            }
+            Err(error) => return Err(map_backend_error(error)),
+        };
         match result {
             BackendAppendOutcome::NewlyCommitted => Ok(AppendDisposition::NewlyCommitted {
                 sequence: frame.expected_sequence(),
@@ -1116,11 +1489,6 @@ impl QualifiedHistoryPort {
             self.inner.limits.max_run_frames(),
             self.inner.limits.max_run_frame_bytes(),
         )
-    }
-
-    /// Returns the exact private Store brand identity.
-    pub(crate) fn same_open(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.inner.brand, &other.inner.brand)
     }
 }
 
@@ -1146,21 +1514,155 @@ pub struct ConfigurationStore {
     inner: Arc<OpenedStoreInner>,
 }
 
-impl ConfigurationStore {
-    /// Loads the raw bounded configuration stream for semantic Store qualification.
-    pub async fn load(&self) -> BackendResult<Vec<RawConfigurationRevision>> {
-        self.inner.backend.load_configuration().await
+/// One affine configuration append owner branded to an opened Store.
+#[derive(Debug)]
+pub struct PreparedConfigurationWrite {
+    expected_sequence: u64,
+    total_bytes: usize,
+    append_request_id: AppendRequestId,
+    revision: ConfigurationRevision,
+    brand: Arc<StoreBrand>,
+}
+
+impl PreparedConfigurationWrite {
+    /// Returns the expected configuration head sequence.
+    pub const fn expected_sequence(&self) -> u64 {
+        self.expected_sequence
     }
 
-    /// Appends one borrowed raw configuration command.
-    pub async fn append<'a>(
-        &'a self,
-        command: &'a ConfigurationAppendCommand<'a>,
-    ) -> BackendResult<BackendConfigurationOutcome> {
-        self.inner
+    /// Returns the fixed physical append identity.
+    pub const fn append_request_id(&self) -> &AppendRequestId {
+        &self.append_request_id
+    }
+
+    /// Returns the validated canonical configuration revision.
+    pub const fn revision(&self) -> &ConfigurationRevision {
+        &self.revision
+    }
+
+    /// Returns the cumulative byte count after this direct successor.
+    pub const fn total_bytes(&self) -> usize {
+        self.total_bytes
+    }
+}
+
+impl ConfigurationStore {
+    /// Loads and qualifies one complete configuration snapshot.
+    pub async fn load(&self) -> Result<ConfigurationSnapshot> {
+        let raw = self
+            .inner
             .backend
-            .compare_and_append_configuration(command)
+            .load_configuration()
             .await
+            .map_err(map_backend_error)?;
+        let revisions = raw
+            .into_iter()
+            .map(|revision| {
+                let canonical_json = String::from_utf8(revision.canonical_bytes().to_vec())
+                    .map_err(|_| StoreError::InvalidHistory)?;
+                ConfigurationRevision::from_parts(
+                    revision.sequence(),
+                    revision.append_request_id().clone(),
+                    canonical_json,
+                    revision.content_ref().clone(),
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
+        ConfigurationSnapshot::from_revisions(revisions)
+    }
+
+    /// Prepares one validated configuration successor from a fixed snapshot without reading the
+    /// retained stream again.
+    pub fn prepare_append(
+        &self,
+        current: &ConfigurationSnapshot,
+        append_request_id: AppendRequestId,
+        canonical_json: String,
+    ) -> Result<PreparedConfigurationWrite> {
+        if current.head_sequence() as usize
+            >= mfm_journal::single_trust::MAX_CONFIGURATION_REVISIONS
+        {
+            return Err(StoreError::Capacity);
+        }
+        let revision = ConfigurationRevision::new(
+            current.head_sequence().saturating_add(1),
+            append_request_id.clone(),
+            canonical_json,
+        )?;
+        let total_bytes = current
+            .total_bytes()
+            .checked_add(revision.canonical_json().len())
+            .ok_or(StoreError::Capacity)?;
+        if total_bytes > mfm_journal::single_trust::MAX_CONFIGURATION_STREAM_BYTES {
+            return Err(StoreError::Capacity);
+        }
+        Ok(PreparedConfigurationWrite {
+            expected_sequence: current.head_sequence(),
+            total_bytes,
+            append_request_id,
+            revision,
+            brand: Arc::clone(&self.inner.brand),
+        })
+    }
+
+    /// Consumes one Store-branded configuration owner through the exact backend command.
+    pub async fn commit(
+        &self,
+        owner: PreparedConfigurationWrite,
+    ) -> Result<ConfigurationCommitOutcome> {
+        if !Arc::ptr_eq(&owner.brand, &self.inner.brand) {
+            return Ok(ConfigurationCommitOutcome::Rejected {
+                owner,
+                error: StoreError::Identity,
+            });
+        }
+        let command = ConfigurationAppendCommand::new(
+            &self.inner.identity,
+            owner.expected_sequence,
+            &owner.append_request_id,
+            owner.revision.canonical_json().as_bytes(),
+            owner.revision.content_ref(),
+        );
+        let result = match self
+            .inner
+            .backend
+            .compare_and_append_configuration(&command)
+            .await
+        {
+            Ok(result) => result,
+            Err(BackendError::AcknowledgementUnknown) => {
+                return Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(owner));
+            }
+            Err(error) => {
+                return Ok(ConfigurationCommitOutcome::Rejected {
+                    owner,
+                    error: map_backend_error(error),
+                })
+            }
+        };
+        let (disposition, revision) = match result {
+            BackendConfigurationOutcome::NewlyCommitted => (
+                ConfigurationAppendDisposition::NewlyCommitted {
+                    sequence: owner.expected_sequence.saturating_add(1),
+                },
+                Some(owner.revision.clone()),
+            ),
+            BackendConfigurationOutcome::Found { sequence } => (
+                ConfigurationAppendDisposition::Found { sequence },
+                Some(owner.revision.clone()),
+            ),
+            BackendConfigurationOutcome::StaleHead { actual_sequence } => (
+                ConfigurationAppendDisposition::StaleHead { actual_sequence },
+                None,
+            ),
+            BackendConfigurationOutcome::AcknowledgementUnknown => {
+                return Ok(ConfigurationCommitOutcome::AcknowledgementUnknown(owner));
+            }
+        };
+        Ok(ConfigurationCommitOutcome::Disposition {
+            disposition,
+            revision,
+        })
     }
 }
 
@@ -1185,7 +1687,7 @@ fn qualify_raw_prefix(
     identity: &StructuredStoreIdentity,
     raw: RawRunPrefix,
 ) -> Result<QualifiedRun> {
-    RunStore::qualify_prefix(
+    QualifiedRun::qualify_prefix(
         identity.scope().clone(),
         identity.epoch(),
         identity.tenant().clone(),
@@ -1198,6 +1700,7 @@ fn decode_raw_frames(
     raw: &RawRunPrefix,
 ) -> Result<Vec<mfm_journal::single_trust::RunFrame>> {
     let mut frames = Vec::with_capacity(raw.frames().len());
+    let mut previous_head = None;
     for stored in raw.frames() {
         if stored.frame_digest() != &mfm_canonical::raw_content_digest(stored.frame_bytes()) {
             return Err(StoreError::InvalidHistory);
@@ -1219,6 +1722,13 @@ fn decode_raw_frames(
         {
             return Err(StoreError::InvalidHistory);
         }
+        let expected_head = frame
+            .head_digest(previous_head.as_ref())
+            .map_err(|_| StoreError::InvalidHistory)?;
+        if stored.head_digest() != &expected_head {
+            return Err(StoreError::InvalidHistory);
+        }
+        previous_head = Some(expected_head);
         frames.push(frame);
     }
     Ok(frames)
@@ -1233,5 +1743,86 @@ fn map_backend_error(error: BackendError) -> StoreError {
         BackendError::AcknowledgementUnknown
         | BackendError::Unsupported
         | BackendError::Storage => StoreError::InvalidHistory,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::single_trust::ConfigurationAppendDisposition;
+    use mfm_ids::{DigestAlgorithm, DigestBytes, SchemaId};
+
+    fn identity() -> StructuredStoreIdentity {
+        StructuredStoreIdentity::new(
+            StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("scope"),
+            StoreEpoch::new(1),
+            TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
+                .expect("tenant"),
+        )
+    }
+
+    #[tokio::test]
+    async fn configuration_owner_promotes_direct_success_and_retains_stale_owner() {
+        let contract = ContentRef::new(
+            SchemaId::new(
+                "mfm.test.configuration",
+                "1",
+                DigestAlgorithm::Sha256JcsV1,
+                DigestBytes::from_array([0; 32]),
+            )
+            .expect("schema"),
+            ContentDigest::from_digest(DigestAlgorithm::Sha256V1, DigestBytes::from_array([1; 32])),
+        )
+        .expect("contract");
+        let document = mfm_program::single_trust::ProgramDocument::new(
+            mfm_ids::StableId::new("mfm.test.configuration-entry").expect("entry"),
+            contract.clone(),
+            contract,
+            Vec::new(),
+        )
+        .expect("document");
+        let (catalog, _) = ProgramCatalog::builder().finish(document).expect("catalog");
+        let opened = StructuredStore::open_memory(identity(), catalog, StoreWorkLimits::default())
+            .expect("opened store");
+        let (_, _, configuration, _) = opened.split().into_parts();
+        let empty = configuration.load().await.expect("empty snapshot");
+        let owner = configuration
+            .prepare_append(
+                &empty,
+                AppendRequestId::new("configuration-direct-0123456789ab").expect("request"),
+                "{\"mode\":\"direct\"}".to_owned(),
+            )
+            .expect("direct owner");
+        let revision = match configuration.commit(owner).await.expect("commit") {
+            ConfigurationCommitOutcome::Disposition {
+                disposition: ConfigurationAppendDisposition::NewlyCommitted { sequence: 1 },
+                revision: Some(revision),
+            } => revision,
+            other => panic!("unexpected direct outcome: {other:?}"),
+        };
+        let promoted = empty.with_successor(revision).expect("local promotion");
+        assert_eq!(promoted.head_sequence(), 1);
+
+        let stale_owner = configuration
+            .prepare_append(
+                &empty,
+                AppendRequestId::new("configuration-stale-0123456789ab").expect("request"),
+                "{\"mode\":\"stale\"}".to_owned(),
+            )
+            .expect("stale owner");
+        match configuration
+            .commit(stale_owner)
+            .await
+            .expect("stale result")
+        {
+            ConfigurationCommitOutcome::Disposition {
+                disposition: ConfigurationAppendDisposition::StaleHead { actual_sequence: 1 },
+                revision: None,
+                ..
+            } => {}
+            other => panic!("unexpected stale outcome: {other:?}"),
+        }
+        assert_eq!(empty.head_sequence(), 0);
     }
 }

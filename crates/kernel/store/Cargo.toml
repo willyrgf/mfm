@@ -8,6 +8,10 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
+[[test]]
+name = "api_contract"
+path = "tests/api_contract.rs"
+
 [package.metadata.mfm]
 layer = "kernel"
 domain-facing = false
@@ -19,7 +23,7 @@ path = "src/lib.rs"
 
 [features]
 test-support = []
-backend-conformance = ["test-support"]
+backend-conformance = ["test-support", "dep:tokio"]
 
 [dependencies]
 mfm-canonical = { path = "../canonical" }
@@ -30,3 +34,8 @@ mfm-program = { path = "../program" }
 mfm-values = { path = "../values" }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+trybuild = "1.0"

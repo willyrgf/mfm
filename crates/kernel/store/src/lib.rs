@@ -8,16 +8,20 @@
 pub mod backend;
 pub mod single_trust;
 
+#[cfg(feature = "backend-conformance")]
+pub mod backend_conformance;
+
 pub use backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
-    BackendFuture, BackendResult, ConfigurationAppendCommand, HistoryReader,
-    MemoryStructuredBackend, OpenedStructuredStore, QualifiedHistoryPort, RawConfigurationRevision,
-    RawFactPublication, RawFactSnapshot, RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix,
-    StoreAuditPort, StoreOpenError, StoreParts, StoreWorkLimits, StructuredStore,
-    StructuredStoreBackend, StructuredStoreIdentity,
+    BackendFuture, BackendResult, ConclusionCommitOutcome, ConfigurationAppendCommand,
+    ConfigurationCommitOutcome, HistoryReader, MemoryStructuredBackend, OpenedStructuredStore,
+    PreparedConfigurationWrite, QualifiedHistoryPort, RawConfigurationRevision, RawFactPublication,
+    RawFactSnapshot, RawFrameBytes, RawHistoryLoadLimit, RawRunPrefix, StoreAuditPort,
+    StoreOpenError, StoreParts, StoreWorkLimits, StructuredStore, StructuredStoreBackend,
+    StructuredStoreIdentity,
 };
 pub use single_trust::{
-    AppendDisposition, ConfigurationAppendDisposition, ConfigurationHistory, ConfigurationRevision,
-    FactContinuation, PreparationAppend, PreparedConclusion, PreparedConfigurationAppend,
-    QualifiedRun, ReducedRunState, Result, RunAction, RunReducer, RunStore, StoreError,
+    AppendDisposition, ConfigurationAppendDisposition, ConfigurationRevision,
+    ConfigurationSnapshot, FactContinuation, PreparationAppend, PreparedConclusion, QualifiedRun,
+    ReducedRunState, Result, RunAction, RunReducer, StoreError,
 };

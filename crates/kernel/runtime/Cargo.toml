@@ -8,6 +8,10 @@ repository = "https://github.com/willyrgf/mfm"
 license = "MIT"
 readme = "README.md"
 
+[[test]]
+name = "api_contract"
+path = "tests/api_contract.rs"
+
 [package.metadata.mfm]
 layer = "kernel"
 domain-facing = false
@@ -25,8 +29,11 @@ mfm-journal = { path = "../journal" }
 mfm-program = { path = "../program" }
 mfm-store = { path = "../store" }
 mfm-values = { path = "../values" }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 mfm-program-derive = { path = "../program-derive" }
 serde = { workspace = true }
+trybuild = "1.0"
+tokio = { workspace = true }

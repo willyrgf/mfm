@@ -892,6 +892,16 @@ impl ProgramCatalog {
         }
     }
 
+    /// Returns whether two catalog handles share the exact process-local type brand.
+    pub fn same_catalog(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.brand, &other.brand)
+    }
+
+    /// Qualifies one additional normalized Program under this exact catalog brand.
+    pub fn program(&self, document: ProgramDocument) -> Result<Program> {
+        Program::new(document, Arc::clone(&self.brand))
+    }
+
     /// Creates one typed qualified value under this exact catalog instance.
     pub fn qualify<T: MfmValue>(
         &self,

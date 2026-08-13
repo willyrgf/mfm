@@ -80,6 +80,7 @@ CREATE TABLE mfm_configuration_heads (
     store_epoch BIGINT NOT NULL,
     tenant_scope_id TEXT NOT NULL,
     head_sequence BIGINT NOT NULL CHECK (head_sequence >= 0),
+    total_bytes BIGINT NOT NULL CHECK (total_bytes >= 0),
     PRIMARY KEY (store_scope_id, store_epoch, tenant_scope_id),
     FOREIGN KEY (
         store_scope_id, store_epoch, tenant_scope_id, head_sequence

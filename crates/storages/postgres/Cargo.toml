@@ -16,8 +16,8 @@ name = "mfm_storage_postgres"
 path = "src/lib.rs"
 
 [features]
-parity-tests = []
-test-support = []
+parity-tests = ["mfm-store/backend-conformance"]
+test-support = ["mfm-store/backend-conformance"]
 
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
@@ -28,3 +28,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

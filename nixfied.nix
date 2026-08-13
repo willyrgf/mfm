@@ -2,6 +2,7 @@
   lib,
   nixfiedLib,
   pkgs,
+  adapters,
   ...
 }:
 let
@@ -60,6 +61,8 @@ let
     };
 in
 {
+  imports = [ adapters.postgres ];
+
   nixfied.project.projectId = "mfm";
   nixfied.project.name = "MFM";
   nixfied.codebases.main.logicalRoot = ".";
@@ -101,6 +104,18 @@ in
     cargo-test = cargoLeaf {
       run = [ "cargo" "test" "--workspace" "--all-targets" ];
     };
+    postgres-test = (cargoLeaf {
+      run = [ "cargo" "test" "-p" "mfm-storage-postgres" "--features" "test-support" "--all-targets" ];
+      env = {
+        DATABASE_URL = "postgresql://postgres@\${host:postgres}:\${port:postgres}/postgres";
+      };
+    }) // {
+      requires = [ "postgres" ];
+    };
+    test-db = {
+      kind = "composite";
+      steps = nixfiedLib.seq [ "postgres-test" ];
+    };
     doc-tests = cargoLeaf {
       run = [ "cargo" "test" "--workspace" "--doc" ];
     };
@@ -115,6 +130,7 @@ in
         "clippy"
         "cargo-check"
         "cargo-test"
+        "test-db"
         "doc-tests"
       ];
     };
