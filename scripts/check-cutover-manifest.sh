@@ -20,7 +20,9 @@ fi
 if rg -n -F -f "$pattern_file" "$repository_root" \
   -g '!SINGLE_TRUST_BOUNDARY_CUTOVER_MANIFEST.md' \
   -g '!RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md' \
-  -g '!IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md'; then
+  -g '!IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md' \
+  -g '!REQUIRED_FIXES_FOR_RFC.md' \
+  -g '!IMPL_PLAN_RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.log'; then
   echo "cutover manifest scan found a superseded literal" >&2
   exit 1
 fi

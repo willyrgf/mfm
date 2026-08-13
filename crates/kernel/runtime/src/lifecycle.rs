@@ -2437,7 +2437,7 @@ impl<T: MfmValue> ResumeInput<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mfm_capabilities::{AccessCapabilityContract, NoPriorFacts, ReadMode};
+    use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
     use mfm_program::single_trust::{ExecutionMode, ProgramDocument, StateDeclaration};
     use mfm_program_derive::MfmValue as DeriveMfmValue;
     use mfm_store::{
@@ -2506,6 +2506,33 @@ mod tests {
 
         fn contract_id() -> mfm_capabilities::Result<StableId> {
             StableId::new("mfm.test.lifecycle-read")
+                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
+        }
+
+        fn total_attempt_bound() -> NonZeroU16 {
+            NonZeroU16::new(1).expect("nonzero")
+        }
+
+        fn bind_evidence(
+            intent: &Self::Intent,
+            evidence: &Self::Evidence,
+        ) -> mfm_capabilities::Result<()> {
+            (evidence.value == intent.value + 1)
+                .then_some(())
+                .ok_or(mfm_capabilities::CapabilityError::EvidenceBinding)
+        }
+    }
+
+    struct TestEffect;
+
+    impl AccessCapabilityContract for TestEffect {
+        type Mode = EffectMode;
+        type Intent = TestContext;
+        type Evidence = TestContext;
+        type Facts = NoPriorFacts;
+
+        fn contract_id() -> mfm_capabilities::Result<StableId> {
+            StableId::new("mfm.test.lifecycle-effect")
                 .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
         }
 
@@ -3179,6 +3206,153 @@ mod tests {
         assert_eq!(counters.ingress.load(Ordering::SeqCst), 1);
         assert_eq!(counters.preparations.load(Ordering::SeqCst), 2);
         assert_eq!(counters.interpretations.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn unresolved_effect_parks_without_another_preparation_or_provider_entry() {
+        let contract = nominal_contract_ref::<TestContext>().expect("contract");
+        let capability_contract =
+            crate::single_trust::capability_content_ref::<TestEffect>().expect("capability");
+        let implementation_ref = test_ref(b"mfm.test.lifecycle-effect-implementation");
+        let adapter_ref = test_ref(b"mfm.test.lifecycle-effect-adapter");
+        let physical_target_ref = test_ref(b"mfm.test.lifecycle-effect-target");
+        let effect_domain = StableId::new("mfm.test.lifecycle-effect-domain").expect("domain");
+        let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
+            .expect("occurrence");
+        let binding = BindingDescriptor::new(
+            implementation_ref.clone(),
+            Some(capability_contract.clone()),
+            Some(adapter_ref.clone()),
+            physical_target_ref,
+            Some(effect_domain.clone()),
+            None,
+        )
+        .expect("binding");
+        let binding_ref = binding.content_ref().expect("binding ref");
+        let document = ProgramDocument::new(
+            StableId::new("mfm.test.lifecycle-effect-entry").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            vec![mfm_program::Declaration::State(Box::new(
+                StateDeclaration::new(
+                    occurrence,
+                    implementation_ref.clone(),
+                    contract.clone(),
+                    contract.clone(),
+                    None,
+                    ExecutionMode::Effect {
+                        capability_contract_ref: capability_contract.clone(),
+                        effect_domain,
+                        fact_selection_required: false,
+                    },
+                    true,
+                )
+                .expect("state")
+                .with_execution_binding(binding_ref.clone())
+                .expect("execution binding"),
+            ))],
+        )
+        .expect("document");
+        let (catalog, program) = ProgramCatalog::builder().finish(document).expect("program");
+        let counters = Arc::new(AccessCounters::default());
+        let mut builder =
+            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
+                .expect("assembly builder");
+        let preparation_counters = Arc::clone(&counters);
+        let provider_counters = Arc::clone(&counters);
+        builder
+            .register_access_with_binding::<TestAccess, TestEffect, _>(
+                implementation_ref,
+                capability_contract,
+                binding_ref,
+                adapter_ref,
+                binding.clone(),
+                AccessImplementation::new(
+                    move |input: &TestContext| {
+                        preparation_counters
+                            .preparations
+                            .fetch_add(1, Ordering::SeqCst);
+                        Ok(*input)
+                    },
+                    move |call: CommittedCall<TestAccess, TestEffect>| {
+                        Box::pin(async move {
+                            match call.invoke_bound_adapter().await? {
+                                crate::single_trust::AccessResolution::Unresolved(unresolved) => {
+                                    Ok(unresolved.finish())
+                                }
+                                crate::single_trust::AccessResolution::Outcome(_)
+                                | crate::single_trust::AccessResolution::BlockedIntegrity(_) => {
+                                    unreachable!("test adapter is always unresolved")
+                                }
+                            }
+                        })
+                    },
+                ),
+                move |call| {
+                    provider_counters
+                        .provider_entries
+                        .fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        Ok(crate::single_trust::AccessResolution::Unresolved(
+                            call.unresolved(
+                                crate::single_trust::UnresolvedClassification::AcknowledgementUnknown,
+                            ),
+                        ))
+                    })
+                },
+            )
+            .expect("registration");
+        let assembly = builder.finish().expect("assembly");
+        let store = StructuredStore::open_memory(
+            test_identity(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .expect("store");
+        let runtime = Runtime::new(assembly, store).expect("runtime");
+        let value = catalog
+            .qualify(contract, TestContext { value: 4 })
+            .expect("qualified input");
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+        let admission = runtime
+            .admission(
+                run_id.clone(),
+                value,
+                test_ref(b"mfm.test.lifecycle-effect-configuration"),
+                Vec::new(),
+                AppendRequestId::new("runtime-effect-admission").expect("append id"),
+            )
+            .expect("admission");
+        let session = match admission.spawn().await {
+            SpawnStep::Active(session) => session,
+            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
+        };
+        let session = match session.drive().await {
+            RuntimeStep::Unresolved {
+                session,
+                classification:
+                    crate::single_trust::UnresolvedClassification::AcknowledgementUnknown,
+            } => session,
+            other => panic!("unexpected drive outcome: {}", runtime_name(&other)),
+        };
+        assert_eq!(counters.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            session.drive().await,
+            RuntimeStep::Parked {
+                reason: ParkReason::WaitingPreparation,
+                ..
+            }
+        ));
+        assert!(matches!(
+            runtime.resume_run(run_id).await,
+            ResumeStep::Parked(_)
+        ));
+        assert_eq!(counters.preparations.load(Ordering::SeqCst), 1);
+        assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
     }
 
     #[test]

@@ -17,8 +17,7 @@ Exact-bound and independent bound-plus-one tests are required at the owner named
 | Configuration stream bytes | 67,108,864 bytes | Journal limit, Memory/PostgreSQL writer |
 | One configuration revision | 16,777,216 bytes | Configuration revision constructor |
 | Read attempts | 3 total | `ExecutionMode::Read`, `PreparationMode::Read` |
-| Absorbing Effect attempts | 3 total | Sealed Effect mode; unproven Effects are `EntryOnce` |
-| EntryOnce attempts | 1 total | `PreparationMode::Effect { absorbing: false }` |
+| Effect entries | 1 total | `ExecutionMode::Effect`, `PreparationMode::Effect` |
 
 ## Reservation law
 
@@ -43,7 +42,7 @@ declared collection and source into explicit State/Match declarations. The execu
 | Measurement | EVM submission | Portfolio snapshot |
 | --- | ---: | ---: |
 | Program declarations | 4 | 963 |
-| canonical Program bytes | 6,840 | 1,566,954 |
+| canonical Program bytes | 6,798 | 1,566,954 |
 | maximum `C0` canonical bytes | 262,296 | 6,284 |
 | maximum recorded `Cn` canonical bytes | 262,382 | 12,736 |
 | entry fixture expansion | four sequential States | 64 collections / 64 total sources |
@@ -76,7 +75,7 @@ Exact-bound and independent bound-plus-one evidence is executable at each owner:
 | Contract | Exact/+1 test |
 | --- | --- |
 | frame, run-frame count, reachable-object count, cumulative run-frame bytes | `mfm_store::backend::tests::outer_capacity_accepts_exact_ceiling_and_rejects_each_plus_one` |
-| Read attempts, absorbing Effect attempts, EntryOnce, State conclusion reservation | `mfm_program::single_trust::tests::attempt_and_conclusion_capacity_bounds_accept_exact_and_reject_plus_one` |
+| Read attempts, one-entry Effect, State conclusion reservation | `mfm_program::single_trust::tests::attempt_and_conclusion_capacity_bounds_accept_exact_and_reject_plus_one` and `mfm_capabilities::single_trust::tests::access_modes_enforce_their_exact_attempt_bounds` |
 | EVM transaction data | `mfm_evm::tests::transaction_data_capacity_accepts_exact_and_rejects_plus_one` |
 | 64-source Portfolio ceiling and independent +1 | `mfm_portfolio::tests::portfolio_total_source_bound_is_exact` |
 | configuration revisions, one revision, and cumulative stream | `mfm_store::single_trust::tests::configuration_capacity_accepts_each_exact_bound_and_rejects_plus_one` |

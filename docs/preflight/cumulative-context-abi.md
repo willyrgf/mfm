@@ -11,7 +11,7 @@ split, reorder, or interpret domain fields.
 | Admission | `EvmSubmissionRequest` (`C0`) | `EvmSubmissionContext` or `EvmSubmissionFailure` | Domain planning creates one `C0`; no kernel root vector |
 | Read wallet nonce | `EvmSubmissionRequest` | `EvmSubmissionContext` | `ReadWalletNonceStatus`, exact request/target identity |
 | Derive candidate | `EvmSubmissionContext` | `EvmSubmissionContext` | Pure, deterministic, no provider access |
-| Broadcast | `EvmSubmissionContext` | `EvmSubmissionOutput` or `EvmSubmissionFailure` | `BroadcastTransaction`, `EntryOnce`; preparation fixes nonce/candidate identity before entry |
+| Broadcast | `EvmSubmissionContext` | `EvmSubmissionOutput` or `EvmSubmissionFailure` | one-entry `BroadcastTransaction`; preparation fixes nonce/candidate identity before entry |
 | Failure route | `EvmSubmissionFailure` | Declared terminal output route | Pure fail-fast State; no later normal State is evaluated |
 
 The broadcast adapter binds the candidate id, sender, nonce, nonce domain, call id, operation id,

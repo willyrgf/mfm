@@ -78,6 +78,12 @@ ValidatedAppendConsumerSeal
 NoRefreshEvidence
 EffectRefreshMode
 RuntimeEffectRefreshBinding
+EffectEntryMode
+EntryOnce
+EntryAbsorbing
+ABSORBING
+MAX_TOTAL_ENTRIES
+ExecutionMode::is_absorbing_effect
 NoRefreshBinding
 RefreshableBinding
 RuntimeResourceAuthority

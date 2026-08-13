@@ -56,10 +56,9 @@ Admission, preparation, conclusion, and acknowledgement uncertainty return exhau
 outcomes. `SuspendedRun` retains the exact owner across a retryable physical boundary; no generic
 drop or status-only success path creates execution authority.
 
-`EntryOnce` has one total attempt and parks after an unresolved entry. Read and a proven absorbing
-Effect may replace a selected preparation only within their fixed total budget, preserving exact
-input, intent, binding, domain, and absorption identity. A late result cannot settle a superseded
-occurrence.
+Effect has one total attempt and parks after an unresolved entry. Read may replace a selected
+preparation only within its fixed total budget, preserving exact input, intent, and binding. A late
+Read result cannot settle a superseded occurrence.
 
 The recovery matrix is intentionally owner-based:
 

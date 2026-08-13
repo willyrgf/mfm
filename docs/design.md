@@ -69,7 +69,7 @@ Pure implementations receive only typed input. Read and Effect implementations b
 prepare canonical intent, then execute only after the exact preparation append is newly committed.
 An adapter consumes the committed call, derives provider bytes from intent, authenticates the
 response, and returns one capability-owned evidence value. Indeterminate results remain neutral;
-generic errors never mint retry authority. `EntryOnce` is the default Effect discipline.
+generic errors never mint retry authority. Every Effect has exactly one possible provider entry.
 
 An integrity-blocked Access result is a capability-certified, callback-free terminal route. The
 declared failure contract supplies one static typed failure value; callers cannot choose a failure,
