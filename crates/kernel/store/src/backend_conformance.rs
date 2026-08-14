@@ -11,7 +11,9 @@ use mfm_journal::single_trust::{
     ConfigurationHeadProjection, ImmutableObject, PreparationMode, PreparationRef, RunAdmitted,
     RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
 };
-use mfm_program::BindingDescriptor;
+use mfm_program::{
+    BindingDescriptor, Declaration, ExecutionMode, ProgramDocument, StateDeclaration,
+};
 
 use crate::backend::{
     BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendError,
@@ -300,15 +302,14 @@ pub async fn append_primary_restart_probe(
     .map_err(|_| BackendError::Storage)?;
     let (input, input_object) = restart_probe_value(31, "restart-input")?;
     let (intent, intent_object) = restart_probe_value(32, "restart-intent")?;
-    let program_ref = restart_probe_content(33, "restart-program")?;
     let configuration_ref = restart_probe_content(34, "restart-configuration")?;
     let physical_target_ref = restart_probe_content(35, "restart-target")?;
     let state_ref = restart_probe_content(36, "restart-state")?;
     let capability_ref = restart_probe_content(37, "restart-capability")?;
     let adapter_ref = restart_probe_content(38, "restart-adapter")?;
     let binding = BindingDescriptor::new(
-        state_ref,
-        Some(capability_ref),
+        state_ref.clone(),
+        Some(capability_ref.clone()),
         Some(adapter_ref),
         physical_target_ref,
         None,
@@ -316,12 +317,53 @@ pub async fn append_primary_restart_probe(
     )
     .map_err(|_| BackendError::Storage)?;
     let binding_ref = binding.content_ref().map_err(|_| BackendError::Storage)?;
+    let maximum_conclusion_bytes = 4096_u64;
+    let state = StateDeclaration::new(
+        SequentialControlAddress::new(0, Vec::new()).map_err(|_| BackendError::Storage)?,
+        state_ref,
+        input.contract_ref().clone(),
+        input.contract_ref().clone(),
+        None,
+        ExecutionMode::Read {
+            capability_contract_ref: capability_ref,
+            total_attempt_bound: 1,
+            fact_selection_required: false,
+        },
+        true,
+    )
+    .map_err(|_| BackendError::Storage)?
+    .with_execution_binding(binding)
+    .map_err(|_| BackendError::Storage)?
+    .with_maximum_conclusion_bytes(maximum_conclusion_bytes)
+    .map_err(|_| BackendError::Storage)?;
+    let entry_point_id =
+        StableId::new("mfm.test.primary-restart@1").map_err(|_| BackendError::Storage)?;
+    let program_document = ProgramDocument::new(
+        entry_point_id.clone(),
+        input.contract_ref().clone(),
+        input.contract_ref().clone(),
+        vec![Declaration::State(Box::new(state))],
+    )
+    .map_err(|_| BackendError::Storage)?;
+    let program_ref = program_document
+        .program_ref()
+        .map_err(|_| BackendError::Storage)?;
+    let program_object = ImmutableObject::new(
+        StableId::new("mfm.program").map_err(|_| BackendError::Storage)?,
+        program_ref.clone(),
+        program_document
+            .canonical_bytes()
+            .map_err(|_| BackendError::Storage)?
+            .as_str()
+            .to_owned(),
+    )
+    .map_err(|_| BackendError::Storage)?;
     let admission = RunAdmitted::new(
         identity.scope().clone(),
         identity.epoch(),
         run_id.clone(),
         identity.tenant().clone(),
-        StableId::new("mfm.test.primary-restart@1").map_err(|_| BackendError::Storage)?,
+        entry_point_id,
         program_ref,
         input.clone(),
         ConfigurationHeadProjection::new(1, configuration_ref)
@@ -337,7 +379,7 @@ pub async fn append_primary_restart_probe(
         AppendRequestId::new("primary-restart-admission-0123456789")
             .map_err(|_| BackendError::Storage)?,
         RunRecord::RunAdmitted(admission),
-        vec![input_object.clone()],
+        vec![input_object.clone(), program_object],
     )
     .map_err(|_| BackendError::Storage)?;
     let first_head =
@@ -354,7 +396,7 @@ pub async fn append_primary_restart_probe(
         },
         binding_ref,
         None,
-        4096,
+        maximum_conclusion_bytes,
     )
     .map_err(|_| BackendError::Storage)?;
     let prepared_frame = RunFrame::new(
