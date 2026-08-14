@@ -415,6 +415,42 @@ fn integrity_failure_retains_the_active_collection_ordinal() {
 }
 
 #[test]
+fn chain_identity_rejection_uses_the_frozen_collection_failure_code() {
+    let request = EvmBalanceRequest::new(
+        vec![EvmBalanceSource {
+            source_id: "source-1".to_owned(),
+            chain_id: 1,
+            address: "0xabc".to_owned(),
+            token: None,
+        }],
+        18,
+    )
+    .expect("request");
+    let context = EvmBalanceContext::new(
+        request,
+        OpaqueCallerContinuation {
+            marker: "opaque".to_owned(),
+        },
+        0,
+        "collection-0".to_owned(),
+    )
+    .expect("context");
+    let ProposedStateOutcome::Failure { failure } =
+        interpret_check_chain_identity(context, &EvmReadEvidence::Rejected)
+    else {
+        panic!("rejected chain identity must fail");
+    };
+    assert_eq!(
+        failure,
+        EvmBalanceFailure::SourceUnavailable {
+            stage: "check_chain_identity".to_owned(),
+            collection_ordinal: 0,
+            code: "chain_identity_unavailable".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn frozen_submission_and_collection_wires_match_the_contract_goldens() {
     assert_eq!(
         canonical_json(&EvmSubmissionOutput::new(
