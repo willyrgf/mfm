@@ -39,9 +39,12 @@ domain evidence. They are not public output fields.
 
 The `reverted` projection is still a successful terminal result: it is an
 authenticated, canonical execution observation, not a transport failure.
-Failure projections are payload-free `{"kind":"..."}` values from the
-historical failure vocabulary. They never expose a provider diagnostic,
-candidate, hash, nonce, signer, or binding identity.
+Failure projections are exactly these payload-free `{"kind":"..."}` values:
+`nonce_authority_unavailable`, `destination_rejected`, `provider_unavailable`,
+and `nonce_lineage_diverged`. They never expose a provider diagnostic,
+candidate, hash, nonce, signer, or binding identity. Selector or admission
+rejection occurs before a submission run exists and is not serialized as one of
+these terminal failures.
 
 ### EVM balance collection
 
@@ -79,7 +82,7 @@ lifecycle, certification machinery, or any provider topology.
 | Projection / field | Owner | Exact source | Validation before projection |
 | --- | --- | --- | --- |
 | `EvmSubmissionOutput.execution_disposition` | EVM submission consolidation | bound receipt status, receipt block, finalized head, and canonical inclusion-block evidence | one committed broadcast intent; transaction hash correlation; receipt/inclusion block hash and number agreement; receipt chain/target binding; finalized head covers the inclusion block |
-| EVM submission failure `kind` | EVM State | declared State failure or fixed integrity failure | declared failure contract; redacted closed vocabulary |
+| EVM submission failure `kind` | EVM State | declared State failure or fixed integrity failure | one of the four frozen payload-free discriminants; no diagnostic or correlation payload |
 | collection ordinal/correlation | Portfolio planner | admitted `PortfolioSnapshotInput` | dense declaration position and bounded caller correlation agree with the admitted demand |
 | checked chain / common anchor | EVM balance fragment | exact bound chain-identity, initial-anchor, and confirm-anchor Reads | every response is intent-bound; chain and anchors agree with the selected binding and source sequence |
 | source raw quantity / decimals | EVM balance fragment | exact bound native/token balance and token-decimals Reads | asset kind, source, anchor, decimal bounds, canonical integer quantity, and overflow checks agree |
@@ -92,21 +95,19 @@ A broadcast acknowledgement is not inclusion evidence. The final EVM
 submission Program is therefore fixed to this post-broadcast suffix:
 
 ```text
-BroadcastTransaction             Effect<EntryOnce>
-ReadTransactionReceipt           Read
-ReadFinalizedHead                Read
-ReadCanonicalInclusionBlock      Read
-ConsolidateExecutionDisposition  Pure -> EvmSubmissionOutput
+broadcast                         one-entry Effect
+receipt                           Read
+finalized head                    Read
+canonical inclusion block         Read
+disposition consolidation         Pure -> EvmSubmissionOutput
 ```
 
-`ReadTransactionReceipt` is bound to the transaction hash returned by the
-committed broadcast call. `ReadCanonicalInclusionBlock` is bound to the receipt
-block number and must return its exact hash. Consolidation accepts only a
-receipt whose transaction hash and block agree with those two Reads, whose
-status maps to `succeeded` or `reverted`, and whose inclusion block is covered
-by the authenticated finalized head. Any unavailable, rejected, malformed, or
-inconsistent evidence takes the declared typed failure/integrity route; it
-cannot manufacture either public disposition.
+The receipt Read is bound to the transaction hash returned by the committed broadcast call. The
+canonical-inclusion Read is bound to the receipt block number and must return its exact hash.
+Consolidation accepts only a receipt whose transaction hash and block agree with those two Reads,
+whose status maps to `succeeded` or `reverted`, and whose inclusion block is covered by the
+authenticated finalized head. Any unavailable, rejected, malformed, or inconsistent evidence takes
+the declared typed failure/integrity route; it cannot manufacture either public disposition.
 
 ## Standalone binaries
 

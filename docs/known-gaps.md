@@ -9,7 +9,3 @@
   lost.
 - The current product fixes the two entry points `mfm.portfolio/snapshot@1` and
   `mfm.evm/submit-transaction@1`. Additional workflows require a new design decision.
-- The fixed-tenant `Application` facade currently exposes callback-free structural drive/read/
-  replay operations. Trusted embeddings register live State and adapter implementations through
-  `mfm-runtime`; the facade does not manufacture a live registry or publish a successful result
-  before its matching durable conclusion.

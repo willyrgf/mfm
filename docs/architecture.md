@@ -28,8 +28,8 @@ consume App.
 
 ### Program
 
-Program owns strict document ingress, pure expansion, State/Match declarations, contracts,
-the sole exact nominal-contract/schema-descriptor/Rust-type and capability intent/evidence/mode
+Program owns strict document ingress, pure expansion, State/Match declarations, callback-free
+`State`/`FailureValue` contracts, the sole exact nominal-contract/schema-descriptor/Rust-type and capability intent/evidence/mode
 association tables, catalog-branded typed values, and declaration-owned binding descriptors.
 Program data is callback-free and cannot invoke I/O. Runtime
 State and capability registrations must match the finalized table before an assembly exists; their
@@ -89,9 +89,9 @@ immutable binding and capability association, so preparation has no caller-suppl
 path. Conclusion recovery preserves Store classifications for same-run races,
 including identical semantic conclusions, superseded Access preparations, conflicts, and invalid
 history; permanent Store rejection remains a distinct owner-bearing result rather than becoming a
-retryable suspension. The current assembly remains exact-Program-bound: it rejects a selected
-retained Program whose content reference differs from its own, rather than treating current code as
-a resume replacement.
+retryable suspension. One catalog-wide assembly registers each semantic implementation once and
+exact adapters by binding reference. It validates a Program before admission; Store selection and
+cold resume then consume the retained Program document, never a current-code replacement.
 
 ### Adapters
 
@@ -103,16 +103,18 @@ publication.
 
 ### App and storage
 
-App exposes a fixed-tenant structural facade. Storage reports mechanical dispositions and admitted
-durability; it does not rerun Program semantics. PostgreSQL scope and writer epoch are immutable
-append preconditions, not process locks. The database records the active deployment identity; a
-trusted restore explicitly rotates it, making already-open old-identity handles fail closed while
-preserving same-identity multiple opens.
+App exposes a fixed-tenant admission facade with one mandatory Runtime. It validates the finite
+Portfolio/EVM configuration and exact binding closure, dispatches typed selectors to domain
+planners, and never authors Programs or appends through a Store fallback. Storage reports
+mechanical dispositions and admitted durability; it does not rerun Program semantics. PostgreSQL
+scope and writer epoch are immutable append preconditions, not process locks. The database records
+the active deployment identity; a trusted restore explicitly rotates it, making already-open
+old-identity handles fail closed while preserving same-identity multiple opens.
 
-Trusted App composition receives read, configuration, audit, and mutation ports explicitly. For an
-entry backed by Runtime, its configuration head must belong to that Runtime's independent exact
-opening; otherwise it must belong to App's mutation/configuration opening. Equal persisted identity
-and catalog metadata establish composition compatibility but never transpose selected owners.
+Trusted App composition receives read, configuration, audit, and Runtime-owned mutation capability
+from one exact opening. Both resolved configuration heads and every selected route must validate
+against that one Runtime assembly. Equal persisted identity and catalog metadata establish
+composition compatibility but never transpose selected owners.
 
 ## Recovery
 

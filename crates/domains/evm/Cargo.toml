@@ -12,16 +12,23 @@ layer = "domain"
 domain = "evm"
 domain-role = "source"
 
+[[test]]
+name = "balance_matrix"
+path = "tests/balance_matrix.rs"
+
 [features]
 test-support = []
 
 [dependencies]
 mfm-capabilities = { path = "../../kernel/capabilities" }
+mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-values = { path = "../../kernel/values" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-canonical = { path = "../../kernel/canonical" }
 serde_json = { workspace = true }

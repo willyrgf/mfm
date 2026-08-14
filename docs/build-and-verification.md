@@ -24,8 +24,9 @@ and native dependencies supplied by Nix. Release packaging does not act as a
 test cache, and mutable Cargo artifacts are never release inputs or trusted
 verification results.
 
-`nix run .#mfm` is a project CLI convenience, not a separate build lane. It is a credential-free
-transport wrapper over the fixed-tenant application facade.
+`nix run .#mfm` is a project CLI convenience, not a separate build lane. Until a separately scoped
+trusted embedding supplies endpoint, nonce, signer, and Runtime composition, it exposes only
+non-actionable local metadata.
 
 ## Responsibility boundary
 

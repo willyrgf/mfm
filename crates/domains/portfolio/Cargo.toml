@@ -13,10 +13,16 @@ domain = "portfolio"
 domain-role = "aggregate"
 
 [dependencies]
+mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../evm" }
+mfm-facts = { path = "../../kernel/facts" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-program = { path = "../../kernel/program" }
 mfm-program-derive = { path = "../../kernel/program-derive" }
 mfm-values = { path = "../../kernel/values" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+mfm-canonical = { path = "../../kernel/canonical" }

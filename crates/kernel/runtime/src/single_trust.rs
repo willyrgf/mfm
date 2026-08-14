@@ -18,10 +18,10 @@ use mfm_ids::{
 };
 use mfm_journal::single_trust::{PreparationRef, SequentialControlAddress};
 use mfm_program::{
-    canonical_value, BindingDescriptor, Program, ProgramCatalog, QualifiedTypedValue,
+    canonical_value, state_implementation_ref, BindingDescriptor, Program, ProgramCatalog,
+    ProgramDocument, QualifiedTypedValue, State,
 };
 use mfm_store::single_trust::{AppendDisposition, FactContinuation, SelectedRun};
-use mfm_values::MfmValue;
 
 /// Send-owned future used by one qualified live implementation.
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -70,38 +70,6 @@ impl From<mfm_store::single_trust::StoreError> for RuntimeError {
     }
 }
 
-/// A typed failure contract with one static integrity-blocked value.
-///
-/// The value is selected by the domain's closed failure contract and receives no input, evidence,
-/// or Runtime authority. It is therefore safe for the capability-certified integrity path to use
-/// without invoking a State callback or accepting a caller-supplied failure.
-pub trait FailureValue: MfmValue {
-    /// Returns the contract-fixed failure for an accepted integrity block.
-    fn integrity_blocked() -> Self;
-}
-
-/// A callback-free typed State contract.
-pub trait State: Send + Sync + 'static {
-    /// Complete cumulative input consumed by this State.
-    type Input: MfmValue;
-    /// Complete successor context or terminal public result.
-    type Output: MfmValue;
-    /// Explicit fail-fast domain value.
-    type Failure: FailureValue;
-
-    /// Returns the stable State implementation identity.
-    fn state_id() -> Result<StableId>;
-}
-
-/// Marker for deterministic State evaluation.
-pub struct Pure;
-
-/// Marker for a non-mutating capability State.
-pub struct Read<C: AccessCapabilityContract>(PhantomData<fn() -> C>);
-
-/// Marker for a mutating capability State.
-pub struct Effect<C: AccessCapabilityContract>(PhantomData<fn() -> C>);
-
 /// Bounded error returned before a provider-entering call exists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("state preparation rejected")]
@@ -120,6 +88,16 @@ pub enum UnresolvedClassification {
     /// The owner was cancelled before a trustworthy handoff.
     Cancelled,
 }
+
+type AcceptedOutcomeParts<S, C> = (
+    Arc<RuntimeAssemblyBrand>,
+    QualifiedTypedValue<<S as State>::Input>,
+    StableId,
+    <C as AccessCapabilityContract>::Intent,
+    <C as AccessCapabilityContract>::Evidence,
+    PreparationRef,
+    Option<FactContinuation>,
+);
 
 /// Affine capability evidence accepted by exactly one consuming committed call.
 pub struct AcceptedOutcomeAccess<S: State, C: AccessCapabilityContract> {
@@ -169,22 +147,16 @@ impl<S: State, C: AccessCapabilityContract> AcceptedOutcomeAccess<S, C> {
         &self.call_id
     }
 
-    /// Consumes accepted evidence into one call-bound conclusion proposal.
-    pub fn conclude(
-        self,
-        outcome: ProposedStateOutcome<S::Output, S::Failure>,
-    ) -> AccessHandlerResolution<S, S::Output, S::Failure, C> {
-        AccessHandlerResolution {
-            assembly_brand: self.assembly_brand,
-            input: self.input,
-            call_id: self.call_id,
-            intent: self.intent,
-            evidence: Some(self.evidence),
-            outcome: Some(outcome),
-            classification: None,
-            preparation: self.preparation,
-            fact_continuation: self.fact_continuation,
-        }
+    pub(crate) fn into_parts(self) -> AcceptedOutcomeParts<S, C> {
+        (
+            self.assembly_brand,
+            self.input,
+            self.call_id,
+            self.intent,
+            self.evidence,
+            self.preparation,
+            self.fact_continuation,
+        )
     }
 }
 
@@ -230,23 +202,28 @@ impl<S: State, C: AccessCapabilityContract> AcceptedIntegrityAccess<S, C> {
         &self.evidence
     }
 
-    /// Consumes integrity evidence into the exact declared typed failure route.
-    pub fn conclude_blocked(self) -> AccessHandlerResolution<S, S::Output, S::Failure, C> {
-        AccessHandlerResolution {
-            assembly_brand: self.assembly_brand,
-            input: self.input,
-            call_id: self.call_id,
-            intent: self.intent,
-            evidence: Some(self.evidence),
-            outcome: Some(ProposedStateOutcome::Failure {
-                failure: S::Failure::integrity_blocked(),
-            }),
-            classification: None,
-            preparation: self.preparation,
-            fact_continuation: self.fact_continuation,
-        }
+    pub(crate) fn into_parts(self) -> AcceptedOutcomeParts<S, C> {
+        (
+            self.assembly_brand,
+            self.input,
+            self.call_id,
+            self.intent,
+            self.evidence,
+            self.preparation,
+            self.fact_continuation,
+        )
     }
 }
+
+type UnresolvedParts<S, C> = (
+    Arc<RuntimeAssemblyBrand>,
+    QualifiedTypedValue<<S as State>::Input>,
+    StableId,
+    <C as AccessCapabilityContract>::Intent,
+    PreparationRef,
+    Option<FactContinuation>,
+    UnresolvedClassification,
+);
 
 /// An accepted access result that cannot be interpreted into a durable conclusion.
 pub struct UnresolvedAccess<S: State, C: AccessCapabilityContract> {
@@ -285,20 +262,16 @@ impl<S: State, C: AccessCapabilityContract> UnresolvedAccess<S, C> {
         self.classification
     }
 
-    /// Consumes the unresolved owner into a closed handler result.  Runtime will keep the
-    /// preparation neutral and will not pass this branch to conclusion qualification.
-    pub fn finish(self) -> AccessHandlerResolution<S, S::Output, S::Failure, C> {
-        AccessHandlerResolution {
-            assembly_brand: self.assembly_brand,
-            input: self.input,
-            call_id: self.call_id,
-            intent: self.intent,
-            evidence: None,
-            outcome: None,
-            classification: Some(self.classification),
-            preparation: self.preparation,
-            fact_continuation: self.fact_continuation,
-        }
+    pub(crate) fn into_parts(self) -> UnresolvedParts<S, C> {
+        (
+            self.assembly_brand,
+            self.input,
+            self.call_id,
+            self.intent,
+            self.preparation,
+            self.fact_continuation,
+            self.classification,
+        )
     }
 }
 
@@ -312,50 +285,7 @@ pub enum AccessResolution<S: State, C: AccessCapabilityContract> {
     Unresolved(UnresolvedAccess<S, C>),
 }
 
-/// Opaque closed handler resolution owned by the Runtime handoff.
-pub struct AccessHandlerResolution<S: State, O, F, C: AccessCapabilityContract> {
-    assembly_brand: Arc<RuntimeAssemblyBrand>,
-    input: QualifiedTypedValue<S::Input>,
-    call_id: StableId,
-    intent: C::Intent,
-    evidence: Option<C::Evidence>,
-    outcome: Option<ProposedStateOutcome<O, F>>,
-    classification: Option<UnresolvedClassification>,
-    preparation: PreparationRef,
-    fact_continuation: Option<FactContinuation>,
-}
-
-impl<S: State, O, F, C: AccessCapabilityContract> AccessHandlerResolution<S, O, F, C> {
-    /// Consumes the resolution into its exact call-bound components.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        Arc<RuntimeAssemblyBrand>,
-        QualifiedTypedValue<S::Input>,
-        StableId,
-        C::Intent,
-        Option<C::Evidence>,
-        Option<ProposedStateOutcome<O, F>>,
-        Option<UnresolvedClassification>,
-        PreparationRef,
-        Option<FactContinuation>,
-    ) {
-        (
-            self.assembly_brand,
-            self.input,
-            self.call_id,
-            self.intent,
-            self.evidence,
-            self.outcome,
-            self.classification,
-            self.preparation,
-            self.fact_continuation,
-        )
-    }
-}
-
-type PureEvaluator<S> = dyn Fn(&<S as State>::Input) -> ProposedStateOutcome<<S as State>::Output, <S as State>::Failure>
+type PureEvaluator<S> = dyn Fn(<S as State>::Input) -> ProposedStateOutcome<<S as State>::Output, <S as State>::Failure>
     + Send
     + Sync;
 type AccessPreparer<S, C> = dyn Fn(
@@ -363,12 +293,12 @@ type AccessPreparer<S, C> = dyn Fn(
     ) -> std::result::Result<<C as AccessCapabilityContract>::Intent, PreparationError>
     + Send
     + Sync;
-/// Opaque Send future returned by one consuming State/adapter execution.
-#[doc(hidden)]
-pub type AccessResolutionFuture<S, C> =
-    BoxFuture<Result<AccessHandlerResolution<S, <S as State>::Output, <S as State>::Failure, C>>>;
-type AccessStateExecutor<S, C> =
-    dyn Fn(CommittedCall<S, C>) -> AccessResolutionFuture<S, C> + Send + Sync;
+type AccessInterpreter<S, C> = dyn Fn(
+        <S as State>::Input,
+        &<C as AccessCapabilityContract>::Evidence,
+    ) -> ProposedStateOutcome<<S as State>::Output, <S as State>::Failure>
+    + Send
+    + Sync;
 /// Opaque Send future returned by one consuming qualified adapter ingress.
 #[doc(hidden)]
 pub type AccessIngressFuture<S, C> = BoxFuture<Result<AccessResolution<S, C>>>;
@@ -391,57 +321,59 @@ impl<S: State> PureImplementation<S> {
     /// Constructs one deterministic Pure implementation.
     pub fn new<F>(evaluate: F) -> Self
     where
-        F: Fn(&S::Input) -> ProposedStateOutcome<S::Output, S::Failure> + Send + Sync + 'static,
+        F: Fn(S::Input) -> ProposedStateOutcome<S::Output, S::Failure> + Send + Sync + 'static,
     {
         Self {
             evaluate: Arc::new(evaluate),
         }
     }
 
-    /// Evaluates one exact input without history or ambient I/O.
-    pub fn evaluate(&self, input: &S::Input) -> ProposedStateOutcome<S::Output, S::Failure> {
+    /// Consumes one exact input without history or ambient I/O.
+    pub fn evaluate(&self, input: S::Input) -> ProposedStateOutcome<S::Output, S::Failure> {
         (self.evaluate)(input)
     }
 
-    /// Evaluates one exact input while converting a callback panic into a redacted Runtime error.
+    /// Consumes one exact input while converting a callback panic into a redacted Runtime error.
     pub fn evaluate_contained(
         &self,
-        input: &S::Input,
+        input: S::Input,
     ) -> Result<ProposedStateOutcome<S::Output, S::Failure>> {
         catch_unwind(AssertUnwindSafe(|| (self.evaluate)(input)))
             .map_err(|_| RuntimeError::Unresolved)
     }
 }
 
-/// Access State implementation with separate borrowed preparation and consuming execution.
+/// Access State implementation with borrowed preparation and consuming evidence interpretation.
 pub struct AccessImplementation<S: State, C: AccessCapabilityContract> {
     prepare: Arc<AccessPreparer<S, C>>,
-    execute: Arc<AccessStateExecutor<S, C>>,
+    interpret: Arc<AccessInterpreter<S, C>>,
 }
 
 impl<S: State, C: AccessCapabilityContract> Clone for AccessImplementation<S, C> {
     fn clone(&self) -> Self {
         Self {
             prepare: Arc::clone(&self.prepare),
-            execute: Arc::clone(&self.execute),
+            interpret: Arc::clone(&self.interpret),
         }
     }
 }
 
 impl<S: State, C: AccessCapabilityContract> AccessImplementation<S, C> {
-    /// Constructs one access implementation.  The execution closure cannot be called without a
-    /// committed preparation token.
-    pub fn new<P, E>(prepare: P, execute: E) -> Self
+    /// Constructs one access implementation.
+    pub fn new<P, I>(prepare: P, interpret: I) -> Self
     where
         P: Fn(&S::Input) -> std::result::Result<C::Intent, PreparationError>
             + Send
             + Sync
             + 'static,
-        E: Fn(CommittedCall<S, C>) -> AccessResolutionFuture<S, C> + Send + Sync + 'static,
+        I: Fn(S::Input, &C::Evidence) -> ProposedStateOutcome<S::Output, S::Failure>
+            + Send
+            + Sync
+            + 'static,
     {
         Self {
             prepare: Arc::new(prepare),
-            execute: Arc::new(execute),
+            interpret: Arc::new(interpret),
         }
     }
 
@@ -450,9 +382,23 @@ impl<S: State, C: AccessCapabilityContract> AccessImplementation<S, C> {
         (self.prepare)(input)
     }
 
-    /// Consumes the one Runtime-minted call into the implementation future.
-    pub fn execute(&self, call: CommittedCall<S, C>) -> AccessResolutionFuture<S, C> {
-        (self.execute)(call)
+    /// Consumes the State input and accepted authenticated evidence into one proposed outcome.
+    pub fn interpret(
+        &self,
+        input: S::Input,
+        evidence: &C::Evidence,
+    ) -> ProposedStateOutcome<S::Output, S::Failure> {
+        (self.interpret)(input, evidence)
+    }
+
+    /// Runs interpretation while converting a callback panic into a redacted Runtime error.
+    pub fn interpret_contained(
+        &self,
+        input: S::Input,
+        evidence: &C::Evidence,
+    ) -> Result<ProposedStateOutcome<S::Output, S::Failure>> {
+        catch_unwind(AssertUnwindSafe(|| (self.interpret)(input, evidence)))
+            .map_err(|_| RuntimeError::Unresolved)
     }
 }
 
@@ -687,6 +633,8 @@ impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
     /// Creates a preparation by borrowing input while retaining the consuming typed value.
     pub(crate) fn new(
         assembly: &RuntimeAssembly,
+        document: &ProgramDocument,
+        program_ref: ContentRef,
         run_id: RunId,
         occurrence: SequentialControlAddress,
         input: QualifiedTypedValue<S::Input>,
@@ -695,9 +643,7 @@ impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
         if !input.belongs_to_catalog(assembly.catalog()) {
             return Err(RuntimeError::Identity);
         }
-        let Some(mfm_program::Declaration::State(state)) =
-            assembly.program().document().declaration(&occurrence)
-        else {
+        let Some(mfm_program::Declaration::State(state)) = document.declaration(&occurrence) else {
             return Err(RuntimeError::Identity);
         };
         if input.contract_ref() != state.input_contract_ref() {
@@ -705,14 +651,13 @@ impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
         }
         let binding = state.execution_binding().ok_or(RuntimeError::Mode)?.clone();
         let execution_binding_ref = binding.content_ref().map_err(|_| RuntimeError::Identity)?;
-        let implementation =
-            assembly.access_implementation::<S, C>(state.state_implementation_ref())?;
+        let implementation = assembly.access_implementation::<S, C>()?;
         let intent = catch_unwind(AssertUnwindSafe(|| implementation.prepare(input.as_ref())))
             .map_err(|_| RuntimeError::Preparation)?
             .map_err(|_| RuntimeError::Preparation)?;
         Ok(Self {
             assembly_brand: Arc::clone(&assembly.brand),
-            program_ref: assembly.program_ref().clone(),
+            program_ref,
             run_id,
             occurrence,
             input,
@@ -736,6 +681,13 @@ impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
         selected: SelectedRun,
     ) -> OpenedPreparationCommit<S, C> {
         if !Arc::ptr_eq(&self.assembly_brand, &assembly.brand) {
+            return OpenedPreparationCommit::Rejected {
+                owner: self,
+                selected,
+                error: RuntimeError::Identity,
+            };
+        }
+        if self.program_ref != *selected.program_ref() {
             return OpenedPreparationCommit::Rejected {
                 owner: self,
                 selected,
@@ -784,17 +736,16 @@ impl<S: State, C: AccessCapabilityContract> PreparedExecution<S, C> {
                 error: RuntimeError::Value,
             };
         }
-        let adapter =
-            match assembly.qualified_adapter::<S, C>(self.binding.state_implementation_ref()) {
-                Ok(adapter) => Arc::new(adapter),
-                Err(error) => {
-                    return OpenedPreparationCommit::Rejected {
-                        owner: self,
-                        selected,
-                        error,
-                    }
+        let adapter = match assembly.qualified_adapter::<S, C>(&self.binding) {
+            Ok(adapter) => Arc::new(adapter),
+            Err(error) => {
+                return OpenedPreparationCommit::Rejected {
+                    owner: self,
+                    selected,
+                    error,
                 }
-            };
+            }
+        };
         let qualified_intent = qualified_intent.erase();
         let outcome = store
             .prepare_selected_access(selected, &qualified_intent)
@@ -932,35 +883,44 @@ pub(crate) struct RegisteredState {
     pub(crate) state_implementation_ref: ContentRef,
     pub(crate) state_type: TypeId,
     pub(crate) capability_type: Option<TypeId>,
+    pub(crate) input_contract_ref: ContentRef,
+    pub(crate) output_contract_ref: ContentRef,
+    pub(crate) failure_contract_ref: ContentRef,
     pub(crate) implementation: Box<dyn Any + Send + Sync>,
-    pub(crate) adapter: Option<Box<dyn Any + Send + Sync>>,
-    pub(crate) dynamic: Option<Arc<dyn crate::lifecycle::DynamicStateRegistration>>,
+    pub(crate) dynamic: Arc<dyn crate::lifecycle::DynamicStateRegistration>,
+}
+
+struct RegisteredAdapter {
+    binding: BindingDescriptor,
+    binding_ref: ContentRef,
+    state_implementation_ref: ContentRef,
+    state_type: TypeId,
+    capability_type: TypeId,
+    invoke: Box<dyn Any + Send + Sync>,
 }
 
 struct ProcessRegistry {
     states: Vec<RegisteredState>,
+    adapters: Vec<RegisteredAdapter>,
 }
 
-/// Builder for one immutable Program/Runtime association.
+/// Builder for one immutable catalog-wide Runtime registry.
 pub struct RuntimeAssemblyBuilder {
     catalog: ProgramCatalog,
-    program: Program,
     registrations: Vec<RegisteredState>,
+    adapters: Vec<RegisteredAdapter>,
     brand: Arc<RuntimeAssemblyBrand>,
 }
 
 impl RuntimeAssemblyBuilder {
-    /// Starts an assembly builder for one exact catalog and Program.
-    pub fn new(catalog: ProgramCatalog, program: Program) -> Result<Self> {
-        if !program.belongs_to_catalog(&catalog) {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
+    /// Starts an assembly builder for one exact catalog.
+    pub fn new(catalog: ProgramCatalog) -> Self {
+        Self {
             catalog,
-            program,
             registrations: Vec::new(),
+            adapters: Vec::new(),
             brand: Arc::new(RuntimeAssemblyBrand),
-        })
+        }
     }
 
     fn ensure_unique(&self, state_implementation_ref: &ContentRef) -> Result<()> {
@@ -975,12 +935,9 @@ impl RuntimeAssemblyBuilder {
         }
     }
 
-    /// Registers one deterministic Pure State implementation.
-    pub fn register_pure<S: State>(
-        &mut self,
-        state_implementation_ref: ContentRef,
-        implementation: PureImplementation<S>,
-    ) -> Result<()> {
+    /// Registers one deterministic semantic State implementation.
+    pub fn register_pure<S: State>(&mut self, implementation: PureImplementation<S>) -> Result<()> {
+        let state_implementation_ref = state_implementation_ref::<S>()?;
         self.ensure_unique(&state_implementation_ref)?;
         let input_contract_ref = mfm_program::nominal_contract_ref::<S::Input>()?;
         let output_contract_ref = mfm_program::nominal_contract_ref::<S::Output>()?;
@@ -995,72 +952,29 @@ impl RuntimeAssemblyBuilder {
         {
             return Err(RuntimeError::Identity);
         }
-        let state = self
-            .program
-            .document()
-            .declarations()
-            .iter()
-            .find_map(|declaration| match declaration {
-                mfm_program::Declaration::State(state)
-                    if state.state_implementation_ref() == &state_implementation_ref =>
-                {
-                    Some(state.as_ref())
-                }
-                _ => None,
-            })
-            .ok_or(RuntimeError::Identity)?;
-        if !state.execution().is_pure()
-            || state.input_contract_ref() != &input_contract_ref
-            || state.output_contract_ref() != &output_contract_ref
-            || state
-                .failure_contract_ref()
-                .is_some_and(|failure| failure != &failure_contract_ref)
-        {
-            return Err(RuntimeError::Identity);
-        }
         let dynamic = crate::lifecycle::pure_registration(implementation.clone());
         self.registrations.push(RegisteredState {
             state_implementation_ref,
             state_type: TypeId::of::<S>(),
             capability_type: None,
+            input_contract_ref,
+            output_contract_ref,
+            failure_contract_ref,
             implementation: Box::new(implementation),
-            adapter: None,
-            dynamic: Some(dynamic),
+            dynamic,
         });
         Ok(())
     }
 
-    /// Registers one Access State implementation and its bound adapter entry.
-    pub fn register_access<S: State, C: AccessCapabilityContract, F>(
+    /// Registers one semantic Access State implementation.
+    pub fn register_access<S: State, C: AccessCapabilityContract>(
         &mut self,
-        state_implementation_ref: ContentRef,
         implementation: AccessImplementation<S, C>,
-        invoke: F,
-    ) -> Result<()>
-    where
-        F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
-    {
+    ) -> Result<()> {
         C::validate().map_err(|_| RuntimeError::Mode)?;
+        let state_implementation_ref = state_implementation_ref::<S>()?;
         self.ensure_unique(&state_implementation_ref)?;
-        let state = self
-            .program
-            .document()
-            .declarations()
-            .iter()
-            .find_map(|declaration| match declaration {
-                mfm_program::Declaration::State(state)
-                    if state.state_implementation_ref() == &state_implementation_ref =>
-                {
-                    Some(state.as_ref())
-                }
-                _ => None,
-            })
-            .ok_or(RuntimeError::Identity)?;
-        let capability_contract_ref = state
-            .execution()
-            .capability_contract_ref()
-            .ok_or(RuntimeError::Mode)?
-            .clone();
+        let capability_contract_ref = mfm_program::capability_contract_ref::<C>()?;
         if !self
             .catalog
             .contains_capability::<C>(&capability_contract_ref)
@@ -1080,74 +994,76 @@ impl RuntimeAssemblyBuilder {
         {
             return Err(RuntimeError::Identity);
         }
-        if state.input_contract_ref() != &input_contract_ref
-            || state.output_contract_ref() != &output_contract_ref
-            || state
-                .failure_contract_ref()
-                .is_some_and(|failure| failure != &failure_contract_ref)
-        {
-            return Err(RuntimeError::Identity);
-        }
-        let adapter: Arc<AccessExecutor<S, C>> = Arc::new(invoke);
         let dynamic = crate::lifecycle::access_registration(implementation.clone());
         self.registrations.push(RegisteredState {
             state_implementation_ref,
             state_type: TypeId::of::<S>(),
             capability_type: Some(TypeId::of::<C>()),
+            input_contract_ref,
+            output_contract_ref,
+            failure_contract_ref,
             implementation: Box::new(implementation),
-            adapter: Some(Box::new(adapter)),
-            dynamic: Some(dynamic),
+            dynamic,
         });
         Ok(())
     }
 
-    /// Finishes the immutable assembly after checking every Program registration.
-    pub fn finish(self) -> Result<RuntimeAssembly> {
-        let declarations = self
-            .program
-            .document()
-            .declarations()
+    /// Registers one exact adapter invocation for an Access binding descriptor.
+    pub fn register_adapter<S: State, C: AccessCapabilityContract, F>(
+        &mut self,
+        binding: BindingDescriptor,
+        invoke: F,
+    ) -> Result<()>
+    where
+        F: Fn(CommittedCall<S, C>) -> AccessIngressFuture<S, C> + Send + Sync + 'static,
+    {
+        C::validate().map_err(|_| RuntimeError::Mode)?;
+        let state_implementation_ref = state_implementation_ref::<S>()?;
+        let capability_contract_ref = mfm_program::capability_contract_ref::<C>()?;
+        let registered = self
+            .registrations
             .iter()
-            .filter_map(|declaration| match declaration {
-                mfm_program::Declaration::State(state) => Some(state),
-                mfm_program::Declaration::Match(_) => None,
+            .find(|registered| {
+                registered.state_implementation_ref == state_implementation_ref
+                    && registered.state_type == TypeId::of::<S>()
+                    && registered.capability_type == Some(TypeId::of::<C>())
             })
-            .collect::<Vec<_>>();
-        if self.registrations.len() != declarations.len() {
+            .ok_or(RuntimeError::Identity)?;
+        if binding.state_implementation_ref() != &state_implementation_ref
+            || binding.capability_contract_ref() != Some(&capability_contract_ref)
+            || binding.adapter_implementation_ref().is_none()
+            || registered.capability_type.is_none()
+        {
             return Err(RuntimeError::Identity);
         }
-        let mut registrations = self.registrations;
-        let mut states = Vec::with_capacity(declarations.len());
-        for state in declarations {
-            let index = registrations
-                .iter()
-                .position(|registered| {
-                    registered.state_implementation_ref == *state.state_implementation_ref()
-                })
-                .ok_or(RuntimeError::Identity)?;
-            let registered = registrations.swap_remove(index);
-            match state.execution() {
-                mfm_program::ExecutionMode::Pure => {
-                    if registered.capability_type.is_some() || registered.adapter.is_some() {
-                        return Err(RuntimeError::Mode);
-                    }
-                }
-                mfm_program::ExecutionMode::Read { .. }
-                | mfm_program::ExecutionMode::Effect { .. } => {
-                    if registered.capability_type.is_none() || registered.adapter.is_none() {
-                        return Err(RuntimeError::Mode);
-                    }
-                }
-            }
-            states.push(registered);
-        }
-        if !registrations.is_empty() {
+        let binding_ref = binding.content_ref().map_err(|_| RuntimeError::Identity)?;
+        if self.adapters.iter().any(|registered| {
+            registered.binding_ref == binding_ref
+                || (registered.binding == binding
+                    && (registered.state_type != TypeId::of::<S>()
+                        || registered.capability_type != TypeId::of::<C>()))
+        }) {
             return Err(RuntimeError::Identity);
         }
+        self.adapters.push(RegisteredAdapter {
+            binding,
+            binding_ref,
+            state_implementation_ref,
+            state_type: TypeId::of::<S>(),
+            capability_type: TypeId::of::<C>(),
+            invoke: Box::new(Arc::new(invoke) as Arc<AccessExecutor<S, C>>),
+        });
+        Ok(())
+    }
+
+    /// Finishes the immutable catalog-wide assembly.
+    pub fn finish(self) -> Result<RuntimeAssembly> {
         Ok(RuntimeAssembly {
             catalog: self.catalog,
-            program: self.program,
-            registry: ProcessRegistry { states },
+            registry: ProcessRegistry {
+                states: self.registrations,
+                adapters: self.adapters,
+            },
             brand: self.brand,
         })
     }
@@ -1156,30 +1072,14 @@ impl RuntimeAssemblyBuilder {
 /// Immutable process assembly brand shared by callback-free consumers.
 pub struct RuntimeAssembly {
     catalog: ProgramCatalog,
-    program: Program,
     registry: ProcessRegistry,
     brand: Arc<RuntimeAssemblyBrand>,
 }
 
 impl RuntimeAssembly {
-    /// Starts an immutable Runtime assembly for one exact catalog and Program.
-    pub fn new(catalog: ProgramCatalog, program: Program) -> Result<Self> {
-        RuntimeAssemblyBuilder::new(catalog, program)?.finish()
-    }
-
     /// Returns the exact callback-free Program catalog.
     pub const fn catalog(&self) -> &ProgramCatalog {
         &self.catalog
-    }
-
-    /// Returns the immutable callback-free Program.
-    pub const fn program(&self) -> &Program {
-        &self.program
-    }
-
-    /// Returns the exact Program content identity.
-    pub const fn program_ref(&self) -> &ContentRef {
-        self.program.program_ref().content_ref()
     }
 
     pub(crate) fn has_brand(&self, brand: &Arc<RuntimeAssemblyBrand>) -> bool {
@@ -1194,8 +1094,7 @@ impl RuntimeAssembly {
             .states
             .iter()
             .find(|registered| &registered.state_implementation_ref == state_implementation_ref)
-            .and_then(|registered| registered.dynamic.as_ref())
-            .cloned()
+            .map(|registered| Arc::clone(&registered.dynamic))
             .ok_or(RuntimeError::Identity)
     }
 
@@ -1209,16 +1108,14 @@ impl RuntimeAssembly {
             .map_err(|_| RuntimeError::Value)
     }
 
-    /// Returns one registered Pure implementation under its exact implementation identity.
-    pub fn pure_implementation<S: State>(
-        &self,
-        state_implementation_ref: &ContentRef,
-    ) -> Result<&PureImplementation<S>> {
+    /// Returns one registered Pure implementation under its State-derived identity.
+    pub fn pure_implementation<S: State>(&self) -> Result<&PureImplementation<S>> {
+        let state_implementation_ref = state_implementation_ref::<S>()?;
         self.registry
             .states
             .iter()
             .find(|registered| {
-                &registered.state_implementation_ref == state_implementation_ref
+                registered.state_implementation_ref == state_implementation_ref
                     && registered.state_type == TypeId::of::<S>()
                     && registered.capability_type.is_none()
             })
@@ -1226,16 +1123,16 @@ impl RuntimeAssembly {
             .ok_or(RuntimeError::Identity)
     }
 
-    /// Returns one registered Access implementation under its exact State/capability identity.
+    /// Returns one registered Access implementation under its State-derived identity.
     pub fn access_implementation<S: State, C: AccessCapabilityContract>(
         &self,
-        state_implementation_ref: &ContentRef,
     ) -> Result<&AccessImplementation<S, C>> {
+        let state_implementation_ref = state_implementation_ref::<S>()?;
         self.registry
             .states
             .iter()
             .find(|registered| {
-                &registered.state_implementation_ref == state_implementation_ref
+                registered.state_implementation_ref == state_implementation_ref
                     && registered.state_type == TypeId::of::<S>()
                     && registered.capability_type == Some(TypeId::of::<C>())
             })
@@ -1246,40 +1143,88 @@ impl RuntimeAssembly {
     /// Reifies one inert adapter from the exact registered Access binding.
     pub fn qualified_adapter<S: State, C: AccessCapabilityContract>(
         &self,
-        state_implementation_ref: &ContentRef,
+        binding: &BindingDescriptor,
     ) -> Result<QualifiedAdapter<S, C>> {
+        let state_implementation_ref = state_implementation_ref::<S>()?;
+        let binding_ref = binding.content_ref().map_err(|_| RuntimeError::Identity)?;
         let registered = self
             .registry
-            .states
+            .adapters
             .iter()
             .find(|registered| {
-                &registered.state_implementation_ref == state_implementation_ref
+                registered.binding_ref == binding_ref
+                    && registered.binding == *binding
+                    && registered.state_implementation_ref == state_implementation_ref
                     && registered.state_type == TypeId::of::<S>()
-                    && registered.capability_type == Some(TypeId::of::<C>())
+                    && registered.capability_type == TypeId::of::<C>()
             })
             .ok_or(RuntimeError::Identity)?;
         let invoke = registered
-            .adapter
-            .as_ref()
-            .and_then(|adapter| adapter.downcast_ref::<Arc<AccessExecutor<S, C>>>())
+            .invoke
+            .downcast_ref::<Arc<AccessExecutor<S, C>>>()
             .ok_or(RuntimeError::Identity)?;
         Ok(QualifiedAdapter::from_arc(
             self,
-            self.program
-                .document()
-                .declarations()
-                .iter()
-                .find_map(|declaration| match declaration {
-                    mfm_program::Declaration::State(state)
-                        if state.state_implementation_ref() == state_implementation_ref =>
-                    {
-                        state.execution_binding()?.content_ref().ok()
-                    }
-                    _ => None,
-                })
-                .ok_or(RuntimeError::Identity)?,
+            binding_ref,
             Arc::clone(invoke),
         ))
+    }
+
+    pub(crate) fn validate_program(&self, program: &Program) -> Result<()> {
+        if !program.belongs_to_catalog(&self.catalog) {
+            return Err(RuntimeError::Identity);
+        }
+        for declaration in program.document().declarations() {
+            let mfm_program::Declaration::State(state) = declaration else {
+                continue;
+            };
+            let registered = self
+                .registry
+                .states
+                .iter()
+                .find(|registered| {
+                    registered.state_implementation_ref == *state.state_implementation_ref()
+                })
+                .ok_or(RuntimeError::Identity)?;
+            if registered.input_contract_ref != *state.input_contract_ref()
+                || registered.output_contract_ref != *state.output_contract_ref()
+                || state.failure_contract_ref() != Some(&registered.failure_contract_ref)
+            {
+                return Err(RuntimeError::Identity);
+            }
+            match state.execution() {
+                mfm_program::ExecutionMode::Pure if registered.capability_type.is_none() => {}
+                mfm_program::ExecutionMode::Read {
+                    capability_contract_ref,
+                    ..
+                }
+                | mfm_program::ExecutionMode::Effect {
+                    capability_contract_ref,
+                    ..
+                } if registered.capability_type.is_some() => {
+                    let binding = state.execution_binding().ok_or(RuntimeError::Identity)?;
+                    let binding_ref = binding.content_ref().map_err(|_| RuntimeError::Identity)?;
+                    if binding.capability_contract_ref() != Some(capability_contract_ref) {
+                        return Err(RuntimeError::Identity);
+                    }
+                    let adapter = self
+                        .registry
+                        .adapters
+                        .iter()
+                        .find(|adapter| {
+                            adapter.binding_ref == binding_ref
+                                && adapter.binding == *binding
+                                && adapter.state_implementation_ref
+                                    == *state.state_implementation_ref()
+                                && Some(adapter.capability_type) == registered.capability_type
+                        })
+                        .ok_or(RuntimeError::Identity)?;
+                    let _ = adapter;
+                }
+                _ => return Err(RuntimeError::Mode),
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1291,506 +1236,4 @@ fn mint_call_id(run_id: &RunId, preparation: &PreparationRef) -> Result<StableId
         preparation.record_ordinal()
     ))
     .map_err(|_| RuntimeError::Identity)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_canonical::raw_content_digest;
-    use mfm_capabilities::ReadMode;
-    use mfm_program_derive::MfmValue as DeriveMfmValue;
-    use serde::{Deserialize, Serialize};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
-    #[serde(deny_unknown_fields)]
-    struct Context {
-        value: u64,
-    }
-
-    #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
-    #[serde(deny_unknown_fields)]
-    struct ForeignContext {
-        value: u64,
-    }
-
-    impl FailureValue for Context {
-        fn integrity_blocked() -> Self {
-            Self { value: 0 }
-        }
-    }
-
-    impl FailureValue for ForeignContext {
-        fn integrity_blocked() -> Self {
-            Self { value: 0 }
-        }
-    }
-
-    struct PureState;
-    impl State for PureState {
-        type Input = Context;
-        type Output = Context;
-        type Failure = Context;
-
-        fn state_id() -> Result<StableId> {
-            StableId::new("mfm.test.pure-state").map_err(|_| RuntimeError::Identity)
-        }
-    }
-
-    struct ForeignState;
-    impl State for ForeignState {
-        type Input = ForeignContext;
-        type Output = ForeignContext;
-        type Failure = ForeignContext;
-
-        fn state_id() -> Result<StableId> {
-            StableId::new("mfm.test.foreign-state").map_err(|_| RuntimeError::Identity)
-        }
-    }
-
-    struct TestRead;
-
-    impl AccessCapabilityContract for TestRead {
-        type Mode = ReadMode;
-        type Intent = Context;
-        type Evidence = Context;
-        type Facts = mfm_capabilities::NoPriorFacts;
-
-        fn contract_id() -> mfm_capabilities::Result<StableId> {
-            StableId::new("mfm.test.read-capability")
-                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
-        }
-
-        fn total_attempt_bound() -> std::num::NonZeroU16 {
-            std::num::NonZeroU16::new(1).expect("nonzero")
-        }
-
-        fn bind_evidence(
-            _intent: &Self::Intent,
-            _evidence: &Self::Evidence,
-        ) -> mfm_capabilities::Result<()> {
-            Ok(())
-        }
-    }
-
-    struct ForeignRead;
-
-    impl AccessCapabilityContract for ForeignRead {
-        type Mode = ReadMode;
-        type Intent = ForeignContext;
-        type Evidence = ForeignContext;
-        type Facts = mfm_capabilities::NoPriorFacts;
-
-        fn contract_id() -> mfm_capabilities::Result<StableId> {
-            StableId::new("mfm.test.foreign-read-capability")
-                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
-        }
-
-        fn total_attempt_bound() -> std::num::NonZeroU16 {
-            std::num::NonZeroU16::new(1).expect("nonzero")
-        }
-
-        fn bind_evidence(
-            _intent: &Self::Intent,
-            _evidence: &Self::Evidence,
-        ) -> mfm_capabilities::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn context_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
-        let mut builder = ProgramCatalog::builder();
-        builder.register_value::<Context>().expect("context type");
-        builder
-            .register_capability::<TestRead>()
-            .expect("test read capability");
-        builder
-    }
-
-    fn all_context_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
-        let mut builder = context_catalog_builder();
-        builder
-            .register_value::<ForeignContext>()
-            .expect("foreign context type");
-        builder
-    }
-
-    fn context_contract() -> ContentRef {
-        mfm_program::nominal_contract_ref::<Context>().expect("context contract")
-    }
-
-    #[test]
-    fn session_retains_non_clone_context() {
-        assert_eq!(
-            PureState::state_id().expect("state").as_str(),
-            "mfm.test.pure-state"
-        );
-        let builder = context_catalog_builder();
-        let contract = context_contract();
-        let doc = mfm_program::single_trust::ProgramDocument::new(
-            StableId::new("mfm.test.entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            Vec::new(),
-        )
-        .expect("document");
-        let (catalog, _program) = builder.finish(doc).expect("catalog");
-        let value = catalog
-            .qualify(contract, Context { value: 7 })
-            .expect("value");
-        assert_eq!(value.as_ref().value, 7);
-        let value = value.into_value();
-        assert_eq!(value.value, 7);
-    }
-
-    #[test]
-    fn assembly_requires_and_retrieves_typed_pure_registration() {
-        let contract = context_contract();
-        let implementation_ref = ContentRef::new(
-            Context::schema_id().expect("schema"),
-            mfm_ids::ContentDigest::from_digest(
-                mfm_ids::DigestAlgorithm::Sha256V1,
-                mfm_ids::DigestBytes::from_array([4; 32]),
-            ),
-        )
-        .expect("implementation ref");
-        let document = mfm_program::single_trust::ProgramDocument::new(
-            StableId::new("mfm.test.registered-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                mfm_program::single_trust::StateDeclaration::new(
-                    SequentialControlAddress::new(0, Vec::new()).expect("address"),
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    mfm_program::single_trust::ExecutionMode::Pure,
-                    true,
-                )
-                .expect("state"),
-            ))],
-        )
-        .expect("document");
-        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
-        let builder = RuntimeAssemblyBuilder::new(catalog.clone(), program).expect("builder");
-        assert!(builder.finish().is_err());
-
-        let document = mfm_program::single_trust::ProgramDocument::new(
-            StableId::new("mfm.test.registered-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                mfm_program::single_trust::StateDeclaration::new(
-                    SequentialControlAddress::new(0, Vec::new()).expect("address"),
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    mfm_program::single_trust::ExecutionMode::Pure,
-                    true,
-                )
-                .expect("state"),
-            ))],
-        )
-        .expect("document");
-        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
-        let mut builder = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
-        builder
-            .register_pure::<PureState>(
-                implementation_ref.clone(),
-                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
-                    output: Context {
-                        value: input.value + 1,
-                    },
-                    facts: mfm_facts::FactProposalSet::empty(),
-                }),
-            )
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        let implementation = assembly
-            .pure_implementation::<PureState>(&implementation_ref)
-            .expect("implementation");
-        assert_eq!(
-            implementation.evaluate(&Context { value: 4 }),
-            ProposedStateOutcome::Success {
-                output: Context { value: 5 },
-                facts: mfm_facts::FactProposalSet::empty(),
-            }
-        );
-    }
-
-    #[test]
-    fn assembly_rejects_missing_surplus_and_wrong_typed_implementations_without_callbacks() {
-        let contract = context_contract();
-        let implementation_ref = ContentRef::new(
-            contract.schema_id().clone(),
-            raw_content_digest(b"mfm.test.assembly-validation-state"),
-        )
-        .expect("implementation");
-        let pure_document = || {
-            mfm_program::ProgramDocument::new(
-                StableId::new("mfm.test.assembly-validation-entry").expect("entry"),
-                contract.clone(),
-                contract.clone(),
-                vec![mfm_program::Declaration::State(Box::new(
-                    mfm_program::StateDeclaration::new(
-                        SequentialControlAddress::new(0, Vec::new()).expect("address"),
-                        implementation_ref.clone(),
-                        contract.clone(),
-                        contract.clone(),
-                        None,
-                        mfm_program::ExecutionMode::Pure,
-                        true,
-                    )
-                    .expect("state"),
-                ))],
-            )
-            .expect("document")
-        };
-        let callbacks = Arc::new(AtomicUsize::new(0));
-
-        let (catalog, program) = all_context_catalog_builder()
-            .finish(pure_document())
-            .expect("wrong-State catalog");
-        let mut wrong_state = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
-        let counter = Arc::clone(&callbacks);
-        assert!(wrong_state
-            .register_pure::<ForeignState>(
-                implementation_ref.clone(),
-                PureImplementation::<ForeignState>::new(move |input| {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    ProposedStateOutcome::Success {
-                        output: ForeignContext { value: input.value },
-                        facts: mfm_facts::FactProposalSet::empty(),
-                    }
-                }),
-            )
-            .is_err());
-
-        let (catalog, program) = context_catalog_builder()
-            .finish(pure_document())
-            .expect("surplus catalog");
-        let mut surplus = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
-        let first_counter = Arc::clone(&callbacks);
-        surplus
-            .register_pure::<PureState>(
-                implementation_ref.clone(),
-                PureImplementation::<PureState>::new(move |input| {
-                    first_counter.fetch_add(1, Ordering::SeqCst);
-                    ProposedStateOutcome::Success {
-                        output: Context { value: input.value },
-                        facts: mfm_facts::FactProposalSet::empty(),
-                    }
-                }),
-            )
-            .expect("declared registration");
-        let extra_ref = ContentRef::new(
-            contract.schema_id().clone(),
-            raw_content_digest(b"mfm.test.assembly-validation-extra"),
-        )
-        .expect("extra implementation");
-        let extra_counter = Arc::clone(&callbacks);
-        assert!(surplus
-            .register_pure::<PureState>(
-                extra_ref,
-                PureImplementation::<PureState>::new(move |input| {
-                    extra_counter.fetch_add(1, Ordering::SeqCst);
-                    ProposedStateOutcome::Success {
-                        output: Context { value: input.value },
-                        facts: mfm_facts::FactProposalSet::empty(),
-                    }
-                }),
-            )
-            .is_err());
-
-        let capability_ref =
-            mfm_program::capability_contract_ref::<ForeignRead>().expect("capability");
-        let adapter_ref = ContentRef::new(
-            contract.schema_id().clone(),
-            raw_content_digest(b"mfm.test.assembly-validation-adapter"),
-        )
-        .expect("adapter");
-        let binding = BindingDescriptor::new(
-            implementation_ref.clone(),
-            Some(capability_ref.clone()),
-            Some(adapter_ref.clone()),
-            ContentRef::new(
-                contract.schema_id().clone(),
-                raw_content_digest(b"mfm.test.assembly-validation-target"),
-            )
-            .expect("target"),
-            None,
-            None,
-        )
-        .expect("binding");
-        let access_document = mfm_program::ProgramDocument::new(
-            StableId::new("mfm.test.assembly-validation-access").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                mfm_program::StateDeclaration::new(
-                    SequentialControlAddress::new(0, Vec::new()).expect("address"),
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    mfm_program::ExecutionMode::Read {
-                        capability_contract_ref: capability_ref.clone(),
-                        total_attempt_bound: 1,
-                        fact_selection_required: false,
-                    },
-                    true,
-                )
-                .expect("state")
-                .with_execution_binding(binding)
-                .expect("binding"),
-            ))],
-        )
-        .expect("access document");
-        assert!(context_catalog_builder().finish(access_document).is_err());
-
-        let (catalog, program) = context_catalog_builder()
-            .finish(pure_document())
-            .expect("conflict catalog");
-        let mut conflicting = RuntimeAssemblyBuilder::new(catalog, program).expect("builder");
-        conflicting
-            .register_pure::<PureState>(
-                implementation_ref.clone(),
-                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
-                    output: Context { value: input.value },
-                    facts: mfm_facts::FactProposalSet::empty(),
-                }),
-            )
-            .expect("first registration");
-        assert!(conflicting
-            .register_pure::<PureState>(
-                implementation_ref,
-                PureImplementation::<PureState>::new(|input| ProposedStateOutcome::Success {
-                    output: Context { value: input.value },
-                    facts: mfm_facts::FactProposalSet::empty(),
-                }),
-            )
-            .is_err());
-        assert_eq!(callbacks.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn pure_evaluation_panics_are_contained_before_conclusion() {
-        let implementation = PureImplementation::<PureState>::new(|_| {
-            panic!("test pure panic");
-        });
-        assert!(matches!(
-            implementation.evaluate_contained(&Context { value: 4 }),
-            Err(RuntimeError::Unresolved)
-        ));
-    }
-
-    #[test]
-    fn access_preparation_panics_are_contained_before_commit() {
-        let reference = || {
-            let schema = Context::schema_id().expect("schema");
-            ContentRef::new(
-                schema,
-                mfm_ids::ContentDigest::from_digest(
-                    mfm_ids::DigestAlgorithm::Sha256V1,
-                    mfm_ids::DigestBytes::from_array([5; 32]),
-                ),
-            )
-            .expect("reference")
-        };
-        let contract = context_contract();
-        let implementation_ref = reference();
-        let capability_ref =
-            mfm_program::capability_contract_ref::<TestRead>().expect("capability");
-        let adapter_ref = reference();
-        let binding = BindingDescriptor::new(
-            implementation_ref.clone(),
-            Some(capability_ref.clone()),
-            Some(adapter_ref.clone()),
-            reference(),
-            None,
-            None,
-        )
-        .expect("binding");
-        let occurrence = SequentialControlAddress::new(0, Vec::new()).expect("occurrence");
-        let document = mfm_program::ProgramDocument::new(
-            StableId::new("mfm.test.preparation-panic").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                mfm_program::StateDeclaration::new(
-                    occurrence.clone(),
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    mfm_program::ExecutionMode::Read {
-                        capability_contract_ref: capability_ref.clone(),
-                        total_attempt_bound: 1,
-                        fact_selection_required: false,
-                    },
-                    true,
-                )
-                .expect("state")
-                .with_execution_binding(binding)
-                .expect("binding"),
-            ))],
-        )
-        .expect("document");
-        let input_contract = match document.declaration(&occurrence) {
-            Some(mfm_program::Declaration::State(state)) => state.input_contract_ref().clone(),
-            _ => panic!("state declaration missing"),
-        };
-        let (catalog, program) = context_catalog_builder().finish(document).expect("program");
-        let mut builder = RuntimeAssemblyBuilder::new(catalog.clone(), program).expect("builder");
-        builder
-            .register_access::<PureState, TestRead, _>(
-                implementation_ref,
-                AccessImplementation::new(
-                    |_| panic!("test preparation panic"),
-                    |_call| Box::pin(async { Err(RuntimeError::Unresolved) }),
-                ),
-                |_call| Box::pin(async { Err(RuntimeError::Unresolved) }),
-            )
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        let input = catalog
-            .qualify(input_contract, Context { value: 4 })
-            .expect("input");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run");
-        assert!(matches!(
-            PreparedExecution::<PureState, TestRead>::new(&assembly, run_id, occurrence, input,),
-            Err(RuntimeError::Preparation)
-        ));
-    }
-
-    #[test]
-    fn adapter_future_panics_are_contained_as_unresolved() {
-        let inner: AccessIngressFuture<PureState, TestRead> = Box::pin(async {
-            panic!("test adapter panic");
-        });
-        let mut future = PanicContainedFuture { inner };
-        let waker = std::task::Waker::noop();
-        let mut context = std::task::Context::from_waker(waker);
-        let result = Future::poll(Pin::new(&mut future), &mut context);
-        assert!(matches!(result, Poll::Ready(Err(RuntimeError::Unresolved))));
-    }
-
-    #[test]
-    fn direct_new_call_correlation_uses_the_checked_stable_id_grammar() {
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run");
-        let preparation = PreparationRef::new(run_id.clone(), 2, 1);
-        let call_id = mint_call_id(&run_id, &preparation).expect("call id");
-        assert_eq!(
-            call_id.as_str(),
-            "call/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/2/1"
-        );
-    }
 }

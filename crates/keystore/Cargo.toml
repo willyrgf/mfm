@@ -17,3 +17,6 @@ path = "src/lib.rs"
 mfm-ids = { path = "../kernel/ids" }
 thiserror = { workspace = true }
 zeroize = "1.7"
+
+[dev-dependencies]
+trybuild = "1.0"

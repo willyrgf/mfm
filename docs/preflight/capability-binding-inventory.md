@@ -9,11 +9,10 @@ is part of the descriptor.
 
 | Entry point | State capability | Provider owner | Intent | Raw ingress | Authentication and correlation | Evidence projection | Fact mode | Entry rule |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `mfm.portfolio/snapshot@1` | `ReadBalance` | `mfm-live/evm::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` | `EvmProviderResponse::Read`, `Rejected`, `SafeFailure`, or `IntegrityBlocked` | Complete `ExecutionBindingRef`, physical target, State/capability/adapter refs, call id, and echoed operation; `EvmReadEvidence::validate_for` binds operation and subject | `Returned`, `Rejected`, `SafeFailure`, or `IntegrityBlocked`; only bounded value/anchor or stable redacted code survives | `NoPriorFacts` | Read, three total attempts |
-| `mfm.portfolio/snapshot@1` | `ReadWalletNonceStatus` | `mfm-live/evm::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` | Same bounded provider response algebra | Same exact binding and call/operation correlation | Same strict EVM read evidence, interpreted by the State implementation | `NoPriorFacts` | Read, three total attempts |
-| `mfm.portfolio/snapshot@1` | `ReadLatestAnchor` | `mfm-live/evm::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` | Same bounded provider response algebra | Same exact binding and call/operation correlation | Same strict EVM read evidence, interpreted by the State implementation | `NoPriorFacts` | Read, three total attempts |
-| `mfm.evm/submit-transaction@1` | `ReadWalletNonceStatus` | `mfm-live/evm::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` | Same bounded provider response algebra | Same exact binding and call/operation correlation | Same strict EVM read evidence | `NoPriorFacts` | Read, three total attempts |
-| `mfm.evm/submit-transaction@1` | `BroadcastTransaction` | `mfm-live/evm::EvmAdapterBinding` and its `EvmProvider` | `BroadcastIntent` | `EvmProviderResponse::Broadcast`, `Rejected`, `PossibleEntry`, or `IntegrityBlocked` | Complete `ExecutionBindingRef`, sender, nonce domain, target, State/capability/adapter refs, call id, echoed broadcast operation, and candidate id | `Returned`, `Rejected`, or `IntegrityBlocked`; authenticated `PossibleEntry` remains unresolved and emits no evidence; no signed bytes or raw response survives | `NoPriorFacts` | one-entry `EffectMode`, one total attempt |
+| `mfm.portfolio/snapshot@1` | `EvmCapability<2>` (chain), `<6>` (anchor), and `<7>` (balance) Reads | `mfm-evm-live::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` with exact chain, source, anchor, and asset intent | `EvmProviderResponse::Read`, `Rejected`, `SafeFailure`, or `IntegrityBlocked` | Complete execution binding, physical target, State/capability/adapter refs, call id, and echoed operation; each closed capability family and `EvmReadEvidence::validate_for` bind the private complete subject and returned value | Bounded typed chain/anchor/raw-unit/decimal evidence or a stable redacted code | `NoPriorFacts` | Read, three total attempts |
+| `mfm.evm/submit-transaction@1` | `EvmCapability<0>` (nonce reservation) | `mfm-evm-live::EvmAdapterBinding` and its `WalletNonceAuthority` | `NonceReservationIntent` | Durable nonce reservation result | Exact State/capability/binding/target, tenant/sender/nonce-domain effect domain, and committed call id | `Reserved`, `Rejected`, or `IntegrityBlocked`; acknowledgement unknown remains unresolved | `NoPriorFacts` | one-entry `EffectMode`, one total attempt |
+| `mfm.evm/submit-transaction@1` | `EvmCapability<1>` (broadcast) | `mfm-evm-live::EvmAdapterBinding`, signer, and `EvmProvider` | Complete `BroadcastIntent` | `Broadcast`, `Rejected`, `PossibleEntry`, or `IntegrityBlocked` | Complete execution binding, sender, nonce domain, target, public signer key instance, call id, operation, and candidate id | `Returned`, `Rejected`, or `IntegrityBlocked`; `PossibleEntry` remains unresolved and emits no evidence | `NoPriorFacts` | one-entry `EffectMode`, one total attempt |
+| `mfm.evm/submit-transaction@1` | `EvmCapability<3>` (receipt), `<4>` (finality), and `<5>` (canonical block) Reads | `mfm-evm-live::EvmAdapterBinding` and its `EvmProvider` | `EvmReadIntent` bound to broadcast hash, finalized head, or receipt block | Same bounded read response algebra | Exact binding/target/call/operation and intent-derived private read subject | Bounded receipt/finality/canonical-block evidence | `NoPriorFacts` | Read, three total attempts |
 
 Authenticated JSON-RPC/provider material is a provider assertion, not independent chain truth. The
 adapter drops raw response bytes and maps transport ambiguity to `UnresolvedClassification`; a
@@ -49,9 +48,8 @@ resource-currentness lineage have no consumer in the final surface.
 
 The inventory is implemented by `crates/domains/evm/src/lib.rs`,
 `crates/live/evm/src/lib.rs`, `crates/kernel/program/src/single_trust.rs`, and
-`crates/kernel/runtime/src/single_trust.rs`. The focused checks are
-`admission_and_result_deserialization_reenter_domain_validation`,
-`adapter_future_panics_are_contained_as_unresolved`, the Store preparation/conclusion tests, and
-the Runtime access lifecycle counter regression. That regression separately counts provider entry,
-accepted ingress, preparation, and State interpretation and requires one of each before a durable
-conclusion is produced.
+`crates/kernel/runtime/src/single_trust.rs`. Focused evidence includes the EVM balance matrix,
+the exact live-adapter closure target, the App submission/Portfolio cutover target, Store
+preparation/conclusion tests, and the Runtime access lifecycle counter regression. Those checks
+separately count provider entry, accepted ingress, preparation, and State interpretation before a
+durable conclusion is produced.

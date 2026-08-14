@@ -279,6 +279,19 @@ BootstrapBalanceWork
 AnchoredBalanceWork
 TokenBalanceWork
 ObservedBalanceWork
+ReadWalletNonceStatus
+EvmSubmissionState
+EvmBalanceState
+ReadLatestAnchor
+ReadBalance
+BroadcastTransaction
+EvmBalanceStage
+EvmNativeBalanceInput
+EvmTokenBalanceInput
+PortfolioSourcePlan
+PortfolioCollectionPlan
+ApplicationSuspended::Admission
+document_for_run
 ```
 
 ## Deleted PostgreSQL shapes

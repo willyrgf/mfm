@@ -31,4 +31,14 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+mfm-evm-live = { path = "../live/evm" }
+mfm-signing = { path = "../signing" }
 tokio = { workspace = true }
+
+[[test]]
+name = "evm_portfolio_cutover"
+path = "tests/evm_portfolio_cutover.rs"
+
+[[test]]
+name = "capacity_envelope"
+path = "tests/capacity_envelope.rs"

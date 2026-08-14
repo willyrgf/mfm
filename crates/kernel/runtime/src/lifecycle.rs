@@ -6,15 +6,15 @@
 //! returns every live owner through an explicit outcome.
 
 use std::future::Future;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use mfm_capabilities::AccessCapabilityContract;
-#[cfg(test)]
-use mfm_ids::AppendRequestId;
 use mfm_ids::{ContentRef, RunId, StableId};
-use mfm_program::{nominal_contract_ref, ProgramCatalog, QualifiedTypedValue, QualifiedValue};
+use mfm_program::{
+    nominal_contract_ref, Program, ProgramCatalog, ProgramDocument, QualifiedTypedValue,
+    QualifiedValue, State,
+};
 use mfm_store::single_trust::{AppendDisposition, QualifiedRun, RunAction, SelectedRun};
 use mfm_store::{
     QualifiedHistoryPort, ResolvedConfigurationHead, SelectedConclusion, SelectedConclusionOutcome,
@@ -24,8 +24,8 @@ use mfm_values::MfmValue;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::single_trust::{
-    AccessHandlerResolution, AccessImplementation, CommittedCall, PreparedExecution,
-    PureImplementation, RuntimeAssembly, RuntimeError, State, UnresolvedClassification,
+    AccessImplementation, AccessResolution, CommittedCall, PreparedExecution, PureImplementation,
+    RuntimeAssembly, RuntimeError, UnresolvedClassification,
 };
 
 type LifecycleResult<T> = std::result::Result<T, RuntimeError>;
@@ -39,6 +39,20 @@ pub(crate) enum DynamicOutcome {
         facts: mfm_facts::FactProposalSet,
     },
     Failure(ErasedValue),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_limits_require_each_live_work_lane() {
+        assert!(RuntimeLimits::default().validate().is_ok());
+        assert!(RuntimeLimits::new(0, 1, 1, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 0, 1, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 1, 0, 1).validate().is_err());
+        assert!(RuntimeLimits::new(1, 1, 1, 0).validate().is_err());
+    }
 }
 
 pub(crate) struct DynamicPreparationFailure {
@@ -61,6 +75,8 @@ pub(crate) trait DynamicStateRegistration: Send + Sync {
     fn prepare_access(
         &self,
         assembly: &RuntimeAssembly,
+        document: ProgramDocument,
+        program_ref: ContentRef,
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
@@ -150,7 +166,7 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
         let input = input
             .try_downcast::<S::Input>(assembly.catalog(), input_contract)
             .map_err(|_| RuntimeError::Value)?;
-        let outcome = self.implementation.evaluate_contained(input.as_ref())?;
+        let outcome = self.implementation.evaluate_contained(input.into_value())?;
         match outcome {
             mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
                 facts.validate().map_err(|_| RuntimeError::Value)?;
@@ -173,6 +189,8 @@ impl<S: State> DynamicStateRegistration for DynamicPure<S> {
     fn prepare_access(
         &self,
         _assembly: &RuntimeAssembly,
+        _document: ProgramDocument,
+        _program_ref: ContentRef,
         _run_id: RunId,
         _occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
@@ -199,11 +217,13 @@ impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for Dynamic
     fn prepare_access(
         &self,
         assembly: &RuntimeAssembly,
+        document: ProgramDocument,
+        program_ref: ContentRef,
         run_id: RunId,
         occurrence: mfm_journal::single_trust::SequentialControlAddress,
         input: ErasedValue,
     ) -> std::result::Result<Box<dyn DynamicPrepared>, DynamicPreparationFailure> {
-        let state = match assembly.program().document().declaration(&occurrence) {
+        let state = match document.declaration(&occurrence) {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return Err(DynamicPreparationFailure {
@@ -222,7 +242,14 @@ impl<S: State, C: AccessCapabilityContract> DynamicStateRegistration for Dynamic
                     });
                 }
             };
-        let prepared = match PreparedExecution::new(assembly, run_id, occurrence, input) {
+        let prepared = match PreparedExecution::new(
+            assembly,
+            &document,
+            program_ref,
+            run_id,
+            occurrence,
+            input,
+        ) {
             Ok(prepared) => prepared,
             Err(error) => return Err(DynamicPreparationFailure { input: None, error }),
         };
@@ -297,15 +324,20 @@ impl<S: State, C: AccessCapabilityContract> DynamicCall for TypedCall<S, C> {
         } = *self;
         let expected_call_id = call.call_id().clone();
         Box::pin(async move {
-            let resolution = implementation.execute(call).await?;
-            DynamicResolution::from_handler(&assembly, &expected_call_id, resolution)
+            let resolution = call.invoke_bound_adapter().await?;
+            DynamicResolution::from_access(
+                &assembly,
+                &expected_call_id,
+                &implementation,
+                resolution,
+            )
         })
     }
 }
 
 /// Result of an access implementation before Store conclusion qualification.
 pub(crate) struct DynamicResolution {
-    input: ErasedValue,
+    input: Option<ErasedValue>,
     evidence: Option<ErasedValue>,
     outcome: Option<DynamicOutcome>,
     classification: Option<UnresolvedClassification>,
@@ -313,66 +345,91 @@ pub(crate) struct DynamicResolution {
 }
 
 impl DynamicResolution {
-    fn from_handler<S: State, C: AccessCapabilityContract>(
+    fn from_access<S: State, C: AccessCapabilityContract>(
         assembly: &RuntimeAssembly,
         expected_call_id: &StableId,
-        resolution: AccessHandlerResolution<S, S::Output, S::Failure, C>,
+        implementation: &AccessImplementation<S, C>,
+        resolution: AccessResolution<S, C>,
     ) -> LifecycleResult<Self> {
-        let (
-            brand,
-            input,
-            call_id,
-            intent,
-            evidence,
-            outcome,
-            classification,
-            _preparation,
-            fact_continuation,
-        ) = resolution.into_parts();
-        if !assembly.has_brand(&brand) || &call_id != expected_call_id {
-            return Err(RuntimeError::Identity);
-        }
-        if classification.is_some() != (evidence.is_none() && outcome.is_none())
-            || classification.is_none() != (evidence.is_some() && outcome.is_some())
-        {
-            return Err(RuntimeError::Value);
-        }
-        let input = input.erase();
-        let _intent = qualify_erased(assembly, nominal_contract_ref::<C::Intent>()?, intent)?;
-        let evidence = evidence
-            .map(|evidence| {
-                qualify_erased(assembly, nominal_contract_ref::<C::Evidence>()?, evidence)
-            })
-            .transpose()?;
-        let outcome = outcome
-            .map(|outcome| match outcome {
-                mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
-                    facts.validate().map_err(|_| RuntimeError::Value)?;
-                    Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Success {
-                        value: qualify_erased(
-                            assembly,
-                            nominal_contract_ref::<S::Output>()?,
-                            output,
-                        )?,
-                        facts,
-                    })
+        match resolution {
+            AccessResolution::Outcome(access) => {
+                let (brand, input, call_id, intent, evidence, _preparation, fact_continuation) =
+                    access.into_parts();
+                if !assembly.has_brand(&brand) || &call_id != expected_call_id {
+                    return Err(RuntimeError::Identity);
                 }
-                mfm_capabilities::ProposedStateOutcome::Failure { failure } => {
-                    Ok::<DynamicOutcome, RuntimeError>(DynamicOutcome::Failure(qualify_erased(
-                        assembly,
-                        nominal_contract_ref::<S::Failure>()?,
-                        failure,
-                    )?))
+                let _intent =
+                    qualify_erased(assembly, nominal_contract_ref::<C::Intent>()?, intent)?;
+                let outcome = implementation.interpret_contained(input.into_value(), &evidence)?;
+                let accepted_evidence =
+                    qualify_erased(assembly, nominal_contract_ref::<C::Evidence>()?, evidence)?;
+                let outcome = dynamic_outcome::<S>(assembly, outcome)?;
+                Ok(Self {
+                    input: None,
+                    evidence: Some(accepted_evidence),
+                    outcome: Some(outcome),
+                    classification: None,
+                    fact_continuation,
+                })
+            }
+            AccessResolution::BlockedIntegrity(access) => {
+                let (brand, input, call_id, intent, evidence, _preparation, fact_continuation) =
+                    access.into_parts();
+                if !assembly.has_brand(&brand) || &call_id != expected_call_id {
+                    return Err(RuntimeError::Identity);
                 }
+                let _intent =
+                    qualify_erased(assembly, nominal_contract_ref::<C::Intent>()?, intent)?;
+                let evidence =
+                    qualify_erased(assembly, nominal_contract_ref::<C::Evidence>()?, evidence)?;
+                let failure = qualify_erased(
+                    assembly,
+                    nominal_contract_ref::<S::Failure>()?,
+                    S::integrity_failure(input.as_ref()),
+                )?;
+                Ok(Self {
+                    input: None,
+                    evidence: Some(evidence),
+                    outcome: Some(DynamicOutcome::Failure(failure)),
+                    classification: None,
+                    fact_continuation,
+                })
+            }
+            AccessResolution::Unresolved(access) => {
+                let (brand, input, call_id, intent, _preparation, _facts, classification) =
+                    access.into_parts();
+                if !assembly.has_brand(&brand) || &call_id != expected_call_id {
+                    return Err(RuntimeError::Identity);
+                }
+                let _intent =
+                    qualify_erased(assembly, nominal_contract_ref::<C::Intent>()?, intent)?;
+                Ok(Self {
+                    input: Some(input.erase()),
+                    evidence: None,
+                    outcome: None,
+                    classification: Some(classification),
+                    fact_continuation: None,
+                })
+            }
+        }
+    }
+}
+
+fn dynamic_outcome<S: State>(
+    assembly: &RuntimeAssembly,
+    outcome: mfm_capabilities::ProposedStateOutcome<S::Output, S::Failure>,
+) -> LifecycleResult<DynamicOutcome> {
+    match outcome {
+        mfm_capabilities::ProposedStateOutcome::Success { output, facts } => {
+            facts.validate().map_err(|_| RuntimeError::Value)?;
+            Ok(DynamicOutcome::Success {
+                value: qualify_erased(assembly, nominal_contract_ref::<S::Output>()?, output)?,
+                facts,
             })
-            .transpose()?;
-        Ok(Self {
-            input,
-            evidence,
-            outcome,
-            classification,
-            fact_continuation,
-        })
+        }
+        mfm_capabilities::ProposedStateOutcome::Failure { failure } => Ok(DynamicOutcome::Failure(
+            qualify_erased(assembly, nominal_contract_ref::<S::Failure>()?, failure)?,
+        )),
     }
 }
 
@@ -887,7 +944,7 @@ impl Runtime {
         limits: RuntimeLimits,
     ) -> LifecycleResult<Self> {
         limits.validate()?;
-        if !assembly.program().belongs_to_catalog(store.catalog()) {
+        if !assembly.catalog().same_catalog(store.catalog()) {
             return Err(RuntimeError::Identity);
         }
         Ok(Self {
@@ -938,33 +995,12 @@ impl Runtime {
     pub fn admission<T: MfmValue>(
         &self,
         run_id: RunId,
+        program: Program,
         value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
     ) -> LifecycleResult<AdmissionInput<T>> {
-        AdmissionInput::new(self, run_id, value, configuration, source_refs)
-    }
-
-    /// Resumes one exact run after cold callback-free prefix qualification.
-    pub async fn resume<T: MfmValue>(&self, input: ResumeInput<T>) -> ResumeStep {
-        if !Arc::ptr_eq(&self.inner, &input.runtime.inner) {
-            return ResumeStep::Failed(ResumeFailure::Identity);
-        }
-        let selected = match self.inner.store.select(&input.run_id).await {
-            Ok(selected) => selected,
-            Err(_) => return ResumeStep::Failed(ResumeFailure::History),
-        };
-        match self
-            .session_from_selected(selected, Some(input.value))
-            .await
-        {
-            Ok(session) => self.classify_resume_session(session).await,
-            Err(SessionBuildFailure {
-                error: RuntimeError::Capacity,
-                ..
-            }) => ResumeStep::Failed(ResumeFailure::Capacity),
-            Err(_) => ResumeStep::Failed(ResumeFailure::Identity),
-        }
+        AdmissionInput::new(self, run_id, program, value, configuration, source_refs)
     }
 
     /// Resumes one run by cold-qualified retained context owned by this Runtime.
@@ -997,14 +1033,12 @@ impl Runtime {
         self.inner.assembly.catalog().clone()
     }
 
-    /// Returns the immutable entry-point identity of this Runtime's Program.
-    pub fn entry_point_id(&self) -> StableId {
-        self.inner
-            .assembly
-            .program()
-            .document()
-            .entry_point_id()
-            .clone()
+    /// Validates that one catalog-qualified final Program resolves entirely in this live assembly.
+    ///
+    /// Trusted composition uses this before exposing an Application; admission repeats the same
+    /// check while creating its affine owner.
+    pub fn validate_program(&self, program: &Program) -> LifecycleResult<()> {
+        self.inner.assembly.validate_program(program)
     }
 
     /// Returns whether a configuration head was issued by this Runtime's exact Store opening.
@@ -1029,25 +1063,10 @@ impl Runtime {
 
     async fn execute_committed_access(
         &self,
-        occurrence: mfm_journal::single_trust::SequentialControlAddress,
+        _occurrence: mfm_journal::single_trust::SequentialControlAddress,
         call: Box<dyn DynamicCall>,
         selected: SelectedRun,
     ) -> RuntimeStep {
-        let _state = match self
-            .inner
-            .assembly
-            .program()
-            .document()
-            .declaration(&occurrence)
-        {
-            Some(mfm_program::Declaration::State(state)) => state,
-            _ => {
-                return RuntimeStep::Failed {
-                    history: selected.into_qualified_run(),
-                    error: RuntimeError::Identity,
-                }
-            }
-        };
         let resolution = {
             let _ingress_permit = match self.acquire_ingress_job().await {
                 Ok(permit) => permit,
@@ -1075,10 +1094,12 @@ impl Runtime {
                 .await;
         };
         if let Some(classification) = resolution.classification {
-            return match self
-                .session_from_selected(selected, Some(resolution.input))
-                .await
-            {
+            let Some(input) = resolution.input else {
+                return self
+                    .neutral_access(selected, UnresolvedClassification::InvalidResponse)
+                    .await;
+            };
+            return match self.session_from_selected(selected, Some(input)).await {
                 Ok(session) => RuntimeStep::Unresolved {
                     session,
                     classification,
@@ -1203,6 +1224,7 @@ impl Runtime {
     async fn spawn_typed<T: MfmValue>(
         &self,
         run_id: RunId,
+        program: Program,
         value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
@@ -1214,13 +1236,7 @@ impl Runtime {
         let outcome = self
             .inner
             .store
-            .admit(
-                run_id,
-                self.inner.assembly.program(),
-                &value,
-                configuration,
-                source_refs,
-            )
+            .admit(run_id, &program, &value, configuration, source_refs)
             .await;
         let value = value.erase();
         match outcome {
@@ -1255,7 +1271,12 @@ impl Runtime {
         selected: SelectedRun,
         supplied: Option<ErasedValue>,
     ) -> std::result::Result<RunSession, SessionBuildFailure> {
-        if selected.program_ref() != self.inner.assembly.program().program_ref().content_ref() {
+        if self
+            .inner
+            .assembly
+            .validate_program(selected.program())
+            .is_err()
+        {
             return Err(SessionBuildFailure {
                 selected,
                 error: RuntimeError::Identity,
@@ -1341,13 +1362,9 @@ impl RunSession {
             latest,
             _active_permit,
         } = self;
-        let state = match runtime
-            .inner
-            .assembly
-            .program()
-            .document()
-            .declaration(&occurrence)
-        {
+        let document = selected.program().document().clone();
+        let program_ref = selected.program_ref().clone();
+        let state = match document.declaration(&occurrence) {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
@@ -1383,7 +1400,14 @@ impl RunSession {
         let prepare_occurrence = occurrence.clone();
         let prepared_result = match tokio::task::spawn_blocking(move || {
             let _planning_permit = _planning_permit;
-            registration.prepare_access(&assembly, run_id, prepare_occurrence, latest)
+            registration.prepare_access(
+                &assembly,
+                document,
+                program_ref,
+                run_id,
+                prepare_occurrence,
+                latest,
+            )
         })
         .await
         {
@@ -1451,13 +1475,8 @@ impl RunSession {
             latest,
             _active_permit,
         } = self;
-        let state = match runtime
-            .inner
-            .assembly
-            .program()
-            .document()
-            .declaration(&occurrence)
-        {
+        let document = selected.program().document().clone();
+        let state = match document.declaration(&occurrence) {
             Some(mfm_program::Declaration::State(state)) => state,
             _ => {
                 return RuntimeStep::Failed {
@@ -1597,6 +1616,7 @@ impl RunSession {
 pub struct AdmissionInput<T: MfmValue> {
     runtime: Runtime,
     run_id: RunId,
+    program: Program,
     value: QualifiedTypedValue<T>,
     configuration: ResolvedConfigurationHead,
     source_refs: Vec<ContentRef>,
@@ -1607,24 +1627,22 @@ impl<T: MfmValue> AdmissionInput<T> {
     pub fn new(
         runtime: &Runtime,
         run_id: RunId,
+        program: Program,
         value: QualifiedTypedValue<T>,
         configuration: ResolvedConfigurationHead,
         source_refs: Vec<ContentRef>,
     ) -> LifecycleResult<Self> {
-        if !value.belongs_to_catalog(runtime.inner.assembly.catalog())
-            || value.contract_ref()
-                != runtime
-                    .inner
-                    .assembly
-                    .program()
-                    .document()
-                    .admitted_context_contract_ref()
+        if !program.belongs_to_catalog(runtime.inner.assembly.catalog())
+            || runtime.inner.assembly.validate_program(&program).is_err()
+            || !value.belongs_to_catalog(runtime.inner.assembly.catalog())
+            || value.contract_ref() != program.document().admitted_context_contract_ref()
         {
             return Err(RuntimeError::Identity);
         }
         Ok(Self {
             runtime: runtime.clone(),
             run_id,
+            program,
             value,
             configuration,
             source_refs,
@@ -1636,1156 +1654,11 @@ impl<T: MfmValue> AdmissionInput<T> {
         self.runtime
             .spawn_typed(
                 self.run_id,
+                self.program,
                 self.value,
                 self.configuration,
                 self.source_refs,
             )
             .await
-    }
-}
-
-/// Typed cold-resume owner carrying the admitted value needed for exact catalog reification.
-pub struct ResumeInput<T: MfmValue> {
-    runtime: Runtime,
-    run_id: RunId,
-    value: ErasedValue,
-    _marker: PhantomData<fn() -> T>,
-}
-
-impl<T: MfmValue> ResumeInput<T> {
-    /// Creates a resume owner from a catalog-qualified admitted value.
-    pub fn new(
-        runtime: &Runtime,
-        run_id: RunId,
-        value: QualifiedTypedValue<T>,
-    ) -> LifecycleResult<Self> {
-        if !value.belongs_to_catalog(runtime.inner.assembly.catalog()) {
-            return Err(RuntimeError::Identity);
-        }
-        Ok(Self {
-            value: value.erase(),
-            runtime: runtime.clone(),
-            run_id,
-            _marker: PhantomData,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_canonical::raw_content_digest;
-    use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
-    use mfm_program::single_trust::{
-        BindingDescriptor, ExecutionMode, ProgramDocument, StateDeclaration,
-    };
-    use mfm_program_derive::{MfmConfig as DeriveMfmConfig, MfmValue as DeriveMfmValue};
-    use mfm_store::{
-        BackendAppendCommand, BackendAppendOutcome, BackendConfigurationOutcome, BackendFuture,
-        ConfigurationAppendCommand, ConfigurationCommitOutcome, MemoryStructuredBackend,
-        RawConfigurationRevision, RawFactSnapshot, RawHistoryLoadLimit, RawRunPrefix,
-        StoreWorkLimits, StructuredStore, StructuredStoreBackend, StructuredStoreIdentity,
-    };
-    use mfm_values::ValidatedConfig;
-    use serde::{Deserialize, Serialize};
-    use std::num::NonZeroU16;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    #[test]
-    fn runtime_limits_require_one_permit_per_work_lane() {
-        assert!(RuntimeLimits::default().validate().is_ok());
-        assert_eq!(RuntimeLimits::default().max_cpu_jobs(), 8);
-        assert!(RuntimeLimits::new(0, 1, 1, 1).validate().is_err());
-        assert!(RuntimeLimits::new(1, 0, 1, 1).validate().is_err());
-        assert!(RuntimeLimits::new(1, 1, 0, 1).validate().is_err());
-        assert!(RuntimeLimits::new(1, 1, 1, 0).validate().is_err());
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, DeriveMfmValue)]
-    #[serde(deny_unknown_fields)]
-    struct TestContext {
-        value: u64,
-    }
-
-    #[derive(Debug, Serialize, Deserialize, DeriveMfmConfig)]
-    #[serde(deny_unknown_fields)]
-    struct TestConfig {
-        value: u64,
-    }
-
-    impl crate::single_trust::FailureValue for TestContext {
-        fn integrity_blocked() -> Self {
-            Self { value: 0 }
-        }
-    }
-
-    struct TestPure;
-
-    impl State for TestPure {
-        type Input = TestContext;
-        type Output = TestContext;
-        type Failure = TestContext;
-
-        fn state_id() -> LifecycleResult<StableId> {
-            StableId::new("mfm.test.lifecycle-pure").map_err(|_| RuntimeError::Identity)
-        }
-    }
-
-    struct TestAccess;
-
-    impl State for TestAccess {
-        type Input = TestContext;
-        type Output = TestContext;
-        type Failure = TestContext;
-
-        fn state_id() -> LifecycleResult<StableId> {
-            StableId::new("mfm.test.lifecycle-access").map_err(|_| RuntimeError::Identity)
-        }
-    }
-
-    struct TestRead;
-
-    impl AccessCapabilityContract for TestRead {
-        type Mode = ReadMode;
-        type Intent = TestContext;
-        type Evidence = TestContext;
-        type Facts = NoPriorFacts;
-
-        fn contract_id() -> mfm_capabilities::Result<StableId> {
-            StableId::new("mfm.test.lifecycle-read")
-                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
-        }
-
-        fn total_attempt_bound() -> NonZeroU16 {
-            NonZeroU16::new(1).expect("nonzero")
-        }
-
-        fn bind_evidence(
-            intent: &Self::Intent,
-            evidence: &Self::Evidence,
-        ) -> mfm_capabilities::Result<()> {
-            (evidence.value == intent.value + 1)
-                .then_some(())
-                .ok_or(mfm_capabilities::CapabilityError::EvidenceBinding)
-        }
-    }
-
-    struct TestEffect;
-
-    impl AccessCapabilityContract for TestEffect {
-        type Mode = EffectMode;
-        type Intent = TestContext;
-        type Evidence = TestContext;
-        type Facts = NoPriorFacts;
-
-        fn contract_id() -> mfm_capabilities::Result<StableId> {
-            StableId::new("mfm.test.lifecycle-effect")
-                .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
-        }
-
-        fn total_attempt_bound() -> NonZeroU16 {
-            NonZeroU16::new(1).expect("nonzero")
-        }
-
-        fn bind_evidence(
-            intent: &Self::Intent,
-            evidence: &Self::Evidence,
-        ) -> mfm_capabilities::Result<()> {
-            (evidence.value == intent.value + 1)
-                .then_some(())
-                .ok_or(mfm_capabilities::CapabilityError::EvidenceBinding)
-        }
-    }
-
-    fn test_ref(label: &[u8]) -> ContentRef {
-        let schema = TestContext::schema_id().expect("schema");
-        ContentRef::new(schema, raw_content_digest(label)).expect("content ref")
-    }
-
-    fn test_catalog_builder() -> mfm_program::ProgramCatalogBuilder {
-        let mut builder = ProgramCatalog::builder();
-        builder
-            .register_value::<TestContext>()
-            .expect("test context");
-        builder
-            .register_capability::<TestRead>()
-            .expect("test read capability");
-        builder
-            .register_capability::<TestEffect>()
-            .expect("test effect capability");
-        builder
-    }
-
-    fn test_identity() -> StructuredStoreIdentity {
-        StructuredStoreIdentity::new(
-            mfm_ids::StoreScopeId::new("mfm.store_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("scope"),
-            mfm_ids::StoreEpoch::new(1),
-            mfm_ids::TenantScopeId::new("mfm.tenant_scope.v1:0123456789abcdef0123456789abcdef")
-                .expect("tenant"),
-        )
-    }
-
-    fn pure_runtime_assembly(
-        pure_entries: Option<Arc<AtomicUsize>>,
-    ) -> (
-        crate::single_trust::RuntimeAssembly,
-        ProgramCatalog,
-        ContentRef,
-    ) {
-        let contract = nominal_contract_ref::<TestContext>().expect("contract");
-        let first_implementation_ref = test_ref(b"mfm.test.concurrent-pure-first");
-        let second_implementation_ref = test_ref(b"mfm.test.concurrent-pure-second");
-        let first_occurrence =
-            mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
-                .expect("occurrence");
-        let second_occurrence =
-            mfm_journal::single_trust::SequentialControlAddress::new(1, Vec::new())
-                .expect("occurrence");
-        let document = ProgramDocument::new(
-            StableId::new("mfm.test.concurrent-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![
-                mfm_program::Declaration::State(Box::new(
-                    StateDeclaration::with_next(
-                        first_occurrence,
-                        first_implementation_ref.clone(),
-                        contract.clone(),
-                        contract.clone(),
-                        None,
-                        ExecutionMode::Pure,
-                        second_occurrence.clone(),
-                    )
-                    .expect("state"),
-                )),
-                mfm_program::Declaration::State(Box::new(
-                    StateDeclaration::new(
-                        second_occurrence,
-                        second_implementation_ref.clone(),
-                        contract.clone(),
-                        contract,
-                        None,
-                        ExecutionMode::Pure,
-                        true,
-                    )
-                    .expect("state"),
-                )),
-            ],
-        )
-        .expect("document");
-        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
-        let implementation = PureImplementation::<TestPure>::new(move |input| {
-            if let Some(pure_entries) = &pure_entries {
-                pure_entries.fetch_add(1, Ordering::SeqCst);
-            }
-            mfm_capabilities::ProposedStateOutcome::Success {
-                output: TestContext {
-                    value: input.value + 1,
-                },
-                facts: mfm_facts::FactProposalSet::empty(),
-            }
-        });
-        let mut builder =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
-                .expect("assembly builder");
-        builder
-            .register_pure(first_implementation_ref, implementation.clone())
-            .expect("registration");
-        builder
-            .register_pure(second_implementation_ref, implementation)
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        (
-            assembly,
-            catalog,
-            nominal_contract_ref::<TestContext>().expect("contract"),
-        )
-    }
-
-    fn runtime_with_ports(
-        assembly: RuntimeAssembly,
-        store: mfm_store::OpenedStructuredStore,
-    ) -> (
-        Runtime,
-        mfm_store::ConfigurationStore,
-        mfm_store::HistoryReader,
-    ) {
-        let (history, reader, configuration, _audit) = store.split().into_parts();
-        (
-            Runtime::new(assembly, history).expect("runtime"),
-            configuration,
-            reader,
-        )
-    }
-
-    fn pure_runtime_fixture() -> (
-        Runtime,
-        mfm_store::ConfigurationStore,
-        mfm_store::HistoryReader,
-        ProgramCatalog,
-        ContentRef,
-    ) {
-        let (assembly, catalog, contract) = pure_runtime_assembly(None);
-        let store = StructuredStore::open_memory(
-            test_identity(),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .expect("store");
-        let (runtime, configuration, reader) = runtime_with_ports(assembly, store);
-        (runtime, configuration, reader, catalog, contract)
-    }
-
-    async fn test_configuration(
-        configuration: &mfm_store::ConfigurationStore,
-    ) -> ResolvedConfigurationHead {
-        let owner = configuration
-            .initial_write_session::<TestConfig>()
-            .prepare_local(
-                AppendRequestId::new("runtime-test-configuration-000001").expect("request"),
-                ValidatedConfig::new(TestConfig { value: 1 }).expect("config"),
-            )
-            .expect("configuration owner");
-        match configuration
-            .commit(owner)
-            .await
-            .expect("configuration commit")
-        {
-            ConfigurationCommitOutcome::NewlyCommitted(resolved)
-            | ConfigurationCommitOutcome::Found(resolved) => resolved.into_head(),
-            other => panic!("unexpected configuration outcome: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn resume_rejects_a_run_admitted_under_a_different_current_program() {
-        let contract = nominal_contract_ref::<TestContext>().expect("contract");
-        let admitted_document = ProgramDocument::new(
-            StableId::new("mfm.test.retained-program-a").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            Vec::new(),
-        )
-        .expect("admitted document");
-        let current_document = ProgramDocument::new(
-            StableId::new("mfm.test.retained-program-b").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            Vec::new(),
-        )
-        .expect("current document");
-        let (catalog, admitted_program) = test_catalog_builder()
-            .finish(admitted_document)
-            .expect("catalog");
-        let current_program = catalog.program(current_document).expect("current program");
-        let admitted_assembly =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), admitted_program)
-                .expect("admitted assembly")
-                .finish()
-                .expect("admitted assembly finish");
-        let current_assembly =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), current_program)
-                .expect("current assembly")
-                .finish()
-                .expect("current assembly finish");
-
-        let identity = test_identity();
-        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
-        let admitted_store = StructuredStore::open(
-            backend.clone(),
-            identity.clone(),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .await
-        .expect("admitted store");
-        let current_store = StructuredStore::open(
-            backend,
-            identity,
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .await
-        .expect("current store");
-        let (admitted_history, _, configuration, _) = admitted_store.split().into_parts();
-        let (current_history, _, _, _) = current_store.split().into_parts();
-        let admitted_runtime = Runtime::new(admitted_assembly, admitted_history).expect("runtime");
-        let current_runtime = Runtime::new(current_assembly, current_history).expect("runtime");
-        let configuration = test_configuration(&configuration).await;
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let value = catalog
-            .qualify(contract, TestContext { value: 1 })
-            .expect("qualified input");
-        assert!(matches!(
-            admitted_runtime
-                .admission(run_id.clone(), value, configuration, Vec::new())
-                .expect("admission")
-                .spawn()
-                .await,
-            SpawnStep::Terminal(_)
-        ));
-        assert!(matches!(
-            current_runtime.resume_run(run_id).await,
-            ResumeStep::Failed(ResumeFailure::Identity)
-        ));
-    }
-
-    struct UnknownConclusionBackend {
-        inner: Arc<MemoryStructuredBackend>,
-        injected: AtomicUsize,
-    }
-
-    impl UnknownConclusionBackend {
-        fn new(inner: Arc<MemoryStructuredBackend>) -> Self {
-            Self {
-                inner,
-                injected: AtomicUsize::new(0),
-            }
-        }
-    }
-
-    impl StructuredStoreBackend for UnknownConclusionBackend {
-        fn identity(&self) -> StructuredStoreIdentity {
-            self.inner.identity()
-        }
-
-        fn load_complete_prefix<'a>(
-            &'a self,
-            run_id: &'a RunId,
-            limit: RawHistoryLoadLimit,
-        ) -> BackendFuture<'a, Option<RawRunPrefix>> {
-            self.inner.load_complete_prefix(run_id, limit)
-        }
-
-        fn compare_and_append<'a>(
-            &'a self,
-            command: &'a BackendAppendCommand<'a>,
-        ) -> BackendFuture<'a, BackendAppendOutcome> {
-            let inner = Arc::clone(&self.inner);
-            let injected = &self.injected;
-            Box::pin(async move {
-                let outcome = inner.compare_and_append(command).await?;
-                if !command.is_admission()
-                    && matches!(outcome, BackendAppendOutcome::NewlyCommitted)
-                    && injected.fetch_add(1, Ordering::SeqCst) == 0
-                {
-                    return Ok(BackendAppendOutcome::AcknowledgementUnknown);
-                }
-                Ok(outcome)
-            })
-        }
-
-        fn load_configuration<'a>(&'a self) -> BackendFuture<'a, Vec<RawConfigurationRevision>> {
-            self.inner.load_configuration()
-        }
-
-        fn compare_and_append_configuration<'a>(
-            &'a self,
-            command: &'a ConfigurationAppendCommand<'a>,
-        ) -> BackendFuture<'a, BackendConfigurationOutcome> {
-            self.inner.compare_and_append_configuration(command)
-        }
-
-        fn load_facts<'a>(&'a self) -> BackendFuture<'a, RawFactSnapshot> {
-            self.inner.load_facts()
-        }
-
-        fn audit_run_ids<'a>(&'a self) -> BackendFuture<'a, Vec<RunId>> {
-            self.inner.audit_run_ids()
-        }
-    }
-
-    #[derive(Default)]
-    struct AccessCounters {
-        provider_entries: AtomicUsize,
-        ingress: AtomicUsize,
-        preparations: AtomicUsize,
-        interpretations: AtomicUsize,
-    }
-
-    #[cfg(target_os = "linux")]
-    fn process_vm_hwm_bytes() -> Option<usize> {
-        std::fs::read_to_string("/proc/self/status")
-            .ok()?
-            .lines()
-            .find_map(|line| line.strip_prefix("VmHWM:")?.split_whitespace().next())
-            .and_then(|kilobytes| kilobytes.parse::<usize>().ok())
-            .and_then(|kilobytes| kilobytes.checked_mul(1024))
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    const fn process_vm_hwm_bytes() -> Option<usize> {
-        None
-    }
-
-    #[tokio::test]
-    async fn pure_session_advances_through_runtime_and_store() {
-        let contract = nominal_contract_ref::<TestContext>().expect("contract");
-        let implementation_ref = test_ref(b"mfm.test.lifecycle-pure-implementation");
-        let second_implementation_ref = test_ref(b"mfm.test.lifecycle-pure-second-implementation");
-        let first_occurrence =
-            mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
-                .expect("occurrence");
-        let second_occurrence =
-            mfm_journal::single_trust::SequentialControlAddress::new(1, Vec::new())
-                .expect("occurrence");
-        let document = ProgramDocument::new(
-            StableId::new("mfm.test.lifecycle-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![
-                mfm_program::Declaration::State(Box::new(
-                    StateDeclaration::with_next(
-                        first_occurrence,
-                        implementation_ref.clone(),
-                        contract.clone(),
-                        contract.clone(),
-                        None,
-                        ExecutionMode::Pure,
-                        second_occurrence.clone(),
-                    )
-                    .expect("state"),
-                )),
-                mfm_program::Declaration::State(Box::new(
-                    StateDeclaration::new(
-                        second_occurrence,
-                        second_implementation_ref.clone(),
-                        contract.clone(),
-                        contract.clone(),
-                        None,
-                        ExecutionMode::Pure,
-                        true,
-                    )
-                    .expect("state"),
-                )),
-            ],
-        )
-        .expect("document");
-        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
-        let mut builder =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
-                .expect("assembly builder");
-        let pure_entries = Arc::new(AtomicUsize::new(0));
-        let pure_entries_for_state = Arc::clone(&pure_entries);
-        let pure_implementation = PureImplementation::<TestPure>::new(move |input| {
-            pure_entries_for_state.fetch_add(1, Ordering::SeqCst);
-            mfm_capabilities::ProposedStateOutcome::Success {
-                output: TestContext {
-                    value: input.value + 1,
-                },
-                facts: mfm_facts::FactProposalSet::empty(),
-            }
-        });
-        builder
-            .register_pure(implementation_ref, pure_implementation.clone())
-            .expect("registration");
-        builder
-            .register_pure(second_implementation_ref, pure_implementation)
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        let store = StructuredStore::open_memory(
-            test_identity(),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .expect("store");
-        let (runtime, configuration_store, reader) = runtime_with_ports(assembly, store);
-        let value = catalog
-            .qualify(contract, TestContext { value: 1 })
-            .expect("qualified input");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let configuration = test_configuration(&configuration_store).await;
-        let admission = runtime
-            .admission(run_id, value, configuration, Vec::new())
-            .expect("admission");
-        let session = match admission.spawn().await {
-            SpawnStep::Active(session) => session,
-            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
-        };
-        let advanced = match session.drive().await {
-            RuntimeStep::Advanced(session) => session,
-            RuntimeStep::Failed { error, .. } => panic!("unexpected drive failure: {error:?}"),
-            other => panic!("unexpected drive outcome: {}", runtime_name(&other)),
-        };
-        assert_eq!(advanced.head_sequence(), 2);
-        let run_id = advanced.run_id().clone();
-        let hot_prefix = reader.load(&run_id).await.expect("hot prefix");
-        let hot_frame_bytes: usize = hot_prefix
-            .frames()
-            .iter()
-            .map(|frame| {
-                frame
-                    .canonical_bytes()
-                    .expect("frame bytes")
-                    .as_bytes()
-                    .len()
-            })
-            .sum();
-        let hot_context_bytes = advanced.latest.canonical_bytes().len();
-        let hot_process_vm_hwm_bytes = process_vm_hwm_bytes();
-        eprintln!(
-            "capacity-envelope runtime pure hot_head={} hot_frame_bytes={} hot_context_bytes={} process_vm_hwm_bytes={:?} executor=retained-session",
-            hot_prefix.head_sequence(),
-            hot_frame_bytes,
-            hot_context_bytes,
-            hot_process_vm_hwm_bytes,
-        );
-        drop(advanced);
-        let cold = match runtime.resume_run(run_id).await {
-            ResumeStep::Active(session) => session,
-            other => panic!("unexpected cold resume outcome: {}", resume_name(&other)),
-        };
-        let cold_context_bytes = cold.latest.canonical_bytes().len();
-        let terminal = match cold.drive().await {
-            RuntimeStep::Terminal(terminal) => terminal,
-            RuntimeStep::Failed { error, .. } => panic!("unexpected cold drive failure: {error:?}"),
-            other => panic!("unexpected cold drive outcome: {}", runtime_name(&other)),
-        };
-        assert_eq!(terminal.head_sequence(), 3);
-        eprintln!(
-            "capacity-envelope runtime pure cold_resume_head={} cold_frame_bytes={} cold_context_bytes={} process_vm_hwm_bytes={:?} executor=one-shot-resume-drive",
-            terminal.head_sequence(),
-            terminal
-                .qualified_run()
-                .frames()
-                .iter()
-                .map(|frame| frame
-                    .canonical_bytes()
-                    .expect("frame bytes")
-                    .as_bytes()
-                    .len())
-            .sum::<usize>(),
-            cold_context_bytes,
-            process_vm_hwm_bytes(),
-        );
-        assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn unknown_pure_conclusion_recovery_does_not_reexecute_state() {
-        let pure_entries = Arc::new(AtomicUsize::new(0));
-        let (assembly, catalog, contract) = pure_runtime_assembly(Some(Arc::clone(&pure_entries)));
-        let identity = test_identity();
-        let backend = Arc::new(UnknownConclusionBackend::new(Arc::new(
-            MemoryStructuredBackend::new(identity.clone()),
-        )));
-        let store = StructuredStore::open(
-            backend,
-            identity,
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .await
-        .expect("store");
-        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:4123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let value = catalog
-            .qualify(contract, TestContext { value: 1 })
-            .expect("qualified input");
-        let configuration = test_configuration(&configuration_store).await;
-        let admission = runtime
-            .admission(run_id, value, configuration, Vec::new())
-            .expect("admission");
-        let session = match admission.spawn().await {
-            SpawnStep::Active(session) => session,
-            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
-        };
-        let suspended = match session.drive().await {
-            RuntimeStep::Suspended(suspended) => suspended,
-            other => panic!("unexpected first drive outcome: {}", runtime_name(&other)),
-        };
-        assert_eq!(pure_entries.load(Ordering::SeqCst), 1);
-        let advanced = match suspended.resolve().await {
-            RuntimeStep::Advanced(session) => session,
-            other => panic!("unexpected conclusion recovery: {}", runtime_name(&other)),
-        };
-        assert_eq!(advanced.head_sequence(), 2);
-        assert_eq!(pure_entries.load(Ordering::SeqCst), 1);
-        let terminal = match advanced.drive().await {
-            RuntimeStep::Terminal(terminal) => terminal,
-            other => panic!(
-                "unexpected terminal drive outcome: {}",
-                runtime_name(&other)
-            ),
-        };
-        assert_eq!(terminal.head_sequence(), 3);
-        assert_eq!(pure_entries.load(Ordering::SeqCst), 2);
-    }
-
-    #[tokio::test]
-    async fn concurrent_spawn_and_resume_share_cas_outcomes_without_duplicate_pure_entries() {
-        let (runtime, configuration_store, _reader, catalog, contract) = pure_runtime_fixture();
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let configuration = test_configuration(&configuration_store).await;
-        let value = |amount| {
-            catalog
-                .qualify(contract.clone(), TestContext { value: amount })
-                .expect("qualified value")
-        };
-        let left = runtime
-            .admission(run_id.clone(), value(1), configuration.clone(), Vec::new())
-            .expect("admission");
-        let right = runtime
-            .admission(run_id.clone(), value(1), configuration.clone(), Vec::new())
-            .expect("admission");
-        let (left, right) = tokio::join!(left.spawn(), right.spawn());
-        assert!(matches!(
-            left,
-            SpawnStep::Active(_) | SpawnStep::Terminal(_)
-        ));
-        assert!(matches!(
-            right,
-            SpawnStep::Active(_) | SpawnStep::Terminal(_)
-        ));
-
-        let value = value(1);
-        let seed = runtime
-            .admission(run_id.clone(), value, configuration, Vec::new())
-            .expect("same admission");
-        drop(seed.spawn().await);
-
-        let (left, right) = tokio::join!(
-            runtime.resume_run(run_id.clone()),
-            runtime.resume_run(run_id)
-        );
-        let left = match left {
-            ResumeStep::Active(session) => session,
-            other => panic!("unexpected left resume: {}", resume_name(&other)),
-        };
-        let right = match right {
-            ResumeStep::Active(session) => session,
-            other => panic!("unexpected right resume: {}", resume_name(&other)),
-        };
-        let (left, right) = tokio::join!(left.drive(), right.drive());
-        assert!(matches!(
-            left,
-            RuntimeStep::Advanced(_) | RuntimeStep::Terminal(_)
-        ));
-        assert!(matches!(
-            right,
-            RuntimeStep::Advanced(_) | RuntimeStep::Terminal(_)
-        ));
-    }
-
-    #[tokio::test]
-    async fn access_session_enters_only_the_bound_adapter_and_concludes() {
-        let contract = nominal_contract_ref::<TestContext>().expect("contract");
-        let capability_contract =
-            mfm_program::capability_contract_ref::<TestRead>().expect("capability");
-        let implementation_ref = test_ref(b"mfm.test.lifecycle-access-implementation");
-        let adapter_ref = test_ref(b"mfm.test.lifecycle-access-adapter");
-        let physical_target_ref = test_ref(b"mfm.test.lifecycle-access-target");
-        let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
-            .expect("occurrence");
-        let binding = BindingDescriptor::new(
-            implementation_ref.clone(),
-            Some(capability_contract.clone()),
-            Some(adapter_ref.clone()),
-            physical_target_ref,
-            None,
-            None,
-        )
-        .expect("binding");
-        let document = ProgramDocument::new(
-            StableId::new("mfm.test.lifecycle-access-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                StateDeclaration::new(
-                    occurrence,
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    ExecutionMode::Read {
-                        capability_contract_ref: capability_contract.clone(),
-                        total_attempt_bound: 1,
-                        fact_selection_required: false,
-                    },
-                    true,
-                )
-                .expect("state")
-                .with_execution_binding(binding)
-                .expect("execution binding"),
-            ))],
-        )
-        .expect("document");
-        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
-        let counters = Arc::new(AccessCounters::default());
-        let mut builder =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
-                .expect("assembly builder");
-        let counters_for_registration = Arc::clone(&counters);
-        let counters_for_state = Arc::clone(&counters);
-        let counters_for_preparation = Arc::clone(&counters);
-        builder
-            .register_access::<TestAccess, TestRead, _>(
-                implementation_ref,
-                AccessImplementation::new(
-                    move |input: &TestContext| {
-                        counters_for_preparation
-                            .preparations
-                            .fetch_add(1, Ordering::SeqCst);
-                        Ok(*input)
-                    },
-                    move |call: CommittedCall<TestAccess, TestRead>| {
-                        let counters = Arc::clone(&counters_for_state);
-                        Box::pin(async move {
-                            match call.invoke_bound_adapter().await? {
-                                crate::single_trust::AccessResolution::Outcome(accepted) => {
-                                    counters.interpretations.fetch_add(1, Ordering::SeqCst);
-                                    let output = TestContext {
-                                        value: accepted.evidence().value,
-                                    };
-                                    Ok(accepted.conclude(
-                                        mfm_capabilities::ProposedStateOutcome::Success {
-                                            output,
-                                            facts: mfm_facts::FactProposalSet::empty(),
-                                        },
-                                    ))
-                                }
-                                crate::single_trust::AccessResolution::BlockedIntegrity(
-                                    accepted,
-                                ) => Ok(accepted.conclude_blocked()),
-                                crate::single_trust::AccessResolution::Unresolved(unresolved) => {
-                                    Ok(unresolved.finish())
-                                }
-                            }
-                        })
-                    },
-                ),
-                move |call| {
-                    counters_for_registration
-                        .provider_entries
-                        .fetch_add(1, Ordering::SeqCst);
-                    let counters = Arc::clone(&counters_for_registration);
-                    Box::pin(async move {
-                        counters.ingress.fetch_add(1, Ordering::SeqCst);
-                        let evidence = TestContext {
-                            value: call.intent().value + 1,
-                        };
-                        call.accept_evidence(evidence)
-                            .map(crate::single_trust::AccessResolution::Outcome)
-                    })
-                },
-            )
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        let store = StructuredStore::open_memory(
-            test_identity(),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .expect("store");
-        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
-        let value = catalog
-            .qualify(contract, TestContext { value: 4 })
-            .expect("qualified input");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let configuration = test_configuration(&configuration_store).await;
-        let admission = runtime
-            .admission(run_id.clone(), value, configuration, Vec::new())
-            .expect("admission");
-        let session = match admission.spawn().await {
-            SpawnStep::Active(session) => session,
-            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
-        };
-        drop(session);
-        let (left, right) = tokio::join!(
-            runtime.resume_run(run_id.clone()),
-            runtime.resume_run(run_id)
-        );
-        let left = match left {
-            ResumeStep::Active(session) => session,
-            other => panic!("unexpected left resume: {}", resume_name(&other)),
-        };
-        let right = match right {
-            ResumeStep::Active(session) => session,
-            other => panic!("unexpected right resume: {}", resume_name(&other)),
-        };
-        let (left, right) = tokio::join!(left.drive(), right.drive());
-        let suspended = match (left, right) {
-            (RuntimeStep::Terminal(terminal), RuntimeStep::Suspended(suspended))
-            | (RuntimeStep::Suspended(suspended), RuntimeStep::Terminal(terminal)) => {
-                assert_eq!(terminal.head_sequence(), 3);
-                suspended
-            }
-            (left, right) => panic!(
-                "expected one terminal and one suspended preparation, got {} and {}",
-                runtime_name(&left),
-                runtime_name(&right)
-            ),
-        };
-        match suspended.resolve().await {
-            RuntimeStep::Terminal(terminal) => assert_eq!(terminal.head_sequence(), 3),
-            other => panic!(
-                "unexpected preparation resolution: {}",
-                runtime_name(&other)
-            ),
-        }
-        assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
-        assert_eq!(counters.ingress.load(Ordering::SeqCst), 1);
-        assert_eq!(counters.preparations.load(Ordering::SeqCst), 2);
-        assert_eq!(counters.interpretations.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn unresolved_effect_parks_without_another_preparation_or_provider_entry() {
-        let contract = nominal_contract_ref::<TestContext>().expect("contract");
-        let capability_contract =
-            mfm_program::capability_contract_ref::<TestEffect>().expect("capability");
-        let implementation_ref = test_ref(b"mfm.test.lifecycle-effect-implementation");
-        let adapter_ref = test_ref(b"mfm.test.lifecycle-effect-adapter");
-        let physical_target_ref = test_ref(b"mfm.test.lifecycle-effect-target");
-        let effect_domain = StableId::new("mfm.test.lifecycle-effect-domain").expect("domain");
-        let occurrence = mfm_journal::single_trust::SequentialControlAddress::new(0, Vec::new())
-            .expect("occurrence");
-        let binding = BindingDescriptor::new(
-            implementation_ref.clone(),
-            Some(capability_contract.clone()),
-            Some(adapter_ref.clone()),
-            physical_target_ref,
-            Some(effect_domain.clone()),
-            None,
-        )
-        .expect("binding");
-        let document = ProgramDocument::new(
-            StableId::new("mfm.test.lifecycle-effect-entry").expect("entry"),
-            contract.clone(),
-            contract.clone(),
-            vec![mfm_program::Declaration::State(Box::new(
-                StateDeclaration::new(
-                    occurrence,
-                    implementation_ref.clone(),
-                    contract.clone(),
-                    contract.clone(),
-                    None,
-                    ExecutionMode::Effect {
-                        capability_contract_ref: capability_contract.clone(),
-                        effect_domain,
-                        fact_selection_required: false,
-                    },
-                    true,
-                )
-                .expect("state")
-                .with_execution_binding(binding)
-                .expect("execution binding"),
-            ))],
-        )
-        .expect("document");
-        let (catalog, program) = test_catalog_builder().finish(document).expect("program");
-        let counters = Arc::new(AccessCounters::default());
-        let mut builder =
-            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), program)
-                .expect("assembly builder");
-        let preparation_counters = Arc::clone(&counters);
-        let provider_counters = Arc::clone(&counters);
-        builder
-            .register_access::<TestAccess, TestEffect, _>(
-                implementation_ref,
-                AccessImplementation::new(
-                    move |input: &TestContext| {
-                        preparation_counters
-                            .preparations
-                            .fetch_add(1, Ordering::SeqCst);
-                        Ok(*input)
-                    },
-                    move |call: CommittedCall<TestAccess, TestEffect>| {
-                        Box::pin(async move {
-                            match call.invoke_bound_adapter().await? {
-                                crate::single_trust::AccessResolution::Unresolved(unresolved) => {
-                                    Ok(unresolved.finish())
-                                }
-                                crate::single_trust::AccessResolution::Outcome(_)
-                                | crate::single_trust::AccessResolution::BlockedIntegrity(_) => {
-                                    unreachable!("test adapter is always unresolved")
-                                }
-                            }
-                        })
-                    },
-                ),
-                move |call| {
-                    provider_counters
-                        .provider_entries
-                        .fetch_add(1, Ordering::SeqCst);
-                    Box::pin(async move {
-                        Ok(crate::single_trust::AccessResolution::Unresolved(
-                            call.unresolved(
-                                crate::single_trust::UnresolvedClassification::AcknowledgementUnknown,
-                            ),
-                        ))
-                    })
-                },
-            )
-            .expect("registration");
-        let assembly = builder.finish().expect("assembly");
-        let store = StructuredStore::open_memory(
-            test_identity(),
-            catalog.clone(),
-            StoreWorkLimits::default(),
-        )
-        .expect("store");
-        let (runtime, configuration_store, _reader) = runtime_with_ports(assembly, store);
-        let value = catalog
-            .qualify(contract, TestContext { value: 4 })
-            .expect("qualified input");
-        let run_id = RunId::parse(
-            "run:sha256-jcs-v1:5123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .expect("run id");
-        let configuration = test_configuration(&configuration_store).await;
-        let admission = runtime
-            .admission(run_id.clone(), value, configuration, Vec::new())
-            .expect("admission");
-        let session = match admission.spawn().await {
-            SpawnStep::Active(session) => session,
-            other => panic!("unexpected spawn outcome: {}", spawn_name(&other)),
-        };
-        let session = match session.drive().await {
-            RuntimeStep::Unresolved {
-                session,
-                classification:
-                    crate::single_trust::UnresolvedClassification::AcknowledgementUnknown,
-            } => session,
-            other => panic!("unexpected drive outcome: {}", runtime_name(&other)),
-        };
-        assert_eq!(counters.preparations.load(Ordering::SeqCst), 1);
-        assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
-        assert!(matches!(
-            session.drive().await,
-            RuntimeStep::Parked {
-                reason: ParkReason::WaitingPreparation,
-                ..
-            }
-        ));
-        assert!(matches!(
-            runtime.resume_run(run_id).await,
-            ResumeStep::Parked(_)
-        ));
-        assert_eq!(counters.preparations.load(Ordering::SeqCst), 1);
-        assert_eq!(counters.provider_entries.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn finite_owner_fate_model_never_mints_a_call_from_a_non_new_append() {
-        #[derive(Clone, Copy)]
-        enum Operation {
-            Admission,
-            Pure,
-            Preparation,
-            Replacement,
-            Conclusion,
-            Fact,
-            Match,
-            Failure,
-            Late,
-        }
-
-        #[derive(Clone, Copy, PartialEq, Eq)]
-        enum AppendResult {
-            NewlyCommitted,
-            Found,
-            Stale,
-            AcknowledgementUnknown,
-            Rejected,
-        }
-
-        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-        enum Owner {
-            Prepared,
-            Call,
-            Suspended,
-            History,
-        }
-
-        let operations = [
-            Operation::Admission,
-            Operation::Pure,
-            Operation::Preparation,
-            Operation::Replacement,
-            Operation::Conclusion,
-            Operation::Fact,
-            Operation::Match,
-            Operation::Failure,
-            Operation::Late,
-        ];
-        let outcomes = [
-            AppendResult::NewlyCommitted,
-            AppendResult::Found,
-            AppendResult::Stale,
-            AppendResult::AcknowledgementUnknown,
-            AppendResult::Rejected,
-        ];
-        for operation in operations {
-            for outcome in outcomes {
-                let allows_call = matches!(operation, Operation::Preparation)
-                    && matches!(outcome, AppendResult::NewlyCommitted);
-                let (owner, calls) = if allows_call {
-                    (Owner::Call, 1)
-                } else {
-                    match outcome {
-                        AppendResult::NewlyCommitted
-                        | AppendResult::Found
-                        | AppendResult::Stale => (Owner::History, 0),
-                        AppendResult::AcknowledgementUnknown | AppendResult::Rejected => {
-                            (Owner::Suspended, 0)
-                        }
-                    }
-                };
-                assert_eq!(calls, usize::from(owner == Owner::Call));
-                assert_ne!(owner, Owner::Prepared);
-                assert!(calls <= 1);
-            }
-        }
-    }
-
-    fn spawn_name(step: &SpawnStep) -> &'static str {
-        match step {
-            SpawnStep::Active(_) => "active",
-            SpawnStep::Terminal(_) => "terminal",
-            SpawnStep::Suspended(_) => "suspended",
-            SpawnStep::Conflict(_) => "conflict",
-            SpawnStep::Failed(_) => "failed",
-        }
-    }
-
-    fn runtime_name(step: &RuntimeStep) -> &'static str {
-        match step {
-            RuntimeStep::Advanced(_) => "advanced",
-            RuntimeStep::Terminal(_) => "terminal",
-            RuntimeStep::PreparationRejected { .. } => "preparation-rejected",
-            RuntimeStep::Unresolved { .. } => "unresolved",
-            RuntimeStep::Parked { .. } => "parked",
-            RuntimeStep::Suspended(_) => "suspended",
-            RuntimeStep::ConclusionRejected { .. } => "conclusion-rejected",
-            RuntimeStep::AdmissionRejected(_) => "admission-rejected",
-            RuntimeStep::Conflict { .. } => "conflict",
-            RuntimeStep::Failed { .. } => "failed",
-        }
-    }
-
-    fn resume_name(step: &ResumeStep) -> &'static str {
-        match step {
-            ResumeStep::Active(_) => "active",
-            ResumeStep::Terminal(_) => "terminal",
-            ResumeStep::Parked(_) => "parked",
-            ResumeStep::Failed(_) => "failed",
-        }
     }
 }

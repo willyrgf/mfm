@@ -12,6 +12,10 @@ readme = "README.md"
 name = "api_contract"
 path = "tests/api_contract.rs"
 
+[[test]]
+name = "assembly_cutover"
+path = "tests/assembly_cutover.rs"
+
 [package.metadata.mfm]
 layer = "kernel"
 domain-facing = false
