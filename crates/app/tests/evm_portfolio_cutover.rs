@@ -14,18 +14,19 @@ use mfm_evm_live::{
     EvmPhysicalTarget, EvmProvider, EvmProviderResponse, WalletNonceAuthority,
 };
 use mfm_ids::{
-    AppendRequestId, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId, StoreEpoch,
-    StoreScopeId, TenantScopeId,
+    AppendRequestId, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId,
+    StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_portfolio::{
-    plan_snapshot, PortfolioConfig, PortfolioContinuation, PortfolioId, PortfolioSnapshotSelector,
-    PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
+    plan_snapshot, PortfolioConfig, PortfolioContinuation, PortfolioId, PortfolioSnapshotInput,
+    PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::{capability_contract_ref, state_implementation_ref, BindingDescriptor, State};
-use mfm_runtime::{BoxFuture, Runtime, RuntimeAssemblyBuilder};
+use mfm_runtime::{BoxFuture, Runtime, RuntimeAssemblyBuilder, RuntimeStep, SpawnStep};
 use mfm_signing::{PublicSignerKeyInstance, Signer, SigningFuture, SigningRequest, SigningResult};
 use mfm_store::{
-    ConfigurationCommitOutcome, StoreWorkLimits, StructuredStore, StructuredStoreIdentity,
+    ConfigurationCommitOutcome, ResolvedConfigurationHead, StoreWorkLimits, StructuredStore,
+    StructuredStoreIdentity,
 };
 use mfm_values::ValidatedConfig;
 
@@ -312,6 +313,10 @@ async fn drive_to_failure(
 
 struct Fixture {
     application: Application,
+    runtime: Runtime,
+    portfolio_config: PortfolioConfig,
+    portfolio_configuration_head: ResolvedConfigurationHead,
+    balance_bindings: Vec<EvmBalanceBindings>,
     provider_calls: Arc<AtomicUsize>,
     provider_operations: Arc<Mutex<Vec<String>>>,
     nonce_calls: Arc<AtomicUsize>,
@@ -495,6 +500,7 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
         ],
     }))
     .expect("portfolio config");
+    let planned_portfolio_config = portfolio_config.clone();
     let selector: PortfolioSnapshotSelector = serde_json::from_value(serde_json::json!({
         "target": portfolio_id,
         "quote": "usd",
@@ -517,6 +523,7 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
         )
         .expect("portfolio owner");
     let portfolio_configuration = commit_configuration(&configuration, portfolio_owner).await;
+    let portfolio_configuration_head = portfolio_configuration.head().clone();
     let evm_config: EvmConfig = serde_json::from_value(serde_json::json!({
         "submission_routes": [{
             "target": transaction_target,
@@ -534,6 +541,8 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
         .expect("evm owner");
     let evm_configuration = commit_configuration(&configuration, evm_owner).await;
     let (submission_bindings, balance_bindings) = live.planning_bindings();
+    let test_runtime = runtime.clone();
+    let test_balance_bindings = balance_bindings.to_vec();
     let application = Application::new(
         reader,
         configuration,
@@ -548,6 +557,10 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
 
     Fixture {
         application,
+        runtime: test_runtime,
+        portfolio_config: planned_portfolio_config,
+        portfolio_configuration_head,
+        balance_bindings: test_balance_bindings,
         provider_calls,
         provider_operations,
         nonce_calls,
@@ -555,6 +568,71 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
         broadcast_requests,
         signer_ref_json,
     }
+}
+
+#[tokio::test]
+async fn forged_portfolio_route_never_enters_the_provider() {
+    let fixture = compose_application(None, false).await;
+    let selector: PortfolioSnapshotSelector = serde_json::from_value(serde_json::json!({
+        "target": "portfolio-example",
+        "quote": "usd",
+    }))
+    .expect("portfolio selector");
+    let (input, document, source_refs) = plan_snapshot(
+        selector,
+        &fixture.portfolio_config,
+        &fixture.balance_bindings,
+    )
+    .expect("portfolio plan")
+    .into_parts();
+    let mut forged_wire = serde_json::to_value(input).expect("Portfolio C0 JSON");
+    forged_wire["collections"][0]["route_ref"] =
+        serde_json::to_value(test_ref("forged-route")).expect("forged route JSON");
+    let forged_input: PortfolioSnapshotInput =
+        serde_json::from_value(forged_wire).expect("strict forged Portfolio C0");
+    let catalog = fixture.runtime.catalog();
+    let program = catalog.program(document).expect("qualified Program");
+    let value = catalog
+        .qualify(
+            program.document().admitted_context_contract_ref().clone(),
+            forged_input,
+        )
+        .expect("qualified forged C0");
+    let run_id = RunId::parse(
+        "run:sha256-jcs-v1:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    )
+    .expect("run id");
+    let session = match fixture
+        .runtime
+        .admission(
+            run_id,
+            program,
+            value,
+            fixture.portfolio_configuration_head.clone(),
+            source_refs,
+        )
+        .expect("admission")
+        .spawn()
+        .await
+    {
+        SpawnStep::Active(session) => session,
+        _ => panic!("admission must begin at Portfolio initialization"),
+    };
+    let session = match session.drive().await {
+        RuntimeStep::Advanced(session) => session,
+        _ => panic!("Portfolio initialization must advance"),
+    };
+    let session = match session.drive().await {
+        RuntimeStep::Advanced(session) => session,
+        _ => panic!("Portfolio collection entry must advance"),
+    };
+    let session = match session.drive().await {
+        RuntimeStep::Advanced(session) => session,
+        _ => panic!("route mismatch must conclude the EVM integrity failure"),
+    };
+    assert!(matches!(session.drive().await, RuntimeStep::Terminal(_)));
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_provider_operations(&fixture, &[]);
 }
 
 #[tokio::test]

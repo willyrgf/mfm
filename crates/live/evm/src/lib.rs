@@ -364,6 +364,12 @@ impl EvmAdapterBinding {
         if chain_id != self.target.chain_id {
             return Ok(unresolved(call, UnresolvedClassification::InvalidResponse));
         }
+        if intent
+            .route_ref()
+            .is_some_and(|route_ref| route_ref != self.descriptor.physical_target_ref())
+        {
+            return accept(call, EvmReadEvidence::IntegrityBlocked, true);
+        }
         let operation =
             StableId::new(operation_name).map_err(|_| EvmAdapterError::Authentication)?;
         let request = intent_request_bytes(&call)?;

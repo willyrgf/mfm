@@ -26,18 +26,19 @@ physical target. The typed EVM continuation is not recovered from history by a S
 | Boundary | Input | Output or failure | Execution |
 | --- | --- | --- | --- |
 | Admission | `PortfolioSnapshotInput` (`C0`) | `PortfolioContinuation` | One singular domain-planned value; at most 64 total EVM sources |
-| Collection entry | `PortfolioContinuation` | `EvmBalanceContext<PortfolioContinuation>` | Portfolio-owned Pure State constructs the complete child context |
+| Collection entry | `PortfolioContinuation` | `EvmBalanceContext<PortfolioContinuation>` | Portfolio-owned Pure State constructs the complete child context, including the planned secret-free route identity |
 | Asset selection | `EvmBalanceContext<PortfolioContinuation>` | `EvmBalanceAsset<PortfolioContinuation>` | Closed `Match`; either arm retains the byte-identical complete child context |
-| Native/token stages | Complete balance context | `EvmBalanceContext<PortfolioContinuation>` | Explicit sequential Read States retain checked chain, common initial anchor, asset, decimal scale, and raw units; failure routes immediately |
+| Native/token stages | Complete balance context | `EvmBalanceContext<PortfolioContinuation>` | Explicit sequential Read States retain the route-bound intent, checked chain, common initial anchor, asset, decimal scale, and raw units; the adapter checks the intent route against its committed descriptor before provider entry |
 | Collection consolidation | `EvmBalanceContext<PortfolioContinuation>` | `EvmBalanceCollectionCompletion<PortfolioContinuation>` | Pure; validates declaration order, anchor, sources, and result arithmetic |
 | Collection resume | `EvmBalanceCollectionCompletion<PortfolioContinuation>` | `PortfolioContinuation` | Portfolio-owned Pure State appends exactly one completed collection |
 | Final consolidation | `PortfolioContinuation` | `PortfolioSnapshotOutput` or `PortfolioSnapshotFailure` | Pure terminal State; no dynamic collection scheduler |
 
 `PortfolioContinuation` is the opaque caller continuation carried by EVM. EVM can transport it as
 an exact typed value but has no accessor for Portfolio semantics. `EvmBalanceResultMetadata`
-allocates the reviewed public ordinal/correlation fields once; it is not a serialized continuation
-or history handle. Completed balance results, active work, and the remaining declaration suffix are
-derived and validated as one exact ordered demand rather than stored as redundant cursors.
+allocates the reviewed public ordinal/correlation and the secret-free planned route identity once;
+it is not a serialized continuation or history handle. Completed balance results, active work, and
+the remaining declaration suffix are derived and validated as one exact ordered demand rather than
+stored as redundant cursors.
 EVM recomputes every completed integer-scaled amount from its raw units and source scale; Portfolio
 recomputes the completed collection total against its admitted collection scale before projecting it.
 

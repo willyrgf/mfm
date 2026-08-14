@@ -597,7 +597,13 @@ fn enter_portfolio_collection(
         Some(demand) => demand,
         None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
     };
-    match EvmBalanceContext::new(demand.request, input, ordinal, demand.correlation) {
+    match EvmBalanceContext::new(
+        demand.request,
+        input,
+        ordinal,
+        demand.correlation,
+        demand.route_ref,
+    ) {
         Ok(output) => portfolio_success(output),
         Err(_) => portfolio_failure(PortfolioSnapshotFailure::InvalidInput),
     }

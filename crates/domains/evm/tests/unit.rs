@@ -47,6 +47,10 @@ fn submission_failure<O>(
     }
 }
 
+fn balance_route_ref() -> ContentRef {
+    nominal_contract_ref::<EvmBalanceRequest>().expect("route reference")
+}
+
 #[test]
 fn generic_balance_completion_moves_a_non_clone_continuation() {
     let request = EvmBalanceRequest::new(
@@ -62,9 +66,14 @@ fn generic_balance_completion_moves_a_non_clone_continuation() {
     let continuation = OpaqueCallerContinuation {
         marker: "opaque".to_owned(),
     };
-    let context =
-        EvmBalanceContext::new(request.clone(), continuation, 0, "correlation".to_owned())
-            .expect("full context");
+    let context = EvmBalanceContext::new(
+        request.clone(),
+        continuation,
+        0,
+        "correlation".to_owned(),
+        balance_route_ref(),
+    )
+    .expect("full context");
     assert!(context.validate().is_ok());
     let EvmBalanceContext {
         caller_continuation,
@@ -291,20 +300,36 @@ fn balance_context_rejects_a_forged_non_prefix_work_item() {
 
 #[test]
 fn read_evidence_requires_the_exact_operation_subject_and_value() {
-    let chain_intent = EvmReadIntent::new(
+    let chain_intent = EvmReadIntent::for_balance(
         "mfm.evm.read-chain-identity@1".to_owned(),
         1,
         EvmReadSubject::ChainIdentity,
+        balance_route_ref(),
     )
     .expect("chain intent");
     let chain_evidence = EvmReadEvidence::Returned {
         value: EvmReadValue::ChainId(1),
     };
     assert!(EvmCapability::<2>::bind_evidence(&chain_intent, &chain_evidence).is_ok());
-    let mismatched_chain_intent = EvmReadIntent::new(
+    assert!(serde_json::from_value::<EvmReadIntent>(serde_json::json!({
+        "operation": "mfm.evm.read-chain-identity@1",
+        "chain_id": 1,
+        "subject": {"kind": "chain_identity"},
+        "route_ref": null,
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<EvmReadIntent>(serde_json::json!({
+        "operation": "mfm.evm.read-finalized-head@1",
+        "chain_id": 1,
+        "subject": {"kind": "finalized_head"},
+        "route_ref": balance_route_ref(),
+    }))
+    .is_err());
+    let mismatched_chain_intent = EvmReadIntent::for_balance(
         "mfm.evm.read-chain-identity@1".to_owned(),
         1,
         EvmReadSubject::InitialAnchor,
+        balance_route_ref(),
     )
     .expect("structurally valid intent");
     assert!(EvmCapability::<2>::bind_evidence(
@@ -377,10 +402,11 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
         token: None,
     };
     let anchor = EvmBlockAnchor::new("1".to_owned(), "0xblock".to_owned()).expect("anchor");
-    let balance_intent = EvmReadIntent::new(
+    let balance_intent = EvmReadIntent::for_balance(
         "mfm.evm.read-native-balance@1".to_owned(),
         1,
         EvmReadSubject::NativeBalance { source, anchor },
+        balance_route_ref(),
     )
     .expect("balance intent");
     let wrong_value = EvmReadEvidence::Returned {
@@ -410,6 +436,7 @@ fn integrity_failure_retains_the_active_collection_ordinal() {
         },
         7,
         "collection-7".to_owned(),
+        balance_route_ref(),
     )
     .expect("context");
     assert_eq!(
@@ -441,6 +468,7 @@ fn chain_identity_rejection_uses_the_frozen_collection_failure_code() {
         },
         0,
         "collection-0".to_owned(),
+        balance_route_ref(),
     )
     .expect("context");
     let ProposedStateOutcome::Failure { failure } =
