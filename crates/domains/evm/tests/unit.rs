@@ -143,6 +143,14 @@ fn admission_and_result_deserialization_reenter_domain_validation() {
     )
     .is_err());
     assert!(serde_json::from_str::<EvmBalanceFailure>(
+        r#"{"kind":"source_unavailable","value":{"stage":"read_initial_anchor","collection_ordinal":0,"code":"chain_identity_unavailable"}}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<EvmBalanceFailure>(
+        r#"{"kind":"source_unavailable","value":{"stage":"check_chain_identity","collection_ordinal":0,"code":"observation_unavailable"}}"#
+    )
+    .is_err());
+    assert!(serde_json::from_str::<EvmBalanceFailure>(
         r#"{"kind":"integrity_blocked","value":{"stage":"check_chain_identity","collection_ordinal":0,"code":"collection_invalid"}}"#
     )
     .is_err());
