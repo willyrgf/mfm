@@ -70,6 +70,10 @@ fn anchor_value() -> EvmReadValue {
     }
 }
 
+fn route_ref() -> mfm_ids::ContentRef {
+    mfm_program::nominal_contract_ref::<EvmBalanceRequest>().expect("route reference")
+}
+
 fn result(source: Value, anchor: Value) -> Value {
     json!({
         "source": source,
@@ -83,7 +87,12 @@ fn context(sources: Vec<Value>, completed: Vec<Value>, work: Value) -> Value {
     json!({
         "request": {"sources": sources, "decimals": 18},
         "caller_continuation": {"marker": "opaque"},
-        "metadata": {"collection_ordinal": 2, "correlation": "collection-2"},
+        "metadata": {
+            "collection_ordinal": 2,
+            "correlation": "collection-2",
+            "route_ref": mfm_program::nominal_contract_ref::<EvmBalanceRequest>()
+                .expect("route reference"),
+        },
         "completed": completed,
         "work": work,
     })
@@ -196,6 +205,16 @@ fn hostile_work_and_prefix_combinations_fail_before_interpretation() {
         Vec::new(),
         json!({"kind": "read_token_balance", "source": source("token", Some("0x2222222222222222222222222222222222222222")), "checked_chain_id": 1, "initial_anchor": anchor("100"), "token_decimals": 31}),
     ));
+    let mut missing_route = context(
+        vec![source("native", None)],
+        Vec::new(),
+        json!({"kind": "check_chain_identity", "source": source("native", None)}),
+    );
+    missing_route["metadata"]
+        .as_object_mut()
+        .expect("metadata object")
+        .remove("route_ref");
+    assert_rejected(missing_route);
 }
 
 #[test]
@@ -278,6 +297,7 @@ fn initial_context(token: Option<&str>) -> EvmBalanceContext<OpaqueContinuation>
         },
         2,
         "collection-2".to_owned(),
+        mfm_program::nominal_contract_ref::<EvmBalanceRequest>().expect("route reference"),
     )
     .expect("context")
 }
@@ -293,6 +313,7 @@ fn canonical(value: &Value) -> String {
 fn native_and_token_paths_have_the_exact_stage_order_and_preserve_match_payload() {
     let context = initial_context(None);
     let intent = prepare::<Check, EvmCapability<2>>(&context).expect("chain intent");
+    assert_eq!(intent.route_ref(), Some(&route_ref()));
     let context = success(interpret::<Check, EvmCapability<2>>(
         context,
         &returned(&intent, EvmReadValue::ChainId(1)),

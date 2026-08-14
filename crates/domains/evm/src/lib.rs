@@ -676,26 +676,38 @@ impl EvmBalanceRequest {
 struct EvmBalanceResultMetadata {
     collection_ordinal: u32,
     correlation: String,
+    route_ref: ContentRef,
 }
 
 impl_checked_deserialize!(EvmBalanceResultMetadata {
     collection_ordinal: u32,
     correlation: String,
+    route_ref: ContentRef,
 });
 
 impl EvmBalanceResultMetadata {
-    fn new(collection_ordinal: u32, correlation: String) -> Result<Self, EvmDomainError> {
+    fn new(
+        collection_ordinal: u32,
+        correlation: String,
+        route_ref: ContentRef,
+    ) -> Result<Self, EvmDomainError> {
         if !valid_public_text(&correlation, 256) {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(Self {
             collection_ordinal,
             correlation,
+            route_ref,
         })
     }
 
     fn validate(&self) -> Result<(), EvmDomainError> {
-        Self::new(self.collection_ordinal, self.correlation.clone()).map(|_| ())
+        Self::new(
+            self.collection_ordinal,
+            self.correlation.clone(),
+            self.route_ref.clone(),
+        )
+        .map(|_| ())
     }
 }
 
@@ -826,13 +838,14 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
         caller_continuation: K,
         collection_ordinal: u32,
         correlation: String,
+        route_ref: ContentRef,
     ) -> Result<Self, EvmDomainError> {
         let first = request
             .sources
             .first()
             .cloned()
             .ok_or(EvmDomainError::InvalidValue)?;
-        let metadata = EvmBalanceResultMetadata::new(collection_ordinal, correlation)?;
+        let metadata = EvmBalanceResultMetadata::new(collection_ordinal, correlation, route_ref)?;
         let context = Self {
             request,
             caller_continuation,
@@ -1348,12 +1361,14 @@ pub struct EvmReadIntent {
     operation: String,
     chain_id: u64,
     subject: EvmReadSubject,
+    route_ref: Option<ContentRef>,
 }
 
 impl_checked_deserialize!(EvmReadIntent {
     operation: String,
     chain_id: u64,
     subject: EvmReadSubject,
+    route_ref: Option<ContentRef>,
 });
 
 impl EvmReadIntent {
@@ -1366,6 +1381,23 @@ impl EvmReadIntent {
             operation,
             chain_id,
             subject,
+            route_ref: None,
+        };
+        intent.validate()?;
+        Ok(intent)
+    }
+
+    fn for_balance(
+        operation: String,
+        chain_id: u64,
+        subject: EvmReadSubject,
+        route_ref: ContentRef,
+    ) -> Result<Self, EvmDomainError> {
+        let intent = Self {
+            operation,
+            chain_id,
+            subject,
+            route_ref: Some(route_ref),
         };
         intent.validate()?;
         Ok(intent)
@@ -1376,8 +1408,25 @@ impl EvmReadIntent {
         (&self.operation, self.chain_id)
     }
 
+    /// Returns the planned physical route identity when this is a balance-read intent.
+    pub const fn route_ref(&self) -> Option<&ContentRef> {
+        self.route_ref.as_ref()
+    }
+
     fn validate(&self) -> Result<(), EvmDomainError> {
         if StableId::new(&self.operation).is_err() || self.chain_id == 0 {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        let balance_subject = matches!(
+            &self.subject,
+            EvmReadSubject::ChainIdentity
+                | EvmReadSubject::InitialAnchor
+                | EvmReadSubject::NativeBalance { .. }
+                | EvmReadSubject::TokenDecimals { .. }
+                | EvmReadSubject::TokenBalance { .. }
+                | EvmReadSubject::ConfirmAnchor { .. }
+        );
+        if balance_subject != self.route_ref.is_some() {
             return Err(EvmDomainError::InvalidValue);
         }
         match &self.subject {
@@ -2538,14 +2587,30 @@ impl_balance_state!(
     "mfm.evm.state.consolidate-balance-collection@1",
     EvmBalanceFailureStage::Consolidate
 );
+
+fn balance_read_intent<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+    operation: &str,
+    chain_id: u64,
+    subject: EvmReadSubject,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    EvmReadIntent::for_balance(
+        operation.to_owned(),
+        chain_id,
+        subject,
+        input.metadata.route_ref.clone(),
+    )
+}
+
 fn prepare_check_chain_identity<K: MfmValueTrait>(
     input: &EvmBalanceContext<K>,
 ) -> Result<EvmReadIntent, EvmDomainError> {
     let EvmBalanceWork::CheckChainIdentity { source } = &input.work else {
         return Err(EvmDomainError::InvalidValue);
     };
-    EvmReadIntent::new(
-        "mfm.evm.read-chain-identity@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.read-chain-identity@1",
         source.chain_id,
         EvmReadSubject::ChainIdentity,
     )
@@ -2584,8 +2649,9 @@ fn prepare_read_initial_anchor<K: MfmValueTrait>(
     else {
         return Err(EvmDomainError::InvalidValue);
     };
-    EvmReadIntent::new(
-        "mfm.evm.read-initial-anchor@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.read-initial-anchor@1",
         *checked_chain_id,
         EvmReadSubject::InitialAnchor,
     )
@@ -2660,8 +2726,9 @@ fn prepare_read_native_balance<K: MfmValueTrait>(
     if source.token.is_some() {
         return Err(EvmDomainError::InvalidValue);
     }
-    EvmReadIntent::new(
-        "mfm.evm.read-native-balance@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.read-native-balance@1",
         *checked_chain_id,
         EvmReadSubject::NativeBalance {
             source: source.clone(),
@@ -2725,8 +2792,9 @@ fn prepare_read_token_decimals<K: MfmValueTrait>(
     if source.token.is_none() {
         return Err(EvmDomainError::InvalidValue);
     }
-    EvmReadIntent::new(
-        "mfm.evm.read-token-decimals@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.read-token-decimals@1",
         *checked_chain_id,
         EvmReadSubject::TokenDecimals {
             source: source.clone(),
@@ -2782,8 +2850,9 @@ fn prepare_read_token_balance<K: MfmValueTrait>(
     else {
         return Err(EvmDomainError::InvalidValue);
     };
-    EvmReadIntent::new(
-        "mfm.evm.read-token-balance@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.read-token-balance@1",
         *checked_chain_id,
         EvmReadSubject::TokenBalance {
             source: source.clone(),
@@ -2836,8 +2905,9 @@ fn prepare_confirm_balance_anchor<K: MfmValueTrait>(
     else {
         return Err(EvmDomainError::InvalidValue);
     };
-    EvmReadIntent::new(
-        "mfm.evm.confirm-balance-anchor@1".to_owned(),
+    balance_read_intent(
+        input,
+        "mfm.evm.confirm-balance-anchor@1",
         *checked_chain_id,
         EvmReadSubject::ConfirmAnchor {
             source: source.clone(),

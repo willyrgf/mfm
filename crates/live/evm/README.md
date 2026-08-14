@@ -5,4 +5,5 @@ nonce authority, signing, and raw-response disposal. `EvmLiveAssembly::install` 
 registers the finite exact descriptor closure into one catalog-wide Runtime, then retains only the
 secret-free planning bindings. A binding must match the stable adapter identity,
 physical target, State/capability role, nonce effect domain, and (for broadcast) public signer key
-instance before any provider, signer, or nonce handle can enter.
+instance before any provider, signer, or nonce handle can enter. Balance Reads also compare the
+secret-free route retained in the committed intent with that descriptor's physical target.
