@@ -3228,7 +3228,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
     let failure =
         nominal_contract_ref::<EvmSubmissionFailure>().map_err(|_| EvmDomainError::Program)?;
     let declarations = vec![
-        Declaration::State(Box::new(effect_state::<EvmState<0, 0>, EvmCapability<0>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 0>, EvmCapability<0>>(
             0,
             request.clone(),
             progress.clone(),
@@ -3243,7 +3243,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             failure.clone(),
             Some(address(2)?),
         )?)),
-        Declaration::State(Box::new(effect_state::<EvmState<0, 2>, EvmCapability<1>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 2>, EvmCapability<1>>(
             2,
             progress.clone(),
             progress.clone(),
@@ -3251,7 +3251,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             address(3)?,
             broadcast,
         )?)),
-        Declaration::State(Box::new(read_state::<EvmState<0, 3>, EvmCapability<3>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 3>, EvmCapability<3>>(
             3,
             progress.clone(),
             progress.clone(),
@@ -3259,7 +3259,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             address(4)?,
             receipt,
         )?)),
-        Declaration::State(Box::new(read_state::<EvmState<0, 4>, EvmCapability<4>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 4>, EvmCapability<4>>(
             4,
             progress.clone(),
             progress.clone(),
@@ -3267,7 +3267,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             address(5)?,
             finalized_head,
         )?)),
-        Declaration::State(Box::new(read_state::<EvmState<0, 5>, EvmCapability<5>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 5>, EvmCapability<5>>(
             5,
             progress.clone(),
             progress.clone(),
@@ -3396,7 +3396,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
     let consolidate = address(start_ordinal + 8)?;
     declarations.extend([
         state_with_failure(
-            read_state::<EvmState<1, 0, K>, EvmCapability<2>>(
+            access_state::<EvmState<1, 0, K>, EvmCapability<2>>(
                 start_ordinal,
                 context.clone(),
                 context.clone(),
@@ -3407,7 +3407,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             &failure_next,
         )?,
         state_with_failure(
-            read_state::<EvmState<1, 1, K>, EvmCapability<6>>(
+            access_state::<EvmState<1, 1, K>, EvmCapability<6>>(
                 start_ordinal + 1,
                 context.clone(),
                 context.clone(),
@@ -3449,7 +3449,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             .map_err(|_| EvmDomainError::Program)?,
         ),
         state_with_failure(
-            read_state::<EvmState<1, 3, K>, EvmCapability<7>>(
+            access_state::<EvmState<1, 3, K>, EvmCapability<7>>(
                 start_ordinal + 4,
                 context.clone(),
                 context.clone(),
@@ -3460,7 +3460,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             &failure_next,
         )?,
         state_with_failure(
-            read_state::<EvmState<1, 4, K>, EvmCapability<7>>(
+            access_state::<EvmState<1, 4, K>, EvmCapability<7>>(
                 start_ordinal + 5,
                 context.clone(),
                 context.clone(),
@@ -3471,7 +3471,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             &failure_next,
         )?,
         state_with_failure(
-            read_state::<EvmState<1, 5, K>, EvmCapability<7>>(
+            access_state::<EvmState<1, 5, K>, EvmCapability<7>>(
                 start_ordinal + 6,
                 context.clone(),
                 context.clone(),
@@ -3482,7 +3482,7 @@ pub fn append_balance_fragment<K: MfmValueTrait>(
             &failure_next,
         )?,
         state_with_failure(
-            read_state::<EvmState<1, 6, K>, EvmCapability<6>>(
+            access_state::<EvmState<1, 6, K>, EvmCapability<6>>(
                 start_ordinal + 7,
                 context.clone(),
                 context.clone(),
@@ -3552,7 +3552,7 @@ fn pure_state<S: State>(
     }
 }
 
-fn read_state<S: State, C: AccessCapabilityContract>(
+fn access_state<S: State, C: AccessCapabilityContract>(
     ordinal: u32,
     input: mfm_ids::ContentRef,
     output: mfm_ids::ContentRef,
@@ -3562,51 +3562,27 @@ fn read_state<S: State, C: AccessCapabilityContract>(
 ) -> Result<StateDeclaration, EvmDomainError> {
     validate_access_binding::<S, C>(binding)?;
     let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
-    StateDeclaration::with_next(
-        address(ordinal)?,
-        implementation,
-        input,
-        output,
-        Some(failure),
-        ExecutionMode::Read {
-            capability_contract_ref: capability_contract_ref::<C>()
-                .map_err(|_| EvmDomainError::Program)?,
+    let capability_contract_ref =
+        capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?;
+    let execution = match binding.effect_domain() {
+        Some(effect_domain) => ExecutionMode::Effect {
+            capability_contract_ref,
+            effect_domain: effect_domain.clone(),
+            fact_selection_required: C::requires_prior_facts(),
+        },
+        None => ExecutionMode::Read {
+            capability_contract_ref,
             total_attempt_bound: C::total_attempt_bound().get(),
             fact_selection_required: C::requires_prior_facts(),
         },
-        next,
-    )
-    .map_err(|_| EvmDomainError::Program)?
-    .with_execution_binding(binding.clone())
-    .map_err(|_| EvmDomainError::Program)
-}
-
-fn effect_state<S: State, C: AccessCapabilityContract>(
-    ordinal: u32,
-    input: mfm_ids::ContentRef,
-    output: mfm_ids::ContentRef,
-    failure: mfm_ids::ContentRef,
-    next: SequentialControlAddress,
-    binding: &BindingDescriptor,
-) -> Result<StateDeclaration, EvmDomainError> {
-    validate_access_binding::<S, C>(binding)?;
-    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
-    let effect_domain = binding
-        .effect_domain()
-        .cloned()
-        .ok_or(EvmDomainError::Program)?;
+    };
     StateDeclaration::with_next(
         address(ordinal)?,
         implementation,
         input,
         output,
         Some(failure),
-        ExecutionMode::Effect {
-            capability_contract_ref: capability_contract_ref::<C>()
-                .map_err(|_| EvmDomainError::Program)?,
-            effect_domain,
-            fact_selection_required: C::requires_prior_facts(),
-        },
+        execution,
         next,
     )
     .map_err(|_| EvmDomainError::Program)?
