@@ -332,6 +332,24 @@ fn evm_integrity_failure_preserves_its_collection_ordinal() {
 }
 
 #[test]
+fn chain_identity_failure_reaches_the_frozen_public_failure_projection() {
+    let mfm_capabilities::ProposedStateOutcome::Failure { failure } =
+        map_evm_balance_failure(EvmBalanceFailure::SourceUnavailable {
+            stage: "check_chain_identity".to_owned(),
+            collection_ordinal: 0,
+            code: "chain_identity_unavailable".to_owned(),
+        })
+    else {
+        panic!("EVM failure must remain a Portfolio failure");
+    };
+    assert_eq!(
+        canonical_json(&failure),
+        include_str!("../../../../docs/contracts/evm-portfolio/portfolio-snapshot-failure.json")
+            .trim()
+    );
+}
+
+#[test]
 fn portfolio_total_source_bound_is_exact() {
     let sources = |count: usize| {
         (0..count)

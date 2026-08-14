@@ -87,6 +87,7 @@ lifecycle, certification machinery, or any provider topology.
 | checked chain / common anchor | EVM balance fragment | exact bound chain-identity, initial-anchor, and confirm-anchor Reads | every response is intent-bound; chain and anchors agree with the selected binding and source sequence |
 | source raw quantity / decimals | EVM balance fragment | exact bound native/token balance and token-decimals Reads | asset kind, source, anchor, decimal bounds, canonical integer quantity, and overflow checks agree |
 | collection total | EVM balance consolidation | completed source results | exact source order/uniqueness; common anchor; checked integer-scaled addition |
+| Portfolio collection failure `code` | EVM balance failure mapped by Portfolio | EVM-owned closed redacted stage code | check-chain rejection is `chain_identity_unavailable` (the frozen golden); later unavailable observations, invalid collection consolidation, and integrity blocks use their distinct reviewed codes, never provider text |
 | Portfolio snapshot/report fields | Portfolio consolidation | admitted Portfolio input and exact EVM collection completions | collection order, route/binding agreement, source realization, checked decimal arithmetic, and selected quote agreement |
 
 ## Submission program suffix

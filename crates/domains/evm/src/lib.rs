@@ -2328,6 +2328,7 @@ impl EvmBalanceFailureStage {
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EvmBalanceFailureCode {
+    ChainIdentityUnavailable,
     ObservationUnavailable,
     CollectionInvalid,
     IntegrityBlocked,
@@ -2336,6 +2337,7 @@ enum EvmBalanceFailureCode {
 impl EvmBalanceFailureCode {
     const fn as_str(self) -> &'static str {
         match self {
+            Self::ChainIdentityUnavailable => "chain_identity_unavailable",
             Self::ObservationUnavailable => "observation_unavailable",
             Self::CollectionInvalid => "collection_invalid",
             Self::IntegrityBlocked => "integrity_blocked",
@@ -2403,7 +2405,8 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
                 collection_ordinal,
                 code:
                     code @ (EvmBalanceFailureCode::ObservationUnavailable
-                    | EvmBalanceFailureCode::CollectionInvalid),
+                    | EvmBalanceFailureCode::CollectionInvalid
+                    | EvmBalanceFailureCode::ChainIdentityUnavailable),
             } => Self::SourceUnavailable {
                 stage: stage.as_str().to_owned(),
                 collection_ordinal,
@@ -3050,12 +3053,22 @@ fn balance_failure<K: MfmValueTrait, O>(
     context: &EvmBalanceContext<K>,
     stage: EvmBalanceFailureStage,
 ) -> ProposedStateOutcome<O, EvmBalanceFailure> {
+    let code = match stage {
+        EvmBalanceFailureStage::CheckChainIdentity => {
+            EvmBalanceFailureCode::ChainIdentityUnavailable
+        }
+        EvmBalanceFailureStage::ReadInitialAnchor
+        | EvmBalanceFailureStage::SelectAsset
+        | EvmBalanceFailureStage::ReadNativeBalance
+        | EvmBalanceFailureStage::ReadTokenDecimals
+        | EvmBalanceFailureStage::ReadTokenBalance
+        | EvmBalanceFailureStage::ConfirmAnchor
+        | EvmBalanceFailureStage::Consolidate => EvmBalanceFailureCode::ObservationUnavailable,
+    };
     failure(EvmBalanceFailure::SourceUnavailable {
         stage: stage.as_str().to_owned(),
         collection_ordinal: context.metadata.collection_ordinal,
-        code: EvmBalanceFailureCode::ObservationUnavailable
-            .as_str()
-            .to_owned(),
+        code: code.as_str().to_owned(),
     })
 }
 
