@@ -13,13 +13,19 @@ use std::sync::Mutex;
 use mfm_canonical::raw_content_digest;
 use mfm_ids::{
     short_stable_id_fragment, AppendRequestId, ContentDigest, ContentRef, DigestAlgorithm, RunId,
-    SchemaId, StoreEpoch, StoreScopeId, TenantScopeId,
+    SchemaId, StableId, StoreEpoch, StoreScopeId, TenantScopeId,
 };
 use mfm_journal::single_trust::{
-    PreparationRef, RunFrame, RunRecord, StateConcluded, StateOutcome, StatePrepared, ValueRef,
+    ImmutableObject, PreparationRef, RunFrame, RunRecord, StateConcluded, StateOutcome,
+    StatePrepared, ValueRef,
 };
-use mfm_program::single_trust::{Declaration, ExecutionMode, ProgramDocument, StateDeclaration};
+use mfm_program::{
+    Declaration, ExecutionMode, Program, ProgramCatalog, ProgramDocument, ProgramIngress,
+    StateDeclaration,
+};
 use mfm_values::MfmValue;
+
+const PROGRAM_OBJECT_TYPE: &str = "mfm.program";
 
 /// Process-local identity of one opened semantic Store.
 ///
@@ -359,6 +365,13 @@ impl QualifiedRun {
             }
             object_map.insert(object.content_ref().clone(), object.clone());
         }
+        if frame
+            .objects()
+            .iter()
+            .any(|object| object.object_type().as_str() == PROGRAM_OBJECT_TYPE)
+        {
+            return Err(StoreError::InvalidHistory);
+        }
         validate_record_objects(&object_map, frame.record())?;
         if let RunRecord::StatePrepared(prepared) = frame.record() {
             if let (Some(request), Some(selection)) =
@@ -426,9 +439,29 @@ pub fn validate_prefix(
     QualifiedRun::new(scope, epoch, tenant, frames).map(|_| ())
 }
 
+/// Loads the exact Program document retained in an admitted run under one catalog.
+///
+/// Qualification first proves that the admission closure contains one canonical `mfm.program`
+/// object matching the admission reference and entry point. This function then applies the
+/// catalog's strict associations, so a document cannot become executable under a foreign catalog.
+pub fn retained_program(run: &QualifiedRun, catalog: &ProgramCatalog) -> Result<Program> {
+    let admission = admitted_record(run.frames())?;
+    let object = admitted_program_object(run.frames())?;
+    let program = ProgramIngress::new(catalog)
+        .decode(object.canonical_json().as_bytes())
+        .map_err(|_| StoreError::InvalidHistory)?;
+    if program.program_ref().content_ref() != admission.program_ref()
+        || program.document().entry_point_id() != admission.entry_point_id()
+    {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(program)
+}
+
 /// Computes callback-free terminality for replay without minting mutation authority.
-pub fn replay_terminality(run: &QualifiedRun, document: ProgramDocument) -> Result<bool> {
-    let selection = RunReducer::new(document).reduce(run)?;
+pub fn replay_terminality(run: &QualifiedRun, catalog: &ProgramCatalog) -> Result<bool> {
+    let program = retained_program(run, catalog)?;
+    let selection = RunReducer::new(program.document().clone()).reduce(run)?;
     Ok(matches!(
         selection.action(),
         RunAction::ZeroStateTerminal { .. } | RunAction::Terminal { .. } | RunAction::Failed { .. }
@@ -1353,7 +1386,7 @@ impl RunSelection {
 #[derive(Debug)]
 pub struct SelectedRun {
     run: QualifiedRun,
-    document: ProgramDocument,
+    program: Program,
     selection: RunSelection,
     store_brand: Arc<StoreBrand>,
 }
@@ -1361,13 +1394,13 @@ pub struct SelectedRun {
 impl SelectedRun {
     pub(crate) fn new(
         run: QualifiedRun,
-        document: ProgramDocument,
+        program: Program,
         selection: RunSelection,
         store_brand: Arc<StoreBrand>,
     ) -> Self {
         Self {
             run,
-            document,
+            program,
             selection,
             store_brand,
         }
@@ -1378,15 +1411,15 @@ impl SelectedRun {
     }
 
     pub(crate) const fn document(&self) -> &ProgramDocument {
-        &self.document
+        self.program.document()
     }
 
     pub(crate) const fn selection(&self) -> &RunSelection {
         &self.selection
     }
 
-    pub(crate) fn into_parts(self) -> (QualifiedRun, ProgramDocument, RunSelection) {
-        (self.run, self.document, self.selection)
+    pub(crate) fn into_parts(self) -> (QualifiedRun, Program, RunSelection) {
+        (self.run, self.program, self.selection)
     }
 
     pub(crate) const fn qualified_run(&self) -> &QualifiedRun {
@@ -1396,6 +1429,11 @@ impl SelectedRun {
     /// Returns the durable run identity.
     pub fn run_id(&self) -> &RunId {
         self.run.run_id()
+    }
+
+    /// Returns the retained exact Program content identity selected for this run.
+    pub fn program_ref(&self) -> &ContentRef {
+        self.program.program_ref().content_ref()
     }
 
     /// Returns the exact selected head sequence.
@@ -1454,8 +1492,9 @@ impl RunReducer {
         if self.document.declarations().is_empty() {
             let latest = admission.admitted_context().clone();
             if self.document.root_contract_ref() != latest.contract_ref()
-                || run.frames()[0].objects().len() != 1
-                || run.frames()[0].objects()[0].content_ref() != latest.value_ref()
+                || run.frames()[0].objects().len() != 2
+                || admitted_program_object(run.frames()).is_err()
+                || object_for_value(run, &latest)?.content_ref() != latest.value_ref()
             {
                 return Err(StoreError::InvalidHistory);
             }
@@ -2134,14 +2173,59 @@ fn validate_prefix_structure(frames: &[RunFrame]) -> Result<()> {
     Ok(())
 }
 
+fn admitted_record(frames: &[RunFrame]) -> Result<&mfm_journal::single_trust::RunAdmitted> {
+    match frames.first().map(RunFrame::record) {
+        Some(RunRecord::RunAdmitted(admission)) => Ok(admission),
+        _ => Err(StoreError::InvalidHistory),
+    }
+}
+
+fn program_object_type() -> Result<StableId> {
+    StableId::new(PROGRAM_OBJECT_TYPE).map_err(|_| StoreError::InvalidRecord)
+}
+
+/// Returns the sole exact Program object in one admission closure after structural validation.
+fn admitted_program_object(frames: &[RunFrame]) -> Result<&ImmutableObject> {
+    let admission = admitted_record(frames)?;
+    let object_type = program_object_type()?;
+    let admission_frame = frames.first().ok_or(StoreError::InvalidHistory)?;
+    let mut program_objects = admission_frame
+        .objects()
+        .iter()
+        .filter(|object| object.object_type() == &object_type);
+    let object = program_objects.next().ok_or(StoreError::InvalidHistory)?;
+    if program_objects.next().is_some()
+        || frames
+            .iter()
+            .skip(1)
+            .flat_map(RunFrame::objects)
+            .any(|candidate| candidate.object_type() == &object_type)
+    {
+        return Err(StoreError::InvalidHistory);
+    }
+    let document = ProgramDocument::decode_canonical(object.canonical_json().as_bytes())
+        .map_err(|_| StoreError::InvalidHistory)?;
+    let document_ref = document
+        .program_ref()
+        .map_err(|_| StoreError::InvalidHistory)?;
+    if object.content_ref() != &document_ref
+        || object.content_ref() != admission.program_ref()
+        || document.entry_point_id() != admission.entry_point_id()
+    {
+        return Err(StoreError::InvalidHistory);
+    }
+    Ok(object)
+}
+
 fn validate_object_reachability(
     scope: &StoreScopeId,
     epoch: StoreEpoch,
     tenant: &TenantScopeId,
     frames: &[RunFrame],
 ) -> Result<()> {
+    let program_object = admitted_program_object(frames)?;
     let mut objects = BTreeMap::new();
-    let mut referenced = BTreeSet::new();
+    let mut referenced = BTreeSet::from([program_object.content_ref().clone()]);
     for frame in frames {
         for object in frame.objects() {
             if let Some(previous) = objects.get(object.content_ref()) {
@@ -2635,6 +2719,19 @@ mod tests {
         .expect("value object")
     }
 
+    fn program_object(document: &ProgramDocument) -> ImmutableObject {
+        ImmutableObject::new(
+            StableId::new(PROGRAM_OBJECT_TYPE).expect("program object type"),
+            document.program_ref().expect("program ref"),
+            document
+                .canonical_bytes()
+                .expect("program bytes")
+                .as_str()
+                .to_owned(),
+        )
+        .expect("program object")
+    }
+
     fn pure_state(
         ordinal: u32,
         input: ContentRef,
@@ -2671,6 +2768,10 @@ mod tests {
 
     fn admission(scope: StoreScopeId, tenant: TenantScopeId, run: RunId) -> RunFrame {
         let context_ref = context_value_ref();
+        let entry = StableId::new("mfm.test-entry-1").expect("entry");
+        let document = ProgramDocument::new(entry.clone(), content(2), content(2), Vec::new())
+            .expect("document");
+        let context = ValueRef::new(content(2), context_ref.clone());
         RunFrame::new(
             run.clone(),
             scope.clone(),
@@ -2683,20 +2784,15 @@ mod tests {
                     StoreEpoch::new(1),
                     run,
                     tenant,
-                    StableId::new("mfm.test-entry-1").expect("entry"),
-                    content(1),
-                    ValueRef::new(content(2), context_ref.clone()),
+                    entry,
+                    document.program_ref().expect("program ref"),
+                    context.clone(),
                     configuration(4),
                     Vec::new(),
                 )
                 .expect("admission"),
             ),
-            vec![ImmutableObject::new(
-                StableId::new("mfm.value").expect("object type"),
-                context_ref,
-                "null".to_owned(),
-            )
-            .expect("context object")],
+            vec![value_object(&context, "null"), program_object(&document)],
         )
         .expect("frame")
     }
@@ -2769,6 +2865,89 @@ mod tests {
     }
 
     #[test]
+    fn admission_requires_one_exact_canonical_program_object() {
+        let (scope, tenant, run) = ids();
+        let valid = admission(scope.clone(), tenant.clone(), run.clone());
+        assert!(QualifiedRun::validate_prefix(
+            scope.clone(),
+            StoreEpoch::new(1),
+            tenant.clone(),
+            vec![valid.clone()],
+        )
+        .is_ok());
+
+        let record = valid.record().clone();
+        let missing = RunFrame::new(
+            run.clone(),
+            scope.clone(),
+            StoreEpoch::new(1),
+            1,
+            AppendRequestId::new("missing-program-admission-012345").expect("request"),
+            record.clone(),
+            vec![valid.objects()[0].clone()],
+        )
+        .expect("missing program frame");
+        assert_eq!(
+            QualifiedRun::validate_prefix(
+                scope.clone(),
+                StoreEpoch::new(1),
+                tenant.clone(),
+                vec![missing],
+            ),
+            Err(StoreError::InvalidHistory)
+        );
+
+        let duplicate = RunFrame::new(
+            run.clone(),
+            scope.clone(),
+            StoreEpoch::new(1),
+            1,
+            AppendRequestId::new("duplicate-program-admission-012345").expect("request"),
+            record.clone(),
+            vec![
+                valid.objects()[0].clone(),
+                valid.objects()[1].clone(),
+                valid.objects()[1].clone(),
+            ],
+        )
+        .expect("duplicate program frame");
+        assert_eq!(
+            QualifiedRun::validate_prefix(
+                scope.clone(),
+                StoreEpoch::new(1),
+                tenant.clone(),
+                vec![duplicate],
+            ),
+            Err(StoreError::InvalidHistory)
+        );
+
+        let substituted_document = ProgramDocument::new(
+            StableId::new("mfm.test-entry-1").expect("entry"),
+            content(3),
+            content(3),
+            Vec::new(),
+        )
+        .expect("substituted document");
+        let substituted = RunFrame::new(
+            run,
+            scope.clone(),
+            StoreEpoch::new(1),
+            1,
+            AppendRequestId::new("substituted-program-admission-012345").expect("request"),
+            record,
+            vec![
+                valid.objects()[0].clone(),
+                program_object(&substituted_document),
+            ],
+        )
+        .expect("substituted program frame");
+        assert_eq!(
+            QualifiedRun::validate_prefix(scope, StoreEpoch::new(1), tenant, vec![substituted]),
+            Err(StoreError::InvalidHistory)
+        );
+    }
+
+    #[test]
     fn pure_conclusion_has_no_preparation_path() {
         let (scope, tenant, run) = ids();
         let store = SemanticStore::memory(scope.clone(), StoreEpoch::new(1), tenant.clone());
@@ -2808,10 +2987,10 @@ mod tests {
                 )
                 .expect("admission"),
             ),
-            vec![value_object(
-                &ValueRef::new(content(2), context_ref.clone()),
-                "null",
-            )],
+            vec![
+                value_object(&ValueRef::new(content(2), context_ref.clone()), "null"),
+                program_object(&document),
+            ],
         )
         .expect("frame");
         store.append_admission_fixture(admitted).expect("admit");
@@ -2904,7 +3083,7 @@ mod tests {
                 )
                 .expect("admission"),
             ),
-            vec![value_object(&input, "null")],
+            vec![value_object(&input, "null"), program_object(&document)],
         )
         .expect("admission frame");
         store.append_admission_fixture(admission).expect("admit");
@@ -3012,7 +3191,7 @@ mod tests {
                 )
                 .expect("admission"),
             ),
-            vec![value_object(&input, "null")],
+            vec![value_object(&input, "null"), program_object(&document)],
         )
         .expect("admission frame");
         store.append_admission_fixture(admission).expect("admit");
@@ -3136,7 +3315,10 @@ mod tests {
                 )
                 .expect("admission"),
             ),
-            vec![value_object(&root_value, "{\"step\":0}")],
+            vec![
+                value_object(&root_value, "{\"step\":0}"),
+                program_object(&document),
+            ],
         )
         .expect("admission frame");
         store.append_admission_fixture(admission).expect("admit");
@@ -3246,12 +3428,15 @@ mod tests {
                 )
                 .expect("admission"),
             ),
-            vec![ImmutableObject::new(
-                StableId::new("mfm.value").expect("object type"),
-                selector_value.value_ref().clone(),
-                "{\"kind\":\"left\",\"value\":{\"n\":1}}".to_owned(),
-            )
-            .expect("selector object")],
+            vec![
+                ImmutableObject::new(
+                    StableId::new("mfm.value").expect("object type"),
+                    selector_value.value_ref().clone(),
+                    "{\"kind\":\"left\",\"value\":{\"n\":1}}".to_owned(),
+                )
+                .expect("selector object"),
+                program_object(&document),
+            ],
         )
         .expect("admission frame");
         store.append_admission_fixture(admission).expect("admit");

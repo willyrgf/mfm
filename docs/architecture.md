@@ -33,7 +33,9 @@ the sole exact nominal-contract/schema-descriptor/Rust-type and capability inten
 association tables, catalog-branded typed values, and declaration-owned binding descriptors.
 Program data is callback-free and cannot invoke I/O. Runtime
 State and capability registrations must match the finalized table before an assembly exists; their
-private `TypeId` correlation is not a second value registry.
+private `TypeId` correlation is not a second value registry. Canonical Program documents use a
+dedicated persisted-contract schema identity and are retained as `mfm.program` objects, never
+reconstructed from admitted values.
 
 ### Capabilities
 
@@ -60,7 +62,10 @@ independent opens. `QualifiedRun` is cloneable callback-free evidence. `Selected
 affine Store-selected run mutation owner and can become cloneable evidence only by being consumed.
 Its public mutation ingress is admission-specific; preparations and conclusions consume selections
 and coordinate-free material only. Runtime receives only the exact mutation port and never returns
-the port or an opened Store.
+the port or an opened Store. Admission genesis includes exactly one canonical `mfm.program` object
+whose content reference and entry point match `RunAdmitted`; Store selection ingresses that retained
+document under the opened catalog before reduction. No reader, replay, App, or resume path supplies
+or reconstructs a Program document.
 
 The configuration port keeps PostgreSQL and Memory byte-oriented while exposing only
 `ResolvedConfiguration<C>`, erased `ResolvedConfigurationHead` evidence, affine typed write
@@ -84,7 +89,9 @@ immutable binding and capability association, so preparation has no caller-suppl
 path. Conclusion recovery preserves Store classifications for same-run races,
 including identical semantic conclusions, superseded Access preparations, conflicts, and invalid
 history; permanent Store rejection remains a distinct owner-bearing result rather than becoming a
-retryable suspension.
+retryable suspension. The current assembly remains exact-Program-bound: it rejects a selected
+retained Program whose content reference differs from its own, rather than treating current code as
+a resume replacement.
 
 ### Adapters
 

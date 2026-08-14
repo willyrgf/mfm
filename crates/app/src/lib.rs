@@ -31,7 +31,7 @@ use mfm_program::single_trust::{
     MatchDeclaration, MatchVariant, ProgramCatalog, ProgramCatalogBuilder, ProgramDocument,
     StateDeclaration,
 };
-use mfm_replay::{qualify_with_program, PortableRun, ReplayError, ReplayReport};
+use mfm_replay::{qualify_with_retained_program, PortableRun, ReplayError, ReplayReport};
 use mfm_runtime::{ResumeStep, Runtime, RuntimeStep, SpawnStep, SuspendedRun};
 use mfm_store::{
     ConfigurationStore, HistoryReader, PreparedAdmission, QualifiedHistoryPort,
@@ -542,14 +542,9 @@ impl Application {
         if let Some(runtime) = self.runtimes.get(&entry_point) {
             return self.drive_with_runtime(runtime, run_id).await;
         }
-        let document = self.document_for_run(&run)?;
-        let program = self
-            .catalog
-            .program(document)
-            .map_err(|_| PublicError::Internal)?;
         let selected = self
             .history
-            .select(&run_id, &program)
+            .select(&run_id)
             .await
             .map_err(map_store_error)?;
         if matches!(
@@ -702,15 +697,9 @@ impl Application {
 
     /// Reads one run inside this fixed tenant partition.
     pub async fn read_public_run(&self, run_id: RunId) -> Result<PublicRunView> {
-        let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
-        let document = self.document_for_run(&run)?;
-        let program = self
-            .catalog
-            .program(document)
-            .map_err(|_| PublicError::Internal)?;
         let selected = self
             .history
-            .select(&run_id, &program)
+            .select(&run_id)
             .await
             .map_err(map_store_error)?;
         Ok(PublicRunView {
@@ -724,8 +713,7 @@ impl Application {
     /// Replays a retained prefix with zero live callbacks.
     pub async fn replay_run(&self, run_id: RunId) -> Result<ReplayResponse> {
         let run = self.reader.load(&run_id).await.map_err(map_store_error)?;
-        let document = self.document_for_run(&run)?;
-        qualify_with_program(&run, document)
+        qualify_with_retained_program(&run, &self.catalog)
             .map(Into::into)
             .map_err(map_replay_error)
     }
@@ -797,38 +785,6 @@ impl Application {
         let portable = PortableRun::from_run(&run);
         let bytes = portable.encode().map_err(map_replay_error)?;
         Ok(ExportedRun { bytes })
-    }
-
-    fn document_for_run(&self, run: &mfm_store::QualifiedRun) -> Result<ProgramDocument> {
-        let admission = match run.frames().first().map(RunFrame::record) {
-            Some(RunRecord::RunAdmitted(admission)) => admission,
-            Some(RunRecord::StatePrepared(_)) | Some(RunRecord::StateConcluded(_)) | None => {
-                return Err(PublicError::Internal)
-            }
-        };
-        if !self
-            .supported_entry_points
-            .contains_key(admission.entry_point_id())
-        {
-            return Err(PublicError::Internal);
-        }
-        let object = run
-            .frames()
-            .iter()
-            .flat_map(|frame| frame.objects())
-            .find(|object| object.content_ref() == admission.admitted_context().value_ref())
-            .ok_or(PublicError::Internal)?;
-        let input =
-            serde_json::from_str(object.canonical_json()).map_err(|_| PublicError::Internal)?;
-        let (_, _, document) = canonical_typed_admission(admission.entry_point_id(), input)
-            .map_err(|_| PublicError::Internal)?;
-        if program_ref(&document)? != *admission.program_ref() {
-            return Err(PublicError::Internal);
-        }
-        self.catalog
-            .program(document.clone())
-            .map_err(|_| PublicError::Internal)?;
-        Ok(document)
     }
 }
 
@@ -1430,10 +1386,6 @@ fn portfolio_program(input: &PortfolioSnapshotInput) -> Result<ProgramDocument> 
     .map_err(|_| PublicError::Internal)
 }
 
-fn program_ref(document: &ProgramDocument) -> Result<ContentRef> {
-    document.program_ref().map_err(|_| PublicError::Internal)
-}
-
 fn status_from_action(action: &RunAction) -> RunStatus {
     match action {
         RunAction::ZeroStateTerminal { .. } | RunAction::Terminal { .. } => RunStatus::Terminal,
@@ -1725,6 +1677,16 @@ mod tests {
             .expect("admission");
         let export = app.export_run(response.run_id).await.expect("export");
         let portable = PortableRun::decode(export.bytes()).expect("portable");
+        let RunRecord::RunAdmitted(admission) = portable.frames()[0].record() else {
+            panic!("expected admission")
+        };
+        let program_objects: Vec<_> = portable.frames()[0]
+            .objects()
+            .iter()
+            .filter(|object| object.object_type().as_str() == "mfm.program")
+            .collect();
+        assert_eq!(program_objects.len(), 1);
+        assert_eq!(program_objects[0].content_ref(), admission.program_ref());
         let content_ref = portable.content_ref().expect("content ref");
         assert_eq!(
             PortableRun::decode_expected(export.bytes(), &content_ref).expect("expected"),

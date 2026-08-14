@@ -21,4 +21,7 @@ for one typed re-ingress. Local `ValidatedConfig<C>` publication does no decode;
 retained bytes are strict canonical, float-free, secret-free, exact-schema input. Admissions
 require the same-opening resolved head and persist its sequence and typed content ref. A stale
 same-run conclusion is classified as identical, superseded Access, conflict, or invalid history
-before Runtime can advance it.
+before Runtime can advance it. An admission closure also contains exactly one canonical
+`mfm.program` object matching `RunAdmitted.program_ref` and entry point. Store selects by run id,
+strictly ingresses that retained document under its catalog, and never accepts a caller-supplied
+or reconstructed Program during cold selection.

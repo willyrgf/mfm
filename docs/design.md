@@ -23,6 +23,9 @@ association. Access declarations retain their complete immutable binding descrip
 content-equal Program is not catalog authority, and retained bytes reenter through the same exact
 association. The declaration algebra is exactly `State | Match`. Authoring fragments are expanded
 before a Program is constructed; no runtime collection or ambient value map exists.
+The canonical Program document has its own persisted-contract schema identity, distinct from any
+root result contract. Every `RunAdmitted.program_ref` names one exact canonical `mfm.program`
+object in the genesis closure; it is not reconstructed from the admitted value or current source.
 
 Each operation supplies one domain-owned typed admission value `C0`. Every successful nonterminal
 State consumes the complete current context and returns the complete next context. A Match selects
@@ -55,6 +58,12 @@ tenant fact head in the same append transaction. If that independent fact fronti
 the append, Store clears only the assigned publication coordinate, rotates the physical append
 identity, and retries the same semantic conclusion owner. A conclusion is durable before its
 output is public.
+
+The admission closure contains exactly one `mfm.program` immutable object. Qualification verifies
+its canonical bytes, content reference, and entry point before Store ingresses it under its exact
+catalog and reduces the prefix. Missing, duplicate, substituted, noncanonical, or foreign-catalog
+Program material invalidates selection; Reader, replay, export, audit, and cold resume therefore
+use the retained document rather than re-planning current code.
 
 Same-run conclusion races are classified after the latest qualified prefix, in precedence order:
 `AlreadyConcludedSame`, `NoLongerSelected` for a superseded Access preparation, `Conflict`, and
@@ -101,7 +110,9 @@ Runtime has no scheduler, history API, per-run execution lock, or process-wide w
 opening owns bounded active-session, deterministic CPU, planning, and provider-ingress permits;
 retained-prefix qualification uses a bounded blocking job. Workers race through Store exact-head
 compare-and-append. A dropped hot owner leaves only the durable prefix; cold replay qualifies the
-complete prefix without callbacks.
+complete prefix without callbacks. A Runtime still binds one exact live Program assembly: after
+Store selects the retained document, Runtime admits it only when its retained Program reference
+matches that assembly.
 
 ## Storage, tenants, and deployment
 

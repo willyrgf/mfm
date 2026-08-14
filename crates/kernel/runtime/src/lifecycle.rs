@@ -647,12 +647,7 @@ impl SuspendedRun {
                     disposition,
                     Some(disposition) if !matches!(disposition, AppendDisposition::AcknowledgementUnknown)
                 ) {
-                    return match runtime
-                        .inner
-                        .store
-                        .select(selected.run_id(), runtime.inner.assembly.program())
-                        .await
-                    {
+                    return match runtime.inner.store.select(selected.run_id()).await {
                         Ok(latest) => runtime.step_from_selected(latest, None).await,
                         Err(_) => RuntimeStep::Suspended(SuspendedRun::preparation(
                             runtime,
@@ -955,12 +950,7 @@ impl Runtime {
         if !Arc::ptr_eq(&self.inner, &input.runtime.inner) {
             return ResumeStep::Failed(ResumeFailure::Identity);
         }
-        let selected = match self
-            .inner
-            .store
-            .select(&input.run_id, self.inner.assembly.program())
-            .await
-        {
+        let selected = match self.inner.store.select(&input.run_id).await {
             Ok(selected) => selected,
             Err(_) => return ResumeStep::Failed(ResumeFailure::History),
         };
@@ -983,12 +973,7 @@ impl Runtime {
     /// performs the same bounded prefix qualification as typed [`Runtime::resume`] and never
     /// exposes the retained history to State code.
     pub async fn resume_run(&self, run_id: RunId) -> ResumeStep {
-        let selected = match self
-            .inner
-            .store
-            .select(&run_id, self.inner.assembly.program())
-            .await
-        {
+        let selected = match self.inner.store.select(&run_id).await {
             Ok(selected) => selected,
             Err(_) => return ResumeStep::Failed(ResumeFailure::History),
         };
@@ -1270,6 +1255,12 @@ impl Runtime {
         selected: SelectedRun,
         supplied: Option<ErasedValue>,
     ) -> std::result::Result<RunSession, SessionBuildFailure> {
+        if selected.program_ref() != self.inner.assembly.program().program_ref().content_ref() {
+            return Err(SessionBuildFailure {
+                selected,
+                error: RuntimeError::Identity,
+            });
+        }
         let latest_result = if let Some(value) = supplied {
             Ok(value)
         } else {
@@ -1965,6 +1956,82 @@ mod tests {
             | ConfigurationCommitOutcome::Found(resolved) => resolved.into_head(),
             other => panic!("unexpected configuration outcome: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_a_run_admitted_under_a_different_current_program() {
+        let contract = nominal_contract_ref::<TestContext>().expect("contract");
+        let admitted_document = ProgramDocument::new(
+            StableId::new("mfm.test.retained-program-a").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            Vec::new(),
+        )
+        .expect("admitted document");
+        let current_document = ProgramDocument::new(
+            StableId::new("mfm.test.retained-program-b").expect("entry"),
+            contract.clone(),
+            contract.clone(),
+            Vec::new(),
+        )
+        .expect("current document");
+        let (catalog, admitted_program) = test_catalog_builder()
+            .finish(admitted_document)
+            .expect("catalog");
+        let current_program = catalog.program(current_document).expect("current program");
+        let admitted_assembly =
+            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), admitted_program)
+                .expect("admitted assembly")
+                .finish()
+                .expect("admitted assembly finish");
+        let current_assembly =
+            crate::single_trust::RuntimeAssemblyBuilder::new(catalog.clone(), current_program)
+                .expect("current assembly")
+                .finish()
+                .expect("current assembly finish");
+
+        let identity = test_identity();
+        let backend = Arc::new(MemoryStructuredBackend::new(identity.clone()));
+        let admitted_store = StructuredStore::open(
+            backend.clone(),
+            identity.clone(),
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("admitted store");
+        let current_store = StructuredStore::open(
+            backend,
+            identity,
+            catalog.clone(),
+            StoreWorkLimits::default(),
+        )
+        .await
+        .expect("current store");
+        let (admitted_history, _, configuration, _) = admitted_store.split().into_parts();
+        let (current_history, _, _, _) = current_store.split().into_parts();
+        let admitted_runtime = Runtime::new(admitted_assembly, admitted_history).expect("runtime");
+        let current_runtime = Runtime::new(current_assembly, current_history).expect("runtime");
+        let configuration = test_configuration(&configuration).await;
+        let run_id = RunId::parse(
+            "run:sha256-jcs-v1:9123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("run id");
+        let value = catalog
+            .qualify(contract, TestContext { value: 1 })
+            .expect("qualified input");
+        assert!(matches!(
+            admitted_runtime
+                .admission(run_id.clone(), value, configuration, Vec::new())
+                .expect("admission")
+                .spawn()
+                .await,
+            SpawnStep::Terminal(_)
+        ));
+        assert!(matches!(
+            current_runtime.resume_run(run_id).await,
+            ResumeStep::Failed(ResumeFailure::Identity)
+        ));
     }
 
     struct UnknownConclusionBackend {
