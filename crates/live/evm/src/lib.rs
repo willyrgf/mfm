@@ -593,16 +593,16 @@ fn accept<S: State, C: AccessCapabilityContract>(
     .map_err(|_| EvmAdapterError::Authentication)
 }
 
-/// Exact live adapter and planning-binding closure for the two EVM-backed entry points.
+/// Exact planning bindings retained after one live EVM installation.
 pub struct EvmLiveAssembly {
     submission_bindings: Vec<EvmSubmissionBindings>,
     balance_bindings: Vec<EvmBalanceBindings>,
-    adapters: BTreeMap<ContentRef, Arc<EvmAdapterBinding>>,
 }
 
 impl EvmLiveAssembly {
-    /// Validates one complete, finite descriptor closure produced by trusted composition.
-    pub fn new(
+    /// Validates and installs one complete finite descriptor closure into the Runtime builder.
+    pub fn install(
+        builder: &mut RuntimeAssemblyBuilder,
         submission_bindings: Vec<EvmSubmissionBindings>,
         balance_bindings: Vec<EvmBalanceBindings>,
         adapters: Vec<EvmAdapterBinding>,
@@ -634,7 +634,11 @@ impl EvmLiveAssembly {
                 return Err(EvmAdapterError::Assembly);
             }
         }
-        if registered.keys().collect::<BTreeSet<_>>() != expected.iter().collect::<BTreeSet<_>>() {
+        if registered.len() != expected.len()
+            || expected
+                .iter()
+                .any(|reference| !registered.contains_key(reference))
+        {
             return Err(EvmAdapterError::Assembly);
         }
         if submission_bindings
@@ -659,10 +663,15 @@ impl EvmLiveAssembly {
         for bindings in &balance_bindings {
             validate_balance_route(bindings, &registered)?;
         }
+        register_all(
+            builder,
+            &submission_bindings,
+            &balance_bindings,
+            &registered,
+        )?;
         Ok(Self {
             submission_bindings,
             balance_bindings,
-            adapters: registered,
         })
     }
 
@@ -670,151 +679,117 @@ impl EvmLiveAssembly {
     pub fn planning_bindings(&self) -> (&[EvmSubmissionBindings], &[EvmBalanceBindings]) {
         (&self.submission_bindings, &self.balance_bindings)
     }
-
-    /// Registers all domain semantic implementations and exact adapter invocations once.
-    pub fn register(&self, builder: &mut RuntimeAssemblyBuilder) -> Result<(), EvmAdapterError> {
-        register_semantics(builder)?;
-        for bindings in &self.submission_bindings {
-            let [reserve_nonce, broadcast, receipt, finalized_head, canonical_inclusion_block] =
-                bindings.descriptors();
-            self.register_nonce::<EvmState<0, 0>, EvmCapability<0>>(builder, reserve_nonce)?;
-            self.register_broadcast::<EvmState<0, 2>, EvmCapability<1>>(builder, broadcast)?;
-            self.register_read::<EvmState<0, 3>, EvmCapability<3>>(builder, receipt)?;
-            self.register_read::<EvmState<0, 4>, EvmCapability<4>>(builder, finalized_head)?;
-            self.register_read::<EvmState<0, 5>, EvmCapability<5>>(
-                builder,
-                canonical_inclusion_block,
-            )?;
-        }
-        for bindings in &self.balance_bindings {
-            let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
-                bindings.descriptors();
-            self.register_read::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(
-                builder,
-                check_chain_identity,
-            )?;
-            self.register_read::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>(
-                builder,
-                read_initial_anchor,
-            )?;
-            self.register_read::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>(
-                builder,
-                read_native_balance,
-            )?;
-            self.register_read::<EvmState<1, 4, PortfolioContinuation>, EvmCapability<7>>(
-                builder,
-                read_token_decimals,
-            )?;
-            self.register_read::<EvmState<1, 5, PortfolioContinuation>, EvmCapability<7>>(
-                builder,
-                read_token_balance,
-            )?;
-            self.register_read::<EvmState<1, 6, PortfolioContinuation>, EvmCapability<6>>(
-                builder,
-                confirm_anchor,
-            )?;
-        }
-        Ok(())
-    }
-
-    fn adapter(
-        &self,
-        descriptor: &BindingDescriptor,
-    ) -> Result<Arc<EvmAdapterBinding>, EvmAdapterError> {
-        let reference = descriptor
-            .content_ref()
-            .map_err(|_| EvmAdapterError::Assembly)?;
-        self.adapters
-            .get(&reference)
-            .filter(|adapter| adapter.descriptor() == descriptor)
-            .cloned()
-            .ok_or(EvmAdapterError::Assembly)
-    }
-
-    fn register_read<S, C>(
-        &self,
-        builder: &mut RuntimeAssemblyBuilder,
-        descriptor: &BindingDescriptor,
-    ) -> Result<(), EvmAdapterError>
-    where
-        S: State,
-        C: AccessCapabilityContract<Intent = EvmReadIntent, Evidence = EvmReadEvidence>,
-    {
-        let adapter = self.adapter(descriptor)?;
-        builder
-            .register_adapter::<S, C, _>(descriptor.clone(), move |call| {
-                let adapter = Arc::clone(&adapter);
-                Box::pin(async move {
-                    adapter
-                        .read_call(call)
-                        .await
-                        .map_err(|_| RuntimeError::Unresolved)
-                })
-            })
-            .map_err(|_| EvmAdapterError::Assembly)
-    }
-
-    fn register_nonce<S, C>(
-        &self,
-        builder: &mut RuntimeAssemblyBuilder,
-        descriptor: &BindingDescriptor,
-    ) -> Result<(), EvmAdapterError>
-    where
-        S: State,
-        C: AccessCapabilityContract<
-            Intent = NonceReservationIntent,
-            Evidence = NonceReservationEvidence,
-        >,
-    {
-        let adapter = self.adapter(descriptor)?;
-        builder
-            .register_adapter::<S, C, _>(descriptor.clone(), move |call| {
-                let adapter = Arc::clone(&adapter);
-                Box::pin(async move {
-                    adapter
-                        .reserve_nonce_call(call)
-                        .await
-                        .map_err(|_| RuntimeError::Unresolved)
-                })
-            })
-            .map_err(|_| EvmAdapterError::Assembly)
-    }
-
-    fn register_broadcast<S, C>(
-        &self,
-        builder: &mut RuntimeAssemblyBuilder,
-        descriptor: &BindingDescriptor,
-    ) -> Result<(), EvmAdapterError>
-    where
-        S: State,
-        C: AccessCapabilityContract<Intent = BroadcastIntent, Evidence = BroadcastEvidence>,
-    {
-        let adapter = self.adapter(descriptor)?;
-        builder
-            .register_adapter::<S, C, _>(descriptor.clone(), move |call| {
-                let adapter = Arc::clone(&adapter);
-                Box::pin(async move {
-                    adapter
-                        .broadcast_call(call)
-                        .await
-                        .map_err(|_| RuntimeError::Unresolved)
-                })
-            })
-            .map_err(|_| EvmAdapterError::Assembly)
-    }
 }
 
-fn registered_adapter<'a>(
-    adapters: &'a BTreeMap<ContentRef, Arc<EvmAdapterBinding>>,
+fn register_all(
+    builder: &mut RuntimeAssemblyBuilder,
+    submission_bindings: &[EvmSubmissionBindings],
+    balance_bindings: &[EvmBalanceBindings],
+    adapters: &BTreeMap<ContentRef, Arc<EvmAdapterBinding>>,
+) -> Result<(), EvmAdapterError> {
+    register_semantics(builder)?;
+    for bindings in submission_bindings {
+        let [reserve_nonce, broadcast, receipt, finalized_head, canonical_inclusion_block] =
+            bindings.descriptors();
+        register_nonce::<EvmState<0, 0>, EvmCapability<0>>(builder, adapters, reserve_nonce)?;
+        register_broadcast::<EvmState<0, 2>, EvmCapability<1>>(builder, adapters, broadcast)?;
+        register_read::<EvmState<0, 3>, EvmCapability<3>>(builder, adapters, receipt)?;
+        register_read::<EvmState<0, 4>, EvmCapability<4>>(builder, adapters, finalized_head)?;
+        register_read::<EvmState<0, 5>, EvmCapability<5>>(
+            builder,
+            adapters,
+            canonical_inclusion_block,
+        )?;
+    }
+    for bindings in balance_bindings {
+        let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
+            bindings.descriptors();
+        register_read::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(
+            builder,
+            adapters,
+            check_chain_identity,
+        )?;
+        register_read::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>(
+            builder,
+            adapters,
+            read_initial_anchor,
+        )?;
+        register_read::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>(
+            builder,
+            adapters,
+            read_native_balance,
+        )?;
+        register_read::<EvmState<1, 4, PortfolioContinuation>, EvmCapability<7>>(
+            builder,
+            adapters,
+            read_token_decimals,
+        )?;
+        register_read::<EvmState<1, 5, PortfolioContinuation>, EvmCapability<7>>(
+            builder,
+            adapters,
+            read_token_balance,
+        )?;
+        register_read::<EvmState<1, 6, PortfolioContinuation>, EvmCapability<6>>(
+            builder,
+            adapters,
+            confirm_anchor,
+        )?;
+    }
+    Ok(())
+}
+
+macro_rules! register_adapter {
+    ($name:ident, $intent:ty, $evidence:ty, $invoke:ident) => {
+        fn $name<S, C>(
+            builder: &mut RuntimeAssemblyBuilder,
+            adapters: &BTreeMap<ContentRef, Arc<EvmAdapterBinding>>,
+            descriptor: &BindingDescriptor,
+        ) -> Result<(), EvmAdapterError>
+        where
+            S: State,
+            C: AccessCapabilityContract<Intent = $intent, Evidence = $evidence>,
+        {
+            let adapter = registered_adapter(adapters, descriptor)?;
+            builder
+                .register_adapter::<S, C, _>(descriptor.clone(), move |call| {
+                    let adapter = Arc::clone(&adapter);
+                    Box::pin(async move {
+                        adapter
+                            .$invoke(call)
+                            .await
+                            .map_err(|_| RuntimeError::Unresolved)
+                    })
+                })
+                .map_err(|_| EvmAdapterError::Assembly)
+        }
+    };
+}
+
+register_adapter!(register_read, EvmReadIntent, EvmReadEvidence, read_call);
+register_adapter!(
+    register_nonce,
+    NonceReservationIntent,
+    NonceReservationEvidence,
+    reserve_nonce_call
+);
+register_adapter!(
+    register_broadcast,
+    BroadcastIntent,
+    BroadcastEvidence,
+    broadcast_call
+);
+
+fn registered_adapter(
+    adapters: &BTreeMap<ContentRef, Arc<EvmAdapterBinding>>,
     descriptor: &BindingDescriptor,
-) -> Result<&'a EvmAdapterBinding, EvmAdapterError> {
+) -> Result<Arc<EvmAdapterBinding>, EvmAdapterError> {
     let reference = descriptor
         .content_ref()
         .map_err(|_| EvmAdapterError::Assembly)?;
     adapters
         .get(&reference)
         .filter(|adapter| adapter.descriptor() == descriptor)
-        .map(Arc::as_ref)
+        .cloned()
         .ok_or(EvmAdapterError::Assembly)
 }
 
