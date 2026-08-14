@@ -193,32 +193,13 @@ impl PortfolioSnapshotInput {
 #[serde(deny_unknown_fields)]
 pub struct PortfolioContinuation {
     input: PortfolioSnapshotInput,
-    completed_collections: Vec<PortfolioCompletedCollection>,
+    completed_collections: Vec<PortfolioSnapshotCollection>,
 }
 
 impl_checked_deserialize!(PortfolioContinuation {
     input: PortfolioSnapshotInput,
-    completed_collections: Vec<PortfolioCompletedCollection>,
+    completed_collections: Vec<PortfolioSnapshotCollection>,
 });
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct PortfolioCompletedCollection {
-    chain_id: u64,
-    anchor: PortfolioAnchor,
-    balances: Vec<PortfolioCompletedBalance>,
-    total_scaled: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-struct PortfolioCompletedBalance {
-    source_id: String,
-    address: String,
-    token: Option<String>,
-    decimals: u8,
-    raw_units: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
@@ -245,18 +226,10 @@ impl PortfolioAnchor {
     }
 }
 
-impl PortfolioCompletedBalance {
-    fn matches_planned_source(&self, source: &EvmBalanceSource) -> bool {
-        self.source_id == source.source_id
-            && self.address == source.address
-            && self.token == source.token
-    }
-}
-
 impl PortfolioContinuation {
     fn new(
         input: PortfolioSnapshotInput,
-        completed_collections: Vec<PortfolioCompletedCollection>,
+        completed_collections: Vec<PortfolioSnapshotCollection>,
     ) -> Result<Self, PortfolioError> {
         let continuation = Self {
             input,
@@ -270,31 +243,14 @@ impl PortfolioContinuation {
         self.input.validate()?;
         let next = self.completed_collections.len();
         if next > self.input.collections.len()
-            || self.completed_collections.iter().any(|result| {
-                result.chain_id == 0
-                    || result.anchor.validate().is_err()
-                    || !is_decimal_integer(&result.total_scaled)
-                    || result.balances.is_empty()
-                    || result.balances.iter().any(|balance| {
-                        !valid_public_text(&balance.source_id, 256)
-                            || !valid_public_text(&balance.address, 128)
-                            || balance.address != balance.address.to_ascii_lowercase()
-                            || balance.token.as_ref().is_some_and(|token| {
-                                !valid_public_text(token, 128)
-                                    || token != &token.to_ascii_lowercase()
-                            })
-                            || balance.decimals > 30
-                            || !is_decimal_integer(&balance.raw_units)
-                    })
-            })
             || self
                 .completed_collections
                 .iter()
                 .enumerate()
                 .any(|(ordinal, result)| {
-                    self.input
-                        .collection(ordinal)
-                        .is_none_or(|demand| !completed_collection_matches_demand(result, demand))
+                    self.input.collection(ordinal).is_none_or(|demand| {
+                        completed_collection_scaled_total(result, demand, ordinal as u32).is_none()
+                    })
                 })
         {
             return Err(PortfolioError::InvalidContinuation);
@@ -309,35 +265,51 @@ impl PortfolioContinuation {
     }
 }
 
-fn completed_collection_matches_demand(
-    result: &PortfolioCompletedCollection,
+fn completed_collection_scaled_total(
+    result: &PortfolioSnapshotCollection,
     demand: &PortfolioCollectionDemand,
-) -> bool {
+    ordinal: u32,
+) -> Option<String> {
     if demand
         .request
         .sources
         .first()
         .is_none_or(|source| result.chain_id != source.chain_id)
-        || result.balances.len() != demand.request.sources.len()
+        || result.collection_ordinal != ordinal
+        || result.anchor.validate().is_err()
+        || result.holdings.len() != demand.request.sources.len()
         || result
-            .balances
+            .holdings
             .iter()
             .zip(&demand.request.sources)
-            .any(|(balance, source)| !balance.matches_planned_source(source))
+            .any(|(holding, source)| {
+                holding.source_id != source.source_id
+                    || holding.decimals > 30
+                    || !is_decimal_integer(&holding.raw_units)
+                    || holding.amount_dec != decimal_amount(&holding.raw_units, holding.decimals)
+                    || !holding_matches_planned_source(holding, source)
+            })
     {
-        return false;
+        return None;
     }
     result
-        .balances
+        .holdings
         .iter()
-        .map(|balance| {
+        .map(|holding| {
             demand
                 .request
-                .scale_units(&balance.raw_units, balance.decimals)
+                .scale_units(&holding.raw_units, holding.decimals)
         })
         .collect::<Option<Vec<_>>>()
         .and_then(|amounts| sum_unsigned(&amounts))
-        .is_some_and(|total| total == result.total_scaled)
+}
+
+fn holding_matches_planned_source(holding: &PortfolioHolding, source: &EvmBalanceSource) -> bool {
+    match (&holding.asset, &source.token) {
+        (PortfolioAsset::Native, None) => true,
+        (PortfolioAsset::Token { contract }, Some(token)) => contract == token,
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
@@ -652,25 +624,36 @@ fn resume_portfolio_collection(
         Ok(anchor) => anchor,
         Err(_) => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
     };
-    continuation
-        .completed_collections
-        .push(PortfolioCompletedCollection {
-            chain_id,
-            anchor,
-            balances: balances
-                .into_iter()
-                .map(
-                    |(source_id, address, token, decimals, raw_units)| PortfolioCompletedBalance {
-                        source_id,
-                        address,
-                        token,
-                        decimals,
-                        raw_units,
+    let collection = PortfolioSnapshotCollection {
+        collection_ordinal,
+        chain_id,
+        anchor,
+        holdings: balances
+            .into_iter()
+            .map(
+                |(source_id, _, token, decimals, raw_units)| PortfolioHolding {
+                    source_id,
+                    asset: match token {
+                        None => PortfolioAsset::Native,
+                        Some(contract) => PortfolioAsset::Token { contract },
                     },
-                )
-                .collect(),
-            total_scaled,
-        });
+                    decimals,
+                    amount_dec: decimal_amount(&raw_units, decimals),
+                    raw_units,
+                },
+            )
+            .collect(),
+    };
+    let demand = match continuation.input.collection(collection_ordinal as usize) {
+        Some(demand) => demand,
+        None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    };
+    if completed_collection_scaled_total(&collection, demand, collection_ordinal).as_deref()
+        != Some(total_scaled.as_str())
+    {
+        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+    }
+    continuation.completed_collections.push(collection);
     match continuation.validate() {
         Ok(()) => portfolio_success(continuation),
         Err(_) => portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
@@ -705,36 +688,24 @@ fn consolidate_portfolio(
     if input.next_collection_ordinal().is_some() || input.validate().is_err() {
         return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
     }
-    let mut collections = Vec::with_capacity(input.completed_collections.len());
     let mut summaries = Vec::with_capacity(input.completed_collections.len());
     let mut totals = Vec::with_capacity(input.completed_collections.len());
-    for (ordinal, result) in input.completed_collections.into_iter().enumerate() {
-        let holdings = result
-            .balances
-            .into_iter()
-            .map(|balance| PortfolioHolding {
-                source_id: balance.source_id,
-                asset: match balance.token {
-                    None => PortfolioAsset::Native,
-                    Some(contract) => PortfolioAsset::Token { contract },
-                },
-                decimals: balance.decimals,
-                raw_units: balance.raw_units.clone(),
-                amount_dec: decimal_amount(&balance.raw_units, balance.decimals),
-            })
-            .collect::<Vec<_>>();
-        let total_value_dec = decimal_amount(
-            &result.total_scaled,
-            input.input.collections[ordinal].request.decimals,
-        );
+    let PortfolioContinuation {
+        input,
+        completed_collections,
+    } = input;
+    for (ordinal, collection) in completed_collections.iter().enumerate() {
+        let Some(demand) = input.collection(ordinal) else {
+            return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+        };
+        let Some(total_scaled) =
+            completed_collection_scaled_total(collection, demand, ordinal as u32)
+        else {
+            return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+        };
+        let total_value_dec = decimal_amount(&total_scaled, demand.request.decimals);
         let total_value_dec = canonical_decimal(total_value_dec);
         totals.push(total_value_dec.clone());
-        collections.push(PortfolioSnapshotCollection {
-            collection_ordinal: ordinal as u32,
-            chain_id: result.chain_id,
-            anchor: result.anchor,
-            holdings,
-        });
         summaries.push(PortfolioCollectionSummary {
             collection_ordinal: ordinal as u32,
             total_value_dec,
@@ -747,16 +718,16 @@ fn consolidate_portfolio(
     let output = PortfolioSnapshotOutput {
         snapshot: PortfolioSnapshot {
             schema_version: 1,
-            portfolio_id: input.input.portfolio_id.clone(),
-            collections,
+            portfolio_id: input.portfolio_id.clone(),
+            collections: completed_collections,
         },
         report: PortfolioReport {
             schema_version: 1,
-            portfolio_id: input.input.portfolio_id,
-            quote: input.input.quote.clone(),
+            portfolio_id: input.portfolio_id,
+            quote: input.quote.clone(),
             collection_summaries: summaries,
             totals_by_quote: vec![PortfolioQuoteTotal {
-                quote: input.input.quote,
+                quote: input.quote,
                 total_value_dec: aggregate,
             }],
         },

@@ -75,7 +75,6 @@ fn result(source: Value, anchor: Value) -> Value {
         "source": source,
         "decimals": 18,
         "raw_units": "1000000000000000000",
-        "amount_scaled": "1000000000000000000",
         "anchor": anchor,
     })
 }
@@ -228,7 +227,7 @@ fn a_later_source_cannot_switch_the_collection_anchor() {
 }
 
 #[test]
-fn completed_prefix_rejects_a_forged_scaled_amount() {
+fn completed_prefix_rejects_the_deleted_derived_scaled_amount() {
     let source = source("native", None);
     let mut completed = result(source.clone(), anchor("100"));
     completed["amount_scaled"] = Value::String("2".to_owned());
@@ -239,18 +238,12 @@ fn completed_prefix_rejects_a_forged_scaled_amount() {
     ));
 }
 
-fn returned(intent: &EvmReadIntent, value: EvmReadValue) -> EvmReadEvidence {
-    EvmReadEvidence::Returned {
-        operation: intent.operation_and_chain_id().0.to_owned(),
-        value,
-    }
+fn returned(_intent: &EvmReadIntent, value: EvmReadValue) -> EvmReadEvidence {
+    EvmReadEvidence::Returned { value }
 }
 
-fn rejected(intent: &EvmReadIntent) -> EvmReadEvidence {
-    EvmReadEvidence::Rejected {
-        operation: intent.operation_and_chain_id().0.to_owned(),
-        code: "observation_unavailable".to_owned(),
-    }
+fn rejected(_intent: &EvmReadIntent) -> EvmReadEvidence {
+    EvmReadEvidence::Rejected
 }
 
 fn success<T, F>(outcome: ProposedStateOutcome<T, F>) -> T {

@@ -81,7 +81,6 @@ fn generic_balance_completion_moves_a_non_clone_continuation() {
                 source: request.sources[0].clone(),
                 decimals: 18,
                 raw_units: "0".to_owned(),
-                amount_scaled: "0".to_owned(),
                 anchor,
             })],
             total_scaled: "0".to_owned(),
@@ -182,9 +181,7 @@ fn submission_failure_mapping_is_closed_and_stage_specific() {
     assert_eq!(
         submission_failure(interpret_reserve_wallet_nonce(
             request.clone(),
-            &NonceReservationEvidence::Rejected {
-                code: "reservation_rejected".to_owned(),
-            },
+            &NonceReservationEvidence::Rejected,
         )),
         EvmSubmissionFailure::NonceAuthorityUnavailable
     );
@@ -201,10 +198,7 @@ fn submission_failure_mapping_is_closed_and_stage_specific() {
     assert_eq!(
         submission_failure(interpret_broadcast_transaction(
             candidate,
-            &BroadcastEvidence::Rejected {
-                candidate_id,
-                code: "destination_rejected".to_owned(),
-            },
+            &BroadcastEvidence::Rejected,
         )),
         EvmSubmissionFailure::DestinationRejected
     );
@@ -288,7 +282,6 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
     )
     .expect("chain intent");
     let chain_evidence = EvmReadEvidence::Returned {
-        operation: chain_intent.operation.clone(),
         value: EvmReadValue::ChainId(1),
     };
     assert!(EvmCapability::<2>::bind_evidence(&chain_intent, &chain_evidence).is_ok());
@@ -301,7 +294,6 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
     assert!(EvmCapability::<2>::bind_evidence(
         &mismatched_chain_intent,
         &EvmReadEvidence::Returned {
-            operation: mismatched_chain_intent.operation.clone(),
             value: EvmReadValue::Anchor {
                 number: "1".to_owned(),
                 hash: "0xblock".to_owned(),
@@ -324,7 +316,6 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
     )
     .expect("balance intent");
     let wrong_value = EvmReadEvidence::Returned {
-        operation: balance_intent.operation.clone(),
         value: EvmReadValue::TokenDecimals(18),
     };
     assert!(EvmCapability::<7>::bind_evidence(&balance_intent, &wrong_value).is_err());

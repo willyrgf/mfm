@@ -141,9 +141,7 @@ impl WalletNonceAuthority for ScriptedNonceAuthority {
         let rejected = self.rejected;
         Box::pin(async move {
             if rejected {
-                Ok(NonceReservationEvidence::Rejected {
-                    code: "scripted_rejection".to_owned(),
-                })
+                Ok(NonceReservationEvidence::Rejected)
             } else {
                 Ok(NonceReservationEvidence::Reserved { nonce: 7 })
             }

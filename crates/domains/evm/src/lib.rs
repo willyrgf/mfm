@@ -873,8 +873,7 @@ impl<K: MfmValueTrait> EvmBalanceContext<K> {
                         || self
                             .request
                             .scale_units(&result.raw_units, result.decimals)
-                            .as_deref()
-                            != Some(result.amount_scaled.as_str())
+                            .is_none()
                 })
             || self
                 .completed
@@ -1023,7 +1022,6 @@ struct EvmBalanceResult {
     source: EvmBalanceSource,
     decimals: u8,
     raw_units: String,
-    amount_scaled: String,
     anchor: EvmBlockAnchor,
 }
 
@@ -1031,7 +1029,6 @@ impl_checked_deserialize!(EvmBalanceResult {
     source: EvmBalanceSource,
     decimals: u8,
     raw_units: String,
-    amount_scaled: String,
     anchor: EvmBlockAnchor,
 });
 
@@ -1040,7 +1037,6 @@ impl EvmBalanceResult {
         if self.source.validate().is_err()
             || self.decimals > 30
             || !is_decimal_integer(&self.raw_units)
-            || !is_decimal_integer(&self.amount_scaled)
             || self.anchor.validate().is_err()
         {
             return Err(EvmDomainError::InvalidValue);
@@ -1531,46 +1527,23 @@ impl<'de> Deserialize<'de> for EvmReadValue {
 pub enum EvmReadEvidence {
     /// Provider returned an exact structured value for the committed intent.
     Returned {
-        /// Operation identity echoed by the authenticated adapter.
-        operation: String,
         /// Interpreted provider value.
         value: EvmReadValue,
     },
     /// Provider returned a reviewed rejection.
-    Rejected {
-        /// Operation identity echoed by the authenticated adapter.
-        operation: String,
-        /// Stable redacted rejection code.
-        code: String,
-    },
+    Rejected,
     /// Adapter accepted a safe failure.
-    SafeFailure {
-        /// Operation identity echoed by the authenticated adapter.
-        operation: String,
-        /// Stable redacted failure code.
-        code: String,
-    },
+    SafeFailure,
     /// Authentication/integrity failed and grants no retry authority.
-    IntegrityBlocked {
-        /// Operation identity echoed by the authenticated adapter.
-        operation: String,
-        /// Stable redacted integrity code.
-        code: String,
-    },
+    IntegrityBlocked,
 }
 
 impl EvmReadEvidence {
     /// Validates the exact operation-bound evidence envelope.
     fn validate_for(&self, intent: &EvmReadIntent) -> Result<(), EvmDomainError> {
         let valid = match self {
-            Self::Returned { operation, value } => {
-                operation == &intent.operation && read_value_valid_for_intent(intent, value)
-            }
-            Self::Rejected { operation, code }
-            | Self::SafeFailure { operation, code }
-            | Self::IntegrityBlocked { operation, code } => {
-                operation == &intent.operation && valid_public_text(code, 256)
-            }
+            Self::Returned { value } => read_value_valid_for_intent(intent, value),
+            Self::Rejected | Self::SafeFailure | Self::IntegrityBlocked => true,
         };
         valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
     }
@@ -1764,10 +1737,7 @@ pub enum NonceReservationEvidence {
         nonce: u64,
     },
     /// The authority rejected reservation before entry.
-    Rejected {
-        /// Stable redacted code.
-        code: String,
-    },
+    Rejected,
     /// The adapter authenticated an integrity block.
     IntegrityBlocked,
 }
@@ -1777,9 +1747,7 @@ impl NonceReservationEvidence {
     fn validate_for(&self, intent: &NonceReservationIntent) -> Result<(), EvmDomainError> {
         intent.validate()?;
         match self {
-            Self::Reserved { .. } | Self::IntegrityBlocked => Ok(()),
-            Self::Rejected { code } if valid_public_text(code, 256) => Ok(()),
-            Self::Rejected { .. } => Err(EvmDomainError::EvidenceBinding),
+            Self::Reserved { .. } | Self::Rejected | Self::IntegrityBlocked => Ok(()),
         }
     }
 }
@@ -1902,37 +1870,22 @@ impl BroadcastIntent {
 pub enum BroadcastEvidence {
     /// Provider returned the authenticated transaction hash.
     Returned {
-        /// Deterministic candidate identity echoed by the authenticated adapter.
-        candidate_id: String,
         /// Provider-asserted transaction hash.
         transaction_hash: String,
     },
     /// Provider rejected before durable entry.
-    Rejected {
-        /// Deterministic candidate identity echoed by the authenticated adapter.
-        candidate_id: String,
-        /// Stable redacted rejection code.
-        code: String,
-    },
+    Rejected,
     /// Request/response integrity failed.
-    IntegrityBlocked {
-        /// Deterministic candidate identity bound by the request.
-        candidate_id: String,
-    },
+    IntegrityBlocked,
 }
 
 impl BroadcastEvidence {
-    /// Validates the exact candidate-bound evidence envelope.
+    /// Validates evidence for the exact committed broadcast intent.
     fn validate_for(&self, intent: &BroadcastIntent) -> Result<(), EvmDomainError> {
+        intent.validate()?;
         let valid = match self {
-            Self::Returned {
-                candidate_id,
-                transaction_hash,
-            } => candidate_id == &intent.candidate_id && valid_public_text(transaction_hash, 256),
-            Self::Rejected { candidate_id, code } => {
-                candidate_id == &intent.candidate_id && valid_public_text(code, 256)
-            }
-            Self::IntegrityBlocked { candidate_id } => candidate_id == &intent.candidate_id,
+            Self::Returned { transaction_hash } => valid_public_text(transaction_hash, 256),
+            Self::Rejected | Self::IntegrityBlocked => true,
         };
         valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
     }
@@ -2081,7 +2034,7 @@ fn interpret_reserve_wallet_nonce(
         NonceReservationEvidence::Reserved { nonce } => {
             submission_progress(input, SubmissionPhase::Reserved { nonce: *nonce })
         }
-        NonceReservationEvidence::Rejected { .. } => {
+        NonceReservationEvidence::Rejected => {
             failure(EvmSubmissionFailure::NonceAuthorityUnavailable)
         }
         NonceReservationEvidence::IntegrityBlocked => {
@@ -2138,32 +2091,25 @@ fn interpret_broadcast_transaction(
     }
     let EvmSubmissionProgress {
         request,
-        phase:
-            SubmissionPhase::Candidate {
-                nonce,
-                candidate_id: expected_candidate_id,
-            },
+        phase: SubmissionPhase::Candidate {
+            nonce,
+            candidate_id,
+        },
     } = input
     else {
         return failure(EvmSubmissionFailure::NonceLineageDiverged);
     };
     match evidence {
-        BroadcastEvidence::Returned {
-            candidate_id,
-            transaction_hash,
-        } if candidate_id == &expected_candidate_id => submission_progress(
+        BroadcastEvidence::Returned { transaction_hash } => submission_progress(
             request,
             SubmissionPhase::Broadcast {
                 nonce,
-                candidate_id: expected_candidate_id,
+                candidate_id,
                 transaction_hash: transaction_hash.clone(),
             },
         ),
-        BroadcastEvidence::Rejected { .. } => failure(EvmSubmissionFailure::DestinationRejected),
-        BroadcastEvidence::IntegrityBlocked { .. } => {
-            failure(EvmSubmissionFailure::ProviderUnavailable)
-        }
-        BroadcastEvidence::Returned { .. } => failure(EvmSubmissionFailure::ProviderUnavailable),
+        BroadcastEvidence::Rejected => failure(EvmSubmissionFailure::DestinationRejected),
+        BroadcastEvidence::IntegrityBlocked => failure(EvmSubmissionFailure::ProviderUnavailable),
     }
 }
 
@@ -2939,15 +2885,17 @@ fn interpret_confirm_balance_anchor<K: MfmValueTrait>(
     if &anchor != initial_anchor {
         return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
     }
-    let amount_scaled = match input.request.scale_units(raw_balance, *source_decimals) {
-        Some(amount) => amount,
-        None => return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor),
-    };
+    if input
+        .request
+        .scale_units(raw_balance, *source_decimals)
+        .is_none()
+    {
+        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+    }
     input.completed.push(EvmBalanceResult {
         source: source.clone(),
         decimals: *source_decimals,
         raw_units: raw_balance.clone(),
-        amount_scaled,
         anchor: initial_anchor.clone(),
     });
     let work = match input.request.sources.get(input.completed.len()).cloned() {
@@ -2963,12 +2911,7 @@ fn consolidate_balance_collection<K: MfmValueTrait>(
     if !matches!(input.work, EvmBalanceWork::Complete) || input.validate().is_err() {
         return balance_failure(&input, EvmBalanceFailureStage::Consolidate);
     }
-    let total_scaled = match sum_decimal(
-        input
-            .completed
-            .iter()
-            .map(|result| result.amount_scaled.as_str()),
-    ) {
+    let total_scaled = match completed_total_scaled(&input.request, &input.completed) {
         Some(total) => total,
         None => return balance_failure(&input, EvmBalanceFailureStage::Consolidate),
     };
@@ -3704,13 +3647,10 @@ fn read_returned<'a>(
         return None;
     }
     match evidence {
-        EvmReadEvidence::Returned { operation, value } if operation == &intent.operation => {
-            Some(value)
-        }
-        EvmReadEvidence::Returned { .. }
-        | EvmReadEvidence::Rejected { .. }
-        | EvmReadEvidence::SafeFailure { .. }
-        | EvmReadEvidence::IntegrityBlocked { .. } => None,
+        EvmReadEvidence::Returned { value } => Some(value),
+        EvmReadEvidence::Rejected
+        | EvmReadEvidence::SafeFailure
+        | EvmReadEvidence::IntegrityBlocked => None,
     }
 }
 
@@ -3765,6 +3705,17 @@ fn scale_units(raw: &str, source_decimals: u8, target_decimals: u8) -> Option<St
                 value.to_owned()
             }
         })
+}
+
+fn completed_total_scaled(
+    request: &EvmBalanceRequest,
+    completed: &[EvmBalanceResult],
+) -> Option<String> {
+    let amounts = completed
+        .iter()
+        .map(|result| request.scale_units(&result.raw_units, result.decimals))
+        .collect::<Option<Vec<_>>>()?;
+    sum_decimal(amounts.iter().map(String::as_str))
 }
 
 fn sum_decimal<'a>(values: impl Iterator<Item = &'a str>) -> Option<String> {
