@@ -7,7 +7,7 @@
 use mfm_canonical::raw_content_digest;
 use mfm_ids::{ContentRef, DigestAlgorithm, DigestBytes, SchemaId};
 use mfm_journal::single_trust::{RunFrame, RunRecord};
-use mfm_program::single_trust::ProgramDocument;
+use mfm_program::ProgramCatalog;
 use mfm_store::single_trust::{replay_terminality, QualifiedRun, StoreError};
 use serde::{Deserialize, Serialize};
 
@@ -74,13 +74,14 @@ pub fn qualify(run: &QualifiedRun) -> Result<ReplayReport, ReplayError> {
 /// Qualifies a retained prefix and derives terminality from its exact callback-free Program.
 ///
 /// The structural [`qualify`] helper is useful when only the retained three-family stream is
-/// available. Consumers that know the admitted Program must use this function so a nonterminal
-/// conclusion is not mistaken for a terminal result.
-pub fn qualify_with_program(
+/// available. Consumers that need semantic terminality must use this function so a nonterminal
+/// conclusion is not mistaken for a terminal result. The Program is loaded only from the run's
+/// admitted object closure and strictly ingressed under `catalog`.
+pub fn qualify_with_retained_program(
     run: &QualifiedRun,
-    document: ProgramDocument,
+    catalog: &ProgramCatalog,
 ) -> Result<ReplayReport, ReplayError> {
-    let terminal = replay_terminality(run, document).map_err(|_| ReplayError::Store)?;
+    let terminal = replay_terminality(run, catalog).map_err(|_| ReplayError::Store)?;
     Ok(ReplayReport {
         head_sequence: run.head_sequence(),
         terminal,

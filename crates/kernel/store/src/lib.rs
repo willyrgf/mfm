@@ -24,6 +24,7 @@ pub use backend::{
     StructuredStoreIdentity, SuspendedConfigurationAppend,
 };
 pub use single_trust::{
-    replay_terminality, validate_prefix, AppendDisposition, ConfigurationAppendDisposition,
-    FactContinuation, QualifiedRun, Result, RunAction, SelectedRun, StoreError,
+    replay_terminality, retained_program, validate_prefix, AppendDisposition,
+    ConfigurationAppendDisposition, FactContinuation, QualifiedRun, Result, RunAction, SelectedRun,
+    StoreError,
 };

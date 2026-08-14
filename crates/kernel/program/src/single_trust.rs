@@ -6,6 +6,7 @@
 
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -13,8 +14,10 @@ use mfm_canonical::{raw_content_digest, PlainCanonicalJsonBytes};
 use mfm_capabilities::{AccessCapabilityContract, EffectMode, FactSelectionMode, ReadMode};
 use mfm_facts::FactSelectionRequest;
 pub use mfm_ids::SequentialControlAddress;
-use mfm_ids::{ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, StableId};
-use mfm_values::MfmValue;
+use mfm_ids::{
+    ContentDigest, ContentRef, DigestAlgorithm, DigestBytes, SchemaId, SchemaVersion, StableId,
+};
+use mfm_values::{CanonicalJsonProfile, MfmValue, SchemaIdentity, SchemaKind, SchemaShape};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
@@ -26,6 +29,29 @@ pub const MAX_DECLARATIONS: usize = 65_536;
 pub const MAX_MATCH_ARMS: usize = 256;
 /// Maximum conclusion reservation accepted by one State declaration.
 pub const MAX_STATE_CONCLUSION_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Returns the dedicated persisted schema identity for canonical Program documents.
+///
+/// Program documents are retained implementation contracts, not root result values. Keeping this
+/// identity distinct from every State result contract prevents a document object from being
+/// mistaken for a domain value solely because their content digests happen to share a hash
+/// algorithm.
+pub fn program_document_schema_id() -> Result<SchemaId> {
+    let version = SchemaVersion::new("1").map_err(|_| ProgramError::InvalidContract)?;
+    let identity = SchemaIdentity::new(
+        SchemaKind::PersistedContract,
+        None,
+        "mfm-program-document",
+        version,
+        SchemaShape::CanonicalJsonTerminal {
+            profile: CanonicalJsonProfile::GeneralFloatFree,
+        },
+    )
+    .map_err(|_| ProgramError::InvalidContract)?;
+    identity
+        .schema_id()
+        .map_err(|_| ProgramError::InvalidContract)
+}
 
 /// Result of final Program construction and typed ingress.
 pub type Result<T> = std::result::Result<T, ProgramError>;
@@ -845,11 +871,28 @@ impl ProgramDocument {
         canonical_json(self)
     }
 
+    /// Strictly decodes one complete canonical Program document without granting catalog
+    /// authority.
+    pub fn decode_canonical(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > MAX_PROGRAM_BYTES {
+            return Err(ProgramError::Capacity);
+        }
+        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
+            .map_err(|_| ProgramError::Canonical)?;
+        let document: Self =
+            serde_json::from_slice(canonical.as_bytes()).map_err(|_| ProgramError::Canonical)?;
+        let checked = document.canonical_bytes()?;
+        if checked.as_bytes() != canonical.as_bytes() {
+            return Err(ProgramError::Canonical);
+        }
+        Ok(document)
+    }
+
     /// Returns the content identity of this exact normalized Program document.
     pub fn program_ref(&self) -> Result<ContentRef> {
         let canonical = self.canonical_bytes()?;
         ContentRef::new(
-            self.root_contract_ref.schema_id().clone(),
+            program_document_schema_id()?,
             ContentDigest::from_digest(DigestAlgorithm::Sha256V1, canonical.digest_bytes()),
         )
         .map_err(|_| ProgramError::InvalidContract)
@@ -895,6 +938,16 @@ pub struct Program {
     document: ProgramDocument,
     program_ref: ProgramRef,
     catalog: Arc<ProgramCatalogInner>,
+}
+
+impl fmt::Debug for Program {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Program")
+            .field("document", &self.document)
+            .field("program_ref", &self.program_ref)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Opaque content address of one normalized Program document.
@@ -1215,17 +1268,7 @@ impl<'a> ProgramIngress<'a> {
 
     /// Strictly decodes and normalizes one Program document without expansion or callbacks.
     pub fn decode(&self, bytes: &[u8]) -> Result<Program> {
-        if bytes.len() > MAX_PROGRAM_BYTES {
-            return Err(ProgramError::Capacity);
-        }
-        let canonical = PlainCanonicalJsonBytes::from_canonical_json_slice(bytes)
-            .map_err(|_| ProgramError::Canonical)?;
-        let document: ProgramDocument =
-            serde_json::from_slice(canonical.as_bytes()).map_err(|_| ProgramError::Canonical)?;
-        let checked = document.canonical_bytes()?;
-        if checked.as_bytes() != canonical.as_bytes() {
-            return Err(ProgramError::Canonical);
-        }
+        let document = ProgramDocument::decode_canonical(bytes)?;
         self.catalog.program(document)
     }
 }
@@ -1754,6 +1797,30 @@ mod tests {
             Vec::new(),
         )
         .expect("document")
+    }
+
+    #[test]
+    fn program_document_has_a_dedicated_persisted_identity() {
+        let document = empty_document(reference(9));
+        let program_ref = document.program_ref().expect("program ref");
+        assert_eq!(
+            program_ref.schema_id(),
+            &program_document_schema_id().expect("program schema")
+        );
+        assert_ne!(
+            program_ref.schema_id(),
+            document.root_contract_ref().schema_id()
+        );
+
+        let canonical = document.canonical_bytes().expect("canonical document");
+        assert_eq!(
+            ProgramDocument::decode_canonical(canonical.as_bytes()).expect("strict decode"),
+            document
+        );
+        assert!(matches!(
+            ProgramDocument::decode_canonical(b"{ \"entry_point_id\": \"invalid\" }"),
+            Err(ProgramError::Canonical)
+        ));
     }
 
     #[test]
