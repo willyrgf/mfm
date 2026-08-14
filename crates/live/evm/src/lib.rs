@@ -694,8 +694,8 @@ fn register_all(
         register_nonce::<EvmState<0, 0>, EvmCapability<0>>(builder, adapters, reserve_nonce)?;
         register_broadcast::<EvmState<0, 2>, EvmCapability<1>>(builder, adapters, broadcast)?;
         register_read::<EvmState<0, 3>, EvmCapability<3>>(builder, adapters, receipt)?;
-        register_read::<EvmState<0, 4>, EvmCapability<4>>(builder, adapters, finalized_head)?;
-        register_read::<EvmState<0, 5>, EvmCapability<5>>(
+        register_read::<EvmState<0, 4>, EvmCapability<3>>(builder, adapters, finalized_head)?;
+        register_read::<EvmState<0, 5>, EvmCapability<3>>(
             builder,
             adapters,
             canonical_inclusion_block,
@@ -871,8 +871,8 @@ fn register_semantics(builder: &mut RuntimeAssemblyBuilder) -> Result<(), EvmAda
     register_access::<EvmState<0, 0>, EvmCapability<0>>(builder)?;
     register_access::<EvmState<0, 2>, EvmCapability<1>>(builder)?;
     register_access::<EvmState<0, 3>, EvmCapability<3>>(builder)?;
-    register_access::<EvmState<0, 4>, EvmCapability<4>>(builder)?;
-    register_access::<EvmState<0, 5>, EvmCapability<5>>(builder)?;
+    register_access::<EvmState<0, 4>, EvmCapability<3>>(builder)?;
+    register_access::<EvmState<0, 5>, EvmCapability<3>>(builder)?;
     register_access::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(builder)?;
     register_access::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>(builder)?;
     register_access::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>(builder)?;
@@ -945,8 +945,8 @@ fn is_read_descriptor(descriptor: &BindingDescriptor) -> bool {
     descriptor.effect_domain().is_none()
         && descriptor.public_signer_key_instance_ref().is_none()
         && (descriptor_has_role::<EvmState<0, 3>, EvmCapability<3>>(descriptor)
-            || descriptor_has_role::<EvmState<0, 4>, EvmCapability<4>>(descriptor)
-            || descriptor_has_role::<EvmState<0, 5>, EvmCapability<5>>(descriptor)
+            || descriptor_has_role::<EvmState<0, 4>, EvmCapability<3>>(descriptor)
+            || descriptor_has_role::<EvmState<0, 5>, EvmCapability<3>>(descriptor)
             || descriptor_has_role::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(
                 descriptor,
             )

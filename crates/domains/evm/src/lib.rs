@@ -1554,9 +1554,7 @@ enum ReadCapabilityFamily {
     ChainIdentity,
     LatestAnchor,
     Balance,
-    TransactionReceipt,
-    FinalizedHead,
-    CanonicalInclusionBlock,
+    SubmissionStatus,
 }
 
 fn validate_read_capability_intent(
@@ -1595,23 +1593,15 @@ fn validate_read_capability_intent(
                 EvmReadSubject::TokenBalance { .. }
             )
         ),
-        ReadCapabilityFamily::TransactionReceipt => matches!(
+        ReadCapabilityFamily::SubmissionStatus => matches!(
             (&intent.operation[..], &intent.subject),
             (
                 "mfm.evm.read-transaction-receipt@1",
                 EvmReadSubject::TransactionReceipt { .. }
-            )
-        ),
-        ReadCapabilityFamily::FinalizedHead => matches!(
-            (&intent.operation[..], &intent.subject),
-            (
+            ) | (
                 "mfm.evm.read-finalized-head@1",
                 EvmReadSubject::FinalizedHead
-            )
-        ),
-        ReadCapabilityFamily::CanonicalInclusionBlock => matches!(
-            (&intent.operation[..], &intent.subject),
-            (
+            ) | (
                 "mfm.evm.read-canonical-inclusion-block@1",
                 EvmReadSubject::CanonicalInclusionBlock { .. }
             )
@@ -1622,8 +1612,9 @@ fn validate_read_capability_intent(
 
 /// Exact EVM Access capability selected by its closed contract kind.
 ///
-/// Kinds 0 and 1 are the one-entry nonce and broadcast Effects. The remaining kinds retain the
-/// distinct chain, receipt, finality, anchor, and balance Read contracts required by each State.
+/// Kinds 0 and 1 are the one-entry nonce and broadcast Effects. Kind 3 is the submission-status
+/// Read contract; its closed intent distinguishes receipt, finalized-head, and canonical-block
+/// observations. The remaining Read contracts cover chain, anchor, and balance observations.
 pub struct EvmCapability<const KIND: u8>;
 
 macro_rules! impl_read_capability {
@@ -1661,18 +1652,8 @@ impl_read_capability!(
 );
 impl_read_capability!(
     EvmCapability<3>,
-    "mfm.evm.capability.read-transaction-receipt@1",
-    TransactionReceipt
-);
-impl_read_capability!(
-    EvmCapability<4>,
-    "mfm.evm.capability.read-finalized-head@1",
-    FinalizedHead
-);
-impl_read_capability!(
-    EvmCapability<5>,
-    "mfm.evm.capability.read-canonical-inclusion-block@1",
-    CanonicalInclusionBlock
+    "mfm.evm.capability.read-submission-status@1",
+    SubmissionStatus
 );
 impl_read_capability!(
     EvmCapability<6>,
@@ -3007,13 +2988,13 @@ impl_submission_access!(
 );
 impl_submission_access!(
     4,
-    EvmCapability<4>,
+    EvmCapability<3>,
     prepare_finalized_head,
     interpret_finalized_head
 );
 impl_submission_access!(
     5,
-    EvmCapability<5>,
+    EvmCapability<3>,
     prepare_canonical_inclusion_block,
     interpret_canonical_inclusion_block
 );
@@ -3121,8 +3102,8 @@ impl EvmSubmissionBindings {
         validate_access_binding::<EvmState<0, 0>, EvmCapability<0>>(reserve_nonce)?;
         validate_access_binding::<EvmState<0, 2>, EvmCapability<1>>(broadcast)?;
         validate_access_binding::<EvmState<0, 3>, EvmCapability<3>>(receipt)?;
-        validate_access_binding::<EvmState<0, 4>, EvmCapability<4>>(finalized_head)?;
-        validate_access_binding::<EvmState<0, 5>, EvmCapability<5>>(canonical_inclusion_block)?;
+        validate_access_binding::<EvmState<0, 4>, EvmCapability<3>>(finalized_head)?;
+        validate_access_binding::<EvmState<0, 5>, EvmCapability<3>>(canonical_inclusion_block)?;
         if reserve_nonce.effect_domain().is_none()
             || reserve_nonce.public_signer_key_instance_ref().is_some()
             || broadcast.effect_domain().is_none()
@@ -3259,7 +3240,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             address(4)?,
             receipt,
         )?)),
-        Declaration::State(Box::new(access_state::<EvmState<0, 4>, EvmCapability<4>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 4>, EvmCapability<3>>(
             4,
             progress.clone(),
             progress.clone(),
@@ -3267,7 +3248,7 @@ fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocumen
             address(5)?,
             finalized_head,
         )?)),
-        Declaration::State(Box::new(access_state::<EvmState<0, 5>, EvmCapability<5>>(
+        Declaration::State(Box::new(access_state::<EvmState<0, 5>, EvmCapability<3>>(
             5,
             progress.clone(),
             progress.clone(),
