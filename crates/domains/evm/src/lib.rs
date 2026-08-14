@@ -2343,6 +2343,25 @@ impl EvmBalanceFailureCode {
             Self::IntegrityBlocked => "integrity_blocked",
         }
     }
+
+    const fn is_source_failure_for(self, stage: EvmBalanceFailureStage) -> bool {
+        matches!(
+            (self, stage),
+            (
+                Self::ChainIdentityUnavailable,
+                EvmBalanceFailureStage::CheckChainIdentity
+            ) | (
+                Self::ObservationUnavailable,
+                EvmBalanceFailureStage::ReadInitialAnchor
+                    | EvmBalanceFailureStage::SelectAsset
+                    | EvmBalanceFailureStage::ReadNativeBalance
+                    | EvmBalanceFailureStage::ReadTokenDecimals
+                    | EvmBalanceFailureStage::ReadTokenBalance
+                    | EvmBalanceFailureStage::ConfirmAnchor
+                    | EvmBalanceFailureStage::Consolidate,
+            ) | (Self::CollectionInvalid, EvmBalanceFailureStage::Consolidate)
+        )
+    }
 }
 
 /// EVM-owned typed failure that leaves Portfolio semantics to its mapper.
@@ -2403,11 +2422,8 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
             Wire::SourceUnavailable {
                 stage,
                 collection_ordinal,
-                code:
-                    code @ (EvmBalanceFailureCode::ObservationUnavailable
-                    | EvmBalanceFailureCode::CollectionInvalid
-                    | EvmBalanceFailureCode::ChainIdentityUnavailable),
-            } => Self::SourceUnavailable {
+                code,
+            } if code.is_source_failure_for(stage) => Self::SourceUnavailable {
                 stage: stage.as_str().to_owned(),
                 collection_ordinal,
                 code: code.as_str().to_owned(),
