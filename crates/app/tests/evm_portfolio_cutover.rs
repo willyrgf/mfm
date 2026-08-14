@@ -410,7 +410,10 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
     )
     .expect("balance bindings");
 
-    let live = EvmLiveAssembly::new(
+    let catalog = application_catalog().expect("catalog");
+    let mut assembly_builder = RuntimeAssemblyBuilder::new(catalog.clone());
+    let live = EvmLiveAssembly::install(
+        &mut assembly_builder,
         vec![submission_bindings],
         vec![balance_bindings],
         vec![
@@ -454,10 +457,6 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
     )
     .expect("live closure");
 
-    let catalog = application_catalog().expect("catalog");
-    let mut assembly_builder = RuntimeAssemblyBuilder::new(catalog.clone());
-    live.register(&mut assembly_builder)
-        .expect("register live assembly");
     let assembly = assembly_builder.finish().expect("finish assembly");
     let store =
         StructuredStore::open_memory(identity, catalog, StoreWorkLimits::default()).expect("store");
