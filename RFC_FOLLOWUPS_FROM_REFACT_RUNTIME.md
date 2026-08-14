@@ -1,6 +1,6 @@
 # RFC: simplify operation authoring, runtime control, and application entry points
 
-Status: proposed follow-up target; material blockers under discussion
+Status: ready for implementation planning
 
 Relationship: this RFC follows `RFC_REFACTOR_SINGLE_TRUST_BOUNDARY.md`. It completes boundaries
 that the runtime refactor left at the wrong level: reusable Operation authoring, capability-owned
@@ -19,8 +19,9 @@ Persisted formats and replay do not gain an expansion or Application concept.
 Where the prior RFC or current design documents prescribe separately addressed `Match`
 declarations, a fixed EVM/Portfolio App facade, duplicated dynamic State-entry paths, external
 coordination of one-State Runtime steps, or public suspended-owner handling, this RFC supersedes
-those statements. It does not supersede committed-call gating, acknowledgement safety, fail-fast
-State semantics, or any durable trust invariant.
+those statements. It also supersedes cross-request acknowledgement-token retention and its
+stronger recovery-liveness guarantee. It does not supersede direct-new committed-call gating,
+durability before public success, fail-fast State semantics, Store CAS, or no-unsafe-Effect-reentry.
 
 ---
 
@@ -29,13 +30,15 @@ State semantics, or any durable trust invariant.
 MFM will have one reusable path at each of three boundaries:
 
 1. `OperationExpansion` is the only Program-authoring and State-setup path. Its small sequence DSL
-   accepts child Operations and State occurrences in semantic order. During Access State setup,
-   the exact capability may inject ordinary States before and after that occurrence.
-2. Runtime owns admission, immediate State advancement, parking, acknowledgement-owner retention,
-   resolution, and recovery classification behind one process-facing progression path. Every
-   dynamically selected State enters typed execution through one registered `StateStart` boundary
-   and one correlated value conversion. App and transports never coordinate Runtime's affine
-   lifecycle variants.
+   accepts child Operations and State occurrences in semantic order, connects lexical success, and
+   lowers one typed failure policy. During Access State setup, the exact capability may inject
+   ordinary States before and after that occurrence.
+2. Runtime owns admission, immediate State advancement, parking, and recovery classification
+   behind one process-facing progression path. Every dynamically selected State enters typed
+   execution through one registered `StateStart` boundary and one correlated value conversion. A
+   call retains only its private ephemeral execution proofs;
+   acknowledgement uncertainty discards them and later calls restart from Store-qualified history.
+   App and transports never coordinate Runtime's affine lifecycle variants.
 3. `ApplicationBuilder::entry_point` is the only public entry-point registration path. Each
    registration combines a strict typed request, one resolved typed root configuration, typed
    domain bindings, `C0` construction, and the same `[Operations + States]` sequence DSL. Private
@@ -61,47 +64,40 @@ count.
 
 ## Material uncertainties
 
-- **EVM token-read durability and fact granularity.** The simplest State-only balance sequence uses
-  one variant-aware `ReadSelectedBalance` Access State with a new
-  `EvmSelectedBalanceRead` capability: native evidence carries units, while token evidence carries
-  decimals plus units. The current token path persists decimals and balance as two separate
-  prepared/concluded States. It is not yet confirmed whether that intermediate checkpoint or
-  independently reusable decimals fact is a required domain contract. If it is, consolidating the
-  reads would weaken recovery or fact reuse; preserving it requires another fixed-sequence typed
-  design without fake provider calls. Resolve by auditing the live adapter, fact selection, retry,
-  and replay requirements and approving the exact combined intent/evidence contract before
-  implementation planning.
-- **Operation failure authoring.** State-owned `FailureNext` defines the final Program contract,
-  but the two general streaming actions still do not specify how a parent sends a child
-  Operation's success and failure to different later sequences, as Portfolio requires. If this is
-  left implicit, implementation will need raw labels, a hidden intermediate declaration algebra,
-  or ad hoc address patching at call sites. Resolve by approving one typed
-  `Operation::{Input, Output, Failure}` contract and one restricted lexical success/failure
-  continuation writer, including canonical emission-order goldens.
-- **Cancellation-safe pending-owner cardinality and disposal.** Concurrent same-run CAS attempts
-  can create more than one affine append owner, and cancellation can occur while Store
-  acknowledgement is awaited. A single `RunId -> owner` entry or post-await insertion can lose
-  authority; retaining permanent owners forever can leak bounded capacity. Resolve with a focused
-  Runtime/Store custody design and tests covering multiple owners per run, cancellation at every
-  append await, restoration during resolution, and one explicit trusted permanent-disposal rule.
-- **Progress versus durable query contract.** Admission acknowledgement uncertainty or pre-admit
-  capacity failure may have no durable head, and a work bound may stop while a State remains
-  runnable. A callback-free `read` also cannot report Runtime-local pending custody. Resolve the
-  closed `RunProgress` dispositions, optional last-qualified head, work-bound `Yielded`/`Runnable`
-  result, and separate durable Store-owned `RunView` before implementing the process-facing API.
-The other previously open choices are fixed by this RFC:
+none.
 
+The previously open choices are fixed by this RFC:
+
+- Operations have exact authoring-only input, output, and unhandled-failure contracts. Success is
+  ordinary lexical sequencing. A parent may give each child Operation or State occurrence one
+  typed failure-policy scope; successful recovery reconstructs the item's exact externally visible
+  output and rejoins the lexical continuation, while propagated handler failures use the parent's
+  exact failure contract; only propagated root failure becomes a terminal Program route;
+- EVM balance Operations specialize their fixed State sequence from the exact validated request:
+  token sources retain a separate token-decimals checkpoint, native sources omit it, and both use
+  one `ReadAssetBalance` State without a successful runtime branch;
+- Runtime has no exclusive run ownership, per-run lock, cross-request execution cursor, suspended
+  append registry, or owner-resolution API; Store exact-head CAS remains the concurrency boundary;
+- acknowledgement uncertainty ends the current invocation, discards every hot candidate, and
+  resumes only from freshly qualified retained history; losing an entry-once Effect result may
+  therefore park that run permanently rather than authorize provider re-entry; cancellation after
+  direct-new preparation has the same conservative outcome;
+- `invoke`, `resume`, and `read` return the same Store-derived `RunView`; a qualified ready head is
+  `Runnable`, a retained head with no currently permitted action is `Waiting`, and an uncertain
+  admission with no qualified genesis returns `RunError::Indeterminate { run_id }` rather than a
+  fabricated head or `RunProgress`;
 - the State-only Program and ordinal-only occurrence address are one incompatible clean-slate
   format cutover: reset current Program/journal/replay baselines and reject prior `Match` Programs
   and old address records, with no migration, legacy decoder, or dual reducer;
 - a Runtime command drains immediately actionable States until the next stable external boundary;
 - each admission pins one resolved typed root configuration head;
-- the Program's terminal root output is the entry point's public typed success result;
+- the Program's terminal root success and failure are the entry point's reviewed public typed
+  contracts;
 - exact request-specialized Program validation happens before `RunAdmitted`, without a duplicate
   exhaustive Program-closure API;
 - numeric EVM and Portfolio State markers are replaced together with numeric capabilities; and
-- trusted embedding supplies an already-composed Application to HTTP, while CLI may invoke that
-  transport remotely.
+- trusted embedding supplies an already-composed Application to HTTP, while the production CLI
+  invokes that transport remotely.
 
 ## 1. Goals and constraints
 
@@ -112,7 +108,7 @@ This follow-up has five measurable goals:
 - make reusable operation sequencing expressible once and composable everywhere;
 - make every dynamically selected State regain its exact typed input through one correlated
   Runtime boundary;
-- put each responsibility in one owner instead of duplicating it across domain, App, Runtime,
+- put each responsibility in one component instead of duplicating it across domain, App, Runtime,
   tests, and transports;
 - let a new on-chain or off-chain entry point be installed without editing generic platform or
   transport source; and
@@ -137,11 +133,13 @@ The runtime refactor established the correct durable and execution boundaries:
 - Store append atomicity and content addressing remain unchanged; and
 - Runtime, Store, import, audit, and replay never invoke authoring callbacks.
 
-This RFC preserves those invariants while deliberately establishing two new persisted contracts:
+This RFC preserves those invariants while deliberately establishing these new persisted contracts:
 
-- the Program contains only canonically ordered ordinary `State` declarations; and
+- the Program contains only canonically ordered ordinary `State` declarations;
 - each declaration owns its fixed success continuation and terminal, common, or exhaustive
-  variant-selected failure continuation.
+  variant-selected failure continuation;
+- the Program retains exact root input, terminal success, and terminal failure contracts; and
+- State occurrences use ordinal-only `StateAddress` throughout Program, Journal, Store, and replay.
 
 ### 1.3 Complexity and reuse accounting
 
@@ -161,10 +159,11 @@ more readable semantic type names; the cut must still delete more public lifecyc
 registry, and compatibility concepts than it adds.
 
 LOC is not forecast before implementation and its final sign is not a standalone merge gate. The
-primary evidence is fewer concepts, owners, public coordination types, code paths, dependency
-edges, and future change sites. A final LOC reduction is desirable and expected where manual
-planning and duplicated coordination disappear; any net increase must be explained by necessary
-typed guarantees, validation, or usable transport behavior. Moving code to another crate,
+primary evidence is fewer concepts, duplicated responsibility holders, public coordination types,
+code paths, dependency edges, and future change sites. A final LOC reduction is desirable and
+expected where manual planning and duplicated coordination disappear; any net increase must be
+explained by necessary typed guarantees, validation, or usable transport behavior. Moving code to
+another crate,
 compressing readable code, deleting boundary tests, or hiding duplication in a macro does not
 demonstrate simplification.
 
@@ -188,7 +187,7 @@ The problems are connected rather than independent cleanup opportunities.
 
 The result is accidental responsibility sharing:
 
-| Symptom | Knowledge duplicated outside its owner |
+| Symptom | Knowledge duplicated outside its responsible component |
 | --- | --- |
 | `submission_program` manually creates seven declarations | Capability submission policy |
 | `append_balance_fragment` reserves ordinals and mutates a caller vector | Reusable child Operation structure |
@@ -197,7 +196,7 @@ The result is accidental responsibility sharing:
 | `application_catalog` lists every domain value and numeric capability | Trusted domain/catalog composition |
 | `mfm-evm-live` imports Portfolio and registers its States | Caller-owned child-Operation instantiation |
 | Pure and Access registration each downcast selected State input | One correlated Runtime State-start boundary |
-| App retains `SuspendedRun` and normalizes Runtime steps | Runtime owner fate and recovery |
+| App retains `SuspendedRun` and normalizes Runtime steps | One-call Runtime progression and cold recovery |
 | App tests loop up to a fixed number of States | Runtime progression behavior |
 | `EvmCapability<0>`, `<1>`, `<2>`, `<3>`, `<6>`, and `<7>` | Capability semantics |
 
@@ -207,19 +206,20 @@ registered State-start/value boundary, one generic entry-point registration meth
 Runtime progression path, and semantic domain types. Everything else is consolidation or
 deletion.
 
-## 3. Target ownership
+## 3. Target responsibilities
 
-| Owner | Owns | Does not own |
+| Component | Owns | Does not own |
 | --- | --- | --- |
-| Domain Operation | Ordered reusable child Operations and States, domain context transitions, and typed construction helpers | Runtime execution or transport decoding |
-| `OperationExpansion` | The only recursion/flattening path, State setup, capability injection, contract continuity, bounds, addresses, State-owned transitions, and final Program construction | Domain semantics, provider IO, or persisted expansion metadata |
-| State | One reusable domain transition with complete input, output, and failure contracts plus declared success/failure continuations | Expansion or awareness that it was injected |
+| Domain Operation | Exact Input/Output/unhandled-Failure contracts, ordered reusable child Operations and States, domain context transitions, and typed construction helpers | Runtime execution, final addresses, or transport decoding |
+| `OperationExpansion` | The only recursion/flattening path, lexical success and typed failure-policy lowering, State setup, capability injection, contract continuity, bounds, addresses, final State-declaration transitions, and Program construction | Domain semantics, provider IO, or persisted expansion metadata |
+| State | One reusable domain transition with complete input, output, and failure contracts | Expansion, final addresses, final continuations, or awareness that it was injected |
+| Final State declaration | One occurrence's immutable execution data and fixed success/failure transitions | Domain behavior or authoring callbacks |
 | Access capability | Intent/evidence/mode/fact discipline and deterministic authoring-time pre/post State injection | Address assignment, scheduling, or runtime expansion |
 | Adapter/binding | Exact provider implementation and immutable association for one Access occurrence | Operation composition or entry-point dispatch |
 | Trusted composition | Explicit catalog contributions, Store/Runtime assembly, live adapters, resolved configurations, and configured entry-point registration | Transport request handling |
 | `ApplicationBuilder` | Fixed-tenant entry-point registration, validation, and private heterogeneous dispatch construction | Domain-specific global registries or Runtime stepping |
-| `Application` | Strict public input, entry-point lookup, Runtime invocation, public result/error projection, and read-only public queries | Domain sequencing, Store mutation, or lifecycle-owner coordination |
-| Runtime | Exact registered-State binding, the sole State-input value conversion, typed execution, admission, immediate advancement, parking, bounded pending-owner retention/resolution, and recovery classification | Operation authoring, transport concerns, or background scheduling |
+| `Application` | Strict public input, entry-point lookup, Runtime invocation, public result/error projection, and read-only public queries | Domain sequencing, Store mutation, or Runtime lifecycle-step coordination |
+| Runtime | Exact registered-State binding, the sole State-input value conversion, typed execution, admission, bounded immediate advancement, conservative parking, and cold recovery | Operation authoring, transport concerns, cross-request execution custody, or background scheduling |
 | Store/replay query code | Callback-free State success/failure routing, run status, result, trace, audit, and export derivation | Domain-value downcasts or live State/adapter invocation |
 | CLI/HTTP | Transport parsing, invocation, status mapping, and rendering | Catalogs, configs, bindings, adapters, expanders, or Runtime internals |
 
@@ -255,39 +255,104 @@ that the broadcast State alone owns those outer contracts.
 
 ### 4.2 Solution: one streaming `[Operations + States]` DSL
 
-An Operation is an authoring-only sequence of child Operations and State occurrences. It writes to
-one `OperationExpansion` in semantic order:
+An Operation is an authoring-only sequence with three exact nominal contracts:
 
 ```text
-sequence.operation(child_operation)
-sequence.state::<S>(occurrence_setup)
-sequence.operation(next_child)
-sequence.state::<T>(next_setup)
+Operation {
+  Input: MfmValue
+  Output: MfmValue
+  Failure: FailureValue
+  expand(&mut OperationExpansion<Input, Output, Failure>)
+}
 ```
 
-These are the only general composition actions. Calls stream into one bounded authoring buffer;
-there is no persisted operation tree, public node enum, second Program algebra, or general workflow
-model.
+`Failure` is the one type of failure still unhandled when that Operation finishes expanding. It is
+not a runtime Operation result or a persisted declaration. The final Program still contains only
+ordinary States and their transitions.
+
+An Operation writes child Operations and State occurrences in semantic order:
+
+```text
+sequence.operation(child_operation, child_failure_policy)
+sequence.state::<S>(occurrence_setup, state_failure_policy)
+sequence.operation(next_child, next_child_failure_policy)
+sequence.state::<T>(next_setup, next_state_failure_policy)
+```
+
+Every action receives exactly one failure policy. `Propagate` is the zero-sized common policy and
+implements the policy contract only when the source failure and enclosing Operation failure are
+the same Rust type; handled policies use the scoped writer. There is no omitted/default argument,
+method overloading, or third composition action. Child Operations and States remain the only
+general sequence items.
+
+Success is always lexical. The successful externally visible output of one item becomes the input
+of the next item; there is no success callback or caller-supplied destination. For a child
+Operation this is `Child::Output`. For an authored State occurrence it is the final output of the
+complete injected-before/original/injected-after suffix, which equals `S::Output` only when no
+after State changes it. A failure policy is needed only when the item failure must be handled,
+adapted, recovered, or routed by variant before the enclosing Operation can continue.
 
 Conceptually:
 
 ```text
 Operation::expand(sequence):
-  sequence.operation(child)
-  sequence.state::<StateA>(setup_a)
-  sequence.state::<StateB>(setup_b)
+  sequence.operation(
+    child,
+    |failure| failure.state::<MapChildFailure>(mapping_setup, Propagate),
+  )
+  sequence.state::<NextState>(next_setup, Propagate)
 ```
 
-`sequence.operation` recursively invokes the same API. `sequence.state` invokes the one State setup
-path described below. Once the root Operation finishes, the expander validates the complete result,
-assigns canonical addresses, connects success and State-owned failure continuations, derives
-terminality, and constructs the State-only `ProgramDocument`.
+The failure scope begins with the complete unchanged item failure. A common or variant handler is
+an ordinary `[Operations + States]` sequence. Every successful handler path must finish with the
+item's exact externally visible output; it then rejoins the same next lexical item as ordinary
+item success. Every failure propagated by the handler must be the exact enclosing
+`Operation::Failure`. `Propagate` or an explicit variant propagation arm is legal only when the
+source failure equals the enclosing failure contract. Adapting a different failure requires an
+ordinary typed mapper State.
 
-The same State implementation may appear repeatedly with different runtime inputs, explicit
-configuration, or binding descriptors. Its input/output/failure contracts and Access capability
-pairing remain fixed; a different capability contract requires a different semantic State type. A
-State occurrence is identified by its final address and immutable declaration, not by inventing
-another State category.
+The same rule applies to an authored State occurrence: capability setup normalizes every
+propagated before/original/after failure to `S::Failure`, while successful recovery must produce
+the completed occurrence's externally visible output. That failure must equal the enclosing
+Operation failure or its typed policy must handle/map it. Exhaustive variant policies use the
+source failure association's stable tags, and every nonterminal handler receives the complete
+unchanged source failure rather than a projected payload.
+
+`sequence.operation` recursively invokes the same expansion path. `sequence.state` invokes the one
+State setup path described below. Calls stream into one bounded flat draft buffer. Each private
+draft is only the immutable State-declaration core plus unresolved success/failure slots; it is not
+a public node enum, nested tree, alternate Program algebra, or independently reusable plan.
+Finalization consumes that sole buffer into `Vec<StateDeclaration>` once, after every forward slot
+is resolved. There is never a second finalized declaration representation.
+
+Canonical lowering order is:
+
+```text
+child States
+common failure-handler States
+or variant handlers in stable-tag order
+following lexical States
+```
+
+Item success skips the handler declarations. Item failure targets the selected handler or remains
+propagated from the current Operation. Successful recovery and ordinary item success target the
+same following lexical State. Propagation never means "terminate the run here": it exits one
+typed Operation scope and may be handled by its caller. Only after root expansion does remaining
+success become terminal `Output` and remaining propagated failure become terminal `Failure`. An
+empty Operation is legal only as the identity `Input == Output` and exposes no failure source. Any
+failed item/policy expansion drops its entire scratch suffix.
+
+Once root expansion finishes, the expander assigns canonical forward addresses, validates both
+terminal contracts and every transition, and constructs the State-only `ProgramDocument`. No
+Operation, failure-policy closure, unfinished index, or expansion callback survives.
+
+The same State implementation may appear repeatedly with different runtime inputs,
+configuration-derived context, or binding descriptors. Its input/output/failure contracts and
+Access capability pairing remain fixed; a different capability contract requires a different
+semantic State type. Occurrence-specific configuration is explicit in the cumulative context or
+immutable binding rather than captured by the registered State implementation. A State occurrence
+is identified by its final address and immutable declaration, not by inventing another State
+category.
 
 ### 4.3 State is the non-expandable leaf
 
@@ -304,9 +369,10 @@ There is no:
 - replacement of an original State by a capability recipe.
 
 An occurrence setup is transient typed arguments used to finalize an ordinary State. It may carry
-an exact capability, binding, bounded domain configuration, and failure continuation. It is not an
-AST node or persisted wrapper. Keep its helper representation private or minimally public only
-where domain code must construct it.
+an exact capability, binding, and bounded domain configuration. The sequence action supplies any
+typed failure policy separately; setup never contains a destination, label, ordinal, or raw
+continuation. It is not an AST node or persisted wrapper. Keep its helper representation private or
+minimally public only where domain code must construct it.
 
 Configuration that affects runtime behavior must lower into `C0`, a complete successor context, or
 an existing immutable binding descriptor. It cannot remain hidden in an authoring closure after
@@ -350,6 +416,7 @@ setup_state<S, C>(incoming_contract, setup):
   require the before suffix's output contract == S::Input
   append the original State exactly once
   C::write_after(setup, restricted_after_writer starting at S::Output)
+  apply the authored occurrence failure policy against S::Failure and the completed suffix output
   commit the suffix only after its complete validation succeeds
 ```
 
@@ -372,15 +439,24 @@ Runtime against the exact finalized Program before admission.
 
 The hook is deterministic and performs no ambient IO. Its restricted writer exposes only normal
 typed `state` setup. It cannot replace, suppress, duplicate, or mutate the original State;
-contribute an Operation or transition declaration; allocate addresses; select raw successors;
-register catalog entries; inspect runtime values; persist a callback; or define rollback,
-compensation, or `finally` behavior.
+contribute an Operation; allocate addresses; select raw successors; register catalog entries;
+inspect runtime values; persist a callback; or define rollback, compensation, or `finally`
+behavior.
 
 Injected States recursively receive normal setup, so their capabilities may also inject. A fixed
 maximum recursive expansion depth makes direct or mutual injection cycles fail deterministically,
 and the existing declaration limit is enforced while expanding. Legitimate repeated State types
 remain allowed within those bounds. Any error drops the scratch suffix and returns one typed
 authoring error with no partial Program.
+
+The restricted writer applies the same typed State failure-policy rule but may write only States.
+Every failure propagated by an injected before/after State must equal the original `S::Failure`
+before the scratch suffix commits. A typed mapper State may adapt it; no capability hook receives
+or constructs a final address. Consequently all propagated failures exposed by the completed
+before/original/after suffix have the original State's exact failure contract and participate in
+the authored occurrence policy normally. Successful recovery from that outer policy produces the
+completed suffix output, not merely `S::Output`, and skips the unfinished remainder of the failed
+suffix.
 
 Pure States retain their current meaning. They require no Access capability and create no durable
 preparation. Their setup uses the same path with an empty capability phase. Do not introduce a fake
@@ -405,22 +481,24 @@ Cin
 Every predecessor's successful output contract must equal its successor's input contract. The
 Operation input contract equals the first selected State input, and its output contract equals the
 last successful State output. The rule also applies across child Operations and failure-handler
-sequences. A terminal State cannot have a successor.
+sequences. `Next::Terminal` and `Next::State` are exclusive by representation.
 
 Each successful nonterminal State constructs the complete next context. The framework does not
 merge patches, restore an outer context, search history for earlier outputs, or maintain a generic
 context map. If a later State needs earlier information, the preceding complete output carries it
 explicitly.
 
-An internal authoring cursor may retain only current contract identity and unresolved continuation
-while validating expansion. It is compiler state, not a domain context and not serialized.
+An internal authoring cursor may retain only the current success contract and private indices of
+unfinished transition slots while validating expansion. It is bounded compiler state over the one
+flat draft buffer, not a domain context or second Program representation, and is not serialized.
 
 Before/original/after is success-path order:
 
 - a failed before State skips the original and all after States;
 - a failed original skips all after States;
 - a failed after State skips all later States; and
-- the failed State's typed failure continuation remains authoritative.
+- the failed State's typed failure policy determines propagation, mapping, recovery, or
+  variant-specific routing.
 
 A successful conclusion is durable before context advancement. If broadcast concludes and receipt
 or finality later stops, resume begins at the unresolved later occurrence. It does not reserve a
@@ -434,6 +512,9 @@ State and owns its transitions:
 
 ```text
 StateDeclaration {
+  input_contract_ref,
+  output_contract_ref,
+  failure_contract_ref,
   on_success: Next,
   on_failure: FailureNext,
 }
@@ -441,6 +522,10 @@ StateDeclaration {
 Next = State(address) | Terminal
 FailureNext = Terminal | State(address) | ByVariant { stable_tag -> Next }
 ```
+
+The failure contract and `on_failure` are non-optional because every `State::Failure` is an exact
+`FailureValue`. Terminality is represented only by `Next::Terminal`; the old parallel
+`terminal` flag and optional next/failure fields are deleted.
 
 Successful closed-sum interpretation is domain behavior. A producing State carries the complete
 success context plus a typed enum or option identifying which part is present. Its one declared
@@ -450,24 +535,31 @@ variant-aware State prepares the corresponding typed capability intent; the Prog
 branch around Access occurrences and an irrelevant provider call must not be invented merely to
 simulate a skipped branch.
 
-Failure routing is different because it decides whether and where recovery continues. A State may
-terminate every failure, send every failure to one common handler, or route an exact closed failure
-sum by stable variant tag:
+Failure routing is different because it decides whether and where recovery continues. Authoring
+may propagate the complete failure from the current Operation scope, send every failure to one
+common handler, or route an exact closed failure sum by stable variant tag. Final root lowering
+turns any still-propagated route into `FailureNext::Terminal`:
 
 ```text
 sequence
-  .state::<SubmitTransfer>(...)
-  .on_success::<RecordReceipt>(...)
-  .match_failure(|failure| {
+  .state::<SubmitTransfer>(..., |failure| {
       failure
         .variant("insufficient_funds")
-        .to::<HandleInsufficientFunds>(...)
+        .to::<HandleInsufficientFunds>(..., Propagate)
         .variant("provider_unavailable")
-        .to::<HandleUnavailable>(...)
+        .to::<HandleUnavailable>(..., Propagate)
         .variant("invalid_request")
-        .terminal()
+        .propagate()
   })
+  .state::<RecordReceipt>(..., Propagate)
 ```
+
+`RecordReceipt` is the lexical success continuation. Each successful recovery arm must construct
+the exact completed `SubmitTransfer` occurrence output consumed by it. A propagation arm is legal
+only when the complete `SubmitTransfer::Failure` is also the enclosing Operation's exact
+`Failure`; otherwise the arm must use a mapper whose failure is the enclosing contract. If an
+enclosing caller handles that Operation failure, the arm targets the caller's handler. It becomes
+`FailureNext::Terminal` only if it remains propagated at the root.
 
 Each variant carries the complete recovery context required by its declared path. A routed State
 consumes the complete unchanged failure type, not a projected payload: the same contract, value
@@ -481,7 +573,9 @@ adjacent tagging profile and complete stable-tag set. That association exposes o
 structural `variant_tag(canonical_bytes)` operation. Program qualification uses the same metadata
 to prove that every registered stable tag occurs exactly once, there are no unknown or duplicate
 arms, and every nonterminal destination consumes the complete source failure contract. The arms
-are canonically ordered by stable tag.
+are canonically ordered by stable tag. There is no inherited `MAX_MATCH_ARMS` concept: the exact
+registered enum descriptor bound plus the existing canonical Program byte/declaration bounds own
+capacity.
 
 During callback-free reduction, Store invokes that exact association-owned structural operation
 on the already-qualified canonical failure and selects the declared successor. It does not
@@ -489,11 +583,37 @@ hard-code a `{"kind","value"}` shape, perform a domain `Any` downcast, decode or
 or create a new value object. The complete original failure and `ValueRef` remain unchanged, and
 Runtime owns no competing routing decision.
 
-Final State declarations have canonical order. `StateAddress` is the canonical ordinal identity in
-that fixed list; Match-arm path components are deleted. `OperationExpansion` assigns it and exposes
-no public label, ordinal, or address construction API. Every nonterminal success or failure target
-is a later State in canonical order; self-targets and backward transitions are rejected. This RFC
-adds no parallel branch, fan-out, join, scheduler, or dynamic workflow structure.
+Final State declarations have canonical list order. `StateAddress` is a private-field newtype over
+the declaration's zero-based `u32` list index and its wire form is that canonical unsigned integer.
+The declaration carries no redundant address field. `OperationExpansion` assigns indices and
+exposes no public label, ordinal, or address construction API; ingress requires the nonempty entry
+to be index zero. Every nonterminal success or failure target must be in bounds and greater than
+the source index, and every declaration must be reachable from index zero by following the fixed
+transitions. Gaps, reordered declarations, unreachable declarations, self-targets, and backward
+targets are rejected. Match-arm path components and `SequentialControlAddress` are deleted.
+
+This RFC adds no parallel branch, fan-out, multi-input merge, scheduler, or dynamic workflow
+structure. Failure recovery is one deterministically selected forward path that may rejoin lexical
+execution only after reconstructing its exact input contract; it is never concurrent with ordinary
+success.
+
+The target retained document is conceptually:
+
+```text
+ProgramDocument {
+  entry_point_id,
+  input_contract_ref,
+  output_contract_ref,
+  failure_contract_ref,
+  states: Vec<StateDeclaration>,
+}
+```
+
+`ProgramDocument` retains those exact root contracts even for a zero-State identity Program.
+Qualification proves that every root success terminates with the declared Output and every root
+failure terminates with the declared Failure. Those contracts come from the typed root
+`OperationExpansion<C0, Output, Failure>` and are not inferred from whichever terminal State
+happens to be encountered first.
 
 ### 4.7 EVM transaction submission target
 
@@ -550,19 +670,65 @@ occurrences, context contracts, capability bindings, and ordering. Its canonical
 ### 4.8 Portfolio and reusable child Operations
 
 Portfolio writes its own States and composes one child EVM balance Operation per configured
-collection. Each balance Operation writes one fixed State sequence. Native/token selection remains
-inside its complete typed context: `SelectBalanceAsset<K>` returns
-`EvmBalanceAsset<K>::Native(context)` or `::Token(context)`, and the single
-`ReadSelectedBalance<K>` successor prepares a native-read or token-read typed intent from that
-variant. Native evidence contains the raw units; token evidence contains the authenticated token
-decimals and raw units. Its typed handler restores one complete `EvmBalanceContext<K>` for anchor
-confirmation. The common expander assigns addresses and connects continuations after all child and
-capability injection.
+collection. The exact validated `EvmBalanceRequest` used to construct the collection's initial
+context also specializes that child Operation. For each source, authoring writes:
+
+```text
+CheckChainIdentity<K>
+ReadInitialAnchor<K>
+[ReadTokenDecimals<K> only when source.token is present]
+ReadAssetBalance<K>
+ConfirmBalanceAnchor<K>
+```
+
+After the last source it writes `ConsolidateBalanceCollection<K>`. This conditional exists only
+during request-specific Operation expansion. The finalized Program is one fixed State sequence;
+Runtime does not select the native/token shape or insert/omit a source State. It only follows the
+fixed success and failure transitions already retained in that Program.
+
+`ReadInitialAnchor<K>` constructs the complete next context expected by the statically selected
+source shape. `ReadTokenDecimals<K>` remains its own Access State and durable conclusion, so token
+decimals and token units retain independent preparation, replacement, failure, and cold-resume
+boundaries. `ReadAssetBalance<K>` prepares a native-units or token-units intent from the complete
+context and its occurrence uses the corresponding immutable binding. It never performs both
+provider reads in one call. Its typed handler constructs the common complete context consumed by
+`ConfirmBalanceAnchor<K>`.
+
+The Operation constructor privately derives both the initial context and expanded source shapes
+from one validated request value. A caller cannot supply an independently constructed shape list.
+`SelectBalanceAsset<K>`, `EvmBalanceAsset<K>`, the successful `Match`, and the separate native-unit
+and token-unit State implementations are deleted. The common expander assigns addresses and
+connects continuations after all child and capability injection.
+
+Portfolio composes each child with one caller-owned typed failure policy:
+
+```text
+sequence.state::<EnterPortfolioCollection>(enter_setup, Propagate)
+sequence.operation(
+  EvmBalanceCollection(...),
+  |failure| failure.state::<MapEvmBalanceFailure>(mapping_setup, Propagate),
+)
+sequence.state::<ResumePortfolioCollection>(resume_setup, Propagate)
+```
+
+`EnterPortfolioCollection` transforms the complete Portfolio continuation into the exact child
+EVM context. Ordinary child success goes directly to `ResumePortfolioCollection`. Every EVM
+failure propagated from inside the child targets `MapEvmBalanceFailure`, which consumes the
+complete unchanged `EvmBalanceFailure`. Its success contract is
+`EvmBalanceCollectionCompletion<PortfolioContinuation>`, the exact value required to recover and
+rejoin `ResumePortfolioCollection`; its failure contract is `PortfolioSnapshotFailure`. The current
+handler always returns that parent failure, but the authoring contract permits a real typed recovery
+without another DSL feature.
 
 Portfolio no longer knows the balance Operation's declaration count, starting ordinal, or reserved
 address range. Child composition consumes the caller's exact complete current context and returns
 one complete successor context. A mismatch requires an explicit caller-owned State; expansion
 never coerces, wraps, merges, or interprets context values.
+
+For `C` collections, `S` total sources, and `T` token sources, the resulting Portfolio count is
+`2 + 4*C + 4*S + T`: initialize/consolidate; enter, child consolidation, mapper, and resume per
+collection; four common source States; and one additional decimals State per token. At the existing
+ceilings `C = S = T = 64`, this is exactly 578 States.
 
 ## 5. Problem group B: Runtime typed entry and lifecycle leakage into App
 
@@ -590,10 +756,10 @@ but App has become its process supervisor:
 - App retains `SuspendedRun` values in its own unbounded map; and
 - App tests manually loop over States to reach a terminal result.
 
-This puts recovery policy and owner fate in a transport-facing crate. It also loses distinctions:
-the current mapping collapses several conflicts and permanent owner-bearing rejections into one
-public internal error, while the suspended map has no Runtime capacity bound or concurrent
-resolution state.
+This puts recovery and acknowledgement policy in a transport-facing crate. It also loses
+distinctions: the current mapping collapses several conflicts and retained append rejections into
+one public internal error, while the suspended map invents cross-request process state that the
+durable run does not need.
 
 The low-level types are useful inside `mfm-runtime`; their public exposure is not a reason for App
 to coordinate them. The duplicated dynamic wrappers are likewise implementation residue, not a
@@ -602,9 +768,9 @@ second State model.
 ### 5.2 Solution: one correlated value and registered State start
 
 Replace the current parallel qualified-value and dynamic-registration concepts with one current
-correlated value family and one Runtime-owned registered start function. The existing
-`QualifiedTypedValue<T>` and `QualifiedValue` are evolved or fully renamed; a parallel
-`ProvenValue` hierarchy must not remain:
+correlated value family and one Runtime-owned registered start function. Rename and reshape
+`QualifiedTypedValue<T>` into `ProvenValue<T>` and replace `QualifiedValue` with the private
+Runtime-only `ErasedProvenValue`; retain neither old name nor an alias:
 
 ```text
 ProvenValue<T> {
@@ -624,16 +790,38 @@ ErasedProvenValue {
 
 The exact same association brands both forms. `ValueAssociation` inseparably owns the exact
 catalog identity, value contract reference, schema-descriptor identity, process-local `TypeId`,
-strict retained-value decoder, and optional closed-sum structural metadata plus
+one monomorphic strict validate-and-drop function over retained canonical bytes, one strict owned
+decoder for Runtime, and optional closed-sum structural metadata plus
 `variant_tag(canonical_bytes)` operation. A value proven under one association cannot be re-erased
-or accepted under another association merely because both use the same Rust type. Runtime alone
-may invoke its typed decoder/downcast authority; Program qualification and Store may use only its
-domain-free structural metadata.
+or accepted under another association merely because both use the same Rust type. Store invokes
+the exact validate-and-drop function while qualifying retained material, so a schema/Serde drift
+still fails closed, but no decoded domain value or `Any` leaves that call. Runtime alone may invoke
+the owned decoder/downcast authority.
+
+Because `mfm-program` and `mfm-runtime` are separate crates, the association is one opaque kernel
+bridge type with private fields and constructors, not a publicly forgeable record. The catalog is
+the only source of handles; the narrow kernel API exposes only the operations Runtime needs, and
+higher layers do not re-export it. Compile-fail coverage proves that callers cannot construct an
+association or perform an unchecked downcast. Architecture/dependency checks keep Runtime as the
+only production consumer of decode authority. This deliberately replaces the public erased value
+wrappers; it does not add a second association registry or public proof hierarchy.
 
 `ErasedProvenValue` is not cloneable, serializable, persisted, or part of any public Application,
-adapter, Journal, or transport API. Store may carry its opaque proof/canonical material across a
-commit result, but has no API that exposes or downcasts the domain `Any`. Runtime alone consumes
-the domain value when entering a selected State.
+adapter, Store, Journal, replay, or transport API. Runtime may retain a hot value locally while it
+awaits Store I/O, but Store receives only canonical objects and value references and never carries
+the domain `Any` in an argument or result. Runtime alone consumes the domain value when entering a
+selected State.
+
+Capability intent/evidence qualification remains a separate exact capability concern and does not
+reuse `ErasedProvenValue`. Each catalog `CapabilityAssociation` owns monomorphic, bounded
+functions over canonical bytes that strictly decode `C::Intent` and `C::Evidence`, derive any
+prior-fact selection, and run `C::bind_evidence`; the typed temporaries are dropped inside that
+function. Store may invoke those functions while qualifying preparation/evidence history, but it
+never receives or returns a domain `Any`, performs a downcast, or invokes a State/domain handler.
+The closed-sum tag extractor is likewise one generic structural operation derived from the exact
+`SchemaShape::Enum`, not a domain-provided callback. Therefore Store and replay remain
+callback-free while the unique dynamically selected State-context downcast remains in
+`start_typed`.
 
 Runtime assembly installs one `RegisteredState` per exact concrete State execution association:
 
@@ -653,6 +841,8 @@ StateStart = Arc<
     + Sync
     + 'static,
 >
+
+StateFuture = one private boxed future whose output is Runtime's typed Result
 ```
 
 `implementation_ref` remains the stable persisted State identity, but it is not by itself a
@@ -684,7 +874,7 @@ register_access<S, C>(assembly, implementation):
     failure_association,
     capability_association: Some(capability_association),
     start: Arc::new(move |context, input| {
-      start_typed::<S>(context, input, &input_association, |context, input| {
+      start_typed::<S>(context, input, input_association.clone(), |context, input| {
         run_typed_state::<S, C>(context, input, implementation.clone())
       })
     }),
@@ -699,16 +889,19 @@ The one generic start function contains the only dynamically selected State-inpu
 downcast:
 
 ```text
-start_typed<S, Run>(context, input, association, run):
-  let input: ProvenValue<S::Input> =
-    input.into_typed::<S::Input>(association)?
-  run(context, input)
+start_typed<S, Run>(context, input, association: Arc<ValueAssociation>, run):
+  StateFuture(async move {
+    let input: ProvenValue<S::Input> =
+      input.into_typed::<S::Input>(association)?
+    run(context, input).await
+  })
 ```
 
 Pure registration supplies its Pure typed runner to the same function; it does not introduce a
 fake capability. “One downcast” means this one private State-input implementation, exercised each
-time Runtime enters a dynamically selected State. Capability intent/evidence erasure remains
-separately scoped to exact capability registration.
+time Runtime enters a dynamically selected State. Capability intent/evidence retained-byte
+qualification remains separately scoped to exact capability registration and performs no
+State-context downcast.
 
 The conversion checks the exact association identity, contract, schema, and `TypeId` before
 moving the value. Failure is an internal Program/assembly invariant error: Runtime fails closed
@@ -732,9 +925,11 @@ state.handler(S::Input, &C::Evidence) -> Outcome<S::Output, S::Failure>
 
 Provider entry occurs only after the exact direct-new preparation acknowledgement. For a Pure
 State, preparation, committed-call minting, and provider entry do not exist; its typed handler
-runs directly. The typed outcome is canonicalized and schema-validated exactly once under the
-bound output or failure association, producing `ProvenValue<S::Output>` or
-`ProvenValue<S::Failure>`.
+runs directly. Runtime canonicalizes and schema-validates the typed outcome once under the bound
+output or failure association, producing `ProvenValue<S::Output>` or
+`ProvenValue<S::Failure>`. This is one Runtime construction pass; Store independently performs its
+strict validate-and-drop check whenever those bytes cross or reenter the retained-history trust
+boundary.
 
 `StateFuture` is a private Runtime future over this lifecycle. It does not create a second public
 cursor algebra or expose State-by-State ownership to Application.
@@ -749,7 +944,7 @@ cold qualified object -> exact association decoder -> ProvenValue<T> -> ErasedPr
 ```
 
 Both then use the selected `RegisteredState.start` and the same typed lifecycle. Store, not
-Runtime, structurally validates and reduces retained history and selects the current occurrence.
+Runtime, strictly qualifies and reduces retained history and selects the current occurrence.
 Cold resume is therefore:
 
 ```text
@@ -765,8 +960,9 @@ PostgreSQL rows
 A hot outcome may cross directly to its successor only after Store durably accepts the conclusion
 or returns the exact idempotent already-concluded result. A conflicting or no-longer-selected
 result discards the local typed candidate and follows the Store-selected retained value. An
-acknowledgement-unknown conclusion retains the candidate with its affine pending owner; Runtime
-does not invoke the State, adapter, or decoder again merely because acknowledgement is unresolved.
+acknowledgement-unknown result ends the invocation and discards the hot candidate and every
+ephemeral execution proof. Runtime performs no further State, adapter, provider, or append work
+from that cursor. A later call starts only from freshly qualified retained history.
 
 A failure variant uses the same handoff without projection: Store selects the declared route from
 the stable tag, and the complete correlated failure enters the selected `RegisteredState.start`.
@@ -779,67 +975,118 @@ rather than invoking the live Runtime state machine.
 ### 5.5 Solution: one process-facing Runtime progression path
 
 Runtime will expose typed admission and run resume methods that both delegate to one private
-`advance_until_stable` path. They return one small callback-free `RunProgress` contract rather than
-the internal owner algebra.
+`advance_until_stable` path. They return the same callback-free, Store-derived `RunView` as the
+read path rather than the internal step algebra.
 
 The progression path drains immediately actionable States until the first stable external
 boundary:
 
 - terminal success with the exact qualified root result;
-- terminal typed domain failure;
+- terminal failure with the exact registered root domain contract;
 - durable waiting or permanent Effect parking;
-- retained acknowledgement uncertainty;
-- permanent operational block with owner fate preserved;
+- a fixed work bound reached at a qualified runnable head;
+- acknowledgement uncertainty followed by a callback-free Store reload;
 - conflict or invalid history; or
 - redaction-safe capacity/identity failure.
 
-It stops after a fixed work bound, on any non-progressing durable head, or at one of those
-boundaries. The bound derives from Program/declaration and Runtime work limits. Runtime does not
-spin on preparation rejection, unresolved provider results, or repeated acknowledgement
-uncertainty.
+`RuntimeLimits` owns one nonzero `max_state_starts_per_call`, fixed by trusted assembly rather than
+the request. The progression path checks it only at a durable boundary before calling another
+`RegisteredState.start` and counts each start once. It never interrupts a State or provider future
+to manufacture a yield. Reaching the bound returns the qualified head as `RunState::Runnable`; the
+next `resume` continues from that retained head. Runtime does not spin on preparation rejection,
+unresolved provider results, or acknowledgement uncertainty.
 
 This is caller-driven execution, not a scheduler. Runtime creates no background worker, timer,
-queue, general per-run lock, or process-wide ownership lease. An embedding or transport invokes
-admission/resume explicitly, but it never asks for one raw State step.
+queue, general per-run lock, cross-request cursor, or process-wide lease. An embedding or transport
+invokes admission/resume explicitly, but it never asks for one raw State step.
 
-### 5.6 Bounded pending-owner ownership
+### 5.6 No cross-request run custody
 
-Runtime, which creates and understands `SuspendedRun`, owns a bounded process-local pending-owner
-registry. It is held inside the existing clone-shared Runtime identity.
+Runtime has no exclusive run owner, run lock, suspended-owner map, pending-append registry,
+resolution endpoint, or administrative disposal API. Concurrent workers may select the same
+qualified head and race; Store append identity and exact-head compare-and-append remain the sole
+linearization boundary.
 
-When admission or advancement returns an acknowledgement-unknown owner, Runtime retains it before
-returning `RunProgress`. A later resume for that run resolves the exact retained owner before
-attempting cold selection. Repeated uncertainty returns it to the registry without provider or
-State re-entry.
+One invocation still uses private non-Clone affine proofs while it is active. In particular, only
+the direct-new durable preparation result can mint the exact `CommittedCall` consumed by one
+provider entry, and a selected-prefix proof prevents same-call reuse or Store-opening
+transposition. These are execution-local implementation types, not ownership of the run, and never
+escape the Store/Runtime boundary or survive cancellation, acknowledgement uncertainty, or a
+public return.
 
-Resolution uses a narrow in-resolution marker so concurrent callers cannot consume the same affine
-owner. A competing request receives a stable busy/capacity disposition. The marker protects only
-pending-owner fate; it is not a general run mutex or scheduler.
+Store admission, preparation, and conclusion methods consume those invocation-local inputs and
+return no retry token on acknowledgement uncertainty. Store performs any bounded mechanical
+fact-frontier rebind or same-call append retry internally, without invoking a State or provider.
+The exported split `prepare conclusion -> commit owner -> resolve owner` protocol and its
+`PreparedAdmission`/`SelectedConclusion` retry values are deleted. Any affine append-attempt state
+needed for one call is an unexported local inside that Store future and cannot be returned. An
+acknowledgement-unknown result returns only its redaction-safe classification and run identity for
+the callback-free reload. A definitive rejection returns its distinct redaction-safe error and no
+retry authority; Runtime does not reinterpret it as acknowledgement uncertainty.
 
-The registry has an explicit capacity included in `RuntimeLimits`. Capacity exhaustion fails before
-discarding an owner. Permanent conclusion rejection retains its exact owner fate until explicitly
-classified or deliberately discarded by the trusted Runtime boundary; App cannot accidentally
-drop it while mapping an enum.
+Dropping those proofs deliberately gives up recovery liveness without weakening Effect safety:
 
-To make that guarantee real, Runtime reserves a pending-owner slot before consuming an action whose
-Store acknowledgement could become suspended. If no slot is available, it performs no append or
-provider entry and returns capacity pressure. A conclusive transition releases the reservation; an
-acknowledgement-unknown transition transfers it into the retained registry entry. The slot remains
-attached while that owner is in resolution and across repeated uncertainty.
+- an unknown preparation acknowledgement mints no `CommittedCall`, so that invocation enters no
+  provider; if that preparation is nevertheless durable, an entry-once run may park even though
+  the provider was never entered;
+- cancellation after a direct-new preparation becomes durable may occur before provider entry,
+  during the provider future, or after a result but before its conclusion is durable; every such
+  case discards the invocation-local proof and may park the run permanently;
+- after provider entry, the exact preparation is already durable;
+- cold resume never reconstructs entry-once authority from a retained preparation, so an
+  unresolved entry-once Effect parks permanently;
+- an absorbing Effect may be replaced only under its already-declared bounded absorption contract;
+- Pure work may be recomputed and Read work may use its declared replacement budget; and
+- a typed outcome whose conclusion was not durably retained is lost.
 
-Process loss still destroys process-local owners under the existing durability model. Cold resume
-then uses only the retained Program and journal, with the same no-unsafe-Effect-reentry rules as
-today.
+Runtime never claims whether the provider was entered after such cancellation. The retained
+preparation proves only that re-entry is unsafe, so cold recovery parks rather than guessing. This
+is the explicit safety-over-liveness consequence of removing cross-request custody.
 
-### 5.7 Public result and callback-free queries
+Public success or domain failure is returned only after its conclusion appears in qualified
+history. Acknowledgement uncertainty first discards the hot cursor and performs one callback-free
+Store reload. If a qualified run exists, Runtime returns its current `RunView`. If no qualified
+genesis exists after a successful authoritative reload, it returns
+`RunError::Indeterminate { run_id }`; it never invents head sequence zero or exposes the
+uncommitted candidate. A failed reload remains the distinct redacted infrastructure error and is
+not evidence of absence. Repeated calls are new cold attempts, not resolution of a retained
+process-local token.
 
-`RunProgress` exposes only stable application-relevant facts: run identity, durable head, one
-closed disposition, and the qualified terminal root or typed failure when present. It does not
-expose `RunSession`, append owners, pending conclusions, or provider evidence.
+### 5.7 One durable public run view
 
-The terminal Program root is already the entry point's reviewed public result type. App serializes
-its canonical value through a common envelope; there is no optional projector registry or
-transport-specific result callback.
+Store owns one callback-free projection from qualified reduction into:
+
+```text
+RunView {
+  run_id,
+  head_sequence,
+  head_digest,
+  state: Runnable | Waiting | Succeeded(RetainedValueView) | Failed(RetainedValueView),
+}
+
+RetainedValueView {
+  contract_ref,
+  value_ref,
+  canonical,
+}
+```
+
+Every `RunView` has a real qualified genesis and head. `Runnable` means the retained head selects
+another State, including when the current call stopped at its work bound. `Waiting` means retained
+history conservatively permits no immediate action, including an unresolved entry-once Effect.
+`Succeeded` contains only the registered root `Output`; `Failed` contains only the registered root
+`Failure`. Both retain the exact contract-qualified canonical terminal value. A routed nonterminal
+failure remains `Runnable`.
+
+`invoke`, `resume`, and `read` all return this contract. Runtime may project it from an
+already-qualified selected head; `read`, replay, and cold recovery use the same Store-owned
+projection. App never examines the last `RunFrame` or infers status. Operational absence,
+indeterminate admission, conflict, invalid history, identity, capacity, and infrastructure
+unavailability remain distinct redaction-safe errors rather than `RunView` variants.
+
+The terminal Program success and failure contracts are already the entry point's reviewed public
+types. App serializes either canonical value through the common envelope; there is no optional
+projector registry or transport-specific result callback.
 
 Status, terminal result, trace, audit, replay, and export are callback-free projections over
 qualified retained history. Their derivation belongs in Store/replay query code. App may invoke
@@ -860,10 +1107,11 @@ Delete from App:
 - `status_from_frames`; and
 - every match over low-level Runtime lifecycle variants.
 
-After the high-level path owns all consumers, stop publicly re-exporting lifecycle owner enums and
-types whose only external purpose was coordination: `SpawnStep`, `ResumeStep`, `RuntimeStep`,
-`RunSession`, `ParkedRun`, `PendingConclusion`, and `SuspendedRun`. Keep only the private/internal
-forms required to implement and test Runtime invariants.
+After the high-level path owns all consumers, stop publicly re-exporting `SpawnStep`, `ResumeStep`,
+`RuntimeStep`, `RunSession`, and `ParkedRun`; keep only a smaller private cursor if the high-level
+implementation needs one. Delete `PendingConclusion`, `SuspendedRun`, their resolution methods,
+and every cross-request replacement. Private Store selection, append-attempt, and `CommittedCall`
+proofs remain scoped to one Runtime invocation.
 
 Move State-by-State drive loops from App integration tests to Runtime/live-domain integration
 tests. App tests exercise one public invocation or resume result.
@@ -906,19 +1154,25 @@ is added.
 Conceptually:
 
 ```text
-entry_point<Request, Configuration, C0, Output>(
+entry_point<Request, Configuration, C0, Output, Failure>(
   entry_point_id,
   Arc<ResolvedConfiguration<Configuration>>,
-  |request, configuration, sequence: &mut OperationExpansion<C0, Output>|
+  |request, configuration, sequence: &mut OperationExpansion<C0, Output, Failure>|
       -> Result<(C0, source_refs)>
 )
 ```
 
-The `OperationExpansion<C0, Output>` type ties the registered public result to the root sequence's
-terminal success contract. The resolved configuration is explicitly shared without requiring
-`Configuration: Clone`. `Application::invoke` accepts the entry-point ID plus bounded raw request
-bytes; Application remains the authoritative duplicate-key, float-free, canonical decoder and
-run-identity owner.
+`Request`, `C0`, and `Output` use their exact registered `MfmValue` contracts;
+`Configuration: MfmConfig`; and `Failure: FailureValue`. The request contract is an ingress type,
+not necessarily a State context or retained Program root.
+
+The `OperationExpansion<C0, Output, Failure>` type ties the registered public success and domain
+failure contracts to every terminal root path. `Failure` implements the reviewed public failure
+value contract; internal failures must pass through typed mapper States before terminality. The
+resolved configuration is explicitly shared without requiring `Configuration: Clone`.
+`Application::invoke` accepts the entry-point ID plus bounded raw request bytes; Application
+remains the authoritative duplicate-key, float-free, canonical decoder and run-identity derivation
+boundary.
 
 The closure:
 
@@ -937,7 +1191,7 @@ Application::builder(reader, runtime)
       evm_configuration,
       |request, config, sequence| {
           C0 = construct_submission_input(request, config, submission_bindings)
-          sequence.operation(SubmitTransaction(...))
+          sequence.operation(SubmitTransaction(...), Propagate)
           return (C0, source_refs)
       })
   .entry_point(
@@ -945,11 +1199,15 @@ Application::builder(reader, runtime)
       portfolio_configuration,
       |request, config, sequence| {
           C0 = construct_portfolio_input(request, config)
-          sequence.state::<InitializePortfolio>(...)
+          sequence.state::<InitializePortfolio>(..., Propagate)
           for configured collection:
-              sequence.operation(EvmBalanceCollection(...))
-              sequence.state::<ResumePortfolioCollection>(...)
-          sequence.state::<ConsolidatePortfolio>(...)
+              sequence.state::<EnterPortfolioCollection>(..., Propagate)
+              sequence.operation(
+                  EvmBalanceCollection(...),
+                  |failure| failure.state::<MapEvmBalanceFailure>(..., Propagate),
+              )
+              sequence.state::<ResumePortfolioCollection>(..., Propagate)
+          sequence.state::<ConsolidatePortfolio>(..., Propagate)
           return (C0, source_refs)
       })
   .finish()
@@ -983,7 +1241,7 @@ Each entry-point registration validates:
 - a unique stable entry-point ID;
 - Runtime, reader, and configuration-head ownership by the same Store opening through one narrow
   composition check, without a public brand token;
-- the registered request boundary and `C0`/root-output nominal contracts;
+- the registered request boundary and `C0`/root-success/root-failure nominal contracts;
 - the fixed-tenant association; and
 - the bounded total entry-point count.
 
@@ -992,9 +1250,10 @@ The captured bundles are already valid by construction. Runtime validates the ex
 Program's complete live State/capability/adapter closure before `RunAdmitted`; there is no second
 generic binding registry or installed-bundle witness.
 
-After validation, the resolved typed configuration and captured typed bindings are privately
-erased with the invocation closure into a map keyed by entry-point ID. The map is a dispatch
-implementation detail, not a public configuration or binding registry.
+After validation, the resolved typed configuration, root success/failure associations, and
+captured typed bindings are privately erased with the invocation closure into a map keyed by
+entry-point ID. The map is a dispatch implementation detail, not a public configuration or binding
+registry.
 
 ### 6.4 Invocation path
 
@@ -1014,11 +1273,13 @@ One invocation follows one path:
 5. The closure constructs `C0` and streams child Operations/States through
    `OperationExpansion`.
 6. Capability injection completes during each Access State setup.
-7. Expansion produces the immutable State-only Program.
+7. Expansion produces the immutable State-only Program with exact root success and failure
+   contracts.
 8. Program and `C0` are qualified under the exact catalog.
 9. Runtime validates the exact request-specialized Program before `RunAdmitted`, admits the run
    with the registration's configuration head, and advances to a stable boundary.
-10. App returns one transport-independent public response.
+10. App returns one transport-independent `RunView` whose terminal value, if present, matches the
+    registered success or failure contract.
 
 App continues deriving the deterministic run identity from the fixed tenant, exact entry-point ID,
 and canonical request. The generic dispatch path replaces domain switches without changing that
@@ -1043,7 +1304,7 @@ Child Operation configuration is explicit typed authoring input. There is no amb
 type, schema, name, or string key. Bindings are exact domain/live witness types captured by the
 configured closure and become existing immutable descriptors in final Access declarations.
 
-Several entry points may share one resolved configuration through the smallest ownership mechanism
+Several entry points may share one resolved configuration through the smallest sharing mechanism
 supported by that type, such as `Arc`; no `MfmConfig: Clone` requirement or `Any` map is introduced.
 
 Changing configuration creates a newly composed Application/entry-point registration. Existing
@@ -1056,7 +1317,7 @@ The final `Application` contains only:
 
 - fixed tenant identity;
 - the exact Runtime;
-- the callback-free reader/query capability it actually uses; and
+- the callback-free reader/query capability it actually uses;
 - one bounded authoring-work permit set; and
 - bounded privately erased entry-point handlers.
 
@@ -1095,22 +1356,31 @@ different CLI/HTTP behavior, and make every new entry point a multi-crate transp
 Application exposes transport-independent operations conceptually equivalent to:
 
 ```text
-invoke(entry_point_id, request) -> RunResponse
-resume(run_id)                  -> RunResponse
-read(run_id)                    -> RunResponse
+invoke(entry_point_id, request) -> Result<RunView, RunError>
+resume(run_id)                  -> Result<RunView, RunError>
+read(run_id)                    -> Result<RunView, RunError>
 ```
 
 `invoke` is the only domain-operation entry surface. `resume` asks Runtime to progress to the next
 stable boundary; it is not a one-State drive operation. `read` is callback-free. Trace, audit,
 replay, and export may be exposed through equally generic read-only Application methods.
 
-Thus a transport's only mutating domain action is invoking a registered entry point. Generic
-resume is run-lifecycle continuation, and the remaining methods are read-only projections; none is
-a route to construct or execute an unregistered domain operation.
+Thus a transport's only domain-specific mutating action is invoking a registered entry point.
+`resume` is a generic mutating run-lifecycle continuation; the remaining methods are read-only
+projections. None is a route to construct or execute an unregistered domain operation.
 
-All responses use one reviewed envelope containing run identity, durable head, stable disposition,
-and terminal public result or typed failure when available. Domain values remain canonical and
-strict; transports do not reinterpret them.
+Every successful response is the same reviewed Store-derived `RunView`. Domain values remain
+contract-qualified, canonical, and strict; transports do not reinterpret them. In particular,
+`Runnable` is enough to request another resume: transports do not need a separate yielded status.
+`RunError::Indeterminate { run_id }` reports acknowledgement uncertainty when no qualified genesis
+is observable and carries no fabricated view.
+
+Any returned `RunView`, including `Runnable`, `Waiting`, or a durable domain `Failed`, is a
+successful application exchange. HTTP returns it as a success response and CLI renders it without
+inventing transport failure semantics. `Indeterminate` is a retryable transport error that must
+include the run id (HTTP `503`; a stable nonzero CLI exit); transports do not automatically invoke
+or resume again. Malformed input, absence, conflict, capacity, and redacted infrastructure errors
+retain their distinct reviewed mappings.
 
 CLI owns only:
 
@@ -1180,30 +1450,18 @@ Delete `EvmCapability<const KIND: u8>` and replace it with named zero-sized type
 - `EvmChainIdentityRead`;
 - `EvmSubmissionStatusRead`;
 - `EvmAnchorRead`; and
-- `EvmSelectedBalanceRead`.
+- `EvmBalanceRead`.
 
 `EvmTransactionSubmission` is the broadcast Effect capability and owns the submission pre/post
 injection policy. `EvmWalletNonceReservation` is the narrower injected nonce-reservation Effect.
 The other capabilities implement empty injection until a real reusable policy requires otherwise.
 
-Subject to the Material uncertainties decision, `EvmSelectedBalanceRead` is a new Read capability,
-not a rename or reuse of the current balance-read capability ID:
-
-```text
-SelectedBalanceIntent =
-  Native { source, anchor }
-  | Token { source, anchor }
-
-SelectedBalanceEvidence =
-  Native { raw_units }
-  | Token { decimals, raw_units }
-```
-
-The native variant performs one provider read. The token variant performs decimals and units reads
-inside one committed adapter invocation and authenticates evidence only after both succeed. Retry,
-failure, and fact retention apply to that combined observation as one unit; no intermediate
-decimals conclusion or separately reusable decimals fact remains. If that contract is not
-acceptable, implementation planning stops until another State-only sequence is approved.
+`EvmBalanceRead` is the semantic name for the existing Read capability used by token-decimals,
+native-units, and token-units observations. It preserves that capability's stable ID, intent and
+evidence contracts, Read replacement bound, fact rule, and adapter boundary. Each Access State
+prepares exactly one provider observation. Request-specific Operation expansion decides whether a
+token-decimals occurrence exists; the capability does not combine decimals and units or select a
+runtime branch.
 
 The existing macro for repetitive Read capability implementations may remain if it produces
 clear diagnostics and less code. Its invocations use named types and semantic families.
@@ -1227,8 +1485,8 @@ EVM balance collection, retaining the required caller-continuation type paramete
 
 - `CheckChainIdentity<K>`;
 - `ReadInitialAnchor<K>`;
-- `SelectBalanceAsset<K>`;
-- `ReadSelectedBalance<K>`;
+- `ReadTokenDecimals<K>`;
+- `ReadAssetBalance<K>`;
 - `ConfirmBalanceAnchor<K>`; and
 - `ConsolidateBalanceCollection<K>`.
 
@@ -1247,12 +1505,18 @@ hatches, or generic constructors accepting arbitrary family/stage numbers.
 ### 8.4 Stable identity preservation
 
 Source-name-only replacements preserve every existing stable capability ID, State implementation
-ID, intent/evidence type, mode, retry bound, fact rule, schema identity, and binding content. The
-State-only EVM balance redesign retires the current balance-read capability ID plus the three
-branch-specific balance-read State IDs and gives `EvmSelectedBalanceRead` and
-`ReadSelectedBalance<K>` new stable semantic IDs. A retired ID is never reassigned to either new
-contract. Their combined intent/evidence, retry, and fact rules require the explicit decision in
-Material uncertainties.
+ID, intent/evidence type, mode, retry bound, fact rule, schema identity, and binding content.
+`EvmBalanceRead` and `ReadTokenDecimals<K>` are such source-level replacements. The State-only EVM
+balance redesign retires the successful selector/Match contracts and the separate native-unit and
+token-unit State implementation IDs. `ReadAssetBalance<K>` receives one new stable semantic State
+ID and a retired ID is never reassigned. Its occurrence still performs exactly one existing
+capability observation with the source-specific immutable binding.
+
+`MapEvmBalanceFailure` also receives a new stable State implementation ID because its previously
+unused success contract changes to
+`EvmBalanceCollectionCompletion<PortfolioContinuation>` so typed recovery can rejoin the normal
+Portfolio continuation. Its old implementation ID is retired and never reused; the handler's
+current always-fail behavior does not make its declared output contract semantically invisible.
 
 The Program-and-occurrence-address format cutover recalculates canonical Program bytes and
 `ProgramRef`s once. Renaming a surviving Rust type must not cause any additional persisted identity
@@ -1271,7 +1535,7 @@ strict external request
   -> registered typed entry point
   -> C0 + [Operations and States]
   -> OperationExpansion and capability injection
-  -> immutable ProgramDocument { State declarations only }
+  -> immutable ProgramDocument { root input/success/failure + State declarations only }
   -> ProgramCatalog and live Runtime validation
   -> RunAdmitted
   -> Store-selected RegisteredState.start
@@ -1293,21 +1557,27 @@ replay:
 - expansion provenance.
 
 Final Access declarations retain their existing immutable binding descriptors. Admission retains
-the selected configuration head and exact final Program. Two authoring inputs producing identical
-canonical declarations produce the same Program identity.
+the selected configuration head and exact final Program. The Program retains the root input,
+terminal success, and terminal failure contract references produced by typed expansion. Two
+authoring inputs for the same entry-point ID that produce identical canonical declarations and
+root contracts produce the same Program identity.
 
 Runtime, Store, resume, replay, audit, export, and import invoke entry-point planners, Operations,
 and capability injection zero times. Cold resume uses the admitted Program even when current
 configuration or authoring code differs or is unavailable. `ProgramIngress` remains strict and
 callback-free; decoding a Program never expands it.
 
-This RFC changes no journal family, Store database schema, canonical hashing rule, or
-replay-report ownership. It deliberately changes the retained `ProgramDocument` declaration
-algebra and the occurrence-address fields carried by Program/journal/replay once by removing
-`Match`, adding State-owned failure routing, and replacing arm paths with ordinal-only
-`StateAddress`. Existing persisted Program, journal, and replay baselines are reset and old bytes
-are rejected under the repository's clean-slate cutover policy. Capability intent/evidence changes
-only for the unresolved selected-balance contract described in Material uncertainties.
+This RFC changes no journal family, Store database schema, canonical hashing rule, capability
+intent/evidence contract, or replay-report ownership. It deliberately changes the retained
+`ProgramDocument` declaration algebra and the occurrence-address fields carried by
+Program/journal/replay once by removing `Match`, adding State-owned failure routing, and replacing
+arm paths with ordinal-only `StateAddress`; it also adds the exact terminal failure contract beside
+the existing root contracts. The State-only document uses the existing persisted-contract name
+`mfm-program-document` at current schema version `2`; its decoder accepts only the new fields and
+unsigned-index address representation.
+Existing persisted Program, journal, and replay baselines are reset and old bytes are rejected
+under the repository's clean-slate cutover policy. There is no version-one decoder under the new
+identity and no fallback from the old identity.
 
 ## 10. Placement and complete cutover
 
@@ -1315,15 +1585,19 @@ only for the unresolved selected-balance contract described in Material uncertai
 
 Add only the authoring surface required for:
 
-- typed `Operation` input/output contracts;
-- streaming `OperationExpansion` over child Operations and States;
+- typed `Operation` input/output/unhandled-failure contracts;
+- streaming `OperationExpansion` over child Operations, States, and their one typed failure-policy
+  scope;
 - fixed State success continuations and terminal/common/exhaustive variant failure routing;
 - exact value-association closed-sum metadata and one private structural variant-tag extractor
   shared by Program qualification and Store routing;
+- opaque catalog association handles for Runtime plus canonical-byte capability intent/evidence
+  verifiers for Store qualification, with no Store-facing domain `Any`;
 - the capability-owned injection trait and before/after State writer;
 - centralized Pure and Access State setup;
 - centralized capability-mode/configuration/binding validation;
-- context continuity, terminality, failure-continuation, and address construction;
+- context continuity, exact root success/failure terminality, failure-policy lowering, and address
+  construction;
 - fixed recursive/declaration bounds; and
 - typed authoring errors.
 
@@ -1331,27 +1605,63 @@ Replace the Program-requiring catalog finalizer with
 `ProgramCatalogBuilder::finish() -> ProgramCatalog`; qualify each expanded document later through
 the finalized catalog. Delete the placeholder Program path rather than retaining both APIs.
 
+`OperationExpansion::finish` is the only trusted constructor for a new `ProgramDocument`.
+`ProgramIngress` remains the only byte decoder and fully validates the same invariants; final
+document/declaration/address fields expose read-only accessors but no public raw constructor or
+transition mutator. Hostile ingress tests forge canonical bytes rather than retaining a second
+manual authoring API.
+
 Keep helper types private or crate-private unless domain crates must name them. Do not expose an
 intermediate expansion algebra for implementation convenience.
 
-Delete `MatchDeclaration`, Match-arm builders, Match-path address components,
-payload-projection helpers, and all Match-specific Program and Store reducer paths in the one
-State-only format cutover. Replace persisted occurrence uses of `SequentialControlAddress` across
-IDs, Program, Journal, Store, and replay with ordinal-only `StateAddress`; reset their fixtures and
-retain no old decoder.
+Delete the `Declaration` wrapper enum, `MatchDeclaration`, `MAX_MATCH_ARMS`, Match-arm builders,
+Match-path address components, payload-projection helpers, and all Match-specific Program and
+Store reducer paths in the one State-only format cutover. `ProgramDocument` stores
+`Vec<StateDeclaration>` directly. Replace persisted occurrence uses of
+`SequentialControlAddress` across
+IDs, Program, Journal, Store, and replay with the unsigned-index `StateAddress`; remove the
+redundant address and terminal fields plus optional next/failure encoding from each declaration,
+require list-index canonicality, and replace address-map/root-discovery/cycle traversal with one
+indexed forward validation pass. Assign the new State-only Program schema identity, reset all
+affected fixtures, and retain no old decoder.
 
-### 10.2 `mfm-runtime`
+### 10.2 `mfm-store`
 
-Evolve the existing qualified values into the one correlated typed/erased family. Replace separate
+Qualify the retained root input, terminal success, and terminal failure contracts and reduce the
+State-only Program through the same callback-free reducer used by live selection and replay.
+Expose one projection from a qualified reduction into `RunView`; App and Runtime do not duplicate
+it.
+
+Replace Store-facing erased context values with exact canonical objects/references. Retained
+State-context material passes the exact association's monomorphic strict validate-and-drop byte
+function. Retained capability intent/evidence binding and prior-fact derivation use the catalog's
+monomorphic canonical-byte verifier; failure-variant selection uses the schema-derived structural
+tag extractor. Store receives no `ErasedProvenValue` or other domain `Any`, and invokes no State or
+domain handler.
+
+Collapse admission and conclusion preparation/resolution APIs around one async Store call per
+append boundary. Invocation-local attempt material may remain private inside that future, but
+acknowledgement-unknown and rejection outcomes return no retry authority. Delete exported
+`PreparedAdmission`, `SelectedConclusion`, owner-bearing outcome variants, and resolver methods
+after Runtime migrates. Preserve direct-new preparation evidence, append-id uniqueness, exact-head
+CAS, same-conclusion/no-longer-selected/conflict classification, and bounded internal fact-frontier
+rebinding.
+
+### 10.3 `mfm-runtime`
+
+Replace `QualifiedTypedValue`/`QualifiedValue` with the one
+`ProvenValue`/Runtime-private `ErasedProvenValue` correlated family. Replace separate
 Pure/Access dynamic registration wrappers with `RegisteredState`, one monomorphic `StateStart` per
 exact execution association, one generic State-input downcast, and one private typed lifecycle.
 Bind declarations by their complete State/capability association rather than stable implementation
 reference alone, then select the occurrence's exact adapter under that proven pair.
 
-Add one high-level progress result and typed admission/resume entry points sharing a private
-advance-until-stable implementation. Move bounded pending-owner retention into `RuntimeInner` and
-extend `RuntimeLimits` with its capacity. Preserve all affine owner and committed-call invariants
-internally.
+Add typed admission/resume entry points sharing a private advance-until-stable implementation and
+the Store-owned `RunView` projection used by reads. On acknowledgement uncertainty, discard the
+hot cursor and reload qualified history once; return `RunError::Indeterminate { run_id }` when no
+qualified genesis exists. Add the nonzero assembly-owned `max_state_starts_per_call`; add no
+pending-owner storage or corresponding capacity. Preserve the invocation-local affine
+selection/append proofs and direct-new-only `CommittedCall` invariant internally.
 
 Make superseded lifecycle coordination types and methods private or delete them after all internal
 and test consumers migrate. Runtime receives finalized Programs only and never depends on
@@ -1361,18 +1671,18 @@ Delete the separate Pure/Access dynamic State-input downcasts, implementation-ID
 selection, and superseded dynamic cursor/driver wrappers after every State uses
 `RegisteredState.start`.
 
-### 10.3 Domain and live crates
+### 10.4 Domain and live crates
 
 - replace numeric capability and State types with named contracts;
 - express EVM submission and balance collection as Operations;
 - express Portfolio as its own States plus child Operations;
-- replace native/token Program branching with complete-context, variant-aware State semantics;
+- specialize native/token balance State sequences from the exact validated request while retaining
+  complete contexts and the separate token-decimals checkpoint;
 - put submission injection on `EvmTransactionSubmission`;
 - implement empty injection for other Access pairings;
 - retain typed config and binding bundle validation in domain/live composition;
 - preserve every semantically unchanged capability/State identity, assign reviewed new IDs without
-  reuse, and freeze the new State-only canonical Programs;
-  and
+  reuse, and freeze the new State-only canonical Programs; and
 - expose explicit catalog contributions and the smallest typed entry-point input helpers needed by
   trusted composition.
 
@@ -1401,17 +1711,18 @@ Delete:
 - numeric capability/State families and all aliases; and
 - tests or docs teaching manual declaration construction.
 
-### 10.4 `mfm-app`
+### 10.5 `mfm-app`
 
 Add one `ApplicationBuilder::entry_point` registration DSL, a bounded private handler map, strict
-generic dispatch, and common public run envelopes. Keep domain types out of stored public App APIs.
+generic dispatch, and the common public `RunView`/`RunError` contracts. Keep domain types out of
+stored public App APIs.
 
 Delete all domain fields, switches, catalog lists, closure enumeration, Runtime-step coordination,
 raw frame interpretation, unused ports, and direct EVM/Portfolio/Capabilities production
 dependencies listed in Sections 5 and 6. Remove App's direct Journal dependency when Store-owned
 `RunView` replaces frame inspection.
 
-### 10.5 CLI and HTTP
+### 10.6 CLI and HTTP
 
 Convert the current REST package into the embeddable HTTP library described in Section 7.2 and
 remove its standalone placeholder binary target. Implement only the common Application invocation
@@ -1419,7 +1730,7 @@ and result contracts. Trusted embedding supplies the HTTP Application; CLI uses 
 an explicitly injected Application in tests. Do not add domain or Runtime lifecycle dependencies
 to make either transport self-compose.
 
-### 10.6 Documentation
+### 10.7 Documentation
 
 Update `docs/design.md` and `docs/architecture.md` in the relevant cutover commits. Their taxonomy
 must describe:
@@ -1429,14 +1740,15 @@ must describe:
   State-owned failure-variant routing;
 - capability-owned authoring injection;
 - the one correlated typed/erased value family and registered State start boundary;
-- Runtime-owned process progression and pending-owner fate;
+- one-call Runtime progression, no cross-request run custody, and conservative cold recovery;
 - typed generic entry-point registration;
 - explicit trusted composition versus thin transports;
-- one root configuration head and terminal public root output; and
+- one root configuration head and terminal public root success/failure contracts; and
 - semantic capability and State names.
 
 Update Runtime/App/CLI/HTTP READMEs and every capability/binding inventory at the same time. Remove
-superseded examples instead of documenting two paths.
+superseded examples instead of documenting two paths. Update the checked-in capacity envelope with
+request-specialized State counts, including the 578-State maximum Portfolio shape.
 
 ## 11. Rejected alternatives and non-goals
 
@@ -1449,6 +1761,11 @@ This RFC rejects:
 - separately addressed `Match` declarations or successful Program-level variant routing;
 - a persisted Operation, entry-point, or expansion Program variant;
 - a second entry-point AST, node enum, compiler, or public erased-operation trait;
+- caller-supplied child completion/failure addresses, public labels, or declaration-count
+  arithmetic;
+- separate success/failure continuation writers when success is already lexical;
+- child Operations parameterized by caller-specific failure mappers or terminal-only failure
+  handlers;
 - a recipe registry, `RequiresCapability` inventory, or certification pass;
 - automatic catalog discovery or mutation during expansion/invocation;
 - JSON/`Any` configuration bags or string-key binding lookup;
@@ -1459,9 +1776,11 @@ This RFC rejects:
 - transport-specific terminal result projectors;
 - public one-State drive APIs;
 - App- or transport-owned suspended-owner maps;
+- Runtime-owned cross-request append registries, owner-resolution APIs, or permanent-owner disposal;
+- a separate process-local `RunProgress`, yielded status, or optional/fabricated durable head;
 - a background scheduler, queue, timer, or general per-run lock;
 - runtime/replay invocation of authoring code;
-- parallel execution, fan-out, join, or dynamic scheduling;
+- parallel execution, fan-out, multi-input merge, or dynamic scheduling;
 - an ambient runtime context map or framework-owned context merge;
 - operation-level checkpoints, rollback, compensation, or `finally` semantics;
 - numeric capability/State aliases or compatibility escape hatches; and
@@ -1474,7 +1793,7 @@ deployment plugin system require separate designs.
 
 ### 12.1 Operation authoring and capability injection
 
-Focused `mfm-program` tests prove:
+Focused `mfm-program` and `mfm-store` tests prove:
 
 - child Operations and direct States expand in authored order;
 - empty capability injection is an identity;
@@ -1485,10 +1804,24 @@ Focused `mfm-program` tests prove:
 - before expansion starts at the incoming contract and is validated against `S::Input` only after
   it completes;
 - recursive setup and injection for injected Access States;
-- exact mode, binding, adapter, effect-domain, attempt-bound, fact-selection, and configuration
-  mismatch rejection;
+- exact mode, binding, effect-domain, attempt-bound, fact-selection, and configuration mismatch
+  rejection during setup, with live adapter availability rejected later by Runtime validation;
 - complete context continuity across direct States, child Operations, injections, and failure
   handler sequences;
+- ordinary child success and successful failure recovery both target the next lexical State, while
+  child failures target the typed handler and skip the normal continuation;
+- a handler consumes the complete item failure, succeeds only with the item's exact externally
+  visible output, and propagates only the enclosing Operation's exact failure;
+- compile-fail coverage makes `Propagate` unavailable for unequal source/enclosing failure types,
+  while qualification rejects a forged unequal explicit variant propagation arm;
+- a nested propagated arm targets its caller's failure handler, while only a route still
+  propagated after root expansion lowers to `FailureNext::Terminal`;
+- common handlers emit after child States, variant handlers emit in stable-tag order, and both are
+  skipped by ordinary success;
+- injected-State failures either equal the original State failure or are mapped to it before the
+  before/original/after suffix commits;
+- when an after injection changes the occurrence output, its outer recovery handler must produce
+  that completed suffix output and is rejected if it produces only the original `S::Output`;
 - fixed success transitions and exhaustive canonically ordered failure-variant routes;
 - missing, duplicate, unknown, self, backward, or wrong-input failure targets fail qualification;
 - association-owned tag extraction handles each registered enum-tagging profile and rejects
@@ -1498,15 +1831,20 @@ Focused `mfm-program` tests prove:
 - prior `Match` Program bytes and old journal occurrence-address records fail current ingress with
   no legacy decoder or migration path;
 - catalog finalization requires no Program and request-specific Programs qualify afterward;
+- compile-fail coverage exposes no raw trusted `ProgramDocument`/`StateDeclaration` authoring
+  constructor outside `OperationExpansion`, while hostile canonical bytes still reenter only
+  through `ProgramIngress`;
 - terminal-successor rejection;
+- every root success/failure terminates under the exact `OperationExpansion` Output/Failure
+  contract retained by `ProgramDocument`;
 - repeated State occurrences with distinct inputs/config/bindings;
 - deterministic depth/declaration bound failures, including direct and mutual injection cycles;
-- canonical ordinal-only State addresses independent of caller arithmetic, with no arm-path
-  component;
+- canonical ordinal-only State addresses independent of caller arithmetic, with unsigned-index
+  wire form, no redundant declaration address, no gaps/reordering, and no arm-path component;
 - no partial Program on error; and
 - zero catalog mutation or ambient IO.
 
-### 12.2 Runtime progression and owner fate
+### 12.2 Runtime progression and cold recovery
 
 Runtime tests prove:
 
@@ -1517,10 +1855,19 @@ Runtime tests prove:
   provider callbacks;
 - Runtime assembly derives every registered association from its own catalog; callers cannot
   substitute an association and lookup never falls back to implementation ID alone;
+- association handles are opaque and nonconstructible, Runtime is the only production consumer of
+  their decode authority, and Store capability verification receives canonical bytes rather than
+  a domain `Any`;
+- Store's exact association validate-and-drop path rejects retained schema/Serde drift without
+  returning an erased or typed domain value;
+- live and retained capability intent/evidence use the same exact monomorphic canonical-byte
+  verifier for strict decoding, prior-fact selection, and evidence binding;
 - identical Rust types from different catalog/value associations cannot be transposed;
 - two concrete generic State instantiations sharing one stable implementation ID select their
   exact registered start and adapter associations;
 - multiple occurrence bindings reuse one semantic State start while selecting their exact adapters;
+- an expanded Program with a missing or mismatched exact State/capability/adapter association is
+  rejected before `RunAdmitted`;
 - a non-clone input moves exactly once through hot direct advancement, cold reconstruction, and
   failure-variant routing;
 - hot advancement performs no retained decode after an exact committed conclusion, while a
@@ -1528,20 +1875,34 @@ Runtime tests prove:
 - failure routing performs no payload projection or second decode;
 - typed admission and resume both use the same advance-until-stable behavior;
 - multiple immediately actionable States advance without exposing lifecycle enums;
-- terminal success, typed failure, waiting, acknowledgement pending, conflict, invalid history,
-  absence, identity, and capacity remain distinct;
+- terminal success, typed failure, runnable, waiting, indeterminate admission, conflict, invalid
+  history, absence, identity, and capacity remain distinct;
+- `Succeeded` and `Failed` carry only the Program's exact registered root Output and Failure;
 - Read replacement and Effect permanent parking retain current semantics;
-- acknowledgement owners are retained before public return and automatically resolved later;
-- repeated uncertainty causes zero duplicate State/provider entry;
-- concurrent resolution cannot consume one affine owner twice;
-- pending-owner capacity is bounded and exhaustion does not discard an owner;
-- pending-owner capacity is reserved before any possibly suspending append or provider entry;
-- permanent conclusion rejection preserves owner fate;
-- progress stops on work bound or non-progressing head; and
-- process loss followed by cold resume preserves all existing safety guarantees.
+- acknowledgement uncertainty discards the hot cursor, exposes no uncommitted candidate, and
+  performs no later callback from that cursor;
+- cancellation at each point after direct-new Effect preparation performs no cold provider re-entry
+  and may leave the run permanently waiting;
+- a qualified reload returns the same `RunView` projection as `read`, while uncertain admission
+  without qualified genesis returns `RunError::Indeterminate { run_id }` and no fake head;
+- unknown preparation acknowledgement produces zero provider entry from that invocation;
+- unknown conclusion after an entry-once provider call leaves a durable preparation and cold
+  resume performs zero further provider calls;
+- an eventually visible conclusion is discovered through cold resume, while an absent conclusion
+  leaves the entry-once run waiting permanently;
+- Pure recomputation, Read replacement, and absorbing-Effect replacement occur only under their
+  existing semantic contracts and bounds;
+- concurrent same-head calls still mint at most one direct-new `CommittedCall` through Store CAS;
+- the exact `max_state_starts_per_call` is enforced before the next start; a bound stop returns a
+  qualified `Runnable` view and resumes without replaying a durable conclusion;
+- Runtime and App contain no cross-request cursor, pending-append registry, resolution endpoint,
+  or permanent-owner disposal path; and
+- acknowledgement-unknown Store outcomes return no append token, and no exported admission or
+  conclusion resolver protocol remains.
 
-Low-level affine lifecycle tests remain in Runtime. State-by-State EVM/Portfolio drive loops move
-from App into Runtime/live-domain integration coverage.
+Invocation-local affine selection, append, and committed-call tests remain in Runtime.
+State-by-State EVM/Portfolio drive loops move from App into Runtime/live-domain integration
+coverage.
 
 ### 12.3 Generic Application entry points
 
@@ -1552,18 +1913,19 @@ off-chain operation, and prove:
 - an entry point may author a direct State, a child Operation, or both in one ordered sequence;
 - bounded raw bytes are decoded exactly once by Application and duplicate keys are never hidden by
   transport parsing;
-- the registered `Output` is structurally tied to the root expansion's terminal contract;
+- the registered `Output` and `Failure` are structurally tied to every root terminal contract;
 - invalid binding bundles fail trusted domain/live construction; duplicate IDs, foreign
   configuration heads, unregistered contracts, unknown IDs, malformed requests, and over-capacity
   registration fail closed at their owning boundaries;
 - authoring concurrency is bounded, expansion runs off the async executor, and overload causes no
   admission, State callback, or provider entry;
 - exact request-specialized Program validation fails before `RunAdmitted`;
-- private erasure cannot transpose request/configuration/`C0` types;
+- private erasure cannot transpose request/configuration/`C0`/Output/Failure associations;
 - fixed-tenant run identity and redacted error contracts remain stable;
-- the terminal root is returned as the public typed result;
+- terminal roots return only the registered public typed success or failure;
 - reconfiguration creates a new registration while old runs retain their admitted head; and
-- read/trace/audit/replay/export cause zero live callbacks and use owning query projections.
+- read/trace/audit/replay/export cause zero live callbacks and use their Store/replay-owned query
+  projections.
 
 An architectural dependency test or manifest check proves `mfm-app` has no production dependency
 on EVM, Portfolio, or Capabilities.
@@ -1586,21 +1948,32 @@ Tests prove:
 
 - every semantically unchanged named capability has the exact old stable contract ID, mode,
   attempts, facts, intent/evidence types, and evidence binding;
-- the old balance-read capability ID is retired and never reassigned;
-- `EvmSelectedBalanceRead` has one new reviewed ID and exact closed native/token intent/evidence,
-  combined retry, failure, and fact contract;
+- `EvmBalanceRead` retains the exact existing balance-read capability ID and contract;
 - every semantically unchanged named State has its exact old stable implementation ID and context
-  contracts, while `ReadSelectedBalance` has one new reviewed ID and contract;
-- retired native/token branch State IDs are absent and never reassigned;
+  contracts, including the separate `ReadTokenDecimals` checkpoint, while `ReadAssetBalance` has
+  one new reviewed State ID;
+- retired selector, Match, native-unit, and token-unit State IDs are absent and never reassigned;
+- `MapEvmBalanceFailure` has one new reviewed ID and the exact recovery-output/parent-failure
+  contracts, while its prior ID is absent and never reassigned;
 - no numeric capability/State type or alias remains;
 - EVM transaction injection produces the frozen canonical bytes and `ProgramRef` for its new
   State-only seven-occurrence Program;
+- native-only, token-only, and mixed-source requests expand to the exact ordered fixed State lists;
+- the same validated request privately supplies both the initial context and every source shape;
+- the maximum 64 one-token-source Portfolio collections expand to exactly 578 States
+  (`2 + 64 * 9`: root endpoints plus enter, six child States, failure mapper, and resume per
+  collection), remain below declaration and canonical Program-byte admission bounds, and every
+  relevant `+1` input rejects before admission;
+- advancing that maximum Program respects the independent per-call Runtime work bound, returning a
+  qualified `Runnable` head as often as necessary rather than treating total Program length as one
+  call's work budget;
 - Portfolio native/token execution retains correct provider selection, anchor checks, failure
-  continuations, ordering, duplicate handling, and public results through variant-aware States;
+  continuations, ordering, duplicate handling, and public results;
 - native execution performs no token provider request and token execution performs no native
   provider request;
-- partial token observation produces no authenticated evidence, retained fact, or State
-  conclusion, and retry repeats the combined observation under the same committed call rules;
+- token decimals conclude durably before token units, cold resume after decimals invokes only the
+  units read, and the two occurrences retain independent replacement exhaustion;
+- a context/source-shape mismatch fails before adapter or provider entry;
 - EVM balance live registration accepts a caller continuation type without importing that caller,
   and `mfm-evm-live` has no Portfolio production dependency;
 - nonce acknowledgement uncertainty, one reservation, candidate lineage, signer binding,
@@ -1656,51 +2029,46 @@ survives a cutover commit.
 1. **`document reusable operation and entry point follow-up`**
 
    Replace the authoring-only follow-up with this complete problem/solution contract, settled
-   ownership, deletion scope, verification plan, and complexity/reuse principle.
+   responsibilities, deletion scope, verification plan, and complexity/reuse principle.
 
-2. **`replace match and numeric markers with semantic state transitions`**
+2. **`unify runtime state entry and typed execution`**
 
-   After resolving the selected-balance evidence contract, remove `Match` in one complete
-   Program/Journal/Store/replay/domain cutover; add fixed success and
-   exhaustive stable-tag failure routes to `StateDeclaration`; replace EVM capability kinds and
-   EVM/Portfolio State stages with their final semantic types; consolidate native/token reads into
-   the approved variant-aware State contract; preserve every unchanged stable identity; freeze
-   the new canonical Program goldens; and leave no retired ID reuse, alias, numeric escape hatch,
-   old decoder, reducer, builder, or compatibility path.
-
-3. **`unify runtime state entry and typed execution`**
-
-   Evolve the current qualified values into one correlated typed/erased family; install exact
+   Replace the current qualified values with one correlated typed/erased family; install exact
    `RegisteredState.start` closures for Pure and Access execution; move every State-input downcast
    into the one generic start function; bind generic State implementations by their complete
-   execution associations; preserve callback APIs over raw typed domain values; and delete the
-   superseded dynamic registration/cursor paths.
+   execution associations; replace Store-facing erased context material with canonical
+   objects/references and monomorphic canonical-byte capability verifiers; preserve callback APIs
+   over raw typed domain values; and delete the superseded qualified-value and dynamic
+   registration/cursor paths in the same Program/Store/Runtime cutover.
 
-4. **`move run coordination behind runtime progress`**
+3. **`replace app driving with one-call runtime advancement`**
 
-   Add bounded advance-until-stable behavior and pending-owner ownership; migrate App and every
-   external consumer in the same commit; make low-level lifecycle coordination internal; preserve
-   every retry, Effect-entry, acknowledgement, conclusion, and cold-resume invariant; and move
-   State-driving tests to Runtime/live-domain ownership.
+   Collapse Store's exported owner/resolver outcomes; add bounded advance-until-stable behavior and
+   the Store-owned `RunView`; migrate the current App and every external consumer in the same
+   commit; discard hot execution state on acknowledgement uncertainty; delete suspended-owner
+   retention and resolution; preserve direct-new-only Effect entry and conservative cold parking
+   while explicitly accepting the documented liveness loss; and move State-driving tests to
+   Runtime/live-domain ownership.
 
-5. **`cut over authoring to capability state injection`**
+4. **`cut over state-only operation authoring and semantic domains`**
 
-   Add the minimal Operation sequence DSL and capability injection trait; centralize State setup,
-   context validation, bounds, address assignment, and continuations; migrate EVM submission, EVM
-   balance, and Portfolio; make EVM live balance registration generic over the caller continuation
-   and remove its Portfolio dependency; reproduce the frozen State-only Program identities; delete
-   every manual declaration builder, ordinal calculation, and duplicate binding check; and retain
-   any existing App-facing plan facade only as the sole thin consumer of `OperationExpansion`
-   until the next commit.
+   In one inseparable Program/Journal/Store/replay/domain cutover, add the minimal typed Operation
+   sequence/failure-policy DSL and capability injection trait; remove `Match`; add root Failure,
+   fixed success, and exhaustive stable-tag failure routes; replace occurrence addresses and reset
+   old bytes; centralize State setup, context validation, bounds, and address assignment; replace
+   numeric EVM/Portfolio contracts; migrate submission, request-specialized balance, and Portfolio;
+   make live balance registration generic over the caller continuation; and freeze the new
+   canonical Programs. Migrate the existing hard-coded App branches directly to
+   `OperationExpansion` so the tree has one authoring path; add no plan facade, alias, old builder,
+   decoder, reducer, or compatibility wrapper.
 
-6. **`make application dispatch registered entry points`**
+5. **`make application dispatch registered entry points`**
 
    Add the typed registration DSL and private dispatch; migrate EVM and Portfolio composition;
-   remove the temporary thin plan facade, domain fields, switches, catalog lists, closure
-   enumeration, unused ports, plan wrappers, raw frame interpretation, and domain production
-   dependencies; add the unrelated off-chain boundary test.
+   remove domain fields, switches, catalog lists, closure enumeration, unused ports, raw frame
+   interpretation, and domain production dependencies; add the unrelated off-chain boundary test.
 
-7. **`make cli and http thin entry point transports`**
+6. **`make cli and http thin entry point transports`**
 
    Implement the common invocation/resume/read contract, convert REST into an injectable HTTP
    library and remove its placeholder binary, make CLI a thin remote client, and prove both
@@ -1727,22 +2095,38 @@ change-site audit.
 
 - every domain Program is authored through `OperationExpansion`;
 - Operations disappear completely after expansion;
+- every Operation declares exact authoring-only Input, Output, and unhandled Failure contracts;
+- success is lexical; child failure mapping uses one typed scope with no success callback, raw
+  destination, or persisted Operation boundary;
+- every Operation/State action supplies exactly one policy, with zero-sized `Propagate` available
+  only for exact source/enclosing failure equality;
+- successful failure recovery reconstructs the item's exact externally visible Output and rejoins
+  its normal lexical continuation, while propagated failure is the enclosing Operation's exact
+  Failure and only root propagation becomes terminal;
 - State remains one non-expandable leaf with no State-level expansion;
-- the finalized Program contains only a canonically ordered finite sequence of State declarations;
+- the finalized Program contains a canonically ordered `Vec<StateDeclaration>` with no declaration
+  wrapper enum;
 - every State owns one fixed success target and a terminal, common, or exhaustive stable-tag
   failure target;
+- every Program retains exact root input/success/failure contracts and every root terminal path
+  matches them;
 - successful enum/option interpretation remains typed State behavior rather than Program routing;
 - every nonterminal transition points forward to a declared State and no `Match` type or reducer
   path remains;
+- `StateAddress` is only the declaration's canonical unsigned list index; declarations carry no
+  redundant address and ingress rejects gaps, reordering, unreachable States, or non-forward
+  targets;
 - every Access occurrence has one exact compatible capability/configuration/binding setup;
 - every usable Access capability implements injection, including the empty case;
 - injected States recursively receive normal setup;
+- injected-State propagated failures equal or are mapped to the original State failure before
+  their setup suffix commits;
 - the original State is emitted exactly once between ordered before/after injections;
 - expansion is deterministic, bounded, ambient-IO-free, and produces no partial Program;
 - complete context contracts connect across every final transition; and
 - repeated State implementations with distinct occurrence data remain supported.
 
-### 14.3 Runtime ownership
+### 14.3 Runtime execution and recovery
 
 - one correlated value family retains exact association, canonical bytes, reference, and typed or
   erased domain value without a parallel proof hierarchy;
@@ -1752,13 +2136,23 @@ change-site audit.
 - Pure and Access callbacks remain statically typed and receive no persistence-proof wrapper;
 - hot and cold inputs converge before the same typed lifecycle, and Replay never receives Runtime
   assembly or domain `Any`;
-- App/transports invoke only high-level admission/resume progress APIs;
+- Store receives canonical objects/references rather than erased State contexts and verifies
+  every retained value through its exact strict byte association plus capability binding through
+  the exact canonical-byte capability association;
+- App/transports invoke only high-level admission/resume APIs returning the Store-derived
+  `RunView`;
 - Runtime drains immediately actionable States to a stable boundary under fixed bounds;
-- Runtime alone retains and resolves pending acknowledgement owners;
-- concurrent resolution cannot duplicate owner consumption or provider entry;
+- acknowledgement uncertainty discards hot execution state and subsequent calls use only freshly
+  qualified history;
+- cancellation after direct-new Effect preparation may sacrifice liveness but never mints cold
+  provider re-entry authority;
+- no cross-request run custody, pending-append registry, or resolution API remains;
+- only a direct-new preparation can mint the invocation-local `CommittedCall`, so cold resume
+  cannot duplicate entry-once provider execution;
 - no public one-State drive or suspended-owner resolution API remains;
 - no scheduler or general per-run lock is introduced; and
-- all existing Effect, durability, conflict, and cold-resume guarantees remain intact.
+- public success/failure still requires a qualified durable conclusion, while the explicitly
+  accepted acknowledgement/cancellation liveness loss is documented and tested.
 
 ### 14.4 Generic Application and transports
 
@@ -1768,7 +2162,7 @@ change-site audit.
 - each entry point retains one exact resolved typed root configuration and typed binding closure;
 - private dispatch erasure happens only after typed registration validation;
 - the exact expanded Program is validated before `RunAdmitted`;
-- terminal Program roots are the public typed success outputs;
+- terminal Program roots are the registered public typed success outputs or domain failures;
 - CLI and HTTP use the same generic request/response contract;
 - transports receive only minimal transport and invocation configuration; and
 - transports contain no domain, Program-authoring, Store-mutation, adapter, or Runtime-lifecycle
@@ -1779,12 +2173,16 @@ change-site audit.
 - numeric EVM capability and EVM/Portfolio State types are absent;
 - every capability and State use is readable without a kind/stage comment;
 - no compatibility aliases survive;
-- every semantically unchanged capability/State retains its stable ID, retired balance capability
-  and branch-specific State IDs are not reused, and `EvmSelectedBalanceRead` plus
-  `ReadSelectedBalance` have new reviewed IDs;
+- every semantically unchanged capability/State retains its stable ID, `EvmBalanceRead` retains the
+  existing balance capability contract, retired selector/native-unit/token-unit State IDs are not
+  reused, and `ReadAssetBalance` has one new reviewed State ID;
+- `MapEvmBalanceFailure` uses a new reviewed ID for its changed recovery output and its old ID is
+  not reused;
 - every State-only EVM/Portfolio Program matches its checked-in post-cutover canonical golden;
 - EVM submission expansion produces the exact post-cutover seven-State Program identity; and
-- Portfolio no longer manages child declaration counts or address ranges.
+- native/token source shapes are fixed during Operation expansion, token decimals remain a
+  separate durable State, and Portfolio no longer manages child declaration counts or address
+  ranges.
 
 ### 14.6 Final trust boundary
 
@@ -1794,8 +2192,9 @@ change-site audit.
   bundle, or expansion provenance is persisted;
 - Runtime, Store, query, resume, replay, audit, export, and import invoke authoring hooks zero
   times;
-- Store/journal/replay contracts outside the deliberate Program-and-occurrence-address cutover and
-  the approved selected-balance capability evidence change are unchanged; and
+- journal families, Store backend schema/atomicity, replay-report ownership, and capability
+  intent/evidence contracts remain unchanged outside the deliberate
+  Program-and-occurrence-address cutover; and
 - manual builders, duplicate validation paths, runtime lifecycle leakage, hard-coded domain
   dispatch, numeric markers, transport placeholders, and compatibility paths are absent from the
   final tree.
