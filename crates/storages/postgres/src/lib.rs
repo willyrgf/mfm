@@ -1667,6 +1667,12 @@ mod managed_postgres_tests {
             )
             .await
             .expect("primary restart probe append");
+            mfm_store::backend_conformance::verify_primary_restart_probe(
+                primary.store.clone(),
+                restart_run.clone(),
+            )
+            .await
+            .expect("primary restart probe before crash");
             crash_and_restart_primary(&primary).await;
             primary
                 .store
