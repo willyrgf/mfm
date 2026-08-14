@@ -13,17 +13,13 @@ error[E0599]: no associated function or constant named `prepare_selected_access`
 error[E0624]: method `select_qualified` is private
  --> tests/ui/reader_cannot_promote_or_mutate.rs:6:35
   |
-6 |       let _ = QualifiedHistoryPort::select_qualified;
-  |                                     ^^^^^^^^^^^^^^^^ private method
+6 |     let _ = QualifiedHistoryPort::select_qualified;
+  |                                   ^^^^^^^^^^^^^^^^ private method
   |
  ::: src/backend.rs
   |
-  | /     fn select_qualified(
-  | |         &self,
-  | |         run: QualifiedRun,
-  | |         program: &mfm_program::Program,
-  | |     ) -> Result<SelectedRun> {
-  | |____________________________- private method defined here
+  |     fn select_qualified(&self, run: QualifiedRun) -> Result<SelectedRun> {
+  |     -------------------------------------------------------------------- private method defined here
 
 error[E0599]: no associated function or constant named `append_admission` found for struct `OpenedStructuredStore` in the current scope
  --> tests/ui/reader_cannot_promote_or_mutate.rs:7:36
