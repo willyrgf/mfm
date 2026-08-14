@@ -17,11 +17,13 @@ use mfm_ids::{
     AppendRequestId, ContentRef, DigestAlgorithm, DigestBytes, RunId, SchemaId, StableId,
     StoreEpoch, StoreScopeId, TenantScopeId,
 };
+use mfm_journal::RunRecord;
 use mfm_portfolio::{
     plan_snapshot, PortfolioConfig, PortfolioContinuation, PortfolioId, PortfolioSnapshotInput,
     PortfolioSnapshotSelector, PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID,
 };
 use mfm_program::{capability_contract_ref, state_implementation_ref, BindingDescriptor, State};
+use mfm_replay::PortableRun;
 use mfm_runtime::{BoxFuture, Runtime, RuntimeAssemblyBuilder, RuntimeStep, SpawnStep};
 use mfm_signing::{PublicSignerKeyInstance, Signer, SigningFuture, SigningRequest, SigningResult};
 use mfm_store::{
@@ -758,14 +760,52 @@ async fn one_live_runtime_drives_submission_and_native_token_portfolio_programs(
     assert_eq!(nonce_calls.load(Ordering::SeqCst), 1);
     assert_eq!(signer_calls.load(Ordering::SeqCst), 1);
     assert_eq!(provider_calls.load(Ordering::SeqCst), 13);
+    let provider_calls_after_execution = provider_calls.load(Ordering::SeqCst);
+    let view = application
+        .read_public_run(submission.run_id.clone())
+        .await
+        .expect("callback-free public view");
+    assert_eq!(view.status, RunStatus::Terminal);
+    let replay = application
+        .replay_run(submission.run_id.clone())
+        .await
+        .expect("callback-free replay");
+    assert!(replay.terminal);
+    let trace = application
+        .trace_run(submission.run_id.clone())
+        .await
+        .expect("redacted trace");
+    let trace_bytes = serde_json::to_vec(&trace).expect("trace JSON");
+    assert!(!trace_bytes
+        .windows(b"signature-canary-must-not-persist".len())
+        .any(|window| window == b"signature-canary-must-not-persist"));
     let export = application
-        .export_run(submission.run_id)
+        .export_run(submission.run_id.clone())
         .await
         .expect("export");
     assert!(!export
         .bytes()
         .windows(b"signature-canary-must-not-persist".len())
         .any(|window| window == b"signature-canary-must-not-persist"));
+    let portable = PortableRun::decode(export.bytes()).expect("strict portable export");
+    let admission = portable.frames().first().expect("admission frame");
+    let RunRecord::RunAdmitted(admitted) = admission.record() else {
+        panic!("first portable frame must be admission");
+    };
+    assert_eq!(
+        admission
+            .objects()
+            .iter()
+            .filter(|object| object.content_ref() == admitted.program_ref())
+            .count(),
+        1,
+        "portable export must retain the admitted Program exactly once",
+    );
+    assert_eq!(
+        provider_calls.load(Ordering::SeqCst),
+        provider_calls_after_execution,
+        "callback-free read, replay, trace, and export must not re-enter the provider",
+    );
 }
 
 async fn admit_submission(application: &Application, idempotency_key: &str) -> mfm_ids::RunId {
