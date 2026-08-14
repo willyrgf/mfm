@@ -839,3 +839,50 @@ repository's one-final-composite invocation.
 Material uncertainties
 
 none.
+
+2026-08-14 — EVM/Portfolio completion audit (blocked by plan metric)
+
+Material uncertainties
+
+none.
+
+Implementation and verification
+
+- The retained-Program, catalog-wide Runtime, domain-owned EVM/Portfolio State, exact live EVM
+  binding, and mandatory-App cutover commits are present. The follow-up route cutover carries the
+  Portfolio-planned secret-free physical target through every EVM balance Read intent and blocks a
+  mismatched committed descriptor before provider entry.
+- The trusted App end-to-end matrix now covers both entry points, native/token collections,
+  payload-free typed failures, a forged retained Portfolio route with zero provider calls,
+  callback-free read/replay/trace/export after terminality, exactly one exported Program object,
+  and nonce acknowledgement-unknown parking without a second nonce reservation.
+- `nix develop -c cargo test -p mfm-program -p mfm-store -p mfm-runtime -p mfm-keystore
+  --all-targets` passed after refreshing the Store Trybuild diagnostic for the selected-run API.
+  `nix develop -c cargo check -p mfm -p mfm-rest-api`, `nix develop -c cargo test -p mfm-evm
+  -p mfm-portfolio -p mfm-evm-live -p mfm-app --all-targets`, and `nix develop -c cargo test
+  -p mfm-journal -p mfm-replay --all-targets` passed.
+- Focused all-target Clippy with warnings denied for Store, EVM, Portfolio, live EVM, and App;
+  `nix develop -c cargo fmt --all -- --check`; `git diff --check`; and
+  `nix run .#run -- --task negative-scan` passed (run `run-3243156-1786699023131191885`).
+
+Pinned-baseline audit
+
+- Relative to `bc103f891a9576bba98b18adc437ad6f201fc9e0`, production Rust is
+  `+6,326/-9,037` (net `-2,711`) and physical product lines are `35,064 -> 32,353`.
+  Public declarations are `951 -> 937` and public types are `313 -> 311`. Tests are
+  `+7,127/-18`; documentation is `+1,091/-137`.
+- There is no new crate or new third-party package in `Cargo.lock`; the new direct `trybuild`
+  dev-dependency reuses an already-locked test-only package. New production edges are internal
+  workspace dependencies required by the Program/Runtime/domain/live cutover.
+- The required exact-admitted-Program cutover alone was `+613/-274` product lines. The inseparable
+  domain/live vertical cutover was `+6,085/-9,062`. The present gross additions therefore exceed
+  the plan's `+1,400` hard ceiling by `4,926` lines despite satisfying its deletion, net, and
+  public-surface constraints.
+
+Unsolved problem
+
+- This is not a completion claim. The final `nix run .#ci` and the completion record are withheld
+  because the plan explicitly blocks completion above the gross-additions ceiling. Removing the
+  required State, typed intent/evidence, live committed-call, or retained-Program behavior solely
+  to meet that ceiling would violate the same plan. Completion requires an explicit amendment to
+  that one cap (or an explicit scope reduction), after which the final composite gate can run.
