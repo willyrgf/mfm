@@ -2,10 +2,13 @@
 
 Portfolio admission creates one typed `PortfolioSnapshotInput`. Pure expansion turns its ordered
 collection demand into a sequential Program. A Portfolio State constructs one complete EVM child
-context, the EVM fragment returns its opaque caller continuation and one collection result, and a
-Portfolio Pure resume State appends that result to the complete continuation.
+context, including the declaration ordinal/correlation. EVM work derives its completed prefix and
+active source from that context, preserves the complete context through the native/token Match, and
+requires a common checked anchor before it returns one collection result. The fragment returns its
+opaque caller continuation unchanged, and a Portfolio Pure resume State appends exactly that result
+to the complete continuation.
 
-The final Pure consolidation owns declaration-order validation, totals, quote selection, and public
-output construction. A child failure follows its explicit Portfolio failure route and suppresses
-later normal work. No runtime collection loop, source selector, output map, or multi-result product
-is persisted.
+The final Pure consolidation owns declaration-order/binding realization validation, checked integer
+and decimal totals, quote selection, and frozen public output construction. A child failure maps to
+the terminal Portfolio failure contract and suppresses later normal work. No runtime collection
+loop, caller-supplied routes, output map, or multi-result product is persisted.

@@ -6,30 +6,90 @@
 //! crate; no domain value contains a client, credential, raw response, or generic context map.
 
 use std::collections::BTreeSet;
+use std::marker::PhantomData;
 use std::num::NonZeroU16;
 
-use mfm_capabilities::{AccessCapabilityContract, EffectMode, NoPriorFacts, ReadMode};
-use mfm_ids::StableId;
+use mfm_capabilities::{
+    AccessCapabilityContract, EffectMode, NoPriorFacts, ProposedStateOutcome, ReadMode,
+};
+use mfm_ids::{ContentRef, StableId};
+use mfm_program::{
+    capability_contract_ref, nominal_contract_ref, state_implementation_ref, BindingDescriptor,
+    Declaration, ExecutionMode, FailureValue, MatchDeclaration, MatchVariant, ProgramDocument,
+    SequentialControlAddress, State, StateDeclaration,
+};
 use mfm_program_derive::{MfmConfig, MfmValue};
 use mfm_values::{string_contains_secret_marker, MfmValue as MfmValueTrait};
 use serde::de;
 use serde::{Deserialize, Serialize};
 
+macro_rules! impl_checked_deserialize {
+    ($type:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Wire {
+                    $($field: $field_type,)+
+                }
+
+                let wire = Wire::deserialize(deserializer)?;
+                let value = Self {
+                    $($field: wire.$field,)+
+                };
+                value.validate().map(|_| value).map_err(de::Error::custom)
+            }
+        }
+    };
+}
+
 /// Stable entry-point identity for EVM submission.
 pub const EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID: &str = "mfm.evm/submit-transaction@1";
-/// Stable operation identity for EVM submission.
-pub const EVM_SUBMIT_TRANSACTION_OPERATION_ID: &str = "mfm.evm.submit-transaction@1";
-/// Stable entry-point identity for EVM balance collection fragments.
-pub const EVM_BALANCE_COLLECTION_OPERATION_ID: &str = "mfm.evm.balance-collection@1";
 /// Maximum admitted EVM balance sources.
 pub const EVM_BALANCE_SOURCE_LIMIT: usize = 64;
 /// Maximum EVM transaction payload bytes.
-pub const EVM_TRANSACTION_DATA_LIMIT: usize = 128 * 1024;
+const EVM_TRANSACTION_DATA_LIMIT: usize = 128 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmSubmissionRoute {
+    pub target: EvmTransactionTarget,
+    pub public_signer_key_instance_ref: ContentRef,
+}
 
 /// Secret-free EVM configuration selected by trusted composition.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, MfmConfig)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, MfmValue, MfmConfig)]
 #[serde(deny_unknown_fields)]
-pub struct EvmConfig {}
+#[mfm(validate = "validate_evm_config")]
+pub struct EvmConfig {
+    /// Finite deployment-selected submission routes.
+    submission_routes: Vec<EvmSubmissionRoute>,
+}
+
+fn validate_evm_config(config: &EvmConfig) -> Result<(), EvmDomainError> {
+    if config.submission_routes.is_empty()
+        || config.submission_routes.len() > EVM_BALANCE_SOURCE_LIMIT
+        || config
+            .submission_routes
+            .iter()
+            .any(|route| route.target.validate().is_err())
+        || config
+            .submission_routes
+            .iter()
+            .enumerate()
+            .any(|(index, route)| {
+                config.submission_routes[..index]
+                    .iter()
+                    .any(|prior| prior.target == route.target)
+            })
+    {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    Ok(())
+}
 
 /// A checked public EVM target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
@@ -43,23 +103,11 @@ pub struct EvmTransactionTarget {
     pub nonce_domain: String,
 }
 
-impl<'de> Deserialize<'de> for EvmTransactionTarget {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            chain_id: u64,
-            sender: String,
-            nonce_domain: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.chain_id, wire.sender, wire.nonce_domain).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(EvmTransactionTarget {
+    chain_id: u64,
+    sender: String,
+    nonce_domain: String,
+});
 
 impl EvmTransactionTarget {
     /// Creates one bounded public target.
@@ -83,7 +131,7 @@ impl EvmTransactionTarget {
     }
 
     /// Validates a decoded target without changing ownership.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
+    fn validate(&self) -> Result<(), EvmDomainError> {
         Self::new(
             self.chain_id,
             self.sender.clone(),
@@ -93,11 +141,14 @@ impl EvmTransactionTarget {
     }
 }
 
-/// A singular domain-planned admission value for EVM submission.
-#[derive(Debug, Serialize, MfmValue)]
+/// Public EVM submission selector accepted from a transport.
+///
+/// It contains no signer, route identity, binding, or planned context. Trusted configuration and
+/// live bindings select those fields during [`plan_submission`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-pub struct EvmSubmissionRequest {
-    /// Public target and nonce domain.
+pub struct EvmSubmissionSelector {
+    /// Requested deployment-selected target.
     pub target: EvmTransactionTarget,
     /// Bounded non-secret idempotency key.
     pub idempotency_key: String,
@@ -109,35 +160,16 @@ pub struct EvmSubmissionRequest {
     pub max_fee: String,
 }
 
-impl<'de> Deserialize<'de> for EvmSubmissionRequest {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            target: EvmTransactionTarget,
-            idempotency_key: String,
-            data: Vec<u8>,
-            gas_limit: u64,
-            max_fee: String,
-        }
+impl_checked_deserialize!(EvmSubmissionSelector {
+    target: EvmTransactionTarget,
+    idempotency_key: String,
+    data: Vec<u8>,
+    gas_limit: u64,
+    max_fee: String,
+});
 
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(
-            wire.target,
-            wire.idempotency_key,
-            wire.data,
-            wire.gas_limit,
-            wire.max_fee,
-        )
-        .map_err(de::Error::custom)
-    }
-}
-
-impl EvmSubmissionRequest {
-    /// Constructs one bounded submission request.
+impl EvmSubmissionSelector {
+    /// Constructs one bounded transport selector.
     pub fn new(
         target: EvmTransactionTarget,
         idempotency_key: String,
@@ -145,17 +177,7 @@ impl EvmSubmissionRequest {
         gas_limit: u64,
         max_fee: String,
     ) -> Result<Self, EvmDomainError> {
-        target.validate()?;
-        if idempotency_key.is_empty()
-            || idempotency_key.len() > 256
-            || contains_secret_marker(&idempotency_key)
-            || data.len() > EVM_TRANSACTION_DATA_LIMIT
-            || gas_limit == 0
-            || !is_decimal_integer(&max_fee)
-            || max_fee.len() > 80
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
+        validate_submission_fields(&target, &idempotency_key, &data, gas_limit, &max_fee)?;
         Ok(Self {
             target,
             idempotency_key,
@@ -165,36 +187,149 @@ impl EvmSubmissionRequest {
         })
     }
 
-    /// Validates a decoded submission request by representation and domain bounds.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        self.target.validate()?;
-        if self.idempotency_key.is_empty()
-            || self.idempotency_key.len() > 256
-            || contains_secret_marker(&self.idempotency_key)
-            || self.data.len() > EVM_TRANSACTION_DATA_LIMIT
-            || self.gas_limit == 0
-            || !is_decimal_integer(&self.max_fee)
-            || self.max_fee.len() > 80
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(())
+    /// Validates a decoded selector without changing ownership.
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        validate_submission_fields(
+            &self.target,
+            &self.idempotency_key,
+            &self.data,
+            self.gas_limit,
+            &self.max_fee,
+        )
     }
 }
 
-/// Complete cumulative submission context retained across sequential States.
-#[derive(Debug, Serialize, MfmValue)]
+/// A singular domain-planned admission value for EVM submission.
+///
+/// Its fields are private so only the domain planner can bind a selected public signer identity.
+#[derive(Debug, Clone, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-pub struct EvmSubmissionContext {
-    /// Original admitted request.
-    pub request: EvmSubmissionRequest,
-    /// Selected wallet nonce after the upstream Read State.
-    pub nonce: u64,
-    /// Deterministic candidate identity fixed before broadcast.
-    pub candidate_id: String,
+pub struct EvmSubmissionRequest {
+    target: EvmTransactionTarget,
+    idempotency_key: String,
+    data: Vec<u8>,
+    gas_limit: u64,
+    max_fee: String,
+    public_signer_key_instance_ref: ContentRef,
 }
 
-impl<'de> Deserialize<'de> for EvmSubmissionContext {
+impl_checked_deserialize!(EvmSubmissionRequest {
+    target: EvmTransactionTarget,
+    idempotency_key: String,
+    data: Vec<u8>,
+    gas_limit: u64,
+    max_fee: String,
+    public_signer_key_instance_ref: ContentRef,
+});
+
+impl EvmSubmissionRequest {
+    fn planned(
+        selector: EvmSubmissionSelector,
+        public_signer_key_instance_ref: ContentRef,
+    ) -> Result<Self, EvmDomainError> {
+        selector.validate()?;
+        Ok(Self {
+            target: selector.target,
+            idempotency_key: selector.idempotency_key,
+            data: selector.data,
+            gas_limit: selector.gas_limit,
+            max_fee: selector.max_fee,
+            public_signer_key_instance_ref,
+        })
+    }
+
+    /// Validates a decoded submission request by representation and domain bounds.
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        validate_submission_fields(
+            &self.target,
+            &self.idempotency_key,
+            &self.data,
+            self.gas_limit,
+            &self.max_fee,
+        )
+    }
+}
+
+fn validate_submission_fields(
+    target: &EvmTransactionTarget,
+    idempotency_key: &str,
+    data: &[u8],
+    gas_limit: u64,
+    max_fee: &str,
+) -> Result<(), EvmDomainError> {
+    target.validate()?;
+    if idempotency_key.is_empty()
+        || idempotency_key.len() > 256
+        || string_contains_secret_marker(idempotency_key)
+        || data.len() > EVM_TRANSACTION_DATA_LIMIT
+        || gas_limit == 0
+        || !is_decimal_integer(max_fee)
+        || max_fee.len() > 80
+    {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    Ok(())
+}
+
+/// Opaque cumulative submission progress passed between the fixed submission States.
+///
+/// The private closed phase sum preserves the exact nonce, candidate, broadcast, receipt,
+/// finality, and canonical-inclusion proof required by the next semantic State.  Callers cannot
+/// construct an intermediate phase or bypass one of those States.
+#[derive(Debug, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+pub struct EvmSubmissionProgress {
+    request: EvmSubmissionRequest,
+    phase: SubmissionPhase,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum SubmissionPhase {
+    Reserved {
+        nonce: u64,
+    },
+    Candidate {
+        nonce: u64,
+        candidate_id: String,
+    },
+    Broadcast {
+        nonce: u64,
+        candidate_id: String,
+        transaction_hash: String,
+    },
+    Receipt {
+        nonce: u64,
+        candidate_id: String,
+        transaction_hash: String,
+        execution_disposition: EvmExecutionDisposition,
+        inclusion_block: EvmBlockAnchor,
+    },
+    Finalized {
+        nonce: u64,
+        candidate_id: String,
+        transaction_hash: String,
+        execution_disposition: EvmExecutionDisposition,
+        inclusion_block: EvmBlockAnchor,
+        finalized_head_number: String,
+    },
+    Canonical {
+        nonce: u64,
+        candidate_id: String,
+        transaction_hash: String,
+        execution_disposition: EvmExecutionDisposition,
+        inclusion_block: EvmBlockAnchor,
+        finalized_head_number: String,
+        canonical_inclusion_block: EvmBlockAnchor,
+    },
+}
+
+impl<'de> Deserialize<'de> for EvmSubmissionProgress {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -203,38 +338,172 @@ impl<'de> Deserialize<'de> for EvmSubmissionContext {
         #[serde(deny_unknown_fields)]
         struct Wire {
             request: EvmSubmissionRequest,
-            nonce: u64,
-            candidate_id: String,
+            phase: SubmissionPhase,
         }
 
         let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.request, wire.nonce, wire.candidate_id).map_err(de::Error::custom)
+        let value = Self {
+            request: wire.request,
+            phase: wire.phase,
+        };
+        value.validate().map(|_| value).map_err(de::Error::custom)
     }
 }
 
-impl EvmSubmissionContext {
-    /// Constructs one complete candidate context after validating the admitted request.
-    pub fn new(
-        request: EvmSubmissionRequest,
-        nonce: u64,
-        candidate_id: String,
-    ) -> Result<Self, EvmDomainError> {
-        let context = Self {
-            request,
-            nonce,
-            candidate_id,
-        };
-        context.validate()?;
-        Ok(context)
+impl EvmSubmissionProgress {
+    fn new(request: EvmSubmissionRequest, phase: SubmissionPhase) -> Result<Self, EvmDomainError> {
+        let value = Self { request, phase };
+        value.validate().map(|_| value)
     }
 
-    /// Validates the complete cumulative submission context.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
+    fn validate(&self) -> Result<(), EvmDomainError> {
         self.request.validate()?;
-        if !valid_public_text(&self.candidate_id, 256) {
-            return Err(EvmDomainError::InvalidValue);
+        match &self.phase {
+            SubmissionPhase::Reserved { .. } => Ok(()),
+            SubmissionPhase::Candidate {
+                nonce,
+                candidate_id,
+            } => valid_submission_candidate(&self.request.target, *nonce, candidate_id),
+            SubmissionPhase::Broadcast {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                ..
+            } => {
+                valid_submission_candidate(&self.request.target, *nonce, candidate_id)?;
+                valid_submission_hash(transaction_hash)
+            }
+            SubmissionPhase::Receipt {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                inclusion_block,
+                ..
+            } => valid_submission_receipt(
+                &self.request.target,
+                *nonce,
+                candidate_id,
+                transaction_hash,
+                inclusion_block,
+            ),
+            SubmissionPhase::Finalized {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                inclusion_block,
+                finalized_head_number,
+                ..
+            } => valid_submission_finality(
+                &self.request.target,
+                *nonce,
+                candidate_id,
+                transaction_hash,
+                inclusion_block,
+                finalized_head_number,
+            ),
+            SubmissionPhase::Canonical {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                inclusion_block,
+                finalized_head_number,
+                canonical_inclusion_block,
+                ..
+            } => {
+                valid_submission_finality(
+                    &self.request.target,
+                    *nonce,
+                    candidate_id,
+                    transaction_hash,
+                    inclusion_block,
+                    finalized_head_number,
+                )?;
+                canonical_inclusion_block.validate()?;
+                (canonical_inclusion_block == inclusion_block)
+                    .then_some(())
+                    .ok_or(EvmDomainError::InvalidValue)
+            }
         }
-        Ok(())
+    }
+}
+
+fn submission_candidate_id(target: &EvmTransactionTarget, nonce: u64) -> String {
+    format!(
+        "mfm.evm.candidate/{}/{}/{}/{}",
+        target.chain_id, target.sender, target.nonce_domain, nonce
+    )
+}
+
+fn valid_submission_candidate(
+    target: &EvmTransactionTarget,
+    nonce: u64,
+    candidate_id: &str,
+) -> Result<(), EvmDomainError> {
+    (candidate_id == submission_candidate_id(target, nonce) && valid_public_text(candidate_id, 256))
+        .then_some(())
+        .ok_or(EvmDomainError::InvalidValue)
+}
+
+fn valid_submission_hash(transaction_hash: &str) -> Result<(), EvmDomainError> {
+    valid_public_text(transaction_hash, 256)
+        .then_some(())
+        .ok_or(EvmDomainError::InvalidValue)
+}
+
+fn valid_submission_receipt(
+    target: &EvmTransactionTarget,
+    nonce: u64,
+    candidate_id: &str,
+    transaction_hash: &str,
+    inclusion_block: &EvmBlockAnchor,
+) -> Result<(), EvmDomainError> {
+    valid_submission_candidate(target, nonce, candidate_id)?;
+    valid_submission_hash(transaction_hash)?;
+    inclusion_block.validate()
+}
+
+fn valid_submission_finality(
+    target: &EvmTransactionTarget,
+    nonce: u64,
+    candidate_id: &str,
+    transaction_hash: &str,
+    inclusion_block: &EvmBlockAnchor,
+    finalized_head_number: &str,
+) -> Result<(), EvmDomainError> {
+    valid_submission_receipt(
+        target,
+        nonce,
+        candidate_id,
+        transaction_hash,
+        inclusion_block,
+    )?;
+    (is_decimal_integer(finalized_head_number)
+        && decimal_at_least(finalized_head_number, &inclusion_block.number))
+    .then_some(())
+    .ok_or(EvmDomainError::InvalidValue)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum EvmExecutionDisposition {
+    Succeeded,
+    Reverted,
+}
+
+impl EvmExecutionDisposition {
+    const fn code(self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Reverted => "reverted",
+        }
+    }
+
+    fn from_code(value: &str) -> Option<Self> {
+        match value {
+            "succeeded" => Some(Self::Succeeded),
+            "reverted" => Some(Self::Reverted),
+            _ => None,
+        }
     }
 }
 
@@ -242,69 +511,68 @@ impl EvmSubmissionContext {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct EvmSubmissionOutput {
-    /// Deterministic candidate identity.
-    pub candidate_id: String,
-    /// Provider-asserted transaction hash.
-    pub transaction_hash: String,
-    /// Inclusion status chosen by the domain State.
-    pub included: bool,
+    /// Authenticated receipt/finality disposition, with all operational detail retained privately.
+    execution_disposition: String,
 }
 
-impl<'de> Deserialize<'de> for EvmSubmissionOutput {
+impl_checked_deserialize!(EvmSubmissionOutput {
+    execution_disposition: String,
+});
+
+impl EvmSubmissionOutput {
+    /// Constructs the exact frozen public success projection.
+    fn new(execution_disposition: EvmExecutionDisposition) -> Self {
+        Self {
+            execution_disposition: execution_disposition.code().to_owned(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        EvmExecutionDisposition::from_code(&self.execution_disposition)
+            .map(|_| ())
+            .ok_or(EvmDomainError::InvalidValue)
+    }
+}
+
+/// Explicit fail-fast EVM submission failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvmSubmissionFailure {
+    /// The wallet nonce authority could not reserve the operation safely.
+    NonceAuthorityUnavailable,
+    /// The authenticated destination rejected the committed candidate before entry.
+    DestinationRejected,
+    /// The provider could not supply a safe, usable observation.
+    ProviderUnavailable,
+    /// Retained nonce/candidate lineage was internally impossible.
+    NonceLineageDiverged,
+}
+
+impl<'de> Deserialize<'de> for EvmSubmissionFailure {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
+        #[serde(rename_all = "snake_case", deny_unknown_fields)]
         struct Wire {
-            candidate_id: String,
-            transaction_hash: String,
-            included: bool,
+            kind: String,
         }
 
-        let wire = Wire::deserialize(deserializer)?;
-        let output = Self {
-            candidate_id: wire.candidate_id,
-            transaction_hash: wire.transaction_hash,
-            included: wire.included,
-        };
-        output.validate().map(|_| output).map_err(de::Error::custom)
+        match Wire::deserialize(deserializer)?.kind.as_str() {
+            "nonce_authority_unavailable" => Ok(Self::NonceAuthorityUnavailable),
+            "destination_rejected" => Ok(Self::DestinationRejected),
+            "provider_unavailable" => Ok(Self::ProviderUnavailable),
+            "nonce_lineage_diverged" => Ok(Self::NonceLineageDiverged),
+            _ => Err(de::Error::custom(EvmDomainError::InvalidValue)),
+        }
     }
 }
 
-impl EvmSubmissionOutput {
-    /// Validates one terminal public submission result.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        if !valid_public_text(&self.candidate_id, 256)
-            || !valid_public_text(&self.transaction_hash, 256)
-        {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(())
+impl FailureValue for EvmSubmissionFailure {
+    fn integrity_blocked() -> Self {
+        Self::ProviderUnavailable
     }
-}
-
-/// Explicit fail-fast EVM submission failure.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum EvmSubmissionFailure {
-    /// The public input or binding was invalid.
-    InvalidInput,
-    /// A wallet nonce could not be read safely.
-    NonceUnavailable,
-    /// The candidate was rejected before provider entry.
-    Rejected {
-        /// Stable redacted rejection code.
-        code: String,
-    },
-    /// The provider result could not be trusted for interpretation.
-    IntegrityBlocked,
 }
 
 /// One EVM balance source admitted into a cumulative collection context.
@@ -321,34 +589,16 @@ pub struct EvmBalanceSource {
     pub token: Option<String>,
 }
 
-impl<'de> Deserialize<'de> for EvmBalanceSource {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            source_id: String,
-            chain_id: u64,
-            address: String,
-            token: Option<String>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let source = Self {
-            source_id: wire.source_id,
-            chain_id: wire.chain_id,
-            address: wire.address,
-            token: wire.token,
-        };
-        source.validate().map(|_| source).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(EvmBalanceSource {
+    source_id: String,
+    chain_id: u64,
+    address: String,
+    token: Option<String>,
+});
 
 impl EvmBalanceSource {
     /// Validates one public source identity without changing ownership.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
+    fn validate(&self) -> Result<(), EvmDomainError> {
         if !valid_public_text(&self.source_id, 256)
             || !valid_public_text(&self.address, 128)
             || self.address != self.address.to_ascii_lowercase()
@@ -364,7 +614,7 @@ impl EvmBalanceSource {
 }
 
 /// Singular domain-planned EVM balance fragment admission value.
-#[derive(Debug, Serialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct EvmBalanceRequest {
     /// Ordered sources; the sequential Program expands one State per source.
@@ -373,22 +623,10 @@ pub struct EvmBalanceRequest {
     pub decimals: u8,
 }
 
-impl<'de> Deserialize<'de> for EvmBalanceRequest {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            sources: Vec<EvmBalanceSource>,
-            decimals: u8,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.sources, wire.decimals).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(EvmBalanceRequest {
+    sources: Vec<EvmBalanceSource>,
+    decimals: u8,
+});
 
 impl EvmBalanceRequest {
     /// Creates one bounded declaration-ordered source list.
@@ -398,6 +636,11 @@ impl EvmBalanceRequest {
             || decimals > 30
             || sources.iter().any(|source| source.validate().is_err())
             || duplicate_source_ids(&sources)
+            || sources.first().is_some_and(|first| {
+                sources
+                    .iter()
+                    .any(|source| source.chain_id != first.chain_id)
+            })
         {
             return Err(EvmDomainError::InvalidValue);
         }
@@ -411,151 +654,37 @@ impl EvmBalanceRequest {
             || self.decimals > 30
             || self.sources.iter().any(|source| source.validate().is_err())
             || duplicate_source_ids(&self.sources)
+            || self.sources.first().is_some_and(|first| {
+                self.sources
+                    .iter()
+                    .any(|source| source.chain_id != first.chain_id)
+            })
         {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(())
     }
+
+    /// Scales one exact observed raw amount to this request's declared decimal scale.
+    pub fn scale_units(&self, raw_units: &str, source_decimals: u8) -> Option<String> {
+        scale_units(raw_units, source_decimals, self.decimals)
+    }
 }
 
-/// Public fields carried unchanged beside one EVM collection result.
-///
-/// This metadata is deliberately separate from the caller continuation: EVM may validate its
-/// own bounded correlation fields, but it cannot inspect or derive the caller's type.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-pub struct EvmBalanceResultMetadata {
-    /// Declaration ordinal of the owning Portfolio collection.
-    pub collection_ordinal: u32,
-    /// Bounded public correlation allocated by the caller.
-    pub correlation: String,
+struct EvmBalanceResultMetadata {
+    collection_ordinal: u32,
+    correlation: String,
 }
 
-impl<'de> Deserialize<'de> for EvmBalanceResultMetadata {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            collection_ordinal: u32,
-            correlation: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.collection_ordinal, wire.correlation).map_err(de::Error::custom)
-    }
-}
-
-/// Exact stage of one declaration-ordered EVM balance source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(rename_all = "snake_case")]
-pub enum EvmBalanceStage {
-    /// The source asset still needs deterministic native/token selection.
-    SelectAsset,
-    /// Native balance request.
-    NativeBalance,
-    /// Token decimal metadata request.
-    TokenDecimals,
-    /// Token balance request.
-    TokenBalance,
-    /// Anchor confirmation request.
-    Anchor,
-    /// Source processing is complete.
-    Complete,
-}
-
-impl EvmBalanceStage {
-    /// Returns whether this stage requires an active source payload.
-    pub const fn requires_current_source(&self) -> bool {
-        !matches!(self, Self::SelectAsset)
-    }
-}
-
-/// Closed Match selector for one source asset.
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum EvmBalanceAsset {
-    /// Native balance source.
-    Native {
-        /// Exact source declaration.
-        source: EvmBalanceSource,
-    },
-    /// Token balance source.
-    Token {
-        /// Exact source declaration.
-        source: EvmBalanceSource,
-        /// Exact public token contract.
-        token: String,
-    },
-}
-
-impl EvmBalanceAsset {
-    /// Validates that a closed Match payload selects the exact next source and asset kind.
-    pub fn validate_for(&self, expected: &EvmBalanceSource) -> Result<(), EvmDomainError> {
-        match self {
-            Self::Native { source } if source == expected && source.token.is_none() => Ok(()),
-            Self::Token { source, token }
-                if source == expected
-                    && expected.token.as_deref() == Some(token.as_str())
-                    && !token.is_empty() =>
-            {
-                Ok(())
-            }
-            _ => Err(EvmDomainError::InvalidValue),
-        }
-    }
-}
-
-/// Complete payload consumed by the native Match arm.
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct EvmNativeBalanceInput {
-    /// Exact selected source.
-    pub source: EvmBalanceSource,
-}
-
-impl EvmNativeBalanceInput {
-    /// Creates one native Match-arm payload after checking its asset kind.
-    pub fn new(source: EvmBalanceSource) -> Result<Self, EvmDomainError> {
-        source.validate()?;
-        if source.token.is_some() {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { source })
-    }
-}
-
-/// Complete payload consumed by the token Match arm.
-#[derive(Debug, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct EvmTokenBalanceInput {
-    /// Exact selected source.
-    pub source: EvmBalanceSource,
-    /// Exact selected token contract.
-    pub token: String,
-}
-
-impl EvmTokenBalanceInput {
-    /// Creates one token Match-arm payload after checking source/token agreement.
-    pub fn new(source: EvmBalanceSource, token: String) -> Result<Self, EvmDomainError> {
-        source.validate()?;
-        if token.is_empty() || source.token.as_deref() != Some(token.as_str()) {
-            return Err(EvmDomainError::InvalidValue);
-        }
-        Ok(Self { source, token })
-    }
-}
+impl_checked_deserialize!(EvmBalanceResultMetadata {
+    collection_ordinal: u32,
+    correlation: String,
+});
 
 impl EvmBalanceResultMetadata {
-    /// Creates one bounded public result correlation.
-    pub fn new(collection_ordinal: u32, correlation: String) -> Result<Self, EvmDomainError> {
+    fn new(collection_ordinal: u32, correlation: String) -> Result<Self, EvmDomainError> {
         if !valid_public_text(&correlation, 256) {
             return Err(EvmDomainError::InvalidValue);
         }
@@ -565,10 +694,75 @@ impl EvmBalanceResultMetadata {
         })
     }
 
-    /// Validates decoded metadata without changing ownership.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
+    fn validate(&self) -> Result<(), EvmDomainError> {
         Self::new(self.collection_ordinal, self.correlation.clone()).map(|_| ())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmBlockAnchor {
+    number: String,
+    hash: String,
+}
+
+impl_checked_deserialize!(EvmBlockAnchor {
+    number: String,
+    hash: String,
+});
+
+impl EvmBlockAnchor {
+    fn new(number: String, hash: String) -> Result<Self, EvmDomainError> {
+        if !is_decimal_integer(&number) || !valid_public_text(&hash, 256) {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Ok(Self { number, hash })
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        Self::new(self.number.clone(), self.hash.clone()).map(|_| ())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EvmBalanceWork {
+    CheckChainIdentity {
+        source: EvmBalanceSource,
+    },
+    ReadInitialAnchor {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+    },
+    SelectAsset {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+        initial_anchor: EvmBlockAnchor,
+    },
+    ReadNativeBalance {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+        initial_anchor: EvmBlockAnchor,
+    },
+    ReadTokenDecimals {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+        initial_anchor: EvmBlockAnchor,
+    },
+    ReadTokenBalance {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+        initial_anchor: EvmBlockAnchor,
+        token_decimals: u8,
+    },
+    ConfirmAnchor {
+        source: EvmBalanceSource,
+        checked_chain_id: u64,
+        initial_anchor: EvmBlockAnchor,
+        source_decimals: u8,
+        raw_balance: String,
+    },
+    Complete,
 }
 
 /// Complete cumulative balance context consumed by each source State and consolidation State.
@@ -585,22 +779,11 @@ impl EvmBalanceResultMetadata {
     )
 )]
 pub struct EvmBalanceContext<K: MfmValueTrait> {
-    /// Singular admitted request.
-    pub request: EvmBalanceRequest,
-    /// Opaque caller continuation retained unchanged until completion.
-    pub caller_continuation: K,
-    /// Public collection correlation owned by the caller.
-    pub metadata: EvmBalanceResultMetadata,
-    /// Current declaration-ordered source, when a source is active.
-    pub current_source: Option<EvmBalanceSource>,
-    /// Exact source-stage discriminator.
-    pub stage: EvmBalanceStage,
-    /// Declaration-ordered results already completed.
-    pub completed: Vec<EvmBalanceResult>,
-    /// Next source ordinal.
-    pub next_source: u16,
-    /// Remaining source declarations after the current source.
-    pub remaining_sources: Vec<EvmBalanceSource>,
+    request: EvmBalanceRequest,
+    caller_continuation: K,
+    metadata: EvmBalanceResultMetadata,
+    completed: Vec<EvmBalanceResult>,
+    work: EvmBalanceWork,
 }
 
 impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
@@ -617,11 +800,8 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
             request: EvmBalanceRequest,
             caller_continuation: K,
             metadata: EvmBalanceResultMetadata,
-            current_source: Option<EvmBalanceSource>,
-            stage: EvmBalanceStage,
             completed: Vec<EvmBalanceResult>,
-            next_source: u16,
-            remaining_sources: Vec<EvmBalanceSource>,
+            work: EvmBalanceWork,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -629,11 +809,8 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
             request: wire.request,
             caller_continuation: wire.caller_continuation,
             metadata: wire.metadata,
-            current_source: wire.current_source,
-            stage: wire.stage,
             completed: wire.completed,
-            next_source: wire.next_source,
-            remaining_sources: wire.remaining_sources,
+            work: wire.work,
         };
         context
             .validate()
@@ -643,96 +820,228 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceContext<K> {
 }
 
 impl<K: MfmValueTrait> EvmBalanceContext<K> {
-    /// Validates the declaration-ordered cumulative work envelope.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
+    /// Creates the first work item for one caller-owned collection continuation.
+    pub fn new(
+        request: EvmBalanceRequest,
+        caller_continuation: K,
+        collection_ordinal: u32,
+        correlation: String,
+    ) -> Result<Self, EvmDomainError> {
+        let first = request
+            .sources
+            .first()
+            .cloned()
+            .ok_or(EvmDomainError::InvalidValue)?;
+        let metadata = EvmBalanceResultMetadata::new(collection_ordinal, correlation)?;
+        let context = Self {
+            request,
+            caller_continuation,
+            metadata,
+            completed: Vec::new(),
+            work: EvmBalanceWork::CheckChainIdentity { source: first },
+        };
+        context.validate()?;
+        Ok(context)
+    }
+
+    fn active_source(&self) -> Option<&EvmBalanceSource> {
+        match &self.work {
+            EvmBalanceWork::CheckChainIdentity { source }
+            | EvmBalanceWork::ReadInitialAnchor { source, .. }
+            | EvmBalanceWork::SelectAsset { source, .. }
+            | EvmBalanceWork::ReadNativeBalance { source, .. }
+            | EvmBalanceWork::ReadTokenDecimals { source, .. }
+            | EvmBalanceWork::ReadTokenBalance { source, .. }
+            | EvmBalanceWork::ConfirmAnchor { source, .. } => Some(source),
+            EvmBalanceWork::Complete => None,
+        }
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
         self.request.validate()?;
         self.metadata.validate()?;
-        if self.next_source as usize > self.request.sources.len()
-            || self.completed.len() != self.next_source as usize
+        if self.completed.len() > self.request.sources.len()
             || self
                 .completed
                 .iter()
                 .zip(&self.request.sources)
                 .any(|(result, source)| {
-                    result.validate().is_err() || result.source_id != source.source_id
+                    result.validate().is_err()
+                        || result.source != *source
+                        || (result.source.token.is_none()
+                            && result.decimals != self.request.decimals)
+                        || self
+                            .request
+                            .scale_units(&result.raw_units, result.decimals)
+                            .as_deref()
+                            != Some(result.amount_scaled.as_str())
                 })
+            || self
+                .completed
+                .windows(2)
+                .any(|pair| pair[0].anchor != pair[1].anchor)
         {
             return Err(EvmDomainError::InvalidValue);
         }
-        let next = self.next_source as usize;
-        let remaining_start = if let Some(current) = &self.current_source {
-            if next >= self.request.sources.len() || current != &self.request.sources[next] {
+        if let Some(anchor) = work_initial_anchor(&self.work) {
+            if anchor.validate().is_err()
+                || self
+                    .completed
+                    .first()
+                    .is_some_and(|result| result.anchor != *anchor)
+            {
                 return Err(EvmDomainError::InvalidValue);
             }
-            next + 1
-        } else {
-            next
-        };
-        if self.stage.requires_current_source() != self.current_source.is_some()
-            || self.remaining_sources != self.request.sources[remaining_start..]
-            || self.remaining_sources.len() > EVM_BALANCE_SOURCE_LIMIT
-        {
-            return Err(EvmDomainError::InvalidValue);
         }
-        if let Some(current) = &self.current_source {
-            current.validate()?;
-            match self.stage {
-                EvmBalanceStage::NativeBalance if current.token.is_some() => {
-                    return Err(EvmDomainError::InvalidValue)
+        let expected = self.request.sources.get(self.completed.len());
+        match (&self.work, expected) {
+            (EvmBalanceWork::Complete, None) => {}
+            (EvmBalanceWork::Complete, Some(_)) => return Err(EvmDomainError::InvalidValue),
+            (work, Some(expected_source)) => {
+                let source = self.active_source().ok_or(EvmDomainError::InvalidValue)?;
+                if source != expected_source || source.validate().is_err() {
+                    return Err(EvmDomainError::InvalidValue);
                 }
-                EvmBalanceStage::TokenDecimals | EvmBalanceStage::TokenBalance
-                    if current.token.is_none() =>
-                {
-                    return Err(EvmDomainError::InvalidValue)
+                match work {
+                    EvmBalanceWork::ReadNativeBalance { source, .. } if source.token.is_some() => {
+                        return Err(EvmDomainError::InvalidValue)
+                    }
+                    EvmBalanceWork::ReadTokenDecimals { source, .. }
+                    | EvmBalanceWork::ReadTokenBalance { source, .. }
+                        if source.token.is_none() =>
+                    {
+                        return Err(EvmDomainError::InvalidValue)
+                    }
+                    EvmBalanceWork::ReadTokenBalance { token_decimals, .. }
+                        if *token_decimals > 30 =>
+                    {
+                        return Err(EvmDomainError::InvalidValue)
+                    }
+                    EvmBalanceWork::ConfirmAnchor {
+                        source_decimals,
+                        raw_balance,
+                        initial_anchor,
+                        checked_chain_id,
+                        ..
+                    } if *source_decimals > 30
+                        || (source.token.is_none()
+                            && *source_decimals != self.request.decimals)
+                        || !is_decimal_integer(raw_balance)
+                        || initial_anchor.validate().is_err()
+                        || *checked_chain_id != source.chain_id =>
+                    {
+                        return Err(EvmDomainError::InvalidValue)
+                    }
+                    EvmBalanceWork::ReadInitialAnchor {
+                        checked_chain_id, ..
+                    }
+                    | EvmBalanceWork::SelectAsset {
+                        checked_chain_id, ..
+                    }
+                    | EvmBalanceWork::ReadNativeBalance {
+                        checked_chain_id, ..
+                    }
+                    | EvmBalanceWork::ReadTokenDecimals {
+                        checked_chain_id, ..
+                    }
+                    | EvmBalanceWork::ReadTokenBalance {
+                        checked_chain_id, ..
+                    } if *checked_chain_id != source.chain_id => {
+                        return Err(EvmDomainError::InvalidValue)
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+            (_, None) => return Err(EvmDomainError::InvalidValue),
         }
         Ok(())
     }
 }
 
-/// One source result retained in the cumulative context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct EvmBalanceResult {
-    /// Source identity.
-    pub source_id: String,
-    /// Integer-scaled amount.
-    pub amount_scaled: String,
-    /// Anchor identity used by the adapter assertion.
-    pub anchor: String,
+/// Closed Match selector retaining the entire EVM context through either asset arm.
+#[derive(Debug, Serialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields,
+    bound(
+        serialize = "K: Serialize",
+        deserialize = "K: serde::de::DeserializeOwned"
+    )
+)]
+pub enum EvmBalanceAsset<K: MfmValueTrait> {
+    /// Native arm with the complete cumulative context.
+    Native(EvmBalanceContext<K>),
+    /// Token arm with the complete cumulative context.
+    Token(EvmBalanceContext<K>),
 }
 
-impl<'de> Deserialize<'de> for EvmBalanceResult {
+impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceAsset<K> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            source_id: String,
-            amount_scaled: String,
-            anchor: String,
+        #[serde(
+            tag = "kind",
+            content = "value",
+            rename_all = "snake_case",
+            deny_unknown_fields,
+            bound(deserialize = "K: serde::de::DeserializeOwned")
+        )]
+        enum Wire<K: MfmValueTrait> {
+            Native(EvmBalanceContext<K>),
+            Token(EvmBalanceContext<K>),
         }
 
-        let wire = Wire::deserialize(deserializer)?;
-        let result = Self {
-            source_id: wire.source_id,
-            amount_scaled: wire.amount_scaled,
-            anchor: wire.anchor,
+        let value = match Wire::deserialize(deserializer)? {
+            Wire::Native(context) => Self::Native(context),
+            Wire::Token(context) => Self::Token(context),
         };
-        result.validate().map(|_| result).map_err(de::Error::custom)
+        value.validate().map(|_| value).map_err(de::Error::custom)
     }
 }
+
+impl<K: MfmValueTrait> EvmBalanceAsset<K> {
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        let context = match self {
+            Self::Native(context) | Self::Token(context) => context,
+        };
+        context.validate()?;
+        match (self, context.active_source()) {
+            (Self::Native(_), Some(source)) if source.token.is_none() => Ok(()),
+            (Self::Token(_), Some(source)) if source.token.is_some() => Ok(()),
+            _ => Err(EvmDomainError::InvalidValue),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmBalanceResult {
+    source: EvmBalanceSource,
+    decimals: u8,
+    raw_units: String,
+    amount_scaled: String,
+    anchor: EvmBlockAnchor,
+}
+
+impl_checked_deserialize!(EvmBalanceResult {
+    source: EvmBalanceSource,
+    decimals: u8,
+    raw_units: String,
+    amount_scaled: String,
+    anchor: EvmBlockAnchor,
+});
 
 impl EvmBalanceResult {
-    /// Validates one interpreted source result.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        if !valid_public_text(&self.source_id, 256)
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        if self.source.validate().is_err()
+            || self.decimals > 30
+            || !is_decimal_integer(&self.raw_units)
             || !is_decimal_integer(&self.amount_scaled)
-            || !valid_public_text(&self.anchor, 256)
+            || self.anchor.validate().is_err()
         {
             return Err(EvmDomainError::InvalidValue);
         }
@@ -740,53 +1049,178 @@ impl EvmBalanceResult {
     }
 }
 
-/// Final public EVM balance collection result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct EvmBalanceCollectionResult {
-    /// Ordered source results.
-    pub results: Vec<EvmBalanceResult>,
-    /// Total integer-scaled amount.
-    pub total_scaled: String,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum EvmCollectedAsset {
+    Native,
+    Token { contract: String },
 }
 
-impl<'de> Deserialize<'de> for EvmBalanceCollectionResult {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            results: Vec<EvmBalanceResult>,
-            total_scaled: String,
+impl EvmCollectedAsset {
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        match self {
+            Self::Native => Ok(()),
+            Self::Token { contract }
+                if valid_public_text(contract, 128)
+                    && contract == &contract.to_ascii_lowercase() =>
+            {
+                Ok(())
+            }
+            Self::Token { .. } => Err(EvmDomainError::InvalidValue),
         }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let result = Self {
-            results: wire.results,
-            total_scaled: wire.total_scaled,
-        };
-        result.validate().map(|_| result).map_err(de::Error::custom)
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmCollectedBalanceSource {
+    source_id: String,
+    chain_id: u64,
+    address: String,
+    asset: EvmCollectedAsset,
+}
+
+impl_checked_deserialize!(EvmCollectedBalanceSource {
+    source_id: String,
+    chain_id: u64,
+    address: String,
+    asset: EvmCollectedAsset,
+});
+
+impl EvmCollectedBalanceSource {
+    fn from_source(source: &EvmBalanceSource) -> Self {
+        Self {
+            source_id: source.source_id.clone(),
+            chain_id: source.chain_id,
+            address: source.address.clone(),
+            asset: match &source.token {
+                Some(contract) => EvmCollectedAsset::Token {
+                    contract: contract.clone(),
+                },
+                None => EvmCollectedAsset::Native,
+            },
+        }
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        if !valid_public_text(&self.source_id, 256)
+            || self.chain_id == 0
+            || !valid_public_text(&self.address, 128)
+            || self.address != self.address.to_ascii_lowercase()
+        {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        self.asset.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmCollectedBalance {
+    source: EvmCollectedBalanceSource,
+    decimals: u8,
+    raw_units: String,
+}
+
+impl_checked_deserialize!(EvmCollectedBalance {
+    source: EvmCollectedBalanceSource,
+    decimals: u8,
+    raw_units: String,
+});
+
+impl EvmCollectedBalance {
+    fn from_result(result: EvmBalanceResult) -> Self {
+        Self {
+            source: EvmCollectedBalanceSource::from_source(&result.source),
+            decimals: result.decimals,
+            raw_units: result.raw_units,
+        }
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        if self.source.validate().is_err()
+            || self.decimals > 30
+            || !is_decimal_integer(&self.raw_units)
+        {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Ok(())
+    }
+}
+
+type EvmCollectedBalanceParts = (String, String, Option<String>, u8, String);
+type EvmBalanceCollectionParts = (u64, EvmBlockAnchor, Vec<EvmCollectedBalanceParts>, String);
+type EvmBalanceCollectionCompletionParts<K> = (
+    K,
+    u32,
+    u64,
+    String,
+    String,
+    Vec<EvmCollectedBalanceParts>,
+    String,
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct EvmBalanceCollectionResult {
+    chain_id: u64,
+    anchor: EvmBlockAnchor,
+    balances: Vec<EvmCollectedBalance>,
+    total_scaled: String,
+}
+
+impl_checked_deserialize!(EvmBalanceCollectionResult {
+    chain_id: u64,
+    anchor: EvmBlockAnchor,
+    balances: Vec<EvmCollectedBalance>,
+    total_scaled: String,
+});
+
 impl EvmBalanceCollectionResult {
-    /// Validates ordered public results and integer-scaled total output.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        if self.results.is_empty()
-            || self.results.len() > EVM_BALANCE_SOURCE_LIMIT
-            || self.results.iter().any(|result| result.validate().is_err())
-            || duplicate_result_ids(&self.results)
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        if self.chain_id == 0
+            || self.anchor.validate().is_err()
+            || self.balances.is_empty()
+            || self.balances.len() > EVM_BALANCE_SOURCE_LIMIT
+            || self
+                .balances
+                .iter()
+                .any(|balance| balance.validate().is_err())
+            || duplicate_collected_source_ids(&self.balances)
+            || self
+                .balances
+                .iter()
+                .any(|balance| balance.source.chain_id != self.chain_id)
             || !is_decimal_integer(&self.total_scaled)
         {
             return Err(EvmDomainError::InvalidValue);
         }
         Ok(())
     }
+
+    fn into_parts(self) -> EvmBalanceCollectionParts {
+        let balances = self
+            .balances
+            .into_iter()
+            .map(|balance| {
+                let token = match balance.source.asset {
+                    EvmCollectedAsset::Native => None,
+                    EvmCollectedAsset::Token { contract } => Some(contract),
+                };
+                (
+                    balance.source.source_id,
+                    balance.source.address,
+                    token,
+                    balance.decimals,
+                    balance.raw_units,
+                )
+            })
+            .collect();
+        (self.chain_id, self.anchor, balances, self.total_scaled)
+    }
 }
 
-/// One consuming EVM completion returned to the caller-owned continuation.
+/// One consuming frozen EVM collection handoff returned to the caller context.
 #[derive(Debug, Serialize, MfmValue)]
 #[serde(
     deny_unknown_fields,
@@ -796,10 +1230,9 @@ impl EvmBalanceCollectionResult {
     )
 )]
 pub struct EvmBalanceCollectionCompletion<K: MfmValueTrait> {
-    /// The exact caller continuation, moved without EVM interpretation.
-    pub caller_continuation: K,
-    /// The one completed public collection result.
-    pub result: EvmBalanceCollectionResult,
+    caller_context: K,
+    collection_ordinal: u32,
+    collection: EvmBalanceCollectionResult,
 }
 
 impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceCollectionCompletion<K> {
@@ -813,14 +1246,15 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceCollectionCompletion<
             bound(deserialize = "K: serde::de::DeserializeOwned")
         )]
         struct Wire<K> {
-            caller_continuation: K,
-            result: EvmBalanceCollectionResult,
+            caller_context: K,
+            collection_ordinal: u32,
+            collection: EvmBalanceCollectionResult,
         }
-
         let wire = Wire::deserialize(deserializer)?;
         let completion = Self {
-            caller_continuation: wire.caller_continuation,
-            result: wire.result,
+            caller_context: wire.caller_context,
+            collection_ordinal: wire.collection_ordinal,
+            collection: wire.collection,
         };
         completion
             .validate()
@@ -830,21 +1264,35 @@ impl<'de, K: MfmValueTrait> Deserialize<'de> for EvmBalanceCollectionCompletion<
 }
 
 impl<K: MfmValueTrait> EvmBalanceCollectionCompletion<K> {
-    /// Constructs one completed collection handoff without interpreting the caller value.
-    pub fn new(
-        caller_continuation: K,
-        result: EvmBalanceCollectionResult,
+    fn new(
+        caller_context: K,
+        collection_ordinal: u32,
+        collection: EvmBalanceCollectionResult,
     ) -> Result<Self, EvmDomainError> {
-        result.validate()?;
+        collection.validate()?;
         Ok(Self {
-            caller_continuation,
-            result,
+            caller_context,
+            collection_ordinal,
+            collection,
         })
     }
 
-    /// Validates the EVM-owned result portion of the handoff.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        self.result.validate()
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        self.collection.validate()
+    }
+
+    /// Consumes the EVM completion into its unchanged caller context and checked observations.
+    pub fn into_parts(self) -> EvmBalanceCollectionCompletionParts<K> {
+        let (chain_id, anchor, balances, total_scaled) = self.collection.into_parts();
+        (
+            self.caller_context,
+            self.collection_ordinal,
+            chain_id,
+            anchor.number,
+            anchor.hash,
+            balances,
+            total_scaled,
+        )
     }
 }
 
@@ -857,41 +1305,67 @@ pub enum EvmDomainError {
     /// A capability intent/evidence pair is not bound.
     #[error("EVM capability evidence is not bound")]
     EvidenceBinding,
+    /// Program authoring or binding identity is invalid.
+    #[error("EVM Program contract is invalid")]
+    Program,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum EvmReadSubject {
+    ChainIdentity,
+    InitialAnchor,
+    NativeBalance {
+        source: EvmBalanceSource,
+        anchor: EvmBlockAnchor,
+    },
+    TokenDecimals {
+        source: EvmBalanceSource,
+        anchor: EvmBlockAnchor,
+    },
+    TokenBalance {
+        source: EvmBalanceSource,
+        anchor: EvmBlockAnchor,
+    },
+    ConfirmAnchor {
+        source: EvmBalanceSource,
+        anchor: EvmBlockAnchor,
+    },
+    TransactionReceipt {
+        transaction_hash: String,
+    },
+    FinalizedHead,
+    CanonicalInclusionBlock {
+        number: String,
+    },
 }
 
 /// One strict read intent shared by the bounded EVM read capabilities.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct EvmReadIntent {
-    /// Capability operation identity.
-    pub operation: String,
-    /// Public chain target.
-    pub chain_id: u64,
-    /// Public account or transaction selector.
-    pub subject: String,
+    operation: String,
+    chain_id: u64,
+    subject: EvmReadSubject,
 }
 
-impl<'de> Deserialize<'de> for EvmReadIntent {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            operation: String,
-            chain_id: u64,
-            subject: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.operation, wire.chain_id, wire.subject).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(EvmReadIntent {
+    operation: String,
+    chain_id: u64,
+    subject: EvmReadSubject,
+});
 
 impl EvmReadIntent {
-    /// Creates one bounded provider intent.
-    pub fn new(operation: String, chain_id: u64, subject: String) -> Result<Self, EvmDomainError> {
+    fn new(
+        operation: String,
+        chain_id: u64,
+        subject: EvmReadSubject,
+    ) -> Result<Self, EvmDomainError> {
         let intent = Self {
             operation,
             chain_id,
@@ -901,15 +1375,148 @@ impl EvmReadIntent {
         Ok(intent)
     }
 
-    /// Validates a decoded provider intent.
-    pub fn validate(&self) -> Result<(), EvmDomainError> {
-        if StableId::new(&self.operation).is_err()
-            || self.chain_id == 0
-            || !valid_public_text(&self.subject, 256)
-        {
+    /// Returns the exact operation and public chain target fixed by this intent.
+    pub fn operation_and_chain_id(&self) -> (&str, u64) {
+        (&self.operation, self.chain_id)
+    }
+
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        if StableId::new(&self.operation).is_err() || self.chain_id == 0 {
             return Err(EvmDomainError::InvalidValue);
         }
+        match &self.subject {
+            EvmReadSubject::ChainIdentity
+            | EvmReadSubject::InitialAnchor
+            | EvmReadSubject::FinalizedHead => {}
+            EvmReadSubject::NativeBalance { source, anchor }
+            | EvmReadSubject::TokenDecimals { source, anchor }
+            | EvmReadSubject::TokenBalance { source, anchor }
+            | EvmReadSubject::ConfirmAnchor { source, anchor } => {
+                source.validate()?;
+                anchor.validate()?;
+                if source.chain_id != self.chain_id {
+                    return Err(EvmDomainError::InvalidValue);
+                }
+            }
+            EvmReadSubject::TransactionReceipt { transaction_hash } => {
+                if !valid_public_text(transaction_hash, 256) {
+                    return Err(EvmDomainError::InvalidValue);
+                }
+            }
+            EvmReadSubject::CanonicalInclusionBlock { number } => {
+                if !is_decimal_integer(number) {
+                    return Err(EvmDomainError::InvalidValue);
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+/// Typed provider values admitted after raw EVM ingress is discarded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum EvmReadValue {
+    /// Authenticated chain id.
+    ChainId(u64),
+    /// Authenticated block anchor components.
+    Anchor {
+        /// Canonical decimal block number.
+        number: String,
+        /// Canonical public block hash.
+        hash: String,
+    },
+    /// Canonical unsigned raw units.
+    RawUnits(String),
+    /// Token decimal scale.
+    TokenDecimals(u8),
+    /// Receipt observation bound to its transaction hash.
+    Receipt {
+        /// Transaction hash.
+        transaction_hash: String,
+        /// Receipt execution disposition code.
+        execution_disposition: String,
+        /// Canonical inclusion block number.
+        inclusion_block_number: String,
+        /// Canonical inclusion block hash.
+        inclusion_block_hash: String,
+    },
+    /// Canonical finalized head number.
+    FinalizedHead {
+        /// Canonical decimal finalized-head number.
+        number: String,
+    },
+    /// Canonical block at the requested height.
+    CanonicalBlock {
+        /// Canonical decimal block number.
+        number: String,
+        /// Canonical public block hash.
+        hash: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for EvmReadValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "value",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Wire {
+            ChainId(u64),
+            Anchor {
+                number: String,
+                hash: String,
+            },
+            RawUnits(String),
+            TokenDecimals(u8),
+            Receipt {
+                transaction_hash: String,
+                execution_disposition: String,
+                inclusion_block_number: String,
+                inclusion_block_hash: String,
+            },
+            FinalizedHead {
+                number: String,
+            },
+            CanonicalBlock {
+                number: String,
+                hash: String,
+            },
+        }
+
+        let value = match Wire::deserialize(deserializer)? {
+            Wire::ChainId(chain_id) => Self::ChainId(chain_id),
+            Wire::Anchor { number, hash } => Self::Anchor { number, hash },
+            Wire::RawUnits(units) => Self::RawUnits(units),
+            Wire::TokenDecimals(decimals) => Self::TokenDecimals(decimals),
+            Wire::Receipt {
+                transaction_hash,
+                execution_disposition,
+                inclusion_block_number,
+                inclusion_block_hash,
+            } => Self::Receipt {
+                transaction_hash,
+                execution_disposition,
+                inclusion_block_number,
+                inclusion_block_hash,
+            },
+            Wire::FinalizedHead { number } => Self::FinalizedHead { number },
+            Wire::CanonicalBlock { number, hash } => Self::CanonicalBlock { number, hash },
+        };
+        read_value_valid(&value)
+            .then_some(value)
+            .ok_or_else(|| de::Error::custom(EvmDomainError::InvalidValue))
     }
 }
 
@@ -922,16 +1529,12 @@ impl EvmReadIntent {
     deny_unknown_fields
 )]
 pub enum EvmReadEvidence {
-    /// Provider returned a bounded value.
+    /// Provider returned an exact structured value for the committed intent.
     Returned {
         /// Operation identity echoed by the authenticated adapter.
         operation: String,
-        /// Subject identity echoed by the authenticated adapter.
-        subject: String,
         /// Interpreted provider value.
-        value: String,
-        /// Provider anchor bound to the request.
-        anchor: String,
+        value: EvmReadValue,
     },
     /// Provider returned a reviewed rejection.
     Rejected {
@@ -958,18 +1561,10 @@ pub enum EvmReadEvidence {
 
 impl EvmReadEvidence {
     /// Validates the exact operation-bound evidence envelope.
-    pub fn validate_for(&self, intent: &EvmReadIntent) -> Result<(), EvmDomainError> {
+    fn validate_for(&self, intent: &EvmReadIntent) -> Result<(), EvmDomainError> {
         let valid = match self {
-            Self::Returned {
-                operation,
-                subject,
-                value,
-                anchor,
-            } => {
-                operation == &intent.operation
-                    && subject == &intent.subject
-                    && valid_public_text(value, 2 * 1024 * 1024)
-                    && valid_public_text(anchor, 256)
+            Self::Returned { operation, value } => {
+                operation == &intent.operation && read_value_valid_for_intent(intent, value)
             }
             Self::Rejected { operation, code }
             | Self::SafeFailure { operation, code }
@@ -981,15 +1576,85 @@ impl EvmReadEvidence {
     }
 }
 
-/// Read capability for wallet nonce status.
-pub enum ReadWalletNonceStatus {}
-/// Read capability for a chain anchor.
-pub enum ReadLatestAnchor {}
-/// Read capability for a balance result.
-pub enum ReadBalance {}
+#[derive(Debug, Clone, Copy)]
+enum ReadCapabilityFamily {
+    ChainIdentity,
+    LatestAnchor,
+    Balance,
+    TransactionReceipt,
+    FinalizedHead,
+    CanonicalInclusionBlock,
+}
+
+fn validate_read_capability_intent(
+    intent: &EvmReadIntent,
+    family: ReadCapabilityFamily,
+) -> Result<(), EvmDomainError> {
+    intent.validate()?;
+    let valid = match family {
+        ReadCapabilityFamily::ChainIdentity => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-chain-identity@1",
+                EvmReadSubject::ChainIdentity
+            )
+        ),
+        ReadCapabilityFamily::LatestAnchor => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-initial-anchor@1",
+                EvmReadSubject::InitialAnchor
+            ) | (
+                "mfm.evm.confirm-balance-anchor@1",
+                EvmReadSubject::ConfirmAnchor { .. }
+            )
+        ),
+        ReadCapabilityFamily::Balance => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-native-balance@1",
+                EvmReadSubject::NativeBalance { .. }
+            ) | (
+                "mfm.evm.read-token-decimals@1",
+                EvmReadSubject::TokenDecimals { .. }
+            ) | (
+                "mfm.evm.read-token-balance@1",
+                EvmReadSubject::TokenBalance { .. }
+            )
+        ),
+        ReadCapabilityFamily::TransactionReceipt => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-transaction-receipt@1",
+                EvmReadSubject::TransactionReceipt { .. }
+            )
+        ),
+        ReadCapabilityFamily::FinalizedHead => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-finalized-head@1",
+                EvmReadSubject::FinalizedHead
+            )
+        ),
+        ReadCapabilityFamily::CanonicalInclusionBlock => matches!(
+            (&intent.operation[..], &intent.subject),
+            (
+                "mfm.evm.read-canonical-inclusion-block@1",
+                EvmReadSubject::CanonicalInclusionBlock { .. }
+            )
+        ),
+    };
+    valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
+}
+
+/// Exact EVM Access capability selected by its closed contract kind.
+///
+/// Kinds 0 and 1 are the one-entry nonce and broadcast Effects. The remaining kinds retain the
+/// distinct chain, receipt, finality, anchor, and balance Read contracts required by each State.
+pub struct EvmCapability<const KIND: u8>;
 
 macro_rules! impl_read_capability {
-    ($ty:ty, $name:literal) => {
+    ($ty:ty, $name:literal, $family:ident) => {
         impl AccessCapabilityContract for $ty {
             type Mode = ReadMode;
             type Intent = EvmReadIntent;
@@ -1008,8 +1673,7 @@ macro_rules! impl_read_capability {
                 intent: &Self::Intent,
                 evidence: &Self::Evidence,
             ) -> mfm_capabilities::Result<()> {
-                intent
-                    .validate()
+                validate_read_capability_intent(intent, ReadCapabilityFamily::$family)
                     .and_then(|_| evidence.validate_for(intent))
                     .map_err(|_| mfm_capabilities::CapabilityError::EvidenceBinding)
             }
@@ -1018,16 +1682,139 @@ macro_rules! impl_read_capability {
 }
 
 impl_read_capability!(
-    ReadWalletNonceStatus,
-    "mfm.evm.capability.read-wallet-nonce@1"
+    EvmCapability<2>,
+    "mfm.evm.capability.read-chain-identity@1",
+    ChainIdentity
 );
-impl_read_capability!(ReadLatestAnchor, "mfm.evm.capability.read-anchor@1");
-impl_read_capability!(ReadBalance, "mfm.evm.capability.read-balance@1");
+impl_read_capability!(
+    EvmCapability<3>,
+    "mfm.evm.capability.read-transaction-receipt@1",
+    TransactionReceipt
+);
+impl_read_capability!(
+    EvmCapability<4>,
+    "mfm.evm.capability.read-finalized-head@1",
+    FinalizedHead
+);
+impl_read_capability!(
+    EvmCapability<5>,
+    "mfm.evm.capability.read-canonical-inclusion-block@1",
+    CanonicalInclusionBlock
+);
+impl_read_capability!(
+    EvmCapability<6>,
+    "mfm.evm.capability.read-anchor@1",
+    LatestAnchor
+);
+impl_read_capability!(
+    EvmCapability<7>,
+    "mfm.evm.capability.read-balance@1",
+    Balance
+);
+
+/// Intent for the one-entry wallet nonce reservation effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+pub struct NonceReservationIntent {
+    /// Exact public target and nonce domain.
+    pub target: EvmTransactionTarget,
+    /// Stable idempotency key that makes reservation idempotent at the authority.
+    pub idempotency_key: String,
+}
+
+impl_checked_deserialize!(NonceReservationIntent {
+    target: EvmTransactionTarget,
+    idempotency_key: String,
+});
+
+impl NonceReservationIntent {
+    /// Creates one bounded reservation intent.
+    fn new(target: EvmTransactionTarget, idempotency_key: String) -> Result<Self, EvmDomainError> {
+        target.validate()?;
+        if !valid_public_text(&idempotency_key, 256) {
+            return Err(EvmDomainError::InvalidValue);
+        }
+        Ok(Self {
+            target,
+            idempotency_key,
+        })
+    }
+
+    /// Validates a decoded reservation intent.
+    pub fn validate(&self) -> Result<(), EvmDomainError> {
+        self.target.validate()?;
+        valid_public_text(&self.idempotency_key, 256)
+            .then_some(())
+            .ok_or(EvmDomainError::InvalidValue)
+    }
+}
+
+/// Closed wallet nonce reservation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum NonceReservationEvidence {
+    /// The exact nonce was durably reserved.
+    Reserved {
+        /// Exact reserved nonce.
+        nonce: u64,
+    },
+    /// The authority rejected reservation before entry.
+    Rejected {
+        /// Stable redacted code.
+        code: String,
+    },
+    /// The adapter authenticated an integrity block.
+    IntegrityBlocked,
+}
+
+impl NonceReservationEvidence {
+    /// Validates this evidence against its exact reservation intent.
+    fn validate_for(&self, intent: &NonceReservationIntent) -> Result<(), EvmDomainError> {
+        intent.validate()?;
+        match self {
+            Self::Reserved { .. } | Self::IntegrityBlocked => Ok(()),
+            Self::Rejected { code } if valid_public_text(code, 256) => Ok(()),
+            Self::Rejected { .. } => Err(EvmDomainError::EvidenceBinding),
+        }
+    }
+}
+
+impl AccessCapabilityContract for EvmCapability<0> {
+    type Mode = EffectMode;
+    type Intent = NonceReservationIntent;
+    type Evidence = NonceReservationEvidence;
+    type Facts = NoPriorFacts;
+
+    fn contract_id() -> mfm_capabilities::Result<StableId> {
+        StableId::new("mfm.evm.capability.reserve-wallet-nonce@1")
+            .map_err(|_| mfm_capabilities::CapabilityError::InvalidContract)
+    }
+
+    fn total_attempt_bound() -> NonZeroU16 {
+        NonZeroU16::new(1).expect("constant")
+    }
+
+    fn bind_evidence(
+        intent: &Self::Intent,
+        evidence: &Self::Evidence,
+    ) -> mfm_capabilities::Result<()> {
+        evidence
+            .validate_for(intent)
+            .map_err(|_| mfm_capabilities::CapabilityError::EvidenceBinding)
+    }
+}
 
 /// Deterministic transaction candidate intent fixed before provider entry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct BroadcastIntent {
+    /// Exact public chain and sender target.
+    pub target: EvmTransactionTarget,
     /// Non-secret idempotency key.
     pub idempotency_key: String,
     /// Deterministic candidate identity.
@@ -1038,62 +1825,65 @@ pub struct BroadcastIntent {
     pub sender: String,
     /// Exact wallet nonce domain selected for this operation.
     pub nonce_domain: String,
+    /// Canonical unsigned transaction data.
+    pub data: Vec<u8>,
+    /// Gas limit fixed before provider entry.
+    pub gas_limit: u64,
+    /// Fee cap fixed before provider entry.
+    pub max_fee: String,
+    /// Exact public signer key-instance identity.
+    pub public_signer_key_instance_ref: ContentRef,
 }
 
-impl<'de> Deserialize<'de> for BroadcastIntent {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            idempotency_key: String,
-            candidate_id: String,
-            nonce: u64,
-            sender: String,
-            nonce_domain: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(
-            wire.idempotency_key,
-            wire.candidate_id,
-            wire.nonce,
-            wire.sender,
-            wire.nonce_domain,
-        )
-        .map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(BroadcastIntent {
+    target: EvmTransactionTarget,
+    idempotency_key: String,
+    candidate_id: String,
+    nonce: u64,
+    sender: String,
+    nonce_domain: String,
+    data: Vec<u8>,
+    gas_limit: u64,
+    max_fee: String,
+    public_signer_key_instance_ref: ContentRef,
+});
 
 impl BroadcastIntent {
-    /// Creates one bounded deterministic broadcast intent.
-    pub fn new(
-        idempotency_key: String,
-        candidate_id: String,
+    fn from_progress(
+        request: &EvmSubmissionRequest,
         nonce: u64,
-        sender: String,
-        nonce_domain: String,
+        candidate_id: &str,
     ) -> Result<Self, EvmDomainError> {
+        request.validate()?;
+        valid_submission_candidate(&request.target, nonce, candidate_id)?;
         let intent = Self {
-            idempotency_key,
-            candidate_id,
+            target: request.target.clone(),
+            idempotency_key: request.idempotency_key.clone(),
+            candidate_id: candidate_id.to_owned(),
             nonce,
-            sender,
-            nonce_domain,
+            sender: request.target.sender.clone(),
+            nonce_domain: request.target.nonce_domain.clone(),
+            data: request.data.clone(),
+            gas_limit: request.gas_limit,
+            max_fee: request.max_fee.clone(),
+            public_signer_key_instance_ref: request.public_signer_key_instance_ref.clone(),
         };
-        intent.validate()?;
-        Ok(intent)
+        intent.validate().map(|_| intent)
     }
 
     /// Validates decoded broadcast intent without exposing request bytes.
     pub fn validate(&self) -> Result<(), EvmDomainError> {
-        if !valid_public_text(&self.idempotency_key, 256)
-            || !valid_public_text(&self.candidate_id, 256)
+        if self.target.validate().is_err()
+            || self.target.sender != self.sender
+            || self.target.nonce_domain != self.nonce_domain
+            || !valid_public_text(&self.idempotency_key, 256)
+            || valid_submission_candidate(&self.target, self.nonce, &self.candidate_id).is_err()
             || !valid_public_text(&self.sender, 128)
             || self.sender != self.sender.to_ascii_lowercase()
             || !valid_public_text(&self.nonce_domain, 256)
+            || self.data.len() > EVM_TRANSACTION_DATA_LIMIT
+            || self.gas_limit == 0
+            || !is_decimal_integer(&self.max_fee)
         {
             return Err(EvmDomainError::InvalidValue);
         }
@@ -1124,11 +1914,6 @@ pub enum BroadcastEvidence {
         /// Stable redacted rejection code.
         code: String,
     },
-    /// Stable-key operation is known to have entered but result is not available.
-    PossibleEntry {
-        /// Deterministic candidate identity whose entry may have occurred.
-        candidate_id: String,
-    },
     /// Request/response integrity failed.
     IntegrityBlocked {
         /// Deterministic candidate identity bound by the request.
@@ -1138,7 +1923,7 @@ pub enum BroadcastEvidence {
 
 impl BroadcastEvidence {
     /// Validates the exact candidate-bound evidence envelope.
-    pub fn validate_for(&self, intent: &BroadcastIntent) -> Result<(), EvmDomainError> {
+    fn validate_for(&self, intent: &BroadcastIntent) -> Result<(), EvmDomainError> {
         let valid = match self {
             Self::Returned {
                 candidate_id,
@@ -1147,18 +1932,13 @@ impl BroadcastEvidence {
             Self::Rejected { candidate_id, code } => {
                 candidate_id == &intent.candidate_id && valid_public_text(code, 256)
             }
-            Self::PossibleEntry { candidate_id } | Self::IntegrityBlocked { candidate_id } => {
-                candidate_id == &intent.candidate_id
-            }
+            Self::IntegrityBlocked { candidate_id } => candidate_id == &intent.candidate_id,
         };
         valid.then_some(()).ok_or(EvmDomainError::EvidenceBinding)
     }
 }
 
-/// One-entry broadcast capability.
-pub enum BroadcastTransaction {}
-
-impl AccessCapabilityContract for BroadcastTransaction {
+impl AccessCapabilityContract for EvmCapability<1> {
     type Mode = EffectMode;
     type Intent = BroadcastIntent;
     type Evidence = BroadcastEvidence;
@@ -1184,8 +1964,1843 @@ impl AccessCapabilityContract for BroadcastTransaction {
     }
 }
 
-fn contains_secret_marker(value: &str) -> bool {
-    string_contains_secret_marker(value)
+/// Reusable semantic EVM State selected by its closed family and stage.
+///
+/// Family 0 is submission: reserve, derive, broadcast, receipt, finality, canonical inclusion,
+/// and disposition consolidation. Family 1 is balance: chain identity, initial anchor, asset
+/// selection, native balance, token decimals, token balance, anchor confirmation, and
+/// consolidation. `K` is used only by the balance family and defaults to the submission progress
+/// value so submission registrations stay concise.
+pub struct EvmState<const FAMILY: u8, const STAGE: u8, K: MfmValueTrait = EvmSubmissionProgress>(
+    PhantomData<fn() -> K>,
+);
+
+/// Domain-owned implementation for a callback-free pure EVM State.
+pub trait EvmPureState: State {
+    /// Consumes one complete State input and produces its typed outcome.
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+}
+
+/// Domain-owned implementation for a capability-bound EVM State.
+pub trait EvmAccessState<C: AccessCapabilityContract>: State {
+    /// Prepares the exact capability intent from the complete retained input.
+    fn prepare(input: &Self::Input) -> Result<C::Intent, EvmDomainError>;
+    /// Consumes the retained input only after exact authenticated evidence is accepted.
+    fn interpret(
+        input: Self::Input,
+        evidence: &C::Evidence,
+    ) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+}
+
+macro_rules! impl_submission_state {
+    ($stage:literal, $input:ty, $output:ty, $id:literal, $integrity:expr) => {
+        impl State for EvmState<0, $stage> {
+            type Input = $input;
+            type Output = $output;
+            type Failure = EvmSubmissionFailure;
+
+            fn state_id() -> mfm_program::Result<StableId> {
+                StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
+            }
+
+            fn integrity_failure(_: &Self::Input) -> Self::Failure {
+                $integrity
+            }
+        }
+    };
+}
+
+impl_submission_state!(
+    0,
+    EvmSubmissionRequest,
+    EvmSubmissionProgress,
+    "mfm.evm.state.reserve-wallet-nonce@1",
+    EvmSubmissionFailure::NonceAuthorityUnavailable
+);
+impl_submission_state!(
+    1,
+    EvmSubmissionProgress,
+    EvmSubmissionProgress,
+    "mfm.evm.state.derive-candidate@1",
+    EvmSubmissionFailure::NonceLineageDiverged
+);
+impl_submission_state!(
+    2,
+    EvmSubmissionProgress,
+    EvmSubmissionProgress,
+    "mfm.evm.state.broadcast-transaction@1",
+    EvmSubmissionFailure::ProviderUnavailable
+);
+impl_submission_state!(
+    3,
+    EvmSubmissionProgress,
+    EvmSubmissionProgress,
+    "mfm.evm.state.read-transaction-receipt@1",
+    EvmSubmissionFailure::ProviderUnavailable
+);
+impl_submission_state!(
+    4,
+    EvmSubmissionProgress,
+    EvmSubmissionProgress,
+    "mfm.evm.state.read-finalized-head@1",
+    EvmSubmissionFailure::ProviderUnavailable
+);
+impl_submission_state!(
+    5,
+    EvmSubmissionProgress,
+    EvmSubmissionProgress,
+    "mfm.evm.state.read-canonical-inclusion-block@1",
+    EvmSubmissionFailure::ProviderUnavailable
+);
+impl_submission_state!(
+    6,
+    EvmSubmissionProgress,
+    EvmSubmissionOutput,
+    "mfm.evm.state.consolidate-execution-disposition@1",
+    EvmSubmissionFailure::NonceLineageDiverged
+);
+fn prepare_reserve_wallet_nonce(
+    input: &EvmSubmissionRequest,
+) -> Result<NonceReservationIntent, EvmDomainError> {
+    input.validate()?;
+    NonceReservationIntent::new(input.target.clone(), input.idempotency_key.clone())
+}
+
+fn interpret_reserve_wallet_nonce(
+    input: EvmSubmissionRequest,
+    evidence: &NonceReservationEvidence,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let intent = match prepare_reserve_wallet_nonce(&input) {
+        Ok(intent) => intent,
+        Err(_) => return failure(EvmSubmissionFailure::NonceLineageDiverged),
+    };
+    if evidence.validate_for(&intent).is_err() {
+        return failure(EvmSubmissionFailure::NonceAuthorityUnavailable);
+    }
+    match evidence {
+        NonceReservationEvidence::Reserved { nonce } => {
+            submission_progress(input, SubmissionPhase::Reserved { nonce: *nonce })
+        }
+        NonceReservationEvidence::Rejected { .. } => {
+            failure(EvmSubmissionFailure::NonceAuthorityUnavailable)
+        }
+        NonceReservationEvidence::IntegrityBlocked => {
+            failure(EvmSubmissionFailure::NonceAuthorityUnavailable)
+        }
+    }
+}
+
+fn derive_submission_candidate(
+    input: EvmSubmissionProgress,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let EvmSubmissionProgress {
+        request,
+        phase: SubmissionPhase::Reserved { nonce },
+    } = input
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    let candidate_id = submission_candidate_id(&request.target, nonce);
+    submission_progress(
+        request,
+        SubmissionPhase::Candidate {
+            nonce,
+            candidate_id,
+        },
+    )
+}
+
+fn prepare_broadcast_transaction(
+    input: &EvmSubmissionProgress,
+) -> Result<BroadcastIntent, EvmDomainError> {
+    match (&input.request, &input.phase) {
+        (
+            request,
+            SubmissionPhase::Candidate {
+                nonce,
+                candidate_id,
+            },
+        ) => BroadcastIntent::from_progress(request, *nonce, candidate_id),
+        _ => Err(EvmDomainError::InvalidValue),
+    }
+}
+
+fn interpret_broadcast_transaction(
+    input: EvmSubmissionProgress,
+    evidence: &BroadcastEvidence,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let intent = match prepare_broadcast_transaction(&input) {
+        Ok(intent) => intent,
+        Err(_) => return failure(EvmSubmissionFailure::NonceLineageDiverged),
+    };
+    if evidence.validate_for(&intent).is_err() {
+        return failure(EvmSubmissionFailure::ProviderUnavailable);
+    }
+    let EvmSubmissionProgress {
+        request,
+        phase:
+            SubmissionPhase::Candidate {
+                nonce,
+                candidate_id: expected_candidate_id,
+            },
+    } = input
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    match evidence {
+        BroadcastEvidence::Returned {
+            candidate_id,
+            transaction_hash,
+        } if candidate_id == &expected_candidate_id => submission_progress(
+            request,
+            SubmissionPhase::Broadcast {
+                nonce,
+                candidate_id: expected_candidate_id,
+                transaction_hash: transaction_hash.clone(),
+            },
+        ),
+        BroadcastEvidence::Rejected { .. } => failure(EvmSubmissionFailure::DestinationRejected),
+        BroadcastEvidence::IntegrityBlocked { .. } => {
+            failure(EvmSubmissionFailure::ProviderUnavailable)
+        }
+        BroadcastEvidence::Returned { .. } => failure(EvmSubmissionFailure::ProviderUnavailable),
+    }
+}
+
+fn prepare_transaction_receipt(
+    input: &EvmSubmissionProgress,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    match (&input.request, &input.phase) {
+        (
+            request,
+            SubmissionPhase::Broadcast {
+                transaction_hash, ..
+            },
+        ) => EvmReadIntent::new(
+            "mfm.evm.read-transaction-receipt@1".to_owned(),
+            request.target.chain_id,
+            EvmReadSubject::TransactionReceipt {
+                transaction_hash: transaction_hash.clone(),
+            },
+        ),
+        _ => Err(EvmDomainError::InvalidValue),
+    }
+}
+
+fn interpret_transaction_receipt(
+    input: EvmSubmissionProgress,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let expected = match prepare_transaction_receipt(&input) {
+        Ok(intent) => intent,
+        Err(_) => return failure(EvmSubmissionFailure::NonceLineageDiverged),
+    };
+    let EvmSubmissionProgress {
+        request,
+        phase:
+            SubmissionPhase::Broadcast {
+                nonce,
+                candidate_id,
+                transaction_hash: expected_hash,
+            },
+    } = input
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    match read_returned(evidence, &expected) {
+        Some(EvmReadValue::Receipt {
+            transaction_hash,
+            execution_disposition,
+            inclusion_block_number,
+            inclusion_block_hash,
+        }) if transaction_hash == &expected_hash => {
+            match (
+                EvmExecutionDisposition::from_code(execution_disposition),
+                read_anchor(inclusion_block_number, inclusion_block_hash),
+            ) {
+                (Some(execution_disposition), Some(inclusion_block)) => submission_progress(
+                    request,
+                    SubmissionPhase::Receipt {
+                        nonce,
+                        candidate_id,
+                        transaction_hash: expected_hash,
+                        execution_disposition,
+                        inclusion_block,
+                    },
+                ),
+                _ => failure(EvmSubmissionFailure::ProviderUnavailable),
+            }
+        }
+        Some(_) => failure(EvmSubmissionFailure::ProviderUnavailable),
+        None => failure(EvmSubmissionFailure::ProviderUnavailable),
+    }
+}
+
+fn prepare_finalized_head(input: &EvmSubmissionProgress) -> Result<EvmReadIntent, EvmDomainError> {
+    match (&input.request, &input.phase) {
+        (request, SubmissionPhase::Receipt { .. }) => EvmReadIntent::new(
+            "mfm.evm.read-finalized-head@1".to_owned(),
+            request.target.chain_id,
+            EvmReadSubject::FinalizedHead,
+        ),
+        _ => Err(EvmDomainError::InvalidValue),
+    }
+}
+
+fn interpret_finalized_head(
+    input: EvmSubmissionProgress,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let expected = match prepare_finalized_head(&input) {
+        Ok(intent) => intent,
+        Err(_) => return failure(EvmSubmissionFailure::NonceLineageDiverged),
+    };
+    let EvmSubmissionProgress {
+        request,
+        phase:
+            SubmissionPhase::Receipt {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                execution_disposition,
+                inclusion_block,
+            },
+    } = input
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    match read_returned(evidence, &expected) {
+        Some(EvmReadValue::FinalizedHead { number })
+            if decimal_at_least(number, &inclusion_block.number) =>
+        {
+            submission_progress(
+                request,
+                SubmissionPhase::Finalized {
+                    nonce,
+                    candidate_id,
+                    transaction_hash,
+                    execution_disposition,
+                    inclusion_block,
+                    finalized_head_number: number.clone(),
+                },
+            )
+        }
+        _ => failure(EvmSubmissionFailure::ProviderUnavailable),
+    }
+}
+
+fn prepare_canonical_inclusion_block(
+    input: &EvmSubmissionProgress,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    match (&input.request, &input.phase) {
+        (
+            request,
+            SubmissionPhase::Finalized {
+                inclusion_block, ..
+            },
+        ) => EvmReadIntent::new(
+            "mfm.evm.read-canonical-inclusion-block@1".to_owned(),
+            request.target.chain_id,
+            EvmReadSubject::CanonicalInclusionBlock {
+                number: inclusion_block.number.clone(),
+            },
+        ),
+        _ => Err(EvmDomainError::InvalidValue),
+    }
+}
+
+fn interpret_canonical_inclusion_block(
+    input: EvmSubmissionProgress,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    let expected = match prepare_canonical_inclusion_block(&input) {
+        Ok(intent) => intent,
+        Err(_) => return failure(EvmSubmissionFailure::NonceLineageDiverged),
+    };
+    let EvmSubmissionProgress {
+        request,
+        phase:
+            SubmissionPhase::Finalized {
+                nonce,
+                candidate_id,
+                transaction_hash,
+                execution_disposition,
+                inclusion_block,
+                finalized_head_number,
+            },
+    } = input
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    match read_returned(evidence, &expected) {
+        Some(EvmReadValue::CanonicalBlock { number, hash }) => match read_anchor(number, hash) {
+            Some(canonical_inclusion_block) if canonical_inclusion_block == inclusion_block => {
+                submission_progress(
+                    request,
+                    SubmissionPhase::Canonical {
+                        nonce,
+                        candidate_id,
+                        transaction_hash,
+                        execution_disposition,
+                        inclusion_block,
+                        finalized_head_number,
+                        canonical_inclusion_block,
+                    },
+                )
+            }
+            _ => failure(EvmSubmissionFailure::ProviderUnavailable),
+        },
+        _ => failure(EvmSubmissionFailure::ProviderUnavailable),
+    }
+}
+
+fn consolidate_execution_disposition(
+    input: EvmSubmissionProgress,
+) -> ProposedStateOutcome<EvmSubmissionOutput, EvmSubmissionFailure> {
+    if input.validate().is_err() {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    }
+    let SubmissionPhase::Canonical {
+        execution_disposition,
+        ..
+    } = input.phase
+    else {
+        return failure(EvmSubmissionFailure::NonceLineageDiverged);
+    };
+    success(EvmSubmissionOutput::new(execution_disposition))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(rename_all = "snake_case")]
+enum EvmBalanceFailureStage {
+    CheckChainIdentity,
+    ReadInitialAnchor,
+    SelectAsset,
+    ReadNativeBalance,
+    ReadTokenDecimals,
+    ReadTokenBalance,
+    ConfirmAnchor,
+    Consolidate,
+}
+
+impl EvmBalanceFailureStage {
+    fn code(self) -> String {
+        match self {
+            Self::CheckChainIdentity => "check_chain_identity",
+            Self::ReadInitialAnchor => "read_initial_anchor",
+            Self::SelectAsset => "select_asset",
+            Self::ReadNativeBalance => "read_native_balance",
+            Self::ReadTokenDecimals => "read_token_decimals",
+            Self::ReadTokenBalance => "read_token_balance",
+            Self::ConfirmAnchor => "confirm_anchor",
+            Self::Consolidate => "consolidate",
+        }
+        .to_owned()
+    }
+
+    fn is_code(value: &str) -> bool {
+        matches!(
+            value,
+            "check_chain_identity"
+                | "read_initial_anchor"
+                | "select_asset"
+                | "read_native_balance"
+                | "read_token_decimals"
+                | "read_token_balance"
+                | "confirm_anchor"
+                | "consolidate"
+        )
+    }
+}
+
+/// EVM-owned typed failure that leaves Portfolio semantics to its mapper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum EvmBalanceFailure {
+    /// A bounded source-stage failure.
+    SourceUnavailable {
+        /// Stage that could not be completed.
+        stage: String,
+        /// Planner-owned collection ordinal retained for the caller's failure mapper.
+        collection_ordinal: u32,
+        /// Stable redacted failure code.
+        code: String,
+    },
+    /// The adapter accepted a capability integrity block.
+    IntegrityBlocked {
+        /// Stage whose capability accepted the integrity block.
+        stage: String,
+        /// Planner-owned collection ordinal retained for the caller's failure mapper.
+        collection_ordinal: u32,
+        /// Stable redacted integrity code.
+        code: String,
+    },
+}
+
+impl<'de> Deserialize<'de> for EvmBalanceFailure {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "value",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Wire {
+            SourceUnavailable {
+                stage: String,
+                collection_ordinal: u32,
+                code: String,
+            },
+            IntegrityBlocked {
+                stage: String,
+                collection_ordinal: u32,
+                code: String,
+            },
+        }
+
+        let value = match Wire::deserialize(deserializer)? {
+            Wire::SourceUnavailable {
+                stage,
+                collection_ordinal,
+                code,
+            } => Self::SourceUnavailable {
+                stage,
+                collection_ordinal,
+                code,
+            },
+            Wire::IntegrityBlocked {
+                stage,
+                collection_ordinal,
+                code,
+            } => Self::IntegrityBlocked {
+                stage,
+                collection_ordinal,
+                code,
+            },
+        };
+        value.validate().map(|_| value).map_err(de::Error::custom)
+    }
+}
+
+impl EvmBalanceFailure {
+    fn validate(&self) -> Result<(), EvmDomainError> {
+        let valid = match self {
+            Self::SourceUnavailable { stage, code, .. } => {
+                EvmBalanceFailureStage::is_code(stage)
+                    && matches!(
+                        code.as_str(),
+                        "observation_unavailable" | "collection_invalid"
+                    )
+            }
+            Self::IntegrityBlocked { stage, code, .. } => {
+                EvmBalanceFailureStage::is_code(stage) && code == "integrity_blocked"
+            }
+        };
+        valid.then_some(()).ok_or(EvmDomainError::InvalidValue)
+    }
+}
+
+impl FailureValue for EvmBalanceFailure {
+    fn integrity_blocked() -> Self {
+        Self::IntegrityBlocked {
+            stage: EvmBalanceFailureStage::Consolidate.code(),
+            collection_ordinal: 0,
+            code: "integrity_blocked".to_owned(),
+        }
+    }
+}
+
+fn balance_integrity_failure<K: MfmValueTrait>(
+    context: &EvmBalanceContext<K>,
+    stage: EvmBalanceFailureStage,
+) -> EvmBalanceFailure {
+    EvmBalanceFailure::IntegrityBlocked {
+        stage: stage.code(),
+        collection_ordinal: context.metadata.collection_ordinal,
+        code: "integrity_blocked".to_owned(),
+    }
+}
+
+macro_rules! impl_balance_state {
+    ($stage:literal, $input:ty, $output:ty, $id:literal, $failure_stage:expr) => {
+        impl<K: MfmValueTrait> State for EvmState<1, $stage, K> {
+            type Input = $input;
+            type Output = $output;
+            type Failure = EvmBalanceFailure;
+
+            fn state_id() -> mfm_program::Result<StableId> {
+                StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
+            }
+
+            fn integrity_failure(input: &Self::Input) -> Self::Failure {
+                balance_integrity_failure(input, $failure_stage)
+            }
+        }
+    };
+}
+
+impl_balance_state!(
+    0,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.check-chain-identity@1",
+    EvmBalanceFailureStage::CheckChainIdentity
+);
+impl_balance_state!(
+    1,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.read-initial-anchor@1",
+    EvmBalanceFailureStage::ReadInitialAnchor
+);
+impl_balance_state!(
+    2,
+    EvmBalanceContext<K>,
+    EvmBalanceAsset<K>,
+    "mfm.evm.state.select-asset@1",
+    EvmBalanceFailureStage::SelectAsset
+);
+impl_balance_state!(
+    3,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.read-native-balance@1",
+    EvmBalanceFailureStage::ReadNativeBalance
+);
+impl_balance_state!(
+    4,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.read-token-decimals@1",
+    EvmBalanceFailureStage::ReadTokenDecimals
+);
+impl_balance_state!(
+    5,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.read-token-balance@1",
+    EvmBalanceFailureStage::ReadTokenBalance
+);
+impl_balance_state!(
+    6,
+    EvmBalanceContext<K>,
+    EvmBalanceContext<K>,
+    "mfm.evm.state.confirm-balance-anchor@1",
+    EvmBalanceFailureStage::ConfirmAnchor
+);
+impl_balance_state!(
+    7,
+    EvmBalanceContext<K>,
+    EvmBalanceCollectionCompletion<K>,
+    "mfm.evm.state.consolidate-balance-collection@1",
+    EvmBalanceFailureStage::Consolidate
+);
+fn prepare_check_chain_identity<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let EvmBalanceWork::CheckChainIdentity { source } = &input.work else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    EvmReadIntent::new(
+        "mfm.evm.read-chain-identity@1".to_owned(),
+        source.chain_id,
+        EvmReadSubject::ChainIdentity,
+    )
+}
+
+fn interpret_check_chain_identity<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_check_chain_identity(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::CheckChainIdentity),
+    };
+    let EvmBalanceWork::CheckChainIdentity { source } = &input.work else {
+        return balance_failure(&input, EvmBalanceFailureStage::CheckChainIdentity);
+    };
+    match read_returned(evidence, &intent) {
+        Some(EvmReadValue::ChainId(chain_id)) if *chain_id == source.chain_id => {
+            let work = EvmBalanceWork::ReadInitialAnchor {
+                source: source.clone(),
+                checked_chain_id: *chain_id,
+            };
+            advance_balance_context(input, work, EvmBalanceFailureStage::CheckChainIdentity)
+        }
+        _ => balance_failure(&input, EvmBalanceFailureStage::CheckChainIdentity),
+    }
+}
+
+fn prepare_read_initial_anchor<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let EvmBalanceWork::ReadInitialAnchor {
+        source,
+        checked_chain_id,
+    } = &input.work
+    else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    EvmReadIntent::new(
+        "mfm.evm.read-initial-anchor@1".to_owned(),
+        *checked_chain_id,
+        EvmReadSubject::InitialAnchor,
+    )
+    .and_then(|intent| {
+        (source.chain_id == *checked_chain_id)
+            .then_some(intent)
+            .ok_or(EvmDomainError::InvalidValue)
+    })
+}
+
+fn interpret_read_initial_anchor<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_read_initial_anchor(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor),
+    };
+    let EvmBalanceWork::ReadInitialAnchor {
+        source,
+        checked_chain_id,
+    } = &input.work
+    else {
+        return balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor);
+    };
+    match read_returned(evidence, &intent) {
+        Some(EvmReadValue::Anchor { number, hash }) => match read_anchor(number, hash) {
+            Some(initial_anchor) => {
+                let work = EvmBalanceWork::SelectAsset {
+                    source: source.clone(),
+                    checked_chain_id: *checked_chain_id,
+                    initial_anchor,
+                };
+                advance_balance_context(input, work, EvmBalanceFailureStage::ReadInitialAnchor)
+            }
+            None => balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor),
+        },
+        _ => balance_failure(&input, EvmBalanceFailureStage::ReadInitialAnchor),
+    }
+}
+
+fn select_balance_asset<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+) -> ProposedStateOutcome<EvmBalanceAsset<K>, EvmBalanceFailure> {
+    let native = matches!(input.work, EvmBalanceWork::SelectAsset { ref source, .. } if source.token.is_none());
+    let token = matches!(input.work, EvmBalanceWork::SelectAsset { ref source, .. } if source.token.is_some());
+    if native {
+        success(EvmBalanceAsset::Native(input))
+    } else if token {
+        success(EvmBalanceAsset::Token(input))
+    } else {
+        balance_failure(&input, EvmBalanceFailureStage::SelectAsset)
+    }
+}
+
+fn prepare_read_native_balance<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let (EvmBalanceWork::SelectAsset {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }
+    | EvmBalanceWork::ReadNativeBalance {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }) = &input.work
+    else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    if source.token.is_some() {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    EvmReadIntent::new(
+        "mfm.evm.read-native-balance@1".to_owned(),
+        *checked_chain_id,
+        EvmReadSubject::NativeBalance {
+            source: source.clone(),
+            anchor: initial_anchor.clone(),
+        },
+    )
+}
+
+fn interpret_read_native_balance<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_read_native_balance(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance),
+    };
+    let (EvmBalanceWork::SelectAsset {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }
+    | EvmBalanceWork::ReadNativeBalance {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }) = &input.work
+    else {
+        return balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance);
+    };
+    match read_returned(evidence, &intent) {
+        Some(EvmReadValue::RawUnits(raw_balance)) => {
+            let work = EvmBalanceWork::ConfirmAnchor {
+                source: source.clone(),
+                checked_chain_id: *checked_chain_id,
+                initial_anchor: initial_anchor.clone(),
+                source_decimals: input.request.decimals,
+                raw_balance: raw_balance.clone(),
+            };
+            advance_balance_context(input, work, EvmBalanceFailureStage::ReadNativeBalance)
+        }
+        _ => balance_failure(&input, EvmBalanceFailureStage::ReadNativeBalance),
+    }
+}
+
+fn prepare_read_token_decimals<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let (EvmBalanceWork::SelectAsset {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }
+    | EvmBalanceWork::ReadTokenDecimals {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }) = &input.work
+    else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    if source.token.is_none() {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    EvmReadIntent::new(
+        "mfm.evm.read-token-decimals@1".to_owned(),
+        *checked_chain_id,
+        EvmReadSubject::TokenDecimals {
+            source: source.clone(),
+            anchor: initial_anchor.clone(),
+        },
+    )
+}
+
+fn interpret_read_token_decimals<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_read_token_decimals(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals),
+    };
+    let (EvmBalanceWork::SelectAsset {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }
+    | EvmBalanceWork::ReadTokenDecimals {
+        source,
+        checked_chain_id,
+        initial_anchor,
+    }) = &input.work
+    else {
+        return balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals);
+    };
+    match read_returned(evidence, &intent) {
+        Some(EvmReadValue::TokenDecimals(token_decimals)) if *token_decimals <= 30 => {
+            let work = EvmBalanceWork::ReadTokenBalance {
+                source: source.clone(),
+                checked_chain_id: *checked_chain_id,
+                initial_anchor: initial_anchor.clone(),
+                token_decimals: *token_decimals,
+            };
+            advance_balance_context(input, work, EvmBalanceFailureStage::ReadTokenDecimals)
+        }
+        _ => balance_failure(&input, EvmBalanceFailureStage::ReadTokenDecimals),
+    }
+}
+
+fn prepare_read_token_balance<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let EvmBalanceWork::ReadTokenBalance {
+        source,
+        checked_chain_id,
+        initial_anchor,
+        ..
+    } = &input.work
+    else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    EvmReadIntent::new(
+        "mfm.evm.read-token-balance@1".to_owned(),
+        *checked_chain_id,
+        EvmReadSubject::TokenBalance {
+            source: source.clone(),
+            anchor: initial_anchor.clone(),
+        },
+    )
+}
+
+fn interpret_read_token_balance<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_read_token_balance(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ReadTokenBalance),
+    };
+    let EvmBalanceWork::ReadTokenBalance {
+        source,
+        checked_chain_id,
+        initial_anchor,
+        token_decimals,
+    } = &input.work
+    else {
+        return balance_failure(&input, EvmBalanceFailureStage::ReadTokenBalance);
+    };
+    match read_returned(evidence, &intent) {
+        Some(EvmReadValue::RawUnits(raw_balance)) => {
+            let work = EvmBalanceWork::ConfirmAnchor {
+                source: source.clone(),
+                checked_chain_id: *checked_chain_id,
+                initial_anchor: initial_anchor.clone(),
+                source_decimals: *token_decimals,
+                raw_balance: raw_balance.clone(),
+            };
+            advance_balance_context(input, work, EvmBalanceFailureStage::ReadTokenBalance)
+        }
+        _ => balance_failure(&input, EvmBalanceFailureStage::ReadTokenBalance),
+    }
+}
+
+fn prepare_confirm_balance_anchor<K: MfmValueTrait>(
+    input: &EvmBalanceContext<K>,
+) -> Result<EvmReadIntent, EvmDomainError> {
+    let EvmBalanceWork::ConfirmAnchor {
+        source,
+        checked_chain_id,
+        initial_anchor,
+        ..
+    } = &input.work
+    else {
+        return Err(EvmDomainError::InvalidValue);
+    };
+    EvmReadIntent::new(
+        "mfm.evm.confirm-balance-anchor@1".to_owned(),
+        *checked_chain_id,
+        EvmReadSubject::ConfirmAnchor {
+            source: source.clone(),
+            anchor: initial_anchor.clone(),
+        },
+    )
+}
+
+fn interpret_confirm_balance_anchor<K: MfmValueTrait>(
+    mut input: EvmBalanceContext<K>,
+    evidence: &EvmReadEvidence,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    let intent = match prepare_confirm_balance_anchor(&input) {
+        Ok(intent) => intent,
+        Err(_) => return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor),
+    };
+    let EvmBalanceWork::ConfirmAnchor {
+        source,
+        initial_anchor,
+        source_decimals,
+        raw_balance,
+        ..
+    } = &input.work
+    else {
+        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+    };
+    let Some(EvmReadValue::Anchor { number, hash }) = read_returned(evidence, &intent) else {
+        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+    };
+    let Some(anchor) = read_anchor(number, hash) else {
+        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+    };
+    if &anchor != initial_anchor {
+        return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor);
+    }
+    let amount_scaled = match input.request.scale_units(raw_balance, *source_decimals) {
+        Some(amount) => amount,
+        None => return balance_failure(&input, EvmBalanceFailureStage::ConfirmAnchor),
+    };
+    input.completed.push(EvmBalanceResult {
+        source: source.clone(),
+        decimals: *source_decimals,
+        raw_units: raw_balance.clone(),
+        amount_scaled,
+        anchor: initial_anchor.clone(),
+    });
+    let work = match input.request.sources.get(input.completed.len()).cloned() {
+        Some(source) => EvmBalanceWork::CheckChainIdentity { source },
+        None => EvmBalanceWork::Complete,
+    };
+    advance_balance_context(input, work, EvmBalanceFailureStage::ConfirmAnchor)
+}
+
+fn consolidate_balance_collection<K: MfmValueTrait>(
+    input: EvmBalanceContext<K>,
+) -> ProposedStateOutcome<EvmBalanceCollectionCompletion<K>, EvmBalanceFailure> {
+    if !matches!(input.work, EvmBalanceWork::Complete) || input.validate().is_err() {
+        return balance_failure(&input, EvmBalanceFailureStage::Consolidate);
+    }
+    let total_scaled = match sum_decimal(
+        input
+            .completed
+            .iter()
+            .map(|result| result.amount_scaled.as_str()),
+    ) {
+        Some(total) => total,
+        None => return balance_failure(&input, EvmBalanceFailureStage::Consolidate),
+    };
+    let collection_ordinal = input.metadata.collection_ordinal;
+    let chain_id = input.request.sources[0].chain_id;
+    let anchor = input.completed[0].anchor.clone();
+    let result = EvmBalanceCollectionResult {
+        chain_id,
+        anchor,
+        balances: input
+            .completed
+            .into_iter()
+            .map(EvmCollectedBalance::from_result)
+            .collect(),
+        total_scaled,
+    };
+    match EvmBalanceCollectionCompletion::new(input.caller_continuation, collection_ordinal, result)
+    {
+        Ok(output) => success(output),
+        Err(_) => failure(EvmBalanceFailure::SourceUnavailable {
+            stage: EvmBalanceFailureStage::Consolidate.code(),
+            collection_ordinal,
+            code: "collection_invalid".to_owned(),
+        }),
+    }
+}
+
+macro_rules! impl_submission_access {
+    ($stage:literal, $capability:ty, $prepare:path, $interpret:path) => {
+        impl EvmAccessState<$capability> for EvmState<0, $stage> {
+            fn prepare(
+                input: &Self::Input,
+            ) -> Result<<$capability as AccessCapabilityContract>::Intent, EvmDomainError> {
+                $prepare(input)
+            }
+
+            fn interpret(
+                input: Self::Input,
+                evidence: &<$capability as AccessCapabilityContract>::Evidence,
+            ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $interpret(input, evidence)
+            }
+        }
+    };
+}
+
+macro_rules! impl_balance_access {
+    ($stage:literal, $capability:ty, $prepare:path, $interpret:path) => {
+        impl<K: MfmValueTrait> EvmAccessState<$capability> for EvmState<1, $stage, K> {
+            fn prepare(
+                input: &Self::Input,
+            ) -> Result<<$capability as AccessCapabilityContract>::Intent, EvmDomainError> {
+                $prepare(input)
+            }
+
+            fn interpret(
+                input: Self::Input,
+                evidence: &<$capability as AccessCapabilityContract>::Evidence,
+            ) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $interpret(input, evidence)
+            }
+        }
+    };
+}
+
+macro_rules! impl_evm_pure {
+    ($state:ty, $evaluate:path) => {
+        impl EvmPureState for $state {
+            fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $evaluate(input)
+            }
+        }
+    };
+}
+
+impl_submission_access!(
+    0,
+    EvmCapability<0>,
+    prepare_reserve_wallet_nonce,
+    interpret_reserve_wallet_nonce
+);
+impl_submission_access!(
+    2,
+    EvmCapability<1>,
+    prepare_broadcast_transaction,
+    interpret_broadcast_transaction
+);
+impl_submission_access!(
+    3,
+    EvmCapability<3>,
+    prepare_transaction_receipt,
+    interpret_transaction_receipt
+);
+impl_submission_access!(
+    4,
+    EvmCapability<4>,
+    prepare_finalized_head,
+    interpret_finalized_head
+);
+impl_submission_access!(
+    5,
+    EvmCapability<5>,
+    prepare_canonical_inclusion_block,
+    interpret_canonical_inclusion_block
+);
+impl_evm_pure!(EvmState<0, 1>, derive_submission_candidate);
+impl_evm_pure!(EvmState<0, 6>, consolidate_execution_disposition);
+
+impl_balance_access!(
+    0,
+    EvmCapability<2>,
+    prepare_check_chain_identity,
+    interpret_check_chain_identity
+);
+impl_balance_access!(
+    1,
+    EvmCapability<6>,
+    prepare_read_initial_anchor,
+    interpret_read_initial_anchor
+);
+impl_balance_access!(
+    3,
+    EvmCapability<7>,
+    prepare_read_native_balance,
+    interpret_read_native_balance
+);
+impl_balance_access!(
+    4,
+    EvmCapability<7>,
+    prepare_read_token_decimals,
+    interpret_read_token_decimals
+);
+impl_balance_access!(
+    5,
+    EvmCapability<7>,
+    prepare_read_token_balance,
+    interpret_read_token_balance
+);
+impl_balance_access!(
+    6,
+    EvmCapability<6>,
+    prepare_confirm_balance_anchor,
+    interpret_confirm_balance_anchor
+);
+impl<K: MfmValueTrait> EvmPureState for EvmState<1, 2, K> {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        select_balance_asset(input)
+    }
+}
+impl<K: MfmValueTrait> EvmPureState for EvmState<1, 7, K> {
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+        consolidate_balance_collection(input)
+    }
+}
+
+fn submission_progress(
+    request: EvmSubmissionRequest,
+    phase: SubmissionPhase,
+) -> ProposedStateOutcome<EvmSubmissionProgress, EvmSubmissionFailure> {
+    match EvmSubmissionProgress::new(request, phase) {
+        Ok(output) => success(output),
+        Err(_) => failure(EvmSubmissionFailure::NonceLineageDiverged),
+    }
+}
+
+fn balance_failure<K: MfmValueTrait, O>(
+    context: &EvmBalanceContext<K>,
+    stage: EvmBalanceFailureStage,
+) -> ProposedStateOutcome<O, EvmBalanceFailure> {
+    failure(EvmBalanceFailure::SourceUnavailable {
+        stage: stage.code(),
+        collection_ordinal: context.metadata.collection_ordinal,
+        code: "observation_unavailable".to_owned(),
+    })
+}
+
+fn advance_balance_context<K: MfmValueTrait>(
+    mut context: EvmBalanceContext<K>,
+    work: EvmBalanceWork,
+    stage: EvmBalanceFailureStage,
+) -> ProposedStateOutcome<EvmBalanceContext<K>, EvmBalanceFailure> {
+    context.work = work;
+    if context.validate().is_ok() {
+        success(context)
+    } else {
+        balance_failure(&context, stage)
+    }
+}
+
+/// Exact live bindings required by the EVM submission Program.
+#[derive(Debug, Clone)]
+pub struct EvmSubmissionBindings {
+    target: EvmTransactionTarget,
+    descriptors: [BindingDescriptor; 5],
+}
+
+impl EvmSubmissionBindings {
+    /// Constructs one complete immutable binding set in reserve, broadcast, receipt, finality,
+    /// and canonical-block order.
+    pub fn new(
+        target: EvmTransactionTarget,
+        descriptors: [BindingDescriptor; 5],
+    ) -> Result<Self, EvmDomainError> {
+        target.validate()?;
+        let [reserve_nonce, broadcast, receipt, finalized_head, canonical_inclusion_block] =
+            &descriptors;
+        validate_access_binding::<EvmState<0, 0>, EvmCapability<0>>(reserve_nonce)?;
+        validate_access_binding::<EvmState<0, 2>, EvmCapability<1>>(broadcast)?;
+        validate_access_binding::<EvmState<0, 3>, EvmCapability<3>>(receipt)?;
+        validate_access_binding::<EvmState<0, 4>, EvmCapability<4>>(finalized_head)?;
+        validate_access_binding::<EvmState<0, 5>, EvmCapability<5>>(canonical_inclusion_block)?;
+        if reserve_nonce.effect_domain().is_none()
+            || reserve_nonce.public_signer_key_instance_ref().is_some()
+            || broadcast.effect_domain().is_none()
+            || broadcast.public_signer_key_instance_ref().is_none()
+            || [receipt, finalized_head, canonical_inclusion_block]
+                .iter()
+                .any(|binding| {
+                    binding.effect_domain().is_some()
+                        || binding.public_signer_key_instance_ref().is_some()
+                })
+            || descriptors
+                .iter()
+                .skip(1)
+                .any(|binding| binding.physical_target_ref() != reserve_nonce.physical_target_ref())
+        {
+            return Err(EvmDomainError::Program);
+        }
+        Ok(Self {
+            target,
+            descriptors,
+        })
+    }
+
+    /// Returns the deployment-selected target for this exact binding set.
+    pub const fn target(&self) -> &EvmTransactionTarget {
+        &self.target
+    }
+
+    /// Returns descriptors in the constructor's fixed semantic order.
+    pub const fn descriptors(&self) -> &[BindingDescriptor; 5] {
+        &self.descriptors
+    }
+
+    fn source_refs(&self) -> Vec<mfm_ids::ContentRef> {
+        vec![self.descriptors[0].physical_target_ref().clone()]
+    }
+
+    /// Returns the exact public signer identity selected for broadcast planning.
+    fn public_signer_key_instance_ref(&self) -> Result<ContentRef, EvmDomainError> {
+        self.descriptors[1]
+            .public_signer_key_instance_ref()
+            .cloned()
+            .ok_or(EvmDomainError::Program)
+    }
+}
+
+/// Exact live bindings required by one reusable EVM balance fragment route.
+#[derive(Debug, Clone)]
+pub struct EvmBalanceBindings {
+    /// Chain id selected by this route.
+    pub chain_id: u64,
+    descriptors: [BindingDescriptor; 6],
+}
+
+impl EvmBalanceBindings {
+    /// Constructs one complete immutable binding set in the fragment's State order.
+    pub fn new(chain_id: u64, descriptors: [BindingDescriptor; 6]) -> Result<Self, EvmDomainError> {
+        if chain_id == 0 {
+            return Err(EvmDomainError::Program);
+        }
+        let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
+            &descriptors;
+        validate_access_binding::<EvmState<1, 0>, EvmCapability<2>>(check_chain_identity)?;
+        validate_access_binding::<EvmState<1, 1>, EvmCapability<6>>(read_initial_anchor)?;
+        validate_access_binding::<EvmState<1, 3>, EvmCapability<7>>(read_native_balance)?;
+        validate_access_binding::<EvmState<1, 4>, EvmCapability<7>>(read_token_decimals)?;
+        validate_access_binding::<EvmState<1, 5>, EvmCapability<7>>(read_token_balance)?;
+        validate_access_binding::<EvmState<1, 6>, EvmCapability<6>>(confirm_anchor)?;
+        if descriptors.iter().any(|binding| {
+            binding.effect_domain().is_some() || binding.public_signer_key_instance_ref().is_some()
+        }) || descriptors.iter().skip(1).any(|binding| {
+            binding.physical_target_ref() != check_chain_identity.physical_target_ref()
+        }) {
+            return Err(EvmDomainError::Program);
+        }
+        Ok(Self {
+            chain_id,
+            descriptors,
+        })
+    }
+
+    /// Returns the one physical route identity shared by all reads in this fragment.
+    pub fn route_ref(&self) -> mfm_ids::ContentRef {
+        self.descriptors[0].physical_target_ref().clone()
+    }
+
+    /// Returns descriptors in the constructor's fixed semantic order.
+    pub const fn descriptors(&self) -> &[BindingDescriptor; 6] {
+        &self.descriptors
+    }
+}
+
+/// Authors the exact EVM submission Program for one planned request shape.
+fn submission_program(bindings: &EvmSubmissionBindings) -> Result<ProgramDocument, EvmDomainError> {
+    let [reserve_nonce, broadcast, receipt, finalized_head, canonical_inclusion_block] =
+        bindings.descriptors();
+    let request =
+        nominal_contract_ref::<EvmSubmissionRequest>().map_err(|_| EvmDomainError::Program)?;
+    let progress =
+        nominal_contract_ref::<EvmSubmissionProgress>().map_err(|_| EvmDomainError::Program)?;
+    let output =
+        nominal_contract_ref::<EvmSubmissionOutput>().map_err(|_| EvmDomainError::Program)?;
+    let failure =
+        nominal_contract_ref::<EvmSubmissionFailure>().map_err(|_| EvmDomainError::Program)?;
+    let declarations = vec![
+        Declaration::State(Box::new(effect_state::<EvmState<0, 0>, EvmCapability<0>>(
+            0,
+            request.clone(),
+            progress.clone(),
+            failure.clone(),
+            address(1)?,
+            reserve_nonce,
+        )?)),
+        Declaration::State(Box::new(pure_state::<EvmState<0, 1>>(
+            1,
+            progress.clone(),
+            progress.clone(),
+            failure.clone(),
+            Some(address(2)?),
+        )?)),
+        Declaration::State(Box::new(effect_state::<EvmState<0, 2>, EvmCapability<1>>(
+            2,
+            progress.clone(),
+            progress.clone(),
+            failure.clone(),
+            address(3)?,
+            broadcast,
+        )?)),
+        Declaration::State(Box::new(read_state::<EvmState<0, 3>, EvmCapability<3>>(
+            3,
+            progress.clone(),
+            progress.clone(),
+            failure.clone(),
+            address(4)?,
+            receipt,
+        )?)),
+        Declaration::State(Box::new(read_state::<EvmState<0, 4>, EvmCapability<4>>(
+            4,
+            progress.clone(),
+            progress.clone(),
+            failure.clone(),
+            address(5)?,
+            finalized_head,
+        )?)),
+        Declaration::State(Box::new(read_state::<EvmState<0, 5>, EvmCapability<5>>(
+            5,
+            progress.clone(),
+            progress.clone(),
+            failure.clone(),
+            address(6)?,
+            canonical_inclusion_block,
+        )?)),
+        Declaration::State(Box::new(pure_state::<EvmState<0, 6>>(
+            6,
+            progress,
+            output.clone(),
+            failure,
+            None,
+        )?)),
+    ];
+    ProgramDocument::new(
+        StableId::new(EVM_SUBMIT_TRANSACTION_ENTRY_POINT_ID)
+            .map_err(|_| EvmDomainError::Program)?,
+        output,
+        request,
+        declarations,
+    )
+    .map_err(|_| EvmDomainError::Program)
+}
+
+/// One indivisible domain-planned EVM submission admission product.
+pub struct EvmSubmissionPlan {
+    input: EvmSubmissionRequest,
+    program: ProgramDocument,
+    source_refs: Vec<ContentRef>,
+}
+
+impl EvmSubmissionPlan {
+    /// Consumes the plan into the only values App needs to qualify and admit it.
+    pub fn into_parts(self) -> (EvmSubmissionRequest, ProgramDocument, Vec<ContentRef>) {
+        (self.input, self.program, self.source_refs)
+    }
+}
+
+/// Selects one trusted EVM route and authors its final submission Program.
+pub fn plan_submission(
+    selector: EvmSubmissionSelector,
+    config: &EvmConfig,
+    bindings: &[EvmSubmissionBindings],
+) -> Result<EvmSubmissionPlan, EvmDomainError> {
+    validate_evm_config(config)?;
+    selector.validate()?;
+    let mut routes = config
+        .submission_routes
+        .iter()
+        .filter(|route| route.target == selector.target);
+    let route = routes.next().ok_or(EvmDomainError::InvalidValue)?;
+    if routes.next().is_some() {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    let binding = submission_binding_for_route(route, bindings)?;
+    let input =
+        EvmSubmissionRequest::planned(selector, route.public_signer_key_instance_ref.clone())?;
+    Ok(EvmSubmissionPlan {
+        input,
+        program: submission_program(binding)?,
+        source_refs: binding.source_refs(),
+    })
+}
+
+/// Returns the final EVM submission Programs needed to validate a trusted composition closure.
+///
+/// The domain owns the route-to-binding relation, so App validates only the resulting Programs
+/// against its one Runtime rather than inspecting EVM configuration or binding internals.
+pub fn submission_closure_documents(
+    config: &EvmConfig,
+    bindings: &[EvmSubmissionBindings],
+) -> Result<Vec<ProgramDocument>, EvmDomainError> {
+    validate_evm_config(config)?;
+    if bindings.len() != config.submission_routes.len() {
+        return Err(EvmDomainError::Program);
+    }
+    config
+        .submission_routes
+        .iter()
+        .map(|route| submission_binding_for_route(route, bindings).and_then(submission_program))
+        .collect()
+}
+
+fn submission_binding_for_route<'a>(
+    route: &EvmSubmissionRoute,
+    bindings: &'a [EvmSubmissionBindings],
+) -> Result<&'a EvmSubmissionBindings, EvmDomainError> {
+    let mut matches = bindings
+        .iter()
+        .filter(|binding| binding.target == route.target);
+    let binding = matches.next().ok_or(EvmDomainError::InvalidValue)?;
+    if matches.next().is_some()
+        || binding.public_signer_key_instance_ref()? != route.public_signer_key_instance_ref
+    {
+        return Err(EvmDomainError::InvalidValue);
+    }
+    Ok(binding)
+}
+
+/// Appends one unrolled, reusable balance fragment to a Program declaration list.
+pub fn append_balance_fragment<K: MfmValueTrait>(
+    declarations: &mut Vec<Declaration>,
+    start_ordinal: u32,
+    bindings: &EvmBalanceBindings,
+    failure_next: SequentialControlAddress,
+    completion_next: SequentialControlAddress,
+) -> Result<(), EvmDomainError> {
+    let [check_chain_identity, read_initial_anchor, read_native_balance, read_token_decimals, read_token_balance, confirm_anchor] =
+        bindings.descriptors();
+    let context =
+        nominal_contract_ref::<EvmBalanceContext<K>>().map_err(|_| EvmDomainError::Program)?;
+    let asset =
+        nominal_contract_ref::<EvmBalanceAsset<K>>().map_err(|_| EvmDomainError::Program)?;
+    let completion = nominal_contract_ref::<EvmBalanceCollectionCompletion<K>>()
+        .map_err(|_| EvmDomainError::Program)?;
+    let failure =
+        nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| EvmDomainError::Program)?;
+    let initial = address(start_ordinal + 1)?;
+    let select = address(start_ordinal + 2)?;
+    let selector = address(start_ordinal + 3)?;
+    let native = address(start_ordinal + 4)?;
+    let decimals = address(start_ordinal + 5)?;
+    let token = address(start_ordinal + 6)?;
+    let confirm = address(start_ordinal + 7)?;
+    let consolidate = address(start_ordinal + 8)?;
+    declarations.extend([
+        state_with_failure(
+            read_state::<EvmState<1, 0, K>, EvmCapability<2>>(
+                start_ordinal,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                initial.clone(),
+                check_chain_identity,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            read_state::<EvmState<1, 1, K>, EvmCapability<6>>(
+                start_ordinal + 1,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                select.clone(),
+                read_initial_anchor,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            pure_state::<EvmState<1, 2, K>>(
+                start_ordinal + 2,
+                context.clone(),
+                asset.clone(),
+                failure.clone(),
+                Some(selector.clone()),
+            ),
+            &failure_next,
+        )?,
+        Declaration::Match(
+            MatchDeclaration::new(
+                selector,
+                asset,
+                vec![
+                    MatchVariant::new(
+                        StableId::new("native").map_err(|_| EvmDomainError::Program)?,
+                        context.clone(),
+                        context.clone(),
+                        native.clone(),
+                    ),
+                    MatchVariant::new(
+                        StableId::new("token").map_err(|_| EvmDomainError::Program)?,
+                        context.clone(),
+                        context.clone(),
+                        decimals.clone(),
+                    ),
+                ],
+            )
+            .map_err(|_| EvmDomainError::Program)?,
+        ),
+        state_with_failure(
+            read_state::<EvmState<1, 3, K>, EvmCapability<7>>(
+                start_ordinal + 4,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                confirm.clone(),
+                read_native_balance,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            read_state::<EvmState<1, 4, K>, EvmCapability<7>>(
+                start_ordinal + 5,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                token.clone(),
+                read_token_decimals,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            read_state::<EvmState<1, 5, K>, EvmCapability<7>>(
+                start_ordinal + 6,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                confirm.clone(),
+                read_token_balance,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            read_state::<EvmState<1, 6, K>, EvmCapability<6>>(
+                start_ordinal + 7,
+                context.clone(),
+                context.clone(),
+                failure.clone(),
+                consolidate.clone(),
+                confirm_anchor,
+            ),
+            &failure_next,
+        )?,
+        state_with_failure(
+            pure_state::<EvmState<1, 7, K>>(
+                start_ordinal + 8,
+                context,
+                completion,
+                failure,
+                Some(completion_next),
+            ),
+            &failure_next,
+        )?,
+    ]);
+    Ok(())
+}
+
+fn address(ordinal: u32) -> Result<SequentialControlAddress, EvmDomainError> {
+    SequentialControlAddress::new(ordinal, Vec::new()).map_err(|_| EvmDomainError::Program)
+}
+
+fn state_with_failure(
+    state: Result<StateDeclaration, EvmDomainError>,
+    failure_next: &SequentialControlAddress,
+) -> Result<Declaration, EvmDomainError> {
+    state?
+        .with_failure_next(failure_next.clone())
+        .map(|state| Declaration::State(Box::new(state)))
+        .map_err(|_| EvmDomainError::Program)
+}
+
+fn pure_state<S: State>(
+    ordinal: u32,
+    input: mfm_ids::ContentRef,
+    output: mfm_ids::ContentRef,
+    failure: mfm_ids::ContentRef,
+    next: Option<SequentialControlAddress>,
+) -> Result<StateDeclaration, EvmDomainError> {
+    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
+    match next {
+        Some(next) => StateDeclaration::with_next(
+            address(ordinal)?,
+            implementation,
+            input,
+            output,
+            Some(failure),
+            ExecutionMode::Pure,
+            next,
+        )
+        .map_err(|_| EvmDomainError::Program),
+        None => StateDeclaration::new(
+            address(ordinal)?,
+            implementation,
+            input,
+            output,
+            Some(failure),
+            ExecutionMode::Pure,
+            true,
+        )
+        .map_err(|_| EvmDomainError::Program),
+    }
+}
+
+fn read_state<S: State, C: AccessCapabilityContract>(
+    ordinal: u32,
+    input: mfm_ids::ContentRef,
+    output: mfm_ids::ContentRef,
+    failure: mfm_ids::ContentRef,
+    next: SequentialControlAddress,
+    binding: &BindingDescriptor,
+) -> Result<StateDeclaration, EvmDomainError> {
+    validate_access_binding::<S, C>(binding)?;
+    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
+    StateDeclaration::with_next(
+        address(ordinal)?,
+        implementation,
+        input,
+        output,
+        Some(failure),
+        ExecutionMode::Read {
+            capability_contract_ref: capability_contract_ref::<C>()
+                .map_err(|_| EvmDomainError::Program)?,
+            total_attempt_bound: C::total_attempt_bound().get(),
+            fact_selection_required: C::requires_prior_facts(),
+        },
+        next,
+    )
+    .map_err(|_| EvmDomainError::Program)?
+    .with_execution_binding(binding.clone())
+    .map_err(|_| EvmDomainError::Program)
+}
+
+fn effect_state<S: State, C: AccessCapabilityContract>(
+    ordinal: u32,
+    input: mfm_ids::ContentRef,
+    output: mfm_ids::ContentRef,
+    failure: mfm_ids::ContentRef,
+    next: SequentialControlAddress,
+    binding: &BindingDescriptor,
+) -> Result<StateDeclaration, EvmDomainError> {
+    validate_access_binding::<S, C>(binding)?;
+    let implementation = state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?;
+    let effect_domain = binding
+        .effect_domain()
+        .cloned()
+        .ok_or(EvmDomainError::Program)?;
+    StateDeclaration::with_next(
+        address(ordinal)?,
+        implementation,
+        input,
+        output,
+        Some(failure),
+        ExecutionMode::Effect {
+            capability_contract_ref: capability_contract_ref::<C>()
+                .map_err(|_| EvmDomainError::Program)?,
+            effect_domain,
+            fact_selection_required: C::requires_prior_facts(),
+        },
+        next,
+    )
+    .map_err(|_| EvmDomainError::Program)?
+    .with_execution_binding(binding.clone())
+    .map_err(|_| EvmDomainError::Program)
+}
+
+fn validate_access_binding<S: State, C: AccessCapabilityContract>(
+    binding: &BindingDescriptor,
+) -> Result<(), EvmDomainError> {
+    if binding.state_implementation_ref()
+        != &state_implementation_ref::<S>().map_err(|_| EvmDomainError::Program)?
+        || binding.capability_contract_ref()
+            != Some(&capability_contract_ref::<C>().map_err(|_| EvmDomainError::Program)?)
+        || binding.adapter_implementation_ref().is_none()
+    {
+        return Err(EvmDomainError::Program);
+    }
+    Ok(())
+}
+
+fn success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
+    ProposedStateOutcome::Success {
+        output,
+        facts: mfm_facts::FactProposalSet::empty(),
+    }
+}
+
+fn failure<O, F>(failure: F) -> ProposedStateOutcome<O, F> {
+    ProposedStateOutcome::Failure { failure }
+}
+
+fn read_returned<'a>(
+    evidence: &'a EvmReadEvidence,
+    intent: &EvmReadIntent,
+) -> Option<&'a EvmReadValue> {
+    if evidence.validate_for(intent).is_err() {
+        return None;
+    }
+    match evidence {
+        EvmReadEvidence::Returned { operation, value } if operation == &intent.operation => {
+            Some(value)
+        }
+        EvmReadEvidence::Returned { .. }
+        | EvmReadEvidence::Rejected { .. }
+        | EvmReadEvidence::SafeFailure { .. }
+        | EvmReadEvidence::IntegrityBlocked { .. } => None,
+    }
+}
+
+fn work_initial_anchor(work: &EvmBalanceWork) -> Option<&EvmBlockAnchor> {
+    match work {
+        EvmBalanceWork::SelectAsset { initial_anchor, .. }
+        | EvmBalanceWork::ReadNativeBalance { initial_anchor, .. }
+        | EvmBalanceWork::ReadTokenDecimals { initial_anchor, .. }
+        | EvmBalanceWork::ReadTokenBalance { initial_anchor, .. }
+        | EvmBalanceWork::ConfirmAnchor { initial_anchor, .. } => Some(initial_anchor),
+        EvmBalanceWork::CheckChainIdentity { .. }
+        | EvmBalanceWork::ReadInitialAnchor { .. }
+        | EvmBalanceWork::Complete => None,
+    }
+}
+
+fn decimal_at_least(left: &str, right: &str) -> bool {
+    let left = left.trim_start_matches('0');
+    let right = right.trim_start_matches('0');
+    let left = if left.is_empty() { "0" } else { left };
+    let right = if right.is_empty() { "0" } else { right };
+    left.len() > right.len() || (left.len() == right.len() && left >= right)
+}
+
+fn scale_units(raw: &str, source_decimals: u8, target_decimals: u8) -> Option<String> {
+    if !is_decimal_integer(raw) || source_decimals > 30 || target_decimals > 30 {
+        return None;
+    }
+    if source_decimals == target_decimals {
+        return Some(raw.to_owned());
+    }
+    if source_decimals < target_decimals {
+        let zeros = usize::from(target_decimals - source_decimals);
+        let mut scaled = raw.to_owned();
+        scaled.reserve(zeros);
+        scaled.extend(std::iter::repeat_n('0', zeros));
+        return (scaled.len() <= 80).then_some(scaled);
+    }
+    let shift = usize::from(source_decimals - target_decimals);
+    if raw.len() <= shift {
+        return Some("0".to_owned());
+    }
+    let (whole, discarded) = raw.split_at(raw.len() - shift);
+    discarded
+        .bytes()
+        .all(|byte| byte == b'0')
+        .then(|| whole.trim_start_matches('0'))
+        .map(|value| {
+            if value.is_empty() {
+                "0".to_owned()
+            } else {
+                value.to_owned()
+            }
+        })
+}
+
+fn sum_decimal<'a>(values: impl Iterator<Item = &'a str>) -> Option<String> {
+    let mut digits = vec![0u8];
+    for value in values {
+        if !is_decimal_integer(value) {
+            return None;
+        }
+        let mut carry = 0u16;
+        let width = digits.len().max(value.len());
+        digits.resize(width, 0);
+        for offset in 0..width {
+            let right = value
+                .as_bytes()
+                .get(value.len().wrapping_sub(offset + 1))
+                .copied()
+                .unwrap_or(b'0')
+                .saturating_sub(b'0') as u16;
+            let index = digits.len() - 1 - offset;
+            let sum = u16::from(digits[index]) + right + carry;
+            digits[index] = (sum % 10) as u8;
+            carry = sum / 10;
+        }
+        if carry != 0 {
+            digits.insert(0, carry as u8);
+        }
+        if digits.len() > 80 {
+            return None;
+        }
+    }
+    Some(
+        digits
+            .into_iter()
+            .map(|digit| char::from(b'0' + digit))
+            .collect(),
+    )
 }
 
 fn is_decimal_integer(value: &str) -> bool {
@@ -1195,6 +3810,65 @@ fn is_decimal_integer(value: &str) -> bool {
         && (value == "0" || !value.starts_with('0'))
 }
 
+fn read_value_valid(value: &EvmReadValue) -> bool {
+    match value {
+        EvmReadValue::ChainId(chain_id) => *chain_id != 0,
+        EvmReadValue::Anchor { number, hash } | EvmReadValue::CanonicalBlock { number, hash } => {
+            read_anchor(number, hash).is_some()
+        }
+        EvmReadValue::RawUnits(units) => is_decimal_integer(units),
+        EvmReadValue::TokenDecimals(decimals) => *decimals <= 30,
+        EvmReadValue::Receipt {
+            transaction_hash,
+            execution_disposition,
+            inclusion_block_number,
+            inclusion_block_hash,
+        } => {
+            valid_public_text(transaction_hash, 256)
+                && EvmExecutionDisposition::from_code(execution_disposition).is_some()
+                && read_anchor(inclusion_block_number, inclusion_block_hash).is_some()
+        }
+        EvmReadValue::FinalizedHead { number } => is_decimal_integer(number),
+    }
+}
+
+fn read_value_valid_for_intent(intent: &EvmReadIntent, value: &EvmReadValue) -> bool {
+    read_value_valid(value)
+        && match (&intent.subject, value) {
+            (EvmReadSubject::ChainIdentity, EvmReadValue::ChainId(chain_id))
+                if *chain_id == intent.chain_id =>
+            {
+                true
+            }
+            (EvmReadSubject::ChainIdentity, EvmReadValue::ChainId(_)) => false,
+            (EvmReadSubject::InitialAnchor, EvmReadValue::Anchor { .. })
+            | (EvmReadSubject::NativeBalance { .. }, EvmReadValue::RawUnits(_))
+            | (EvmReadSubject::TokenDecimals { .. }, EvmReadValue::TokenDecimals(_))
+            | (EvmReadSubject::TokenBalance { .. }, EvmReadValue::RawUnits(_))
+            | (EvmReadSubject::ConfirmAnchor { .. }, EvmReadValue::Anchor { .. })
+            | (EvmReadSubject::FinalizedHead, EvmReadValue::FinalizedHead { .. }) => true,
+            (
+                EvmReadSubject::TransactionReceipt { transaction_hash },
+                EvmReadValue::Receipt {
+                    transaction_hash: returned_hash,
+                    ..
+                },
+            ) => transaction_hash == returned_hash,
+            (
+                EvmReadSubject::CanonicalInclusionBlock { number },
+                EvmReadValue::CanonicalBlock {
+                    number: returned_number,
+                    ..
+                },
+            ) => number == returned_number,
+            _ => false,
+        }
+}
+
+fn read_anchor(number: &str, hash: &str) -> Option<EvmBlockAnchor> {
+    EvmBlockAnchor::new(number.to_owned(), hash.to_owned()).ok()
+}
+
 fn duplicate_source_ids(sources: &[EvmBalanceSource]) -> bool {
     let mut ids = BTreeSet::new();
     sources
@@ -1202,128 +3876,20 @@ fn duplicate_source_ids(sources: &[EvmBalanceSource]) -> bool {
         .any(|source| !ids.insert(source.source_id.as_str()))
 }
 
-fn duplicate_result_ids(results: &[EvmBalanceResult]) -> bool {
+fn duplicate_collected_source_ids(balances: &[EvmCollectedBalance]) -> bool {
     let mut ids = BTreeSet::new();
-    results
+    balances
         .iter()
-        .any(|result| !ids.insert(result.source_id.as_str()))
+        .any(|balance| !ids.insert(balance.source.source_id.as_str()))
 }
 
 fn valid_public_text(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
-        && !contains_secret_marker(value)
+        && !string_contains_secret_marker(value)
         && !value.chars().any(char::is_control)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Debug, Serialize, Deserialize, MfmValue)]
-    #[serde(deny_unknown_fields)]
-    struct OpaqueCallerContinuation {
-        marker: String,
-    }
-
-    #[test]
-    fn generic_balance_completion_moves_a_non_clone_continuation() {
-        let request = EvmBalanceRequest::new(
-            vec![EvmBalanceSource {
-                source_id: "source-1".to_owned(),
-                chain_id: 1,
-                address: "0xabc".to_owned(),
-                token: None,
-            }],
-            18,
-        )
-        .expect("request");
-        let continuation = OpaqueCallerContinuation {
-            marker: "opaque".to_owned(),
-        };
-        let context = EvmBalanceContext {
-            request,
-            caller_continuation: continuation,
-            metadata: EvmBalanceResultMetadata::new(0, "correlation".to_owned()).expect("metadata"),
-            current_source: None,
-            stage: EvmBalanceStage::SelectAsset,
-            completed: Vec::new(),
-            next_source: 0,
-            remaining_sources: vec![EvmBalanceSource {
-                source_id: "source-1".to_owned(),
-                chain_id: 1,
-                address: "0xabc".to_owned(),
-                token: None,
-            }],
-        };
-        assert!(context.validate().is_ok());
-        let EvmBalanceContext {
-            caller_continuation,
-            ..
-        } = context;
-        let completion = EvmBalanceCollectionCompletion {
-            caller_continuation,
-            result: EvmBalanceCollectionResult {
-                results: Vec::new(),
-                total_scaled: "0".to_owned(),
-            },
-        };
-        assert_eq!(completion.caller_continuation.marker, "opaque");
-    }
-
-    #[test]
-    fn balance_request_rejects_non_adjacent_duplicate_sources() {
-        let source = EvmBalanceSource {
-            source_id: "source-1".to_owned(),
-            chain_id: 1,
-            address: "0xabc".to_owned(),
-            token: None,
-        };
-        assert!(EvmBalanceRequest::new(
-            vec![
-                source.clone(),
-                EvmBalanceSource {
-                    source_id: "source-2".to_owned(),
-                    ..source.clone()
-                },
-                source,
-            ],
-            18,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn admission_and_result_deserialization_reenter_domain_validation() {
-        assert!(serde_json::from_str::<EvmSubmissionRequest>(
-            r#"{"target":{"chain_id":1,"sender":"0xABC","nonce_domain":"main"},"idempotency_key":"request","data":[],"gas_limit":1,"max_fee":"1"}"#
-        )
-        .is_err());
-        assert!(serde_json::from_str::<EvmSubmissionOutput>(
-            r#"{"candidate_id":"candidate","transaction_hash":"","included":true}"#
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn transaction_data_capacity_accepts_exact_and_rejects_plus_one() {
-        let target = EvmTransactionTarget::new(1, "0xabc".to_owned(), "wallet-main".to_owned())
-            .expect("target");
-        assert!(EvmSubmissionRequest::new(
-            target.clone(),
-            "capacity-exact".to_owned(),
-            vec![0; EVM_TRANSACTION_DATA_LIMIT],
-            1,
-            "1".to_owned(),
-        )
-        .is_ok());
-        assert!(EvmSubmissionRequest::new(
-            target,
-            "capacity-plus-one".to_owned(),
-            vec![0; EVM_TRANSACTION_DATA_LIMIT + 1],
-            1,
-            "1".to_owned(),
-        )
-        .is_err());
-    }
-}
+#[path = "../tests/unit.rs"]
+mod tests;

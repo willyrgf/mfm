@@ -1,9 +1,10 @@
 use std::num::NonZeroU16;
 
 use mfm_capabilities::{AccessCapabilityContract, NoPriorFacts, ReadMode};
-use mfm_runtime::{FailureValue, PreparedExecution, RuntimeError, State};
 use mfm_ids::StableId;
+use mfm_program::{FailureValue, ProgramError, State};
 use mfm_program_derive::MfmValue as DeriveMfmValue;
+use mfm_runtime::PreparedExecution;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, DeriveMfmValue)]
@@ -24,8 +25,8 @@ impl State for TestState {
     type Output = TestValue;
     type Failure = TestValue;
 
-    fn state_id() -> Result<StableId, RuntimeError> {
-        StableId::new("mfm.test.api-state").map_err(|_| RuntimeError::Identity)
+    fn state_id() -> Result<StableId, ProgramError> {
+        StableId::new("mfm.test.api-state").map_err(|_| ProgramError::InvalidContract)
     }
 }
 

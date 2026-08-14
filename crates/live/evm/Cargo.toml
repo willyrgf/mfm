@@ -12,12 +12,20 @@ layer = "adapter"
 domain = "evm"
 domain-role = "live"
 
+[[test]]
+name = "adapter_closure"
+path = "tests/adapter_closure.rs"
+
 [dependencies]
 mfm-canonical = { path = "../../kernel/canonical" }
 mfm-capabilities = { path = "../../kernel/capabilities" }
 mfm-evm = { path = "../../domains/evm" }
 mfm-ids = { path = "../../kernel/ids" }
+mfm-portfolio = { path = "../../domains/portfolio" }
+mfm-program = { path = "../../kernel/program" }
 mfm-runtime = { path = "../../kernel/runtime" }
+mfm-signing = { path = "../../signing" }
+mfm-storage-evm-postgres = { path = "../../storages/evm-postgres" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

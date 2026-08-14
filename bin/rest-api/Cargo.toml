@@ -10,16 +10,6 @@ autotests = false
 layer = "binary"
 
 [dependencies]
-axum = "0.7"
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-mfm-app = { path = "../../crates/app" }
-mfm-evm = { path = "../../crates/domains/evm" }
-mfm-ids = { path = "../../crates/kernel/ids" }
-mfm-portfolio = { path = "../../crates/domains/portfolio" }
-mfm-store = { path = "../../crates/kernel/store" }
-mfm-values = { path = "../../crates/kernel/values" }
 
 [[bin]]
 name = "mfm_rest_api"

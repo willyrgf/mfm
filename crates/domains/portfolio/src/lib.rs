@@ -5,32 +5,62 @@
 //! collection is expanded into an ordinary sequential child State; there is no runtime collection
 //! loop, output map, parallel branch, or multi-result join.
 
-use mfm_evm::{EvmBalanceCollectionResult, EvmBalanceRequest};
-use mfm_ids::StableId;
+use mfm_capabilities::ProposedStateOutcome;
+use std::collections::BTreeSet;
+
+use mfm_evm::{
+    append_balance_fragment, EvmBalanceBindings, EvmBalanceCollectionCompletion, EvmBalanceContext,
+    EvmBalanceFailure, EvmBalanceRequest, EvmBalanceSource,
+};
+use mfm_ids::{ContentRef, StableId};
+use mfm_program::{
+    nominal_contract_ref, state_implementation_ref, Declaration, ExecutionMode, FailureValue,
+    ProgramDocument, SequentialControlAddress, State, StateDeclaration,
+};
 use mfm_program_derive::{MfmConfig, MfmValue};
+use mfm_values::string_contains_secret_marker;
 use serde::de;
 use serde::{Deserialize, Serialize};
 
+macro_rules! impl_checked_deserialize {
+    ($type:ident { $($field:ident: $field_type:ty),+ $(,)? }) => {
+        impl<'de> Deserialize<'de> for $type {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct Wire {
+                    $($field: $field_type,)+
+                }
+
+                let wire = Wire::deserialize(deserializer)?;
+                let value = Self {
+                    $($field: wire.$field,)+
+                };
+                value.validate().map(|_| value).map_err(de::Error::custom)
+            }
+        }
+    };
+}
+
 /// Stable Portfolio snapshot entry-point identity.
 pub const PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID: &str = "mfm.portfolio/snapshot@1";
-/// Stable Portfolio operation identity.
-pub const PORTFOLIO_SNAPSHOT_OPERATION_ID: &str = "mfm.portfolio.snapshot@1";
 /// Maximum declaration-ordered EVM collections.
-pub const PORTFOLIO_COLLECTION_LIMIT: usize = 64;
+const PORTFOLIO_COLLECTION_LIMIT: usize = 64;
 
-/// Public quote identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(rename_all = "snake_case")]
-pub enum QuoteCode {
-    /// US dollar quote.
+enum QuoteCode {
     Usd,
-    /// Euro quote.
     Eur,
 }
 
 /// One public Portfolio identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
-#[serde(deny_unknown_fields)]
+#[serde(transparent)]
+#[mfm(transparent_string)]
 pub struct PortfolioId {
     /// Stable public spelling.
     pub value: String,
@@ -41,76 +71,90 @@ impl<'de> Deserialize<'de> for PortfolioId {
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            value: String,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        if !valid_public_text(&wire.value, 256) {
+        let value = String::deserialize(deserializer)?;
+        if !valid_public_text(&value, 256) {
             return Err(de::Error::custom(PortfolioError::InvalidValue));
         }
-        Ok(Self { value: wire.value })
+        Ok(Self { value })
+    }
+}
+
+/// One exact collection demand selected by the trusted Portfolio planner.
+///
+/// The route identity is secret-free evidence of the binding selected during planning. It is not
+/// a provider handle and cannot be supplied by a transport selector.
+#[derive(Debug, Clone, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioCollectionDemand {
+    correlation: String,
+    request: EvmBalanceRequest,
+    route_ref: ContentRef,
+}
+
+impl_checked_deserialize!(PortfolioCollectionDemand {
+    correlation: String,
+    request: EvmBalanceRequest,
+    route_ref: ContentRef,
+});
+
+impl PortfolioCollectionDemand {
+    fn new(
+        correlation: String,
+        request: EvmBalanceRequest,
+        route_ref: ContentRef,
+    ) -> Result<Self, PortfolioError> {
+        let value = Self {
+            correlation,
+            request,
+            route_ref,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+
+    fn validate(&self) -> Result<(), PortfolioError> {
+        if !valid_public_text(&self.correlation, 256) || self.request.validate().is_err() {
+            return Err(PortfolioError::InvalidValue);
+        }
+        Ok(())
     }
 }
 
 /// One singular domain-planned Portfolio admission value.
+///
+/// Its fields are intentionally private: callers can select a target and quote, but only the
+/// trusted planner can assemble collection demand and route identities.
 #[derive(Debug, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSnapshotInput {
-    /// Stable Portfolio identity.
-    pub portfolio_id: PortfolioId,
-    /// One declaration-ordered EVM collection per child fragment.
-    pub collections: Vec<EvmBalanceRequest>,
-    /// Requested public quote.
-    pub quote: QuoteCode,
+    portfolio_id: PortfolioId,
+    collections: Vec<PortfolioCollectionDemand>,
+    quote: QuoteCode,
 }
 
-impl<'de> Deserialize<'de> for PortfolioSnapshotInput {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            portfolio_id: PortfolioId,
-            collections: Vec<EvmBalanceRequest>,
-            quote: QuoteCode,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Self::new(wire.portfolio_id, wire.collections, wire.quote).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(PortfolioSnapshotInput {
+    portfolio_id: PortfolioId,
+    collections: Vec<PortfolioCollectionDemand>,
+    quote: QuoteCode,
+});
 
 impl PortfolioSnapshotInput {
-    /// Creates one bounded singular admission value.
-    pub fn new(
+    fn from_demand(
         portfolio_id: PortfolioId,
-        collections: Vec<EvmBalanceRequest>,
+        collections: Vec<PortfolioCollectionDemand>,
         quote: QuoteCode,
     ) -> Result<Self, PortfolioError> {
-        if !valid_public_text(&portfolio_id.value, 256)
-            || collections.is_empty()
-            || collections.len() > PORTFOLIO_COLLECTION_LIMIT
-            || collections
-                .iter()
-                .any(|collection| collection.validate().is_err())
-            || total_sources(&collections) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
-        {
-            return Err(PortfolioError::InvalidValue);
-        }
-        Ok(Self {
+        let value = Self {
             portfolio_id,
             collections,
             quote,
-        })
+        };
+        value.validate()?;
+        Ok(value)
     }
 
     /// Validates a decoded snapshot input and every declaration-ordered child request.
-    pub fn validate(&self) -> Result<(), PortfolioError> {
+    fn validate(&self) -> Result<(), PortfolioError> {
         if !valid_public_text(&self.portfolio_id.value, 256)
             || self.collections.is_empty()
             || self.collections.len() > PORTFOLIO_COLLECTION_LIMIT
@@ -118,11 +162,29 @@ impl PortfolioSnapshotInput {
                 .collections
                 .iter()
                 .any(|collection| collection.validate().is_err())
-            || total_sources(&self.collections) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
+            || total_sources(
+                self.collections
+                    .iter()
+                    .map(|collection| &collection.request),
+            ) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
+            || duplicate_text(
+                self.collections
+                    .iter()
+                    .map(|collection| collection.correlation.as_str()),
+            )
+            || duplicate_source_ids(
+                self.collections
+                    .iter()
+                    .map(|collection| &collection.request),
+            )
         {
             return Err(PortfolioError::InvalidValue);
         }
         Ok(())
+    }
+
+    fn collection(&self, ordinal: usize) -> Option<&PortfolioCollectionDemand> {
+        self.collections.get(ordinal)
     }
 }
 
@@ -130,150 +192,296 @@ impl PortfolioSnapshotInput {
 #[derive(Debug, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioContinuation {
-    /// Singular admitted input retained for late consolidation.
-    pub input: PortfolioSnapshotInput,
-    /// Completed collections in declaration order.
-    pub completed: Vec<EvmBalanceCollectionResult>,
-    /// Next collection ordinal.
-    pub next_collection: u16,
-    /// Declaration ordinals that remain after the current completed prefix.
-    pub remaining_collections: Vec<u16>,
+    input: PortfolioSnapshotInput,
+    completed_collections: Vec<PortfolioCompletedCollection>,
 }
 
-impl<'de> Deserialize<'de> for PortfolioContinuation {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            input: PortfolioSnapshotInput,
-            completed: Vec<EvmBalanceCollectionResult>,
-            next_collection: u16,
-            remaining_collections: Vec<u16>,
-        }
+impl_checked_deserialize!(PortfolioContinuation {
+    input: PortfolioSnapshotInput,
+    completed_collections: Vec<PortfolioCompletedCollection>,
+});
 
-        let wire = Wire::deserialize(deserializer)?;
-        let continuation = Self {
-            input: wire.input,
-            completed: wire.completed,
-            next_collection: wire.next_collection,
-            remaining_collections: wire.remaining_collections,
-        };
-        continuation
-            .validate()
-            .map(|_| continuation)
-            .map_err(de::Error::custom)
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioCompletedCollection {
+    chain_id: u64,
+    anchor: PortfolioAnchor,
+    balances: Vec<PortfolioCompletedBalance>,
+    total_scaled: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioCompletedBalance {
+    source_id: String,
+    address: String,
+    token: Option<String>,
+    decimals: u8,
+    raw_units: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioAnchor {
+    number: String,
+    hash: String,
+}
+
+impl_checked_deserialize!(PortfolioAnchor {
+    number: String,
+    hash: String,
+});
+
+impl PortfolioAnchor {
+    fn new(number: String, hash: String) -> Result<Self, PortfolioError> {
+        if !is_decimal_integer(&number) || !valid_public_text(&hash, 256) {
+            return Err(PortfolioError::InvalidValue);
+        }
+        Ok(Self { number, hash })
+    }
+
+    fn validate(&self) -> Result<(), PortfolioError> {
+        Self::new(self.number.clone(), self.hash.clone()).map(|_| ())
+    }
+}
+
+impl PortfolioCompletedBalance {
+    fn matches_planned_source(&self, source: &EvmBalanceSource) -> bool {
+        self.source_id == source.source_id
+            && self.address == source.address
+            && self.token == source.token
     }
 }
 
 impl PortfolioContinuation {
-    /// Creates one declaration-ordered continuation at a collection boundary.
-    pub fn new(
+    fn new(
         input: PortfolioSnapshotInput,
-        completed: Vec<EvmBalanceCollectionResult>,
-        next_collection: u16,
+        completed_collections: Vec<PortfolioCompletedCollection>,
     ) -> Result<Self, PortfolioError> {
-        let remaining_collections = (usize::from(next_collection)..input.collections.len())
-            .map(|ordinal| u16::try_from(ordinal).map_err(|_| PortfolioError::InvalidValue))
-            .collect::<Result<Vec<_>, _>>()?;
         let continuation = Self {
             input,
-            completed,
-            next_collection,
-            remaining_collections,
+            completed_collections,
         };
         continuation.validate()?;
         Ok(continuation)
     }
 
-    /// Validates declaration order, completed result count, and remaining work.
-    pub fn validate(&self) -> Result<(), PortfolioError> {
+    fn validate(&self) -> Result<(), PortfolioError> {
         self.input.validate()?;
-        let next = usize::from(self.next_collection);
+        let next = self.completed_collections.len();
         if next > self.input.collections.len()
-            || self.completed.len() != next
-            || self
-                .completed
-                .iter()
-                .any(|result| result.validate().is_err())
-            || self.completed.iter().enumerate().any(|(ordinal, result)| {
-                let request = &self.input.collections[ordinal];
-                result.results.len() != request.sources.len()
-                    || result
-                        .results
-                        .iter()
-                        .zip(&request.sources)
-                        .any(|(result, source)| result.source_id != source.source_id)
+            || self.completed_collections.iter().any(|result| {
+                result.chain_id == 0
+                    || result.anchor.validate().is_err()
+                    || !is_decimal_integer(&result.total_scaled)
+                    || result.balances.is_empty()
+                    || result.balances.iter().any(|balance| {
+                        !valid_public_text(&balance.source_id, 256)
+                            || !valid_public_text(&balance.address, 128)
+                            || balance.address != balance.address.to_ascii_lowercase()
+                            || balance.token.as_ref().is_some_and(|token| {
+                                !valid_public_text(token, 128)
+                                    || token != &token.to_ascii_lowercase()
+                            })
+                            || balance.decimals > 30
+                            || !is_decimal_integer(&balance.raw_units)
+                    })
             })
+            || self
+                .completed_collections
+                .iter()
+                .enumerate()
+                .any(|(ordinal, result)| {
+                    self.input
+                        .collection(ordinal)
+                        .is_none_or(|demand| !completed_collection_matches_demand(result, demand))
+                })
         {
-            return Err(PortfolioError::InvalidContinuation);
-        }
-        let expected: Vec<u16> = (next..self.input.collections.len())
-            .map(|ordinal| u16::try_from(ordinal).map_err(|_| PortfolioError::InvalidContinuation))
-            .collect::<Result<Vec<_>, _>>()?;
-        if self.remaining_collections != expected {
             return Err(PortfolioError::InvalidContinuation);
         }
         Ok(())
     }
+
+    /// Returns the next collection ordinal derived from the completed prefix.
+    fn next_collection_ordinal(&self) -> Option<u32> {
+        (self.completed_collections.len() < self.input.collections.len())
+            .then_some(self.completed_collections.len() as u32)
+    }
+}
+
+fn completed_collection_matches_demand(
+    result: &PortfolioCompletedCollection,
+    demand: &PortfolioCollectionDemand,
+) -> bool {
+    if demand
+        .request
+        .sources
+        .first()
+        .is_none_or(|source| result.chain_id != source.chain_id)
+        || result.balances.len() != demand.request.sources.len()
+        || result
+            .balances
+            .iter()
+            .zip(&demand.request.sources)
+            .any(|(balance, source)| !balance.matches_planned_source(source))
+    {
+        return false;
+    }
+    result
+        .balances
+        .iter()
+        .map(|balance| {
+            demand
+                .request
+                .scale_units(&balance.raw_units, balance.decimals)
+        })
+        .collect::<Option<Vec<_>>>()
+        .and_then(|amounts| sum_unsigned(&amounts))
+        .is_some_and(|total| total == result.total_scaled)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(
+    tag = "kind",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+enum PortfolioAsset {
+    Native,
+    Token { contract: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioHolding {
+    pub source_id: String,
+    pub asset: PortfolioAsset,
+    pub decimals: u8,
+    pub raw_units: String,
+    pub amount_dec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioSnapshotCollection {
+    pub collection_ordinal: u32,
+    pub chain_id: u64,
+    pub anchor: PortfolioAnchor,
+    pub holdings: Vec<PortfolioHolding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioSnapshot {
+    pub schema_version: u8,
+    pub portfolio_id: PortfolioId,
+    pub collections: Vec<PortfolioSnapshotCollection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioCollectionSummary {
+    pub collection_ordinal: u32,
+    pub total_value_dec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioQuoteTotal {
+    pub quote: QuoteCode,
+    pub total_value_dec: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+struct PortfolioReport {
+    pub schema_version: u8,
+    pub portfolio_id: PortfolioId,
+    pub quote: QuoteCode,
+    pub collection_summaries: Vec<PortfolioCollectionSummary>,
+    pub totals_by_quote: Vec<PortfolioQuoteTotal>,
 }
 
 /// Final public Portfolio snapshot output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(deny_unknown_fields)]
 pub struct PortfolioSnapshotOutput {
-    /// Stable Portfolio identity.
-    pub portfolio_id: PortfolioId,
-    /// Quote selected at admission.
-    pub quote: QuoteCode,
-    /// Collection totals in declaration order.
-    pub collection_totals: Vec<String>,
+    snapshot: PortfolioSnapshot,
+    report: PortfolioReport,
 }
 
-impl<'de> Deserialize<'de> for PortfolioSnapshotOutput {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Wire {
-            portfolio_id: PortfolioId,
-            quote: QuoteCode,
-            collection_totals: Vec<String>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        let output = Self {
-            portfolio_id: wire.portfolio_id,
-            quote: wire.quote,
-            collection_totals: wire.collection_totals,
-        };
-        output.validate().map(|_| output).map_err(de::Error::custom)
-    }
-}
+impl_checked_deserialize!(PortfolioSnapshotOutput {
+    snapshot: PortfolioSnapshot,
+    report: PortfolioReport,
+});
 
 impl PortfolioSnapshotOutput {
-    /// Validates the public output envelope and integer-scaled totals.
-    pub fn validate(&self) -> Result<(), PortfolioError> {
-        if !valid_public_text(&self.portfolio_id.value, 256)
-            || self.collection_totals.is_empty()
-            || self.collection_totals.len() > PORTFOLIO_COLLECTION_LIMIT
-            || self
-                .collection_totals
-                .iter()
-                .any(|total| total.is_empty() || total.len() > 80 || !is_decimal_integer(total))
+    /// Validates the frozen snapshot and report projection agreement.
+    fn validate(&self) -> Result<(), PortfolioError> {
+        if self.snapshot.schema_version != 1
+            || self.report.schema_version != 1
+            || !valid_public_text(&self.snapshot.portfolio_id.value, 256)
+            || self.snapshot.portfolio_id != self.report.portfolio_id
+            || self.snapshot.collections.is_empty()
+            || self.snapshot.collections.len() > PORTFOLIO_COLLECTION_LIMIT
+            || self.report.collection_summaries.len() != self.snapshot.collections.len()
+            || self.report.totals_by_quote.len() != 1
+            || self.report.totals_by_quote[0].quote != self.report.quote
         {
             return Err(PortfolioError::InvalidValue);
         }
-        Ok(())
+        let mut source_ids = BTreeSet::new();
+        let mut totals = Vec::with_capacity(self.snapshot.collections.len());
+        for (ordinal, collection) in self.snapshot.collections.iter().enumerate() {
+            let Some(total) = collection_total_value_dec(collection, &mut source_ids) else {
+                return Err(PortfolioError::InvalidValue);
+            };
+            let summary = &self.report.collection_summaries[ordinal];
+            if collection.collection_ordinal != ordinal as u32
+                || summary.collection_ordinal != ordinal as u32
+                || summary.total_value_dec != total
+            {
+                return Err(PortfolioError::InvalidValue);
+            }
+            totals.push(total);
+        }
+        (sum_decimal_values(&totals)
+            == Some(self.report.totals_by_quote[0].total_value_dec.clone()))
+        .then_some(())
+        .ok_or(PortfolioError::InvalidValue)
     }
 }
 
+fn collection_total_value_dec(
+    collection: &PortfolioSnapshotCollection,
+    source_ids: &mut BTreeSet<String>,
+) -> Option<String> {
+    if collection.chain_id == 0
+        || collection.anchor.validate().is_err()
+        || collection.holdings.is_empty()
+    {
+        return None;
+    }
+    let mut values = Vec::with_capacity(collection.holdings.len());
+    for holding in &collection.holdings {
+        if !source_ids.insert(holding.source_id.clone())
+            || !valid_public_text(&holding.source_id, 256)
+            || holding.decimals > 30
+            || !is_decimal_integer(&holding.raw_units)
+            || holding.amount_dec != decimal_amount(&holding.raw_units, holding.decimals)
+            || matches!(&holding.asset, PortfolioAsset::Token { contract }
+                if !valid_public_text(contract, 128) || contract != &contract.to_ascii_lowercase())
+        {
+            return None;
+        }
+        values.push(canonical_decimal(holding.amount_dec.clone()));
+    }
+    sum_decimal_values(&values)
+}
+
 /// Explicit fail-fast Portfolio failure route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -294,39 +502,434 @@ pub enum PortfolioSnapshotFailure {
     ConsolidationFailed,
 }
 
-/// Selector used by the fixed-tenant application to choose the admitted Portfolio target.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioSnapshotSelector {
-    /// Target Portfolio identity.
-    pub target: PortfolioId,
-}
+impl<'de> Deserialize<'de> for PortfolioSnapshotFailure {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(
+            tag = "kind",
+            content = "value",
+            rename_all = "snake_case",
+            deny_unknown_fields
+        )]
+        enum Wire {
+            InvalidInput,
+            CollectionFailed { ordinal: u16, code: String },
+            ConsolidationFailed,
+        }
 
-impl PortfolioSnapshotSelector {
-    /// Returns the selected target identity.
-    pub const fn target(&self) -> &PortfolioId {
-        &self.target
+        let value = match Wire::deserialize(deserializer)? {
+            Wire::InvalidInput => Self::InvalidInput,
+            Wire::CollectionFailed { ordinal, code } => Self::CollectionFailed { ordinal, code },
+            Wire::ConsolidationFailed => Self::ConsolidationFailed,
+        };
+        value.validate().map(|_| value).map_err(de::Error::custom)
     }
 }
 
-/// Secret-free routing binding used by domain planning and immutable adapter descriptors.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
-#[serde(deny_unknown_fields)]
-pub struct PortfolioEvmRoutingBinding {
-    /// Public network id.
-    pub network_id: u64,
-    /// Public chain identity.
-    pub chain_id: u64,
-    /// Content identity of the physical route descriptor.
-    pub route_ref: String,
+impl PortfolioSnapshotFailure {
+    fn validate(&self) -> Result<(), PortfolioError> {
+        match self {
+            Self::InvalidInput | Self::ConsolidationFailed => Ok(()),
+            Self::CollectionFailed { ordinal, code }
+                if usize::from(*ordinal) < PORTFOLIO_COLLECTION_LIMIT
+                    && valid_public_text(code, 256) =>
+            {
+                Ok(())
+            }
+            Self::CollectionFailed { .. } => Err(PortfolioError::InvalidValue),
+        }
+    }
 }
 
-/// Public routing manifest admitted with one Portfolio operation.
+impl FailureValue for PortfolioSnapshotFailure {
+    fn integrity_blocked() -> Self {
+        Self::InvalidInput
+    }
+}
+
+/// Reusable semantic Portfolio State selected by its fixed stage ordinal.
+///
+/// The ordinal is an internal closed mapping: 0 initialize, 1 enter collection, 2 resume
+/// collection, 3 map EVM failure, and 4 consolidate.
+pub struct PortfolioState<const STAGE: u8>;
+
+/// Domain-owned implementation for a callback-free pure Portfolio State.
+pub trait PortfolioPureState: State {
+    /// Consumes one complete State input and produces its typed outcome.
+    fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure>;
+}
+
+macro_rules! impl_portfolio_state {
+    ($stage:literal, $input:ty, $output:ty, $id:literal) => {
+        impl State for PortfolioState<$stage> {
+            type Input = $input;
+            type Output = $output;
+            type Failure = PortfolioSnapshotFailure;
+
+            fn state_id() -> mfm_program::Result<StableId> {
+                StableId::new($id).map_err(|_| mfm_program::ProgramError::InvalidContract)
+            }
+        }
+    };
+}
+
+impl_portfolio_state!(
+    0,
+    PortfolioSnapshotInput,
+    PortfolioContinuation,
+    "mfm.portfolio.state.initialize@1"
+);
+impl_portfolio_state!(
+    1,
+    PortfolioContinuation,
+    EvmBalanceContext<PortfolioContinuation>,
+    "mfm.portfolio.state.enter-collection@1"
+);
+impl_portfolio_state!(
+    2,
+    EvmBalanceCollectionCompletion<PortfolioContinuation>,
+    PortfolioContinuation,
+    "mfm.portfolio.state.resume-collection@1"
+);
+impl_portfolio_state!(
+    3,
+    EvmBalanceFailure,
+    PortfolioSnapshotOutput,
+    "mfm.portfolio.state.map-evm-failure@1"
+);
+impl_portfolio_state!(
+    4,
+    PortfolioContinuation,
+    PortfolioSnapshotOutput,
+    "mfm.portfolio.state.consolidate@1"
+);
+fn initialize_portfolio(
+    input: PortfolioSnapshotInput,
+) -> ProposedStateOutcome<PortfolioContinuation, PortfolioSnapshotFailure> {
+    match PortfolioContinuation::new(input, Vec::new()) {
+        Ok(output) => portfolio_success(output),
+        Err(_) => portfolio_failure(PortfolioSnapshotFailure::InvalidInput),
+    }
+}
+
+fn enter_portfolio_collection(
+    input: PortfolioContinuation,
+) -> ProposedStateOutcome<EvmBalanceContext<PortfolioContinuation>, PortfolioSnapshotFailure> {
+    let Some(ordinal) = input.next_collection_ordinal() else {
+        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+    };
+    let demand = match input.input.collection(ordinal as usize).cloned() {
+        Some(demand) => demand,
+        None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    };
+    match EvmBalanceContext::new(demand.request, input, ordinal, demand.correlation) {
+        Ok(output) => portfolio_success(output),
+        Err(_) => portfolio_failure(PortfolioSnapshotFailure::InvalidInput),
+    }
+}
+
+fn resume_portfolio_collection(
+    input: EvmBalanceCollectionCompletion<PortfolioContinuation>,
+) -> ProposedStateOutcome<PortfolioContinuation, PortfolioSnapshotFailure> {
+    let (
+        caller_context,
+        collection_ordinal,
+        chain_id,
+        anchor_number,
+        anchor_hash,
+        balances,
+        total_scaled,
+    ) = input.into_parts();
+    let mut continuation = caller_context;
+    let expected = continuation.next_collection_ordinal();
+    if expected != Some(collection_ordinal) {
+        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+    }
+    let anchor = match PortfolioAnchor::new(anchor_number, anchor_hash) {
+        Ok(anchor) => anchor,
+        Err(_) => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    };
+    continuation
+        .completed_collections
+        .push(PortfolioCompletedCollection {
+            chain_id,
+            anchor,
+            balances: balances
+                .into_iter()
+                .map(
+                    |(source_id, address, token, decimals, raw_units)| PortfolioCompletedBalance {
+                        source_id,
+                        address,
+                        token,
+                        decimals,
+                        raw_units,
+                    },
+                )
+                .collect(),
+            total_scaled,
+        });
+    match continuation.validate() {
+        Ok(()) => portfolio_success(continuation),
+        Err(_) => portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    }
+}
+
+fn map_evm_balance_failure(
+    input: EvmBalanceFailure,
+) -> ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure> {
+    let (collection_ordinal, code) = match input {
+        EvmBalanceFailure::SourceUnavailable {
+            collection_ordinal,
+            code,
+            ..
+        }
+        | EvmBalanceFailure::IntegrityBlocked {
+            collection_ordinal,
+            code,
+            ..
+        } => (collection_ordinal, code),
+    };
+    let failure = match u16::try_from(collection_ordinal) {
+        Ok(ordinal) => PortfolioSnapshotFailure::CollectionFailed { ordinal, code },
+        Err(_) => PortfolioSnapshotFailure::ConsolidationFailed,
+    };
+    portfolio_failure(failure)
+}
+
+fn consolidate_portfolio(
+    input: PortfolioContinuation,
+) -> ProposedStateOutcome<PortfolioSnapshotOutput, PortfolioSnapshotFailure> {
+    if input.next_collection_ordinal().is_some() || input.validate().is_err() {
+        return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed);
+    }
+    let mut collections = Vec::with_capacity(input.completed_collections.len());
+    let mut summaries = Vec::with_capacity(input.completed_collections.len());
+    let mut totals = Vec::with_capacity(input.completed_collections.len());
+    for (ordinal, result) in input.completed_collections.into_iter().enumerate() {
+        let holdings = result
+            .balances
+            .into_iter()
+            .map(|balance| PortfolioHolding {
+                source_id: balance.source_id,
+                asset: match balance.token {
+                    None => PortfolioAsset::Native,
+                    Some(contract) => PortfolioAsset::Token { contract },
+                },
+                decimals: balance.decimals,
+                raw_units: balance.raw_units.clone(),
+                amount_dec: decimal_amount(&balance.raw_units, balance.decimals),
+            })
+            .collect::<Vec<_>>();
+        let total_value_dec = decimal_amount(
+            &result.total_scaled,
+            input.input.collections[ordinal].request.decimals,
+        );
+        let total_value_dec = canonical_decimal(total_value_dec);
+        totals.push(total_value_dec.clone());
+        collections.push(PortfolioSnapshotCollection {
+            collection_ordinal: ordinal as u32,
+            chain_id: result.chain_id,
+            anchor: result.anchor,
+            holdings,
+        });
+        summaries.push(PortfolioCollectionSummary {
+            collection_ordinal: ordinal as u32,
+            total_value_dec,
+        });
+    }
+    let aggregate = match sum_decimal_values(&totals) {
+        Some(value) => value,
+        None => return portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    };
+    let output = PortfolioSnapshotOutput {
+        snapshot: PortfolioSnapshot {
+            schema_version: 1,
+            portfolio_id: input.input.portfolio_id.clone(),
+            collections,
+        },
+        report: PortfolioReport {
+            schema_version: 1,
+            portfolio_id: input.input.portfolio_id,
+            quote: input.input.quote.clone(),
+            collection_summaries: summaries,
+            totals_by_quote: vec![PortfolioQuoteTotal {
+                quote: input.input.quote,
+                total_value_dec: aggregate,
+            }],
+        },
+    };
+    match output.validate() {
+        Ok(()) => portfolio_success(output),
+        Err(_) => portfolio_failure(PortfolioSnapshotFailure::ConsolidationFailed),
+    }
+}
+
+macro_rules! impl_portfolio_pure {
+    ($stage:literal, $evaluate:path) => {
+        impl PortfolioPureState for PortfolioState<$stage> {
+            fn evaluate(input: Self::Input) -> ProposedStateOutcome<Self::Output, Self::Failure> {
+                $evaluate(input)
+            }
+        }
+    };
+}
+
+impl_portfolio_pure!(0, initialize_portfolio);
+impl_portfolio_pure!(1, enter_portfolio_collection);
+impl_portfolio_pure!(2, resume_portfolio_collection);
+impl_portfolio_pure!(3, map_evm_balance_failure);
+impl_portfolio_pure!(4, consolidate_portfolio);
+
+fn portfolio_success<O, F>(output: O) -> ProposedStateOutcome<O, F> {
+    ProposedStateOutcome::Success {
+        output,
+        facts: mfm_facts::FactProposalSet::empty(),
+    }
+}
+
+fn portfolio_failure<O, F>(failure: F) -> ProposedStateOutcome<O, F> {
+    ProposedStateOutcome::Failure { failure }
+}
+
+fn decimal_amount(raw: &str, decimals: u8) -> String {
+    if decimals == 0 {
+        return raw.to_owned();
+    }
+    if raw.len() <= usize::from(decimals) {
+        let mut value = String::from("0.");
+        value.extend(std::iter::repeat_n('0', usize::from(decimals) - raw.len()));
+        value.push_str(raw);
+        return value;
+    }
+    let split = raw.len() - usize::from(decimals);
+    format!("{}.{}", &raw[..split], &raw[split..])
+}
+
+fn canonical_decimal(mut value: String) -> String {
+    if let Some((whole, fraction)) = value.split_once('.') {
+        let fraction = fraction.trim_end_matches('0');
+        value = if fraction.is_empty() {
+            whole.to_owned()
+        } else {
+            format!("{whole}.{fraction}")
+        };
+    }
+    value
+}
+
+fn sum_decimal_values(values: &[String]) -> Option<String> {
+    let max_fraction = values
+        .iter()
+        .filter_map(|value| value.split_once('.').map(|(_, fraction)| fraction.len()))
+        .max()
+        .unwrap_or(0);
+    let mut scaled = Vec::with_capacity(values.len());
+    for value in values {
+        let (whole, fraction) = match value.split_once('.') {
+            Some((whole, fraction)) => (whole, fraction),
+            None => (value.as_str(), ""),
+        };
+        if !is_decimal_integer(whole) || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let mut digits = String::with_capacity(whole.len() + max_fraction);
+        digits.push_str(whole);
+        digits.push_str(fraction);
+        digits.extend(std::iter::repeat_n('0', max_fraction - fraction.len()));
+        let digits = digits.trim_start_matches('0');
+        scaled.push(if digits.is_empty() {
+            "0".to_owned()
+        } else {
+            digits.to_owned()
+        });
+    }
+    let total = sum_unsigned(&scaled)?;
+    if max_fraction == 0 {
+        return Some(total);
+    }
+    let padded = if total.len() <= max_fraction {
+        format!("{}{}", "0".repeat(max_fraction + 1 - total.len()), total)
+    } else {
+        total
+    };
+    let split = padded.len() - max_fraction;
+    Some(canonical_decimal(format!(
+        "{}.{}",
+        &padded[..split],
+        &padded[split..]
+    )))
+}
+
+fn sum_unsigned(values: &[String]) -> Option<String> {
+    let mut digits = vec![0u8];
+    for value in values {
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let width = digits.len().max(value.len());
+        digits.resize(width, 0);
+        let mut carry = 0u16;
+        for offset in 0..width {
+            let right = value
+                .as_bytes()
+                .iter()
+                .rev()
+                .nth(offset)
+                .map(|byte| u16::from(*byte - b'0'))
+                .unwrap_or(0);
+            let index = digits.len() - 1 - offset;
+            let sum = u16::from(digits[index]) + right + carry;
+            digits[index] = (sum % 10) as u8;
+            carry = sum / 10;
+        }
+        if carry != 0 {
+            digits.insert(0, carry as u8);
+        }
+        if digits.len() > 80 {
+            return None;
+        }
+    }
+    let output = digits
+        .into_iter()
+        .map(|digit| char::from(b'0' + digit))
+        .collect::<String>();
+    let output = output.trim_start_matches('0');
+    Some(if output.is_empty() {
+        "0".to_owned()
+    } else {
+        output.to_owned()
+    })
+}
+
+/// Selector used by the fixed-tenant application to choose the admitted Portfolio target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, MfmValue)]
+#[serde(deny_unknown_fields)]
+pub struct PortfolioSnapshotSelector {
+    target: PortfolioId,
+    quote: QuoteCode,
+}
+
+impl_checked_deserialize!(PortfolioSnapshotSelector {
+    target: PortfolioId,
+    quote: QuoteCode,
+});
+
+impl PortfolioSnapshotSelector {
+    fn validate(&self) -> Result<(), PortfolioError> {
+        valid_public_text(&self.target.value, 256)
+            .then_some(())
+            .ok_or(PortfolioError::InvalidValue)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
 #[serde(deny_unknown_fields)]
-pub struct PortfolioRoutingManifest {
-    /// Ordered EVM route bindings.
-    pub evm: Vec<PortfolioEvmRoutingBinding>,
+struct PortfolioCollectionConfig {
+    pub correlation: String,
+    pub request: EvmBalanceRequest,
 }
 
 /// Minimal persisted Portfolio configuration.
@@ -334,17 +937,265 @@ pub struct PortfolioRoutingManifest {
 #[serde(deny_unknown_fields)]
 #[mfm(validate = "validate_portfolio_config")]
 pub struct PortfolioConfig {
-    /// Portfolio identity.
-    pub portfolio_id: PortfolioId,
-    /// Public quote list.
-    pub quotes: Vec<QuoteCode>,
+    portfolio_id: PortfolioId,
+    quotes: Vec<QuoteCode>,
+    collections: Vec<PortfolioCollectionConfig>,
 }
 
 fn validate_portfolio_config(config: &PortfolioConfig) -> Result<(), PortfolioError> {
-    if config.portfolio_id.value.is_empty() || config.quotes.is_empty() {
+    if !valid_public_text(&config.portfolio_id.value, 256)
+        || config.quotes.is_empty()
+        || config.collections.is_empty()
+        || config.collections.len() > PORTFOLIO_COLLECTION_LIMIT
+        || config.collections.iter().any(|collection| {
+            !valid_public_text(&collection.correlation, 256)
+                || collection.request.validate().is_err()
+        })
+        || config
+            .quotes
+            .iter()
+            .enumerate()
+            .any(|(index, quote)| config.quotes[..index].contains(quote))
+        || duplicate_text(
+            config
+                .collections
+                .iter()
+                .map(|collection| collection.correlation.as_str()),
+        )
+        || total_sources(
+            config
+                .collections
+                .iter()
+                .map(|collection| &collection.request),
+        ) > mfm_evm::EVM_BALANCE_SOURCE_LIMIT
+        || duplicate_source_ids(
+            config
+                .collections
+                .iter()
+                .map(|collection| &collection.request),
+        )
+    {
         return Err(PortfolioError::InvalidValue);
     }
     Ok(())
+}
+
+/// One indivisible domain-planned Portfolio admission product.
+///
+/// The constructor is private so the public selector, trusted configuration, exact Program, and
+/// source manifest cannot be combined from different plans.
+pub struct PortfolioAdmissionPlan {
+    input: PortfolioSnapshotInput,
+    program: ProgramDocument,
+    source_refs: Vec<ContentRef>,
+}
+
+impl PortfolioAdmissionPlan {
+    /// Consumes the plan into the only values App needs to qualify and admit it.
+    pub fn into_parts(self) -> (PortfolioSnapshotInput, ProgramDocument, Vec<ContentRef>) {
+        (self.input, self.program, self.source_refs)
+    }
+}
+
+/// Selects trusted Portfolio configuration and statically expands its exact EVM child fragments.
+pub fn plan_snapshot(
+    selector: PortfolioSnapshotSelector,
+    config: &PortfolioConfig,
+    bindings: &[EvmBalanceBindings],
+) -> Result<PortfolioAdmissionPlan, PortfolioError> {
+    validate_portfolio_config(config)?;
+    selector.validate()?;
+    if selector.target != config.portfolio_id || !config.quotes.contains(&selector.quote) {
+        return Err(PortfolioError::InvalidValue);
+    }
+    let mut demand = Vec::with_capacity(config.collections.len());
+    let mut selected_bindings = Vec::with_capacity(config.collections.len());
+    let mut source_refs = BTreeSet::new();
+    for collection in &config.collections {
+        let chain_id = collection
+            .request
+            .sources
+            .first()
+            .map(|source| source.chain_id)
+            .ok_or(PortfolioError::InvalidValue)?;
+        let mut matches = bindings
+            .iter()
+            .filter(|binding| binding.chain_id == chain_id);
+        let binding = matches.next().ok_or(PortfolioError::InvalidValue)?;
+        if matches.next().is_some() {
+            return Err(PortfolioError::InvalidValue);
+        }
+        let route_ref = binding.route_ref();
+        source_refs.insert(route_ref.clone());
+        demand.push(PortfolioCollectionDemand::new(
+            collection.correlation.clone(),
+            collection.request.clone(),
+            route_ref,
+        )?);
+        selected_bindings.push(binding);
+    }
+    let input =
+        PortfolioSnapshotInput::from_demand(config.portfolio_id.clone(), demand, selector.quote)?;
+    let program = portfolio_program(&selected_bindings)?;
+    Ok(PortfolioAdmissionPlan {
+        input,
+        program,
+        source_refs: source_refs.into_iter().collect(),
+    })
+}
+
+/// Returns the final Portfolio Program needed to validate a trusted composition closure.
+///
+/// The selected Portfolio and first admitted quote are configuration-owned, keeping App outside
+/// Portfolio configuration inspection and route selection.
+pub fn snapshot_closure_document(
+    config: &PortfolioConfig,
+    bindings: &[EvmBalanceBindings],
+) -> Result<ProgramDocument, PortfolioError> {
+    validate_portfolio_config(config)?;
+    let selector = PortfolioSnapshotSelector {
+        target: config.portfolio_id.clone(),
+        quote: config
+            .quotes
+            .first()
+            .cloned()
+            .ok_or(PortfolioError::InvalidValue)?,
+    };
+    plan_snapshot(selector, config, bindings).map(|plan| plan.program)
+}
+
+fn portfolio_program(bindings: &[&EvmBalanceBindings]) -> Result<ProgramDocument, PortfolioError> {
+    if bindings.is_empty() || bindings.len() > PORTFOLIO_COLLECTION_LIMIT {
+        return Err(PortfolioError::InvalidValue);
+    }
+    let input =
+        nominal_contract_ref::<PortfolioSnapshotInput>().map_err(|_| PortfolioError::Program)?;
+    let continuation =
+        nominal_contract_ref::<PortfolioContinuation>().map_err(|_| PortfolioError::Program)?;
+    let context = nominal_contract_ref::<EvmBalanceContext<PortfolioContinuation>>()
+        .map_err(|_| PortfolioError::Program)?;
+    let completion =
+        nominal_contract_ref::<EvmBalanceCollectionCompletion<PortfolioContinuation>>()
+            .map_err(|_| PortfolioError::Program)?;
+    let evm_failure =
+        nominal_contract_ref::<EvmBalanceFailure>().map_err(|_| PortfolioError::Program)?;
+    let output =
+        nominal_contract_ref::<PortfolioSnapshotOutput>().map_err(|_| PortfolioError::Program)?;
+    let failure =
+        nominal_contract_ref::<PortfolioSnapshotFailure>().map_err(|_| PortfolioError::Program)?;
+    let mut declarations = Vec::with_capacity(2 + bindings.len() * 12);
+    declarations.push(Declaration::State(Box::new(portfolio_pure_state::<
+        PortfolioState<0>,
+    >(
+        0,
+        input.clone(),
+        continuation.clone(),
+        failure.clone(),
+        Some(portfolio_address(1)?),
+    )?)));
+    for (index, binding) in bindings.iter().enumerate() {
+        let index = u32::try_from(index).map_err(|_| PortfolioError::Program)?;
+        let base = index
+            .checked_mul(12)
+            .and_then(|offset| offset.checked_add(1))
+            .ok_or(PortfolioError::Program)?;
+        let fragment_start = base.checked_add(1).ok_or(PortfolioError::Program)?;
+        let resume = base.checked_add(10).ok_or(PortfolioError::Program)?;
+        let mapper = base.checked_add(11).ok_or(PortfolioError::Program)?;
+        let next = base.checked_add(12).ok_or(PortfolioError::Program)?;
+        declarations.push(Declaration::State(Box::new(portfolio_pure_state::<
+            PortfolioState<1>,
+        >(
+            base,
+            continuation.clone(),
+            context.clone(),
+            failure.clone(),
+            Some(portfolio_address(fragment_start)?),
+        )?)));
+        append_balance_fragment::<PortfolioContinuation>(
+            &mut declarations,
+            fragment_start,
+            binding,
+            portfolio_address(mapper)?,
+            portfolio_address(resume)?,
+        )
+        .map_err(|_| PortfolioError::Program)?;
+        declarations.push(Declaration::State(Box::new(portfolio_pure_state::<
+            PortfolioState<2>,
+        >(
+            resume,
+            completion.clone(),
+            continuation.clone(),
+            failure.clone(),
+            Some(portfolio_address(next)?),
+        )?)));
+        declarations.push(Declaration::State(Box::new(portfolio_pure_state::<
+            PortfolioState<3>,
+        >(
+            mapper,
+            evm_failure.clone(),
+            output.clone(),
+            failure.clone(),
+            None,
+        )?)));
+    }
+    let terminal = u32::try_from(bindings.len())
+        .map_err(|_| PortfolioError::Program)?
+        .checked_mul(12)
+        .and_then(|offset| offset.checked_add(1))
+        .ok_or(PortfolioError::Program)?;
+    declarations.push(Declaration::State(Box::new(portfolio_pure_state::<
+        PortfolioState<4>,
+    >(
+        terminal,
+        continuation,
+        output.clone(),
+        failure,
+        None,
+    )?)));
+    ProgramDocument::new(
+        entry_point_id().map_err(|_| PortfolioError::Program)?,
+        output,
+        input,
+        declarations,
+    )
+    .map_err(|_| PortfolioError::Program)
+}
+
+fn portfolio_address(ordinal: u32) -> Result<SequentialControlAddress, PortfolioError> {
+    SequentialControlAddress::new(ordinal, Vec::new()).map_err(|_| PortfolioError::Program)
+}
+
+fn portfolio_pure_state<S: State>(
+    ordinal: u32,
+    input: ContentRef,
+    output: ContentRef,
+    failure: ContentRef,
+    next: Option<SequentialControlAddress>,
+) -> Result<StateDeclaration, PortfolioError> {
+    let implementation = state_implementation_ref::<S>().map_err(|_| PortfolioError::Program)?;
+    match next {
+        Some(next) => StateDeclaration::with_next(
+            portfolio_address(ordinal)?,
+            implementation,
+            input,
+            output,
+            Some(failure),
+            ExecutionMode::Pure,
+            next,
+        )
+        .map_err(|_| PortfolioError::Program),
+        None => StateDeclaration::new(
+            portfolio_address(ordinal)?,
+            implementation,
+            input,
+            output,
+            Some(failure),
+            ExecutionMode::Pure,
+            true,
+        )
+        .map_err(|_| PortfolioError::Program),
+    }
 }
 
 /// Redaction-safe Portfolio domain error.
@@ -356,10 +1207,12 @@ pub enum PortfolioError {
     /// A declaration-order continuation is not valid.
     #[error("Portfolio continuation is invalid")]
     InvalidContinuation,
+    /// Program authoring or exact binding resolution failed.
+    #[error("Portfolio Program contract is invalid")]
+    Program,
 }
 
-/// Returns a stable `StableId` for the Portfolio entry point.
-pub fn entry_point_id() -> Result<StableId, PortfolioError> {
+fn entry_point_id() -> Result<StableId, PortfolioError> {
     StableId::new(PORTFOLIO_SNAPSHOT_ENTRY_POINT_ID).map_err(|_| PortfolioError::InvalidValue)
 }
 
@@ -374,142 +1227,28 @@ fn valid_public_text(value: &str, maximum: usize) -> bool {
     !value.is_empty()
         && value.len() <= maximum
         && !value.chars().any(char::is_control)
-        && ![
-            "password",
-            "passphrase",
-            "mnemonic",
-            "private_key",
-            "privatekey",
-            "secret",
-            "access_token",
-            "api_key",
-        ]
-        .iter()
-        .any(|marker| value.to_ascii_lowercase().contains(marker))
+        && !string_contains_secret_marker(value)
 }
 
-fn total_sources(collections: &[EvmBalanceRequest]) -> usize {
-    collections
-        .iter()
-        .map(|collection| collection.sources.len())
+fn total_sources<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest>) -> usize {
+    requests
+        .map(|request| request.sources.len())
         .try_fold(0usize, usize::checked_add)
         .unwrap_or(usize::MAX)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use mfm_evm::EvmBalanceSource;
-    use mfm_values::ValidatedConfig;
-
-    #[test]
-    fn shared_config_validation_rejects_domain_invalid_values() {
-        assert!(ValidatedConfig::new(PortfolioConfig {
-            portfolio_id: PortfolioId {
-                value: "portfolio-1".to_owned(),
-            },
-            quotes: Vec::new(),
-        })
-        .is_err());
-    }
-
-    fn request() -> EvmBalanceRequest {
-        EvmBalanceRequest::new(
-            vec![mfm_evm::EvmBalanceSource {
-                source_id: "source-1".to_owned(),
-                chain_id: 1,
-                address: "0xabc".to_owned(),
-                token: None,
-            }],
-            18,
-        )
-        .expect("request")
-    }
-
-    #[test]
-    fn continuation_proves_remaining_declaration_suffix() {
-        let input = PortfolioSnapshotInput::new(
-            PortfolioId {
-                value: "portfolio-1".to_owned(),
-            },
-            vec![request()],
-            QuoteCode::Usd,
-        )
-        .expect("input");
-        let mut continuation =
-            PortfolioContinuation::new(input, Vec::new(), 0).expect("continuation");
-        assert_eq!(continuation.remaining_collections, vec![0]);
-        continuation.remaining_collections.clear();
-        assert_eq!(
-            continuation.validate(),
-            Err(PortfolioError::InvalidContinuation)
-        );
-    }
-
-    #[test]
-    fn output_rejects_non_integer_totals() {
-        let output = PortfolioSnapshotOutput {
-            portfolio_id: PortfolioId {
-                value: "portfolio-1".to_owned(),
-            },
-            quote: QuoteCode::Usd,
-            collection_totals: vec!["1.5".to_owned()],
-        };
-        assert_eq!(output.validate(), Err(PortfolioError::InvalidValue));
-    }
-
-    #[test]
-    fn portfolio_total_source_bound_is_exact() {
-        let sources = |count: usize| {
-            (0..count)
-                .map(|ordinal| EvmBalanceSource {
-                    source_id: format!("source-{ordinal}"),
-                    chain_id: 1,
-                    address: format!("0x{ordinal:x}"),
-                    token: None,
-                })
-                .collect::<Vec<_>>()
-        };
-        let accepted = EvmBalanceRequest::new(sources(64), 18).expect("64 sources");
-        assert!(PortfolioSnapshotInput::new(
-            PortfolioId {
-                value: "portfolio-1".to_owned(),
-            },
-            vec![accepted],
-            QuoteCode::Usd,
-        )
-        .is_ok());
-
-        let half = EvmBalanceRequest::new(sources(32), 18).expect("32 sources");
-        let over = EvmBalanceRequest::new(sources(33), 18).expect("33 sources");
-        assert!(PortfolioSnapshotInput::new(
-            PortfolioId {
-                value: "portfolio-1".to_owned(),
-            },
-            vec![half, over],
-            QuoteCode::Usd,
-        )
-        .is_err());
-
-        let rejected = EvmBalanceRequest::new(sources(65), 18);
-        assert!(rejected.is_err());
-    }
-
-    #[test]
-    fn admission_deserialization_reenters_nested_domain_validation() {
-        let invalid = serde_json::json!({
-            "portfolio_id": {"value": "portfolio-1"},
-            "collections": [{
-                "sources": [{
-                    "source_id": "source-1",
-                    "chain_id": 1,
-                    "address": "0xABC",
-                    "token": null
-                }],
-                "decimals": 18
-            }],
-            "quote": "usd"
-        });
-        assert!(serde_json::from_value::<PortfolioSnapshotInput>(invalid).is_err());
-    }
+fn duplicate_text<'a>(mut values: impl Iterator<Item = &'a str>) -> bool {
+    let mut values_seen = BTreeSet::new();
+    values.any(|value| !values_seen.insert(value))
 }
+
+fn duplicate_source_ids<'a>(requests: impl Iterator<Item = &'a EvmBalanceRequest>) -> bool {
+    let mut source_ids = BTreeSet::new();
+    requests
+        .flat_map(|request| &request.sources)
+        .any(|source| !source_ids.insert(&source.source_id))
+}
+
+#[cfg(test)]
+#[path = "../tests/unit.rs"]
+mod tests;

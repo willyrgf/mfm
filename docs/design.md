@@ -88,15 +88,17 @@ persisted scope, epoch, and tenant values alone cannot transpose a semantic owne
 The Runtime-owned `PendingConclusion` is the affine handoff that retains only conclusion Store I/O
 and the inert session continuation.
 
-Pure implementations receive only typed input. Read and Effect implementations borrow input to
-prepare canonical intent, then execute only after the exact preparation append is newly committed.
-An adapter consumes the committed call, derives provider bytes from intent, authenticates the
-response, and returns one capability-owned evidence value. Indeterminate results remain neutral;
-generic errors never mint retry authority. Every Effect has exactly one possible provider entry.
+`State` and `FailureValue` are Program contracts. Pure implementations consume their typed input.
+Read and Effect implementations borrow it only to prepare canonical intent, then consume the
+retained input exactly once when they interpret accepted evidence. An adapter consumes the
+committed call, derives provider bytes from intent, authenticates the response, and returns one
+capability-owned evidence value. Indeterminate results remain neutral; generic errors never mint
+retry authority. Every Effect has exactly one possible provider entry.
 
 An integrity-blocked Access result is a capability-certified, callback-free terminal route. The
-declared failure contract supplies one static typed failure value; callers cannot choose a failure,
-successor context, retry authority, or new fact publication on that route.
+declared failure contract supplies the State's reviewed `integrity_failure` projection from the
+retained typed input; callers cannot choose a failure, successor context, retry authority, or new
+fact publication on that route.
 
 Program retains the complete immutable binding descriptor in each Access declaration. Runtime
 registration and preparation derive it from that declaration, accept no replacement descriptor,
@@ -110,9 +112,10 @@ Runtime has no scheduler, history API, per-run execution lock, or process-wide w
 opening owns bounded active-session, deterministic CPU, planning, and provider-ingress permits;
 retained-prefix qualification uses a bounded blocking job. Workers race through Store exact-head
 compare-and-append. A dropped hot owner leaves only the durable prefix; cold replay qualifies the
-complete prefix without callbacks. A Runtime still binds one exact live Program assembly: after
-Store selects the retained document, Runtime admits it only when its retained Program reference
-matches that assembly.
+complete prefix without callbacks. One catalog-wide assembly registers stable semantic State
+implementations once and exact adapters by binding reference. It validates each supplied Program
+at admission, while every cold path uses that admitted Program object rather than re-planning
+current code.
 
 ## Storage, tenants, and deployment
 
@@ -134,5 +137,8 @@ configuration sequence, schema, and content identity and is accepted only with a
 resolved head.
 
 EVM and Portfolio domains own their bounded cumulative contexts. EVM source States are expanded in
-declaration order, and Portfolio passes one opaque continuation through each child collection.
-There is no generic context type, ordered child-input bijection, or parallel workflow mechanism.
+declaration order and keep one checked common collection anchor; a closed native/token Match
+retains the complete EVM context. Portfolio passes one opaque continuation through each child
+collection and maps EVM failures to its terminal failure contract. There is no generic context
+type, ordered child-input bijection, or parallel workflow mechanism. App owns one mandatory
+Runtime and only dispatches typed selectors to these planners.

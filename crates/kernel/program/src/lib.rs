@@ -9,8 +9,8 @@ pub mod single_trust;
 
 pub use single_trust::{
     canonical_value, capability_contract_ref, nominal_contract_ref, program_document_schema_id,
-    BindingDescriptor, Declaration, ExecutionMode, MatchDeclaration, MatchVariant, Program,
-    ProgramCatalog, ProgramCatalogBuilder, ProgramDocument, ProgramError, ProgramIngress,
-    ProgramRef, QualifiedTypedValue, QualifiedValue, Result, SequentialControlAddress,
-    StateDeclaration,
+    state_implementation_ref, BindingDescriptor, Declaration, ExecutionMode, FailureValue,
+    MatchDeclaration, MatchVariant, Program, ProgramCatalog, ProgramCatalogBuilder,
+    ProgramDocument, ProgramError, ProgramIngress, ProgramRef, QualifiedTypedValue, QualifiedValue,
+    Result, SequentialControlAddress, State, StateDeclaration,
 };

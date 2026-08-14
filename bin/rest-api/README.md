@@ -1,11 +1,7 @@
 # mfm REST API
 
-The REST binary is a transport wrapper over a trusted fixed-tenant App. Requests contain one
-entry-point id and one singular input; authentication and tenant policy are outside this facade.
-Admission bodies are capped at 512 KiB and use strict duplicate/unknown-field rejection before
-domain validation. The transport exposes callback-free read, drive, replay, trace, audit, and
-portable-export routes; responses expose only redacted public error codes.
-
-Startup explicitly opens and splits the demo Store, publishes secret-free typed Portfolio and EVM
-configuration, and passes the explicit mutation/read/configuration/audit ports and resolved heads
-to App. There is no REST configuration or credential endpoint.
+The standalone REST binary is deliberately unavailable until a trusted embedding supplies an exact
+live `Application`. It does not open a local Store, publish configuration, expose admission/drive
+routes, or install a fake provider. Endpoint discovery, credentials, nonce authority, signer
+custody, and Runtime topology remain outside this binary and require separately scoped deployment
+composition.

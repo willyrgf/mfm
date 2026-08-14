@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use mfm_ids::{StableId, TenantScopeId};
 use sqlx::{postgres::PgPoolOptions, PgPool, Postgres, Transaction};
 
-const SCHEMA_CONTRACT: &str = "mfm.single-trust-evm-nonce-postgres.v1";
+const SCHEMA_CONTRACT: &str = "mfm.single-trust-evm-nonce-postgres.v2";
 
 /// Redaction-safe wallet nonce storage error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -19,9 +19,6 @@ pub enum WalletAuthorityError {
     /// The public wallet domain or operation key is invalid.
     #[error("wallet nonce domain is invalid")]
     Invalid,
-    /// A nonce key was absent when completion was requested.
-    #[error("wallet nonce operation is not actionable")]
-    NotActionable,
     /// The database operation failed without exposing driver diagnostics.
     #[error("wallet nonce storage failed")]
     Storage,
@@ -189,8 +186,8 @@ impl PostgresWalletNonceStore {
         .map_err(|_| WalletAuthorityError::Storage)?;
         sqlx::query(
             "INSERT INTO mfm_evm_nonce_operations
-             (tenant_scope_id, sender_id, nonce_domain_id, operation_key, nonce, completed)
-             VALUES ($1, $2, $3, $4, $5, FALSE)",
+             (tenant_scope_id, sender_id, nonce_domain_id, operation_key, nonce)
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(self.domain.tenant.as_str())
         .bind(self.domain.sender.as_str())
@@ -203,26 +200,6 @@ impl PostgresWalletNonceStore {
         commit(transaction).await?;
         Ok(next)
     }
-
-    /// Marks one operation complete without deleting its idempotency row.
-    pub async fn complete(&self, operation_key: &StableId) -> Result<u64> {
-        let nonce: Option<i64> = sqlx::query_scalar(
-            "UPDATE mfm_evm_nonce_operations SET completed = TRUE
-             WHERE tenant_scope_id = $1 AND sender_id = $2 AND nonce_domain_id = $3
-               AND operation_key = $4
-             RETURNING nonce",
-        )
-        .bind(self.domain.tenant.as_str())
-        .bind(self.domain.sender.as_str())
-        .bind(self.domain.nonce_domain.as_str())
-        .bind(operation_key.as_str())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|_| WalletAuthorityError::Storage)?;
-        nonce
-            .map(|value| u64::try_from(value).map_err(|_| WalletAuthorityError::Storage))
-            .unwrap_or(Err(WalletAuthorityError::NotActionable))
-    }
 }
 
 async fn commit(transaction: Transaction<'_, Postgres>) -> Result<()> {
@@ -234,7 +211,7 @@ async fn commit(transaction: Transaction<'_, Postgres>) -> Result<()> {
 
 struct MemoryNonceState {
     next_nonce: u64,
-    operations: BTreeMap<StableId, (u64, bool)>,
+    operations: BTreeMap<StableId, u64>,
 }
 
 /// In-memory nonce-domain implementation for local assembly and conformance tests.
@@ -267,7 +244,7 @@ impl PostgresWalletNonceAuthority {
             .state
             .lock()
             .map_err(|_| WalletAuthorityError::Invalid)?;
-        if let Some((nonce, _)) = state.operations.get(&operation_key) {
+        if let Some(nonce) = state.operations.get(&operation_key) {
             return Ok(*nonce);
         }
         let nonce = state.next_nonce;
@@ -275,22 +252,8 @@ impl PostgresWalletNonceAuthority {
             .next_nonce
             .checked_add(1)
             .ok_or(WalletAuthorityError::Invalid)?;
-        state.operations.insert(operation_key, (nonce, false));
+        state.operations.insert(operation_key, nonce);
         Ok(nonce)
-    }
-
-    /// Marks one operation complete idempotently.
-    pub fn complete(&self, operation_key: &StableId) -> Result<u64> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| WalletAuthorityError::Invalid)?;
-        let (nonce, completed) = state
-            .operations
-            .get_mut(operation_key)
-            .ok_or(WalletAuthorityError::NotActionable)?;
-        *completed = true;
-        Ok(*nonce)
     }
 }
 
@@ -314,8 +277,6 @@ mod tests {
 
         assert_eq!(authority.reserve(operation.clone()).expect("reserve"), 7);
         assert_eq!(authority.reserve(operation.clone()).expect("retry"), 7);
-        assert_eq!(authority.complete(&operation).expect("complete"), 7);
-        assert_eq!(authority.complete(&operation).expect("repeat complete"), 7);
     }
 
     #[test]
@@ -326,10 +287,6 @@ mod tests {
         assert_eq!(
             authority.reserve(operation.clone()),
             Err(WalletAuthorityError::Invalid)
-        );
-        assert_eq!(
-            authority.complete(&operation),
-            Err(WalletAuthorityError::NotActionable)
         );
     }
 }

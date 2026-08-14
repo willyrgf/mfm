@@ -4,7 +4,7 @@ CREATE TABLE mfm_evm_nonce_schema (
 );
 
 INSERT INTO mfm_evm_nonce_schema (schema_contract)
-VALUES ('mfm.single-trust-evm-nonce-postgres.v1')
+VALUES ('mfm.single-trust-evm-nonce-postgres.v2')
 ON CONFLICT (schema_contract) DO NOTHING;
 
 CREATE TABLE mfm_evm_nonce_domains (
@@ -21,7 +21,6 @@ CREATE TABLE mfm_evm_nonce_operations (
     nonce_domain_id TEXT NOT NULL,
     operation_key TEXT NOT NULL,
     nonce BIGINT NOT NULL CHECK (nonce >= 0),
-    completed BOOLEAN NOT NULL,
     PRIMARY KEY (tenant_scope_id, sender_id, nonce_domain_id, operation_key),
     UNIQUE (tenant_scope_id, sender_id, nonce_domain_id, nonce),
     FOREIGN KEY (tenant_scope_id, sender_id, nonce_domain_id)
