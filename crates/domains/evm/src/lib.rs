@@ -2297,7 +2297,7 @@ fn consolidate_execution_disposition(
     success(EvmSubmissionOutput::new(execution_disposition))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, MfmValue)]
+#[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum EvmBalanceFailureStage {
     CheckChainIdentity,
@@ -2311,7 +2311,7 @@ enum EvmBalanceFailureStage {
 }
 
 impl EvmBalanceFailureStage {
-    fn code(self) -> String {
+    const fn as_str(self) -> &'static str {
         match self {
             Self::CheckChainIdentity => "check_chain_identity",
             Self::ReadInitialAnchor => "read_initial_anchor",
@@ -2322,21 +2322,24 @@ impl EvmBalanceFailureStage {
             Self::ConfirmAnchor => "confirm_anchor",
             Self::Consolidate => "consolidate",
         }
-        .to_owned()
     }
+}
 
-    fn is_code(value: &str) -> bool {
-        matches!(
-            value,
-            "check_chain_identity"
-                | "read_initial_anchor"
-                | "select_asset"
-                | "read_native_balance"
-                | "read_token_decimals"
-                | "read_token_balance"
-                | "confirm_anchor"
-                | "consolidate"
-        )
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum EvmBalanceFailureCode {
+    ObservationUnavailable,
+    CollectionInvalid,
+    IntegrityBlocked,
+}
+
+impl EvmBalanceFailureCode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ObservationUnavailable => "observation_unavailable",
+            Self::CollectionInvalid => "collection_invalid",
+            Self::IntegrityBlocked => "integrity_blocked",
+        }
     }
 }
 
@@ -2383,14 +2386,14 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
         )]
         enum Wire {
             SourceUnavailable {
-                stage: String,
+                stage: EvmBalanceFailureStage,
                 collection_ordinal: u32,
-                code: String,
+                code: EvmBalanceFailureCode,
             },
             IntegrityBlocked {
-                stage: String,
+                stage: EvmBalanceFailureStage,
                 collection_ordinal: u32,
-                code: String,
+                code: EvmBalanceFailureCode,
             },
         }
 
@@ -2398,50 +2401,35 @@ impl<'de> Deserialize<'de> for EvmBalanceFailure {
             Wire::SourceUnavailable {
                 stage,
                 collection_ordinal,
-                code,
+                code:
+                    code @ (EvmBalanceFailureCode::ObservationUnavailable
+                    | EvmBalanceFailureCode::CollectionInvalid),
             } => Self::SourceUnavailable {
-                stage,
+                stage: stage.as_str().to_owned(),
                 collection_ordinal,
-                code,
+                code: code.as_str().to_owned(),
             },
             Wire::IntegrityBlocked {
                 stage,
                 collection_ordinal,
-                code,
+                code: EvmBalanceFailureCode::IntegrityBlocked,
             } => Self::IntegrityBlocked {
-                stage,
+                stage: stage.as_str().to_owned(),
                 collection_ordinal,
-                code,
+                code: EvmBalanceFailureCode::IntegrityBlocked.as_str().to_owned(),
             },
+            _ => return Err(de::Error::custom(EvmDomainError::InvalidValue)),
         };
-        value.validate().map(|_| value).map_err(de::Error::custom)
-    }
-}
-
-impl EvmBalanceFailure {
-    fn validate(&self) -> Result<(), EvmDomainError> {
-        let valid = match self {
-            Self::SourceUnavailable { stage, code, .. } => {
-                EvmBalanceFailureStage::is_code(stage)
-                    && matches!(
-                        code.as_str(),
-                        "observation_unavailable" | "collection_invalid"
-                    )
-            }
-            Self::IntegrityBlocked { stage, code, .. } => {
-                EvmBalanceFailureStage::is_code(stage) && code == "integrity_blocked"
-            }
-        };
-        valid.then_some(()).ok_or(EvmDomainError::InvalidValue)
+        Ok(value)
     }
 }
 
 impl FailureValue for EvmBalanceFailure {
     fn integrity_blocked() -> Self {
         Self::IntegrityBlocked {
-            stage: EvmBalanceFailureStage::Consolidate.code(),
+            stage: EvmBalanceFailureStage::Consolidate.as_str().to_owned(),
             collection_ordinal: 0,
-            code: "integrity_blocked".to_owned(),
+            code: EvmBalanceFailureCode::IntegrityBlocked.as_str().to_owned(),
         }
     }
 }
@@ -2451,9 +2439,9 @@ fn balance_integrity_failure<K: MfmValueTrait>(
     stage: EvmBalanceFailureStage,
 ) -> EvmBalanceFailure {
     EvmBalanceFailure::IntegrityBlocked {
-        stage: stage.code(),
+        stage: stage.as_str().to_owned(),
         collection_ordinal: context.metadata.collection_ordinal,
-        code: "integrity_blocked".to_owned(),
+        code: EvmBalanceFailureCode::IntegrityBlocked.as_str().to_owned(),
     }
 }
 
@@ -2913,9 +2901,9 @@ fn consolidate_balance_collection<K: MfmValueTrait>(
     {
         Ok(output) => success(output),
         Err(_) => failure(EvmBalanceFailure::SourceUnavailable {
-            stage: EvmBalanceFailureStage::Consolidate.code(),
+            stage: EvmBalanceFailureStage::Consolidate.as_str().to_owned(),
             collection_ordinal,
-            code: "collection_invalid".to_owned(),
+            code: EvmBalanceFailureCode::CollectionInvalid.as_str().to_owned(),
         }),
     }
 }
@@ -3063,9 +3051,11 @@ fn balance_failure<K: MfmValueTrait, O>(
     stage: EvmBalanceFailureStage,
 ) -> ProposedStateOutcome<O, EvmBalanceFailure> {
     failure(EvmBalanceFailure::SourceUnavailable {
-        stage: stage.code(),
+        stage: stage.as_str().to_owned(),
         collection_ordinal: context.metadata.collection_ordinal,
-        code: "observation_unavailable".to_owned(),
+        code: EvmBalanceFailureCode::ObservationUnavailable
+            .as_str()
+            .to_owned(),
     })
 }
 
