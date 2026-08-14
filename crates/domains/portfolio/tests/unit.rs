@@ -60,24 +60,27 @@ fn planned_input(requests: Vec<EvmBalanceRequest>) -> PortfolioSnapshotInput {
     .expect("input")
 }
 
-fn result_for(request: &EvmBalanceRequest) -> PortfolioCompletedCollection {
+fn result_for(request: &EvmBalanceRequest) -> PortfolioSnapshotCollection {
     let anchor = PortfolioAnchor::new("1".to_owned(), "0xblock".to_owned()).expect("anchor");
-    PortfolioCompletedCollection {
+    PortfolioSnapshotCollection {
+        collection_ordinal: 0,
         chain_id: 1,
-        anchor: anchor.clone(),
-        balances: request
+        anchor,
+        holdings: request
             .sources
             .iter()
             .cloned()
-            .map(|source| PortfolioCompletedBalance {
+            .map(|source| PortfolioHolding {
                 source_id: source.source_id,
-                address: source.address,
-                token: source.token,
+                asset: match source.token {
+                    None => PortfolioAsset::Native,
+                    Some(contract) => PortfolioAsset::Token { contract },
+                },
                 decimals: request.decimals,
                 raw_units: "0".to_owned(),
+                amount_dec: decimal_amount("0", request.decimals),
             })
             .collect(),
-        total_scaled: "0".to_owned(),
     }
 }
 
@@ -87,7 +90,7 @@ fn continuation_derives_its_remaining_declaration_suffix() {
     let mut continuation = PortfolioContinuation::new(input, Vec::new()).expect("continuation");
     assert_eq!(continuation.next_collection_ordinal(), Some(0));
     let mut foreign_result = result_for(&request());
-    foreign_result.balances[0].source_id = "foreign-source".to_owned();
+    foreign_result.holdings[0].source_id = "foreign-source".to_owned();
     continuation.completed_collections.push(foreign_result);
     assert_eq!(
         continuation.validate(),
@@ -96,14 +99,47 @@ fn continuation_derives_its_remaining_declaration_suffix() {
 
     let input = planned_input(vec![request()]);
     let mut continuation = PortfolioContinuation::new(input, Vec::new()).expect("continuation");
-    let mut forged_total = result_for(&request());
-    forged_total.balances[0].raw_units = "1".to_owned();
-    forged_total.total_scaled = "2".to_owned();
-    continuation.completed_collections.push(forged_total);
+    let mut inconsistent_amount = result_for(&request());
+    inconsistent_amount.holdings[0].amount_dec = "2".to_owned();
+    continuation.completed_collections.push(inconsistent_amount);
     assert_eq!(
         continuation.validate(),
         Err(PortfolioError::InvalidContinuation)
     );
+}
+
+#[test]
+fn resume_rechecks_the_evm_scaled_total_before_storing_the_snapshot_projection() {
+    let request = request();
+    let input = planned_input(vec![request.clone()]);
+    let continuation = PortfolioContinuation::new(input, Vec::new()).expect("continuation");
+    let completion: EvmBalanceCollectionCompletion<PortfolioContinuation> =
+        serde_json::from_value(serde_json::json!({
+            "caller_context": &continuation,
+            "collection_ordinal": 0,
+            "collection": {
+                "chain_id": 1,
+                "anchor": { "number": "1", "hash": "0xblock" },
+                "balances": [{
+                    "source": {
+                        "source_id": &request.sources[0].source_id,
+                        "chain_id": 1,
+                        "address": &request.sources[0].address,
+                        "asset": { "kind": "native" },
+                    },
+                    "decimals": 18,
+                    "raw_units": "1",
+                }],
+                "total_scaled": "2",
+            },
+        }))
+        .expect("syntactically valid EVM completion");
+    let mfm_capabilities::ProposedStateOutcome::Failure { failure } =
+        resume_portfolio_collection(completion)
+    else {
+        panic!("mismatched EVM total must fail");
+    };
+    assert_eq!(failure, PortfolioSnapshotFailure::ConsolidationFailed);
 }
 
 #[test]
@@ -250,17 +286,17 @@ fn consolidation_projects_the_frozen_decimal_snapshot_wire() {
         "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
     )
     .expect("anchor");
-    let collection = PortfolioCompletedCollection {
+    let collection = PortfolioSnapshotCollection {
+        collection_ordinal: 0,
         chain_id: 1,
         anchor,
-        balances: vec![PortfolioCompletedBalance {
+        holdings: vec![PortfolioHolding {
             source_id: "wallet-a.native".to_owned(),
-            address: "0x1111111111111111111111111111111111111111".to_owned(),
-            token: None,
+            asset: PortfolioAsset::Native,
             decimals: 18,
             raw_units: "1000000000000000000".to_owned(),
+            amount_dec: "1.000000000000000000".to_owned(),
         }],
-        total_scaled: "1000000000000000000".to_owned(),
     };
     let continuation =
         PortfolioContinuation::new(input, vec![collection]).expect("complete continuation");

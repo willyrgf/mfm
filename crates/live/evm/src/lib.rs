@@ -386,47 +386,35 @@ impl EvmAdapterBinding {
                 operation: response_operation,
                 value,
             } if call_id == *call.call_id() && response_operation == operation => {
-                EvmReadEvidence::Returned {
-                    operation: operation_name.to_owned(),
-                    value,
-                }
+                EvmReadEvidence::Returned { value }
             }
             EvmProviderResponse::Rejected {
                 call_id,
                 operation: response_operation,
-                code,
+                code: _,
             } if call_id == *call.call_id() && response_operation == operation => {
-                EvmReadEvidence::Rejected {
-                    operation: operation_name.to_owned(),
-                    code,
-                }
+                EvmReadEvidence::Rejected
             }
             EvmProviderResponse::SafeFailure {
                 call_id,
                 operation: response_operation,
-                code,
+                code: _,
             } if call_id == *call.call_id() && response_operation == operation => {
-                EvmReadEvidence::SafeFailure {
-                    operation: operation_name.to_owned(),
-                    code,
-                }
+                EvmReadEvidence::SafeFailure
             }
             EvmProviderResponse::IntegrityBlocked {
                 call_id,
                 operation: response_operation,
-                code,
+                code: _,
             } if call_id == *call.call_id() && response_operation == operation => {
-                EvmReadEvidence::IntegrityBlocked {
-                    operation: operation_name.to_owned(),
-                    code,
-                }
+                EvmReadEvidence::IntegrityBlocked
             }
             _ => return Ok(unresolved(call, UnresolvedClassification::InvalidResponse)),
         };
         if C::bind_evidence(&intent, &evidence).is_err() {
             return Ok(unresolved(call, UnresolvedClassification::InvalidResponse));
         }
-        let integrity = matches!(evidence, EvmReadEvidence::IntegrityBlocked { .. });
+        let integrity = matches!(evidence, EvmReadEvidence::IntegrityBlocked);
         accept(call, evidence, integrity)
     }
 
@@ -548,27 +536,17 @@ impl EvmAdapterBinding {
                 operation,
                 transaction_hash,
             } if call_id == *call.call_id() && operation == purpose => {
-                BroadcastEvidence::Returned {
-                    candidate_id: intent.candidate_id.clone(),
-                    transaction_hash,
-                }
+                BroadcastEvidence::Returned { transaction_hash }
             }
             EvmProviderResponse::Rejected {
                 call_id,
                 operation,
-                code,
-            } if call_id == *call.call_id() && operation == purpose => {
-                BroadcastEvidence::Rejected {
-                    candidate_id: intent.candidate_id.clone(),
-                    code,
-                }
-            }
+                code: _,
+            } if call_id == *call.call_id() && operation == purpose => BroadcastEvidence::Rejected,
             EvmProviderResponse::IntegrityBlocked {
                 call_id, operation, ..
             } if call_id == *call.call_id() && operation == purpose => {
-                BroadcastEvidence::IntegrityBlocked {
-                    candidate_id: intent.candidate_id.clone(),
-                }
+                BroadcastEvidence::IntegrityBlocked
             }
             EvmProviderResponse::PossibleEntry {
                 call_id,
@@ -588,7 +566,7 @@ impl EvmAdapterBinding {
         if C::bind_evidence(&intent, &evidence).is_err() {
             return Ok(unresolved(call, UnresolvedClassification::InvalidResponse));
         }
-        let integrity = matches!(evidence, BroadcastEvidence::IntegrityBlocked { .. });
+        let integrity = matches!(evidence, BroadcastEvidence::IntegrityBlocked);
         accept(call, evidence, integrity)
     }
 }
