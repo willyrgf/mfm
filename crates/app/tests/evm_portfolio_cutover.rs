@@ -130,9 +130,16 @@ impl EvmProvider for ScriptedProvider {
     }
 }
 
+#[derive(Clone, Copy)]
+enum NonceOutcome {
+    Reserved,
+    Rejected,
+    AcknowledgementUnknown,
+}
+
 struct ScriptedNonceAuthority {
     calls: Arc<AtomicUsize>,
-    rejected: bool,
+    outcome: NonceOutcome,
 }
 
 impl WalletNonceAuthority for ScriptedNonceAuthority {
@@ -141,12 +148,12 @@ impl WalletNonceAuthority for ScriptedNonceAuthority {
         _operation_key: StableId,
     ) -> BoxFuture<std::result::Result<NonceReservationEvidence, EvmAdapterError>> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        let rejected = self.rejected;
+        let outcome = self.outcome;
         Box::pin(async move {
-            if rejected {
-                Ok(NonceReservationEvidence::Rejected)
-            } else {
-                Ok(NonceReservationEvidence::Reserved { nonce: 7 })
+            match outcome {
+                NonceOutcome::Reserved => Ok(NonceReservationEvidence::Reserved { nonce: 7 }),
+                NonceOutcome::Rejected => Ok(NonceReservationEvidence::Rejected),
+                NonceOutcome::AcknowledgementUnknown => Err(EvmAdapterError::Unresolved),
             }
         })
     }
@@ -328,6 +335,21 @@ struct Fixture {
 }
 
 async fn compose_application(rejected_operation: Option<&str>, reject_nonce: bool) -> Fixture {
+    compose_application_with_nonce_outcome(
+        rejected_operation,
+        if reject_nonce {
+            NonceOutcome::Rejected
+        } else {
+            NonceOutcome::Reserved
+        },
+    )
+    .await
+}
+
+async fn compose_application_with_nonce_outcome(
+    rejected_operation: Option<&str>,
+    nonce_outcome: NonceOutcome,
+) -> Fixture {
     let provider_calls = Arc::new(AtomicUsize::new(0));
     let nonce_calls = Arc::new(AtomicUsize::new(0));
     let signer_calls = Arc::new(AtomicUsize::new(0));
@@ -341,7 +363,7 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
     });
     let nonce_authority = Arc::new(ScriptedNonceAuthority {
         calls: Arc::clone(&nonce_calls),
-        rejected: reject_nonce,
+        outcome: nonce_outcome,
     });
     let signer = Arc::new(ScriptedSigner {
         identity: PublicSignerKeyInstance {
@@ -806,6 +828,34 @@ async fn one_live_runtime_drives_submission_and_native_token_portfolio_programs(
         provider_calls_after_execution,
         "callback-free read, replay, trace, and export must not re-enter the provider",
     );
+}
+
+#[tokio::test]
+async fn nonce_acknowledgement_unknown_parks_without_a_second_reservation() {
+    let fixture =
+        compose_application_with_nonce_outcome(None, NonceOutcome::AcknowledgementUnknown).await;
+    let run_id = admit_submission(&fixture.application, "nonce-acknowledgement-unknown").await;
+    let first = fixture
+        .application
+        .drive(run_id.clone())
+        .await
+        .expect("first nonce drive");
+    assert_eq!(first.status, RunStatus::WaitingPreparation);
+    assert_eq!(fixture.nonce_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+
+    let resumed = fixture
+        .application
+        .drive(run_id)
+        .await
+        .expect("parked nonce resume");
+    assert_eq!(resumed.status, RunStatus::WaitingPreparation);
+    assert_eq!(resumed.head_sequence, first.head_sequence);
+    assert_eq!(fixture.nonce_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(fixture.signer_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    assert_provider_operations(&fixture, &[]);
 }
 
 async fn admit_submission(application: &Application, idempotency_key: &str) -> mfm_ids::RunId {
