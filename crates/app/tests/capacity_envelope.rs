@@ -68,11 +68,13 @@ fn make_submission_bindings(
 ) -> EvmSubmissionBindings {
     EvmSubmissionBindings::new(
         target,
-        effect_binding::<EvmState<0, 0>, EvmCapability<0>>(None),
-        effect_binding::<EvmState<0, 2>, EvmCapability<1>>(Some(signer)),
-        read_binding::<EvmState<0, 3>, EvmCapability<3>>(),
-        read_binding::<EvmState<0, 4>, EvmCapability<4>>(),
-        read_binding::<EvmState<0, 5>, EvmCapability<5>>(),
+        [
+            effect_binding::<EvmState<0, 0>, EvmCapability<0>>(None),
+            effect_binding::<EvmState<0, 2>, EvmCapability<1>>(Some(signer)),
+            read_binding::<EvmState<0, 3>, EvmCapability<3>>(),
+            read_binding::<EvmState<0, 4>, EvmCapability<3>>(),
+            read_binding::<EvmState<0, 5>, EvmCapability<3>>(),
+        ],
     )
     .expect("submission bindings")
 }
@@ -80,12 +82,14 @@ fn make_submission_bindings(
 fn balance_bindings() -> EvmBalanceBindings {
     EvmBalanceBindings::new(
         1,
-        read_binding::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(),
-        read_binding::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>(),
-        read_binding::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>(),
-        read_binding::<EvmState<1, 4, PortfolioContinuation>, EvmCapability<7>>(),
-        read_binding::<EvmState<1, 5, PortfolioContinuation>, EvmCapability<7>>(),
-        read_binding::<EvmState<1, 6, PortfolioContinuation>, EvmCapability<6>>(),
+        [
+            read_binding::<EvmState<1, 0, PortfolioContinuation>, EvmCapability<2>>(),
+            read_binding::<EvmState<1, 1, PortfolioContinuation>, EvmCapability<6>>(),
+            read_binding::<EvmState<1, 3, PortfolioContinuation>, EvmCapability<7>>(),
+            read_binding::<EvmState<1, 4, PortfolioContinuation>, EvmCapability<7>>(),
+            read_binding::<EvmState<1, 5, PortfolioContinuation>, EvmCapability<7>>(),
+            read_binding::<EvmState<1, 6, PortfolioContinuation>, EvmCapability<6>>(),
+        ],
     )
     .expect("balance bindings")
 }
@@ -135,10 +139,10 @@ fn maximum_entry_point_programs_record_capacity_envelope() {
         .as_bytes()
         .len();
     let evm_progress: EvmSubmissionProgress = serde_json::from_value(json!({
+        "request": &evm_input,
         "phase": {
             "kind": "candidate",
             "value": {
-                "request": &evm_input,
                 "nonce": u64::MAX,
                 "candidate_id": format!(
                     "mfm.evm.candidate/{}/{}/{}/{}",
@@ -194,19 +198,19 @@ fn maximum_entry_point_programs_record_capacity_envelope() {
         .map(|ordinal| {
             let collection = request(ordinal);
             json!({
+                "collection_ordinal": ordinal,
                 "chain_id": 1,
                 "anchor": {
                     "number": "100",
                     "hash": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 },
-                "balances": collection.sources.iter().map(|source| json!({
+                "holdings": collection.sources.iter().map(|source| json!({
                     "source_id": &source.source_id,
-                    "address": &source.address,
-                    "token": &source.token,
+                    "asset": { "kind": "native" },
                     "decimals": 18,
                     "raw_units": "0",
+                    "amount_dec": "0.000000000000000000",
                 })).collect::<Vec<_>>(),
-                "total_scaled": "0",
             })
         })
         .collect::<Vec<_>>();

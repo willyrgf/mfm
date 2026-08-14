@@ -302,6 +302,58 @@ fn read_evidence_requires_the_exact_operation_subject_and_value() {
     )
     .is_err());
 
+    for (intent, evidence) in [
+        (
+            EvmReadIntent::new(
+                "mfm.evm.read-transaction-receipt@1".to_owned(),
+                1,
+                EvmReadSubject::TransactionReceipt {
+                    transaction_hash: "0xtx".to_owned(),
+                },
+            )
+            .expect("receipt intent"),
+            EvmReadEvidence::Returned {
+                value: EvmReadValue::Receipt {
+                    transaction_hash: "0xtx".to_owned(),
+                    execution_disposition: "succeeded".to_owned(),
+                    inclusion_block_number: "1".to_owned(),
+                    inclusion_block_hash: "0xblock".to_owned(),
+                },
+            },
+        ),
+        (
+            EvmReadIntent::new(
+                "mfm.evm.read-finalized-head@1".to_owned(),
+                1,
+                EvmReadSubject::FinalizedHead,
+            )
+            .expect("finalized-head intent"),
+            EvmReadEvidence::Returned {
+                value: EvmReadValue::FinalizedHead {
+                    number: "1".to_owned(),
+                },
+            },
+        ),
+        (
+            EvmReadIntent::new(
+                "mfm.evm.read-canonical-inclusion-block@1".to_owned(),
+                1,
+                EvmReadSubject::CanonicalInclusionBlock {
+                    number: "1".to_owned(),
+                },
+            )
+            .expect("canonical-block intent"),
+            EvmReadEvidence::Returned {
+                value: EvmReadValue::CanonicalBlock {
+                    number: "1".to_owned(),
+                    hash: "0xblock".to_owned(),
+                },
+            },
+        ),
+    ] {
+        assert!(EvmCapability::<3>::bind_evidence(&intent, &evidence).is_ok());
+    }
+
     let source = EvmBalanceSource {
         source_id: "source-1".to_owned(),
         chain_id: 1,

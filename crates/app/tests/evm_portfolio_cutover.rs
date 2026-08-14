@@ -371,8 +371,8 @@ async fn compose_application(rejected_operation: Option<&str>, reject_nonce: boo
         Some(signer_ref.clone()),
     );
     let receipt = read_binding::<EvmState<0, 3>, EvmCapability<3>>(&physical_target);
-    let finalized_head = read_binding::<EvmState<0, 4>, EvmCapability<4>>(&physical_target);
-    let canonical_block = read_binding::<EvmState<0, 5>, EvmCapability<5>>(&physical_target);
+    let finalized_head = read_binding::<EvmState<0, 4>, EvmCapability<3>>(&physical_target);
+    let canonical_block = read_binding::<EvmState<0, 5>, EvmCapability<3>>(&physical_target);
     let submission_bindings = EvmSubmissionBindings::new(
         transaction_target.clone(),
         [

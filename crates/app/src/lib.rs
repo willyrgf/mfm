@@ -631,12 +631,6 @@ fn register_catalog_values(builder: &mut ProgramCatalogBuilder) -> Result<()> {
         .register_capability::<EvmCapability<3>>()
         .map_err(|_| PublicError::Internal)?;
     builder
-        .register_capability::<EvmCapability<4>>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
-        .register_capability::<EvmCapability<5>>()
-        .map_err(|_| PublicError::Internal)?;
-    builder
         .register_capability::<EvmCapability<6>>()
         .map_err(|_| PublicError::Internal)?;
     builder
