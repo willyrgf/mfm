@@ -34,41 +34,31 @@ canonical bytes, bounded by the run ceiling.
 
 ## Maximum fixtures and exact/+1 checks
 
-The current production fixture families are the two builders in `crates/app/src/lib.rs`: one EVM
-submission with four sequential State declarations and one Portfolio plan that expands each
-declared collection and source into explicit State/Match declarations. The executable task
-`capacity-envelope` runs the maximum App, Runtime, and configuration fixtures with `--nocapture`.
+The current production fixture families use the domain-owned EVM and Portfolio planners through
+`crates/app/tests/capacity_envelope.rs`: one EVM submission with its receipt/finality suffix and
+one Portfolio plan that expands each declared collection and source into explicit State/Match
+declarations. The executable task `capacity-envelope` runs the maximum App, Runtime, and
+configuration fixtures with `--nocapture`.
 
 | Measurement | EVM submission | Portfolio snapshot |
 | --- | ---: | ---: |
-| Program declarations | 4 | 963 |
-| canonical Program bytes | 6,798 | 1,566,954 |
-| maximum `C0` canonical bytes | 262,296 | 6,284 |
-| maximum recorded `Cn` canonical bytes | 262,382 | 12,736 |
-| entry fixture expansion | four sequential States | 64 collections / 64 total sources |
+| Program declarations | 7 | 770 |
+| canonical Program bytes | 17,173 | 1,597,453 |
+| maximum `C0` canonical bytes | 262,594 | 26,744 |
+| maximum recorded `Cn` canonical bytes | 262,787 | 44,168 |
+| entry fixture expansion | seven sequential States | 64 collections / 64 total sources |
 
-The EVM fixture uses the exact 128 KiB transaction-data bound, constructs the maximum candidate
-context before broadcast, finishes both Programs, and decodes each finished canonical document
+The EVM fixture uses the exact 128 KiB transaction-data bound, performs the durable
+nonce-to-candidate handoff, finishes both Programs, and decodes each finished canonical document
 through `ProgramIngress`. The Portfolio fixture constructs all 64 completed collection results
 before constructing its final continuation, so the `Cn` measurement covers retained cumulative
 results rather than only the empty continuation.
 
-The Runtime fixture `pure_session_advances_through_runtime_and_store` records both the retained
-session and the one-shot cold `resume_run(...).drive()` path:
-
-| Executor path | head | retained canonical frame bytes | latest context bytes |
-| --- | ---: | ---: | ---: |
-| retained hot session | 2 | 4,063 | 11 |
-| one-shot cold resume/drive | 3 | 6,194 | 11 |
-
-The retained canonical-byte total is the portable, allocator-independent high-water proxy used by
-this artifact (`frame bytes + latest context bytes`). On Linux the same fixture also records
-`/proc/self/status` `VmHWM` samples after hot advancement and cold resume; those samples are
-diagnostic process measurements and include the test harness, while the canonical-byte total is
-the portable contract bound. Neither is an RSS or latency acceptance threshold. The test also
-counts the pure State entries and proves that cold resume does not re-execute the already
-concluded State. No executor, cache, checkpoint, suffix protocol, or structural sharing is
-retained.
+The Runtime fixture `pure_session_advances_through_runtime_and_store` advances the first repeated
+semantic State in a retained session to head 2, drops that owner, then cold-resumes the persisted
+Program and drives the second occurrence to head 3. It counts exactly two State entries, proving
+that cold resume neither rebuilds the Program nor re-executes the concluded occurrence. No
+executor, cache, checkpoint, suffix protocol, or structural sharing is retained.
 
 Exact-bound and independent bound-plus-one evidence is executable at each owner:
 
