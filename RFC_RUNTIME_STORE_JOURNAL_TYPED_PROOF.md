@@ -1,6 +1,6 @@
 # RFC: establish the core Runtime, Journal, and Store proof path
 
-Status: selected implementation target; the material validation artifacts below remain required
+Status: selected implementation target; the material validation artifact below remains required
 before implementation planning
 
 This RFC is the clean-slate target for the MFM core proof path. It replaces the conflicting runtime,
@@ -18,8 +18,8 @@ The target has four semantic owners:
 | Owner | Sole responsibility |
 | --- | --- |
 | Program | The immutable State-or-Match graph and its exact persisted value, State, capability, and binding associations |
-| Runtime | Program association, the sole semantic reducer, exact registered State entry, typed execution, bounded caller-driven progression, configuration qualification, and RunView |
-| Journal | Exact canonical run/configuration/portable wire formats, content addressing, structural qualification, recursive heads, and fixed format limits |
+| Runtime | Program association, the sole semantic reducer, exact registered State entry, typed execution, bounded caller-driven progression, and RunView |
+| Journal | Exact canonical run-frame wire, content addressing, structural qualification, recursive heads, frame-local object closure, and fixed format limits |
 | Store | Mechanical complete loads, exact-head compare-and-append, idempotent physical equality, durable reservation arithmetic, and atomic PostgreSQL or Memory persistence |
 
 Application and transports parse requests, supply explicit identities, call Runtime, and render
@@ -33,6 +33,17 @@ replacement incarnation concept.
 Facts are not part of this target. No current admitted capability consumes prior-run facts, so the
 fact selection/publication/proof system is deleted rather than rebuilt speculatively.
 
+Independently published configuration is not part of this target. Domain material required to
+reproduce a run is retained in the Program or typed admitted context `C0`; deployment clients,
+credentials, and other live bindings remain process-local in RuntimeAssembly and adapters. The
+MfmConfig contract, configuration streams, latest lookup, and configuration persistence are
+deleted.
+
+Portable bundles and offline inspection are not part of this target. No current core consumer
+requires a second complete-history ingress or export format. Runtime reads and qualifies durable
+history only through Store. A future portability feature requires a consumer-driven RFC rather
+than reserving another wire surface now.
+
 Runtime has no cancellation concept. A supported caller that starts a mutating Runtime future must
 drive it to completion. Runtime does not add cancellation tokens, timeout wrappers, detached
 completion tasks, pending-result custody, or Runtime-owned semaphores. Synchronous State work is
@@ -44,18 +55,12 @@ recovery authority.
 
 ## Material uncertainties
 
-No material architecture choice remains open. These concrete validation artifacts are still
-required before implementation planning:
+No material architecture choice remains open. This concrete validation artifact is still required
+before implementation planning:
 
-1. **Configuration instance inventory.** ConfigurationKey uses one explicit stable instance id for
-   every independently current configuration series. The mechanism is settled, but the exact EVM
-   and Portfolio instance ids and cardinalities are not yet recorded. An overly broad id makes
-   unrelated publishers overwrite latest; an overly narrow id makes intended consumers miss
-   updates. Resolve by checking in the complete instance inventory before codec goldens are frozen.
-2. **Transport retry inventory.** Runtime retains nothing after indeterminate admission or
-   configuration publication. Callers must reproduce the same explicit RunId or configuration
-   instance, expected ConfigurationPosition, and canonical typed inputs. Current CLI and REST retry
-   behavior has not yet been inventoried against that rule. If callers cannot reproduce those
+1. **Transport retry inventory.** Runtime retains nothing after indeterminate admission. Callers
+   must reproduce the same explicit RunId, Program, and canonical typed `C0`. Current CLI and REST
+   retry behavior has not yet been inventoried against that rule. If callers cannot reproduce those
    inputs, an indeterminate request cannot be retried honestly. Resolve by freezing request,
    response, and retry behavior for every current transport.
 
@@ -68,7 +73,12 @@ The following are settled contracts, not uncertainties:
 - an Effect may park after Adapter returns Unresolved or after its conclusion append is
   indeterminate and later absent;
 - blocking State/codec callbacks are trusted, bounded-input, pure, and terminating;
-- facts, tenant, scope, epoch, identity rotation, and database incarnation are absent;
+- facts, independently published configuration, portable bundles, tenant, scope, epoch, identity
+  rotation, and database incarnation are absent;
+- every frame carries all canonical objects directly named by its record; there is no
+  history-dependent first-reference dictionary, object-count limit, or object reservation;
+- exact qualified record equality uses the closed record fields and content references directly;
+  there is no separate record digest;
 - trace and access-audit DTOs are not core Runtime APIs;
 - independent execution uses a fresh caller-supplied RunId.
 
@@ -143,8 +153,7 @@ Application currently drives one State at a time and retains suspended Runtime/S
 infers status from frames and participates in acknowledgement recovery.
 
 Runtime already owns all information needed to advance or inspect a run. Application should see
-only start, resume, read, export, portable inspection, configuration operations, RunView, and
-reviewed errors.
+only start, resume, read, RunView, and reviewed errors.
 
 ### 1.6 Unused protocols dominate the core
 
@@ -156,6 +165,17 @@ capability uses no prior facts and every current success proposes an empty set.
 The target removes that protocol. A future consumer-driven fact RFC may introduce a new clean
 format only after defining its real key, multiplicity, freshness, retention, threat model, and
 operational envelope.
+
+The current independently published configuration protocol similarly adds a second value
+lifecycle, latest-versus-exact lookup, CAS, revisions, SQL, retry behavior, and admission coupling.
+No retained domain value needs that lifecycle: reproducible policy belongs in Program or `C0`, and
+live deployment material belongs in assembly/adapters. The target deletes the protocol instead of
+preserving a unit or empty configuration.
+
+Portable bundles add another complete-history wire, decode budget, and semantic ingress solely for
+an unused export/inspection surface. Store-backed Runtime read is the one supported inspection
+path. Portability may return only with a concrete external consumer and its own threat and
+transport contract.
 
 ### 1.7 Persisted identities model authorities outside the product
 
@@ -186,7 +206,8 @@ able to write is unsupported operator behavior; the core does not pretend to fen
 Program does not depend on Runtime or Store. Journal depends only on stable ids, canonical/value
 representation, and its own record types. Store depends on stable ids and opaque Journal
 representations, never on Program, State, capabilities, domains, or Runtime selection types.
-Portable bytes enter Journal structural decoding and then RuntimeAssembly semantic inspection.
+Runtime receives retained bytes only from Store, passes them through Journal structural decoding,
+and then performs semantic reduction.
 
 ### 2.2 Validation ownership
 
@@ -198,7 +219,7 @@ Validation remains where trust changes:
 | A value is canonical, float-free, contract-bound, and content-addressed | Runtime value registration yields ProvenValue of T |
 | A Program document is canonical and structurally valid | Program decoder yields Program |
 | A Program is completely supported by one process assembly | Runtime yields ExecutableProgram |
-| A frame/configuration/bundle is exact canonical target wire | Journal yields an opaque qualified type |
+| A frame is exact canonical target wire | Journal yields an opaque qualified type |
 | A retained run is a complete structurally valid hash chain | Journal yields JournalHistory |
 | A history is semantically valid under its retained Program | Runtime fold yields a private reduced state or RunView |
 | Provider evidence matches the exact call | Typed adapter/capability ingress |
@@ -268,13 +289,14 @@ Program retains one strict immutable State-or-Match document. Every State declar
   physical public target identity; and
 - the next control edge or terminal contract.
 
-The Program also persists its one entry point, exact admitted-context contract, and exact
-configuration contract. `C0` means that domain-owned typed admitted-context value. It is the first
-complete State context, not configuration `C` and not a transport request wrapper.
+The Program also persists its one entry point and exact admitted-context contract. `C0` is the
+domain-owned typed admitted-context value and the first complete State context, not a transport
+request wrapper. Every secret-free domain input needed to reproduce this run but not fixed by the
+Program is carried in `C0`.
 
 Program validates graph shape, reachable declarations, stable contract continuity, Match tag and
 payload continuity, and fixed graph/size limits. It performs no State execution, provider IO,
-configuration lookup, Store access, TypeId lookup, or erased value reification.
+Store access, TypeId lookup, or erased value reification.
 
 ProgramCatalog, catalog branding, public value reifiers, erased capability callbacks, and
 process-local catalog identity are deleted.
@@ -286,8 +308,7 @@ RuntimeAssemblyBuilder owns:
 - one exact value codec per stable value contract, schema, and Rust type association;
 - one exact State registration per complete persisted State execution association;
 - one exact adapter/capability registration per complete Access association;
-- one pure schema-derived Match projection for each registered closed-sum value; and
-- one configuration validation hook on a value slot when that type is also MfmConfig.
+- one pure schema-derived Match projection for each registered closed-sum value.
 
 Assembly finalization rejects duplicate or inconsistent registrations. Associating a retained
 Program produces ExecutableProgram only when every reachable declaration has one exact compatible
@@ -358,18 +379,28 @@ future.
 Box of Any is not prohibited inside this one private driver boundary. Any second supported
 erase/downcast workflow is prohibited.
 
-### 3.5 Configuration is a value contract
+### 3.5 No independent configuration lifecycle
 
-MfmConfig extends MfmValue and adds only deterministic semantic validation:
+The core has no MfmConfig trait, ProvenConfiguration owner, ConfigurationKey, mutable latest
+configuration, or configuration registry. Existing authoring structures named Config are migrated
+according to what they mean:
 
-~~~text
-MfmConfig: MfmValue {
-  validate(config) -> Result
-}
-~~~
+- secret-free material required to interpret every run using one Program is persisted in that
+  Program;
+- secret-free material selected independently for one run is part of typed `C0`; and
+- clients, credentials, connection material, and other live bindings remain process-local in
+  RuntimeAssembly or adapters; the exact secret-free physical target identity required by an
+  adapter association is already persisted in Program.
 
-Configuration registration enriches the same Runtime value slot. There is no second configuration
-codec registry, Rust-type-only routing, or duplicated schema reference.
+Concretely, EvmConfig and PortfolioConfig remain ordinary process-local composition/authoring
+inputs only. They lose MfmValue/MfmConfig derives and are never passed to Runtime, Journal, or
+Store. `plan_submission` and `plan_snapshot` validate them and consume their selected public
+material into one exact Program and typed `C0`; their admission plans return only those two durable
+inputs. Resume and read therefore need neither authoring structure. Existing `source_refs` plan
+outputs disappear with facts.
+
+Runtime never consults ambient or latest configuration while starting, resuming, or reading a
+run. A retained Program plus `C0` is the complete durable admission input.
 
 ## 4. Runtime design
 
@@ -379,7 +410,6 @@ Runtime owns one pure fold over:
 
 - an ExecutableProgram;
 - one JournalHistory;
-- the exact qualified ConfigurationRevision referenced by admission; and
 - the compatible RuntimeAssembly.
 
 The fold yields one private state:
@@ -392,7 +422,7 @@ The fold yields one private state:
 
 The reducer validates:
 
-- genesis/entry point/Program/context/configuration association;
+- genesis/entry point/Program/context association;
 - State-or-Match occurrence order;
 - input/output/failure contract continuity;
 - exact Access preparation and conclusion relationship;
@@ -402,10 +432,9 @@ The reducer validates:
 - terminality.
 
 It does not execute State preparation/evaluation/interpretation, call an adapter, perform provider
-IO, re-author a Program, or select current configuration.
+IO, or re-author a Program.
 
-Execution, resume, read, and portable inspection all use this reducer. There is no Store reducer or
-replay reducer.
+Execution, resume, and read all use this reducer. There is no Store reducer or replay reducer.
 
 ### 4.2 Direct-new provider-entry proof
 
@@ -555,22 +584,14 @@ acknowledgement was previously indeterminate may commit after an earlier view wa
 The core process-facing surface is:
 
 ~~~text
-publish_configuration<C>(instance_id, expected: Absent | ConfigurationPosition, C)
-  -> ProvenConfiguration<C>
-load_configuration<C>(ConfigurationRef) -> ProvenConfiguration<C>
-load_latest_configuration<C>(instance_id) -> ProvenConfiguration<C>
-
-start(run_id, Program, ProvenConfiguration<C>, typed_c0) -> RunView
+start(run_id, Program, typed_c0) -> RunView
 resume(run_id) -> RunView
 read(run_id) -> RunView
-export(run_id) -> PortableRunBundle
-RuntimeAssembly.inspect(PortableRunBundle) -> RunView
 ~~~
 
 The operation/domain layer deterministically constructs Program and `C0`; Runtime does not own an
-entry-point planner registry. start verifies the Program entry point and exact `C0`/configuration
-contracts before admission. start and resume may execute State/provider work. read, export, and
-inspect do not.
+entry-point planner registry. start verifies the Program entry point and exact `C0` contract before
+admission. start and resume may execute State/provider work. read does not.
 
 Absence, AdmissionConflict, semantic Conflict, Indeterminate, InvalidHistory,
 IncompatibleAssembly, Capacity, Unavailable, and redaction-safe Internal failure remain distinct
@@ -595,7 +616,14 @@ semantics:
 - arrays in their specified canonical order;
 - bounded strings, arrays, maps, and nesting;
 - canonical bytes must equal strict decode and re-encode; and
-- secrets are rejected before Journal construction.
+- construction inputs include only exact content references and canonical values supplied by the
+  Runtime-qualified path.
+
+Secret exclusion is a layered input contract, not a semantic property discoverable by a generic
+codec. Domain types and adapters keep secrets outside MfmValue inputs; Runtime value qualification
+rejects the repository's mechanically identifiable secret markers before Journal construction;
+and Journal never logs canonical values or includes them in diagnostics. An arbitrary secret
+encoded as an ordinary string is not claimed to be detectable by Journal.
 
 Protocol counters are non-negative JSON integers bounded by the fixed limits below. Domain values
 retain the canonical representation fixed by their MfmValue schemas.
@@ -630,8 +658,7 @@ RunAdmitted {
   kind: "run_admitted",
   entry_point,
   program_ref: content_ref,
-  admitted_context: content_ref,
-  configuration_ref
+  admitted_context: content_ref
 }
 
 StatePrepared {
@@ -667,20 +694,13 @@ material is duplicated in the semantic frame.
 An accepted integrity block is an Access conclusion with its accepted evidence and the exact
 registered failure outcome. It never invokes the ordinary Access interpreter.
 
-### 5.3 Exact first-reference object closure
+### 5.3 Exact frame-local object closure
 
-Let:
-
-- R_i be the set of data-object content references directly named by record i;
-- K_i be the cumulative object map after frame i; and
-- C_i be the frame i object map.
-
-The recurrence is:
+Let R_i be the set of data-object content references directly named by record i and C_i be the
+object map embedded in the same frame. The complete rule is:
 
 ~~~text
-K_0       = empty
-keys(C_i) = R_i minus keys(K_(i-1))
-K_i       = K_(i-1) union C_i
+keys(C_i) = R_i
 ~~~
 
 Direct data-object references are:
@@ -690,17 +710,22 @@ Direct data-object references are:
 - outcome object for StateConcludedPure; and
 - evidence and outcome objects for StateConcludedAccess.
 
-ConfigurationRef and stable contract/implementation references are external identities, not run
-closure objects. There is no implicit transitive object graph.
+Stable contract and implementation references are external identities, not closure objects. There
+is no implicit transitive object graph.
 
-Each new content reference has exactly one object whose nested canonical value hashes to that
-reference. A previously known object must not be embedded again. Missing, duplicate, conflicting,
-out-of-order, or unreferenced objects are invalid.
+Every direct content reference has exactly one object in that frame whose nested canonical value
+hashes to the reference. Missing, duplicate, conflicting, out-of-order, or unreferenced objects are
+invalid. A reference used by a later frame is embedded again in that later frame; cross-frame
+deduplication is deliberately not a wire invariant.
 
-The objects array is sorted by complete content reference. Journal exposes only the qualified
-cumulative object lookup needed by Runtime value registrations.
+The objects array is sorted by complete content reference. Because RunFrameV1 names at most two
+direct objects, frame count and canonical-byte limits already bound object processing. There is no
+first-reference dictionary, cumulative object-count limit, object slot reservation, or object
+accounting in Store. JournalHistory exposes only the qualified record and frame-local objects needed
+by Runtime; it has no cumulative object-store contract. Repeated bytes count fully toward
+MAX_RUN_BYTES, which is the accepted cost of deleting cross-frame dictionary state.
 
-### 5.4 Recursive run head and semantic record equality
+### 5.4 Recursive run head and exact record equality
 
 The frame head is:
 
@@ -725,24 +750,12 @@ RunPosition {
   run_sequence,
   head_digest
 }
-
-ConfigurationPosition {
-  revision_sequence,
-  head_digest
-}
 ~~~
 
-For Runtime race classification:
-
-~~~text
-record_digest = SHA-256(JCS {
-  domain: "mfm.run.record.v1",
-  record
-})
-~~~
-
-Value references already commit to exact canonical objects, so equal record digests define the
-exact semantic equality used by AlreadyConcludedSame and identical admission classification.
+Runtime race classification compares the closed qualified record fields directly. Value references
+already commit to exact canonical objects, so exact record equality defines AlreadyConcludedSame
+and identical admission classification without another digest, persisted identity, or public proof
+type.
 
 ### 5.5 Fixed run limits
 
@@ -752,102 +765,13 @@ The clean format freezes:
 | --- | ---: |
 | One canonical frame | 33,554,432 bytes |
 | Frames per run | 65,536 |
-| First-reference objects per run | 1,048,576 |
 | Canonical frame bytes per run | 536,870,912 bytes |
 
-The last three per-run ceilings are MAX_RUN_FRAMES, MAX_RUN_OBJECTS, and MAX_RUN_BYTES in table
-order. Frame bytes already contain first-reference object values, so objects are never charged a
-second time.
+The per-run ceilings are MAX_RUN_FRAMES and MAX_RUN_BYTES in table order. Frame bytes already
+contain every frame-local object value, so objects are charged exactly where their bytes occur and
+never require separate accounting.
 
 Changing a limit requires another deliberate persisted-format cutover.
-
-### 5.6 Configuration revision wire
-
-ConfigurationKeyMaterial is:
-
-~~~text
-{
-  instance_id,
-  contract_ref
-}
-~~~
-
-`instance_id` is the existing checked StableId string. It names one independently current logical
-series and carries no tenant, deployment, Store, or process identity.
-
-The key is:
-
-~~~text
-configuration_key = SHA-256(JCS {
-  domain: "mfm.configuration.key.v1",
-  instance_id,
-  contract_ref
-})
-~~~
-
-The contract reference already commits to its schema.
-
-One revision is:
-
-~~~text
-ConfigurationRevisionV1 {
-  domain: "mfm.configuration.revision.v1",
-  instance_id,
-  contract_ref,
-  revision_sequence,
-  previous_head_digest: null | digest,
-  value_ref,
-  canonical: raw canonical no-float configuration value
-}
-
-revision_head_digest = SHA-256(JCS(ConfigurationRevisionV1))
-~~~
-
-ConfigurationRef is:
-
-~~~text
-{
-  configuration_key,
-  revision_sequence,
-  revision_head_digest
-}
-~~~
-
-Sequence one uses null predecessor. Every later revision uses the exact preceding per-key head.
-There is no global configuration sequence, singleton head, separate envelope reference, duplicated
-schema reference, or through-global-head snapshot.
-
-The fixed per-key limits remain:
-
-| Resource | Exact limit |
-| --- | ---: |
-| One configuration revision | 16,777,216 bytes |
-| Revisions per ConfigurationKey | 1,024 |
-| Canonical revision bytes per ConfigurationKey | 67,108,864 bytes |
-
-### 5.7 Portable bundle
-
-The exact portable shape is:
-
-~~~text
-PortableRunBundleV1 {
-  domain: "mfm.portable-run-bundle.v1",
-  configuration_revision: ConfigurationRevisionV1,
-  run_frames: [complete ordered RunFrameV1 sequence through the exported head]
-}
-~~~
-
-The configuration revision must be the exact revision named by admission. Bundle decoding applies
-the configuration, per-frame, per-run, and total decode limits before allocation. The exact maximum
-canonical bundle length is 553,713,744 bytes: MAX_RUN_BYTES + the 16,777,216-byte configuration
-revision ceiling + at most 65,535 frame separators + 81 fixed wrapper bytes. That integer is
-MAX_PORTABLE_BUNDLE_BYTES, a format limit rather than a caller-selected budget.
-
-Journal strictly decodes and structurally qualifies it. RuntimeAssembly associates the retained
-Program and folds it through the same inspection path as Store-backed read.
-
-There is no run-only semantic bundle, fact proof, producer dependency DAG, Store brand, current
-authoring fallback, or second replay format.
 
 ## 6. Store and PostgreSQL design
 
@@ -864,15 +788,6 @@ append_run(&RunAppend)
 
 list_run_ids(PageRequest)
   -> BoundedRunIdPage
-
-load_latest_configuration(ConfigurationKey)
-  -> Absent | StoredConfigurationRevision
-
-load_configuration(ConfigurationRef)
-  -> Absent | StoredConfigurationRevision
-
-append_configuration(&ConfigurationAppend)
-  -> ConfigurationAppendResult
 
 check_ready()
   -> Result
@@ -892,8 +807,8 @@ before or wholly after the captured prefix, never a truncated mix.
 Store implementations have a non-persisted read budget no larger than the format ceilings. A valid
 run larger than the configured process budget produces load Capacity, not InvalidHistory.
 
-Store does not decode Program, reduce State-or-Match, select facts, reify domain values, qualify
-configuration as C, or construct provider authority.
+Store does not decode Program, reduce State-or-Match, select facts, reify domain values, or
+construct provider authority.
 
 ### 6.2 Run append command
 
@@ -999,18 +914,15 @@ Run head metadata contains:
   sequence,
   head_digest,
   total_bytes,
-  object_count,
   reserved_bytes,
-  reserved_frames,
-  reserved_objects
+  reserved_frames
 }
 ~~~
 
-Because object values are embedded:
+Because every frame contains its complete frame-local closure:
 
 ~~~text
 new_total_bytes = old_total_bytes + frame_byte_length
-new_object_count = old_object_count + frame_first_reference_object_count
 ~~~
 
 Reservation arithmetic under the same head transition is:
@@ -1026,20 +938,13 @@ new_reserved_frames =
     - released_reservation_frames
     + opened_reservation_frames
 
-new_reserved_objects =
-    old_reserved_objects
-    - released_reservation_objects
-    + opened_reservation_objects
-
 new_total_bytes + new_reserved_bytes <= MAX_RUN_BYTES
 new_sequence + new_reserved_frames <= MAX_RUN_FRAMES
-new_object_count + new_reserved_objects <= MAX_RUN_OBJECTS
 ~~~
 
 maximum_bytes means the maximum complete canonical conclusion-frame length, including its object
-closure. Every active Access reservation also reserves exactly one conclusion frame and two
-first-reference object slots, the maximum directly named by StateConcludedAccess. Those fixed
-liabilities are not caller-supplied command fields.
+closure. Every active Access reservation also reserves exactly one conclusion frame. That fixed
+frame liability is not a caller-supplied command field.
 
 ReservationKey is mechanically derived from RunId and preparation sequence:
 
@@ -1053,9 +958,9 @@ SHA-256(JCS {
 
 Open accompanies an Access preparation and creates one active row. Replace atomically removes the
 old Read row and creates the new row. Consume removes the exact active row and requires a conclusion
-frame no larger than its byte maximum and with no more than two first-reference objects. The three
-liabilities move in the same transaction; underflow, duplicate open, missing old row, or immutable
-limit failure rejects without mutation. Exact Existing never reapplies a transition.
+frame no larger than its byte maximum. The byte and frame liabilities move in the same transaction;
+underflow, duplicate open, missing old row, or immutable limit failure rejects without mutation.
+Exact Existing never reapplies a transition.
 
 ### 6.6 PostgreSQL run schema
 
@@ -1063,68 +968,14 @@ The logical schema contains:
 
 | Table | Key and retained material |
 | --- | --- |
-| run_frames | primary key (run_id, run_sequence); canonical bytes, head/predecessor, command digest, reservation instruction, byte/object deltas |
-| run_heads | primary key run_id; current position and cumulative byte/object plus active byte/frame/object reservation accounting |
+| run_frames | primary key (run_id, run_sequence); canonical bytes, head/predecessor, command digest, reservation instruction, and byte length |
+| run_heads | primary key run_id; current position and cumulative bytes plus active byte/frame reservation accounting |
 | run_reservations | primary key (run_id, preparation_sequence); active immutable maximum conclusion bytes |
 
 A unique per-run command-digest index supports exact historical Existing lookup. No separate
 command or receipt row exists.
 
-### 6.7 Configuration persistence
-
-Configuration streams are independent per ConfigurationKey. There is no global configuration
-head.
-
-ConfigurationAppend contains:
-
-~~~text
-{
-  expected_position: Absent | ConfigurationPosition,
-  revision: EncodedConfigurationRevision
-}
-~~~
-
-Its exact physical digest is:
-
-~~~text
-configuration_command_digest = SHA-256(JCS {
-  domain: "mfm.configuration.append-command.v1",
-  configuration_key,
-  expected_position,
-  revision_head_digest,
-  revision_byte_length
-})
-~~~
-
-PostgreSQL serializes the complete ConfigurationKey, including an absent first revision, then uses
-the same idempotency-first transaction ordering and exact material comparison as run append. It
-provides Inserted, Existing, Stale, and Indeterminate. ConfigurationAppendResult has the same three
-success variants over ConfigurationPosition, and the same StoreError contract. Exact revision rows
-retain their command digest and are their own receipts.
-
-The logical schema is:
-
-| Table | Key and retained material |
-| --- | --- |
-| configuration_revisions | primary key (configuration_key, revision_sequence); canonical bytes, predecessor/head, command digest, byte length |
-| configuration_heads | primary key configuration_key; current position and cumulative bytes |
-
-A unique per-key command-digest index supports exact historical Existing lookup.
-
-Latest load captures the key head and its exact revision row in one database snapshot. Exact load
-requires the complete ConfigurationRef to match one immutable row. Missing requested material is
-Absent; disagreement between a head and its retained row or internal length/accounting metadata is
-CorruptPhysicalState. Journal then strictly qualifies the returned canonical revision.
-
-Different keys do not contend. Same-key publication uses exact-head CAS. Admission binds an exact
-immutable ConfigurationRef and never requires it to remain latest.
-
-After indeterminate publication Runtime retains nothing. The caller either repeats the exact
-instance, expected position, and typed value or loads the exact/latest revision. Runtime never
-silently substitutes the then-latest position, because doing so would create a different revision
-rather than retry the uncertain command.
-
-### 6.8 EVM nonce persistence
+### 6.7 EVM nonce persistence
 
 Tenant removal must not merge wallets across chains. The exact public domain is:
 
@@ -1144,53 +995,31 @@ contract.
 Endpoint identity does not split one chain wallet nonce sequence. Credentials and signer secrets
 remain outside every persisted key.
 
-### 6.9 Global schema deletion
+### 6.8 Global schema deletion
 
 The target schema has no:
 
 - tenant, Store scope, writer epoch, active identity, rotation, or database incarnation tables;
 - global object or per-run object-membership tables;
-- append-request, configuration-request, or separate receipt tables;
+- append-request or separate receipt tables;
+- configuration revision, head, request, or receipt tables;
 - fact head, publication, sparse-tree, CT-log, proof, or node tables; or
-- global configuration head/sequence.
+- any global sequencing table.
 
 check_ready verifies only the one current schema/format baseline and connectivity. Schema version is
 a static compatibility check, not a writer authority.
 
 ## 7. Execution flows
 
-### 7.1 Configuration publication
-
-~~~text
-typed C
-  -> C::validate and Runtime value qualification
-  -> determine explicit ConfigurationKey
-  -> caller-supplied expected per-key position
-  -> Journal encode complete next revision
-  -> Store append
-
-Inserted | Existing
-  -> load/qualify exact revision
-  -> ProvenConfiguration<C>
-
-Stale
-  -> typed publication conflict; a new publication requires a newly observed expected position
-
-Indeterminate
-  -> retain nothing
-  -> caller loads or repeats the exact expected position and value
-~~~
-
-### 7.2 New run
+### 7.1 New run
 
 ~~~text
 operation/domain layer deterministically constructs Program and typed C0
   -> explicit fresh RunId
-  -> ProvenConfiguration<C>
   -> Program validation and Runtime association
   -> qualify C0 against Program's exact admitted-context contract
-  -> verify Program's exact configuration contract and entry point
-  -> Journal encode genesis with Program/C0 first-reference objects
+  -> verify Program's exact entry point
+  -> Journal encode genesis with complete frame-local Program/C0 objects
   -> Store append expected Absent
 
 Inserted
@@ -1212,7 +1041,7 @@ Indeterminate
 Core never derives RunId. Every independent execution uses a new caller-supplied value. Retry
 reuses the exact RunId and admission inputs.
 
-### 7.3 Hot Pure State
+### 7.2 Hot Pure State
 
 ~~~text
 Runnable Pure occurrence
@@ -1236,7 +1065,7 @@ Indeterminate
 
 Pure evaluation must be deterministic and perform no ambient IO.
 
-### 7.4 Hot Access State
+### 7.3 Hot Access State
 
 ~~~text
 Runnable Access occurrence
@@ -1295,7 +1124,7 @@ Indeterminate
 
 No path from retained preparation recreates the original provider entry.
 
-### 7.5 Resume, read, export, and inspect
+### 7.4 Resume and read
 
 resume:
 
@@ -1304,18 +1133,11 @@ Store complete current load
   -> JournalHistory
   -> retained Program decode
   -> Runtime association
-  -> exact configuration load/qualification
   -> Runtime fold
   -> bounded advance_until_stable
 ~~~
 
 read performs the same load, qualification, and fold but starts no State/provider work.
-
-export captures one exact current run and its exact configuration revision, then Journal encodes
-PortableRunBundle.
-
-inspect strictly decodes the bundle, associates its Program under RuntimeAssembly, qualifies its
-configuration, and runs the same fold with no State/provider work.
 
 There is no pending-owner resolution step.
 
@@ -1354,9 +1176,7 @@ brands, active-identity rows, rotation methods, identity retries, and every rela
 - hashes and canonical fixtures;
 - Store APIs and backend rows;
 - Runtime values and errors;
-- configuration;
 - App/transports;
-- portable bundles; and
 - EVM nonce authority.
 
 No replacement identifier may provide the same function under another name.
@@ -1371,9 +1191,11 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 
 ### 10.1 mfm-values and derive
 
-- make MfmConfig extend MfmValue;
 - add the reserved Never value contract;
 - retain strict canonical, schema, no-float, bounded-input, and content-reference rules;
+- reject mechanically identifiable secret markers during persistable value qualification without
+  claiming semantic secret discovery;
+- delete MfmConfig, ValidatedConfig, ProvenConfiguration, and the MfmConfig derive;
 - remove facts-related value/schema exports; and
 - update derives and compile-fail coverage.
 
@@ -1382,6 +1204,7 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 - retain the immutable State-or-Match document;
 - make every failure contract non-optional;
 - persist complete Access association;
+- remove the Program configuration contract and migrate durable policy into Program or `C0`;
 - remove FailureValue and State::integrity_failure;
 - remove Program execution catalogs, reifiers, TypeId maps, brands, and erased callbacks;
 - remove fact behavior; and
@@ -1389,34 +1212,34 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 
 ### 10.3 mfm-runtime
 
-- own RuntimeAssembly, Program association, the sole reducer, typed State drivers, configuration
-  qualification, bounded progression, RunView, and portable semantic inspection;
+- own RuntimeAssembly, Program association, the sole reducer, typed State drivers, bounded
+  progression, and RunView;
 - register the exact Access integrity projection;
 - keep only one private object-safe State driver/hot-value handoff;
 - run blocking deterministic callbacks outside the async executor and immediately await them;
-- retain no pending append/conclusion/configuration owner;
+- retain no pending append or conclusion owner;
 - own no cancellation API, timeout policy, detached completion task, or Runtime semaphore;
 - perform no background progression; and
 - expose no public State-by-State lifecycle algebra.
 
 ### 10.4 mfm-journal
 
-- own exact RunFrameV1, ConfigurationRevisionV1, and PortableRunBundle codecs;
-- own strict construction/decoding, recursive heads, record digests, object closure, and fixed
-  limits;
-- expose opaque EncodedRunFrame, JournalHistory, EncodedConfigurationRevision, and qualified
-  portable types; and
-- remove open DTO validation choreography, identity fields, request ids, facts, and publication
-  rebinding.
+- own only the exact RunFrameV1 codec;
+- own strict construction/decoding, recursive run heads, exact frame-local object closure, and
+  fixed frame/run limits;
+- expose only opaque EncodedRunFrame and JournalHistory proof types; and
+- remove open DTO validation choreography, configuration and portable codecs, record digests,
+  first-reference state, identity fields, request ids, facts, and publication rebinding.
 
 ### 10.5 mfm-store
 
 - expose only the mechanical Store trait and physical command/result types;
 - implement identical Memory/PostgreSQL append semantics;
-- store frame/revision command digests on their immutable rows;
+- store frame command digests on their immutable rows;
 - own database/pool wait control and classify failures as UnavailableBeforeSubmission or
   Indeterminate at the exact submission boundary;
-- own no Program, reducer, State, capability, fact, configuration-C, or replay semantics; and
+- own no Program, reducer, State, capability, fact, configuration, portability, or replay
+  semantics; and
 - delete semantic Store facades, selection owners, brands, duplicated backend DTOs, and split ports.
 
 ### 10.6 Adapters and live IO
@@ -1431,7 +1254,7 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 
 - establish an explicit fresh RunId before submission and make that same value reproducible to the
   caller for an indeterminate retry;
-- call Runtime configuration/start/resume/read/export APIs;
+- call only Runtime start/resume/read APIs;
 - drive every started mutating Runtime future to completion without racing a timeout, aborting it,
   or tying it to client-disconnect cancellation;
 - optionally apply one coarse operational bound to simultaneous top-level Runtime calls;
@@ -1444,8 +1267,8 @@ writable. Restore with a surviving writer is unsupported and has no core safety 
 
 ### 10.8 Replay
 
-Delete mfm-replay, its workspace membership, dependencies, DTOs, and reducer. Portable structural
-decoding belongs to Journal and semantic inspection belongs to RuntimeAssembly.
+Delete mfm-replay, its workspace membership, dependencies, DTOs, and reducer. Runtime read is the
+one supported Store-backed semantic inspection path; no portable replacement remains.
 
 ## 11. Complete deletion checklist
 
@@ -1542,10 +1365,47 @@ fact publication
 fact proof
 fact SQL
 
-global ConfigurationHead
-global configuration sequence
+MfmConfig
+ValidatedConfig
+ProvenConfiguration
+ConfigurationKey
+ConfigurationPosition
+ConfigurationRef
+ConfigurationRevision
+ConfigurationAppend
+ConfigurationHeadProjection
+ConfigurationStore
+ResolvedConfiguration
+ResolvedConfigurationHead
+ConfigurationWriteSession
+PreparedConfigurationAppend
+SuspendedConfigurationAppend
+ConfigurationAppendCommand
+ConfigurationCommitOutcome
+ConfigurationAppendDisposition
+BackendConfigurationOutcome
+RawConfigurationRevision
+configuration publication/load API
+configuration revision/head/request/receipt SQL
+Program configuration contract
 configuration envelope middleman
 duplicated configuration schema ref
+
+PortableRunBundle
+PortableRun
+ExportedRun
+export_run
+portable export/inspection API
+portable decoder or semantic ingress
+
+record_digest
+separate semantic record hash/proof type
+
+first-reference object closure/dictionary
+MAX_RUN_OBJECTS
+object_count
+reserved_objects
+object-slot reservation/accounting
 
 StoreScopeId
 StoreEpoch
@@ -1573,8 +1433,10 @@ decrease.
 
 ## 12. Security and failure semantics
 
-- Secrets never enter Program, Journal frames, configuration revisions, portable bundles,
-  RunView, outputs, Store physical metadata, SQL keys, logs, or error details.
+- Secrets never enter Program, `C0`, Journal frames, RunView, outputs, Store physical metadata, SQL
+  keys, logs, or error details. Domain types and adapters keep secret material outside persistable
+  MfmValue values; Runtime qualification rejects known secret markers before Journal construction.
+  Journal makes no dishonest claim to discover an arbitrary secret encoded as an ordinary string.
 - Hashed structured values contain no floats.
 - Journal and value canonicalization use fixed domain-separated SHA-256 recurrences and strict
   canonical bytes.
@@ -1592,8 +1454,8 @@ decrease.
   timeout mechanism.
 - spawn_blocking owns only synchronous pure work, is immediately awaited, and contains no IO or
   persistence authority.
-- Store append is atomic per frame/revision and exact-head linearized.
-- Frame/revision rows are immutable and exact retry never reapplies reservation/accounting changes.
+- Store append is atomic per frame and exact-head linearized.
+- Frame rows are immutable and exact retry never reapplies reservation/accounting changes.
 - Process termination has no operation-completion guarantee; restart trusts only durable history.
 - Restore with a surviving old writer is unsupported.
 - Public errors are reviewed and redaction-safe.
@@ -1607,7 +1469,8 @@ decrease.
 - Pure registration with Never succeeds.
 - Access registration with Never fails.
 - Access integrity projection is exact for S/C and may preserve allowed input correlation.
-- MfmConfig uses the same value registration and incompatible C fails association.
+- persistable value qualification rejects every repository-defined secret marker, and no test
+  claims arbitrary-string secret detection.
 - PreparedAccess and CommittedCall constructors remain private and owners remain affine.
 - Private State-driver results cannot contain PreparedAccess, CommittedCall, evidence, or a typed
   conclusion.
@@ -1621,27 +1484,23 @@ Golden fixtures freeze:
 - null genesis predecessor and non-genesis predecessor representation;
 - canonical field names, tagged variants, number representation, and object order;
 - nested raw canonical object representation;
-- run-head and record-digest recurrences;
-- ConfigurationKey, ConfigurationRevisionV1, revision head, and ConfigurationRef;
-- PortableRunBundle;
-- command and reservation digests; and
-- exact frame/run/configuration/portable-bundle bounds and independent bound-plus-one behavior.
+- repeated cross-frame references with complete frame-local objects;
+- the run-head recurrence; and
+- exact frame/run bounds and independent bound-plus-one behavior.
 
 Negative fixtures cover:
 
-- non-canonical bytes, floats, duplicate/unknown fields, invalid UTF-8, and secret markers;
+- non-canonical bytes, floats, duplicate/unknown fields, and invalid UTF-8;
 - wrong sequence/predecessor/head/domain;
-- missing, duplicate, conflicting, repeated, out-of-order, and extra closure objects;
+- missing, duplicate, conflicting, out-of-order, and extra frame-local closure objects;
 - bad object content digest or contract/schema binding;
 - invalid record tag/shape and genesis kind;
-- failure under Never; and
-- wrong configuration key/contract/value/predecessor.
+- failure under Never.
 
 ### 13.3 Runtime semantic tests
 
 - hot and cold fold produce the same RunView;
-- Store-backed read and portable inspection produce the same RunView;
-- inspection invokes no State, adapter, provider, or configuration-authoring callback;
+- Store-backed read invokes no State, adapter, or provider callback;
 - Match reduction uses the one schema-derived projection;
 - exact State key dispatch rejects partial or implementation-only matches;
 - only preparation Inserted mints CommittedCall;
@@ -1666,22 +1525,22 @@ The same suite runs against Memory and PostgreSQL:
 - exact same-command retry before and after later head advancement;
 - different-command same-head race;
 - command digest/material corruption;
+- command and reservation digest golden vectors;
 - historical Existing;
 - stale performs no mutation;
 - Inserted writes frame, head, reservation, and accounting atomically;
 - rollback leaves no partial frame/head/reservation state;
 - exact Existing never reapplies reservation arithmetic;
-- Open, Replace, Consume, late old conclusion, and byte/frame/object bound-plus-one capacity
-  behavior;
-- first-reference byte/object accounting;
+- Open, Replace, Consume, late old conclusion, and byte/frame bound-plus-one capacity behavior;
+- frame-local object bytes are charged exactly once as part of their containing frame;
 - complete Current and Exact loads;
 - load budget returns Capacity without truncation;
 - stable bounded RunId pagination;
 - every pre-submission fault classified UnavailableBeforeSubmission performs no write;
 - every injected post-submission acknowledgement loss is Indeterminate;
 - later load distinguishes committed from rolled-back indeterminate cases; and
-- no AppendRequestId, request row, receipt row, object table, membership table, identity, or fact
-  table exists.
+- no AppendRequestId, request row, receipt row, object table, membership table, configuration
+  table, identity, or fact table exists.
 
 ### 13.5 Completion, blocking, and live-IO tests
 
@@ -1704,18 +1563,8 @@ Boundary-focused tests and repository checks cover:
 - Pure conclusion commit/rollback ambiguity is safely folded/recomputed; and
 - an optional composition-level top-call bound does not enter Runtime proof or persisted state.
 
-### 13.6 Configuration and EVM tests
+### 13.6 EVM persistence tests
 
-- same-key publishers serialize and stale correctly;
-- different ConfigurationKeys do not contend;
-- exact revision retry with the same expected position is Existing, including after a later
-  revision advances the key;
-- repeating an indeterminate publication never substitutes a newer expected position;
-- old exact ConfigurationRef remains loadable after newer revisions;
-- admission binds its exact revision without latest-at-commit CAS;
-- indeterminate publication commit/rollback is recovered only through caller reload/repetition;
-- per-revision, per-key count, and per-key byte limits reject bound plus one;
-- configuration instance/contract mismatch fails;
 - WalletNonceDomainId differs across chain, sender, and nonce-domain changes;
 - endpoint changes do not split the same chain wallet nonce sequence;
 - nonce operations remain idempotent and secret-free; and
@@ -1752,7 +1601,6 @@ In one coherent Program/values/derive/domain cutover:
 - add framework Never;
 - move accepted integrity failure to exact Access registration;
 - persist complete Access associations;
-- make MfmConfig extend MfmValue;
 - update every current domain implementation and Program fixture; and
 - update authoritative design/architecture and crate documentation for that current intermediate
   contract.
@@ -1762,16 +1610,21 @@ introduced yet.
 
 ### 14.2 cut over minimal journal and persistence contracts
 
-In one clean-slate Journal/Store/Memory/PostgreSQL/Runtime/App/EVM cutover:
+In one clean-slate Program/values/derive/domains/Journal/Store/Memory/PostgreSQL/Runtime/App/EVM
+cutover:
 
-- install RunFrameV1, ConfigurationRevisionV1, PortableRunBundle, exact hashes, and goldens;
-- embed exact first-reference object closure and charge frame bytes once;
-- introduce per-key configuration streams;
-- store physical command digests on frame/revision rows;
+- install RunFrameV1, exact recursive heads, frame-local closure, and goldens;
+- embed every directly named object in its frame and charge only complete frame bytes;
+- make EvmConfig and PortfolioConfig process-local authoring inputs, have their planners return only
+  the exact Program and typed `C0`, keep live bindings in assembly/adapters, and delete MfmConfig
+  plus the complete configuration subsystem, Program configuration contract, and admission field;
+- delete portable export, bundle codecs, offline semantic ingress, and mfm-replay;
+- store physical command digests on frame rows;
 - install the final reservation/accounting contract;
 - make RunId global and EVM nonce identity chain-aware;
 - delete tenant, scope, epoch, identities, rotation, facts, request ids/tables, receipt tables,
-  global object/membership tables, and global configuration sequencing;
+  global object/membership tables, configuration tables, first-reference/object accounting, and
+  record digests;
 - rewrite baseline schemas and fixtures with no legacy reader; and
 - keep Store as the one explicitly documented temporary semantic reducer over the final persisted
   contract.
@@ -1781,24 +1634,22 @@ coexists.
 
 At this commit boundary Store still owns exactly one reducer and the existing caller-driven
 lifecycle surface, but that reducer consumes only the final JournalHistory and emits only the final
-RunAppend/ConfigurationAppend commands. Runtime and App are adapted to that one current surface;
-mfm-replay delegates to the same Store reducer and gains no replacement reducer. The intermediate
-has no facts, identity brands, request owners, old wire types, or alternate persistence API. Its
-tests and authoritative docs describe that state explicitly, so the next commit deletes ownership
-rather than choosing between two implementations.
+RunAppend commands. Runtime and App are adapted to that one current surface. The intermediate has
+no configuration, portable bundle, replay crate, facts, identity brands, request owners, old wire
+types, or alternate persistence API. Its tests and authoritative docs describe that state
+explicitly, so the next commit deletes ownership rather than choosing between two implementations.
 
-### 14.3 move execution and inspection into Runtime
+### 14.3 move execution and read into Runtime
 
-In one inseparable Program/Runtime/Store/App/replay cutover:
+In one inseparable Program/Runtime/Store/App cutover:
 
 - add the final RuntimeAssembly, Program association, sole reducer, direct-new gate,
-  advance_until_stable, run-to-completion caller contract, typed configuration, RunView, export,
-  and portable inspection;
+  advance_until_stable, run-to-completion caller contract, RunView, and Store-backed read;
 - delete Runtime cancellation, timeout, detached-completion, and semaphore machinery;
 - reduce Store to its final mechanical trait;
 - migrate App/transports to explicit RunId and Runtime APIs;
 - delete Program execution catalogs/reifiers, Store semantics, public lifecycle/session/suspension
-  types, App suspended/status logic, and mfm-replay; and
+  types, and App suspended/status logic; and
 - update every test, README, docs/design.md, docs/architecture.md, transport contract, and absence
   check in the same commit.
 
@@ -1845,30 +1696,50 @@ both phases.
 
 ### Keep random append request ids
 
-Rejected. The canonical physical command digest plus the immutable target frame/revision row
-already provides exact idempotency. Separate request identities add conflict states and tables
-without proving another property.
+Rejected. The canonical physical command digest plus the immutable target frame row already
+provides exact idempotency. Separate request identities add conflict states and tables without
+proving another property.
 
 ### Keep a separate command/receipt table
 
-Rejected. Every successful command creates exactly one immutable frame or configuration revision.
-That row can retain the command digest, physical instruction, and resulting position.
+Rejected. Every successful command creates exactly one immutable frame. That row can retain the
+command digest, physical instruction, and resulting position.
+
+### Keep a first-reference object dictionary
+
+Rejected. Cross-frame deduplication makes frame construction and qualification depend on a
+cumulative object map and adds object-count/reservation arithmetic. RunFrameV1 names at most two
+direct objects. Re-embedding every directly named object makes closure local and lets the existing
+canonical-byte limit account for the complete cost.
+
+### Keep a separate semantic record digest
+
+Rejected. The closed qualified record fields and their content references already define exact
+semantic equality. Another digest adds a golden contract and identity without avoiding any
+comparison or persistence requirement.
 
 ### Store objects globally
 
-Rejected. Exact first-reference objects embedded in canonical frames make a run and portable bundle
-self-contained and give one byte-accounting model. Physical deduplication is not a semantic
-requirement.
+Rejected. Exact frame-local objects make retained frames self-contained and give one byte-accounting
+model. Physical deduplication is not a semantic requirement.
 
 ### Retain facts as empty extension points
 
 Rejected. Empty markers, fields, crates, tables, and capability modes preserve concepts and future
 change sites without a consumer. A future fact system must be designed from its real contract.
 
-### Keep a global configuration head
+### Keep independently published configuration
 
-Rejected. Admission needs one exact immutable revision, not a database-wide configuration
-snapshot. Per-key CAS removes unrelated contention and global sequencing.
+Rejected. Reproducible secret-free policy belongs in Program or typed `C0`; deployment clients and
+credentials belong in assembly/adapters. A configuration stream adds a second value lifecycle,
+latest lookup, CAS, revisions, SQL, retry semantics, and admission coupling without a current
+consumer that needs independent publication.
+
+### Keep portable export and offline inspection
+
+Rejected. No current core consumer needs a second complete-history ingress or export format.
+Runtime read over Store is the one semantic inspection path. A future portability feature must
+start from a concrete external consumer and cannot reserve codecs or Runtime entry points now.
 
 ### Keep tenant, scope, epoch, or a renamed incarnation
 
@@ -1887,35 +1758,36 @@ Implementation is accepted only when:
 1. Program persists one exact input, output, mandatory failure, and complete Access association for
    every State.
 2. Pure Never registration works, Access Never registration fails, and FailureValue is absent.
-3. RuntimeAssembly is the only concrete value/State/capability/configuration registry.
+3. RuntimeAssembly is the only concrete value/State/capability registry.
 4. Exactly one private object-safe State driver boundary and its HotValue handoff exist at
    RegisteredState.start; typed execution owners never cross it.
-5. Runtime owns the only semantic reducer used by execution, read, and portable inspection.
+5. Runtime owns the only semantic reducer used by execution and read.
 6. Store exposes only the mechanical operations in this RFC and depends on no Program, State,
-   capability, domain, fact, or Runtime-selection type.
-7. RunFrameV1, first-reference closure, run-head, record-digest, and every fixed limit match golden
-   fixtures.
-8. ConfigurationRevisionV1 uses caller-reproducible expected-position per-key CAS, and admission
-   binds one exact ConfigurationRef.
-9. Frame/revision rows retain their physical command digest and provide exact historical Existing
-   without request or receipt tables.
+   capability, domain, fact, configuration, portability, or Runtime-selection type.
+7. RunFrameV1, frame-local closure, run-head recurrence, and every fixed frame/run limit match
+   golden fixtures.
+8. Every frame embeds exactly the canonical objects directly named by its record; first-reference
+   state, a separate record digest, object-count limits, and object reservations are absent.
+9. Frame rows retain their physical command digest and provide exact historical Existing without
+   request or receipt tables.
 10. PostgreSQL and Memory have identical absent-head, exact retry, stale, indeterminate,
     reservation, and capacity behavior.
 11. Only a locally observed preparation Inserted mints CommittedCall.
 12. Existing, Stale, Indeterminate, history, and restart never mint provider authority.
-13. Runtime retains no pending append/conclusion/configuration owner, lease, permit, completion
-    cell, resolver, cancellation/timeout API, detached completion task, or Runtime semaphore.
+13. Runtime retains no pending append/conclusion owner, lease, permit, completion cell, resolver,
+    cancellation/timeout API, detached completion task, or Runtime semaphore.
 14. spawn_blocking work is synchronously pure, contains no block_on, Adapter, Store, or persistence
     authority, and is awaited before dependent IO.
 15. Adapter and Store own live-IO wait classification; Read replacement is bounded after
     Unresolved, while Effect has one possible provider entry and parks after Unresolved or an absent
     indeterminate conclusion.
 16. start, resume, and read return the same Runtime-derived RunView contract.
-17. export plus RuntimeAssembly.inspect reproduces Store-backed semantic RunView without live
-    callbacks.
-18. App/transports own no Runtime lifecycle or frame interpretation, drive every started mutating
+17. App/transports own no Runtime lifecycle or frame interpretation, drive every started mutating
     Runtime future to completion, and keep any top-call concurrency bound outside Runtime semantics.
-19. mfm-replay and its reducer are deleted.
+18. mfm-replay, portable bundles, export, offline inspection, and every replacement semantic
+    ingress are deleted.
+19. MfmConfig, configuration publication/load, Program configuration association, configuration
+    wire, and configuration SQL are deleted; durable policy is in Program or typed `C0`.
 20. mfm-facts and every fact selection/publication/proof/storage concept are deleted.
 21. tenant, scope, epoch, identity rotation, and database incarnation are absent from APIs, wire,
     hashes, SQL, App, transports, and EVM.
@@ -1923,7 +1795,9 @@ Implementation is accepted only when:
     head/sequence are absent.
 23. EVM nonce/effect identity includes chain, sender, and nonce domain and contains no tenant or
     secret.
-24. docs/design.md, docs/architecture.md, transport documentation, crate READMEs, schemas, and
+24. Secret-bearing types remain outside persistable values, known secret markers fail before
+    Journal construction, and Journal does not claim arbitrary-string secret detection.
+25. docs/design.md, docs/architecture.md, transport documentation, crate READMEs, schemas, and
     fixtures describe only this current design.
-25. Production LOC, exported types, dependency edges, and files required to add a State decrease.
-26. Scope-selected checks and final composed CI pass under docs/build-and-verification.md.
+26. Production LOC, exported types, dependency edges, and files required to add a State decrease.
+27. Scope-selected checks and final composed CI pass under docs/build-and-verification.md.
